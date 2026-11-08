@@ -7,6 +7,7 @@ pub mod displays;
 pub mod effects;
 pub mod fans;
 pub mod layout;
+pub mod onboarding;
 pub mod peripherals;
 pub mod settings;
 pub mod updates;

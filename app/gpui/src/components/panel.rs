@@ -319,6 +319,111 @@ pub fn tracked_text_lh(
     row.into_any_element()
 }
 
+/// A tracked text whose word space is the font's own space, not the mono one
+/// [`tracked_text`] assumes. CSS `letter-spacing` tightens every glyph and
+/// the space with it; the UI font's space is a quarter of an em, so a mono
+/// space would put the words back where they were and the line would wrap
+/// where React's does not.
+#[allow(clippy::too_many_arguments)]
+pub fn tracked_text_space(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    space_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    tracked_text_space_wrap(text, font_size, tracking_em, space_em, weight, family, color, line_height, true)
+}
+
+/// A tracked text that stays on one line: React's titles use
+/// `text-wrap: balance`, and a title that is a little wider than the panel
+/// must not break into two lines and push the rest of the screen down.
+#[allow(clippy::too_many_arguments)]
+pub fn tracked_text_space_nowrap(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    space_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    tracked_text_space_wrap(text, font_size, tracking_em, space_em, weight, family, color, line_height, false)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn tracked_text_space_wrap(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    space_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+    wrap: bool,
+) -> gpui::AnyElement {
+    let tracking = px(font_size * tracking_em);
+    // CSS adds the tracking after every glyph, the space included; the word
+    // cells below carry one step less each (between the glyphs), so the space
+    // carries the step the last glyph of the word does not.
+    let space_w = px(font_size * (space_em + tracking_em));
+    let mut row = div()
+        .flex()
+        .items_center()
+        .text_size(px(font_size))
+        .line_height(gpui::relative(line_height))
+        .font_weight(weight)
+        .font_family(family)
+        .text_color(color);
+    if wrap {
+        row = row.flex_wrap();
+    }
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words.len();
+    for (wi, word) in words.iter().enumerate() {
+        let cell = word_cell(word, tracking);
+        row = row.child(cell);
+        if wi + 1 < n {
+            row = row.child(div().w(space_w).h(px(1.0)).flex_none());
+        }
+    }
+    row.into_any_element()
+}
+
+/// One word of a tracked line: its glyphs, each one a step of `tracking`
+/// apart.
+///
+/// A step that opens the line is a flex gap. A step that closes it (CSS
+/// `letter-spacing: -0.02em` on a title) is a negative margin on every
+/// glyph but the first: the layout engine ignores a negative gap (the
+/// title came out 12 px wider than the browser's), and a negative margin
+/// tightens the line the way the browser does.
+fn word_cell(word: &str, tracking: gpui::Pixels) -> gpui::Div {
+    let step = f32::from(tracking);
+    let mut cell = div().flex().items_center().whitespace_nowrap().flex_none();
+    if step < 0.0 {
+        for (i, ch) in word.chars().enumerate() {
+            let mut glyph = div().flex().items_center().whitespace_nowrap();
+            if i > 0 {
+                glyph = glyph.ml(tracking);
+            }
+            glyph = glyph.child(ch.to_string());
+            cell = cell.child(glyph);
+        }
+    } else {
+        cell = cell.gap(tracking);
+        for ch in word.chars() {
+            cell = cell.child(ch.to_string());
+        }
+    }
+    cell
+}
+
 /// A panel with a title. `actions` render beside the title, on the right.
 ///
 /// The panel is returned as a styled div, so a caller that needs it to fill

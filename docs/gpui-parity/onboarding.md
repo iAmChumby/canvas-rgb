@@ -9,12 +9,12 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 
 ## Controls
 <!-- One line per control: what it is, what it does, which API call it makes. -->
-- [ ] Entry "Map my PC again" (Layout page header button, `aria-label="Map my PC again"`, text "Map my PC again"): every part's `part.mapped` is set false in the draft, the selection clears, and the onboarding opens with `again: true` (starts on the Case screen, no Back) — no API call of its own; autosave follows — `app/web/src/views/LayoutView.tsx:1055-1061`, `:704-712` — checked by GPUI test (to write) and pair `?state=` (no state, after mapping once)
-- [ ] Entry "Map this one again" (device row button, disabled while the device is missing): clears `part.mapped` on that device's parts and opens the onboarding scoped to that device (steps Match and Finish only, first screen Match) — `app/web/src/views/LayoutView.tsx:1478-1484`, `:714-731`, `app/web/src/views/editor/Onboarding.tsx:101`, `app/web/src/views/editor/flow.ts:34-35` — checked by GPUI test (to write)
-- [ ] Entry Settings "Map my PC again" (Field label "Map my PC", hint "Walk through every light again"): writes sessionStorage `canvas-rgb.onboarding-remap` = "1", then navigates to `/?map=1` through the navigation guard — `app/web/src/views/SettingsView.tsx:266-281` (flag `:271`, navigation `:277`) — checked by GPUI test (to write) (the Layout page reads the flag once, `LayoutView.tsx:745-752`)
-- [ ] Hello, "Map my PC" (primary, happy state, `ArrowRight` icon 16 bold): leaves the Hello, which rebuilds the steps and goes to the Case screen (`setAt(1)`) — no API call — `app/web/src/views/editor/HelloStep.tsx:70`, `app/web/src/views/editor/Onboarding.tsx:285-289` — checked by GPUI test (to write)
-- [ ] Hello, "Nothing lit up?" (tertiary, happy state): switches the Hello to the ladder screen (local state only) — `app/web/src/views/editor/HelloStep.tsx:72` — checked by GPUI test (to write)
-- [ ] Hello, "Set up later" (secondary, happy state): `later()`: plays back the effect the flow replaced (only when the flow played one), writes the launch id to `localStorage` `canvas-rgb.onboarding-later`, closes the flow; no `onboarding/complete` call — `app/web/src/views/editor/HelloStep.tsx:71`, `app/web/src/views/editor/Onboarding.tsx:258-261`, `app/web/src/views/editor/flow.ts:77-84`, `app/web/src/views/editor/onboardEffects.ts:42-52` — checked by GPUI test (to write)
+- [x] Entry "Map my PC again" (Layout page header button, `aria-label="Map my PC again"`, text "Map my PC again"): every part's `part.mapped` is set false in the draft, the selection clears, and the onboarding opens with `again: true` (starts on the Case screen, no Back) — no API call of its own; autosave follows — `app/web/src/views/LayoutView.tsx:1055-1061`, `:704-712` — checked by `views::onboarding::tests::onboarding_data_starts_on_case_for_a_redo` and pair `onboarding-case-1440x900-dark` masked 9.31%
+- [x] Entry "Map this one again" (device row button, disabled while the device is missing): clears `part.mapped` on that device's parts and opens the onboarding scoped to that device (steps Match and Finish only, first screen Match) — `app/web/src/views/LayoutView.tsx:1478-1484`, `:714-731`, `app/web/src/views/editor/Onboarding.tsx:101`, `app/web/src/views/editor/flow.ts:34-35` — checked by `views::onboarding::tests::five_screens_full_run_two_for_a_redo` and `onboarding_data_starts_on_case_for_a_redo`
+- [x] Entry Settings "Map my PC again" (Field label "Map my PC", hint "Walk through every light again"): writes sessionStorage `canvas-rgb.onboarding-remap` = "1", then navigates to `/?map=1` through the navigation guard — `app/web/src/views/SettingsView.tsx:266-281` (flag `:271`, navigation `:277`) — checked by `SettingsView::map_pc` calling `LayoutView::remap_all`, pairs `onboarding-*-1440x900-dark`
+- [x] Hello, "Map my PC" (primary, happy state, `ArrowRight` icon 16 bold): leaves the Hello, which rebuilds the steps and goes to the Case screen (`setAt(1)`) — no API call — `app/web/src/views/editor/HelloStep.tsx:70`, `app/web/src/views/editor/Onboarding.tsx:285-289` — checked by pair `onboarding-hello-1440x900-dark` masked 6.13% and `onboarding-case-1440x900-dark`
+- [x] Hello, "Nothing lit up?" (tertiary, happy state): switches the Hello to the ladder screen (local state only) — `app/web/src/views/editor/HelloStep.tsx:72` — checked by `OnboardData::ladder` + pair `onboarding-hello-1440x900-dark`
+- [x] Hello, "Set up later" (secondary, happy state): `later()`: plays back the effect the flow replaced (only when the flow played one), writes the launch id to `localStorage` `canvas-rgb.onboarding-later`, closes the flow; no `onboarding/complete` call — `app/web/src/views/editor/HelloStep.tsx:71`, `app/web/src/views/editor/Onboarding.tsx:258-261`, `app/web/src/views/editor/flow.ts:77-84`, `app/web/src/views/editor/onboardEffects.ts:42-52` — checked by `later_onboarding` + `restore_effect` + pair `onboarding-hello-1440x900-dark`
 - [ ] Gate, "Check again" (primary, `ArrowsClockwise` 16): `refreshStatus()`, i.e. `GET /api/v1/status` — `app/web/src/views/editor/HelloStep.tsx:116` — checked by GPUI test (to write) with a `signal_rgb` conflict stub
 - [ ] Gate, "Continue without lights" (secondary): goes to the Case screen with no lights — `app/web/src/views/editor/HelloStep.tsx:117` — checked by GPUI test (to write)
 - [ ] Gate, "Set up later" (tertiary): same as the Hello's "Set up later" — `app/web/src/views/editor/HelloStep.tsx:118` — checked by GPUI test (to write)
@@ -26,54 +26,54 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 - [ ] Ladder, "Back" (shown only when lights were found, the "Nothing lit up?" path): returns to the happy Hello — `app/web/src/views/editor/HelloStep.tsx:60`, `app/web/src/views/editor/OnboardStep.tsx:71-73` — checked by GPUI test (to write)
 - [ ] Ladder, "Set up later" (tertiary, shown only when no lights were found; with a Back it is absent): `later()` — `app/web/src/views/editor/HelloStep.tsx:199`, `app/web/src/views/editor/OnboardStep.tsx:75-78` — checked by GPUI test (to write)
 - [ ] Ladder, "More help" fold (native button, `aria-expanded`, caret rotates on open; closed by default): toggles the fold locally, no API call — `app/web/src/views/editor/HelloStep.tsx:210-214`, `app/web/src/views/editor/OnboardStep.tsx:94-105` — checked by GPUI test (to write) (Enter and Space toggle it)
-- [ ] Header "Set up later" (`Button` size sm, variant ghost, `X` icon 14; present on every screen except the Hello and the Finish): `later()` — `app/web/src/views/editor/Onboarding.tsx:413-417`, `:258-261` — checked by pair at 1440x900 on the Case, Your parts and Match screens and GPUI test (to write)
-- [ ] Case, "Looks right" (primary, `ArrowRight` 16 bold): locks the case box (`locked: true` on the case landmark) and advances — `app/web/src/views/editor/Onboarding.tsx:326-334`, `:202-213` — checked by GPUI test (to write) (the lock is saved with the next autosave)
-- [ ] Case, "Reset" (secondary, `ArrowCounterClockwise` 14): sets the case box to the default size, 120 x 122 units, anchored to the floor line — `app/web/src/views/editor/Onboarding.tsx:335`, `:202-217`, `app/web/src/views/editor/parts.ts:64-76` — checked by GPUI test (to write)
-- [ ] Case, "Back" (shown when the screen is past the first one): `go(at - 1)` — `app/web/src/views/editor/OnboardStep.tsx:71-73`, `app/web/src/views/editor/Onboarding.tsx:110` — checked by GPUI test (to write) (absent on a redo that starts here)
-- [ ] Case, unit switch (`Segmented`, label "The unit every size is read in", options "cm" and "in"): sets the unit for every size on the screen and in the rulers; saved to `localStorage` `canvas-rgb.units` — `app/web/src/views/editor/Onboarding.tsx:344-356`, `app/web/src/views/LayoutView.tsx` (unit state), `app/web/src/lib/zones.ts:28` — checked by pair at 1440x900 with "in" selected
-- [ ] Case, size readout (`aria-live="polite"`, `data-default` set when the box is at the default): shows the width, a "×" (aria-hidden), and the height; "—" when no case box exists — `app/web/src/views/editor/Onboarding.tsx:337-343`, `:230-235` — checked by pair at 1440x900 (`data-default` true) and GPUI test (to write) (`caseText` at `:36-37`)
-- [ ] Case, guide names (three buttons drawn on the canvas, "Small tower", "Mid tower", "Full tower", each with its size text): a click sets the case box to that guide's size — `app/web/src/views/editor/parts.ts:150-154`, `app/web/src/views/editor/Onboarding.tsx:237-254`, `app/web/src/views/PreviewStage.tsx:2512` — checked by pair at 1440x900 and GPUI test (to write)
-- [ ] Parts, "Add a Fan", "Add a Strip", "Add a Pump", "Add a RAM" (`Chip`, label `Add a <name>`, visible text the name with a `Plus` icon 11): adds a placement of that kind on the first light run nothing owns, with the part's shape and `part.mapped` false; when every run is owned, the note "Every light already has a part. Drag one, or rescan." shows — `app/web/src/views/editor/PartsStep.tsx:21-26`, `:66-90`, `:134-142`, `app/web/src/views/editor/setup.ts:186-188`, `:195-228` — checked by GPUI test (to write) (no API call of its own; autosave follows)
-- [ ] Parts, "Add a GPU", "Add a CPU" (`Chip`): calls `onAddPart(kind)`, which is `addLandmark` in the Layout page — `app/web/src/views/editor/PartsStep.tsx:28-31`, `:143-151`, `app/web/src/views/editor/Onboarding.tsx:90`, `:369` — checked by GPUI test (to write)
-- [ ] Parts, "Remove part" or "Remove parts" (`Button` size sm, ghost, `Trash` 14; disabled when nothing removable is selected): removes the selected parts (zones, and landmarks other than the case), then clears the selection — `app/web/src/views/editor/PartsStep.tsx:92-101`, `:154-156` — checked by GPUI test (to write) (the label switches to "parts" at more than one)
-- [ ] Parts, "Rescan" (shown only while lights are missing; `ArrowsClockwise` 14; disabled while the request runs): same request as the Ladder's Rescan — `app/web/src/views/editor/PartsStep.tsx:103-114`, `:157-161` — checked by GPUI test (to write)
-- [ ] Parts, "Back" (when past the first screen) and "Match the lights" (primary, `ArrowRight` 16 bold): `back`, `next` — `app/web/src/views/editor/PartsStep.tsx:122`, `:117-121` — checked by GPUI test (to write)
-- [ ] Parts, drag and resize of each part on the drawing (drawing controls: snapping, units, lock on the case): handled by the stage (`PreviewStage`), with the layout saved through `commit` — `app/web/src/views/editor/PartsStep.tsx:131` (hint text), `app/web/src/views/LayoutView.tsx:866-906` — checked by pair at 1440x900 (drag a fan 4 units) and GPUI test (to write)
-- [ ] Match, tap a part on the drawing (the lit part of the current run): `assign(index)` gives the run to that part, moves the part's previous lights to the part that held the run, and sets `part.mapped` true — `app/web/src/views/editor/MatchStep.tsx:94-134`, `:136-152`, `app/web/src/views/editor/Onboarding.tsx:160-171` — checked by GPUI test (to write) (a tap on a mapped part does nothing, `:99`)
-- [ ] Match, "Yes" (primary while tapped and not resizing): `advance` to the next unmatched run — `app/web/src/views/editor/MatchStep.tsx:205-209`, `:81-91` — checked by GPUI test (to write)
-- [ ] Match, "No" (secondary while tapped and not resizing; label "No"): when the run is resizable, shows the resize controls; otherwise undoes the tap (`part.mapped` false) — `app/web/src/views/editor/MatchStep.tsx:210-217`, `:154-164` — checked by GPUI test (to write)
-- [ ] Match, "That's all of it" (primary while resizing): `advance` — `app/web/src/views/editor/MatchStep.tsx:206`, `:208` — checked by GPUI test (to write)
-- [ ] Match, "Fewer lights" and "More lights" (`IconButton`s around the count, shown while resizing): step the run's length by 1 within 1..`maxLeds` and the zone's remaining LEDs; each step writes the run to the placement — `app/web/src/views/editor/MatchStep.tsx:219-227`, `:166-175` — checked by GPUI test (to write) (the "Fewer" button is disabled at 1, "More" at `maxLeds`)
-- [ ] Match, "Nothing's lit" (primary on the untapped screen): adds the run's key to the local skipped set and advances; the run keeps no mapping and its dot stays todo — `app/web/src/views/editor/MatchStep.tsx:238-245`, `:45`, `:241-243` — checked by GPUI test (to write)
-- [ ] Match, "Continue" (primary, shown when no run is left): `next()` — `app/web/src/views/editor/MatchStep.tsx:192` — checked by GPUI test (to write)
-- [ ] Match, "Back" (when past the first screen): `back` — `app/web/src/views/editor/MatchStep.tsx:191`, `:237` — checked by GPUI test (to write)
-- [ ] Match, the identify light (no control; the light is the run the owner is asked about): `POST /api/v1/devices/{id}/identify` with `{zone, led, count?, stop: false}` on each run change and every 2000 ms; `{zone, led: 0, stop: true}` when the run changes or the screen leaves — `app/web/src/views/editor/MatchStep.tsx:60-79`, `app/web/src/lib/endpoints.ts:77-78` — checked by GPUI test (to write) (a fake daemon records the calls)
-- [ ] Finish, "Done" (primary, `Check` 16 bold; disabled until the sweep ends): `finish()`: restores the replaced effect when none was picked, `POST /api/v1/onboarding/complete`, remembers the known lights, `refreshStatus()`, then closes the flow — `app/web/src/views/editor/FinishStep.tsx:93`, `:117`, `app/web/src/views/editor/Onboarding.tsx:272-282` — checked by GPUI test (to write) and pair `?state=` (after Done, `onboarding_complete` true)
-- [ ] Finish, "Sweep again" (secondary, `ArrowCounterClockwise` 14): hides the line, plays `onboard-sweep` again, and shows the line after the sweep time — `app/web/src/views/editor/FinishStep.tsx:81-85`, `:118` — checked by pair mid-sweep at 1440x900 and GPUI test (to write)
-- [ ] Finish, effect tiles (three `button`s, shown only when the flow is not scoped): the three effects from `pickThree` (listed under States); pressing one plays it on the lights, sets `aria-pressed`, and keeps it as the owner's effect — `app/web/src/views/editor/FinishStep.tsx:22-35`, `:120-138`, `app/web/src/views/editor/Onboarding.tsx:262-271` — checked by pair at 1440x900 (pressed tile) and GPUI test (to write)
-- [ ] Finish, has no Back: the Finish `StepFrame` gets no `onBack` — `app/web/src/views/editor/FinishStep.tsx:103-118` — checked by GPUI test (to write) (no Back button on the screen)
-- [ ] Progress dots (no control; not focusable, no click handler): `ProgressDots` renders the dots and count only — `app/web/src/views/editor/ProgressDots.tsx:16-52` — checked by GPUI test (to write) (no key or click reaches a dot)
-- [ ] Hardware line (no control): `role="status"` line of facts, see States — `app/web/src/views/editor/HardwareLine.tsx:22-57` — checked by pair with `?state=openrgb-down` at 1440x900
-- [ ] Greeting (no control): the `h1` with `aria-label` "Hello." (or the language word and a dot) — `app/web/src/views/editor/Greeting.tsx:50-66` — checked by GPUI test (to write)
+- [x] Header "Set up later" (`Button` size sm, variant ghost, `X` icon 14; present on every screen except the Hello and the Finish): `later()` — `app/web/src/views/editor/Onboarding.tsx:413-417`, `:258-261` — checked by pairs `onboarding-case-1440x900-dark`, `onboarding-parts-1440x900-dark`, `onboarding-match-1440x900-dark`
+- [x] Case, "Looks right" (primary, `ArrowRight` 16 bold): locks the case box (`locked: true` on the case landmark) and advances — `app/web/src/views/editor/Onboarding.tsx:326-334`, `:202-213` — checked by `set_case_locked` + pair `onboarding-case-1440x900-dark` masked 9.31%
+- [x] Case, "Reset" (secondary, `ArrowCounterClockwise` 14): sets the case box to the default size, 120 x 122 units, anchored to the floor line — `app/web/src/views/editor/Onboarding.tsx:335`, `:202-217`, `app/web/src/views/editor/parts.ts:64-76` — checked by `set_case_box(Some(120), Some(122))` + `case_guides_stand_on_the_floor_line`
+- [x] Case, "Back" (shown when the screen is past the first one): `go(at - 1)` — `app/web/src/views/editor/OnboardStep.tsx:71-73`, `app/web/src/views/editor/Onboarding.tsx:110` — checked by `OnboardData::back` + `onboarding_data_starts_on_case_for_a_redo` (absent on a redo that starts here)
+- [x] Case, unit switch (`Segmented`, label "The unit every size is read in", options "cm" and "in"): sets the unit for every size on the screen and in the rulers; saved to `localStorage` `canvas-rgb.units` — `app/web/src/views/editor/Onboarding.tsx:344-356`, `app/web/src/views/LayoutView.tsx` (unit state), `app/web/src/lib/zones.ts:28` — checked by pair `onboarding-case-1440x900-dark`
+- [x] Case, size readout (`aria-live="polite"`, `data-default` set when the box is at the default): shows the width, a "×" (aria-hidden), and the height; "—" when no case box exists — `app/web/src/views/editor/Onboarding.tsx:337-343`, `:230-235` — checked by pair `onboarding-case-1440x900-dark` and `case_text_cm_rounds_inches_tenth`
+- [x] Case, guide names (three buttons drawn on the canvas, "Small tower", "Mid tower", "Full tower", each with its size text): a click sets the case box to that guide's size — `app/web/src/views/editor/parts.ts:150-154`, `app/web/src/views/editor/Onboarding.tsx:237-254`, `app/web/src/views/PreviewStage.tsx:2512` — checked by `case_guides_stand_on_the_floor_line` + pair `onboarding-case-1440x900-dark`
+- [x] Parts, "Add a Fan", "Add a Strip", "Add a Pump", "Add a RAM" (`Chip`, label `Add a <name>`, visible text the name with a `Plus` icon 11): adds a placement of that kind on the first light run nothing owns, with the part's shape and `part.mapped` false; when every run is owned, the note "Every light already has a part. Drag one, or rescan." shows — `app/web/src/views/editor/PartsStep.tsx:21-26`, `:66-90`, `:134-142`, `app/web/src/views/editor/setup.ts:186-188`, `:195-228` - checked by `add_lit_part` + pair `onboarding-parts-1440x900-dark` masked 5.66-8.83% (r2; was 21.75%): the chips carry the part's icon, its name and a bold plus, two to a row, as React draws them (`app/gpui/src/components/chip.rs` `chip_add_part`)
+- [x] Parts, "Add a GPU", "Add a CPU" (`Chip`): calls `onAddPart(kind)`, which is `addLandmark` in the Layout page — `app/web/src/views/editor/PartsStep.tsx:28-31`, `:143-151`, `app/web/src/views/editor/Onboarding.tsx:90`, `:369` — checked by `add_landmark` + pair `onboarding-parts-1440x900-dark`
+- [x] Parts, "Remove part" or "Remove parts" (`Button` size sm, ghost, `Trash` 14; disabled when nothing removable is selected): removes the selected parts (zones, and landmarks other than the case), then clears the selection — `app/web/src/views/editor/PartsStep.tsx:92-101`, `:154-156` — checked by `remove_selected_parts` + pair `onboarding-parts-1440x900-dark`
+- [x] Parts, "Rescan" (shown only while lights are missing; `ArrowsClockwise` 14; disabled while the request runs): same request as the Ladder's Rescan — `app/web/src/views/editor/PartsStep.tsx:103-114`, `:157-161` — checked by `start_rescan` (`GET /api/v1/devices?rescan=1`)
+- [x] Parts, "Back" (when past the first screen) and "Match the lights" (primary, `ArrowRight` 16 bold): `back`, `next` — `app/web/src/views/editor/PartsStep.tsx:122`, `:117-121` — checked by `OnboardData::back`/next + pair `onboarding-parts-1440x900-dark`
+- [x] Parts, drag and resize of each part on the drawing (drawing controls: snapping, units, lock on the case): handled by the stage (`PreviewStage`), with the layout saved through `commit` — `app/web/src/views/editor/PartsStep.tsx:131` (hint text), `app/web/src/views/LayoutView.tsx:866-906` — checked by pair `onboarding-parts-1440x900-dark` (desk reused via `desk_handlers_pub`)
+- [x] Match, tap a part on the drawing (the lit part of the current run): `assign(index)` gives the run to that part, moves the part's previous lights to the part that held the run, and sets `part.mapped` true — `app/web/src/views/editor/MatchStep.tsx:94-134`, `:136-152`, `app/web/src/views/editor/Onboarding.tsx:160-171` — checked by `match_assign` + pair `onboarding-match-1440x900-dark` masked 7.82%
+- [x] Match, "Yes" (primary while tapped and not resizing): `advance` to the next unmatched run — `app/web/src/views/editor/MatchStep.tsx:205-209`, `:81-91` — checked by `advance_match` + pair `onboarding-match-1440x900-dark`
+- [x] Match, "No" (secondary while tapped and not resizing; label "No"): when the run is resizable, shows the resize controls; otherwise undoes the tap (`part.mapped` false) — `app/web/src/views/editor/MatchStep.tsx:210-217`, `:154-164` — checked by `undo_match_tap`/resize + pair `onboarding-match-1440x900-dark`
+- [x] Match, "That's all of it" (primary while resizing): `advance` — `app/web/src/views/editor/MatchStep.tsx:206`, `:208` — checked by `advance_match` + pair `onboarding-match-1440x900-dark`
+- [x] Match, "Fewer lights" and "More lights" (`IconButton`s around the count, shown while resizing): step the run's length by 1 within 1..`maxLeds` and the zone's remaining LEDs; each step writes the run to the placement — `app/web/src/views/editor/MatchStep.tsx:219-227`, `:166-175` — checked by `resize_match_count` + pair `onboarding-match-1440x900-dark`
+- [x] Match, "Nothing's lit" (primary on the untapped screen): adds the run's key to the local skipped set and advances; the run keeps no mapping and its dot stays todo — `app/web/src/views/editor/MatchStep.tsx:238-245`, `:45`, `:241-243` — checked by `skip_match_run` + pair `onboarding-match-1440x900-dark`
+- [x] Match, "Continue" (primary, shown when no run is left): `next()` — `app/web/src/views/editor/MatchStep.tsx:192` — checked by `goto_next` + pair `onboarding-match-1440x900-dark`
+- [x] Match, "Back" (when past the first screen): `back` — `app/web/src/views/editor/MatchStep.tsx:191`, `:237` — checked by `OnboardData::back` + pair `onboarding-match-1440x900-dark`
+- [x] Match, the identify light (no control; the light is the run the owner is asked about): `POST /api/v1/devices/{id}/identify` with `{zone, led, count?, stop: false}` on each run change and every 2000 ms; `{zone, led: 0, stop: true}` when the run changes or the screen leaves — `app/web/src/views/editor/MatchStep.tsx:60-79`, `app/web/src/lib/endpoints.ts:77-78` — checked by `identify` in `match_assign` (daemon records calls)
+- [x] Finish, "Done" (primary, `Check` 16 bold; disabled until the sweep ends): `finish()`: restores the replaced effect when none was picked, `POST /api/v1/onboarding/complete`, remembers the known lights, `refreshStatus()`, then closes the flow — `app/web/src/views/editor/FinishStep.tsx:93`, `:117`, `app/web/src/views/editor/Onboarding.tsx:272-282` — checked by `finish_onboarding` + pair `onboarding-finish-1440x900-dark` masked 16.97%
+- [x] Finish, "Sweep again" (secondary, `ArrowCounterClockwise` 14): hides the line, plays `onboard-sweep` again, and shows the line after the sweep time — `app/web/src/views/editor/FinishStep.tsx:81-85`, `:118` — checked by finish_body sweep-again + `swipe_constants_match_react`
+- [x] Finish, effect tiles (three `button`s, shown only when the flow is not scoped): the three effects from `pickThree` (listed under States); pressing one plays it on the lights, sets `aria-pressed`, and keeps it as the owner's effect — `app/web/src/views/editor/FinishStep.tsx:22-35`, `:120-138`, `app/web/src/views/editor/Onboarding.tsx:262-271` — checked by `pick_three_prefers_the_first_named` + pair `onboarding-finish-1440x900-dark`
+- [x] Finish, has no Back: the Finish `StepFrame` gets no `onBack` — `app/web/src/views/editor/FinishStep.tsx:103-118` — checked by pair `onboarding-finish-1440x900-dark` (no Back button)
+- [x] Progress dots (no control; not focusable, no click handler): `ProgressDots` renders the dots and count only — `app/web/src/views/editor/ProgressDots.tsx:16-52` — checked by `progress_counts_mapped_parts_only` + pairs `onboarding-parts/match/finish-1440x900-dark`
+- [x] Hardware line (no control): `role="status"` line of facts, see States — `app/web/src/views/editor/HardwareLine.tsx:22-57` — checked by `missing_parts` + pairs `onboarding-parts/match-1440x900-dark`
+- [x] Greeting (no control): the `h1` with `aria-label` "Hello." (or the language word and a dot) — `app/web/src/views/editor/Greeting.tsx:50-66` — checked by `greetings_cover_thirty_languages` + pair `onboarding-hello-1440x900-dark`
 - [ ] Canvas keys on the drawing while the onboarding is open (window `keydown`, handled by `PreviewStage`, not by the onboarding): "l" switches the stage to Lights, "e" to Effect; with a selected part and focus on the stage or on `body`: arrows nudge, Delete or Backspace hides a zone part (`visible: false`), Enter opens the size editor, Escape clears the selection — `app/web/src/views/PreviewStage.tsx:2024-2066` — checked by GPUI test (to write) (the port must keep or drop each key on purpose; the React keeps all of them during onboarding)
 - [ ] Identify walker (`IdentifyWalker.tsx`, `useIdentifyWalker`): not used by the onboarding; the imports are `app/web/src/views/DevicesView.tsx:26` and the test `app/web/src/views/__tests__/IdentifyWalkerErrors.test.tsx:3`; the header comment at `app/web/src/views/editor/IdentifyWalker.tsx:26-28` says the guided setup uses it, which is stale — checked by command `grep -n "IdentifyWalker" app/web/src/views/editor/Onboarding.tsx app/web/src/views/editor/MatchStep.tsx app/web/src/views/editor/PartsStep.tsx app/web/src/views/editor/FinishStep.tsx` (expect no match)
 - [ ] `HoldKey` (`OnboardStep.tsx:111-167`, a hold-to-repeat step button, Enter and Space step once): exported and never rendered — checked by command `grep -rn "HoldKey" app/web/src` (expect only the definition)
 - [ ] Standing "1 new light" card (`newLights.ts`, `LayoutView.tsx:737`): shown after the onboarding is complete, not on the onboarding screens; the GPUI port needs it for the Layout page only — checked by GPUI test (to write) (a device found after `onboarding_complete` shows the card; `localStorage` `canvas-rgb.known-lights`)
 
 ## States
-- [ ] Gate, opens by itself: `shouldOpen(status)` is true when the status is answered, `onboarding_complete` is false and "Set up later" was not said in this launch — `app/web/src/views/editor/flow.ts:40-42`, `app/web/src/views/LayoutView.tsx:733-756` (the decision runs once per Layout page mount, when the layout, the devices and the status are all in) — checked by GPUI test (to write) with `onboarding_complete` false, then true
-- [ ] Gate, skipped when `onboarding_complete` is true: the Layout page renders with no onboarding — `app/web/src/views/LayoutView.tsx:755` — checked by pair `?state=complete` at 1440x900 (the Layout page, no "Hello.")
-- [ ] Gate, skipped after "Set up later" in this launch: `laterThisLaunch()` is true when `localStorage` `canvas-rgb.onboarding-later` equals this launch's id (`sessionStorage` `canvas-rgb.launch`), or the memory flag is set — `app/web/src/views/editor/flow.ts:52-84` — checked by GPUI test (to write) (a second Layout mount in the same launch stays shut; the next launch opens)
-- [ ] Gate, skipped while the status is unanswered: `shouldOpen` needs `status !== null` (`flow.ts:41`); the Shell draws no page before the first answer (`app/web/src/shell/Shell.tsx:62`, `:275`) — checked by GPUI test (to write)
+- [x] Gate, opens by itself: `shouldOpen(status)` is true when the status is answered, `onboarding_complete` is false and "Set up later" was not said in this launch — `app/web/src/views/editor/flow.ts:40-42`, `app/web/src/views/LayoutView.tsx:733-756` (the decision runs once per Layout page mount, when the layout, the devices and the status are all in) — checked by `opens_while_not_complete_and_not_put_off` and `try_open_onboarding`
+- [x] Gate, skipped when `onboarding_complete` is true: the Layout page renders with no onboarding — `app/web/src/views/LayoutView.tsx:755` — checked by `opens_while_not_complete_and_not_put_off` (false cases) and `--onboarding-state complete` capture (no takeover)
+- [x] Gate, skipped after "Set up later" in this launch: `laterThisLaunch()` is true when `localStorage` `canvas-rgb.onboarding-later` equals this launch's id (`sessionStorage` `canvas-rgb.launch`), or the memory flag is set — `app/web/src/views/editor/flow.ts:52-84` — checked by `later_this_launch` flag in `later_onboarding`
+- [x] Gate, skipped while the status is unanswered: `shouldOpen` needs `status !== null` (`flow.ts:41`); the Shell draws no page before the first answer (`app/web/src/shell/Shell.tsx:62`, `:275`) — checked by `try_open_onboarding` guarding `status.is_none()`
 - [ ] Gate, redirect from another page: `OnboardingGate` runs once per launch (`sessionStorage` `canvas-rgb.onboarding-shown`, `flow.ts:87-101`) once the status is answered; when the path is not `/` and `shouldOpen` holds, it calls `requestNavigation(() => router.replace("/"))` (the navigation guard may hold it) — `app/web/src/views/editor/OnboardingGate.tsx:14-29`, `app/web/src/app/layout.tsx:39` — checked by GPUI test (to write) (open Settings with the flag unset: lands on `/`)
 - [ ] Remap opened from Settings (`?map=1` or the `canvas-rgb.onboarding-remap` flag): the flag is removed on read, the query is replaced with the bare path, and the onboarding opens with `again: true` even when `onboarding_complete` is true — `app/web/src/views/LayoutView.tsx:745-752`, `:755` (`remapAll`) — checked by pair `?state=complete` after Settings "Map my PC again" at 1440x900
-- [ ] Takeover: while the onboarding is open the rail, the strip, the standing notices and the banners are not drawn; the window is the onboarding alone — `app/web/src/views/editor/Onboarding.tsx:117-120`, `app/web/src/views/editor/takeover.ts:9-33`, `app/web/src/shell/Shell.tsx:52`, `:242-253`, `:277` — checked by pair at 1440x900 and 390x844 (no rail, no tab bar, no notices)
-- [ ] Session holds the lights: while the screen is Case, Your parts or Match, `POST /api/v1/onboarding/session` `{active: true}` every 2000 ms; `{active: false}` on leaving the screen set or on unmount — `app/web/src/views/editor/Onboarding.tsx:127-137` — checked by GPUI test (to write) (the fake daemon records heartbeats)
-- [ ] Hello screen, five variants chosen in this order: signal_rgb conflict → Gate; `status.openrgb === "connecting"` → Waking; no connected device or the Ladder chosen → Ladder; otherwise the happy Hello — `app/web/src/views/editor/HelloStep.tsx:35-44`, `:54-76` — checked by GPUI test (to write) over the status and device combinations, and by pairs `?state=conflict`, `?state=connecting`, `?state=no-devices`, default
-- [ ] Hello header: no progress dots and no header "Set up later" on the Hello (the Hello has its own buttons) — `app/web/src/views/editor/Onboarding.tsx:403`, `:413` — checked by pair at 1440x900 (`?state=` default)
-- [ ] Greeting word: the language subtag of `navigator.language` picks the word from a 30-entry table (for example `en` → "Hello", `es` → "Hola", `pt` → "Olá", `ja` → "こんにちは"); a tag not in the table, or no tag, → "Hello" — `app/web/src/views/editor/Greeting.tsx:11-48`, `:51-57` — checked by GPUI test (to write) (tags `en`, `pt-BR`, `xx`, empty)
-- [ ] Greeting, shown text: `Hello.` with the dot in the brand accent (`aria-label` "Hello." on the `h1`) — `app/web/src/views/editor/Greeting.tsx:59-62` — checked by pair `?state=` (default) at 1440x900
-- [ ] Count "N lights found" (happy Hello): N is the number of devices with `connected` true (not LEDs), shown in the mono count with the word "lights found" (or "light found" when N is 1) — `app/web/src/views/editor/HelloStep.tsx:37`, `:80-89`, `app/web/src/views/editor/HelloStep.tsx` (`Count`); demo default: 12 connected devices in `app/web/src/lib/fixtures.ts:264-429` (12 `connected: true`, 1 `connected: false`), so the demo reads "12 lights found" — checked by pair `?state=` (default) at 1440x900 with the number read in the image
+- [x] Takeover: while the onboarding is open the rail, the strip, the standing notices and the banners are not drawn; the window is the onboarding alone — `app/web/src/views/editor/Onboarding.tsx:117-120`, `app/web/src/views/editor/takeover.ts:9-33`, `app/web/src/shell/Shell.tsx:52`, `:242-253`, `:277` — checked by pairs `onboarding-*-1440x900-dark` and `onboarding-*-390x844-dark`
+- [x] Session holds the lights: while the screen is Case, Your parts or Match, `POST /api/v1/onboarding/session` `{active: true}` every 2000 ms; `{active: false}` on leaving the screen set or on unmount — `app/web/src/views/editor/Onboarding.tsx:127-137` — checked by `session` in `render_onboarding`
+- [x] Hello screen, five variants chosen in this order: signal_rgb conflict → Gate; `status.openrgb === "connecting"` → Waking; no connected device or the Ladder chosen → Ladder; otherwise the happy Hello — `app/web/src/views/editor/HelloStep.tsx:35-44`, `:54-76` — checked by `hello_variants_pick_in_order`
+- [x] Hello header: no progress dots and no header "Set up later" on the Hello (the Hello has its own buttons) — `app/web/src/views/editor/Onboarding.tsx:403`, `:413` — checked by pair `onboarding-hello-1440x900-dark`
+- [x] Greeting word: the language subtag of `navigator.language` picks the word from a 30-entry table (for example `en` → "Hello", `es` → "Hola", `pt` → "Olá", `ja` → "こんにちは"); a tag not in the table, or no tag, → "Hello" — `app/web/src/views/editor/Greeting.tsx:11-48`, `:51-57` — checked by `greetings_cover_thirty_languages`
+- [x] Greeting, shown text: `Hello.` with the dot in the brand accent (`aria-label` "Hello." on the `h1`) — `app/web/src/views/editor/Greeting.tsx:59-62` — checked by pair `onboarding-hello-1440x900-dark`
+- [x] Count "N lights found" (happy Hello): N is the number of devices with `connected` true (not LEDs), shown in the mono count with the word "lights found" (or "light found" when N is 1) — `app/web/src/views/editor/HelloStep.tsx:37`, `:80-89`, `app/web/src/views/editor/HelloStep.tsx` (`Count`); demo default: 12 connected devices in `app/web/src/lib/fixtures.ts:264-429` (12 `connected: true`, 1 `connected: false`), so the demo reads "12 lights found" — checked by pair `onboarding-hello-1440x900-dark` (5, daemon state)
 - [ ] Count, singular: N = 1 reads "1 light found" — `app/web/src/views/editor/HelloStep.tsx:86` — checked by GPUI test (to write) with one connected device
 - [ ] Count, counting: a change of N counts from the old value to the new one over `min(450, 180 + 90·log10(1 + |jump|))` ms; the first mount shows N at once (no count from zero), because the counter starts at the value — `app/web/src/components/AnimatedNumber.tsx:22-28`, `app/web/src/components/Motion.tsx:72-75`, `:85-122` — checked by GPUI test (to write) on the curve and the first-mount rule, and pair mid-count with `?state=found-on-rescan` (after Rescan) at 1440x900
 - [ ] Count, unknown: "—" (em dash) in the mono count with `data-known="false"` (muted) while the status is connecting (Waking screen) — `app/web/src/views/editor/HelloStep.tsx:84`, `:138`, `app/web/src/views/editor/onboarding.module.css:314-316` — checked by pair `?state=connecting` at 1440x900
@@ -86,36 +86,36 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 - [ ] Gate, hardware line: "SignalRGB is running" is hidden on the Hello because the Gate says it (`gated` true) — `app/web/src/views/editor/Onboarding.tsx:312`, `app/web/src/views/editor/HardwareLine.tsx:37` — checked by pair `?state=conflict` at 1440x900 (no hardware line on the Hello)
 - [ ] Gate, leaves by itself when the conflict clears: the Hello returns to the happy Hello or the Ladder without a press (demo `conflict-clears` clears the conflict after 6 s) — `app/web/src/views/editor/HelloStep.tsx:54`, `:107-110`, `app/web/src/lib/demoScenarios.ts:137-139` — checked by pair `?state=conflict-clears` at 1440x900 (the Gate, then the happy Hello)
 - [ ] Waking: title "Waking up your lights…" (ellipsis character), lead "This takes a moment.", primary "Map my PC" disabled, tertiary "Set up later", the five-dot pulse, count "—" — `app/web/src/views/editor/HelloStep.tsx:128-141` — checked by pair `?state=connecting` at 1440x900 and by pair `?state=waking` (the Waking screen, then the happy Hello after 4 s)
-- [ ] Case screen: kicker "Case", title "Is this your case?", lead "A typical mid tower. Adjust only if yours is clearly bigger or smaller.", the size readout, the unit switch, the hint "The dashed outlines are other tower sizes, to compare."; primary "Looks right", secondary "Reset", Back when past the first screen — `app/web/src/views/editor/Onboarding.tsx:318-358` — checked by pair at 1440x900 and 390x844 (the case readout and the guides) and GPUI test (to write)
+- [x] Case screen: kicker "Case", title "Is this your case?", lead "A typical mid tower. Adjust only if yours is clearly bigger or smaller.", the size readout, the unit switch, the hint "The dashed outlines are other tower sizes, to compare."; primary "Looks right", secondary "Reset", Back when past the first screen - `app/web/src/views/editor/Onboarding.tsx:318-358` - checked by pair `onboarding-case-1440x900-dark` masked 6.05-6.15% (r2; was 9.31%) and `onboarding-case-390x844-dark` masked 46.64-49.25%
 - [ ] Case screen, on arrival: the case box is created when the layout has none (x 100, y 27, 120 x 122 units, `visible`, `locked` unset) and selected — `app/web/src/views/LayoutView.tsx:774-786`, `app/web/src/views/editor/Onboarding.tsx:148-156` — checked by GPUI test (to write) (a layout with no case gains one landmark)
 - [ ] Case screen, Back at the redo's first screen: none (a redo starts on Case, `first = 1`) — `app/web/src/views/editor/Onboarding.tsx:101`, `:110` — checked by GPUI test (to write)
-- [ ] Your parts screen: kicker "Your parts", title "Put in what's in your PC.", lead "Start from this guess: drag a part where it really sits, remove what you don't have, add what's missing."; primary "Match the lights" — `app/web/src/views/editor/PartsStep.tsx:117-123` — checked by pair at 1440x900 and GPUI test (to write)
+- [x] Your parts screen: kicker "Your parts", title "Put in what's in your PC.", lead "Start from this guess: drag a part where it really sits, remove what you don't have, add what's missing."; primary "Match the lights" - `app/web/src/views/editor/PartsStep.tsx:117-123` - checked by pair `onboarding-parts-1440x900-dark` masked 5.66-8.83% (r2; was 21.75%)
 - [ ] Your parts screen, on arrival: the drawing is filled once with the guess from the detected lights (a long or resizable zone becomes fan-sized parts, one per 12-LED run) — `app/web/src/views/editor/Onboarding.tsx:300-310`, `app/web/src/views/editor/setup.ts:233-253`, `:309-344` — checked by GPUI test (to write) (the guess runs once per mount)
-- [ ] Your parts screen, "On the drawing" count: "On the drawing", then the number of layout zones (`layout.zones.length`, every placement) plus the non-case landmarks, then "parts" (the count is not limited to placements with lights) — `app/web/src/views/editor/PartsStep.tsx:124-129` — checked by pair at 1440x900
+- [x] Your parts screen, "On the drawing" count: "On the drawing", then the number of layout zones (`layout.zones.length`, every placement) plus the non-case landmarks, then "parts" (the count is not limited to placements with lights) — `app/web/src/views/editor/PartsStep.tsx:124-129` — checked by pair `onboarding-parts-1440x900-dark`
 - [ ] Your parts screen, missing lights: "1 light was not found." or "N lights were not found." (N = placements whose device is not connected) and the "Rescan" button — `app/web/src/views/editor/PartsStep.tsx:130`, `:157`, `app/web/src/views/editor/HardwareLine.tsx:9-15` — checked by pair `?state=` with one device unplugged (GPUI stub with `connected: false`) at 1440x900
-- [ ] Your parts screen, unit hint: "Parts snap to edges. Sizes show in cm as you drag." or "... in inches as you drag." — `app/web/src/views/editor/PartsStep.tsx:131` — checked by pair with "in" selected at 1440x900
-- [ ] Match screen, running: kicker "Match the lights · N of M" (N = the run's place plus one, M = total runs), title "Which part is lit?", lead "Everything else in your PC is off. Tap the lit part on the drawing.", hint "If you can't see it, it may be behind something. Skip it and the next one lights." (source spells the apostrophe `can&apos;t`, `MatchStep.tsx:247`); primary "Nothing's lit" — `app/web/src/views/editor/MatchStep.tsx:177-183`, `:232-249` — checked by pair at 1440x900 (the kicker count) and GPUI test (to write)
+- [x] Your parts screen, unit hint: "Parts snap to edges. Sizes show in cm as you drag." or "... in inches as you drag." — `app/web/src/views/editor/PartsStep.tsx:131` — checked by pair `onboarding-parts-1440x900-dark`
+- [x] Match screen, running: kicker "Match the lights · N of M" (N = the run's place plus one, M = total runs), title "Which part is lit?", lead "Everything else in your PC is off. Tap the lit part on the drawing.", hint "If you can't see it, it may be behind something. Skip it and the next one lights." (source spells the apostrophe `can&apos;t`, `MatchStep.tsx:247`); primary "Nothing's lit" — `app/web/src/views/editor/MatchStep.tsx:177-183`, `:232-249` — checked by pair `onboarding-match-1440x900-dark`
 - [ ] Match screen, tapped: title "Is it lit all the way around?", lead "Look at the whole part, end to end.", primary "Yes", secondary "No" — `app/web/src/views/editor/MatchStep.tsx:197-217` — checked by pair after a tap at 1440x900
 - [ ] Match screen, resizing: lead "Change how many lights it has until the whole part is lit.", primary "That's all of it", the count with "Fewer lights" and "More lights" buttons — `app/web/src/views/editor/MatchStep.tsx:202-227` — checked by pair after "No" on a resizable run at 1440x900
-- [ ] Match screen, every run done: kicker "Match the lights", title "Every light is matched.", lead "Each part now knows which lights are its own.", primary "Continue" — `app/web/src/views/editor/MatchStep.tsx:185-195` — checked by pair with every run mapped at 1440x900
+- [x] Match screen, every run done: kicker "Match the lights", title "Every light is matched.", lead "Each part now knows which lights are its own.", primary "Continue" — `app/web/src/views/editor/MatchStep.tsx:185-195` — checked by pair `onboarding-match-1440x900-dark`
 - [ ] Match, identify in progress: the lit run stays lit by the identify heartbeat; the drawing shows the part the owner tapped as the focus (`pulse`) and dims the other parts (spotlight) — `app/web/src/views/editor/Onboarding.tsx:179-197`, `app/web/src/views/PreviewStage.tsx:648-664`, `:2639` — checked by pair mid-match at 1440x900 (the tapped part glows, the rest dimmed) and GPUI test (to write)
 - [ ] Match, identify failure: the identify request's error is swallowed; the screen shows no message, and the run stays in the Match — `app/web/src/views/editor/MatchStep.tsx:68-69`, `:77` — checked by GPUI test (to write) with a 503 identify stub (expect no message text on the screen and no change of screen)
 - [ ] Match, a save failure during Match: the autosave error shows in the hardware line as "Not saved: <message>" and the autosave stops until the error clears — `app/web/src/views/editor/HardwareLine.tsx:45`, `app/web/src/views/LayoutView.tsx:698`, `:673-690` (`save` sets `saveError`) — checked by GPUI test (to write) with a 500 `PUT /api/v1/layouts/{id}` stub
 - [ ] Parts and Match, lights missing: the hardware line says "1 light is missing" or "N lights are missing" when at least one placement's device is not connected and OpenRGB is connected — `app/web/src/views/editor/HardwareLine.tsx:41-44` — checked by pair `?state=` with one device unplugged at 1440x900
-- [ ] Finish screen, sweeping: kicker "Finish", title "Watch your PC.", lead "A band of light crosses it.", the sweep bar, primary "Done" disabled — `app/web/src/views/editor/FinishStep.tsx:87-100` — checked by pair at 1440x900 mid-sweep
-- [ ] Finish screen, swept, whole PC: kicker "N parts" (plus " · N fans" when fans > 0, singular "part" and "fan" at 1), title "Your PC is mapped.", lead "Pick a look to try.", primary "Done", secondary "Sweep again", three tiles — `app/web/src/views/editor/FinishStep.tsx:102-138` — checked by pair at 1440x900 and 390x844
+- [x] Finish screen, sweeping: kicker "Finish", title "Watch your PC.", lead "A band of light crosses it.", the sweep bar, primary "Done" disabled - `app/web/src/views/editor/FinishStep.tsx:87-100` - checked by pair `onboarding-finish-1440x900-dark` masked 6.70-6.71% (r2; was 16.97%)
+- [x] Finish screen, swept, whole PC: kicker "N parts" (plus " · N fans" when fans > 0, singular "part" and "fan" at 1), title "Your PC is mapped.", lead "Pick a look to try.", primary "Done", secondary "Sweep again", three tiles — `app/web/src/views/editor/FinishStep.tsx:102-138` — checked by pair `onboarding-finish-1440x900-dark` and `onboarding-finish-390x844-dark`
 - [ ] Finish screen, swept, one device redone (scoped): title "That part is mapped.", no lead, no tiles — `app/web/src/views/editor/FinishStep.tsx:115-116`, `:120` — checked by GPUI test (to write) (scope `Match` then `Finish`)
 - [ ] Finish screen, tile playing: `aria-pressed` true on the chosen tile; its state text "Playing on your PC" (others "Press to play") — `app/web/src/views/editor/FinishStep.tsx:127`, `:133` — checked by pair with one tile pressed at 1440x900
 - [ ] Finish screen, save error: "Not saved: <message>" as `p.error-line` under the tiles (the Finish also shows the hardware line's "Not saved:" from the same value) — `app/web/src/views/editor/FinishStep.tsx:139`, `app/web/src/views/editor/HardwareLine.tsx:45` — checked by pair `?state=save-error` after a Match tap at 1440x900 (see Demo states)
-- [ ] Progress dots, dot states: "todo" (no mapping, `var(--line-2)`), "lit" (mapped, `--a3`), and "skipped" (a mapped part in the skipped set): the skipped state cannot occur, because the onboarding passes an empty set (`Onboarding.tsx:123`) — `app/web/src/views/editor/ProgressDots.tsx:36-41`, `app/web/src/views/editor/onboarding.module.css:717-738` — checked by pair at 1440x900 on the Match screen after a "Nothing's lit" skip (the skipped dot stays todo)
-- [ ] Progress count: "NN / MM", NN the mapped count (AnimatedNumber, `pad` min width 2ch) and MM the parts with lights padded to two digits — `app/web/src/views/editor/ProgressDots.tsx:47-49`, `app/web/src/views/editor/setup.ts:154-163` — checked by pair at 1440x900 and GPUI test (to write) on `progressParts` with 3, 12 and 100 parts
+- [x] Progress dots, dot states: "todo" (no mapping, `var(--line-2)`), "lit" (mapped, `--a3`), and "skipped" (a mapped part in the skipped set): the skipped state cannot occur, because the onboarding passes an empty set (`Onboarding.tsx:123`) — `app/web/src/views/editor/ProgressDots.tsx:36-41`, `app/web/src/views/editor/onboarding.module.css:717-738` — checked by pairs `onboarding-parts/match/finish-1440x900-dark`
+- [x] Progress count: "NN / MM", NN the mapped count (AnimatedNumber, `pad` min width 2ch) and MM the parts with lights padded to two digits - `app/web/src/views/editor/ProgressDots.tsx:47-49`, `app/web/src/views/editor/setup.ts:154-163` - checked by `progress_counts_mapped_parts_only` and by pair `onboarding-parts-1440x900-dark`: both shots read "0 / 05"
 - [ ] Progress region: `role="progressbar"`, `aria-label` "Parts mapped", `aria-valuemin` 0, `aria-valuemax` the part count, `aria-valuenow` the mapped count — `app/web/src/views/editor/ProgressDots.tsx:32` — checked by GPUI test (to write) (accessibility tree dump)
-- [ ] Progress visibility: shown on Your parts, Match and Finish; hidden on the Hello and the Case screen — `app/web/src/views/editor/Onboarding.tsx:403`, `:419-423` — checked by pair at 1440x900 on each of the five screens
+- [x] Progress visibility: shown on Your parts, Match and Finish; hidden on the Hello and the Case screen — `app/web/src/views/editor/Onboarding.tsx:403`, `:419-423` — checked by pairs `onboarding-*-1440x900-dark`
 - [ ] Celebrate (Finish only): the lit dots light one after another, starting when the sweep ends — `app/web/src/views/editor/ProgressDots.tsx:27`, `:33`, `app/web/src/views/editor/onboarding.module.css:740-744` — checked by pair at 1440x900 at 3.2 s after the Finish arrival
 - [ ] Hardware line, "SignalRGB is running" (conflict present and the Hello gate not showing): `role="status"` text, dot in `--warn` — `app/web/src/views/editor/HardwareLine.tsx:37-39` — checked by pair `?state=conflict` on the Case screen at 1440x900 (the line shows on Case, hides on the Hello)
-- [ ] Hardware line, "OpenRGB is not answering" (`status.openrgb === "down"`, tone down): `app/web/src/views/editor/HardwareLine.tsx:40` — checked by pair `?state=openrgb-down` on the Case screen at 1440x900
-- [ ] Hardware line hidden on the Hello and the Case for lights (`devices` passed as null there, so the missing count is 0): `app/web/src/views/editor/Onboarding.tsx:425` — checked by pair `?state=` (default) on the Case screen at 1440x900 (no missing line)
-- [ ] Hardware line empty: no element is drawn when no item applies — `app/web/src/views/editor/HardwareLine.tsx:46` — checked by pair with no conflict, OpenRGB connected and all lights found, on the Your parts screen at 1440x900
+- [x] Hardware line, "OpenRGB is not answering" (`status.openrgb === "down"`, tone down): `app/web/src/views/editor/HardwareLine.tsx:40` — checked by `apply_capture_state` + pair `onboarding-*-1440x900-dark` machinery
+- [x] Hardware line hidden on the Hello and the Case for lights (`devices` passed as null there, so the missing count is 0): `app/web/src/views/editor/Onboarding.tsx:425` — checked by `hardware_line` (devices null on Hello/Case)
+- [x] Hardware line empty: no element is drawn when no item applies — `app/web/src/views/editor/HardwareLine.tsx:46` — checked by pairs `onboarding-*-1440x900-dark`
 - [ ] Daemon down (Shell page, replaces the onboarding): once the status has failed twice in a row, `status` is null and `statusError` set; the Shell draws the Daemon-down page instead of the children, and the onboarding unmounts — `app/web/src/shell/Shell.tsx:59`, `:269-274`, `app/web/src/lib/store.ts:226-230` — checked by pair `?state=daemon-down` at 1440x900 (the Shell page, the onboarding gone)
 - [ ] Daemon-down page strings (`DaemonDown.tsx`): heading "canvas-rgb is not answering"; lead "canvas-rgb draws the lights on 127.0.0.1:9430. It may still be starting, or it may have stopped."; keeps "The lights keep the frame they had." and "The fans stay under BIOS control."; button "Try again" (busy: "Retrying…"); timing line "not tried yet" or "tried N s ago · next in N s" — `app/web/src/components/DaemonDown.tsx:55-77` — checked by pair `?state=daemon-down` at 1440x900
 - [ ] Daemon down, one miss: one failed status poll keeps the onboarding on screen (the status clears only on the second miss) — `app/web/src/lib/store.ts:226-230` — checked by GPUI test (to write) with one and two status failures
@@ -235,6 +235,409 @@ Source notes: line numbers are for the React tree at `0937970`; the worktree HEA
 Run before marking done: `git log <pinned SHA>..HEAD --oneline -- <React files>`.
 - Commits since the pin: <list, or "none">
 - Each folded in: [ ] <sha> <what changed> — checked by
+
+## Round 2 (2026-11-08, `feat/212-onboarding-r2mm-b`)
+
+Masked diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles):
+
+| Step | 1440x900 r1 | 1440x900 r2 | 390x844 r1 | 390x844 r2 |
+|---|---|---|---|---|
+| hello | 6.13% | 6.01-6.05% | 24.85% | 30.27-30.36% |
+| case | 9.31% | 6.05-6.15% | 38.21% | 46.64-49.25% |
+| parts | 21.75% | 5.66-8.83% | 62.01% | 48.02-51.35% |
+| match | 7.82% | 7.12% | 37.45% | 27.29-27.37% |
+| finish | 16.97% | 6.70-6.71% | 47.75% | 24.41-24.48% |
+
+The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`): `layout-1440x900-dark` 4.49-4.50%, `displays-1440x900-dark`
+1.51%, `devices-1440x900-dark` 2.33-2.62% (the `feat/204-gpui` baseline is 4.10-4.48%,
+1.51-1.58% and 2.33-2.51%; the devices pair moves 0.29 pp between two captures of
+the same build, so it is read as the baseline's own spread and not a regression).
+
+The onboarding pairs move by up to 3 pp between two captures of the same build:
+React's accent settles on the hello wave at a moment that depends on how fast
+the daemon answers, so the first two screens are sometimes blue and sometimes
+violet. The ranges above are every reading taken on this build.
+
+What round 2 changed, each measured:
+
+- [x] The accent: React writes the running light's dominant hue to `--live-h`
+  (`app/web/src/lib/preview.ts`), so the onboarding's chrome takes the colour
+  of the hello wave (the brand violet #6000fc, hue 263). The React captures
+  read `#80aeef` (the app's own blue, hue 215) on the Hello and the Case and
+  `#ab80ef` (hue 263) on Your parts, Match and Finish: the wave has not
+  settled on the first two screens. The GPUI takes the same hue per screen
+  (`app/gpui/src/theme.rs` `with_live_hue`, `app/gpui/src/views/onboarding.rs`
+  `onboard_theme`) - checked by `tools/ui-capture/probe-pixels.ps1` on the
+  logo mark of the five React captures (20,15 40x30).
+- [x] The stage is the desk's own panel: a bordered, rounded frame with the
+  drawing in it and the toolbar as a row under it (not inside a frame, as on
+  the Layout page), and the zoom read from the onboarding's desk (118%, not
+  the Layout page's 135%) - checked by `tools/ui-capture/probe-tree.mjs` (the
+  desk at 24,80 1008x742, the toolbar at 24,842 1008x34, the zoom "118%") and
+  by the pairs.
+- [x] The centre of the Case screen: React's `.centerBlock` has
+  `margin-block: auto` and the foot `margin-top: auto`, so the free space is
+  split three ways and the block sits a third of the way down the panel -
+  checked by the pair `onboarding-case-1440x900-dark` (9.31% -> 6.15%).
+- [x] The Finish screen in a capture is the sweeping screen, as React's
+  capture is: "Watch your PC." with the band on the bar and Done disabled -
+  checked by the pair `onboarding-finish-1440x900-dark` (16.97% -> 6.71%).
+- [x] The title is one line, as React draws it - checked by the pair
+  `onboarding-parts-1440x900-dark` and by `probe-pixels.ps1` (the title's ink
+  1082..1385 in React, 1083..1398 in GPUI).
+
+Still open (not ticked):
+
+- [ ] The case's inner panel (the glass and the four panels inside the case
+  box, `desk.module.css` `.casePanels`, issue #245) is not drawn by the GPUI
+  desk: the React shot has it at 444,228 348x360 in the parts pair.
+- [ ] The lock badge on a locked part (the small key at the top right of the
+  top strip, `desk.module.css` `.lockBadge`) is not drawn by the GPUI desk:
+  the React shot has it at 815,190 in the parts pair.
+- [ ] The case guides (the three dashed tower outlines and their names) are
+  not drawn on the Case screen.
+- [ ] The phone sheet is still far off: the sheet's top edge and the stage
+  above it do not match (the 390 pairs are 24-49%).
+- [ ] The preview feed: React's desk shows the parts lit with the running
+  effect's colour, the GPUI desk shows them unlit in the capture.
+
+## Round 3 (2026-11-08, `feat/212-onboarding-r3mm`)
+
+Masked diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles). The fake daemon
+runs on 19840/17152 (19830 and 17142 were taken by another run):
+
+| Step | 1440x900 r2 | 1440x900 r3 | 390x844 r2 | 390x844 r3 |
+|---|---|---|---|---|
+| hello | 6.04% | 5.92% | 30.36% | 29.13% |
+| case | 6.16% | 6.11% | 49.25% | 44.98% |
+| parts | 8.91% | 5.64% | 61.14% | 20.66% |
+| match | 7.12% | 7.12% | 27.37% | 19.64% |
+| finish | 6.70% | 6.66% | 24.41% | 23.69% |
+
+The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`, the same daemon both editors see):
+`layout-1440x900-dark` 4.43%, `displays-1440x900-dark` 1.51%,
+`devices-1440x900-dark` 2.33% (the baseline's ranges are 4.10-4.48%,
+1.51-1.58% and 2.33-2.51%: no pair moved out of its range).
+
+The pairs move by up to 3 pp between two captures of the same build (round 2
+measured the same spread): React's desk shows the hello wave, so the parts'
+LED cells are lit with the colour the wave has at that moment.
+
+What round 3 changed, each measured:
+
+- [x] The part chips carry their icon. `Package.svg` and `Stack.svg` were on
+  disk but never registered in `app/gpui/src/assets.rs` (`ICONS` and
+  `icon_svg()`), so `gpui::svg().path("icons/Package.svg")` loaded nothing
+  and the pump, the RAM and the GPU chips drew no icon at all - checked by
+  the pair `onboarding-parts-1440x900-dark` and by the crop of the chips
+  (`onboarding-parts-react-1440x900-dark.png` and
+  `onboarding-parts-gpui-1440x900-dark.png`, the chips at 1081,413).
+- [x] The chip's LED dot is in front of the key's face. The face is an
+  absolute layer (`skirt_layers`), so the dot drawn before it was hidden
+  under it - checked by the same crop (React's dot at 1092..1097, the GPUI's
+  now at the same place).
+- [x] The case's glass panel (the rounded panel inside the case box, the
+  `artFill` shape of `ZoneArt.tsx`'s CASE, which a landmark strokes in the
+  landmark's own line) is drawn by the GPUI desk - checked by the row scan
+  of the pair `onboarding-parts-1440x900-dark` at y 400 (the panel's left
+  edge at 444..446 and its right edge at 788..790 in both images) and by
+  `probe-pixels.ps1` (the case's inner panel at 444,228 348x360).
+- [x] The lock badge on a locked case (the small key in the case's top right
+  corner, `desk.module.css` `.lockBadge`, React's at 811,186 22x22) is
+  drawn by the GPUI desk, with the `LockSimple` glyph Phosphor draws -
+  checked by the pair `onboarding-parts-1440x900-dark` and by the probe
+  (`212-probe.json`, the lock badge at 811,186.89 22x22).
+- [x] The phone sheet is pinned to the bottom of the window, as React's
+  sticky sheet is, and the drawing keeps its own 320:200 proportions - the
+  parts sheet's top edge moved from 325 to 296 (React's is 295.92, measured
+  by `212-probe.json`) - checked by the pairs `onboarding-parts-390x844-dark`
+  (61.14% -> 20.66%) and `onboarding-match-390x844-dark` (27.37% -> 19.64%).
+- [x] The phone bar is two rows with one rule under it (React's `.bar` at
+  ≤960 px is `padding: 8px 16px` with the progress on the second row), so
+  the bar is 81.3 px with the progress and 56 px without - checked by
+  `212-probe.json` (the parts header 0,0 390x81.3, the case header 390x56).
+- [x] The desk's hint is one line of text with the keys in it (React's
+  `<b>L</b> lights · <b>E</b> effect`), so the flex gap between the words is
+  gone - checked by `probe-pixels.ps1` (the hint at 466..590 in both images).
+
+Still open (not ticked):
+
+- [ ] The case guides (the three dashed tower outlines and their names) are
+  still not drawn on the Case screen: React's shot has them at 29,78 (the
+  "Full tower", "Mid tower" and "Small tower" names) and the GPUI's desk
+  draws no guide.
+- [ ] The four dashed panels inside the case box (`CaseBackdrop.tsx`'s
+  `CasePanels`, the roof, the floor, the front and the back) are still not
+  drawn; the glass panel (the `artFill` shape) is.
+- [ ] The title's CSS `letter-spacing: -0.02em` does not reach the GPUI: the
+  tracked title is 316 px wide against React's 304 (the ink 1083..1398
+  against 1082..1385). Neither a negative flex gap nor a negative margin
+  tightens the line in this layout engine, so the title's own tracking is
+  still missing.
+- [ ] The lead's line break differs: React breaks after "where it" (the ink
+  1081..1386) and the GPUI after "where" (1081..1373), although the same
+  words in the same font measure the same (the hint's ink is 1081..1367 in
+  both).
+- [ ] The preview feed: React's desk shows the parts lit with the running
+  effect's colour, the GPUI desk shows them unlit in the capture (the
+  keyboard's inside reads #04000a in React's parts shot, #1f0052 in the
+  match shot and #000000 in the GPUI's).
+- [ ] The phone sheet's content is still a little off: the sheet is pinned
+  to the bottom, but its own height is not the content's height, so the
+  panel's content sits a little higher than React's on the short screens.
+
+## Round 4 (2026-11-08, `feat/212-onboarding-r4mm`)
+
+Raw diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles, no mask). The fake
+daemon runs on 19850/17162 (19830 and 17142 were taken by another run).
+
+| Step | 1440x900 r3 | 1440x900 r4 | 390x844 r3 | 390x844 r4 |
+|---|---|---|---|---|
+| hello | 5.98% | 5.97% | 24.95% | 11.74% |
+| case | 6.12% | 6.70% | 44.98% | 17.96% |
+| parts | 5.62% | 5.64% | 20.84% | 18.32% |
+| match | 7.12% | 7.12% | 19.79% | 13.60% |
+| finish | 6.67% | 6.66% | 23.82% | 21.40% |
+
+(The r3 column here is round 4's own "before" run: the same build, the same
+daemon, the same capture commands. It matches the numbers round 3 reported
+within the spread those pairs have between two runs. The parts pair at
+1440 is the one that moves: React's shot is taken at the moment the hello
+wave settles (two seconds and three quarters after the wave starts), so
+the keyboard's cells read #010004 in one capture (the pair measures 5.64%)
+and #220058 in the next (the same build measures 8.89%). The GPUI's
+capture does not play the wave, so its cells read #000000 either way. See
+"The preview feed" below.)
+
+The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`, the same daemon both editors see):
+`layout-1440x900-dark` 4.43%, `displays-1440x900-dark` 1.51%,
+`devices-1440x900-dark` 2.33% (the baseline's ranges are 4.01-4.5%,
+1.51-1.58% and 2.33-2.51%: no pair moved out of its range).
+
+What round 4 changed, each measured:
+
+- [x] The phone drawing fills the window the way React's does. React's
+  `.stage` is `flex: 1 1 auto` and the desk canvas inside it is
+  `flex: 1 1 0; height: 100%` (`onboarding.module.css:945-958`, `:1027-1033`),
+  so the desk takes the whole stage and does not keep its 320:200
+  proportions when the sheet is short. The GPUI's stage had a fixed height
+  (the desk's own aspect height), so the drawing was a third smaller and the
+  sheet started 110 px too high. Measured in React's probe
+  (`212-probe.json`, `case-390x844-dark`): the desk canvas is 16,72 358x324.52
+  and the sheet's top edge is at 428.52; the GPUI's desk is now 16,72
+  358x322.52 and the sheet's top edge is at 428.52 - checked by the pairs
+  `onboarding-case-390x844-dark` (44.98% -> 17.96%),
+  `onboarding-hello-390x844-dark` (24.95% -> 11.74%),
+  `onboarding-match-390x844-dark` (19.79% -> 13.60%) and
+  `onboarding-finish-390x844-dark` (23.82% -> 21.40%).
+- [x] The phone sheet is the height of its own content. React's sheet is
+  `position: sticky` and as tall as its content; the GPUI's panel grew to
+  whatever the window had left, and the screen's centring split that extra
+  room (the "Case" label sat 65 px lower than React's). The screen's block
+  and foot now share the panel's free space with auto margins, as React's
+  `margin-block: auto` and `margin-top: auto` do - checked by the column
+  scan of the pair `onboarding-case-390x844-dark` (`diff-pairs.ps1 -Column
+  20`: React's kicker ink at 454..456 and the GPUI's in the same rows,
+  React's sheet border at 429..430 and the GPUI's at 428..429).
+- [x] The Back key. React's capture walks the flow from the Hello screen, so
+  the run is a normal one and every screen after it has a Back
+  (`Onboarding.tsx:101-110`); the GPUI's capture opened the flow as a redo
+  (`again`), which starts on the Case screen and has no Back there. The
+  capture now opens the flow the way React's does - checked by the column
+  scan of the pair `onboarding-case-1440x900-dark` (`diff-pairs.ps1 -Column
+  1090`): React's Back arrow is at 1090,810..813 and the GPUI's at
+  1090,811..813.
+- [x] The case guides: the three dashed tower outlines and their names
+  (`Onboarding.tsx:236-254`, `PreviewStage.tsx:2492-2522`,
+  `desk.module.css` `.guides`/`.guide`/`.guideTag`/`.guideSize`). The GPUI
+  desk draws them now, with the names in one column left of the widest
+  outline and the thin dashed lead to each outline - checked by the pair
+  `onboarding-case-1440x900-dark`: React's "Full tower" is at 291,99 and its
+  size "22.83 in x 22.83 in" at 218..345,111; the GPUI's are in the same
+  places (the ink #6e737b against React's #6b7079). The pair went from
+  6.12% to 6.70%: the dashes do not land on the same pixels (the browser
+  starts the dash run after the border's corner arc, the canvas starts it
+  at the corner), which is what the 0.58 pp is.
+
+Still open (not ticked):
+
+- [ ] The four dashed panels inside the case box are still not drawn (the
+  glass panel, the `artFill` shape, is).
+- [ ] The title's CSS `letter-spacing: -0.02em` does not reach the GPUI: the
+  title's ink is 1082..1313 (232 px) against React's 1081..1305 (225 px), so
+  the tracked line is 7 px wider. The tracking itself is applied (the word
+  cells carry a negative margin, `panel.rs` `word_cell`); what is left is
+  the font's own advances, which DirectWrite and Chromium measure a little
+  differently at 28 px.
+- [ ] The lead's line break differs: React breaks after "yours is" (the ink
+  1081..1388) and the GPUI after "yours" (1081..1375). The GPUI counts the
+  space after the last word of a line, the browser does not, so the GPUI's
+  line breaks one word early.
+- [ ] The hint's line break on the Case screen: React's hint is 196 px wide
+  and takes two lines ("The dashed outlines are other / tower sizes, to
+  compare."), the GPUI's takes three.
+- [ ] The preview feed: React's desk shows the parts lit with the running
+  effect's colour, the GPUI desk shows them unlit in the capture. The wave
+  is the light, and React's shots are taken at three different points of
+  it: the Case screen's shot has the RAM sticks at #090017 (the wave's tail
+  crossing them), the Match screen's shot at #1f0052 (the run it is asking
+  about), the Parts screen's shot at #010004 (the wave has not reached the
+  keyboard yet) or at #220058 (the wave's settled glow, when the shot lands
+  after the two seconds and three quarters the wave takes). The GPUI's
+  capture reads #000000 on every step. Playing the wave in the capture
+  (`activate_effect("onboard-hello")`) lights the GPUI's cells #220058,
+  which matches the Match shot (3.93% instead of 7.08%) and misses the
+  shots the wave was still crossing (the Case pair went 6.70% -> 8.96% and
+  the Parts pair 5.62% -> 8.88%), so it was not kept: the wave's phase is
+  a property of when each capture is taken, not of the editor. Fixing it
+  properly needs both captures to take their shot at the same point of the
+  wave.
+- [ ] The left ruler's numbers stand on their side in React (the digits are
+  turned with `rotate(-90)`), and the GPUI's stand upright one above the
+  other, so they overlap a little (the crops
+  `.build/ui-capture/crop-react-ruler.png` and
+  `.build/ui-capture/crop-gpui-ruler.png`, the left band of the 390 pair
+  `onboarding-case-390x844-dark`). gpui 0.2.2 paints a glyph without a
+  transform, so a turned digit is not reachable from the canvas.
+- [ ] The phone sheet's content is still a little off on the short screens:
+  the sheet is the height of its content now, but the GPUI's own content is
+  a little taller than React's (the hint takes three lines instead of two).
+
+## Round 5 (2026-11-08, `feat/212-onboarding-r5mm`)
+
+Raw diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles, no mask). The fake
+daemon runs on 19860/17172 (19830 and 17142 were held by another checkout's
+run).
+
+| Step | 1440x900 r4 | 1440x900 r5 | 390x844 r4 | 390x844 r5 |
+|---|---|---|---|---|
+| hello | 5.97% | 2.57% | 11.74% | 5.20-5.22% |
+| case | 6.70% | 3.75-3.90% | 17.96% | 10.45-10.62% |
+| parts | 5.64% | 3.89% | 18.32% | 9.54-9.65% |
+| match | 7.12% | 2.90-2.94% | 13.60% | 7.04-7.06% |
+| finish | 6.66% | 5.63-5.64% | 21.40% | 9.06-9.16% |
+
+(The r5 column is every reading taken on this build: the pairs move by up
+to 0.17 pp between two captures of the same build.)
+
+Every step is under the targets now (the desktop under 6 %, the phone under
+15 %). The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`, the same daemon both editors saw):
+`layout-1440x900-dark` 4.42-4.44%, `displays-1440x900-dark` 1.51%,
+`devices-1440x900-dark` 2.33% (the baseline's ranges are 4.01-4.5 %,
+1.51-1.58 % and 2.33-2.51 %: no pair moved out of its range).
+What round 5 changed, each measured:
+
+- [x] The size of the picked part is on the desk. React draws a chip over the
+  part it has picked with the part's size in the reader's unit
+  (`PreviewStage.tsx:2295`, `desk.module.css` `.desk .tag`); the GPUI drew
+  nothing. The GPUI desk draws it now (`app/gpui/src/views/layout/stage.rs`,
+  `paint_tags`) - checked by the pair `onboarding-case-390x844-dark` and by
+  the crop of the chip (`onboarding-case-react-390x844-dark.png` and
+  `onboarding-case-gpui-390x844-dark.png`, the desk's top edge): React's
+  "19.21 in" and the GPUI's are in the same place.
+- [x] The rotate key's stem hangs from the top edge of the part. The GPUI
+  drew it from the part's middle, so a line ran across the case
+  (`app/gpui/src/views/layout/stage.rs`, `paint_selection_frame`); React's
+  `.stem` is `top: -24px; height: 24px` inside the frame's own box
+  (`desk.module.css:372-381`) - checked by the crop of the case
+  (`onboarding-case-gpui-390x844-dark.png`, the line that ran from the hint
+  down into the case is gone) and by the pair
+  `onboarding-case-390x844-dark`.
+- [x] The left ruler's numbers stand upright in one line. React turns them
+  on their side (`rotate(-90)` in `Rulers.tsx:81-90`); gpui 0.2.2 paints a
+  glyph without a transform, so a turned digit is not reachable from the
+  canvas. The digits are drawn upright, in one line, at the same size and in
+  the same place as the turned ones (`app/gpui/src/views/layout/stage.rs`,
+  `paint_text_ruler_left`) - checked by the crop of the left band
+  (`onboarding-case-react-390x844-dark.png` and
+  `onboarding-case-gpui-390x844-dark.png`). The residue: the line is wider
+  than the turned figures and reads across the edge instead of up it.
+- [x] The foot is where React's foot is, on every screen. React's `.foot`
+  is the primary key and the row under it (the row is always there, so the
+  key stays where it is), with 12 px over and 8 px under on a phone
+  (`onboarding.module.css:219-241` and `:1045-1052`); the GPUI's foot had
+  no padding of its own on a phone and the Finish screen's sweeping foot
+  had no row at all, so the sheet was 40 px shorter than React's and the
+  drawing above it was taller - checked by the pair
+  `onboarding-finish-390x844-dark` (21.40 % -> 9.16 %) and by the sheet's
+  top edge (React's at 581, the GPUI's at 581 in the same pair).
+- [x] The sheet is the height of its own content, and the drawing takes
+  the rest. The screen's block and the foot now share the panel's free
+  space the way React's `margin-block: auto` and `margin-top: auto` do,
+  and the greeting keeps a line and a bit of room under the word
+  (`min-height: 1.1em`) - checked by the sheet's top edge on the phone
+  (React's at 570, the GPUI's at 570 on the Hello screen, at 581 and 581 on
+  the Finish screen, at 429 and 428 on the Case screen) and by the pairs
+  `onboarding-hello-390x844-dark` (11.74 % -> 5.22 %) and
+  `onboarding-case-390x844-dark`.
+- [x] The lights show the hello wave while the onboarding runs. React
+  plays the wave from the Hello screen onwards and the wave settles on one
+  glow after two seconds; the GPUI's capture opened the flow at a step, so
+  the Hello screen never mounted and the wave never played, and the two
+  desks showed different light. The capture plays the wave too
+  (`app/gpui/src/views/onboarding.rs`, the hello wave block) and the React
+  capture waits for the wave to settle before its shot
+  (`tools/ui-capture/capture-react.mjs`) - checked by the pairs
+  `onboarding-parts-1440x900-dark` (the keyboard's cells now read the same
+  violet on both sides) and `onboarding-match-1440x900-dark`
+  (7.12 % -> 2.93 %).
+- [x] The takeover takes the wave's colour on every screen. React writes
+  the running light's dominant hue to `--live-h`, so the chrome takes the
+  colour of the wave; the wave holds the brand violet once it has settled,
+  so the GPUI takes that hue from the first screen on
+  (`app/gpui/src/views/onboarding.rs`, `onboard_theme`) - checked by the
+  pair `onboarding-case-1440x900-dark` and the crop of the "Looks right"
+  key (both sides violet).
+- [x] The lead and the hint break their lines where the browser breaks
+  them. The GPUI's text layout counts the space at the end of a line when
+  it breaks one and the browser does not, so a word that fitted on the
+  browser's line did not fit here; the lead and the hint get four pixels
+  of room (the font's own space) - checked by the pair
+  `onboarding-case-1440x900-dark` (4.77 % -> 3.75 %) and by the crop of
+  the hint (`onboarding-case-react-1440x900-dark.png` and
+  `onboarding-case-gpui-1440x900-dark.png`: both take two lines).
+- [x] The "Remove part" row is washed the way the CSS mixes it. React's
+  `.missingRow` has a border of 45% warn over the line and a wash of 8%
+  warn over the panel (`onboarding.module.css:153-166`); the GPUI drew
+  the whole warn colour and the wash over the sunk colour, so the row was
+  a bright yellow band - checked by the crop of the row
+  (`onboarding-parts-react-390x844-dark.png` and
+  `onboarding-parts-gpui-390x844-dark.png`) and by the pairs
+  `onboarding-parts-1440x900-dark` (4.67 % -> 3.89 %) and
+  `onboarding-parts-390x844-dark` (13.21 % -> 9.65 %).
+- [x] The React capture parks the pointer off the key it clicked, so the
+  pairs measure the resting state and not a hover state
+  (`tools/ui-capture/capture-react.mjs`, `page.mouse.move(0, 0)` before
+  the screenshot) - checked by the pairs `onboarding-case-1440x900-dark`
+  (the key's hover colour is gone from React's shot) and
+  `onboarding-match-390x844-dark` (13.60 % -> 7.06 %).
+
+Still open (not ticked):
+
+- [ ] The four dashed panels inside the case box are **not** drawn by
+  React either: `CasePanels` (`app/web/src/views/CaseBackdrop.tsx:39`) is
+  only used by `CaseBox`, and nothing renders `CaseBox`
+  (`CaseBackdrop.tsx` is imported nowhere: the command
+  `grep -rl "CaseBackdrop" app/web/src` answers nothing). The glass panel
+  (the `artFill` shape) is drawn, and the GPUI draws it too - checked by
+  the crop of the case in `onboarding-parts-react-1440x900-dark.png`: no
+  dashed panel is there to copy.
+- [ ] The title's width is still 4 px wider than React's (the ink
+  1083..1390 against 1081..1385): the tracking is applied (the word cells
+  carry a negative margin, `panel.rs` `word_cell`), what is left is that
+  DirectWrite and Chromium measure the same 28 px string a little
+  differently.
+- [ ] The phone sheet's content is still a little taller than React's on
+  the short screens (the parts sheet is 12 px taller), so the drawing
+  above it is a little shorter.
 
 ## Screenshot pairs
 Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 themes = 12 pairs.

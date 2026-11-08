@@ -114,6 +114,23 @@ pub struct DragOverlay {
     pub readout: Option<(String, f32, f32)>,
 }
 
+/// A reference outline behind the case, in canvas units: the tower sizes the
+/// Case screen draws the case against (`CaseGuide` in `PreviewStage.tsx`).
+#[derive(Debug, Clone)]
+pub struct CaseGuide {
+    /// The tower's name ("Full tower").
+    pub name: String,
+    /// Its size, in the reader's unit ("22.83 in × 22.83 in").
+    pub size: String,
+    pub x: f64,
+    pub y: f64,
+    pub width: f64,
+    pub height: f64,
+    /// The canvas x the names line up to, left of every outline: three names,
+    /// one column.
+    pub label_x: f64,
+}
+
 /// Everything the desk draws.
 pub struct DeskInput {
     pub zones: Vec<PlacedZone>,
@@ -131,6 +148,11 @@ pub struct DeskInput {
     /// The view the desk is zoomed/panned to: `None` is the hero view.
     pub view: Option<View>,
     pub overlay: DragOverlay,
+    /// A locked case shows the little lock that unlocks it (the
+    /// onboarding). React passes it as `unlockBadge` (`PreviewStage.tsx:664`).
+    pub unlock_badge: bool,
+    /// The tower sizes the Case screen draws behind the case.
+    pub guides: Vec<CaseGuide>,
 }
 
 /// The desk: a canvas that draws the whole picture.
@@ -153,6 +175,8 @@ pub fn desk_with_origin(
     let selection = input.selection;
     let stored_view = input.view;
     let overlay = input.overlay;
+    let unlock_badge = input.unlock_badge;
+    let guides = input.guides;
 
     let measure = origin.clone();
     let element = canvas(
@@ -208,6 +232,9 @@ pub fn desk_with_origin(
                 view,
             );
 
+            // The tower sizes the Case screen draws behind the case.
+            paint_guides(window, &t, &guides, k, view, ox, oy);
+
             // The parts.
             for (i, z) in zones.iter().enumerate() {
                 let info = find_zone_info(&devices, z);
@@ -221,6 +248,7 @@ pub fn desk_with_origin(
                     window,
                     kind,
                     facing,
+                    false,
                     z.x as f64 + view.pan_x,
                     z.y as f64 + view.pan_y,
                     z.width as f64,
@@ -249,6 +277,7 @@ pub fn desk_with_origin(
                     window,
                     l.kind,
                     l.facing,
+                    true,
                     l.x as f64 + view.pan_x,
                     l.y as f64 + view.pan_y,
                     l.width as f64,
@@ -260,6 +289,21 @@ pub fn desk_with_origin(
                     line,
                     &colours,
                 );
+                // The lock on a locked case: a small key in its top corner
+                // (`PreviewStage.tsx:2562`, `.lockBadge`), one click to unlock.
+                if l.kind == PartKind::Case && l.locked && unlock_badge {
+                    paint_lock_badge(
+                        window,
+                        &t,
+                        l.x as f64 + view.pan_x,
+                        l.y as f64 + view.pan_y,
+                        l.width as f64,
+                        l.height as f64,
+                        k,
+                        ox,
+                        oy,
+                    );
+                }
             }
 
             // The drag overlay: snap guides, marquee and readout.
@@ -267,9 +311,147 @@ pub fn desk_with_origin(
 
             // The selection frame and handles (one part picked).
             paint_selection_frame(window, &t, &zones, &landmarks, &selection, k, ox, oy, view);
+
+            // The tag over each picked part: its size, in the reader's unit
+            // (`PreviewStage.tsx:2295`, the `.desk .tag`).
+            paint_tags(
+                window,
+                &t,
+                &zones,
+                &landmarks,
+                &selection,
+                unit,
+                k,
+                ox,
+                oy,
+                view,
+                w,
+            );
         },
     );
     element.flex_1().min_h_0().min_w_0().into_any_element()
+}
+
+/// The tags over the picked parts: the size of each, in the reader's unit.
+///
+/// React draws a chip over the part (`PreviewStage.tsx:2295`,
+/// `desk.module.css` `.desk .tag`): the panel's colour on a 1 px line, a
+/// 3 px accent on its left edge, and the size in the figures face.
+#[allow(clippy::too_many_arguments)]
+fn paint_tags(
+    window: &mut Window,
+    t: &Theme,
+    zones: &[PlacedZone],
+    landmarks: &[Landmark],
+    selection: &[Sel],
+    unit: LengthUnit,
+    k: f32,
+    ox: f32,
+    oy: f32,
+    view: View,
+    stage_w: f32,
+) {
+    for sel in selection {
+        let (x, y, w, h) = match sel {
+            Sel::Zone(i) => {
+                let Some(z) = zones.get(*i) else { continue };
+                (
+                    z.x as f64 + view.pan_x,
+                    z.y as f64 + view.pan_y,
+                    z.width as f64,
+                    z.height as f64,
+                )
+            }
+            Sel::Landmark(i) => {
+                let Some(l) = landmarks.get(*i) else { continue };
+                (
+                    l.x as f64 + view.pan_x,
+                    l.y as f64 + view.pan_y,
+                    l.width as f64,
+                    l.height as f64,
+                )
+            }
+        };
+        let text = format!(
+            "{} × {}",
+            geometry::format_units(w, unit),
+            geometry::format_units(h, unit)
+        );
+        paint_tag(
+            window,
+            t,
+            &text,
+            ox + x as f32 * k,
+            oy + y as f32 * k,
+            oy + (y + h) as f32 * k,
+            stage_w,
+        );
+    }
+}
+
+/// One tag: the chip with the size in it.
+fn paint_tag(
+    window: &mut Window,
+    t: &Theme,
+    text: &str,
+    bx: f32,
+    by: f32,
+    bottom: f32,
+    stage_w: f32,
+) {
+    let hsla = gpui::Hsla::from(Theme::color(t.ink));
+    let font = label_font(true, gpui::FontWeight::NORMAL);
+    let runs = [gpui::TextRun {
+        len: text.len(),
+        font: font.clone(),
+        color: hsla,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    let layout = window.text_system().layout_line(text, px(14.0), &runs, None);
+    let text_w = f32::from(layout.width);
+    // The chip: the padding (6 px a side), the border (1 px) and the accent
+    // on the left (3 px).
+    let chip_w = text_w + 16.0;
+    // React keeps the tag on the desk (`clamp(b.x, 2, …)`) and puts it under
+    // the part when there is no room above it.
+    let x = bx.max(2.0).min((stage_w - chip_w - 2.0).max(2.0));
+    let mut y = by - 22.0 - 6.0;
+    if y < 2.0 {
+        y = bottom + 6.0;
+    }
+    let rect = Bounds {
+        origin: point(px(x), px(y)),
+        size: gpui::size(px(chip_w), px(22.0)),
+    };
+    let line = Theme::color(t.line_2);
+    let accent = Theme::color(t.line_2);
+    window.paint_quad(
+        gpui::fill(rect, Theme::color(t.panel)).corner_radii(gpui::Corners::all(px(4.0))),
+    );
+    window.paint_quad(
+        gpui::outline(rect, line, gpui::BorderStyle::default()).corner_radii(gpui::Corners::all(px(4.0))),
+    );
+    // The accent on the left edge, three pixels wide.
+    window.paint_quad(gpui::fill(
+        Bounds {
+            origin: point(px(x), px(y)),
+            size: gpui::size(px(3.0), px(22.0)),
+        },
+        accent,
+    ));
+    // The size, in the figures face, in the middle of the chip.
+    let baseline = y + 11.0 + f32::from(layout.ascent) / 2.0 - 1.0;
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            let at = point(
+                px(x + 7.0 + f32::from(glyph.position.x)),
+                px(baseline + f32::from(glyph.position.y)),
+            );
+            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(14.0), hsla);
+        }
+    }
 }
 
 /// The snap guides (rose, `--a4`), the marquee band and the drag readout.
@@ -432,9 +614,12 @@ fn paint_selection_frame(
             gpui::BorderStyle::default(),
         ));
     }
-    // Stem + grip.
+    // Stem + grip. The stem hangs from the top edge of the box, not from its
+    // middle (React's `.stem` is `top: -24px; height: 24px` inside the
+    // frame's own box), so it never draws a line across the part.
+    let (sx, sy) = rotate(0.0, -height / 2.0);
     let (gx, gy) = rotate(0.0, -height / 2.0 - 24.0);
-    paint_line(window, cx, cy, gx, gy, 1.5, t.live());
+    paint_line(window, sx, sy, gx, gy, 1.5, t.live());
     window.paint_quad(gpui::fill(
         Bounds {
             origin: point(px(gx - 5.5), px(gy - 5.5)),
@@ -683,8 +868,11 @@ fn paint_furniture(
     }
     for m in &marks {
         if m.at <= EFFECT_H + 0.001 && m.major {
-            // The left-hand numbers stand on their side.
-            paint_text_rotated(
+            // The left-hand numbers stand on their side in React. gpui 0.2.2
+            // paints a glyph without a transform, so a turned digit is not
+            // reachable from the canvas: the digits go upright, in one line,
+            // in the same place and at the same size.
+            paint_text_ruler_left(
                 window,
                 &m.label,
                 left + (BAND_PX - 2.0) / k,
@@ -757,11 +945,17 @@ fn paint_text(
     }
 }
 
-/// The ruler's numbers on the left edge, turned on their side.
+/// The ruler's numbers on the left edge.
 ///
 /// React turns them with `rotate(-90 …)` and anchors them at their end, so
-/// the text runs up the edge from the mark.
-fn paint_text_rotated(
+/// the figures read up the edge from the mark. gpui 0.2.2 paints a glyph
+/// without a transform, so a turned digit is not reachable from the canvas:
+/// the figures are drawn upright, in one line, at the same size and in the
+/// same place as the turned ones - the ink of the turned figures is a band
+/// from the anchor down the edge, and the upright ones take that band's
+/// place. The residue is that the line is wider than the turned figures and
+/// reads across the edge instead of up it.
+fn paint_text_ruler_left(
     window: &mut Window,
     text: &str,
     x: f32,
@@ -780,14 +974,21 @@ fn paint_text_rotated(
         strikethrough: None,
     }];
     let layout = window.text_system().layout_line(text, px(size), &runs, None);
-    // The text is anchored at its end, so it starts `width` to the left.
-    let width = layout.width;
+    let width = f32::from(layout.width);
+    let ascent = f32::from(layout.ascent);
+    let descent = f32::from(layout.descent);
+    // The turned figures sit between the anchor and the anchor plus their
+    // own width, and they are as tall as the font's ascent. The upright line
+    // takes that band: its baseline is the band's lower edge less the
+    // descent, and its left edge is the anchor less the ascent.
+    let baseline = y + width - descent;
+    let left = x - ascent;
     for run in &layout.runs {
         for glyph in &run.glyphs {
-            // A turn of -90 degrees: (dx, dy) becomes (dy, -dx).
-            let gx = f32::from(glyph.position.y);
-            let gy = -(f32::from(glyph.position.x) - f32::from(width));
-            let at = point(px(x + gx), px(y + gy));
+            let at = point(
+                px(left + f32::from(glyph.position.x)),
+                px(baseline + f32::from(glyph.position.y)),
+            );
             let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
         }
     }
@@ -866,6 +1067,155 @@ fn paint_cells(
     }
 }
 
+/// The tower sizes behind the case (React's `.guides`, `PreviewStage.tsx`:
+/// 2492-2522): a dashed outline for each, and its name and size in one
+/// column to the left of them all.
+///
+/// The names are level with the top of their outline and joined to it by a
+/// thin dashed lead, so three outlines and three names never meet.
+fn paint_guides(
+    window: &mut Window,
+    t: &Theme,
+    guides: &[CaseGuide],
+    k: f32,
+    view: View,
+    ox: f32,
+    oy: f32,
+) {
+    if guides.is_empty() {
+        return;
+    }
+    let mute = Theme::color(t.mute);
+    let line = gpui::Rgba {
+        a: mute.a * 0.55,
+        ..mute
+    };
+    for g in guides {
+        let x = ox + (g.x + view.pan_x) as f32 * k;
+        let y = oy + (g.y + view.pan_y) as f32 * k;
+        let w = g.width as f32 * k;
+        let h = g.height as f32 * k;
+        // The outline: a dashed 1 px line round the box.
+        paint_dashed_h(window, x, x + w, y, 1.0, line);
+        paint_dashed_v(window, y, y + h, x + w, 1.0, line);
+        paint_dashed_h(window, x + w, x, y + h, 1.0, line);
+        paint_dashed_v(window, y + h, y, x, 1.0, line);
+        // The name and its size, right-aligned in the column left of the
+        // outlines, level with the outline's top.
+        let right = ox + (g.label_x + view.pan_x) as f32 * k - 6.0;
+        let top = y - 2.0;
+        paint_text_right(
+            window,
+            &g.name,
+            right,
+            top + 9.5,
+            11.0,
+            mute,
+            label_font(false, gpui::FontWeight::MEDIUM),
+        );
+        paint_text_right(
+            window,
+            &g.size,
+            right,
+            top + 9.5 + 13.65,
+            11.0,
+            gpui::Rgba {
+                a: mute.a * 0.8,
+                ..mute
+            },
+            label_font(true, gpui::FontWeight::NORMAL),
+        );
+        // The thin dashed lead from the name to the outline.
+        paint_dashed_h(window, right + 2.0, x - 2.0, top + 7.0, 1.0, line);
+    }
+}
+
+/// A dashed line across: a dash of three pixels, a gap of three (the
+/// browser's own dashed border), on the pixel row the line falls on.
+fn paint_dashed_h(
+    window: &mut Window,
+    x1: f32,
+    x2: f32,
+    y: f32,
+    width: f32,
+    colour: gpui::Rgba,
+) {
+    let y = y.floor() + 0.5;
+    let mut at = x1.floor();
+    let end_at = x2.ceil();
+    while at < end_at {
+        let to = (at + 3.0).min(end_at);
+        paint_line(window, at, y, to, y, width, colour);
+        at = to + 3.0;
+    }
+}
+
+/// A dashed line down: the same dashes, on the pixel column.
+fn paint_dashed_v(
+    window: &mut Window,
+    y1: f32,
+    y2: f32,
+    x: f32,
+    width: f32,
+    colour: gpui::Rgba,
+) {
+    let x = x.floor() + 0.5;
+    let mut at = y1.floor();
+    let end_at = y2.ceil();
+    while at < end_at {
+        let to = (at + 3.0).min(end_at);
+        paint_line(window, x, at, x, to, width, colour);
+        at = to + 3.0;
+    }
+}
+
+/// A label's face: the UI font (`--fu`) or the figures font (`--fm`).
+fn label_font(mono: bool, weight: gpui::FontWeight) -> gpui::Font {
+    gpui::Font {
+        family: if mono {
+            crate::fonts::MONO_FAMILY.into()
+        } else {
+            crate::fonts::UI_FAMILY.into()
+        },
+        features: gpui::FontFeatures::default(),
+        fallbacks: None,
+        weight,
+        style: gpui::FontStyle::default(),
+    }
+}
+
+/// A line of text with its right edge on `right` and its baseline on `y`.
+fn paint_text_right(
+    window: &mut Window,
+    text: &str,
+    right: f32,
+    y: f32,
+    size: f32,
+    colour: gpui::Rgba,
+    font: gpui::Font,
+) {
+    let hsla = gpui::Hsla::from(colour);
+    let runs = [gpui::TextRun {
+        len: text.len(),
+        font,
+        color: hsla,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    let layout = window.text_system().layout_line(text, px(size), &runs, None);
+    let width = f32::from(layout.width);
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            let at = point(
+                px(right - width + f32::from(glyph.position.x)),
+                px(y + f32::from(glyph.position.y)),
+            );
+            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
+        }
+    }
+}
+
 /// The four corners of a cell, turned with the part.
 fn rotated_corners(x: f32, y: f32, w: f32, h: f32, rotation_deg: f64) -> [(f32, f32); 4] {
     let rad = rotation_deg.to_radians();
@@ -912,6 +1262,7 @@ fn paint_part(
     window: &mut Window,
     kind: PartKind,
     facing: Facing,
+    landmark: bool,
     x: f64,
     y: f64,
     w: f64,
@@ -960,6 +1311,7 @@ fn paint_part(
         window,
         kind,
         facing,
+        landmark,
         x,
         y,
         w,
@@ -971,6 +1323,95 @@ fn paint_part(
         line,
         1.25,
     );
+}
+
+/// The lock on a locked case: a 22 px key in the case's top corner.
+///
+/// React draws it as a real button (`.lockBadge` in `desk.module.css`): a
+/// 22 px square with a line-2 border, the panel's face, the mute colour
+/// and a `LockSimple` lock in the middle. It sits 5 px in from the case's
+/// own border, on the padding box (the border is 1.25 px, so the badge
+/// starts 6.25 px in).
+#[allow(clippy::too_many_arguments)]
+fn paint_lock_badge(
+    window: &mut Window,
+    t: &Theme,
+    x: f64,
+    y: f64,
+    w: f64,
+    h: f64,
+    k: f32,
+    ox: f32,
+    oy: f32,
+) {
+    const BADGE: f32 = 22.0;
+    const INSET: f32 = 5.0;
+    const BORDER: f32 = 1.25;
+    // The badge's box in css pixels: the case's box, less its border, less
+    // the 5 px the CSS keeps from the corner.
+    let kf = k as f64;
+    let left = ox + (x * kf) as f32 + BORDER + INSET;
+    let top = oy + (y * kf) as f32 + BORDER + INSET;
+    let right = left + (w * kf) as f32 - BORDER - INSET;
+    let bottom = top + (h * kf) as f32 - BORDER - INSET;
+    // The badge sits in the case's top RIGHT corner (CSS `top: 5px;
+    // right: 5px`), on the padding box (the border is 1.25 px, so the badge
+    // starts 6.25 px in).
+    let size = (right - left).min(bottom - top).min(BADGE);
+    if size <= 0.0 {
+        return;
+    }
+    let left = right - size;
+    // The face: a 4 px rounded square in the panel colour with a 1 px
+    // line-2 border.
+    let mut builder = PathBuilder::fill();
+    let points = rounded_box(left, top, left + size, top + size, 4.0);
+    builder.move_to(point(px(points[0].0), px(points[0].1)));
+    for p in &points[1..] {
+        builder.line_to(point(px(p.0), px(p.1)));
+    }
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, Theme::color(t.panel));
+    }
+    paint_outline(window, left - 0.5, top - 0.5, left + size - 0.5, top + size - 0.5, 4.0, 1.0, Theme::color(t.line_2));
+    // The lock itself: the Phosphor `LockSimple` at the fill weight, 12 px
+    // in the middle of the key.
+    let glyph = (size - 12.0).max(0.0) / 2.0;
+    paint_lock_glyph(window, left + glyph, top + glyph, 12.0, Theme::color(t.mute));
+}
+
+/// The Phosphor `LockSimple` (fill weight) drawn in a 12 px box.
+///
+/// The path is the one `@phosphor-icons/react` renders, in its own 256 x 256
+/// box; the arcs are the SVG arcs, so the shape is the same.
+fn paint_lock_glyph(window: &mut Window, x: f32, y: f32, size: f32, colour: gpui::Rgba) {
+    let s = size / 256.0;
+    let p = |ux: f32, uy: f32| point(px(x + ux * s), px(y + uy * s));
+    let r = |v: f32| point(px(v * s), px(v * s));
+    let mut builder = PathBuilder::fill();
+    builder.move_to(p(208.0, 80.0));
+    builder.line_to(p(176.0, 80.0));
+    builder.line_to(p(176.0, 56.0));
+    builder.arc_to(r(48.0), px(0.0), false, false, p(80.0, 56.0));
+    builder.line_to(p(80.0, 80.0));
+    builder.line_to(p(48.0, 80.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(32.0, 96.0));
+    builder.line_to(p(32.0, 208.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(48.0, 224.0));
+    builder.line_to(p(208.0, 224.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(224.0, 208.0));
+    builder.line_to(p(224.0, 96.0));
+    builder.arc_to(r(16.0), px(0.0), false, false, p(208.0, 80.0));
+    builder.close();
+    builder.move_to(p(96.0, 56.0));
+    builder.arc_to(r(32.0), px(0.0), false, true, p(160.0, 56.0));
+    builder.line_to(p(160.0, 80.0));
+    builder.line_to(p(96.0, 80.0));
+    builder.close();
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, colour);
+    }
 }
 
 /// The derived case: a dashed landmark-line outline with the case's own
@@ -1009,6 +1450,7 @@ fn paint_derived_case(
         window,
         PartKind::Case,
         case.facing,
+        true,
         case.x as f64 + view.pan_x,
         case.y as f64 + view.pan_y,
         case.width as f64,
@@ -1280,7 +1722,9 @@ pub fn desk_with_hint(
                     div()
                         .flex()
                         .items_center()
-                        .gap(px(4.0))
+                        // React's hint is one line of text with the keys in
+                        // it (`<b>L</b> lights · <b>E</b> effect`): the words
+                        // carry their own spaces, so there is no gap here.
                         .px(px(8.0))
                         .py(px(3.0))
                         .r_sm()

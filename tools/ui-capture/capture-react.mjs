@@ -327,7 +327,112 @@ function tauriInit({ daemonBase, token, theme }) {
   window.__TAURI__ = { core: { invoke }, event: { listen } };
 }
 
-async function shootPage(page, base, view, viewport, theme, daemonBase, token, paletteQuery = null) {  const pageErrors = [];
+const STEPS = ["hello", "case", "parts", "match", "finish"];
+
+// The text each screen's panel carries. The walk clicks the primary key and
+// reads `data-step` back, but a headless page sometimes paints the header of
+// the new screen over the body of the old one: the step attribute says
+// "parts" while the panel still shows the Hello screen. The shot is checked
+// against the text the screen must carry, so a half-painted page is retaken
+// rather than saved.
+const STEP_TEXT = {
+  hello: "Map my PC",
+  case: "Is this your case?",
+  parts: "Put in what's in your PC.",
+  match: "Which part is lit?",
+  finish: "Watch your PC.",
+};
+
+// The onboarding takeover (#212): when UI_CAPTURE_ONBOARDING is set (a comma
+// list of steps), only onboarding shots run in demo mode: no __TAURI__, so
+// request() answers from demoRequest() with the ?state= token in
+// UI_CAPTURE_STATE (default empty). Steps advance by clicking the primary
+// button. Files: onboarding-<step>-react-<w>x<h>-<theme>.png.
+const ONBOARD_STEPS = (process.env.UI_CAPTURE_ONBOARDING ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ONBOARD_STATE = (process.env.UI_CAPTURE_STATE ?? "").trim();
+
+async function shootOnboarding(page, base, viewport, theme, step, daemonBase, token) {
+  const fileName = `onboarding-${step}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  const filePath = path.join(OUT_DIR, fileName);
+  const demoMode = ONBOARD_STATE !== "";
+  const q = demoMode ? `?state=${encodeURIComponent(ONBOARD_STATE)}` : "";
+  if (demoMode) {
+    // No __TAURI__: the demo backend answers (demo.ts request()); the theme
+    // still lives in localStorage before load.
+    await page.addInitScript((t) => {
+      try { localStorage.setItem("canvas-rgb.theme", t); } catch {}
+    }, theme);
+  } else {
+    // Happy path against the fake daemon (same state as GPUI).
+    await page.addInitScript(tauriInit, { daemonBase, token, theme });
+  }
+  await page.goto(`${base}/${q}`, { waitUntil: "load", timeout: 30000 }).catch(() => {});
+  // Wait for the shell's live marker.
+  try {
+    await page.waitForFunction(() => document.querySelector('[data-live="on"]') !== null, { timeout: 8000 });
+  } catch {}
+  // Advance to the requested step by clicking the primary button by label.
+  const labels = ["Map my PC", "Looks right", "Match the lights", "Nothing's lit", "Continue", "Done", "Yes", "That's all of it"];
+  const clickPrimary = async () => {
+    for (const b of await page.$$("button")) {
+      const text = (await b.textContent())?.trim() ?? "";
+      if (labels.some((l) => text === l)) {
+        await b.click();
+        await page.waitForTimeout(500);
+        return true;
+      }
+    }
+    return false;
+  };
+  const currentStep = async () => await page.evaluate(() => document.querySelector('[data-step]')?.getAttribute('data-step') ?? null);
+  // Walk forward until the requested step (Match→Finish needs every run skipped).
+  for (let i = 0; i < 12; i++) {
+    if ((await currentStep()) === step) break;
+    if (!(await clickPrimary())) break;
+  }
+  await page.waitForTimeout(600);
+  // The hello wave plays on the lights from the Hello screen onwards: it
+  // takes two seconds to cross the PC and then holds a steady glow. The two
+  // shots have to show the same light, and the wave's phase is a property
+  // of when each capture is taken, so both wait for it to settle: the glow
+  // is the same whatever moment the wave started at. The Finish screen
+  // plays the sweep instead, and its shot lands on the band while it is
+  // crossing, so that screen is not waited for.
+  if (step !== "finish") {
+    await page.waitForTimeout(4500);
+  }
+  // The pointer is left where the last click put it, so the key it clicked is
+  // caught in its hover colour and the part under it carries a name tag. The
+  // GPUI's capture never clicks anything, so the pairs would measure the
+  // hover state against the resting state. Park the pointer off the key (the
+  // top-left corner, over the header, where nothing is clickable) and let the
+  // hover transition finish before the shot.
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(400);
+  // The screen must be the one that was asked for: the step attribute says
+  // so, and the panel's own words say so too. A half-painted page (the
+  // header of the new screen over the body of the old one) is waited out.
+  const want = STEP_TEXT[step];
+  for (let i = 0; i < 20; i++) {
+    const seen = await page.evaluate((t) => {
+      const panel = document.querySelector('[data-step] section');
+      return (panel?.textContent ?? "").includes(t);
+    }, want);
+    if (seen) break;
+    if (i === 19) {
+      throw new Error(`the onboarding screen "${step}" never showed its own text ("${want}")`);
+    }
+    await page.waitForTimeout(500);
+  }
+  await page.screenshot({ path: filePath });
+  return { view: `onboarding-${step}`, path: "/", viewport: { width: viewport.w, height: viewport.h }, theme, file: fileName, pageErrors: [], consoleErrors: [], apiFailures: [], slowThumbnails: [], requestFailures: [], notLoaded: [] };
+}
+
+async function shootPage(page, base, view, viewport, theme, daemonBase, token, paletteQuery = null) {
+  const pageErrors = [];
   const consoleErrors = [];
   const apiFailures = [];
   // A thumbnail that went over the daemon's render budget (a debug build renders slowly) answers
@@ -421,6 +526,9 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
     await page.waitForTimeout(400);
   }
   const filePath = path.join(OUT_DIR, fileName);
+  // Park the pointer off any key, so a shot is the resting state and not a
+  // hover state (the onboarding capture clicks through the flow).
+  await page.mouse.move(0, 0);
   await page.screenshot({ path: filePath });
   page.off("pageerror", onPageError);
   page.off("console", onConsole);
@@ -455,7 +563,23 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const shots = [];
   try {
-    if (PALETTE_ENTRIES.length) {
+    if (ONBOARD_STEPS.length) {
+      for (const step of ONBOARD_STEPS) {
+        for (const viewport of ACTIVE_VIEWPORTS) {
+          for (const theme of ACTIVE_THEMES) {
+            const context = await browser.newContext({
+              viewport: { width: viewport.w, height: viewport.h },
+              deviceScaleFactor: 1,
+              ...(FREEZE ? { reducedMotion: "reduce" } : {}),
+            });
+            const page = await context.newPage();
+            process.stderr.write(`shoot onboarding-${step} ${viewport.w}x${viewport.h} ${theme} ...\n`);
+            shots.push(await shootOnboarding(page, base, viewport, theme, step, DAEMON_BASE, token));
+            await context.close();
+          }
+        }
+      }
+    } else if (PALETTE_ENTRIES.length) {
       const layout = VIEWS.find((v) => v.name === "layout");
       for (const entry of PALETTE_ENTRIES) {
         const query = entry === "empty" ? "" : entry;

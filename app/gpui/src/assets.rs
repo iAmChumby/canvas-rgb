@@ -90,6 +90,13 @@ pub const ICONS: &[&str] = &[
     "Minus",
     "SlidersHorizontal",
     "GripDots",
+    // The Onboarding takeover (#212). `Package` and `Stack` are the part
+    // chips' icons (`PartsStep.tsx`: the pump's stack, the RAM's package);
+    // they were on disk but never registered, so the chips drew no icon at
+    // all. `LockSimple` is the lock badge on a locked case.
+    "Package",
+    "Stack",
+    "LockSimple",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -166,6 +173,9 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "Minus" => include_str!("../assets/icons/Minus.svg"),
         "SlidersHorizontal" => include_str!("../assets/icons/SlidersHorizontal.svg"),
         "GripDots" => include_str!("../assets/icons/GripDots.svg"),
+        "Package" => include_str!("../assets/icons/Package.svg"),
+        "Stack" => include_str!("../assets/icons/Stack.svg"),
+        "LockSimple" => include_str!("../assets/icons/LockSimple.svg"),
         _ => return None,
     })
 }
@@ -220,6 +230,9 @@ impl AssetSource for IconAssets {
                         "Star" => include_str!("../assets/icons/Star-fill.svg"),
                         "Waveform" => include_str!("../assets/icons/Waveform-fill.svg"),
                         "Check" => include_str!("../assets/icons/Check-fill.svg"),
+                        // The onboarding's lock badge (#212): React draws
+                        // `<LockSimple size={12} weight="fill" />`.
+                        "LockSimple" => include_str!("../assets/icons/LockSimple-fill.svg"),
                         _ => icon_svg(base).unwrap_or(""),
                     };
                     Some(Cow::Borrowed(svg.as_bytes()))

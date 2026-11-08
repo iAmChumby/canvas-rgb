@@ -46,7 +46,14 @@ param(
     # The editor's live preview is a render of the effect's own source, which
     # takes a few seconds; a short settle would shoot the pane before the
     # picture lands.
-    [int]$SettleSeconds = 3
+    [int]$SettleSeconds = 3,
+    # Onboarding takeover at a step (--onboarding-step; #212). Files are named
+    # onboarding-<step>-gpui-<size>-<theme>.png so diff-pairs.ps1 pairs them
+    # with the React demo shots (capture-react.mjs UI_CAPTURE_ONBOARDING).
+    [switch]$Onboarding,
+    [string]$OnboardingStep = 'hello',
+    # Mirror a React demo ?state= token (--onboarding-state).
+    [string]$OnboardingState = ''
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 if ($PaletteQuery -ne '') { $Palette = $true }
@@ -195,7 +202,12 @@ foreach ($theme in $Themes) {
         $paletteArgs = ' --palette'
         if ($PaletteQuery -ne '') { $paletteArgs += " --palette-query `"$PaletteQuery`"" }
       }
-      $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs"
+      $onboardArgs = ''
+      if ($Onboarding) {
+        $onboardArgs = " --onboarding-step $OnboardingStep"
+        if ($OnboardingState -ne '') { $onboardArgs += " --onboarding-state `"$OnboardingState`"" }
+      }
+      $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs$onboardArgs"
       if ($Editor -ne '') { $psi.Arguments += " --editor $Editor" }
       if ($Stack -ne '') { $psi.Arguments += " --stack `"$Stack`"" }
       $psi.UseShellExecute = $false
@@ -248,15 +260,21 @@ foreach ($theme in $Themes) {
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           exit 3
         }
-        # Settle, measured: probe the frame every 500 ms until two probes in
-        # a row are identical (painted and stable) AND at least 3 s have
+        # Settle, measured: probe the frame every 500 ms until several probes
+        # in a row are identical (painted and stable) AND at least 8 s have
         # passed since the window appeared. The minimum matters: the
         # "Daemon connecting" frame is itself stable, so stability alone
-        # shot it. 3 s covers the editor's first daemon fetch with margin
-        # (measured well under 1 s when the daemon answers).
-        $settleDeadline = (Get-Date).AddSeconds(15)
+        # shot it. 8 s covers the editor's first daemon fetch with margin:
+        # the onboarding only opens when the layout, the devices and the
+        # status are all in, and a shot taken before that shows the Layout
+        # page reading the layout instead of the takeover (#212).
+        # Three probes in a row (1 s of stillness) also skips the one frame
+        # in which the takeover has opened but the shell has not redrawn its
+        # own chrome yet: that frame is stable too, and it is wrong.
+        $settleDeadline = (Get-Date).AddSeconds(30)
         $appearedAt = Get-Date
         $prevSum = $null
+        $sameCount = 0
         while ((Get-Date) -lt $settleDeadline) {
           Start-Sleep -Milliseconds 500
           $proc.Refresh()
@@ -267,7 +285,9 @@ foreach ($theme in $Themes) {
           $ch = $rect.Bottom - $rect.Top
           if ($cw -le 0 -or $ch -le 0) { continue }
           $sum = Get-ShotChecksum $handle $cw $ch
-          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge $SettleSeconds) { break }
+          if ($null -ne $prevSum -and $sum -eq $prevSum) { $sameCount++ } else { $sameCount = 0 }
+          $settleNeed = if ($Onboarding) { 8 } else { $SettleSeconds }
+          if ($sameCount -ge 2 -and ((Get-Date) - $appearedAt).TotalSeconds -ge $settleNeed) { break }
           $prevSum = $sum
         }
         $rect = New-Object Win32Capture+RECT
@@ -296,7 +316,7 @@ foreach ($theme in $Themes) {
         # viewport shot.
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
-        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } else { $page }
+        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } else { $page }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
         $shot.Dispose()

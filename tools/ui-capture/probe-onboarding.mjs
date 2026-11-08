@@ -1,0 +1,250 @@
+// Probe React's real boxes for the onboarding takeover (#212).
+// Headless Chromium against the fake daemon (the same state the GPUI capture
+// sees), so every number here is the number the diff is measured against.
+//
+// For each viewport x theme x step it dumps the whole onboarding subtree:
+// every element's rect, its computed font (size/weight/line-height), its box
+// (padding/gap/border/radius/background) and its own text. CSS-module class
+// names are hashed, so each class name is rewritten to its module name
+// (onboarding-module__title__x1 -> title) before it is written out.
+//
+//   node tools/ui-capture/probe-onboarding.mjs
+//   UI_CAPTURE_VIEWPORTS=1440x900,390x844 UI_CAPTURE_THEMES=dark node ...
+//
+// Writes .build/ui-capture/212-probe.json.
+import http from "node:http";
+import fs from "node:fs";
+import path from "node:path";
+import { createRequire } from "node:module";
+import { fileURLToPath } from "node:url";
+
+const require = createRequire(new URL("../poison-compare/js/package.json", import.meta.url));
+const { chromium } = require("playwright");
+
+const __dirname = path.dirname(fileURLToPath(import.meta.url));
+const root = path.resolve(__dirname, "../..");
+// The fake daemon only allows CORS from the capture origin
+// (`http://127.0.0.1:4310`, crates/canvas-daemon/src/fakes.rs), so the probe
+// serves on the same port as capture-react.mjs.
+const CAPTURE_PORT = 4310;
+const WEB_OUT = path.resolve(root, "app/web/out");
+const DAEMON_BASE = (process.env.UI_CAPTURE_API_BASE ?? "http://127.0.0.1:19430").replace(/\/$/, "");
+const TOKEN_FILE = process.env.UI_CAPTURE_TOKEN_FILE ?? path.resolve(root, ".build/fake-home/api-token");
+const VIEWPORTS = (process.env.UI_CAPTURE_VIEWPORTS ?? "1440x900,390x844")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map((s) => {
+    const [w, h] = s.split("x");
+    return { w: Number(w), h: Number(h) };
+  });
+const THEMES = (process.env.UI_CAPTURE_THEMES ?? "dark")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const STEPS = ["hello", "case", "parts", "match", "finish"];
+
+const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
+
+function serveStatic(port, dir) {
+  const server = http.createServer((req, res) => {
+    try {
+      const url = new URL(req.url ?? "/", `http://127.0.0.1:${port}`);
+      let pathname = decodeURIComponent(url.pathname);
+      let file = path.normalize(path.join(dir, pathname));
+      if (!file.startsWith(dir)) { res.writeHead(403); res.end("forbidden"); return; }
+      if (fs.existsSync(file) && fs.statSync(file).isDirectory()) file = path.join(file, "index.html");
+      if (!fs.existsSync(file) && !path.extname(pathname)) {
+        const alt = path.join(dir, pathname, "index.html");
+        if (fs.existsSync(alt)) file = alt;
+      }
+      if (!fs.existsSync(file) || fs.statSync(file).isDirectory()) { res.writeHead(404); res.end("not found"); return; }
+      const ext = path.extname(file).toLowerCase();
+      res.writeHead(200, { "Content-Type": MIME[ext] ?? "application/octet-stream", "Cache-Control": "no-store" });
+      fs.createReadStream(file).pipe(res);
+    } catch (e) { res.writeHead(500); res.end(String(e)); }
+  });
+  return new Promise((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(port, "127.0.0.1", () => resolve(server));
+  });
+}
+
+// The __TAURI__ stand-in: shaped exactly like app/web/src/lib/host.ts. The
+// same one capture-react.mjs injects, so the probe sees the same daemon the
+// GPUI capture sees.
+function tauriInit({ daemonBase, token, theme }) {
+  window.__uiCaptureTheme = theme;
+  try { localStorage.setItem("canvas-rgb.theme", theme); } catch {}
+  const updateState = {
+    current_version: "0.1.0",
+    auto_check: true,
+    last_check: null,
+    phase: { kind: "up_to_date" },
+    available: null,
+    skipped_version: null,
+    snoozed: false,
+    updated_to: null,
+  };
+  const invoke = async (cmd) => {
+    switch (cmd) {
+      case "get_api_config": return { base_url: daemonBase, token };
+      case "update_state": return { ...updateState };
+      case "update_check_now": return { ...updateState };
+      case "tray_prefs": return { editor: "react", channel: "stable" };
+      default: return undefined;
+    }
+  };
+  const listen = async () => () => {};
+  window.__TAURI__ = { core: { invoke }, event: { listen } };
+}
+
+// A CSS-module class name is `onboarding-module__title__1a2b3`; keep the
+// module name and drop the hash.
+function friendlyClass(cls) {
+  if (!cls) return "";
+  return cls
+    .split(/\s+/)
+    .map((c) => {
+      const m = /^onboarding-module__([A-Za-z0-9_]+)__[A-Za-z0-9]+$/.exec(c);
+      if (m) return `onb:${m[1]}`;
+      return c;
+    })
+    .join(" ");
+}
+
+async function probe(browser, base, viewport, theme, step, token) {
+  const context = await browser.newContext({ viewport: { width: viewport.w, height: viewport.h }, deviceScaleFactor: 1 });
+  const page = await context.newPage();
+  page.setDefaultTimeout(15000);
+  if (process.env.UI_CAPTURE_DEBUG) {
+    page.on("console", (m) => console.log(`  console ${m.type()}: ${m.text().slice(0, 300)}`));
+    page.on("pageerror", (e) => console.log(`  pageerror: ${String(e).slice(0, 300)}`));
+    page.on("requestfailed", (r) => console.log(`  requestfailed: ${r.url().slice(0, 140)} ${r.failure()?.errorText ?? ""}`));
+  }
+  await page.addInitScript(tauriInit, { daemonBase: DAEMON_BASE, token, theme });
+  await page.goto(`${base}/`, { waitUntil: "load", timeout: 30000 }).catch(() => {});
+  try { await page.waitForFunction(() => document.querySelector('[data-live="on"]') !== null, { timeout: 12000 }); } catch {}
+  const clickPrimary = async () => {
+    const labels = ["Map my PC", "Looks right", "Match the lights", "Nothing's lit", "Continue", "Done", "Yes", "That's all of it"];
+    const buttons = await page.$$("button");
+    for (const b of buttons) {
+      const text = (await b.textContent())?.trim() ?? "";
+      if (!labels.some((l) => text === l)) continue;
+      try {
+        await b.click({ timeout: 4000, force: true });
+      } catch {
+        // A panel that re-renders under the pointer is still the right key:
+        // click it by dispatching the event instead.
+        await b.evaluate((el) => el.click()).catch(() => {});
+      }
+      await page.waitForTimeout(700);
+      return true;
+    }
+    return false;
+  };
+  const currentStep = async () => await page.evaluate(() => document.querySelector('[data-step]')?.getAttribute('data-step') ?? null);
+  for (let i = 0; i < 14; i++) {
+    if ((await currentStep()) === step) break;
+    if (!(await clickPrimary())) break;
+  }
+  await page.waitForTimeout(900);
+  const data = await page.evaluate(() => {
+    const out = { step: document.querySelector('[data-step]')?.getAttribute('data-step') ?? null, windowW: window.innerWidth, windowH: window.innerHeight, nodes: [] };
+    const root = document.querySelector('[data-step]');
+    if (!root) return out;
+    const walk = (el, depth) => {
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      const own = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent)
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      const kids = Array.from(el.children).filter((c) => {
+        const cr = c.getBoundingClientRect();
+        const ccs = getComputedStyle(c);
+        return ccs.display !== "none" && !(cr.width === 0 && cr.height === 0);
+      });
+      out.nodes.push({
+        depth,
+        tag: el.tagName.toLowerCase(),
+        cls: Array.from(el.classList).join(" "),
+        text: own.slice(0, 120),
+        rect: { x: Math.round(r.x * 100) / 100, y: Math.round(r.y * 100) / 100, w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100 },
+        font: { size: cs.fontSize, weight: cs.fontWeight, lineHeight: cs.lineHeight, family: cs.fontFamily.split(",")[0], letterSpacing: cs.letterSpacing },
+        color: cs.color,
+        bg: cs.backgroundColor,
+        border: `${cs.borderTopWidth} ${cs.borderRightWidth} ${cs.borderBottomWidth} ${cs.borderLeftWidth}`,
+        borderColor: cs.borderTopColor,
+        radius: cs.borderRadius,
+        padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
+        margin: `${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft}`,
+        gap: cs.gap,
+        display: cs.display,
+        flexDirection: cs.flexDirection,
+        alignItems: cs.alignItems,
+        justifyContent: cs.justifyContent,
+        overflow: `${cs.overflowX}/${cs.overflowY}`,
+        maxHeight: cs.maxHeight,
+        minHeight: cs.minHeight,
+        position: cs.position,
+      });
+      for (const c of kids) walk(c, depth + 1);
+    };
+    walk(root, 0);
+    // A few named anchors that are handy to grep for.
+    const named = (sel) => {
+      const el = document.querySelector(sel);
+      if (!el) return null;
+      const r = el.getBoundingClientRect();
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
+    };
+    out.anchors = {
+      header: named('[data-step] header'),
+      panel: named('[data-step] section'),
+      stage: named('[data-step] [class*="stage"]'),
+      progress: named('[data-step] [role="progressbar"]'),
+      title: named('[data-step] section h2'),
+      cta: named('[data-step] section button'),
+    };
+    // The live hue the chrome is on now: React writes it on the root element
+    // from the running frame's dominant hue (app/web/src/lib/preview.ts).
+    out.liveH = getComputedStyle(document.documentElement).getPropertyValue('--live-h').trim();
+    out.live = getComputedStyle(document.documentElement).getPropertyValue('--live').trim();
+    return out;
+  });
+  await context.close();
+  return data;
+}
+
+async function main() {
+  if (!fs.existsSync(WEB_OUT)) throw new Error(`web export not found at ${WEB_OUT}; run npm --prefix app/web run build first`);
+  const token = fs.existsSync(TOKEN_FILE) ? fs.readFileSync(TOKEN_FILE, "utf8").trim() : "";
+  const server = await serveStatic(CAPTURE_PORT, WEB_OUT);
+  const base = `http://127.0.0.1:${CAPTURE_PORT}`;
+  console.log(`probe: serving ${WEB_OUT} on ${base} (daemon ${DAEMON_BASE})`);
+  const browser = await chromium.launch({ headless: true });
+  const out = {};
+  try {
+    for (const theme of THEMES) {
+      for (const viewport of VIEWPORTS) {
+        for (const step of STEPS) {
+          const key = `${step}-${viewport.w}x${viewport.h}-${theme}`;
+          out[key] = await probe(browser, base, viewport, theme, step, token);
+          console.log(`probe: ${key} (step=${out[key].step}, nodes=${out[key].nodes.length})`);
+        }
+      }
+    }
+  } finally {
+    await browser.close();
+    await new Promise((r) => server.close(r));
+  }
+  const file = path.resolve(root, ".build/ui-capture/212-probe.json");
+  fs.mkdirSync(path.dirname(file), { recursive: true });
+  fs.writeFileSync(file, JSON.stringify(out, null, 2));
+  console.log(`probe: wrote ${file}`);
+}
+
+await main();
