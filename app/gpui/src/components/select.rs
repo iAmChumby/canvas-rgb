@@ -209,8 +209,12 @@ pub fn select_grouped(
         .gap_2()
         .min_w(px(160.0))
         .h(px(32.0))
-        .pl_3()
-        .pr(px(10.0))
+        // React `.select-trigger`: `padding: 0 10px 0 12px` inside a 1 px
+        // border; the skirt layers draw the border here, so the border's
+        // pixel is added to each side (the text sat 1 px left and the
+        // trigger 2 px narrow against React, #205).
+        .pl(px(13.0))
+        .pr(px(11.0))
         .text_color(Theme::color(t.ink))
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)

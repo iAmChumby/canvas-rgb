@@ -525,7 +525,11 @@ pub fn field(
         .flex_wrap()
         .items_center()
         .justify_between()
-        .gap_2()
+        // React `.field { gap: var(--s2) var(--s4) }`: 8 px between wrapped
+        // rows, 16 px between the label and the control. The 8 px column gap
+        // let a hint that wraps in React sit on one line (Setup at 1920).
+        .gap_y(px(8.0))
+        .gap_x(px(16.0))
         .min_h(px(48.0))
         .py_2();
     let el = if last {
@@ -577,7 +581,11 @@ pub fn field_hint(
         .flex_wrap()
         .items_center()
         .justify_between()
-        .gap_2()
+        // React `.field { gap: var(--s2) var(--s4) }`: 8 px between wrapped
+        // rows, 16 px between the label and the control. The 8 px column gap
+        // let a hint that wraps in React sit on one line (Setup at 1920).
+        .gap_y(px(8.0))
+        .gap_x(px(16.0))
         .min_h(px(48.0))
         .py_2();
     let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };
@@ -634,7 +642,11 @@ pub fn field_hint_fig(
         .flex_wrap()
         .items_center()
         .justify_between()
-        .gap_2()
+        // React `.field { gap: var(--s2) var(--s4) }`: 8 px between wrapped
+        // rows, 16 px between the label and the control. The 8 px column gap
+        // let a hint that wraps in React sit on one line (Setup at 1920).
+        .gap_y(px(8.0))
+        .gap_x(px(16.0))
         .min_h(px(48.0))
         .py_2();
     let el = if last { el } else { el.border_b_1().border_color(Theme::color(t.line)) };

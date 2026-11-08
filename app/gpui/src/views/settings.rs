@@ -1,4 +1,4 @@
-//! `SettingsView`, after `app/web/src/views/SettingsView.tsx` (+
+﻿//! `SettingsView`, after `app/web/src/views/SettingsView.tsx` (+
 //! `UpdatesPanel.tsx`, `AudioSourcePanel.tsx`).
 //!
 //! The port keeps the React view's rules (the checklist is
@@ -59,7 +59,7 @@ pub fn audio_status_words(state: Option<&AudioTestState>) -> String {
     let name = state.source.name.as_deref().unwrap_or("the default output");
     match state.status {
         AudioTestStatus::Off => "Live while this panel is open".to_string(),
-        AudioTestStatus::Waiting => "Waiting for the device…".to_string(),
+        AudioTestStatus::Waiting => "Waiting for the deviceâ€¦".to_string(),
         AudioTestStatus::NotListening => "Press Listen to test this input".to_string(),
         AudioTestStatus::NoDevice => "No output device".to_string(),
         AudioTestStatus::Missing => format!("Saved device not connected: using {name}"),
@@ -143,7 +143,7 @@ pub fn settings_status(
     skipped_version: Option<&str>,
 ) -> (String, String) {
     match phase {
-        "checking" => ("work".into(), "Checking for updates…".into()),
+        "checking" => ("work".into(), "Checking for updatesâ€¦".into()),
         "downloading" => ("work".into(), format!("Downloading {}", available.unwrap_or(""))),
         "verifying" => ("work".into(), "Checking the download".into()),
         "waiting_for_uac" => ("work".into(), "Waiting for Windows".into()),
@@ -177,7 +177,7 @@ pub fn settings_status(
 pub fn fmt1(n: Option<f32>) -> String {
     match n {
         Some(v) if v.is_finite() => format!("{v:.1}"),
-        _ => "—".to_string(),
+        _ => "â€”".to_string(),
     }
 }
 
@@ -211,7 +211,7 @@ pub fn today_utc() -> (u32, u32, u32) {
 
 /// `fmtChecked` (`updateWords.ts:27-34`): "Never", "HH:MM" today, or
 /// "Mon D, HH:MM" another day. `today_day` is today's UTC day count (UTC
-/// civil; the browser formats in local time — GPUI has no local offset).
+/// civil; the browser formats in local time â€” GPUI has no local offset).
 #[allow(dead_code)]
 pub fn fmt_checked(iso: Option<&str>, today_day: i64) -> String {
     let Some(iso) = iso else { return "Never".to_string() };
@@ -380,8 +380,8 @@ pub struct TrayAbsence;
 #[allow(dead_code)]
 impl TrayAbsence {
     pub const CHECKS_AUTOMATICALLY: bool = true;
-    pub const LAST_CHECKED: &str = "—";
-    pub const STATUS: &str = "—";
+    pub const LAST_CHECKED: &str = "â€”";
+    pub const STATUS: &str = "â€”";
 }
 
 /// `canUpdate()` (`host.ts:95-97`): the tray is attached (stdin is a pipe).
@@ -454,7 +454,7 @@ pub fn last_checked_word(acts: bool, u: Option<&UpdateState>, today_day: i64) ->
             return fmt_checked(u.last_check.as_deref(), today_day);
         }
     }
-    "—".to_string()
+    "â€”".to_string()
 }
 
 /// The `kind` string and check-failure reason the Rails status words take.
@@ -529,6 +529,70 @@ pub fn today_day_utc() -> i64 {
 
 // ---------------------------------------------------------------------------
 // The view.
+
+/// The "Map my PC again" key's width in its row (162 px: React's 161.11 rounded
+/// up by GPUI's text measure) and React's `.field` column gap.
+const SETUP_MAP_KEY_W: f32 = 162.0;
+const FIELD_GAP_X: f32 = 16.0;
+/// "Walk through every light again" at 14 px on one line (measured in GPUI).
+const MAP_HINT_ONE_LINE_W: f32 = 196.0;
+
+/// "AUDIO SOURCE" in the 13 px tracked mono title: 106.09 px in React (probed;
+/// the head's picker takes the row less this and the 12 px gap).
+const AUDIO_TITLE_W: f32 = 106.1;
+
+/// Debug only (#205): `CANVAS_RGB_CAPTURE_PROBE=1` prints the layout bounds of
+/// the elements wrapped with [`pr`] to stderr, once per change, so a capture
+/// run reports where GPUI really put a box (React's are probed in headless
+/// Chromium). Release builds never wrap anything.
+fn probe_on() -> bool {
+    cfg!(debug_assertions) && std::env::var_os("CANVAS_RGB_CAPTURE_PROBE").is_some()
+}
+
+fn probe_report(name: &str, b: gpui::Bounds<gpui::Pixels>) {
+    use std::collections::HashMap;
+    use std::sync::OnceLock;
+    static SEEN: OnceLock<Mutex<HashMap<String, String>>> = OnceLock::new();
+    let line = format!(
+        "{:.2},{:.2} {:.2}x{:.2}",
+        f32::from(b.origin.x),
+        f32::from(b.origin.y),
+        f32::from(b.size.width),
+        f32::from(b.size.height)
+    );
+    let mut seen = SEEN.get_or_init(|| Mutex::new(HashMap::new())).lock().unwrap();
+    if seen.get(name) != Some(&line) {
+        // The probe's value is the file the lines are appended to (the
+        // capture script names one per shot); a bare "1" prints to stderr.
+        let target = std::env::var("CANVAS_RGB_CAPTURE_PROBE").unwrap_or_default();
+        if target.len() > 1 {
+            use std::io::Write;
+            if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&target) {
+                let _ = writeln!(f, "{name} {line}");
+            }
+        } else {
+            eprintln!("probe {name} {line}");
+        }
+        seen.insert(name.to_string(), line);
+    }
+}
+
+/// Wraps `el` so its bounds are reported when the probe is on.
+fn pr(name: impl Into<String>, el: impl IntoElement) -> gpui::AnyElement {
+    if !probe_on() {
+        return el.into_any_element();
+    }
+    let name: String = name.into();
+    div()
+        .relative()
+        .child(el)
+        .child(
+            gpui::canvas(move |bounds, _window, _cx| probe_report(&name, bounds), |_, _, _, _| {})
+                .absolute()
+                .inset_0(),
+        )
+        .into_any_element()
+}
 
 /// The theme the shell and this view share (see `shell.rs`).
 pub type ThemeCell = Arc<Mutex<Theme>>;
@@ -1314,11 +1378,32 @@ impl SettingsView {
 
     // -- rendering pieces -------------------------------------------------
 
+    /// A Settings panel. `title_off` is how far React's baseline alignment
+    /// (`.rd-settings .rd-settings-grid .panel-head { align-items: baseline }`,
+    /// app.css:4854) puts the title below the head's top: the version figure
+    /// (15 px mono in a 21.75 px line) sits 3 px above the 13 px title's
+    /// line, the speaker icon's bottom edge 4 px (GPUI has no baselines).
     fn panel(
         &self,
         id: &str,
         title: &str,
         pad: f32,
+        title_off: f32,
+        actions: impl IntoElement,
+        body: impl IntoElement,
+    ) -> impl IntoElement {
+        self.panel_mb(id, title, pad, title_off, 12.0, actions, body)
+    }
+
+    /// [`Self::panel`] with the head's bottom margin given (React's 12 px).
+    #[allow(clippy::too_many_arguments)]
+    fn panel_mb(
+        &self,
+        id: &str,
+        title: &str,
+        pad: f32,
+        title_off: f32,
+        head_mb: f32,
         actions: impl IntoElement,
         body: impl IntoElement,
     ) -> impl IntoElement {
@@ -1336,18 +1421,18 @@ impl SettingsView {
                 div()
                     .flex()
                     .flex_wrap()
-                    .items_center()
+                    .items_start()
                     .justify_between()
                     .gap_2()
-                    .mb_3()
-                    .child(tracked_title(
+                    .mb(px(head_mb))
+                    .child(div().mt(px(title_off)).child(tracked_title(
                         &title.to_uppercase(),
                         13.0,
                         0.08,
                         gpui::FontWeight::MEDIUM,
                         crate::fonts::MONO_FAMILY,
                         Theme::color(t.mute),
-                    ))
+                    )))
                     .child(actions),
             )
             .child(body)
@@ -1366,7 +1451,7 @@ impl SettingsView {
     /// The number well (`.num` + `.unit`): 72 px, mono right-aligned,
     /// the unit beside it. GPUI has no text input, so the well is a
     /// display; the slider drag is the way to change the value (React's
-    /// field is typed into — the checklist's NumberField keyboard items
+    /// field is typed into â€” the checklist's NumberField keyboard items
     /// stay unticked, as they do for Displays).
     fn number_well(
         &self,
@@ -1470,7 +1555,7 @@ impl SettingsView {
         let well = self.number_well(&format!("{id}-num"), num_value, num_min, num_max, unit, cx);
         let slider = match slot_w {
             // Wrapped fields (phone and narrow columns): the slot takes
-            // its React width (inner minus the number row) directly —
+            // its React width (inner minus the number row) directly â€”
             // GPUI's flex mis-measures this nested row at 390.
             Some(w) => div().flex_none().w(px(w)).child(slider).into_any_element(),
             None => slider.into_any_element(),
@@ -1545,7 +1630,11 @@ impl SettingsView {
         } else {
             None
         };
-        let bri_slot_w = slot_w;
+        // Brightness' unit is "%" (8.4 px, not "fps"' 25.2), so its slider takes
+        // 16.8 px more of the row: 72 + 6 + 8.4 + the 12 px gap = 98.4 to
+        // the right of it. The same 115 for both rows left the "%" well 14 px
+        // short of the row's right edge at 390.
+        let bri_slot_w = if wrapped { Some((inner_w - 98.4).max(80.0)) } else { None };
         let mut body = div()
             .flex()
             .flex_col()
@@ -1594,7 +1683,7 @@ impl SettingsView {
         if let Some(msg) = &self.render_err {
             body = body.child(self.error_line(msg, true));
         }
-        self.panel("settings-rendering", "Rendering", pad, div(), body)
+        self.panel("settings-rendering", "Rendering", pad, 0.0, div(), body)
             .into_any_element()
     }
 
@@ -1624,9 +1713,9 @@ impl SettingsView {
         let body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-theme-field", "Theme", None, theme_control, false))
-            .child(field_hint(t, "settings-motion-field", "Motion", None, motion_control, true));
-        self.panel("settings-appearance", "Appearance", pad, div(), body)
+            .child(pr("a-theme", field_hint(t, "settings-theme-field", "Theme", None, theme_control, false)))
+            .child(pr("a-motion", field_hint(t, "settings-motion-field", "Motion", None, motion_control, true)));
+        self.panel("settings-appearance", "Appearance", pad, 0.0, div(), body)
             .into_any_element()
     }
 
@@ -2020,10 +2109,10 @@ impl SettingsView {
         let body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-black-field", "Black on lock", None, black_control, false))
-            .child(field_hint(t, "settings-quit-field", "On quit", None, quit_control, false))
-            .child(self.boot_field(pad, false, cx));
-        self.panel("settings-lock", "Lock and quit", pad, div(), body)
+            .child(pr("l-black", field_hint(t, "settings-black-field", "Black on lock", None, black_control, false)))
+            .child(pr("l-quit", field_hint(t, "settings-quit-field", "On quit", None, quit_control, false)))
+            .child(pr("l-boot", self.boot_field(pad, false, cx)));
+        self.panel("settings-lock", "Lock and quit", pad, 0.0, div(), body)
             .into_any_element()
     }
 
@@ -2147,7 +2236,7 @@ impl SettingsView {
             .text_color(Theme::color(t.ink))
             .child(match peak_db {
                 Some(v) if v.is_finite() => format!("{v:.1}"),
-                _ => "—".to_string(),
+                _ => "â€”".to_string(),
             });
         let mut band_row = div()
             .flex()
@@ -2197,7 +2286,7 @@ impl SettingsView {
             // ("AUDIO SOURCE" tracked, about 105 px) keeps its width and
             // the select takes the rest, clamped [160, 300]: a content-sized
             // flex_1 let the select overlap the title at 390.
-            let select_w = (inner_w - 105.0 - 12.0).clamp(160.0, 300.0);
+            let select_w = (inner_w - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0);
             let select = self.audio_select("settings-audio-select", true, cx);
             let head_actions = div()
                 .flex_none()
@@ -2282,7 +2371,7 @@ impl SettingsView {
                         .child(pop),
                 );
             }
-            // Compact: padding-block s2 (8), others s4 (16) — the panel
+            // Compact: padding-block s2 (8), others s4 (16) â€” the panel
             // builder takes one pad; override the vertical after.
             let panel = div()
                 .id(gpui::SharedString::from("settings-audio"))
@@ -2335,14 +2424,12 @@ impl SettingsView {
                 r
             };
             let hint = if input_selected { Some(Self::EFFECT_NOTE) } else { None };
-            // The audio content sits 4 px high against React at every
-            // non-compact size (1440 column 800: select top 407 vs 411,
-            // panel bottom 600 vs 604): the body carries 4 px more.
+            // The head is 20.25 px here (the speaker icon's line), as in
+            // React, so the body needs no nudge of its own.
             let mut body = div()
                 .flex()
                 .flex_col()
-                .mt_1()
-                .child(field_hint(t, "settings-audio-field", "Source", hint, picker_row, false))
+                .child(pr("au-source", field_hint(t, "settings-audio-field", "Source", hint, picker_row, false)))
                 .child(
                     div()
                         .mt_2()
@@ -2359,7 +2446,7 @@ impl SettingsView {
                 .path("icons/SpeakerHigh.svg")
                 .size(px(16.0))
                 .text_color(Theme::color(t.ink));
-            self.panel("settings-audio", "Audio source", pad, speaker, body)
+            self.panel("settings-audio", "Audio source", pad, 4.0, speaker, body)
                 .into_any_element()
         }
     }
@@ -2422,22 +2509,22 @@ impl SettingsView {
         let mut body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-map-field", "Map my PC", Some("Walk through every light again"), map_control, false))
-            .child(field_hint(t, "settings-export-field", "Export", None, export_control, false))
-            .child(field_hint(t, "settings-import-field", "Import", None, import_control, true));
+            .child(pr("s-map", field_hint(t, "settings-map-field", "Map my PC", Some("Walk through every light again"), map_control, false)))
+            .child(pr("s-export", field_hint(t, "settings-export-field", "Export", None, export_control, false)))
+            .child(pr("s-import", field_hint(t, "settings-import-field", "Import", None, import_control, true)));
         if let Some(note) = &self.note {
             body = body.child(state_dot(t, "ok", note));
         }
         if let Some(msg) = &self.err {
             body = body.child(self.error_line(msg, true));
         }
-        self.panel("settings-setup", "Setup", pad, div(), body)
+        self.panel("settings-setup", "Setup", pad, 0.0, div(), body)
             .into_any_element()
     }
 
-    fn version_panel(&self, pad: f32, _phone: bool, cx: &mut Context<Self>) -> impl IntoElement {
+    fn version_panel(&self, pad: f32, _phone: bool, under_wrapped_hint: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
-        let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| "—".to_string());
+        let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| "â€”".to_string());
         // React `.fig` inherits the body 15 px (`--t15`): "0.9.0" is 46 px
         // wide there, 41 at GPUI's old 14 px.
         let version_fig = div()
@@ -2583,7 +2670,7 @@ impl SettingsView {
                     acts_row = acts_row.child(button_sm(
                         t,
                         "settings-update-whatsnew",
-                        "What’s new",
+                        "Whatâ€™s new",
                         Variant::Ghost,
                         false,
                         move |_, _, cx| {
@@ -2670,14 +2757,14 @@ impl SettingsView {
         let mut body = div()
             .flex()
             .flex_col()
-            .child(field_hint(t, "settings-auto-field", "Check automatically", Some("At start, then once a day"), auto_control, false))
-            .child(field_hint(t, "settings-last-field", "Last checked", None, last_checked, false))
-            .child(field_hint(t, "settings-check-field", "Check now", None, check_control, false))
+            .child(pr("v-auto", field_hint(t, "settings-auto-field", "Check automatically", Some("At start, then once a day"), auto_control, false)))
+            .child(pr("v-last", field_hint(t, "settings-last-field", "Last checked", None, last_checked, false)))
+            .child(pr("v-check", field_hint(t, "settings-check-field", "Check now", None, check_control, false)))
             .child(field_hint(t, "settings-experimental-field", "Experimental builds", Some("Unstable test builds, offered early"), experimental_control, editor_field.is_some()));
         if let Some(editor) = editor_field {
             body = body.child(editor);
         }
-        body = body.child(status_row);
+        body = body.child(pr("v-status", status_row));
         if !acts {
             body = body.child(
                 div()
@@ -2691,8 +2778,8 @@ impl SettingsView {
         if let Some(msg) = &self.tray_err {
             body = body.child(self.error_line(msg, true));
         }
-        body = body.child(logs_row);
-        self.panel("settings-version", "Version", pad, version_fig, body)
+        body = body.child(pr("v-logs", logs_row));
+        self.panel_mb("settings-version", "Version", pad, 3.0, if under_wrapped_hint { 11.5 } else { 12.0 }, version_fig, body)
             .into_any_element()
     }
 
@@ -2859,6 +2946,7 @@ impl Render for SettingsView {
         let distribution = distribute(&heights, cols);
         let mut grid = div().flex().gap_4();
         for column in distribution {
+            let under_setup = column.windows(2).any(|w| w == [4, 5]);
             // `min_w(0)`: a flex item's minimum is its content's width by default, so the
             // audio row ("Follow Windows default output" plus its label) pushed the phone
             // column about 30 px past the window. React's multicol columns never grow past
@@ -2873,22 +2961,52 @@ impl Render for SettingsView {
                         // desktop the flex row already lands where React
                         // puts it (measured at 1440).
                         let wrapped = phone;
-                        col.child(self.rendering_panel(pad, phone, inner, wrapped, cx).into_any_element())
+                        col.child(pr("p-rendering", self.rendering_panel(pad, phone, inner, wrapped, cx)))
                     }
-                    1 => col.child(self.appearance_panel(pad, phone, cx).into_any_element()),
-                    2 => col.child(self.lock_panel(pad, phone, cx).into_any_element()),
+                    1 => col.child(pr("p-appearance", self.appearance_panel(pad, phone, cx))),
+                    2 => col.child(pr("p-lock", self.lock_panel(pad, phone, cx))),
                     3 => {
                         let col_w = (content_w - (cols - 1) as f32 * 16.0) / cols as f32;
                         let inner = col_w - pad * 2.0;
-                        col.child(self.audio_panel(pad, compact, inner, cx).into_any_element())
+                        col.child(pr("p-audio", self.audio_panel(pad, compact, inner, cx)))
                     }
-                    4 => col.child(self.setup_panel(pad, phone, cx).into_any_element()),
-                    _ => col.child(self.version_panel(pad, phone, cx).into_any_element()),
+                    4 => col.child(pr("p-setup", self.setup_panel(pad, phone, cx))),
+                    _ => {
+                        // GPUI rounds the height of the two-line "Map my PC"
+                        // hint up to a whole pixel (2 x 20.3 = 40.6 becomes
+                        // 41), which moves the panel under Setup, and
+                        // everything in it, 0.4 px low: Version's rows sat 1 px
+                        // below React's at 1440x900 (separators 435, 483,
+                        // 532, 591 against 434, 482, 531, 590). The head's
+                        // margin takes the 0.5 px back, only when Setup's
+                        // hint wraps and Version stacks under it.
+                        let col_w = (content_w - (cols - 1) as f32 * 16.0) / cols as f32;
+                        let label_w = col_w - pad * 2.0 - SETUP_MAP_KEY_W - FIELD_GAP_X;
+                        let under_wrapped = under_setup && label_w < MAP_HINT_ONE_LINE_W;
+                        col.child(pr("p-version", self.version_panel(pad, phone, under_wrapped, cx)))
+                    }
                 };
             }
             grid = grid.child(col);
         }
-        let page = page.child(grid);
+        let mut page = page.child(grid);
+        if probe_on() {
+            // Text-width calibration: each hint in a shrink-to-fit row, so the
+            // probe reports its single-line width.
+            let width_of = |name: &'static str, text: &'static str| {
+                pr(name, div().flex().child(div().whitespace_nowrap().text_sm().font_family(crate::fonts::UI_FAMILY).child(text)))
+            };
+            for (i, (name, text)) in [
+                ("w-map", "Walk through every light again"),
+                ("w-auto", "At start, then once a day"),
+                ("w-exp", "Unstable test builds, offered early"),
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                page = page.child(div().absolute().top(px(i as f32 * 30.0)).left(px(0.0)).child(width_of(name, text)));
+            }
+        }
         match super::capture_scroll() {
             s if s > 0.0 => page.relative().top(px(-s)),
             _ => page,
@@ -2901,7 +3019,7 @@ impl Render for SettingsView {
 /// a wrapped slider field 98/78 (the label stacks over the control once
 /// the panel inner width drops below label 140 + control min 240 + gap
 /// 16), each panel carrying its 16 px bottom margin except the last.
-/// (At 1440: [R,A],[L,Audio],[Setup,Version] — the React flow.)
+/// (At 1440: [R,A],[L,Audio],[Setup,Version] â€” the React flow.)
 fn estimated_heights(compact: bool, phone: bool, audio_err: bool, content_w: f32, cols: usize) -> Vec<f32> {
     let head = 30.0;
     let pad = 32.0;
@@ -3012,7 +3130,7 @@ mod tests {
             silent_packets: 0,
         };
         assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Off, None, None))), "Live while this panel is open");
-        assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Waiting, None, None))), "Waiting for the device…");
+        assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Waiting, None, None))), "Waiting for the deviceâ€¦");
         assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::NoDevice, None, None))), "No output device");
         assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Live, None, None))), "Live");
         assert_eq!(
@@ -3065,7 +3183,7 @@ mod tests {
     fn settings_status_words_match_update_words() {
         assert_eq!(
             settings_status("checking", None, None, None),
-            ("work".into(), "Checking for updates…".into())
+            ("work".into(), "Checking for updatesâ€¦".into())
         );
         assert_eq!(
             settings_status("downloading", None, None, None),
@@ -3131,8 +3249,8 @@ mod tests {
     #[test]
     fn fmt1_reads_the_hint_words() {
         assert_eq!(fmt1(Some(59.6)), "59.6");
-        assert_eq!(fmt1(None), "—");
-        assert_eq!(fmt1(Some(f32::NAN)), "—");
+        assert_eq!(fmt1(None), "â€”");
+        assert_eq!(fmt1(Some(f32::NAN)), "â€”");
     }
 
     #[test]
@@ -3187,8 +3305,8 @@ mod tests {
         assert!(auto_disabled(false, None));
         assert!(auto_disabled(true, None));
         // Last checked: dash without the tray or the state, the words with both.
-        assert_eq!(last_checked_word(false, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "—");
-        assert_eq!(last_checked_word(true, None, today), "—");
+        assert_eq!(last_checked_word(false, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "â€”");
+        assert_eq!(last_checked_word(true, None, today), "â€”");
         assert_eq!(last_checked_word(true, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "09:14");
         // Check now disables while checking or installing.
         assert!(check_now_disabled(true, Some(&mk_state("0.1.0", UpdatePhase::Checking, None, None))));
@@ -3196,7 +3314,7 @@ mod tests {
         // Status: the three tones and the offline words ride the spine phase.
         assert_eq!(
             tray_status(Some(&mk_state("0.1.0", UpdatePhase::Checking, None, None))),
-            Some(("work".to_string(), "Checking for updates…".to_string()))
+            Some(("work".to_string(), "Checking for updatesâ€¦".to_string()))
         );
         assert_eq!(
             tray_status(Some(&mk_state(

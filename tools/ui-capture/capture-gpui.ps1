@@ -57,7 +57,10 @@ param(
     # #205: scroll the page down this many pixels before the shot (debug builds
     # read CANVAS_RGB_CAPTURE_SCROLL). Files are <page>-scroll<px>-gpui-...,
     # pairing with capture-react.mjs UI_CAPTURE_SCROLL.
-    [int]$Scroll = 0
+    [int]$Scroll = 0,
+    # #205: print the layout bounds of the probed elements to the console
+    # (debug builds read CANVAS_RGB_CAPTURE_PROBE); settings.rs `pr(..)` names them.
+    [switch]$Probe
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 if ($PaletteQuery -ne '') { $Palette = $true }
@@ -133,6 +136,7 @@ $PW_RENDERFULLCONTENT = 0x00000002
 # the real daemon on 9430 (#239).
 $env:CANVAS_RGB_HOME = Join-Path $root '.build\fake-home'
 $env:CANVAS_RGB_TEST_API_PORT = "$ApiPort"
+Remove-Item Env:CANVAS_RGB_CAPTURE_PROBE -ErrorAction SilentlyContinue
 if ($Scroll -gt 0) { $env:CANVAS_RGB_CAPTURE_SCROLL = "$Scroll" } else { Remove-Item Env:CANVAS_RGB_CAPTURE_SCROLL -ErrorAction SilentlyContinue }
 if (-not (Get-NetTCPConnection -State Listen -LocalPort $ApiPort -ErrorAction SilentlyContinue)) {
   throw "no fake daemon is listening on ${ApiPort}: start it with tools/run-fake-daemon.ps1"
@@ -215,6 +219,12 @@ foreach ($theme in $Themes) {
       $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs$onboardArgs"
       if ($Editor -ne '') { $psi.Arguments += " --editor $Editor" }
       if ($Stack -ne '') { $psi.Arguments += " --stack `"$Stack`"" }
+      if ($Probe) {
+        # One file per shot: the editor appends `<name> x,y WxH` lines to it (settings.rs `pr`).
+        $probeFile = Join-Path $outDir "probe-$page-gpui-${size}-$theme.txt"
+        Remove-Item $probeFile -ErrorAction SilentlyContinue
+        $env:CANVAS_RGB_CAPTURE_PROBE = $probeFile
+      }
       $psi.UseShellExecute = $false
       $psi.CreateNoWindow = $true
       $psi.RedirectStandardInput = [bool]$TrayStub
