@@ -309,6 +309,63 @@ function tauriInit({ daemonBase, token, theme }) {
   window.__TAURI__ = { core: { invoke }, event: { listen } };
 }
 
+const STEPS = ["hello", "case", "parts", "match", "finish"];
+
+// The onboarding takeover (#212): when UI_CAPTURE_ONBOARDING is set (a comma
+// list of steps), only onboarding shots run in demo mode: no __TAURI__, so
+// request() answers from demoRequest() with the ?state= token in
+// UI_CAPTURE_STATE (default empty). Steps advance by clicking the primary
+// button. Files: onboarding-<step>-react-<w>x<h>-<theme>.png.
+const ONBOARD_STEPS = (process.env.UI_CAPTURE_ONBOARDING ?? "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const ONBOARD_STATE = (process.env.UI_CAPTURE_STATE ?? "").trim();
+
+async function shootOnboarding(page, base, viewport, theme, step, daemonBase, token) {
+  const fileName = `onboarding-${step}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  const filePath = path.join(OUT_DIR, fileName);
+  const demoMode = ONBOARD_STATE !== "";
+  const q = demoMode ? `?state=${encodeURIComponent(ONBOARD_STATE)}` : "";
+  if (demoMode) {
+    // No __TAURI__: the demo backend answers (demo.ts request()); the theme
+    // still lives in localStorage before load.
+    await page.addInitScript((t) => {
+      try { localStorage.setItem("canvas-rgb.theme", t); } catch {}
+    }, theme);
+  } else {
+    // Happy path against the fake daemon (same state as GPUI).
+    await page.addInitScript(tauriInit, { daemonBase, token, theme });
+  }
+  await page.goto(`${base}/${q}`, { waitUntil: "load", timeout: 30000 }).catch(() => {});
+  // Wait for the shell's live marker.
+  try {
+    await page.waitForFunction(() => document.querySelector('[data-live="on"]') !== null, { timeout: 8000 });
+  } catch {}
+  // Advance to the requested step by clicking the primary button by label.
+  const labels = ["Map my PC", "Looks right", "Match the lights", "Nothing's lit", "Continue", "Done", "Yes", "That's all of it"];
+  const clickPrimary = async () => {
+    for (const b of await page.$$("button")) {
+      const text = (await b.textContent())?.trim() ?? "";
+      if (labels.some((l) => text === l)) {
+        await b.click();
+        await page.waitForTimeout(500);
+        return true;
+      }
+    }
+    return false;
+  };
+  const currentStep = async () => await page.evaluate(() => document.querySelector('[data-step]')?.getAttribute('data-step') ?? null);
+  // Walk forward until the requested step (Match→Finish needs every run skipped).
+  for (let i = 0; i < 12; i++) {
+    if ((await currentStep()) === step) break;
+    if (!(await clickPrimary())) break;
+  }
+  await page.waitForTimeout(600);
+  await page.screenshot({ path: filePath });
+  return { view: `onboarding-${step}`, path: "/", viewport: { width: viewport.w, height: viewport.h }, theme, file: fileName, pageErrors: [], consoleErrors: [], apiFailures: [], slowThumbnails: [], requestFailures: [], notLoaded: [] };
+}
+
 async function shootPage(page, base, view, viewport, theme, daemonBase, token, paletteQuery = null) {
   const pageErrors = [];
   const consoleErrors = [];
@@ -412,7 +469,23 @@ async function main() {
   const browser = await chromium.launch({ headless: true });
   const shots = [];
   try {
-    if (PALETTE_ENTRIES.length) {
+    if (ONBOARD_STEPS.length) {
+      for (const step of ONBOARD_STEPS) {
+        for (const viewport of ACTIVE_VIEWPORTS) {
+          for (const theme of ACTIVE_THEMES) {
+            const context = await browser.newContext({
+              viewport: { width: viewport.w, height: viewport.h },
+              deviceScaleFactor: 1,
+              ...(FREEZE ? { reducedMotion: "reduce" } : {}),
+            });
+            const page = await context.newPage();
+            process.stderr.write(`shoot onboarding-${step} ${viewport.w}x${viewport.h} ${theme} ...\n`);
+            shots.push(await shootOnboarding(page, base, viewport, theme, step, DAEMON_BASE, token));
+            await context.close();
+          }
+        }
+      }
+    } else if (PALETTE_ENTRIES.length) {
       const layout = VIEWS.find((v) => v.name === "layout");
       for (const entry of PALETTE_ENTRIES) {
         const query = entry === "empty" ? "" : entry;

@@ -55,6 +55,12 @@ struct ParsedArgs {
     palette: bool,
     /// `--palette-query <text>` (debug builds only): the query the palette opens with.
     palette_query: String,
+    /// `--onboarding-step <step>` (debug builds only): open the onboarding at
+    /// a step (`hello|case|parts|match|finish|finish-sweep`) for captures.
+    onboarding_step: Option<String>,
+    /// `--onboarding-state <token>` (debug builds only): the React demo
+    /// `?state=` token to mirror (`complete|connecting|conflict|no-devices|...`).
+    onboarding_state: Option<String>,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -65,6 +71,8 @@ fn parse_args() -> ParsedArgs {
     let mut capture = false;
     let mut palette = false;
     let mut palette_query = String::new();
+    let mut onboarding_step = None;
+    let mut onboarding_state = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -99,6 +107,16 @@ fn parse_args() -> ParsedArgs {
                     palette_query = v;
                 }
             }
+            "--onboarding-step" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    onboarding_step = Some(v);
+                }
+            }
+            "--onboarding-state" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    onboarding_state = Some(v);
+                }
+            }
             _ => {}
         }
     }
@@ -110,6 +128,8 @@ fn parse_args() -> ParsedArgs {
         capture,
         palette,
         palette_query,
+        onboarding_step,
+        onboarding_state,
     }
 }
 
@@ -129,6 +149,8 @@ fn main() {
         capture,
         palette,
         palette_query,
+        onboarding_step,
+        onboarding_state,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -188,6 +210,20 @@ fn main() {
                         // for captures (`--palette-query` types the query).
                         if palette {
                             shell.open_palette_initial(&palette_query, cx);
+                        }
+                        // Debug only: `--onboarding-step` opens the onboarding
+                        // takeover at a step for captures (React `?state=` demo
+                        // tokens are mirrored by `--onboarding-state`).
+                        #[cfg(debug_assertions)]
+                        if let Some(step) = onboarding_step.clone() {
+                            let page = shell.page.clone();
+                            let _ = page;
+                            shell.layout_view.update(cx, |v, cx| {
+                                v.capture_step = Some(step);
+                                v.capture_state = onboarding_state.clone();
+                                v.capture_frozen = true;
+                                v.try_open_onboarding(cx);
+                            });
                         }
                         shell
                     })

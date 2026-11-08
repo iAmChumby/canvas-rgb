@@ -1295,13 +1295,17 @@ impl SettingsView {
         cx.notify();
     }
 
-    /// Map my PC again: the onboarding flow is not ported; the shell
-    /// opens the Layout page (React routes `/?map=1`).
+    /// Map my PC again: navigate to the Layout page and open the
+    /// onboarding with `again: true` (React `/?map=1` + remap flag).
     fn map_pc(&mut self, cx: &mut Context<Self>) {
         if let Some(shell) = &self.shell {
             let shell = shell.clone();
             shell.update(cx, |s, cx| {
                 s.navigate("layout");
+                s.layout_view.update(cx, |v, cx| {
+                    v.remap_all();
+                    cx.notify();
+                });
                 cx.notify();
             });
         }

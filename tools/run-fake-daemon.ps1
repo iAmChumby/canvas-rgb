@@ -28,7 +28,11 @@ param(
     [switch]$Rebuild,
     # Ports for this run. Two checkouts can each run a fake daemon at once on different ports.
     [int]$ApiPort = 19430,
-    [int]$OpenRgbPort = 16742
+    [int]$OpenRgbPort = 16742,
+    # Write onboarding_complete = false so the Layout page opens the
+    # onboarding itself (#212 pairs shoot both editors against the same
+    # daemon state).
+    [switch]$OnboardingIncomplete
 )
 
 $ErrorActionPreference = 'Stop'
@@ -85,13 +89,14 @@ if ($Stop) {
 # --- test home + config ------------------------------------------------------
 New-Item -ItemType Directory -Force -Path $homeDir | Out-Null
 $configPath = Join-Path $homeDir 'config.toml'
+$onboardingComplete = if ($OnboardingIncomplete) { 'false' } else { 'true' }
 $config = @"
 schema_version = 1
 api_port = $testApiPort
 openrgb_port = $fakeOpenRgbPort
 first_run_done = true
 zone_panel_dismissed = true
-onboarding_complete = true
+onboarding_complete = $onboardingComplete
 
 [settings]
 fps = 30

@@ -82,6 +82,23 @@ pub struct LayoutView {
     pub render_open: bool,
     pub add_open: bool,
     pub identifying: Option<usize>,
+    /// The onboarding takeover state, when open (React LayoutView `onboarding`).
+    pub onboarding: Option<crate::views::onboarding::OnboardData>,
+    /// The daemon's status, for the onboarding's hello variants and gate
+    /// (React `st.status`). Polled when the onboarding or its decision needs it.
+    pub status: Option<canvas_proto::api::Status>,
+    /// The daemon's effects, for the finish tiles (React `st.effects`).
+    pub effects: Option<canvas_proto::api::EffectsResponse>,
+    /// "Set up later" was said this launch (React `laterThisLaunch` memory flag).
+    pub later_this_launch: bool,
+    /// The one-time open decision has run (React `decided` ref).
+    pub onboard_decided: bool,
+    /// Debug-only capture overrides (parsed only under `cfg!(debug_assertions)`).
+    pub capture_step: Option<String>,
+    pub capture_state: Option<String>,
+    /// Debug-only: the fake daemon's "case appears after first run" — the
+    /// hello wave/session timers are frozen for captures.
+    pub capture_frozen: bool,
 }
 
 /// One pointer drag on the desk (PreviewStage `Drag`).
@@ -164,6 +181,14 @@ impl LayoutView {
             render_open: false,
             add_open: false,
             identifying: None,
+            onboarding: None,
+            status: None,
+            effects: None,
+            later_this_launch: false,
+            onboard_decided: false,
+            capture_step: None,
+            capture_state: None,
+            capture_frozen: false,
         };
         view.load(cx);
         view.start_feed();
@@ -449,6 +474,609 @@ impl LayoutView {
         self.selection = vec![Sel::Landmark(index)];
     }
 
+    /// Every part with lights is unconfirmed again (React `remapAll`).
+    pub fn remap_all(&mut self) {
+        self.commit(|l| {
+            let mut l = l.clone();
+            l.zones = l
+                .zones
+                .iter()
+                .map(|z| {
+                    let mut z = z.clone();
+                    if let Some(p) = &mut z.part {
+                        p.mapped = false;
+                    }
+                    z
+                })
+                .collect();
+            l
+        });
+        self.selection.clear();
+        self.onboarding = Some(crate::views::onboarding::OnboardData::new(true, None));
+        self.sync_onboarding_match_run();
+    }
+
+    /// One device again, from its row (React `remapOne`).
+    #[allow(dead_code)]
+    pub fn remap_one(&mut self, zone_index: usize) {
+        let Some(draft) = self.history.draft.clone() else { return };
+        let Some(z) = draft.zones.get(zone_index) else { return };
+        let scope = crate::views::onboarding::Scope { device_id: z.device_id.0.clone(), zone_index: z.zone_index };
+        self.commit(|l| {
+            let mut l = l.clone();
+            l.zones = l
+                .zones
+                .iter()
+                .map(|p| {
+                    let mut p = p.clone();
+                    if p.device_id.0 == scope.device_id && p.zone_index == scope.zone_index && p.part.is_some() {
+                        if let Some(pt) = &mut p.part {
+                            pt.mapped = false;
+                        }
+                    }
+                    p
+                })
+                .collect();
+            l
+        });
+        self.selection.clear();
+        self.onboarding = Some(crate::views::onboarding::OnboardData::new(true, Some(scope)));
+        self.sync_onboarding_match_run();
+    }
+
+    /// Open the onboarding without clearing `mapped` (first run / Settings).
+    #[allow(dead_code)]
+    pub fn open_onboarding_with(&mut self, again: bool, scope: Option<crate::views::onboarding::Scope>) {
+        self.onboarding = Some(crate::views::onboarding::OnboardData::new(again, scope));
+        self.sync_onboarding_match_run();
+    }
+
+    /// Close the flow, save if dirty (React `closeOnboarding`).
+    pub fn close_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.stop_identify();
+        self.selection.clear();
+        self.onboarding = None;
+        if self.dirty() && !self.saving {
+            self.save(cx);
+        }
+        cx.notify();
+    }
+
+    /// "Set up later" (React `laterOnboarding`).
+    pub fn later_onboarding(&mut self, cx: &mut Context<Self>) {
+        self.later_this_launch = true;
+        self.close_onboarding(cx);
+    }
+
+    /// The case box the flow sizes (React `ensureCase`).
+    pub fn ensure_case(&mut self) {
+        let (w, h) = (120.0f32, 122.0f32);
+        let lms = self.history.draft.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default();
+        let found = lms.iter().position(|l| l.kind == PartKind::Case);
+        let idx = match found {
+            Some(i) => i,
+            None => {
+                let i = lms.len();
+                self.commit(|l| {
+                    let mut l = l.clone();
+                    l.landmarks.push(canvas_proto::layout::Landmark {
+                        kind: PartKind::Case,
+                        x: 100.0,
+                        y: 27.0,
+                        width: w,
+                        height: h,
+                        rotation_deg: 0.0,
+                        facing: canvas_proto::layout::Facing::Viewer,
+                        visible: true,
+                        label: None,
+                        locked: false,
+                    });
+                    l
+                });
+                i
+            }
+        };
+        self.selection = vec![Sel::Landmark(idx)];
+    }
+
+    /// Sets the case's box, standing on the same floor line (Onboarding.tsx `setCaseBox`).
+    pub fn set_case_box(&mut self, width: Option<f32>, height: Option<f32>, locked: Option<bool>) {
+        self.commit(|l| {
+            let mut l = l.clone();
+            l.landmarks = l
+                .landmarks
+                .iter()
+                .map(|m| {
+                    let mut m = m.clone();
+                    if m.kind != PartKind::Case {
+                        return m;
+                    }
+                    if let (Some(w), Some(h)) = (width, height) {
+                        m.width = w;
+                        m.height = h;
+                        m.x = (crate::views::onboarding::CASE_ANCHOR_X - f64::from(w) / 2.0) as f32;
+                        m.y = (crate::views::onboarding::CASE_ANCHOR_Y - f64::from(h)) as f32;
+                    }
+                    if let Some(locked) = locked {
+                        m.locked = locked;
+                    }
+                    m
+                })
+                .collect();
+            l
+        });
+    }
+
+    pub fn set_case_locked(&mut self, locked: bool) {
+        let cur = self
+            .history
+            .draft
+            .as_ref()
+            .and_then(|l| l.landmarks.iter().find(|m| m.kind == PartKind::Case).cloned());
+        if let Some(cur) = cur {
+            if cur.locked == locked {
+                return;
+            }
+        }
+        self.set_case_box(None, None, Some(locked));
+    }
+
+    /// Locate the Match run at/after (zi, off) (MatchStep.tsx).
+    pub fn sync_onboarding_match_run(&mut self) {
+        let Some(data) = self.onboarding.as_ref() else { return };
+        if data.step() != crate::views::onboarding::StepKind::Match {
+            return;
+        }
+        let layout = self.history.draft.clone();
+        let devices = self.devices.clone();
+        let scope = data.scope.clone();
+        let Some(layout) = layout else { return };
+        let zones = {
+            let mut zones = crate::views::onboarding::setup_zones(&layout, devices.as_deref());
+            zones.retain(|z| z.led_count > 0 && scope.as_ref().is_none_or(|s| z.device_id == s.device_id && z.zone_index == s.zone_index));
+            zones
+        };
+        let run = crate::views::onboarding::locate_run(&layout, &zones, &std::collections::HashSet::new(), 0, 0);
+        if let Some(data) = self.onboarding.as_mut() {
+            data.count = run.as_ref().map(|r| r.count).unwrap_or(0);
+            data.run = run;
+        }
+    }
+
+    /// Sync the Match count from the current run.
+    pub fn onboarding_match_zones(&self) -> Vec<crate::views::onboarding::SetupZone> {
+        let Some(layout) = self.history.draft.clone() else { return Vec::new() };
+        let devices = self.devices.clone();
+        let scope = self.onboarding.as_ref().and_then(|d| d.scope.clone());
+        let mut zones = crate::views::onboarding::setup_zones(&layout, devices.as_deref());
+        zones.retain(|z| z.led_count > 0 && scope.as_ref().is_none_or(|s| z.device_id == s.device_id && z.zone_index == s.zone_index));
+        zones
+    }
+
+    /// Whether the onboarding is open (the shell hides the rail/strip).
+    pub fn is_onboarding_open(&self) -> bool {
+        self.onboarding.is_some()
+    }
+
+    /// Mirror a React demo `?state=` token for capture pairs (debug only).
+    #[cfg(debug_assertions)]
+    fn apply_capture_state(&mut self) {
+        let state = self.capture_state.clone().unwrap_or_default();
+        let mut base = self.status.clone().unwrap_or(canvas_proto::api::Status {
+            version: "0.0.0".into(),
+            power: canvas_proto::api::Power::Running,
+            brightness: 100,
+            fps_target: 60,
+            fps_measured: 59.6,
+            frame_time_ms: 16.7,
+            frames_rendered: 100,
+            parked: false,
+            devices_connected: 0,
+            devices_total: 0,
+            preview_subscribers: 0,
+            active_layout: None,
+            active_effect: None,
+            openrgb: canvas_proto::api::LinkState::Connected,
+            service: canvas_proto::api::LinkState::Connected,
+            service_down_ms: None,
+            conflicts: Vec::new(),
+            show_zone_panel: false,
+            onboarding_complete: false,
+        });
+        base.onboarding_complete = state == "complete";
+        match state.as_str() {
+            "connecting" | "waking" => base.openrgb = canvas_proto::api::LinkState::Connecting,
+            "openrgb-down" => base.openrgb = canvas_proto::api::LinkState::Down,
+            "conflict" | "conflict-clears" => {
+                base.conflicts = vec![canvas_proto::api::Conflict::SignalRgb { process: true, service: false }];
+            }
+            _ => {}
+        }
+        self.status = Some(base);
+        if state == "no-devices" || state == "found-on-rescan" {
+            self.devices = Some(Vec::new());
+        }
+    }
+
+    /// The one-time open decision (LayoutView.tsx:733-756): once the layout,
+    /// devices and status are all in, open when `shouldOpen` holds.
+    pub fn try_open_onboarding(&mut self, cx: &mut Context<Self>) {
+        if self.onboard_decided || self.onboarding.is_some() {
+            return;
+        }
+        let Some(layout) = self.layout().cloned() else { return };
+        let _ = layout;
+        if self.devices.is_none() || self.status.is_none() {
+            return;
+        }
+        // Debug capture: the gate opens regardless of daemon truth.
+        #[cfg(debug_assertions)]
+        if self.capture_step.is_some() {
+            self.onboard_decided = true;
+            // React `?state=complete`: no onboarding — the Layout page alone.
+            if self.capture_state.as_deref() == Some("complete") {
+                cx.notify();
+                return;
+            }
+            self.apply_capture_state();
+            let again = self.capture_step.as_deref() != Some("hello");
+            let step = match self.capture_step.as_deref() {
+                Some("case") => crate::views::onboarding::StepKind::Case,
+                Some("parts") => crate::views::onboarding::StepKind::Parts,
+                Some("match") => crate::views::onboarding::StepKind::Match,
+                Some("finish") | Some("finish-sweep") => crate::views::onboarding::StepKind::Finish,
+                _ => crate::views::onboarding::StepKind::Hello,
+            };
+            let mut data = crate::views::onboarding::OnboardData::new(again, None);
+            let at = match step {
+                crate::views::onboarding::StepKind::Hello => 0,
+                crate::views::onboarding::StepKind::Case => 1,
+                crate::views::onboarding::StepKind::Parts => 2,
+                crate::views::onboarding::StepKind::Match => 3,
+                crate::views::onboarding::StepKind::Finish => 4,
+            };
+            if at < data.steps.len() {
+                data.at = at;
+            }
+            if step == crate::views::onboarding::StepKind::Finish && self.capture_step.as_deref() == Some("finish-sweep") {
+                data.swept = false;
+            } else if step == crate::views::onboarding::StepKind::Finish {
+                data.swept = true;
+            }
+            self.onboarding = Some(data);
+            self.sync_onboarding_match_run();
+            self.poll_status_effects(cx);
+            cx.notify();
+            return;
+        }
+        self.onboard_decided = true;
+        let complete = self.status.as_ref().map(|s| s.onboarding_complete).unwrap_or(true);
+        if crate::views::onboarding::should_open(complete, self.later_this_launch) {
+            self.onboarding = Some(crate::views::onboarding::OnboardData::new(false, None));
+            self.sync_onboarding_match_run();
+            self.poll_status_effects(cx);
+            cx.notify();
+        }
+    }
+
+    /// Poll status and effects for the onboarding (off the UI thread).
+    pub fn poll_status_effects(&mut self, cx: &mut Context<Self>) {
+        let bg = cx.background_executor().spawn(async move {
+            let client = DaemonClient::new();
+            (client.get("/api/v1/status"), client.get("/api/v1/effects"))
+        });
+        cx.spawn(async move |view, cx| {
+            let (status, effects) = bg.await;
+            let _ = view.update(cx, |this, cx| {
+                if let Ok(body) = status {
+                    if let Ok(parsed) = serde_json::from_str::<canvas_proto::api::Status>(&body) {
+                        this.status = Some(parsed);
+                    }
+                }
+                if let Ok(body) = effects {
+                    if let Ok(parsed) = serde_json::from_str::<canvas_proto::api::EffectsResponse>(&body) {
+                        this.effects = Some(parsed);
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Advance the onboarding by one (Case/Parts/Match "next").
+    pub fn goto_next(&mut self, cx: &mut Context<Self>) {
+        if let Some(d) = self.onboarding.as_mut() {
+            d.next_step();
+        }
+        self.sync_onboarding_match_run();
+        self.poll_status_effects(cx);
+        cx.notify();
+    }
+
+    /// Ladder/Parts Rescan (HelloStep/PartsStep `rescan`).
+    pub fn start_rescan(&mut self, cx: &mut Context<Self>) {
+        let Some(data) = self.onboarding.as_ref() else { return };
+        if data.busy {
+            return;
+        }
+        if let Some(d) = self.onboarding.as_mut() {
+            d.busy = true;
+        }
+        cx.notify();
+        let bg = cx.background_executor().spawn(async move { crate::views::onboarding::rescan_devices() });
+        cx.spawn(async move |view, cx| {
+            let result = bg.await;
+            let _ = view.update(cx, |this, cx| {
+                if let Some(d) = this.onboarding.as_mut() {
+                    d.asked = true;
+                    d.busy = false;
+                }
+                if let Ok(devices) = result {
+                    this.devices = Some(devices);
+                }
+                this.poll_status_effects(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Parts: add a lit part on the first run nothing owns (PartsStep `addLit`).
+    pub fn add_lit_part(&mut self, kind: PartKind, cx: &mut Context<Self>) {
+        let Some(layout) = self.history.draft.clone() else { return };
+        let devices = self.devices.clone();
+        let zones = crate::views::onboarding::setup_zones(&layout, devices.as_deref())
+            .into_iter()
+            .filter(|z| z.led_count > 0)
+            .collect::<Vec<_>>();
+        let spare = crate::views::onboarding::all_runs(&zones).into_iter().find(|r| {
+            let zone = &zones[r.zi];
+            crate::views::onboarding::placements_of_run(&layout, zone, r.start, r.count).is_empty()
+        });
+        let Some(spare) = spare else {
+            if let Some(d) = self.onboarding.as_mut() {
+                d.note = Some("Every light already has a part. Drag one, or rescan.".to_string());
+            }
+            cx.notify();
+            return;
+        };
+        let zone = zones[spare.zi].clone();
+        let template = canvas_proto::layout::PlacedZone {
+            device_id: canvas_proto::device::DeviceId(zone.device_id.clone()),
+            zone_index: zone.zone_index,
+            x: 0.0,
+            y: 0.0,
+            width: 30.0,
+            height: 30.0,
+            rotation_deg: 0.0,
+            reversed: false,
+            visible: true,
+            shape: crate::views::onboarding::shape_for_kind_pub(kind),
+            label: None,
+            leds: if spare.whole { None } else { Some(canvas_proto::layout::LedSlice { start: spare.start, count: spare.count }) },
+            part: Some(canvas_proto::layout::Part { kind, facing: canvas_proto::layout::Facing::Viewer, mapped: false }),
+            locked: false,
+        };
+        let index = layout.zones.len();
+        self.commit(|l| {
+            let mut l = l.clone();
+            let box_ = crate::views::onboarding::place_for_part(&l, kind, &template);
+            l.zones.push(canvas_proto::layout::PlacedZone {
+                x: box_.0 as f32,
+                y: box_.1 as f32,
+                width: box_.2 as f32,
+                height: box_.3 as f32,
+                ..template.clone()
+            });
+            l
+        });
+        self.selection = vec![Sel::Zone(index)];
+        if let Some(d) = self.onboarding.as_mut() {
+            d.note = None;
+        }
+        cx.notify();
+    }
+
+    /// Parts: remove the selected parts (PartsStep `remove`).
+    pub fn remove_selected_parts(&mut self) {
+        let layout = self.history.draft.clone();
+        let Some(layout) = layout else { return };
+        let removable: Vec<Sel> = self
+            .selection
+            .iter()
+            .copied()
+            .filter(|s| match s {
+                Sel::Zone(_) => true,
+                Sel::Landmark(i) => layout.landmarks.get(*i).map(|l| l.kind) != Some(PartKind::Case),
+            })
+            .collect();
+        let zi: std::collections::HashSet<usize> = removable.iter().filter_map(|s| match s { Sel::Zone(i) => Some(*i), _ => None }).collect();
+        let li: std::collections::HashSet<usize> = removable.iter().filter_map(|s| match s { Sel::Landmark(i) => Some(*i), _ => None }).collect();
+        self.commit(|l| {
+            let mut l = l.clone();
+            let mut zones = Vec::new();
+            for (i, z) in l.zones.iter().enumerate() {
+                if !zi.contains(&i) {
+                    zones.push(z.clone());
+                }
+            }
+            l.zones = zones;
+            let mut landmarks = Vec::new();
+            for (i, lm) in l.landmarks.iter().enumerate() {
+                if !li.contains(&i) {
+                    landmarks.push(lm.clone());
+                }
+            }
+            l.landmarks = landmarks;
+            l
+        });
+        self.selection.clear();
+    }
+
+    /// Match: tap a part (MatchStep `assign`).
+    #[allow(dead_code)]
+    pub fn match_assign(&mut self, index: usize, cx: &mut Context<Self>) {
+        let Some(data) = self.onboarding.clone() else { return };
+        let Some(run) = data.run.clone() else { return };
+        let zones = self.onboarding_match_zones();
+        let Some(zone) = zones.get(run.zi).cloned() else { return };
+        let slice = if run.whole { None } else { Some(canvas_proto::layout::LedSlice { start: run.start, count: data.count }) };
+        let target = self.history.draft.as_ref().and_then(|l| l.zones.get(index).cloned());
+        let Some(target) = target else { return };
+        if target.part.map(|p| p.mapped).unwrap_or(false) {
+            return;
+        }
+        self.commit(|l| {
+            let mut l = l.clone();
+            let other = {
+                let placements = crate::views::onboarding::placements_of_run(&l, &zone, run.start, data.count);
+                placements.into_iter().find(|i| *i != index && !l.zones[*i].part.map(|p| p.mapped).unwrap_or(false))
+            };
+            let old = (target.device_id.clone(), target.zone_index, target.leds);
+            if let Some(z) = l.zones.get_mut(index) {
+                z.device_id = canvas_proto::device::DeviceId(zone.device_id.clone());
+                z.zone_index = zone.zone_index;
+                z.leds = slice;
+                if let Some(p) = &mut z.part {
+                    p.mapped = true;
+                } else {
+                    z.part = Some(canvas_proto::layout::Part { kind: PartKind::Generic, facing: canvas_proto::layout::Facing::Viewer, mapped: true });
+                }
+            }
+            if let Some(other) = other {
+                if let Some(z) = l.zones.get_mut(other) {
+                    z.device_id = old.0.clone();
+                    z.zone_index = old.1;
+                    z.leds = old.2;
+                }
+            }
+            l
+        });
+        if let Some(d) = self.onboarding.as_mut() {
+            d.tapped = Some(index);
+            d.focus = Some(index);
+        }
+        // Identify the run (MatchStep.tsx:60-79).
+        if !self.capture_frozen {
+            crate::views::onboarding::identify(&zone.device_id, zone.zone_index, run.start, if data.count > 1 { Some(data.count) } else { None }, false);
+        }
+        cx.notify();
+    }
+
+    /// Match: "Yes"/"That's all of it" (MatchStep `advance`).
+    pub fn advance_match(&mut self, cx: &mut Context<Self>) {
+        let (run, zones, count) = match self.onboarding.clone() {
+            Some(d) => (d.run.clone(), self.onboarding_match_zones(), d.count),
+            None => return,
+        };
+        let Some(run) = run else { return };
+        let layout = self.history.draft.clone();
+        let Some(layout) = layout else { return };
+        let next = crate::views::onboarding::locate_run(&layout, &zones, &std::collections::HashSet::new(), run.zi, run.start + count);
+        let next_count = next.as_ref().map(|r| r.count).unwrap_or(0);
+        if let Some(d) = self.onboarding.as_mut() {
+            d.tapped = None;
+            d.resizing = false;
+            d.focus = None;
+            d.run = next;
+            d.count = next_count;
+        }
+        cx.notify();
+    }
+
+    /// Match: "No" on a fixed run (MatchStep `undo`).
+    pub fn undo_match_tap(&mut self) {
+        let Some(tapped) = self.onboarding.as_ref().and_then(|d| d.tapped) else { return };
+        self.commit(|l| {
+            let mut l = l.clone();
+            if let Some(z) = l.zones.get_mut(tapped) {
+                if let Some(p) = &mut z.part {
+                    p.mapped = false;
+                }
+            }
+            l
+        });
+        if let Some(d) = self.onboarding.as_mut() {
+            d.tapped = None;
+            d.resizing = false;
+            d.focus = None;
+        }
+    }
+
+    /// Match: "Nothing's lit" (MatchStep skip).
+    pub fn skip_match_run(&mut self, cx: &mut Context<Self>) {
+        let Some(d) = self.onboarding.clone() else { return };
+        let Some(run) = d.run.clone() else { return };
+        let zones = self.onboarding_match_zones();
+        let Some(zone) = zones.get(run.zi).cloned() else { return };
+        let _key = crate::views::onboarding::run_key(&zone, run.start);
+        // Skipped runs stay todo (no persistent skipped set on the onboarding
+        // shell — React keeps a local set; the next run advances past this one).
+        let layout = self.history.draft.clone();
+        let Some(layout) = layout else { return };
+        let mut skipped = std::collections::HashSet::new();
+        skipped.insert(_key);
+        let next = crate::views::onboarding::locate_run(&layout, &zones, &skipped, run.zi, run.start + run.count);
+        let next_count = next.as_ref().map(|r| r.count).unwrap_or(0);
+        if let Some(d) = self.onboarding.as_mut() {
+            d.tapped = None;
+            d.resizing = false;
+            d.focus = None;
+            d.run = next;
+            d.count = next_count;
+        }
+        cx.notify();
+    }
+
+    /// Match: Fewer/More lights (MatchStep `resize`).
+    pub fn resize_match_count(&mut self, n: u32) {
+        let (run, tapped) = match self.onboarding.clone() {
+            Some(d) => (d.run.clone(), d.tapped),
+            None => return,
+        };
+        let (Some(run), Some(tapped)) = (run, tapped) else { return };
+        let zones = self.onboarding_match_zones();
+        let Some(zone) = zones.get(run.zi).cloned() else { return };
+        let clamped = n.clamp(1, zone.max_leds.min(zone.led_count.saturating_sub(run.start).max(1)));
+        if let Some(d) = self.onboarding.as_mut() {
+            d.count = clamped;
+        }
+        self.commit(|l| {
+            let mut l = l.clone();
+            if let Some(z) = l.zones.get_mut(tapped) {
+                z.leds = Some(canvas_proto::layout::LedSlice { start: run.start, count: clamped });
+            }
+            l
+        });
+    }
+
+    /// Finish: pick a tile (Onboarding.tsx `choose`).
+    pub fn choose_effect(&mut self, id: &str) {
+        if let Some(d) = self.onboarding.as_mut() {
+            d.before_effect = None;
+            d.picked = Some(id.to_string());
+        }
+        crate::views::onboarding::activate_effect(id, &canvas_proto::props::Props::default());
+    }
+
+    /// Finish: "Done" (Onboarding.tsx `finish`).
+    pub fn finish_onboarding(&mut self, cx: &mut Context<Self>) {
+        let picked = self.onboarding.as_ref().and_then(|d| d.picked.clone());
+        if picked.is_none() {
+            // restore the replaced effect
+            let before = self.onboarding.as_mut().and_then(|d| d.before_effect.take());
+            if let Some(Some((id, props))) = before {
+                crate::views::onboarding::activate_effect(&id, &props);
+            }
+        }
+        crate::views::onboarding::complete_onboarding();
+        let devices = self.devices.clone();
+        let _ = devices;
+        self.poll_status_effects(cx);
+        self.close_onboarding(cx);
+    }
+
     /// The devices, or none yet.
     pub fn devices(&self) -> &[DeviceInfo] {
         self.devices.as_deref().unwrap_or(&[])
@@ -662,7 +1290,11 @@ impl LayoutView {
                 "",
                 16.0,
                 move |_, _window, app| {
-                    remap_entity.update(app, |_this: &mut LayoutView, _cx| {});
+                    remap_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.remap_all();
+                        this.poll_status_effects(cx);
+                        cx.notify();
+                    });
                 },
             ));
         }
@@ -922,6 +1554,16 @@ pub fn render_page(
 
     let page = div().flex().flex_1().flex_col().gap_4().min_h_0().h_full();
 
+    // The onboarding takeover (LayoutView.tsx:971): the window is the
+    // onboarding alone — the stage over the preview, one panel beside it.
+    if view.onboarding.is_some() {
+        let layout = view.layout().cloned();
+        if layout.is_some() {
+            let page = div().flex().flex_1().flex_col().min_h_0().h_full().min_w_0();
+            return page.child(crate::views::onboarding::render_onboarding(view, window, cx)).into_any_element();
+        }
+    }
+
     let Some(layout) = layout else {
         // Nothing to draw yet: the page says it is reading the layout.
         return page.child(reading(t)).into_any_element();
@@ -1020,6 +1662,11 @@ pub fn render_page(
 
 /// The desk's pointer and wheel handlers: picking, dragging, rubber band,
 /// marquee, middle pan and wheel zoom (PreviewStage's stage handlers).
+/// Used by the Layout page and the onboarding takeover (same stage).
+pub fn desk_handlers_pub(el: gpui::AnyElement, entity: gpui::Entity<LayoutView>) -> gpui::AnyElement {
+    desk_handlers(el, entity)
+}
+
 fn desk_handlers(
     el: gpui::AnyElement,
     entity: gpui::Entity<LayoutView>,
@@ -1879,6 +2526,12 @@ fn phone_switcher(
 
 /// The bar along the frame's bottom edge: the scale, the segments and the
 /// zoom.
+pub fn stage_toolbar_pub(view: &mut LayoutView, t: &Theme, cx: &mut Context<LayoutView>) -> gpui::AnyElement {
+    let container = container_width(view.width);
+    let phone = view.width <= 720.0;
+    stage_toolbar(view, t, container, phone, cx)
+}
+
 fn stage_toolbar(
     view: &mut LayoutView,
     t: &Theme,

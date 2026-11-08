@@ -1960,6 +1960,53 @@ impl Render for Shell {
         }
         let t = &self.theme;
         let phone = self.width <= 720.0;
+        // The onboarding takeover (takeover.ts): while it is open the rail,
+        // the strip, the notices and the dock are not drawn — the window is
+        // the onboarding alone (`LayoutView.tsx:971`, `Shell.tsx:52`).
+        let onboarding_open = self.page == "layout"
+            && self.layout_view.update(cx, |v, _| v.is_onboarding_open() || v.onboarding.is_some());
+        // Keep the layout view's status/effects in step with the shell's
+        // answers so Hello variants and finish tiles read the same truth.
+        if self.page == "layout" {
+            let status = self.status.clone();
+            let effects = self.effects.clone();
+            self.layout_view.update(cx, |v, _| {
+                if v.status.is_none() && status.is_some() {
+                    v.status = status.clone();
+                }
+                if v.effects.is_none() && effects.is_some() {
+                    v.effects = effects.clone();
+                }
+            });
+            self.layout_view.update(cx, |v, cx| v.try_open_onboarding(cx));
+        }
+        if onboarding_open {
+            let mut root = div()
+                .flex()
+                .flex_col()
+                .relative()
+                .size_full()
+                .bg(Theme::color(t.g1))
+                .line_height(gpui::relative(crate::theme::LINE_HEIGHT))
+                .on_key_down(cx.listener(Self::on_shell_key))
+                .child(self.background())
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .flex_1()
+                        .h_full()
+                        .min_h_0()
+                        .min_w_0()
+                        .overflow_hidden()
+                        .child(self.layout_view.clone()),
+                )
+                .child(self.spectrum_line());
+            if self.palette_open {
+                root = root.child(self.palette.clone());
+            }
+            return root;
+        }
         let phone_pad_top = px(16.0);
         let content = div()
             .flex_1()
