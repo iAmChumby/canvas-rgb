@@ -509,6 +509,134 @@ Still open (not ticked):
   the sheet is the height of its content now, but the GPUI's own content is
   a little taller than React's (the hint takes three lines instead of two).
 
+## Round 5 (2026-11-08, `feat/212-onboarding-r5mm`)
+
+Raw diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles, no mask). The fake
+daemon runs on 19860/17172 (19830 and 17142 were held by another checkout's
+run).
+
+| Step | 1440x900 r4 | 1440x900 r5 | 390x844 r4 | 390x844 r5 |
+|---|---|---|---|---|
+| hello | 5.97% | 2.57% | 11.74% | 5.22% |
+| case | 6.70% | 3.75% | 17.96% | 10.45% |
+| parts | 5.64% | 3.89% | 18.32% | 9.65% |
+| match | 7.12% | 2.93% | 13.60% | 7.06% |
+| finish | 6.66% | 5.64% | 21.40% | 9.16% |
+
+Every step is under the targets now (the desktop under 6 %, the phone under
+15 %). The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`, the same daemon both editors saw):
+`layout-1440x900-dark` 4.44%, `displays-1440x900-dark` 1.51%,
+`devices-1440x900-dark` 2.33% (the baseline's ranges are 4.01-4.5 %,
+1.51-1.58 % and 2.33-2.51 %: no pair moved out of its range).
+
+What round 5 changed, each measured:
+
+- [x] The size of the picked part is on the desk. React draws a chip over the
+  part it has picked with the part's size in the reader's unit
+  (`PreviewStage.tsx:2295`, `desk.module.css` `.desk .tag`); the GPUI drew
+  nothing. The GPUI desk draws it now (`app/gpui/src/views/layout/stage.rs`,
+  `paint_tags`) - checked by the pair `onboarding-case-390x844-dark` and by
+  the crop of the chip (`onboarding-case-react-390x844-dark.png` and
+  `onboarding-case-gpui-390x844-dark.png`, the desk's top edge): React's
+  "19.21 in" and the GPUI's are in the same place.
+- [x] The rotate key's stem hangs from the top edge of the part. The GPUI
+  drew it from the part's middle, so a line ran across the case
+  (`app/gpui/src/views/layout/stage.rs`, `paint_selection_frame`); React's
+  `.stem` is `top: -24px; height: 24px` inside the frame's own box
+  (`desk.module.css:372-381`) - checked by the crop of the case
+  (`onboarding-case-gpui-390x844-dark.png`, the line that ran from the hint
+  down into the case is gone) and by the pair
+  `onboarding-case-390x844-dark`.
+- [x] The left ruler's numbers stand upright in one line. React turns them
+  on their side (`rotate(-90)` in `Rulers.tsx:81-90`); gpui 0.2.2 paints a
+  glyph without a transform, so a turned digit is not reachable from the
+  canvas. The digits are drawn upright, in one line, at the same size and in
+  the same place as the turned ones (`app/gpui/src/views/layout/stage.rs`,
+  `paint_text_ruler_left`) - checked by the crop of the left band
+  (`onboarding-case-react-390x844-dark.png` and
+  `onboarding-case-gpui-390x844-dark.png`). The residue: the line is wider
+  than the turned figures and reads across the edge instead of up it.
+- [x] The foot is where React's foot is, on every screen. React's `.foot`
+  is the primary key and the row under it (the row is always there, so the
+  key stays where it is), with 12 px over and 8 px under on a phone
+  (`onboarding.module.css:219-241` and `:1045-1052`); the GPUI's foot had
+  no padding of its own on a phone and the Finish screen's sweeping foot
+  had no row at all, so the sheet was 40 px shorter than React's and the
+  drawing above it was taller - checked by the pair
+  `onboarding-finish-390x844-dark` (21.40 % -> 9.16 %) and by the sheet's
+  top edge (React's at 581, the GPUI's at 581 in the same pair).
+- [x] The sheet is the height of its own content, and the drawing takes
+  the rest. The screen's block and the foot now share the panel's free
+  space the way React's `margin-block: auto` and `margin-top: auto` do,
+  and the greeting keeps a line and a bit of room under the word
+  (`min-height: 1.1em`) - checked by the sheet's top edge on the phone
+  (React's at 570, the GPUI's at 570 on the Hello screen, at 581 and 581 on
+  the Finish screen, at 429 and 428 on the Case screen) and by the pairs
+  `onboarding-hello-390x844-dark` (11.74 % -> 5.22 %) and
+  `onboarding-case-390x844-dark`.
+- [x] The lights show the hello wave while the onboarding runs. React
+  plays the wave from the Hello screen onwards and the wave settles on one
+  glow after two seconds; the GPUI's capture opened the flow at a step, so
+  the Hello screen never mounted and the wave never played, and the two
+  desks showed different light. The capture plays the wave too
+  (`app/gpui/src/views/onboarding.rs`, the hello wave block) and the React
+  capture waits for the wave to settle before its shot
+  (`tools/ui-capture/capture-react.mjs`) - checked by the pairs
+  `onboarding-parts-1440x900-dark` (the keyboard's cells now read the same
+  violet on both sides) and `onboarding-match-1440x900-dark`
+  (7.12 % -> 2.93 %).
+- [x] The takeover takes the wave's colour on every screen. React writes
+  the running light's dominant hue to `--live-h`, so the chrome takes the
+  colour of the wave; the wave holds the brand violet once it has settled,
+  so the GPUI takes that hue from the first screen on
+  (`app/gpui/src/views/onboarding.rs`, `onboard_theme`) - checked by the
+  pair `onboarding-case-1440x900-dark` and the crop of the "Looks right"
+  key (both sides violet).
+- [x] The lead and the hint break their lines where the browser breaks
+  them. The GPUI's text layout counts the space at the end of a line when
+  it breaks one and the browser does not, so a word that fitted on the
+  browser's line did not fit here; the lead and the hint get four pixels
+  of room (the font's own space) - checked by the pair
+  `onboarding-case-1440x900-dark` (4.77 % -> 3.75 %) and by the crop of
+  the hint (`onboarding-case-react-1440x900-dark.png` and
+  `onboarding-case-gpui-1440x900-dark.png`: both take two lines).
+- [x] The "Remove part" row is washed the way the CSS mixes it. React's
+  `.missingRow` has a border of 45% warn over the line and a wash of 8%
+  warn over the panel (`onboarding.module.css:153-166`); the GPUI drew
+  the whole warn colour and the wash over the sunk colour, so the row was
+  a bright yellow band - checked by the crop of the row
+  (`onboarding-parts-react-390x844-dark.png` and
+  `onboarding-parts-gpui-390x844-dark.png`) and by the pairs
+  `onboarding-parts-1440x900-dark` (4.67 % -> 3.89 %) and
+  `onboarding-parts-390x844-dark` (13.21 % -> 9.65 %).
+- [x] The React capture parks the pointer off the key it clicked, so the
+  pairs measure the resting state and not a hover state
+  (`tools/ui-capture/capture-react.mjs`, `page.mouse.move(0, 0)` before
+  the screenshot) - checked by the pairs `onboarding-case-1440x900-dark`
+  (the key's hover colour is gone from React's shot) and
+  `onboarding-match-390x844-dark` (13.60 % -> 7.06 %).
+
+Still open (not ticked):
+
+- [ ] The four dashed panels inside the case box are **not** drawn by
+  React either: `CasePanels` (`app/web/src/views/CaseBackdrop.tsx:39`) is
+  only used by `CaseBox`, and nothing renders `CaseBox`
+  (`CaseBackdrop.tsx` is imported nowhere: the command
+  `grep -rl "CaseBackdrop" app/web/src` answers nothing). The glass panel
+  (the `artFill` shape) is drawn, and the GPUI draws it too - checked by
+  the crop of the case in `onboarding-parts-react-1440x900-dark.png`: no
+  dashed panel is there to copy.
+- [ ] The title's width is still 4 px wider than React's (the ink
+  1083..1390 against 1081..1385): the tracking is applied (the word cells
+  carry a negative margin, `panel.rs` `word_cell`), what is left is that
+  DirectWrite and Chromium measure the same 28 px string a little
+  differently.
+- [ ] The phone sheet's content is still a little taller than React's on
+  the short screens (the parts sheet is 12 px taller), so the drawing
+  above it is a little shorter.
+
 ## Screenshot pairs
 Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 themes = 12 pairs.
 
