@@ -168,9 +168,7 @@ pub fn art(kind: PartKind, facing: Facing) -> Vec<Stroke> {
 pub fn art_fills(kind: PartKind, facing: Facing) -> Vec<Stroke> {
     match kind {
         PartKind::Fan => {
-            if is_flat(facing) {
-                Vec::new()
-            } else if matches!(facing, Facing::Left | Facing::Right) {
+            if is_flat(facing) || matches!(facing, Facing::Left | Facing::Right) {
                 Vec::new()
             } else {
                 vec![circle(50.0, 50.0, 9.0), poly(&[(46.0, 6.0), (54.0, 6.0), (54.0, 14.0), (46.0, 14.0)])]

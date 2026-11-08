@@ -303,6 +303,93 @@ Still open (not ticked):
 - [ ] The preview feed: React's desk shows the parts lit with the running
   effect's colour, the GPUI desk shows them unlit in the capture.
 
+## Round 3 (2026-11-08, `feat/212-onboarding-r3mm`)
+
+Masked diff of the five onboarding steps, React against GPUI, dark theme
+(`tools/ui-capture/diff-pairs.ps1`, no masked rectangles). The fake daemon
+runs on 19840/17152 (19830 and 17142 were taken by another run):
+
+| Step | 1440x900 r2 | 1440x900 r3 | 390x844 r2 | 390x844 r3 |
+|---|---|---|---|---|
+| hello | 6.04% | 5.92% | 30.36% | 29.13% |
+| case | 6.16% | 6.11% | 49.25% | 44.98% |
+| parts | 8.91% | 5.64% | 61.14% | 20.66% |
+| match | 7.12% | 7.12% | 27.37% | 19.64% |
+| finish | 6.70% | 6.66% | 24.41% | 23.69% |
+
+The layout, displays and devices pairs, the default daemon
+(`onboarding_complete = true`, the same daemon both editors see):
+`layout-1440x900-dark` 4.43%, `displays-1440x900-dark` 1.51%,
+`devices-1440x900-dark` 2.33% (the baseline's ranges are 4.10-4.48%,
+1.51-1.58% and 2.33-2.51%: no pair moved out of its range).
+
+The pairs move by up to 3 pp between two captures of the same build (round 2
+measured the same spread): React's desk shows the hello wave, so the parts'
+LED cells are lit with the colour the wave has at that moment.
+
+What round 3 changed, each measured:
+
+- [x] The part chips carry their icon. `Package.svg` and `Stack.svg` were on
+  disk but never registered in `app/gpui/src/assets.rs` (`ICONS` and
+  `icon_svg()`), so `gpui::svg().path("icons/Package.svg")` loaded nothing
+  and the pump, the RAM and the GPU chips drew no icon at all - checked by
+  the pair `onboarding-parts-1440x900-dark` and by the crop of the chips
+  (`onboarding-parts-react-1440x900-dark.png` and
+  `onboarding-parts-gpui-1440x900-dark.png`, the chips at 1081,413).
+- [x] The chip's LED dot is in front of the key's face. The face is an
+  absolute layer (`skirt_layers`), so the dot drawn before it was hidden
+  under it - checked by the same crop (React's dot at 1092..1097, the GPUI's
+  now at the same place).
+- [x] The case's glass panel (the rounded panel inside the case box, the
+  `artFill` shape of `ZoneArt.tsx`'s CASE, which a landmark strokes in the
+  landmark's own line) is drawn by the GPUI desk - checked by the row scan
+  of the pair `onboarding-parts-1440x900-dark` at y 400 (the panel's left
+  edge at 444..446 and its right edge at 788..790 in both images) and by
+  `probe-pixels.ps1` (the case's inner panel at 444,228 348x360).
+- [x] The lock badge on a locked case (the small key in the case's top right
+  corner, `desk.module.css` `.lockBadge`, React's at 811,186 22x22) is
+  drawn by the GPUI desk, with the `LockSimple` glyph Phosphor draws -
+  checked by the pair `onboarding-parts-1440x900-dark` and by the probe
+  (`212-probe.json`, the lock badge at 811,186.89 22x22).
+- [x] The phone sheet is pinned to the bottom of the window, as React's
+  sticky sheet is, and the drawing keeps its own 320:200 proportions - the
+  parts sheet's top edge moved from 325 to 296 (React's is 295.92, measured
+  by `212-probe.json`) - checked by the pairs `onboarding-parts-390x844-dark`
+  (61.14% -> 20.66%) and `onboarding-match-390x844-dark` (27.37% -> 19.64%).
+- [x] The phone bar is two rows with one rule under it (React's `.bar` at
+  ≤960 px is `padding: 8px 16px` with the progress on the second row), so
+  the bar is 81.3 px with the progress and 56 px without - checked by
+  `212-probe.json` (the parts header 0,0 390x81.3, the case header 390x56).
+- [x] The desk's hint is one line of text with the keys in it (React's
+  `<b>L</b> lights · <b>E</b> effect`), so the flex gap between the words is
+  gone - checked by `probe-pixels.ps1` (the hint at 466..590 in both images).
+
+Still open (not ticked):
+
+- [ ] The case guides (the three dashed tower outlines and their names) are
+  still not drawn on the Case screen: React's shot has them at 29,78 (the
+  "Full tower", "Mid tower" and "Small tower" names) and the GPUI's desk
+  draws no guide.
+- [ ] The four dashed panels inside the case box (`CaseBackdrop.tsx`'s
+  `CasePanels`, the roof, the floor, the front and the back) are still not
+  drawn; the glass panel (the `artFill` shape) is.
+- [ ] The title's CSS `letter-spacing: -0.02em` does not reach the GPUI: the
+  tracked title is 316 px wide against React's 304 (the ink 1083..1398
+  against 1082..1385). Neither a negative flex gap nor a negative margin
+  tightens the line in this layout engine, so the title's own tracking is
+  still missing.
+- [ ] The lead's line break differs: React breaks after "where it" (the ink
+  1081..1386) and the GPUI after "where" (1081..1373), although the same
+  words in the same font measure the same (the hint's ink is 1081..1367 in
+  both).
+- [ ] The preview feed: React's desk shows the parts lit with the running
+  effect's colour, the GPUI desk shows them unlit in the capture (the
+  keyboard's inside reads #04000a in React's parts shot, #1f0052 in the
+  match shot and #000000 in the GPUI's).
+- [ ] The phone sheet's content is still a little off: the sheet is pinned
+  to the bottom, but its own height is not the content's height, so the
+  panel's content sits a little higher than React's on the short screens.
+
 ## Screenshot pairs
 Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 themes = 12 pairs.
 

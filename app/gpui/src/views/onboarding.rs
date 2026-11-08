@@ -901,18 +901,18 @@ pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Co
 
     let main = if phone {
         // The phone takeover (`onboarding.module.css:968`): the drawing sits
-        // on its own, the panel is a bottom sheet pinned to the bottom of
-        // the window (React's `position: sticky; bottom: 0`), and the sheet
-        // covers the drawing when the screen is taller than the window.
-        // The drawing keeps its own height (its own 320:200 proportions),
-        // so the sheet is pinned over it, not under it.
+        // on its own and the panel is a bottom sheet pinned to the bottom of
+        // the window (React's `position: sticky; bottom: 0`). The drawing
+        // keeps its own height, so when the sheet is tall the two overlap
+        // (React's sheet does the same: it covers the drawing's last rows).
         div()
-            .relative()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
-            .child(div().flex().flex_col().flex_none().pt_4().px_4().pb_0().child(stage))
+            .p_4()
+            .pb_0()
+            .child(div().flex().flex_col().min_h_0().child(stage))
             .child(panel)
     } else {
         div().flex().flex_1().min_h_0().gap_6().p_6().child(stage).child(panel)
@@ -987,7 +987,7 @@ fn header_bar(view: &mut LayoutView, _window: &mut Window, cx: &mut Context<Layo
         // and below, an 8 px gap between the rows and one rule under the
         // whole bar. The row with the "Set up later" key is as tall as the
         // key (28 px), not the desktop's 56.
-        let mut col = div().flex().flex_col().min_w_0().bg(Theme::color(t.panel));
+        let mut col = div().flex().flex_col().min_w_0().min_h(px(56.0)).bg(Theme::color(t.panel));
         let top = div()
             .flex()
             .items_center()
@@ -1243,19 +1243,21 @@ fn panel_for(
     let panel = if phone {
         // React's sheet (the 960 px rule): a top border and the top corners
         // only, the full width of the window and no more than 66 vh tall.
-        // It is pinned to the bottom of the window, so it covers the
-        // drawing when the screen is taller than the window.
+        // It is pinned to the bottom of the window (the auto margin above it
+        // is the sticky sheet's `bottom: 0`), and it covers the drawing when
+        // the screen is taller than the window.
         let mut panel = panel
-            .absolute()
-            .bottom_0()
-            .left_0()
-            .right_0()
             .flex()
             .flex_col()
             .flex_none()
+            // The sheet is the width of the window: React's negative side
+            // margins widen it past the page's own padding.
             .w(px(view.width))
             .max_h(px(view.height * 0.66))
             .min_h_0()
+            .mt_auto()
+            .ml(px(-16.0))
+            .mr(px(-16.0))
             .border_0()
             .border_t_1()
             .border_color(Theme::color(t.line_2));
@@ -1282,7 +1284,15 @@ fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body
     // React's `.step` gap is `--s4` on a phone (the 960 px rule) and `--s5`
     // on the desktop.
     let gap = if phone { px(16.0) } else { px(20.0) };
-    let mut col = div().flex().flex_col().flex_1().min_h_0().px(pad_h).py(pad_v);
+    // On a phone the sheet is pinned to the bottom of the window and takes
+    // the height of its own content (React's sheet is `position: sticky`,
+    // so it is as tall as it needs to be); on the desktop the panel has a
+    // height of its own and the screen fills it.
+    let mut col = if phone {
+        div().flex().flex_col().flex_none().px(pad_h).py(pad_v)
+    } else {
+        div().flex().flex_col().flex_1().min_h_0().px(pad_h).py(pad_v)
+    };
     let mut inner = div().flex().flex_col().gap(gap);
     inner = inner.child(head);
     if let Some(b) = body {
