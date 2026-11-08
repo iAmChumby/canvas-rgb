@@ -398,21 +398,21 @@ daemon runs on 19850/17162 (19830 and 17142 were taken by another run).
 
 | Step | 1440x900 r3 | 1440x900 r4 | 390x844 r3 | 390x844 r4 |
 |---|---|---|---|---|
-| hello | 5.98% | 5.98% | 24.95% | 11.81% |
-| case | 6.12% | 6.70% | 44.98% | 17.71% |
-| parts | 5.62% | 8.89% | 20.84% | 18.48% |
-| match | 7.12% | 7.08% | 19.79% | 13.62% |
-| finish | 6.67% | 6.67% | 23.82% | 21.51% |
+| hello | 5.98% | 5.97% | 24.95% | 11.74% |
+| case | 6.12% | 6.70% | 44.98% | 17.96% |
+| parts | 5.62% | 5.64% | 20.84% | 18.32% |
+| match | 7.12% | 7.12% | 19.79% | 13.60% |
+| finish | 6.67% | 6.66% | 23.82% | 21.40% |
 
 (The r3 column here is round 4's own "before" run: the same build, the same
 daemon, the same capture commands. It matches the numbers round 3 reported
 within the spread those pairs have between two runs. The parts pair at
 1440 is the one that moves: React's shot is taken at the moment the hello
 wave settles (two seconds and three quarters after the wave starts), so
-the keyboard's cells read #010004 in one capture (the pair measures 5.62%)
-and #220058 in the next (the pair measures 8.89%). The GPUI's capture does
-not play the wave, so its cells read #000000 either way. See "The preview
-feed" below.)
+the keyboard's cells read #010004 in one capture (the pair measures 5.64%)
+and #220058 in the next (the same build measures 8.89%). The GPUI's
+capture does not play the wave, so its cells read #000000 either way. See
+"The preview feed" below.)
 
 The layout, displays and devices pairs, the default daemon
 (`onboarding_complete = true`, the same daemon both editors see):
@@ -432,10 +432,10 @@ What round 4 changed, each measured:
   (`212-probe.json`, `case-390x844-dark`): the desk canvas is 16,72 358x324.52
   and the sheet's top edge is at 428.52; the GPUI's desk is now 16,72
   358x322.52 and the sheet's top edge is at 428.52 - checked by the pairs
-  `onboarding-case-390x844-dark` (44.98% -> 17.71%),
-  `onboarding-hello-390x844-dark` (24.95% -> 11.81%),
-  `onboarding-match-390x844-dark` (19.79% -> 13.62%) and
-  `onboarding-finish-390x844-dark` (23.82% -> 21.51%).
+  `onboarding-case-390x844-dark` (44.98% -> 17.96%),
+  `onboarding-hello-390x844-dark` (24.95% -> 11.74%),
+  `onboarding-match-390x844-dark` (19.79% -> 13.60%) and
+  `onboarding-finish-390x844-dark` (23.82% -> 21.40%).
 - [x] The phone sheet is the height of its own content. React's sheet is
   `position: sticky` and as tall as its content; the GPUI's panel grew to
   whatever the window had left, and the screen's centring split that extra
