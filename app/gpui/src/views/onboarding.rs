@@ -713,18 +713,21 @@ pub fn complete_onboarding() {
 /// violet from Your parts on (measured in the React captures: the logo mark
 /// is #80aeef on the Hello and the Case, #ab80ef on the other three).
 pub const ONBOARDING_HUE: u16 = 263;
-/// The app's own accent (`--live-h: 215`), the hue the chrome has before the
-/// onboarding's wave has settled.
+/// The app's own accent (`--live-h: 215`), the hue the chrome has outside
+/// the onboarding.
+#[allow(dead_code)]
 pub const APP_HUE: u16 = 215;
 
 /// The theme the takeover draws with: the app's theme on the accent the
 /// screen is on.
-fn onboard_theme(view: &LayoutView, step: StepKind) -> Theme {
-    let hue = match step {
-        StepKind::Hello | StepKind::Case => APP_HUE,
-        StepKind::Parts | StepKind::Match | StepKind::Finish => ONBOARDING_HUE,
-    };
-    view.theme.with_live_hue(hue)
+///
+/// React writes the running light's dominant hue to `--live-h`, so the
+/// onboarding's chrome takes the colour of the hello wave. The wave takes
+/// two seconds to cross the PC and then holds its glow, and the glow is the
+/// brand violet, so the takeover is drawn with that hue from the first
+/// screen on.
+fn onboard_theme(view: &LayoutView, _step: StepKind) -> Theme {
+    view.theme.with_live_hue(ONBOARDING_HUE)
 }
 
 /// The word space of the UI font at a given weight, in em (the `hmtx` advance
