@@ -775,8 +775,12 @@ impl StackBuilder {
 
         // The phone's column reads stage, layers, then the picked layer's
         // summary (React `rd-stack-main` + `rd-layer-summary`); the desktop
-        // puts the picked panel in the side instead.
-        let mut main = div().flex().flex_col().gap_4().min_w(px(0.0)).min_h(px(0.0)).flex_1();
+        // puts the picked panel in the side instead. React's phone gaps are
+        // `s3` (12 px): the stack main, the body and the page all drop from
+        // `s4` (16 px, desktop `.rd-stack-main`, `.rd-stack-body`,
+        // `.rd-page`) to `s3` under `.rd-stacks-phone`.
+        let col_gap = if narrow { gpui::px(12.0) } else { gpui::px(16.0) };
+        let mut main = div().flex().flex_col().gap(col_gap).min_w(px(0.0)).min_h(px(0.0)).flex_1();
         main = main.child(self.stage(cx));
         main = main.child(self.layers_panel(cx));
         if narrow && self.picked_layer().is_some() {
@@ -802,7 +806,7 @@ impl StackBuilder {
             div()
                 .flex()
                 .flex_col()
-                .gap_4()
+                .gap(col_gap)
                 .flex_1()
                 .min_h(px(0.0))
                 .min_w(px(0.0))
@@ -820,7 +824,15 @@ impl StackBuilder {
                 .into_any_element()
         };
 
-        let mut page = div().flex().flex_col().gap_4().flex_1().min_h(px(0.0)).min_w(px(0.0));
+        let mut page = div().flex().flex_col().gap(col_gap).flex_1().min_h(px(0.0)).min_w(px(0.0));
+        if narrow {
+            // React's phone `.content` for this page is `s2 s3` (8 px top,
+            // 12 px sides: `.app:has(.rd-stacks-phone) .content`), but the
+            // shell's phone content is 16 px on the sides, so the panels
+            // sat at x 16-374 instead of React's x 12-378. Pull the page
+            // out 4 px on each side to land on React's box.
+            page = page.mx(px(-4.0)).mt(px(-8.0));
+        }
         if !narrow && self.height > 0.0 {
             // The content box's height, as the editor's render.rs sets it:
             // without it the page is its content's height and the stage
@@ -961,6 +973,24 @@ impl StackBuilder {
         let t = self.theme;
         let entity = cx.entity();
         let count = self.count();
+        // React's phone keys drop their words under `@media (max-width:
+        // 640px)` (`.rd-btn-text { display: none }`): Try on the lights and
+        // Add layer are icon-only keys at 390, not labelled ones.
+        let icon_only = self.width <= 640.0;
+        let narrow = self.width <= 720.0;
+        // The phone stage's picture height: React's `.rd-canvas-wrap` takes
+        // its height from its width (`aspect-ratio: 320 / 200`), so the
+        // picture is (panel inner width) / 1.6 tall — about 212 px at 390
+        // (panel x 12-378 less 12 px padding and the 1 px border each
+        // side), not a flex row's leftover. The builder's width is the
+        // window width less the shell's 16 px phone content padding on
+        // each side, less the page's 4 px pull-out on each side.
+        let canvas_h = if narrow {
+            let inner_w = self.width - 32.0 - 26.0 + 8.0;
+            inner_w / 1.6
+        } else {
+            0.0
+        };
         let picked = self.picked_layer().cloned();
         let editable = picked
             .as_ref()
@@ -978,7 +1008,11 @@ impl StackBuilder {
             ))
         });
 
-        let head = div()
+        // The head's actions: the panel's title is "PREVIEW" on the left
+        // and the meta on the right, on one row. On a phone the meta is
+        // the size and the rate only (`.rd-stacks-phone .rd-show-areas {
+        // display: none }`): the areas switch is a desktop control.
+        let mut head = div()
             .flex()
             .items_center()
             .gap_3()
@@ -990,8 +1024,9 @@ impl StackBuilder {
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("320 × 200 · 15 fps"),
-            )
-            .child(
+            );
+        if !narrow {
+            head = head.child(
                 div()
                     .flex()
                     .items_center()
@@ -1019,42 +1054,72 @@ impl StackBuilder {
                         },
                     )),
             );
+        }
 
         // An empty stack's stage: the centred words (`StackPreviewCanvas`'s
         // `.rd-canvas-empty` replaces the canvas while the stack has no
         // layer: "Nothing to show yet" over "Add a layer and its picture
         // appears here.").
         let picture: gpui::AnyElement = if count == 0 {
-            div()
-                .flex_1()
-                .min_h(px(0.0))
+            let mut empty = div()
                 .r_md()
                 .bg(Theme::color(t.sunk))
                 .flex()
                 .flex_col()
                 .items_center()
-                .justify_center()
-                .gap_1()
-                .child(
-                    div()
-                        .text_size(px(15.0))
-                        .line_height(gpui::relative(1.45))
-                        .font_weight(gpui::FontWeight::SEMIBOLD)
-                        .font_family(crate::fonts::UI_FAMILY)
-                        .text_color(Theme::color(t.ink))
-                        .child("Nothing to show yet"),
-                )
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .line_height(gpui::relative(1.45))
-                        .font_family(crate::fonts::UI_FAMILY)
-                        .text_color(Theme::color(t.mute))
-                        .child("Add a layer and its picture appears here."),
-                )
-                .into_any_element()
+                .gap_1();
+            if narrow {
+                // `justify_center` does not centre a column's children in
+                // this GPUI build, so the centred words are held by two
+                // equal flex spacers instead.
+                empty = empty
+                    .flex_none()
+                    .h(px(canvas_h))
+                    .child(div().flex_1())
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .line_height(gpui::relative(1.45))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child("Nothing to show yet"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .line_height(gpui::relative(1.45))
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child("Add a layer and its picture appears here."),
+                    )
+                    .child(div().flex_1());
+            } else {
+                empty = empty
+                    .flex_1()
+                    .min_h(px(0.0))
+                    .justify_center()
+                    .child(
+                        div()
+                            .text_size(px(15.0))
+                            .line_height(gpui::relative(1.45))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child("Nothing to show yet"),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .line_height(gpui::relative(1.45))
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child("Add a layer and its picture appears here."),
+                    );
+            }
+            empty.into_any_element()
         } else {
-            stack_preview(
+            let preview_el = stack_preview(
                 &t,
                 "rd-canvas",
                 self.frame.clone(),
@@ -1067,8 +1132,21 @@ impl StackBuilder {
                         let _ = &entity;
                     }
                 },
-            )
-            .into_any_element()
+            );
+            // At phone width the wrap takes its height from its width
+            // (React `.rd-stacks-phone .rd-canvas-wrap { aspect-ratio:
+            // 320 / 200 }`), instead of the stage's leftover height.
+            if narrow {
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_none()
+                    .h(px(canvas_h))
+                    .child(preview_el)
+                    .into_any_element()
+            } else {
+                preview_el.into_any_element()
+            }
         };
 
         let foot: gpui::AnyElement = if self.draft_state == super::editor::DraftState::Off {
@@ -1083,24 +1161,44 @@ impl StackBuilder {
             } else {
                 "Preview only — nothing is on the lights.".to_string()
             };
-            div()
+            // React's foot is `flex-wrap`: a long note (the empty stack's)
+            // takes the full row and the Try key wraps below it; a short
+            // note ("Preview only — …") leaves the key on the same row.
+            // A flex key beside a shrinking note never wraps in GPUI, so
+            // the long case is a column: note full width, key under it.
+            let long_note = note.chars().count() > 44;
+            let foot = div()
                 .flex()
-                .items_center()
-                .justify_between()
-                .gap_3()
+                .gap(if narrow { gpui::px(8.0) } else { gpui::px(12.0) })
                 .flex_wrap()
-                .child(
+                .min_w(px(0.0));
+            let foot = if narrow && long_note {
+                foot.flex_col().items_start().child(
                     div()
+                        .w_full()
+                        .min_w(px(0.0))
                         .text_size(px(14.0))
                         .line_height(gpui::relative(1.45))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(note),
                 )
-                .child(button_icon(
+            } else {
+                foot.items_center().justify_between().child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .text_size(px(14.0))
+                        .line_height(gpui::relative(1.45))
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child(note),
+                )
+            };
+            foot.child(button_icon(
                     &t,
                     "rd-try-lights",
-                    "Try on the lights",
+                    if icon_only { "" } else { "Try on the lights" },
                     Variant::Default,
                     count == 0,
                     true,
@@ -1134,11 +1232,14 @@ impl StackBuilder {
                 .justify_between()
                 .gap_3()
                 .flex_wrap()
+                .min_w(px(0.0))
                 .border_t_1()
                 .border_color(Theme::color(t.line))
                 .pt_2()
                 .child(
                     div()
+                        .flex_1()
+                        .min_w(px(0.0))
                         .text_size(px(14.0))
                         .line_height(gpui::relative(1.45))
                         .font_family(crate::fonts::UI_FAMILY)
@@ -1165,18 +1266,33 @@ impl StackBuilder {
                 .into_any_element()
         };
 
+        // The phone stage keeps its content height (`flex: 0 1 auto`,
+        // `.rd-stacks-phone .rd-stack-stage`) and its gaps are `s2` (8 px),
+        // not the desktop `s3` (12 px); the desktop stage takes the panel's
+        // remaining height. The panel (and its body) must be `flex: none`
+        // at phone width: left to flex, the panel grows into the main
+        // column's leftover height and the picture sits at its top with
+        // an empty well under it.
+        let body_gap = if narrow { gpui::px(8.0) } else { gpui::px(12.0) };
+        let mut body = div().flex().flex_col().gap(body_gap).min_h(px(0.0)).child(picture).child(foot);
+        if narrow {
+            body = body.flex_none();
+        } else {
+            body = body.flex_1();
+        }
         let mut panel = panel_with_padding(
             &t,
             "rd-stack-stage",
             "Preview",
             head,
-            // The body takes the panel's remaining height (React
-            // `.rd-canvas-wrap` is 461 px inside a 561 px panel), or the
-            // picture below collapses to zero and the stage paints black.
-            div().flex().flex_col().gap_3().flex_1().min_h(px(0.0)).child(picture).child(foot),
+            body,
             Some(12.0),
         );
-        panel = panel.flex_1();
+        if narrow {
+            panel = panel.flex_none();
+        } else {
+            panel = panel.flex_1();
+        }
         panel.into_any_element()
     }
 
@@ -1185,6 +1301,8 @@ impl StackBuilder {
         let t = self.theme;
         let entity = cx.entity();
         let count = self.count();
+        let narrow = self.width <= 720.0;
+        let icon_only = self.width <= 640.0;
         let head = div()
             .flex()
             .items_center()
@@ -1200,7 +1318,7 @@ impl StackBuilder {
             .child(button_icon(
                 &t,
                 "rd-add-layer",
-                "Add layer",
+                if icon_only { "" } else { "Add layer" },
                 Variant::Primary,
                 count >= stack_draft::MAX_LAYERS,
                 true,
@@ -1225,8 +1343,11 @@ impl StackBuilder {
                 .gap_2()
                 .px_2()
                 .py_3()
+                .min_w(px(0.0))
                 .child(
                     div()
+                        .w_full()
+                        .min_w(px(0.0))
                         .text_size(px(15.0))
                         .line_height(gpui::relative(1.45))
                         .font_weight(gpui::FontWeight::SEMIBOLD)
@@ -1241,24 +1362,32 @@ impl StackBuilder {
                         .flex()
                         .flex_col()
                         .gap(px(4.0))
+                        .w_full()
+                        .min_w(px(0.0))
                         .text_size(px(14.0))
                         .line_height(gpui::relative(1.5))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child(
-                            div().flex().items_center().gap_2().child(
-                                div().flex_none().w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
-                            ).child("The bottom layer is painted first, then each layer over it."),
+                            div().flex().items_start().gap_2().min_w(px(0.0)).child(
+                                div().flex_none().mt(px(9.0)).w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
+                            ).child(
+                                div().flex_1().min_w(px(0.0)).child("The bottom layer is painted first, then each layer over it."),
+                            ),
                         )
                         .child(
-                            div().flex().items_center().gap_2().child(
-                                div().flex_none().w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
-                            ).child("A layer paints on its canvas, a device, a zone or a rectangle."),
+                            div().flex().items_start().gap_2().min_w(px(0.0)).child(
+                                div().flex_none().mt(px(9.0)).w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
+                            ).child(
+                                div().flex_1().min_w(px(0.0)).child("A layer paints on its canvas, a device, a zone or a rectangle."),
+                            ),
                         )
                         .child(
-                            div().flex().items_center().gap_2().child(
-                                div().flex_none().w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
-                            ).child("Blend and opacity mix it over what is under it."),
+                            div().flex().items_start().gap_2().min_w(px(0.0)).child(
+                                div().flex_none().mt(px(9.0)).w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
+                            ).child(
+                                div().flex_1().min_w(px(0.0)).child("Blend and opacity mix it over what is under it."),
+                            ),
                         ),
                 )
                 .child(button_icon(
@@ -1297,7 +1426,9 @@ impl StackBuilder {
             list.into_any_element()
         };
 
-        panel_with_padding(&t, "rd-layers", "Layers", head, body, Some(12.0)).into_any_element()
+        // React `.rd-layers` padding is `s3` (12 px) on desktop and `s2`
+        // (8 px) on a phone (`.rd-stacks-phone .rd-layers`).
+        panel_with_padding(&t, "rd-layers", "Layers", head, body, Some(if narrow { 8.0 } else { 12.0 })).into_any_element()
     }
 
     /// One layer row.
@@ -1328,7 +1459,9 @@ impl StackBuilder {
             .flex()
             .items_center()
             .gap_2()
-            .min_h(px(54.0))
+            // React `.layer-row` is 54 px, and 50 px on a phone
+            // (`.rd-stacks-phone .layer-row`).
+            .min_h(px(if self.width <= 720.0 { 50.0 } else { 54.0 }))
             .px_2()
             .py_1()
             .r_sm()
@@ -1367,6 +1500,7 @@ impl StackBuilder {
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.ink))
                         .whitespace_nowrap()
+                        .overflow_hidden()
                         .child(name.clone()),
                 )
                 .child(
@@ -1376,6 +1510,7 @@ impl StackBuilder {
                         .font_family(crate::fonts::MONO_FAMILY)
                         .text_color(Theme::color(if words.is_some() { t.warn } else { t.mute }))
                         .whitespace_nowrap()
+                        .overflow_hidden()
                         .child(meta),
                 ),
         );
@@ -1439,6 +1574,8 @@ impl StackBuilder {
                             .font_weight(gpui::FontWeight::SEMIBOLD)
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.ink))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
                             .child(picked.name.clone()),
                     )
                     .child(
@@ -1447,6 +1584,8 @@ impl StackBuilder {
                             .line_height(gpui::relative(1.3))
                             .font_family(crate::fonts::MONO_FAMILY)
                             .text_color(Theme::color(t.mute))
+                            .whitespace_nowrap()
+                            .overflow_hidden()
                             .child(format!("{} · {}", label, area_name(&picked.area, None, None))),
                     ),
             )
@@ -1527,6 +1666,7 @@ impl StackBuilder {
                                     .font_family(crate::fonts::UI_FAMILY)
                                     .text_color(Theme::color(t.ink))
                                     .whitespace_nowrap()
+                                    .overflow_hidden()
                                     .child(picked.name.clone()),
                             )
                             .child(
@@ -1536,6 +1676,7 @@ impl StackBuilder {
                                     .font_family(crate::fonts::MONO_FAMILY)
                                     .text_color(Theme::color(t.mute))
                                     .whitespace_nowrap()
+                                    .overflow_hidden()
                                     .child(format!("{label} · layer {index} of {count}")),
                             ),
                     ),
@@ -2227,7 +2368,9 @@ pub fn strip_actions(builder: &StackBuilder, entity: gpui::Entity<StackBuilder>,
     row = row.child(button_icon(
         &t,
         "rd-strip-save",
-        if builder.saving { "Saving…" } else { "Save" },
+        // On a phone the save key keeps its icon and drops its label
+        // (`.rd-btn-text` under `@media (max-width: 640px)`).
+        if narrow { "" } else if builder.saving { "Saving…" } else { "Save" },
         Variant::Primary,
         builder.count() == 0 || builder.saving,
         true,

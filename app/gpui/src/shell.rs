@@ -1545,7 +1545,12 @@ impl Shell {
             .border_b_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.panel));
-        if phone {
+        // React's phone strip hides the brand when the page brings actions
+        // of its own (`.strip-inner:has(.rd-actions) .strip-brand {
+        // display: none }`): the stack builder and the effects page both
+        // have strip actions at 390, so the easel only shows on pages
+        // without them.
+        if phone && page_actions.is_none() {
             inner = inner.child(self.easel(16.0));
         }
         // React `.rd-title`: the h1 and the mono context share one flex row
@@ -1562,6 +1567,16 @@ impl Shell {
             title_row.flex_none()
         } else {
             title_row.mr_2()
+        };
+        // The stack builder's title yields to its keys on a phone
+        // (`.strip-inner:has(.rd-stack-strip-save) .rd-title { flex: 0 1
+        // auto; min-width: 0 }` with the h1 ellipsised): at 390 React
+        // reads "New s…" / "Sunset…", not the full name. The builder is
+        // the one page that brings a leading back key to the strip.
+        let title_text = if phone && page_leading.is_some() {
+            ellipsize(window, &title_text, 68.0, 20.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+        } else {
+            title_text
         };
         title_row = title_row.child(
             div()
@@ -1589,6 +1604,7 @@ impl Shell {
             }
         }
         // The page's leading key, before the title.
+        let has_leading = page_leading.is_some();
         if let Some(leading) = page_leading {
             inner = inner.child(leading);
         }
@@ -1607,11 +1623,13 @@ impl Shell {
             if page_actions.is_none() || phone {
                 let now_name = if phone {
                     // React's phone strip truncates the now-playing name
-                    // (`.strip-now` overflow): the box is 84 px wide
-                    // including the 12 px swatch and its 8 px gap, so the
-                    // name itself is cut at ~64 px ("Nothing…" in React,
-                    // matching GPUI cutting at the same measure).
-                    ellipsize(window, &now_name, 64.0, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+                    // (`.strip-now` overflow): on the stack builder the
+                    // truncated title gives the name more room, so React
+                    // reads "Nothing is ru…" there ("Nothing…" on the
+                    // other pages); the builder is the page with a leading
+                    // back key.
+                    let max_w = if has_leading { 88.0 } else { 64.0 };
+                    ellipsize(window, &now_name, max_w, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
                 } else {
                     now_name.clone()
                 };

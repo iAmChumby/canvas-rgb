@@ -226,6 +226,12 @@ impl EffectEditor {
     pub fn queue_preview(&mut self, cx: &mut Context<Self>, first: bool) {
         self.preview_seq += 1;
         let seq = self.preview_seq;
+        // React's live note reads "Rendering…" while a request is in
+        // flight (`previewState === "rendering"`): set it here, not only
+        // on the answer, so the note and the dimmed picture track React
+        // at every moment, not just once the loop lands.
+        self.preview_state = PreviewState::Rendering;
+        cx.notify();
         let delay = if first { 0 } else { PREVIEW_DEBOUNCE_MS };
         let html = self.source.clone();
         let props = self.values.clone();
@@ -1234,6 +1240,12 @@ impl EffectEditor {
             .border_1()
             .border_color(Theme::color(t.line))
             .bg(Theme::color(t.sunk));
+        if matches!(self.preview_state, PreviewState::Rendering | PreviewState::Busy) {
+            // React `.eff-live[data-preview="rendering"] .preview-canvas
+            // { opacity: 0.45 }`: the last good picture stays behind the
+            // dim while a new render runs.
+            picture = picture.opacity(0.45);
+        }
         if let Some((w, h, data)) = self.picture() {
             let thumb = crate::components::thumb::Thumb { w, h, frames: 1, data };
             picture = picture.child(
