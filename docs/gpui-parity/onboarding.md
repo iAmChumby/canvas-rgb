@@ -398,11 +398,11 @@ daemon runs on 19850/17162 (19830 and 17142 were taken by another run).
 
 | Step | 1440x900 r3 | 1440x900 r4 | 390x844 r3 | 390x844 r4 |
 |---|---|---|---|---|
-| hello | 5.98% | 5.97% | 24.95% | 11.76% |
-| case | 6.12% | 6.71% | 44.98% | 17.73% |
-| parts | 5.62% | 5.62% | 20.84% | 18.50% |
-| match | 7.12% | 7.12% | 19.79% | 13.61% |
-| finish | 6.67% | 6.67% | 23.82% | 21.52% |
+| hello | 5.98% | 5.95% | 24.95% | 11.81% |
+| case | 6.12% | 6.70% | 44.98% | 17.73% |
+| parts | 5.62% | 5.62% | 20.84% | 19.01% |
+| match | 7.12% | 7.12% | 19.79% | 13.62% |
+| finish | 6.67% | 6.67% | 23.82% | 21.50% |
 
 (The r3 column here is round 4's own "before" run: the same build, the same
 daemon, the same capture commands. It matches the numbers round 3 reported
@@ -410,7 +410,7 @@ within the spread those pairs have between two runs.)
 
 The layout, displays and devices pairs, the default daemon
 (`onboarding_complete = true`, the same daemon both editors see):
-`layout-1440x900-dark` 4.44%, `displays-1440x900-dark` 1.51%,
+`layout-1440x900-dark` 4.43%, `displays-1440x900-dark` 1.51%,
 `devices-1440x900-dark` 2.33% (the baseline's ranges are 4.01-4.5%,
 1.51-1.58% and 2.33-2.51%: no pair moved out of its range).
 
@@ -427,17 +427,18 @@ What round 4 changed, each measured:
   and the sheet's top edge is at 428.52; the GPUI's desk is now 16,72
   358x322.52 and the sheet's top edge is at 428.52 - checked by the pairs
   `onboarding-case-390x844-dark` (44.98% -> 17.73%),
-  `onboarding-hello-390x844-dark` (24.95% -> 11.76%),
-  `onboarding-match-390x844-dark` (19.79% -> 13.61%) and
-  `onboarding-finish-390x844-dark` (23.82% -> 21.52%).
+  `onboarding-hello-390x844-dark` (24.95% -> 11.81%),
+  `onboarding-match-390x844-dark` (19.79% -> 13.62%) and
+  `onboarding-finish-390x844-dark` (23.82% -> 21.50%).
 - [x] The phone sheet is the height of its own content. React's sheet is
   `position: sticky` and as tall as its content; the GPUI's panel grew to
   whatever the window had left, and the screen's centring split that extra
   room (the "Case" label sat 65 px lower than React's). The screen's block
   and foot now share the panel's free space with auto margins, as React's
-  `margin-block: auto` and `margin-top: auto` do - checked by the probe
-  (React's kicker at 449.52, the GPUI's at the same place in the pair
-  `onboarding-case-390x844-dark`) and by the pairs above.
+  `margin-block: auto` and `margin-top: auto` do - checked by the column
+  scan of the pair `onboarding-case-390x844-dark` (`diff-pairs.ps1 -Column
+  20`: React's kicker ink at 454..456 and the GPUI's in the same rows,
+  React's sheet border at 429..430 and the GPUI's at 428..429).
 - [x] The Back key. React's capture walks the flow from the Hello screen, so
   the run is a normal one and every screen after it has a Back
   (`Onboarding.tsx:101-110`); the GPUI's capture opened the flow as a redo
@@ -452,8 +453,11 @@ What round 4 changed, each measured:
   desk draws them now, with the names in one column left of the widest
   outline and the thin dashed lead to each outline - checked by the pair
   `onboarding-case-1440x900-dark`: React's "Full tower" is at 291,99 and its
-  size "22.83 in × 22.83 in" at 218..345,111; the GPUI's are in the same
-  places (the ink #6e737b against React's #6b7079).
+  size "22.83 in x 22.83 in" at 218..345,111; the GPUI's are in the same
+  places (the ink #6e737b against React's #6b7079). The pair went from
+  6.12% to 6.70%: the dashes do not land on the same pixels (the browser
+  starts the dash run after the border's corner arc, the canvas starts it
+  at the corner), which is what the 0.58 pp is.
 
 Still open (not ticked):
 
