@@ -1562,9 +1562,13 @@ impl Render for EffectsView {
         let body: gpui::AnyElement = if phone {
             if self.pushed {
                 let entity_back = entity.clone();
+                // There is a gap of one s3 under the back row (React's
+                // `.eff-sheet { gap: var(--s3) }`): measured 108 to the
+                // editor's top at 390.
                 div()
                     .flex()
                     .flex_col()
+                    .gap_3()
                     .flex_1()
                     .min_h(px(0.0))
                     .min_w(px(0.0))

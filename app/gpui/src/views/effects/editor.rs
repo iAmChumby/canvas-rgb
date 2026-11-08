@@ -526,15 +526,31 @@ impl EffectEditor {
             }
         }
 
-        // The side column and the code pane.
-        let side_w = if self.container_width() >= 1000.0 { 420.0 } else { 340.0 };
+        // The side column and the code pane. On the phone the side column
+        // takes the full content width `.eff-edit-side` (358 px at 390:
+        // the container is one column there); the 340 px is for the middle
+        // widths between.
+        let side_w = if self.container_width() >= 1000.0 {
+            420.0
+        } else if self.width <= 720.0 {
+            self.container_width()
+        } else {
+            340.0
+        };
         let mut main = div()
             .flex()
             .gap_3()
             .flex_1()
             .min_h(px(0.0))
             .min_w(px(0.0));
-        let side = self.side_column(cx).w(px(side_w)).flex_none();
+        // At phone width the grid is one column: the side takes the
+        // editor's full box (`.eff-edit-side` is 358 px at 390: whatever
+        // `content_width` reports, the measured editor.width is smaller).
+        let side = if narrow {
+            self.side_column(cx).flex_1().min_w(px(0.0))
+        } else {
+            self.side_column(cx).w(px(side_w)).flex_none()
+        };
         main = main.child(side);
         if self.show_code && !narrow {
             // The pane is the editor's height (React `.eff-code` fills the
@@ -601,7 +617,13 @@ impl EffectEditor {
     /// The live picture's height: React `.eff-live .preview-canvas { aspect-ratio: 16 / 10 }`
     /// over the side column's width.
     pub fn picture_height(&self) -> f32 {
-        let side_w = if self.container_width() >= 1000.0 { 420.0 } else { 340.0 };
+        let side_w = if self.container_width() >= 1000.0 {
+            420.0
+        } else if self.width <= 720.0 {
+            self.container_width()
+        } else {
+            340.0
+        };
         side_w / 1.6
     }
 
@@ -1006,7 +1028,7 @@ impl EffectEditor {
             let last_at = defs.len().saturating_sub(1);
             for (i, def) in defs.iter().enumerate() {
                 let value = values.get(&def.key).cloned().unwrap_or_else(|| def.kind.default_value());
-                col = col.child(self.prop_row(def, &value, entity.clone(), &schema_properties, &values, i == last_at));
+                col = col.child(self.prop_row(def, &value, entity.clone(), &schema_properties, &values, i == last_at, self.width <= 720.0));
             }
             col.into_any_element()
         };
@@ -1031,7 +1053,11 @@ impl EffectEditor {
         // above the box), so the offset is measured here and applied as the
         // content's own top margin: React's centring is the unsafe kind.
         let measured = self.probe.get();
-        let offset = if measured > 0.0 { (self.height - measured) / 2.0 } else { 0.0 };
+        // The centring is the desktop `.eff-edit-side` column's only:
+        // on the phone the column flows from its top (React is one grid
+        // column there), and a content taller than the page made the offset
+        // negative and lifted the live picture above the top.
+        let offset = if measured > 0.0 && self.width > 720.0 { (self.height - measured) / 2.0 } else { 0.0 };
         // The content is measured apart from the column: the inner block is
         // its own height, and the probe measures that.
         let mut inner = div()
@@ -1039,6 +1065,7 @@ impl EffectEditor {
             .relative()
             .flex()
             .flex_col()
+            .flex_none()
             .gap_2()
             .min_w(px(0.0))
             .child(live)
@@ -1062,20 +1089,29 @@ impl EffectEditor {
             .absolute()
             .inset_0(),
         );
+        // The inner block and its wrapper never shrink: a flex parent shrank
+        // them past their natural height (the live picture lost ~12 px at
+        // 390; with a taller desktop the same shrink fed the probe a
+        // smaller measure than the content paints).
         let mut content = div()
             .id(gpui::SharedString::from("eff-edit-content"))
             .flex()
             .flex_col()
+            .flex_none()
             .min_w(px(0.0))
             .child(inner);
         content.style().margin.top = Some(gpui::Length::Definite(gpui::px(offset).into()));
-        div()
+        // No fixed height on the phone: the column flows (the page scrolls);
+        // the desktop keeps the editor's height for the centring.
+        let mut side_div = div()
             .id(gpui::SharedString::from("eff-edit-side"))
             .flex()
             .flex_col()
-            .gap_2()
-            .h(px(self.height))
-            .child(content)
+            .gap_2();
+        if self.width > 720.0 {
+            side_div = side_div.h(px(self.height));
+        }
+        side_div.child(content)
     }
 
     /// One property row (React's `PropertyControls`, under
@@ -1091,6 +1127,7 @@ impl EffectEditor {
         schema_properties: &[canvas_proto::props::PropertyDef],
         values: &Props,
         last: bool,
+        narrow: bool,
     ) -> impl IntoElement {
         let t = self.theme;
         let label = div()
@@ -1146,12 +1183,36 @@ impl EffectEditor {
         // and a 12 px gap; the rest (colours, toggles, selects) take 170 px
         // and 16 px (`.prop-item`, `.prop-item[data-kind="number"]`).
         let narrow_label = matches!(def.kind, PropKind::Number { .. } | PropKind::Hue { .. } | PropKind::Angle { .. });
+        // Phone: non-number rows stack (label above control,
+        // `.prop-item:not([data-kind="number"])` at max-width 720px, with 8 px
+        // vertical padding and the base 52 px thread-through; number rows
+        // keep three columns). Desktop rows use 4 px padding.
+        let stacked = narrow && !matches!(def.kind, PropKind::Number { .. });
+        if stacked {
+            let mut row = div()
+                .flex()
+                .flex_col()
+                .gap_2()
+                .py(px(8.0))
+                .min_h(px(52.0))
+                .child(label)
+                .child(div().flex().items_center().gap_2().flex_1().min_w(px(0.0)).child(control));
+            if !last {
+                row = row.border_b_1().border_color(Theme::color(t.line));
+            }
+            return row;
+        }
         let mut row = div()
             .flex()
             .items_center()
-            .min_h(px(40.0))
-            .py(px(4.0))
-            .child(div().w(px(if narrow_label { 96.0 } else { 170.0 })).flex_none().child(label))
+            .py(px(if narrow { 8.0 } else { 4.0 }))
+            .min_h(px(if narrow { 52.0 } else { 40.0 }))
+            .child(
+                div()
+                    .w(px(if narrow_label { 96.0 } else { 170.0 }))
+                    .flex_none()
+                    .child(label),
+            )
             .child(div().flex().items_center().gap_2().flex_1().min_w(px(0.0)).child(control));
         row = if narrow_label { row.gap_3() } else { row.gap_4() };
         if !last {
