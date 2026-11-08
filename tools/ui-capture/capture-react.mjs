@@ -126,6 +126,10 @@ const EDITOR_EFFECT = (process.env.UI_CAPTURE_EDITOR ?? "").trim();
 // stack that has never been saved). The shot is named
 // stack-<slug>-react-<w>x<h>-<theme>.png.
 const STACK_NAME = (process.env.UI_CAPTURE_STACK ?? "").trim();
+// The peripherals page (#208): the device selected before the shot
+// ("mouse" | "controller"). The shot is named
+// peripherals-<device>-react-<w>x<h>-<theme>.png.
+const PERI_DEVICE = (process.env.UI_CAPTURE_DEVICE ?? "").trim();
 
 function slugOf(text) {
   return text.toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
@@ -480,6 +484,32 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
   // Let the view settle (fonts, thumbnails, one preview frame).
   await page.waitForTimeout(400);
   let fileName = `${view.name}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+  if (PERI_DEVICE && view.name === "peripherals") {
+    // The peripherals page (#208): select the device before the shot, so the
+    // pair shows the same device on both sides. The mouse is the first key
+    // and selected by default; clicking it again just re-reads it.
+    fileName = `peripherals-${PERI_DEVICE}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    const keyText = PERI_DEVICE === "controller" ? "8BitDo Ultimate" : "Attack Shark";
+    const key = page.locator(".rd-devkey", { hasText: keyText }).first();
+    try {
+      await key.waitFor({ timeout: 8000 });
+      await key.click({ timeout: 8000 });
+    } catch {
+      notLoaded.push(`the ${PERI_DEVICE} device key was not found`);
+    }
+    // Wait for the picked device's detail to land (head name follows the pick).
+    const headText = PERI_DEVICE === "controller" ? "8BitDo Ultimate" : "Attack Shark";
+    try {
+      await page.waitForFunction(
+        (want) => (document.querySelector(".peripheral-head-name")?.textContent ?? "").includes(want),
+        headText,
+        { timeout: 10000 },
+      );
+    } catch {
+      notLoaded.push(`the ${PERI_DEVICE} detail did not land`);
+    }
+    await page.waitForTimeout(800);
+  }
   if (EDITOR_EFFECT) {
     // The code editor (#214): the library's card for the effect is clicked,
     // then "Edit code" opens its source.

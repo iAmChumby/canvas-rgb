@@ -837,7 +837,7 @@ impl PeripheralsView {
     }
 
     /// Select a device key (`onClick` of `button.peripheral-row`).
-    fn pick_device(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub fn pick_device(&mut self, id: &str, cx: &mut Context<Self>) {
         self.detail_error = None;
         self.change_saved = false;
         self.picked_stage = None;

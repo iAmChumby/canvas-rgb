@@ -24,6 +24,8 @@
 //!   editor on that effect, for captures.
 //! - `--stack <name>` (debug only) — open the Effects page in build mode on
 //!   that stack (`new` for a stack that has never been saved), for captures.
+//! - `--peri-device <mouse|controller>` (debug only) — open on the
+//!   Peripherals page with that device selected, for captures (#208).
 
 use std::io::{BufRead, BufReader, Write};
 
@@ -70,6 +72,9 @@ struct ParsedArgs {
     /// `--onboarding-state <token>` (debug builds only): the React demo
     /// `?state=` token to mirror (`complete|connecting|conflict|no-devices|...`).
     onboarding_state: Option<String>,
+    /// `--peri-device <mouse|controller>` (debug builds only): open the
+    /// Peripherals page with that device selected (#208 captures).
+    peri_device: Option<String>,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -84,6 +89,7 @@ fn parse_args() -> ParsedArgs {
     let mut stack = None;
     let mut onboarding_step = None;
     let mut onboarding_state = None;
+    let mut peri_device = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -138,6 +144,11 @@ fn parse_args() -> ParsedArgs {
                     onboarding_state = Some(v);
                 }
             }
+            "--peri-device" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    peri_device = Some(v);
+                }
+            }
             _ => {}
         }
     }
@@ -153,6 +164,7 @@ fn parse_args() -> ParsedArgs {
         stack,
         onboarding_step,
         onboarding_state,
+        peri_device,
     }
 }
 
@@ -176,6 +188,7 @@ fn main() {
         stack,
         onboarding_step,
         onboarding_state,
+        peri_device,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -246,6 +259,17 @@ fn main() {
                         if let Some(name) = &stack {
                             let name = name.clone();
                             shell.open_stack_builder(&name, cx);
+                        }
+                        // Debug only: `--peri-device` opens the Peripherals
+                        // page with that device already selected (#208 pairs
+                        // shot the mouse and the controller in turn).
+                        if let Some(device) = &peri_device {
+                            let id = match device.as_str() {
+                                "controller" => "eightbitdo-ultimate-2:2dc8",
+                                _ => "attack-shark-x6:1d57:fa60",
+                            };
+                            let peripherals = shell.peripherals_view.clone();
+                            peripherals.update(cx, |v, cx| v.pick_device(id, cx));
                         }
                         // Debug only: `--onboarding-step` opens the onboarding
                         // takeover at a step for captures (React `?state=` demo
