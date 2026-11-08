@@ -1190,8 +1190,10 @@ impl PeripheralsView {
         Origin::new()
     }
 
-    /// A section panel (`Panel` with the section title).
-    fn panel(&self, id: &str, title: &str, body: impl IntoElement) -> impl IntoElement {
+    /// A section panel (`Panel` with the section title). `narrow` is the
+    /// phone container rule (`.rd-peripherals .panel { padding: var(--s3) }`
+    /// at 639 px, against `p_4` elsewhere).
+    fn panel(&self, id: &str, title: &str, body: impl IntoElement, narrow: bool) -> impl IntoElement {
         let t = &self.theme;
         div()
             .id(gpui::SharedString::from(id.to_string()))
@@ -1199,6 +1201,7 @@ impl PeripheralsView {
             .flex_col()
             .min_w(px(0.0))
             .p_4()
+            .when(narrow, |d| d.p_3())
             .r_lg()
             .border_1()
             .border_color(Theme::color(t.line))
@@ -1529,21 +1532,44 @@ impl PeripheralsView {
         // `flex: 1` (85 px measured at 1440 for the 1fr column, 64 px
         // effective with the `.num` field at 48 px), the field 48 px.
         let is_number = matches!(def.kind, PropKind::Number { .. });
-        // A segmented choice (4 or fewer options) drops under its label
-        // (`.prop-item:has(.seg)`): the control sizes to its content and
-        // spans the row.
-        let is_seg = !fixed && matches!(&def.kind, PropKind::Choice { options, .. } if options.len() <= 4);
         // Phone: only number and segmented rows stack (`.prop-item[data-kind=
         // "number"] .field-label` and `.prop-item:has(.seg) .field-label`
         // span the row at 639 px); a plain row keeps the 116 px label
         // column with the control after it (measured at 390: `Active DPI
-        // stage` label 116 + control 200).
+        // stage` label 116 + control 200). `phone` is the param, before
+        // the local `narrow` below shadows it for the stacking test.
+        let phone = narrow;
+        let is_seg = !fixed && matches!(&def.kind, PropKind::Choice { options, .. } if options.len() <= 4);
+        // A segmented choice (4 or fewer options) drops under its label
+        // (`.prop-item:has(.seg)`): the control sizes to its content and
+        // spans the row.
         let narrow = is_seg || (narrow && is_number);
-        if narrow {
+        if is_seg {
+            // The segmented control sizes to its content
+            // (`.rd-peri-sections .seg { width: max-content }`), so the
+            // stacked row shrink-wraps it.
             div()
                 .flex()
                 .flex_col()
                 .items_start()
+                .gap_2()
+                .min_h(px(44.0))
+                .py_2()
+                .border_b_1()
+                .border_color(Theme::color(t.line))
+                .child(label_el)
+                .child(control)
+        } else if narrow {
+            // Phone number rows: the label spans the row, then the slider
+            // and the 48 px field share that line
+            // (`.rd-peripherals .rd-peri-sections .prop-item[data-kind=
+            // "number"] { grid-template-columns: minmax(0, 1fr) 48px }`
+            // with `.field-label { grid-column: 1 / -1 }`). The control
+            // stretches, so the slider flexes to the space left of the
+            // field instead of collapsing to its cap.
+            div()
+                .flex()
+                .flex_col()
                 .gap_2()
                 .min_h(px(44.0))
                 .py_2()
@@ -1571,11 +1597,15 @@ impl PeripheralsView {
                         .child(control),
                 )
         } else {
+            // Plain rows: the 116 px label column with the control after
+            // it at every width, 52 px tall on desktop and 44 px on the
+            // phone (`.rd-peri-sections .prop-item { min-height: 44px }`
+            // inside the 639 container rule).
             div()
                 .flex()
                 .items_center()
                 .gap_4()
-                .min_h(px(52.0))
+                .min_h(px(if phone { 44.0 } else { 52.0 }))
                 .py_2()
                 .border_b_1()
                 .border_color(Theme::color(t.line))
@@ -1900,7 +1930,7 @@ impl PeripheralsView {
             }
             body = body.child(list);
         }
-        self.panel(&format!("dpi-{section_id}"), section_title, body)
+        self.panel(&format!("dpi-{section_id}"), section_title, body, narrow)
     }
 
     /// The controller panel (`ControllerPanel`).
@@ -2012,7 +2042,7 @@ impl PeripheralsView {
                 .child(div().w(px(420.0)).flex_none().min_w(px(280.0)).child(plan))
                 .child(map_grid)
         };
-        self.panel("controller-panel", &detail.info.name, grid)
+        self.panel("controller-panel", &detail.info.name, grid, content_w < 640.0)
     }
 
     /// The plan of the pad (`ControllerOutline`): front and rear views.
@@ -2262,12 +2292,18 @@ impl PeripheralsView {
                             .child(info.name.clone()),
                     )
                     .child(
+                        // The subline wraps across the name block's width:
+                        // at 390 the mono location drops to a second line
+                        // beside the `Connected` state dot (`.peripheral-head
+                        // -text { flex: 1 1 0 }`, `.peripheral-head { flex-
+                        // wrap: wrap }`), not under the dot.
                         div()
                             .text_sm()
                             .line_height(gpui::relative(1.45))
                             .font_family(crate::fonts::UI_FAMILY)
                             .text_color(Theme::color(t.mute))
                             .flex()
+                            .flex_wrap()
                             .items_center()
                             .gap(px(2.0))
                             .child(format!("{} · {} ·", kind_word(info.kind), info.vendor))
@@ -2384,6 +2420,7 @@ impl PeripheralsView {
             .flex()
             .flex_col()
             .p_4()
+            .when(content_w < 640.0, |d| d.p_3())
             .r_lg()
             .border_1()
             .border_color(Theme::color(t.line))
@@ -2465,7 +2502,7 @@ impl PeripheralsView {
             };
             column_panels.push((
                 section_panel_height(&properties, section.id == "buttons" && is_mouse, narrow),
-                self.panel(&format!("section-{}", section.id), &section.title, panel_body).into_any_element(),
+                self.panel(&format!("section-{}", section.id), &section.title, panel_body, narrow).into_any_element(),
             ));
         }
         // The sections are CSS multicol columns of 280 px (`columns: 280px
@@ -2512,6 +2549,7 @@ impl PeripheralsView {
                     .font_family(crate::fonts::UI_FAMILY)
                     .text_color(Theme::color(t.mute))
                     .child("The rings on the pad are not read yet: this build cannot name them."),
+                narrow,
             ));
         }
         stack
@@ -2874,6 +2912,7 @@ impl Render for PeripheralsView {
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
                         .child("None that canvas-rgb can configure is plugged in."),
+                    content_w < 640.0,
                 )
                 .into_any_element(),
             _ => {
