@@ -188,6 +188,9 @@ pub struct TextInput {
     /// The search box wears React's small radius (`.effect-search input`
     /// `r-sm`); a number field wears the input's `r-md`.
     radius_sm: bool,
+    /// A field that is refused wears the down colour on its border (React's
+    /// `aria-invalid` on a name field).
+    invalid: bool,
     /// The effects search's border is `--line-2` (motion.css
     /// `.effect-search input`); a number or name field's is `--line`
     /// (hardware.css's wells rule for `.num`/`.text-in`).
@@ -195,6 +198,9 @@ pub struct TextInput {
     /// The field's left inset: 8 px everywhere except the effects search,
     /// whose icon sits inside it (React's `padding-left: 30px`).
     left_pad: f32,
+    /// The field's right inset: 8 px everywhere except React's `.text-in`
+    /// (a name field), whose padding is `var(--s3)` (12 px) on each side.
+    right_pad: f32,
     /// Shown dimmed while nothing is typed (the search placeholder).
     placeholder: Option<SharedString>,
     /// The placeholder's colour. `None` uses the theme's mute.
@@ -254,8 +260,10 @@ impl TextInput {
             line_height: None,
             v_pad: 0.0,
             radius_sm: false,
+            invalid: false,
             border_2: false,
             left_pad: 8.0,
+            right_pad: 8.0,
             placeholder: None,
             placeholder_color: None,
             blur: None,
@@ -313,6 +321,29 @@ impl TextInput {
     /// 8 px, so its text starts 30 px in, as React's `padding-left` does).
     pub fn set_left_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
         self.left_pad = pad;
+        cx.notify();
+    }
+
+    /// The field's right inset (React's `.text-in` has 12 px on each side).
+    pub fn set_right_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
+        self.right_pad = pad;
+        cx.notify();
+    }
+
+    /// The input's own radius (React's `.text-in` wears `r-md`; the search
+    /// box wears the small one).
+    pub fn set_radius_md(&mut self, cx: &mut Context<Self>) {
+        self.radius_sm = false;
+        cx.notify();
+    }
+
+    /// The field is refused (React's `aria-invalid`): its border wears the
+    /// down colour, as a name field with a reason under it does.
+    pub fn set_invalid(&mut self, invalid: bool, cx: &mut Context<Self>) {
+        if self.invalid == invalid {
+            return;
+        }
+        self.invalid = invalid;
         cx.notify();
     }
 
@@ -930,7 +961,7 @@ impl Render for TextInput {
             .justify_end()
             .w_full()
             .pl(px(self.left_pad))
-            .pr(if bare { px(0.0) } else { px(8.0) });
+            .pr(if bare { px(0.0) } else { px(self.right_pad) });
         if !bare {
             field = field.h(px(32.0));
         }
@@ -955,7 +986,8 @@ impl Render for TextInput {
             // `.num-invalid`'s `--down`, `app.css:1365`, by specificity).
             let border = if !disabled && self.focus_handle.is_focused(window) && !self.ui_left {
                 t.live()
-            } else if self.invalid() {
+            } else if self.invalid() || self.invalid {
+                // A numeric draft out of range, or a refused name (`aria-invalid`).
                 Theme::color(t.down)
             } else if self.border_2 {
                 Theme::color(t.line_2)
