@@ -719,7 +719,12 @@ impl LayoutView {
                 return;
             }
             self.apply_capture_state();
-            let again = self.capture_step.as_deref() != Some("hello");
+            // React's capture walks the flow from the Hello screen ("Map my
+            // PC" and then on), so the run is a normal one: `again` is false,
+            // the first screen is the Hello and every screen after it has a
+            // Back (Onboarding.tsx:101-110). A redo starts on the Case screen
+            // and has no Back there.
+            let again = false;
             let step = match self.capture_step.as_deref() {
                 Some("case") => crate::views::onboarding::StepKind::Case,
                 Some("parts") => crate::views::onboarding::StepKind::Parts,

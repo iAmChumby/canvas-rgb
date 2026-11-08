@@ -905,14 +905,16 @@ pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Co
         // the window (React's `position: sticky; bottom: 0`). The drawing
         // keeps its own height, so when the sheet is tall the two overlap
         // (React's sheet does the same: it covers the drawing's last rows).
+        // The 16 px gap between them is React's own (`gap: var(--s4)`).
         div()
             .flex()
             .flex_col()
             .flex_1()
             .min_h_0()
+            .gap_4()
             .p_4()
             .pb_0()
-            .child(div().flex().flex_col().min_h_0().child(stage))
+            .child(stage)
             .child(panel)
     } else {
         div().flex().flex_1().min_h_0().gap_6().p_6().child(stage).child(panel)
@@ -1166,14 +1168,38 @@ fn onboarding_stage_for(view: &mut LayoutView, window: &mut Window, cx: &mut Con
         .overflow_hidden()
         .child(desk);
     if phone {
-        // The drawing is centred in what the sheet leaves (onboarding.module.css
-        // :1027-1033). The desk keeps its own proportions (320 x 200), less
-        // the stage's bottom padding: 208 px at 390 (measured in the React
-        // capture, the desk runs from y 88 to y 296).
-        let h = ((view.width - 32.0) * 0.625).max(160.0);
-        // React's desk is 358 x 223.75 at 390 (its own 320:200) and the
-        // stage adds the 16 px of padding under it.
-        div().flex().flex_col().flex_none().h(px(h + 16.0)).min_h_0().pb_4().child(frame).into_any_element()
+        // The drawing fills what the sheet leaves (onboarding.module.css
+        // :1027-1033): React's `.stage` is `flex: 1 1 auto` and the desk canvas
+        // inside it is `flex: 1 1 0; height: 100%`, so the desk takes the whole
+        // stage - it does not keep its 320:200 proportions when the sheet is
+        // short. Measured in the React capture at 390x844: the desk runs from
+        // y 72 to y 396.52 on the Case screen (the sheet's top edge is at
+        // 428.52), and from y 97.3 to y 321.05 on the Parts screen (the sheet
+        // is taller there and covers the drawing's last rows).
+        //
+        // The desk's own 320:200 height is the floor: the sheet's height is
+        // what it is, and when it is taller than the window the drawing keeps
+        // its proportions and the sheet covers it (React's sticky sheet).
+        let aspect = ((view.width - 32.0) * 0.625).max(160.0);
+        div()
+            .flex()
+            .flex_col()
+            .flex_auto()
+            .flex_basis(px(aspect + 16.0))
+            .min_h_0()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .min_h(px(aspect + 16.0))
+                    .child(
+                        // The stage's own 16 px of padding under the drawing
+                        // (onboarding.module.css:1032).
+                        div().flex().flex_col().flex_1().min_h_0().pb_4().child(frame),
+                    ),
+            )
+            .into_any_element()
     } else {
         // The desk's own box, in css pixels: the stage column (the window
         // less the page's padding, the gap and the 360 px panel), less the
@@ -1243,9 +1269,9 @@ fn panel_for(
     let panel = if phone {
         // React's sheet (the 960 px rule): a top border and the top corners
         // only, the full width of the window and no more than 66 vh tall.
-        // It is pinned to the bottom of the window (the auto margin above it
-        // is the sticky sheet's `bottom: 0`), and it covers the drawing when
-        // the screen is taller than the window.
+        // It sits at the bottom of the window: the drawing above it takes
+        // what is left (`flex: 1 1 auto`), and when the sheet is taller than
+        // the window the drawing gives way instead (React's sticky sheet).
         let mut panel = panel
             .flex()
             .flex_col()
@@ -1255,7 +1281,6 @@ fn panel_for(
             .w(px(view.width))
             .max_h(px(view.height * 0.66))
             .min_h_0()
-            .mt_auto()
             .ml(px(-16.0))
             .mr(px(-16.0))
             .border_0()
@@ -1278,6 +1303,12 @@ fn panel_for(
 /// is a column with a 20 px gap and 24 px of padding, and the foot is pinned
 /// to the bottom of the panel (`margin-top: auto`), so the primary action is
 /// in the same place on every screen.
+///
+/// The free space is shared with auto margins, as React does it: the centred
+/// block's `margin-block: auto` and the foot's `margin-top: auto` split it
+/// three ways. A flexible spacer would not do: it would grow the screen's own
+/// height to whatever the window had left, and the sheet would then be taller
+/// than its content (React's sheet is exactly as tall as its content).
 fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body: Option<gpui::AnyElement>, foot: gpui::AnyElement) -> gpui::AnyElement {
     let pad_v = if phone { px(20.0) } else { px(24.0) };
     let pad_h = if phone { px(16.0) } else { px(24.0) };
@@ -1298,24 +1329,30 @@ fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body
     if let Some(b) = body {
         inner = inner.child(b);
     }
-    if center {
+    col = col.gap(gap);
+    if phone {
+        // The sheet is as tall as its content (React's sticky sheet): the
+        // block sits at the top of the sheet and the foot under it.
+        col = col.child(inner);
+        col = col.child(div().flex().flex_col().child(foot));
+    } else if center {
         // React's `.centerBlock` has `margin-block: auto` and the foot has
         // `margin-top: auto`: the free space of the panel is split three
         // ways, so the block sits a third of the way down the panel and the
-        // foot a third of the way up from its own bottom.
+        // foot a third of the way up from its own bottom. The 20 px gap
+        // between the block and the foot is a spacer of its own, so the
+        // three shares stay equal.
         col = col.gap_0();
         col = col.child(div().flex_1());
         col = col.child(inner);
         col = col.child(div().flex_1());
-        col = col.child(div().flex_none().h(px(20.0)));
+        col = col.child(div().flex_none().h(gap));
         col = col.child(div().flex_1());
         col = col.child(foot);
     } else {
-        col = col.gap_5();
         col = col.child(inner);
-        // The foot's own margin-top: auto, as a spacer: GPUI's flex does not
-        // take an auto margin, and the foot has to sit on the panel's bottom
-        // edge (React's `.foot`).
+        // The foot's own margin-top: auto: it sits on the panel's bottom edge
+        // (React's `.foot`).
         col = col.child(
             div()
                 .flex()
@@ -1323,7 +1360,7 @@ fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body
                 .min_h_0()
                 .flex_col()
                 .justify_end()
-                .child(div().flex().flex_col().gap_2().pt(px(16.0)).child(foot)),
+                .child(foot),
         );
     }
     col.into_any_element()
@@ -1372,7 +1409,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .mt_auto()
+                .pt(px(16.0))
                 .child(foot_primary(t, "onb-gate-check", "Check again", None, false, cx, |this, cx| {
                     this.poll_status_effects(cx);
                     cx.notify();
@@ -1397,7 +1434,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .mt_auto()
+                .pt(px(16.0))
                 .child(foot_primary(t, "onb-wake", "Map my PC", Some(("ArrowRight", "bold", 16.0)), true, cx, |_, _| {}))
                 .child(
                     div().flex().justify_between().items_center().min_h(px(32.0)).child(div().into_any_element()).child(foot_row_ghost(t, "onb-wake-later", "Set up later", None, false, cx, |this, cx| {
@@ -1487,7 +1524,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .mt_auto()
+                .pt(px(16.0))
                 .child(foot_primary(t, "onb-ladder-rescan", if data.busy { "Looking…" } else { "Rescan" }, Some(("ArrowsClockwise", "", 16.0)), data.busy, cx, |this, cx| {
                     this.start_rescan(cx);
                 }))
@@ -1512,7 +1549,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .mt_auto()
+                .pt(px(16.0))
                 .child(foot_primary(t, "onb-hello-start", "Map my PC", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
                     // start(): rebuild steps and go to Case (setAt(1)).
                     if let Some(d) = this.onboarding.as_mut() {
@@ -1613,7 +1650,7 @@ fn case_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layou
         .flex()
         .flex_col()
         .gap_2()
-        .mt_auto()
+        .pt(px(16.0))
         .child(foot_primary(t, "onb-case-ok", "Looks right", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
             this.set_case_locked(true);
             if let Some(d) = this.onboarding.as_mut() { d.next_step(); }
@@ -1749,7 +1786,7 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         .flex()
         .flex_col()
         .gap_2()
-        .mt_auto()
+        .pt(px(16.0))
         .child(foot_primary(t, "onb-parts-next", "Match the lights", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
             if let Some(d) = this.onboarding.as_mut() { d.next_step(); }
             this.sync_onboarding_match_run();
@@ -1782,7 +1819,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
             .flex()
             .flex_col()
             .gap_2()
-            .mt_auto()
+            .pt(px(16.0))
             .child(foot_primary(t, "onb-match-cont", "Continue", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
                 if let Some(d) = this.onboarding.as_mut() { d.next_step(); }
                 this.sync_onboarding_match_run();
@@ -1839,7 +1876,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
             .flex()
             .flex_col()
             .gap_2()
-            .mt_auto()
+            .pt(px(16.0))
             .child(foot_primary(t, "onb-match-yes", if data.resizing { "That's all of it" } else { "Yes" }, Some(("Check", "bold", 16.0)), false, cx, |this, cx| {
                 this.advance_match(cx);
             }))
@@ -1870,7 +1907,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         .flex()
         .flex_col()
         .gap_2()
-        .mt_auto()
+        .pt(px(16.0))
         .child(foot_primary(t, "onb-match-nothing", "Nothing's lit", None, false, cx, |this, cx| {
             this.skip_match_run(cx);
         }))
@@ -1892,7 +1929,7 @@ fn finish_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Lay
     if !data.swept {
         let head = step_head(t, Some("Finish".to_string()), title_text(t, "Watch your PC.", phone), Some("A band of light crosses it."));
         let body = div().flex().items_center().gap_3().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.dim)).child(div().w_full().h(px(6.0)).rounded_full().bg(Theme::color(t.line_2))).into_any_element();
-        let foot = div().flex().flex_col().gap_2().mt_auto().child(foot_primary(t, "onb-finish-done-w", "Done", Some(("Check", "bold", 16.0)), true, cx, |_, _| {})).into_any_element();
+        let foot = div().flex().flex_col().gap_2().pt(px(16.0)).child(foot_primary(t, "onb-finish-done-w", "Done", Some(("Check", "bold", 16.0)), true, cx, |_, _| {})).into_any_element();
         return step_frame(t, phone, false, head, Some(body), foot);
     }
     let devs = devices.unwrap_or(&[]);
@@ -1948,7 +1985,7 @@ fn finish_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Lay
         .flex()
         .flex_col()
         .gap_2()
-        .mt_auto()
+        .pt(px(16.0))
         .child(foot_primary(t, "onb-finish-done", "Done", Some(("Check", "bold", 16.0)), false, cx, |this, cx| {
             this.finish_onboarding(cx);
         }))
