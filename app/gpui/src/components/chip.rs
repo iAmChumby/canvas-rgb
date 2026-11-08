@@ -143,6 +143,58 @@ pub fn chip_icon_button(
     chip_inner(t, id, label, icon, tone, pressed, marked, pending, Some(Box::new(on_click)))
 }
 
+/// The onboarding's "Add a <part>" chip (React's `PartsStep.tsx`: a `Chip`
+/// whose body is the part's icon, its name and a bold plus, in `.addChip`).
+/// The chip itself is `hardware.css`'s: a raised face, a line-2 border and
+/// the key's skirt, with the LED at the front.
+pub fn chip_add_part(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    icon: (&str, &str, f32),
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let fg = Theme::color(t.dim);
+    let icon_path = if icon.1.is_empty() {
+        format!("icons/{}.svg", icon.0)
+    } else {
+        format!("icons/{}-{}.svg", icon.0, icon.1)
+    };
+    let body = div()
+        .flex()
+        .items_center()
+        .gap(px(6.0))
+        .child(gpui::svg().path(icon_path).size(px(icon.2)).flex_none().text_color(fg))
+        .child(label.to_string())
+        .child(gpui::svg().path("icons/Plus-bold.svg").size(px(11.0)).flex_none().text_color(fg));
+    div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .relative()
+        .flex()
+        .items_center()
+        .gap(px(4.0))
+        .h(px(28.0))
+        .px(px(10.0))
+        .r_sm()
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .font_family(crate::fonts::UI_FAMILY)
+        .text_size(px(14.0))
+        .text_color(fg)
+        .flex_none()
+        .whitespace_nowrap()
+        .cursor_pointer()
+        .on_click(on_click)
+        .child(div().size(px(5.0)).rounded_full().bg(Theme::color(t.dot)))
+        .child(crate::components::button::skirt_layers(
+            t.skirt(),
+            8.0,
+            28.0,
+            Theme::color(t.raised),
+            Theme::color(t.line_2),
+        ))
+        .child(body)
+}
+
 /// A chip's click handler.
 type OnClick = Box<dyn Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static>;
 

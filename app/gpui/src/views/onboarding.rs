@@ -697,13 +697,39 @@ pub fn complete_onboarding() {
 // UI.
 // ---------------------------------------------------------------------------
 
+/// The accent of the onboarding takeover: the brand violet (#6000fc, hue
+/// 263), the colour its own hello effect runs in. React paints the root
+/// element with the running frame's dominant hue
+/// (`app/web/src/lib/preview.ts`), so the chrome answers the light the owner
+/// is being shown; the onboarding's light is the brand violet.
+pub const ONBOARDING_HUE: u16 = 263;
+
+/// The theme the takeover draws with: the app's theme on the onboarding's
+/// accent.
+fn onboard_theme(view: &LayoutView) -> Theme {
+    view.theme.with_live_hue(ONBOARDING_HUE)
+}
+
+/// The word space of the UI font at a given weight, in em (the `hmtx` advance
+/// of U+0020 in `assets/fonts/schibsted-grotesk-*.ttf`). CSS adds the
+/// letter-spacing after the space too, so a tracked line needs it.
+const UI_SPACE_EM_400: f32 = 0.25391;
+const UI_SPACE_EM_600: f32 = 0.22705;
+/// The mono font's space: a full 0.6 em (`hmtx`, U+0020 in
+/// `assets/fonts/jetbrains-mono-400.ttf`).
+const MONO_SPACE_EM: f32 = 0.6;
+
 fn kicker(t: Theme, text: &str) -> gpui::AnyElement {
-    div()
-        .text_size(px(14.0))
-        .font_family(crate::fonts::MONO_FAMILY)
-        .text_color(Theme::color(t.mute))
-        .child(text.to_string())
-        .into_any_element()
+    crate::components::panel::tracked_text_space(
+        text,
+        14.0,
+        0.01,
+        MONO_SPACE_EM,
+        gpui::FontWeight::NORMAL,
+        crate::fonts::MONO_FAMILY,
+        Theme::color(t.mute),
+        1.45,
+    )
 }
 
 fn step_head(t: Theme, kicker: Option<String>, title: gpui::AnyElement, lead: Option<&str>) -> gpui::AnyElement {
@@ -726,17 +752,22 @@ fn step_head(t: Theme, kicker: Option<String>, title: gpui::AnyElement, lead: Op
     col.into_any_element()
 }
 
+/// The step's title (React's `.title`): 28 px, weight 600, line-height 1.12
+/// and `letter-spacing: -0.02em`. The tracking is what keeps "Put in what's
+/// in your PC." on one line: without it the line is 14 px wider than the
+/// panel and wraps.
 fn title_text(t: Theme, text: &str, phone: bool) -> gpui::AnyElement {
     let size = if phone { 22.0 } else { 28.0 };
-    div()
-        .text_size(px(size))
-        .line_height(gpui::relative(1.12))
-        .font_weight(gpui::FontWeight::SEMIBOLD)
-        .font_family(crate::fonts::UI_FAMILY)
-        .text_color(Theme::color(t.ink))
-        .child(text.to_string())
-        .min_w(px(0.0))
-        .into_any_element()
+    crate::components::panel::tracked_text_space(
+        text,
+        size,
+        -0.02,
+        UI_SPACE_EM_600,
+        gpui::FontWeight::SEMIBOLD,
+        crate::fonts::UI_FAMILY,
+        Theme::color(t.ink),
+        1.12,
+    )
 }
 
 /// One LED dot of the waiting pulse (Gate/Waking): 8 px in --live.
@@ -763,15 +794,10 @@ fn hint(t: Theme, text: &str) -> gpui::AnyElement {
 fn foot_primary(t: Theme, id: &str, label: &str, icon: Option<(&str, &str, f32)>, disabled: bool, cx: &mut Context<LayoutView>, on_click: impl Fn(&mut LayoutView, &mut Context<LayoutView>) + 'static) -> gpui::AnyElement {
     let entity = cx.entity();
     let label = label.to_string();
-    let el = match icon {
-        Some((name, weight, px_size)) => button_icon(&t, id, &label, Variant::Primary, disabled, false, name, weight, px_size, move |_, _, app| {
-            entity.update(app, |this: &mut LayoutView, cx| on_click(this, cx));
-        }).into_any_element(),
-        None => button(&t, id, &label, Variant::Primary, disabled, move |_, _, app| {
-            entity.update(app, |this: &mut LayoutView, cx| on_click(this, cx));
-        }).into_any_element(),
-    };
-    div().w_full().h(px(44.0)).child(el).into_any_element()
+    let el = crate::components::button::button_cta(&t, id, &label, icon, disabled, move |_, _, app| {
+        entity.update(app, |this: &mut LayoutView, cx| on_click(this, cx));
+    });
+    div().w_full().child(el).into_any_element()
 }
 
 fn foot_row_ghost(t: Theme, id: &str, label: &str, icon: Option<(&str, &str, f32)>, disabled: bool, cx: &mut Context<LayoutView>, on_click: impl Fn(&mut LayoutView, &mut Context<LayoutView>) + 'static) -> gpui::AnyElement {
@@ -1161,12 +1187,16 @@ fn panel_for(
     panel.into_any_element()
 }
 
+/// One screen of the flow: the head, the body and the foot. React's `.step`
+/// is a column with a 20 px gap and 24 px of padding, and the foot is pinned
+/// to the bottom of the panel (`margin-top: auto`), so the primary action is
+/// in the same place on every screen.
 fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body: Option<gpui::AnyElement>, foot: gpui::AnyElement) -> gpui::AnyElement {
     let pad_v = if phone { px(20.0) } else { px(24.0) };
     let pad_h = if phone { px(16.0) } else { px(24.0) };
     let mut col = div().flex().flex_col().flex_1().min_h_0().gap_5().px(pad_h).py(pad_v);
     let inner = if center {
-        div().flex().flex_col().gap_5().my_auto().child(head).child(body.unwrap_or(div().into_any_element()))
+        div().flex().flex_col().gap_5().flex_1().min_h_0().justify_center().child(head).child(body.unwrap_or(div().into_any_element()))
     } else {
         let mut c = div().flex().flex_col().gap_5().child(head);
         if let Some(b) = body {
@@ -1174,7 +1204,19 @@ fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body
         }
         c
     };
-    col = col.child(inner).child(foot);
+    col = col.child(inner);
+    // The foot's own margin-top: auto, as a spacer: GPUI's flex does not
+    // take an auto margin, and the foot has to sit on the panel's bottom
+    // edge (React's `.foot`).
+    col = col.child(
+        div()
+            .flex()
+            .flex_1()
+            .min_h_0()
+            .flex_col()
+            .justify_end()
+            .child(div().flex().flex_col().gap_2().pt(px(16.0)).child(foot)),
+    );
     col.into_any_element()
 }
 

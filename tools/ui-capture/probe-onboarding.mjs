@@ -1,7 +1,17 @@
 // Probe React's real boxes for the onboarding takeover (#212).
-// Headless Chromium, demo backend (no __TAURI__), ?state= empty (happy Hello).
-// Dumps getBoundingClientRect + computed font-size/line-height/weight/padding/gap/border
-// for each step's elements at 1440x900 dark.
+// Headless Chromium against the fake daemon (the same state the GPUI capture
+// sees), so every number here is the number the diff is measured against.
+//
+// For each viewport x theme x step it dumps the whole onboarding subtree:
+// every element's rect, its computed font (size/weight/line-height), its box
+// (padding/gap/border/radius/background) and its own text. CSS-module class
+// names are hashed, so each class name is rewritten to its module name
+// (onboarding-module__title__x1 -> title) before it is written out.
+//
+//   node tools/ui-capture/probe-onboarding.mjs
+//   UI_CAPTURE_VIEWPORTS=1440x900,390x844 UI_CAPTURE_THEMES=dark node ...
+//
+// Writes .build/ui-capture/212-probe.json.
 import http from "node:http";
 import fs from "node:fs";
 import path from "node:path";
@@ -13,8 +23,26 @@ const { chromium } = require("playwright");
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(__dirname, "../..");
-const CAPTURE_PORT = 4312;
+// The fake daemon only allows CORS from the capture origin
+// (`http://127.0.0.1:4310`, crates/canvas-daemon/src/fakes.rs), so the probe
+// serves on the same port as capture-react.mjs.
+const CAPTURE_PORT = 4310;
 const WEB_OUT = path.resolve(root, "app/web/out");
+const DAEMON_BASE = (process.env.UI_CAPTURE_API_BASE ?? "http://127.0.0.1:19430").replace(/\/$/, "");
+const TOKEN_FILE = process.env.UI_CAPTURE_TOKEN_FILE ?? path.resolve(root, ".build/fake-home/api-token");
+const VIEWPORTS = (process.env.UI_CAPTURE_VIEWPORTS ?? "1440x900,390x844")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean)
+  .map((s) => {
+    const [w, h] = s.split("x");
+    return { w: Number(w), h: Number(h) };
+  });
+const THEMES = (process.env.UI_CAPTURE_THEMES ?? "dark")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+const STEPS = ["hello", "case", "parts", "match", "finish"];
 
 const MIME = { ".html": "text/html; charset=utf-8", ".js": "text/javascript", ".mjs": "text/javascript", ".css": "text/css", ".json": "application/json", ".png": "image/png", ".svg": "image/svg+xml", ".woff2": "font/woff2" };
 
@@ -42,98 +70,172 @@ function serveStatic(port, dir) {
   });
 }
 
-async function probe(browser, base, step, out) {
-  const context = await browser.newContext({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
+// The __TAURI__ stand-in: shaped exactly like app/web/src/lib/host.ts. The
+// same one capture-react.mjs injects, so the probe sees the same daemon the
+// GPUI capture sees.
+function tauriInit({ daemonBase, token, theme }) {
+  window.__uiCaptureTheme = theme;
+  try { localStorage.setItem("canvas-rgb.theme", theme); } catch {}
+  const updateState = {
+    current_version: "0.1.0",
+    auto_check: true,
+    last_check: null,
+    phase: { kind: "up_to_date" },
+    available: null,
+    skipped_version: null,
+    snoozed: false,
+    updated_to: null,
+  };
+  const invoke = async (cmd) => {
+    switch (cmd) {
+      case "get_api_config": return { base_url: daemonBase, token };
+      case "update_state": return { ...updateState };
+      case "update_check_now": return { ...updateState };
+      case "tray_prefs": return { editor: "react", channel: "stable" };
+      default: return undefined;
+    }
+  };
+  const listen = async () => () => {};
+  window.__TAURI__ = { core: { invoke }, event: { listen } };
+}
+
+// A CSS-module class name is `onboarding-module__title__1a2b3`; keep the
+// module name and drop the hash.
+function friendlyClass(cls) {
+  if (!cls) return "";
+  return cls
+    .split(/\s+/)
+    .map((c) => {
+      const m = /^onboarding-module__([A-Za-z0-9_]+)__[A-Za-z0-9]+$/.exec(c);
+      if (m) return `onb:${m[1]}`;
+      return c;
+    })
+    .join(" ");
+}
+
+async function probe(browser, base, viewport, theme, step, token) {
+  const context = await browser.newContext({ viewport: { width: viewport.w, height: viewport.h }, deviceScaleFactor: 1 });
   const page = await context.newPage();
-  // Demo mode: no __TAURI__.
-  await page.goto(`${base}/`, { waitUntil: "load", timeout: 30000 });
-  try { await page.waitForFunction(() => document.querySelector('[data-live="on"]') !== null, { timeout: 8000 }); } catch {}
-  // Advance by clicking the primary button by its label (CSS-module classes are hashed).
+  page.setDefaultTimeout(15000);
+  if (process.env.UI_CAPTURE_DEBUG) {
+    page.on("console", (m) => console.log(`  console ${m.type()}: ${m.text().slice(0, 300)}`));
+    page.on("pageerror", (e) => console.log(`  pageerror: ${String(e).slice(0, 300)}`));
+    page.on("requestfailed", (r) => console.log(`  requestfailed: ${r.url().slice(0, 140)} ${r.failure()?.errorText ?? ""}`));
+  }
+  await page.addInitScript(tauriInit, { daemonBase: DAEMON_BASE, token, theme });
+  await page.goto(`${base}/`, { waitUntil: "load", timeout: 30000 }).catch(() => {});
+  try { await page.waitForFunction(() => document.querySelector('[data-live="on"]') !== null, { timeout: 12000 }); } catch {}
   const clickPrimary = async () => {
     const labels = ["Map my PC", "Looks right", "Match the lights", "Nothing's lit", "Continue", "Done", "Yes", "That's all of it"];
-    for (const b of await page.$$("button")) {
+    const buttons = await page.$$("button");
+    for (const b of buttons) {
       const text = (await b.textContent())?.trim() ?? "";
-      if (labels.some((l) => text === l)) {
-        await b.click();
-        await page.waitForTimeout(500);
-        return true;
+      if (!labels.some((l) => text === l)) continue;
+      try {
+        await b.click({ timeout: 4000, force: true });
+      } catch {
+        // A panel that re-renders under the pointer is still the right key:
+        // click it by dispatching the event instead.
+        await b.evaluate((el) => el.click()).catch(() => {});
       }
+      await page.waitForTimeout(700);
+      return true;
     }
     return false;
   };
   const currentStep = async () => await page.evaluate(() => document.querySelector('[data-step]')?.getAttribute('data-step') ?? null);
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 14; i++) {
     if ((await currentStep()) === step) break;
     if (!(await clickPrimary())) break;
   }
-  await page.waitForTimeout(600);
+  await page.waitForTimeout(900);
   const data = await page.evaluate(() => {
-    const pick = (sel) => {
+    const out = { step: document.querySelector('[data-step]')?.getAttribute('data-step') ?? null, windowW: window.innerWidth, windowH: window.innerHeight, nodes: [] };
+    const root = document.querySelector('[data-step]');
+    if (!root) return out;
+    const walk = (el, depth) => {
+      const r = el.getBoundingClientRect();
+      const cs = getComputedStyle(el);
+      const own = Array.from(el.childNodes)
+        .filter((n) => n.nodeType === Node.TEXT_NODE)
+        .map((n) => n.textContent)
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      const kids = Array.from(el.children).filter((c) => {
+        const cr = c.getBoundingClientRect();
+        const ccs = getComputedStyle(c);
+        return ccs.display !== "none" && !(cr.width === 0 && cr.height === 0);
+      });
+      out.nodes.push({
+        depth,
+        tag: el.tagName.toLowerCase(),
+        cls: Array.from(el.classList).join(" "),
+        text: own.slice(0, 120),
+        rect: { x: Math.round(r.x * 100) / 100, y: Math.round(r.y * 100) / 100, w: Math.round(r.width * 100) / 100, h: Math.round(r.height * 100) / 100 },
+        font: { size: cs.fontSize, weight: cs.fontWeight, lineHeight: cs.lineHeight, family: cs.fontFamily.split(",")[0], letterSpacing: cs.letterSpacing },
+        color: cs.color,
+        bg: cs.backgroundColor,
+        border: `${cs.borderTopWidth} ${cs.borderRightWidth} ${cs.borderBottomWidth} ${cs.borderLeftWidth}`,
+        borderColor: cs.borderTopColor,
+        radius: cs.borderRadius,
+        padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
+        margin: `${cs.marginTop} ${cs.marginRight} ${cs.marginBottom} ${cs.marginLeft}`,
+        gap: cs.gap,
+        display: cs.display,
+        flexDirection: cs.flexDirection,
+        alignItems: cs.alignItems,
+        justifyContent: cs.justifyContent,
+        overflow: `${cs.overflowX}/${cs.overflowY}`,
+        maxHeight: cs.maxHeight,
+        minHeight: cs.minHeight,
+        position: cs.position,
+      });
+      for (const c of kids) walk(c, depth + 1);
+    };
+    walk(root, 0);
+    // A few named anchors that are handy to grep for.
+    const named = (sel) => {
       const el = document.querySelector(sel);
       if (!el) return null;
       const r = el.getBoundingClientRect();
-      const cs = getComputedStyle(el);
-      return {
-        rect: { x: r.x, y: r.y, w: r.width, h: r.height },
-        fontSize: cs.fontSize, lineHeight: cs.lineHeight, fontWeight: cs.fontWeight,
-        paddingTop: cs.paddingTop, paddingRight: cs.paddingRight, paddingBottom: cs.paddingBottom, paddingLeft: cs.paddingLeft,
-        gap: cs.gap, borderTopWidth: cs.borderTopWidth, borderLeftWidth: cs.borderLeftWidth,
-        borderTopColor: cs.borderTopColor, backgroundColor: cs.backgroundColor, color: cs.color,
-      };
+      return { x: r.x, y: r.y, w: r.width, h: r.height };
     };
-    // CSS-module classes are hashed; find the onboarding root by its data-step.
-    const root = document.querySelector('[data-step]');
-    const bar = root ? root.querySelector('header') : document.querySelector('header');
-    const panel = root ? root.querySelector('section') : null;
-    const title = panel ? panel.querySelector('h2') : document.querySelector('h2');
-    const lead = document.querySelector('[data-step] section p');
-    const kicker = panel ? panel.querySelector('div') : null;
-    const cta = root ? root.querySelector('button[class*="cta"]') ?? root.querySelector('button.btn-primary') : null;
-    const main = root ? root.querySelector('[class*="main"]') : null;
-    const greeting = document.querySelector('h1');
-    const count = root ? root.querySelector('[aria-live="polite"]') : null;
-    const dots = document.querySelector('[role="progressbar"]');
-    const truth = document.querySelector('[role="status"]');
-    const size = panel ? panel.querySelector('[aria-live="polite"]') : null;
-    const tiles = panel ? panel.querySelectorAll('button[aria-pressed]') : [];
-    const out = {};
-    const grab = (key, el) => {
-      if (!el) { out[key] = null; return; }
-      const r = el.getBoundingClientRect();
-      const cs = getComputedStyle(el);
-      out[key] = {
-        rect: { x: r.x, y: r.y, w: r.width, h: r.height },
-        fontSize: cs.fontSize, lineHeight: cs.lineHeight, fontWeight: cs.fontWeight,
-        padding: `${cs.paddingTop} ${cs.paddingRight} ${cs.paddingBottom} ${cs.paddingLeft}`,
-        gap: cs.gap, border: `${cs.borderTopWidth} / ${cs.borderLeftWidth}`,
-        color: cs.color, bg: cs.backgroundColor,
-      };
+    out.anchors = {
+      header: named('[data-step] header'),
+      panel: named('[data-step] section'),
+      stage: named('[data-step] [class*="stage"]'),
+      progress: named('[data-step] [role="progressbar"]'),
+      title: named('[data-step] section h2'),
+      cta: named('[data-step] section button'),
     };
-    grab("bar", bar); grab("panel", panel); grab("main", main); grab("title", title);
-    grab("lead", lead); grab("kicker", kicker); grab("cta", cta ?? document.querySelector('button.btn-primary'));
-    grab("greeting", greeting);
-    grab("count", count); grab("dots", dots); grab("truth", truth); grab("size", size);
-    out.tiles = tiles.length;
-    out.step = document.querySelector('[data-step]')?.getAttribute('data-step') ?? null;
-    out.windowW = window.innerWidth; out.windowH = window.innerHeight;
-    out.panelRect = panel ? (() => { const r = panel.getBoundingClientRect(); return { x: r.x, y: r.y, w: r.width, h: r.height }; })() : null;
+    // The live hue the chrome is on now: React writes it on the root element
+    // from the running frame's dominant hue (app/web/src/lib/preview.ts).
+    out.liveH = getComputedStyle(document.documentElement).getPropertyValue('--live-h').trim();
+    out.live = getComputedStyle(document.documentElement).getPropertyValue('--live').trim();
     return out;
   });
-  out[step] = data;
   await context.close();
+  return data;
 }
 
 async function main() {
   if (!fs.existsSync(WEB_OUT)) throw new Error(`web export not found at ${WEB_OUT}; run npm --prefix app/web run build first`);
+  const token = fs.existsSync(TOKEN_FILE) ? fs.readFileSync(TOKEN_FILE, "utf8").trim() : "";
   const server = await serveStatic(CAPTURE_PORT, WEB_OUT);
   const base = `http://127.0.0.1:${CAPTURE_PORT}`;
-  console.log(`probe: serving ${WEB_OUT} on ${base}`);
+  console.log(`probe: serving ${WEB_OUT} on ${base} (daemon ${DAEMON_BASE})`);
   const browser = await chromium.launch({ headless: true });
   const out = {};
   try {
-    for (const step of ["hello", "case", "parts", "match", "finish"]) {
-      await probe(browser, base, step, out);
-      console.log(`probe: ${step} done`);
+    for (const theme of THEMES) {
+      for (const viewport of VIEWPORTS) {
+        for (const step of STEPS) {
+          const key = `${step}-${viewport.w}x${viewport.h}-${theme}`;
+          out[key] = await probe(browser, base, viewport, theme, step, token);
+          console.log(`probe: ${key} (step=${out[key].step}, nodes=${out[key].nodes.length})`);
+        }
+      }
     }
   } finally {
     await browser.close();

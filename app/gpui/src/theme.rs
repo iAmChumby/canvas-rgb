@@ -93,6 +93,11 @@ pub struct Theme {
     pub spectrum: &'static str,
     pub pop: &'static str,
     pub live_h: &'static str,
+    /// The hue `--live` is computed from at runtime. The CSS writes it on the
+    /// root element from the running frame's dominant hue
+    /// (`app/web/src/lib/preview.ts`), so the accent follows the light. It is
+    /// 215 (blue) until something paints it.
+    pub live_hue: u16,
     pub live: &'static str,
     pub live_soft: &'static str,
     pub field_white: &'static str,
@@ -180,6 +185,7 @@ impl Theme {
             spectrum: "linear-gradient(90deg, var(--rgb-1), var(--rgb-2), var(--rgb-3), var(--rgb-4), var(--rgb-5), var(--rgb-6))",
             pop: "0 12px 32px rgba(0, 0, 0, 0.5)",
             live_h: "215",
+            live_hue: 215,
             live: "hsl(var(--live-h) 78% 72%)",
             live_soft: "hsl(var(--live-h) 55% 55% / 0.16)",
             field_white: "rgb(255 255 255)",
@@ -275,12 +281,26 @@ impl Theme {
 
     /// `--live`: the running accent (an hsl the CSS computes from `--live-h`).
     pub fn live(&self) -> Rgba {
-        parse_color(self.live)
+        let (s, l) = if self.is_dark() { (0.78, 0.72) } else { (0.70, 0.42) };
+        let (r, g, b) = hsl_to_rgb(self.live_hue as f32, s, l);
+        Rgba { r, g, b, a: 1.0 }
     }
 
     /// `--live-soft`: the accent at low alpha, for the active rail row.
     pub fn live_soft(&self) -> Rgba {
-        parse_color(self.live_soft)
+        let (s, l, a) = if self.is_dark() { (0.55, 0.55, 0.16) } else { (0.60, 0.50, 0.14) };
+        let (r, g, b) = hsl_to_rgb(self.live_hue as f32, s, l);
+        Rgba { r, g, b, a }
+    }
+
+    /// The same theme with the accent on another hue: the onboarding takeover
+    /// paints the root with the brand violet (#6000fc, hue 263), the colour
+    /// its own hello effect runs in, so the chrome answers the light the
+    /// owner is being shown.
+    pub fn with_live_hue(&self, hue: u16) -> Theme {
+        let mut t = *self;
+        t.live_hue = hue;
+        t
     }
 
     /// The hardware skirt (`hardware.css` `--skirt`): the 2 px band a key's

@@ -226,6 +226,57 @@ pub fn button_icon(
     }
 }
 
+/// The primary action of a step (React's `.foot .cta`): 44 px tall, 16 px
+/// words, the full width of the foot, on the live accent with its skirt.
+#[allow(clippy::too_many_arguments)]
+pub fn button_cta(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    icon: Option<(&str, &str, f32)>,
+    disabled: bool,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
+    let (bg, fg, border) = colors(t, Variant::Primary, disabled);
+    let skirt_color = t.live_skirt();
+    let el = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .relative()
+        .flex()
+        .items_center()
+        .justify_center()
+        .gap(px(6.0))
+        .h(px(44.0))
+        .text_color(fg)
+        .text_size(px(16.0))
+        .font_weight(gpui::FontWeight::MEDIUM)
+        .font_family(crate::fonts::UI_FAMILY);
+    // The face carries the border, so the key keeps the 1 px React's `.btn`
+    // has inside its box.
+    let el = if disabled {
+        el.r_md().border_1().border_color(border).bg(bg)
+    } else {
+        el.child(skirt_layers(skirt_color, 10.0, 44.0, bg, border))
+    };
+    let el = match icon {
+        Some((name, weight, px_size)) => {
+            let path = if weight.is_empty() {
+                format!("icons/{name}.svg")
+            } else {
+                format!("icons/{name}-{weight}.svg")
+            };
+            el.child(gpui::svg().path(path).size(px(px_size)).flex_none().text_color(fg))
+                .child(label.to_string())
+        }
+        None => el.child(label.to_string()),
+    };
+    if disabled {
+        el
+    } else {
+        el.cursor_pointer().on_click(on_click)
+    }
+}
+
 /// A button with an icon and a label whose cell reserves `text_w` px for
 /// the text: React's `Swap` lays every label variant in one grid cell, so
 /// the key keeps the widest label's width and the visible label is centred

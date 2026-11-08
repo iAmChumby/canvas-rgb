@@ -142,6 +142,50 @@ fn tracked_text_lh(
     row.into_any_element()
 }
 
+/// A tracked text whose word space is the font's own space, not the mono one
+/// [`tracked_text`] assumes. CSS `letter-spacing` tightens every glyph and
+/// the space with it; the UI font's space is a quarter of an em, so a mono
+/// space would put the words back where they were and the line would wrap
+/// where React's does not.
+pub fn tracked_text_space(
+    text: &str,
+    font_size: f32,
+    tracking_em: f32,
+    space_em: f32,
+    weight: FontWeight,
+    family: &'static str,
+    color: Rgba,
+    line_height: f32,
+) -> gpui::AnyElement {
+    let tracking = px(font_size * tracking_em);
+    // CSS adds the tracking after every glyph, the space included; the word
+    // cells below carry one step less each (between the glyphs), so the space
+    // carries the step the last glyph of the word does not.
+    let space_w = px(font_size * (space_em + tracking_em));
+    let mut row = div()
+        .flex()
+        .flex_wrap()
+        .items_center()
+        .text_size(px(font_size))
+        .line_height(gpui::relative(line_height))
+        .font_weight(weight)
+        .font_family(family)
+        .text_color(color);
+    let words: Vec<&str> = text.split_whitespace().collect();
+    let n = words.len();
+    for (wi, word) in words.iter().enumerate() {
+        let mut cell = div().flex().items_center().gap(tracking).whitespace_nowrap();
+        for ch in word.chars() {
+            cell = cell.child(ch.to_string());
+        }
+        row = row.child(cell);
+        if wi + 1 < n {
+            row = row.child(div().w(space_w).h(px(1.0)).flex_none());
+        }
+    }
+    row.into_any_element()
+}
+
 /// A panel with a title. `actions` render beside the title, on the right.
 ///
 /// The panel is returned as a styled div, so a caller that needs it to fill
