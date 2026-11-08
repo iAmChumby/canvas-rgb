@@ -1,4 +1,4 @@
-﻿//! `SettingsView`, after `app/web/src/views/SettingsView.tsx` (+
+//! `SettingsView`, after `app/web/src/views/SettingsView.tsx` (+
 //! `UpdatesPanel.tsx`, `AudioSourcePanel.tsx`).
 //!
 //! The port keeps the React view's rules (the checklist is
@@ -41,9 +41,9 @@ use gpui::{Context, IntoElement, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
 use crate::components::button::{Variant, button, button_icon, button_sm};
-use crate::components::panel::{field_hint, field_stack_hint, state_dot, tracked_title};
+use crate::components::panel::{field_hint, field_stack_hint, state_dot, tracked_title_nowrap};
 use crate::components::segmented::segmented;
-use crate::components::select::select_grouped;
+use crate::components::select::select_grouped_trunc;
 use crate::components::slider::{Origin, slider_range};
 use crate::components::toggle::{toggle, toggle_disabled};
 use crate::theme::{Theme, TokenRadius};
@@ -59,7 +59,7 @@ pub fn audio_status_words(state: Option<&AudioTestState>) -> String {
     let name = state.source.name.as_deref().unwrap_or("the default output");
     match state.status {
         AudioTestStatus::Off => "Live while this panel is open".to_string(),
-        AudioTestStatus::Waiting => "Waiting for the deviceâ€¦".to_string(),
+        AudioTestStatus::Waiting => "Waiting for the device…".to_string(),
         AudioTestStatus::NotListening => "Press Listen to test this input".to_string(),
         AudioTestStatus::NoDevice => "No output device".to_string(),
         AudioTestStatus::Missing => format!("Saved device not connected: using {name}"),
@@ -143,7 +143,7 @@ pub fn settings_status(
     skipped_version: Option<&str>,
 ) -> (String, String) {
     match phase {
-        "checking" => ("work".into(), "Checking for updatesâ€¦".into()),
+        "checking" => ("work".into(), "Checking for updates…".into()),
         "downloading" => ("work".into(), format!("Downloading {}", available.unwrap_or(""))),
         "verifying" => ("work".into(), "Checking the download".into()),
         "waiting_for_uac" => ("work".into(), "Waiting for Windows".into()),
@@ -177,7 +177,7 @@ pub fn settings_status(
 pub fn fmt1(n: Option<f32>) -> String {
     match n {
         Some(v) if v.is_finite() => format!("{v:.1}"),
-        _ => "â€”".to_string(),
+        _ => "—".to_string(),
     }
 }
 
@@ -211,7 +211,7 @@ pub fn today_utc() -> (u32, u32, u32) {
 
 /// `fmtChecked` (`updateWords.ts:27-34`): "Never", "HH:MM" today, or
 /// "Mon D, HH:MM" another day. `today_day` is today's UTC day count (UTC
-/// civil; the browser formats in local time â€” GPUI has no local offset).
+/// civil; the browser formats in local time — GPUI has no local offset).
 #[allow(dead_code)]
 pub fn fmt_checked(iso: Option<&str>, today_day: i64) -> String {
     let Some(iso) = iso else { return "Never".to_string() };
@@ -380,8 +380,8 @@ pub struct TrayAbsence;
 #[allow(dead_code)]
 impl TrayAbsence {
     pub const CHECKS_AUTOMATICALLY: bool = true;
-    pub const LAST_CHECKED: &str = "â€”";
-    pub const STATUS: &str = "â€”";
+    pub const LAST_CHECKED: &str = "—";
+    pub const STATUS: &str = "—";
 }
 
 /// `canUpdate()` (`host.ts:95-97`): the tray is attached (stdin is a pipe).
@@ -454,7 +454,7 @@ pub fn last_checked_word(acts: bool, u: Option<&UpdateState>, today_day: i64) ->
             return fmt_checked(u.last_check.as_deref(), today_day);
         }
     }
-    "â€”".to_string()
+    "—".to_string()
 }
 
 /// The `kind` string and check-failure reason the Rails status words take.
@@ -1425,7 +1425,7 @@ impl SettingsView {
                     .justify_between()
                     .gap_2()
                     .mb(px(head_mb))
-                    .child(div().mt(px(title_off)).child(tracked_title(
+                    .child(div().flex_none().mt(px(title_off)).child(tracked_title_nowrap(
                         &title.to_uppercase(),
                         13.0,
                         0.08,
@@ -1451,7 +1451,7 @@ impl SettingsView {
     /// The number well (`.num` + `.unit`): 72 px, mono right-aligned,
     /// the unit beside it. GPUI has no text input, so the well is a
     /// display; the slider drag is the way to change the value (React's
-    /// field is typed into â€” the checklist's NumberField keyboard items
+    /// field is typed into — the checklist's NumberField keyboard items
     /// stay unticked, as they do for Displays).
     fn number_well(
         &self,
@@ -1555,7 +1555,7 @@ impl SettingsView {
         let well = self.number_well(&format!("{id}-num"), num_value, num_min, num_max, unit, cx);
         let slider = match slot_w {
             // Wrapped fields (phone and narrow columns): the slot takes
-            // its React width (inner minus the number row) directly â€”
+            // its React width (inner minus the number row) directly —
             // GPUI's flex mis-measures this nested row at 390.
             Some(w) => div().flex_none().w(px(w)).child(slider).into_any_element(),
             None => slider.into_any_element(),
@@ -2164,6 +2164,7 @@ impl SettingsView {
         &self,
         id: &str,
         full_width: bool,
+        truncate: bool,
         cx: &mut Context<Self>,
     ) -> impl IntoElement {
         let groups_owned = self.audio_groups();
@@ -2186,7 +2187,7 @@ impl SettingsView {
         let value = self.audio_value();
         let open = self.audio_select_open;
         let disabled = self.audio_sources.is_none();
-        select_grouped(
+        select_grouped_trunc(
             &self.theme,
             id,
             &refs,
@@ -2194,6 +2195,9 @@ impl SettingsView {
             open,
             disabled,
             full_width,
+            // The compact head fixes the trigger's width; the inline field
+            // shrink-wraps the widest label.
+            truncate,
             move |_, cx| {
                 toggle_entity.update(cx, |this, cx| {
                     this.audio_select_open = !this.audio_select_open;
@@ -2236,7 +2240,7 @@ impl SettingsView {
             .text_color(Theme::color(t.ink))
             .child(match peak_db {
                 Some(v) if v.is_finite() => format!("{v:.1}"),
-                _ => "â€”".to_string(),
+                _ => "—".to_string(),
             });
         let mut band_row = div()
             .flex()
@@ -2287,7 +2291,7 @@ impl SettingsView {
             // the select takes the rest, clamped [160, 300]: a content-sized
             // flex_1 let the select overlap the title at 390.
             let select_w = (inner_w - 2.0 - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0);
-            let select = self.audio_select("settings-audio-select", true, cx);
+            let select = self.audio_select("settings-audio-select", true, true, cx);
             let head_actions = div()
                 .flex_none()
                 .w(px(select_w))
@@ -2371,7 +2375,7 @@ impl SettingsView {
                         .child(pop),
                 );
             }
-            // Compact: padding-block s2 (8), others s4 (16) â€” the panel
+            // Compact: padding-block s2 (8), others s4 (16) — the panel
             // builder takes one pad; override the vertical after.
             let panel = div()
                 .id(gpui::SharedString::from("settings-audio"))
@@ -2409,7 +2413,7 @@ impl SettingsView {
                 .child(body);
             panel.into_any_element()
         } else {
-            let select = self.audio_select("settings-audio-select", true, cx);
+            let select = self.audio_select("settings-audio-select", true, false, cx);
             let listen_entity = view_entity.clone();
             let picker_row = {
                 let mut r = div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(select);
@@ -2526,7 +2530,7 @@ impl SettingsView {
 
     fn version_panel(&self, pad: f32, _phone: bool, under_wrapped_hint: bool, cx: &mut Context<Self>) -> impl IntoElement {
         let t = &self.theme;
-        let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| "â€”".to_string());
+        let version = self.status.as_ref().map(|s| s.version.clone()).unwrap_or_else(|| "—".to_string());
         // React `.fig` inherits the body 15 px (`--t15`): "0.9.0" is 46 px
         // wide there, 41 at GPUI's old 14 px.
         let version_fig = div()
@@ -2672,7 +2676,7 @@ impl SettingsView {
                     acts_row = acts_row.child(button_sm(
                         t,
                         "settings-update-whatsnew",
-                        "Whatâ€™s new",
+                        "What’s new",
                         Variant::Ghost,
                         false,
                         move |_, _, cx| {
@@ -3021,7 +3025,7 @@ impl Render for SettingsView {
 /// a wrapped slider field 98/78 (the label stacks over the control once
 /// the panel inner width drops below label 140 + control min 240 + gap
 /// 16), each panel carrying its 16 px bottom margin except the last.
-/// (At 1440: [R,A],[L,Audio],[Setup,Version] â€” the React flow.)
+/// (At 1440: [R,A],[L,Audio],[Setup,Version] — the React flow.)
 fn estimated_heights(compact: bool, phone: bool, audio_err: bool, content_w: f32, cols: usize) -> Vec<f32> {
     let head = 30.0;
     let pad = 32.0;
@@ -3132,7 +3136,7 @@ mod tests {
             silent_packets: 0,
         };
         assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Off, None, None))), "Live while this panel is open");
-        assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Waiting, None, None))), "Waiting for the deviceâ€¦");
+        assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Waiting, None, None))), "Waiting for the device…");
         assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::NoDevice, None, None))), "No output device");
         assert_eq!(audio_status_words(Some(&mk(AudioTestStatus::Live, None, None))), "Live");
         assert_eq!(
@@ -3185,7 +3189,7 @@ mod tests {
     fn settings_status_words_match_update_words() {
         assert_eq!(
             settings_status("checking", None, None, None),
-            ("work".into(), "Checking for updatesâ€¦".into())
+            ("work".into(), "Checking for updates…".into())
         );
         assert_eq!(
             settings_status("downloading", None, None, None),
@@ -3251,8 +3255,8 @@ mod tests {
     #[test]
     fn fmt1_reads_the_hint_words() {
         assert_eq!(fmt1(Some(59.6)), "59.6");
-        assert_eq!(fmt1(None), "â€”");
-        assert_eq!(fmt1(Some(f32::NAN)), "â€”");
+        assert_eq!(fmt1(None), "—");
+        assert_eq!(fmt1(Some(f32::NAN)), "—");
     }
 
     #[test]
@@ -3307,8 +3311,8 @@ mod tests {
         assert!(auto_disabled(false, None));
         assert!(auto_disabled(true, None));
         // Last checked: dash without the tray or the state, the words with both.
-        assert_eq!(last_checked_word(false, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "â€”");
-        assert_eq!(last_checked_word(true, None, today), "â€”");
+        assert_eq!(last_checked_word(false, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "—");
+        assert_eq!(last_checked_word(true, None, today), "—");
         assert_eq!(last_checked_word(true, Some(&mk_state("0.1.0", UpdatePhase::UpToDate, None, None)), today), "09:14");
         // Check now disables while checking or installing.
         assert!(check_now_disabled(true, Some(&mk_state("0.1.0", UpdatePhase::Checking, None, None))));
@@ -3316,7 +3320,7 @@ mod tests {
         // Status: the three tones and the offline words ride the spine phase.
         assert_eq!(
             tray_status(Some(&mk_state("0.1.0", UpdatePhase::Checking, None, None))),
-            Some(("work".to_string(), "Checking for updatesâ€¦".to_string()))
+            Some(("work".to_string(), "Checking for updates…".to_string()))
         );
         assert_eq!(
             tray_status(Some(&mk_state(

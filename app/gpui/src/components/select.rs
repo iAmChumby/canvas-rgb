@@ -188,6 +188,26 @@ pub fn select_grouped(
     on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + Clone + 'static,
     on_pick: impl Fn(String, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
 ) -> impl IntoElement {
+    select_grouped_trunc(t, id, groups, value, open, disabled, full_width, false, on_toggle, on_pick)
+}
+
+/// [`select_grouped`] whose trigger can truncate its value with an ellipsis
+/// (`truncate`, with `full_width`): React's `.select-value` + `.one-line` in a
+/// trigger whose width the parent sets (the Audio panel's compact head). A
+/// shrink-wrapped trigger keeps the widest label's width.
+#[allow(clippy::too_many_arguments)]
+pub fn select_grouped_trunc(
+    t: &Theme,
+    id: &str,
+    groups: &[(&str, &[(&str, &str)])],
+    value: &str,
+    open: bool,
+    disabled: bool,
+    full_width: bool,
+    truncate: bool,
+    on_toggle: impl Fn(&mut gpui::Window, &mut gpui::App) + Clone + 'static,
+    on_pick: impl Fn(String, &mut gpui::Window, &mut gpui::App) + Clone + 'static,
+) -> impl IntoElement {
     let flat: Vec<(&str, &str)> = groups.iter().flat_map(|(_, opts)| opts.iter().copied()).collect();
     let mut value_grid = div().grid().flex_1().min_w(px(0.0)).text_left();
     for (v, l) in &flat {
@@ -203,10 +223,10 @@ pub fn select_grouped(
     // React `.select-value` + `.one-line`: in a trigger of known width a value
     // wider than the room truncates with an ellipsis. The stacked grid above
     // only exists to give a shrink-wrapped trigger the widest label's width, so
-    // a full-width trigger shows just the picked label. No `whitespace_nowrap`:
+    // a trigger of known width shows just the picked label. No `whitespace_nowrap`:
     // gpui only measures a truncation width for wrapping text and caches the
     // first (untruncated) measure of a nowrap one.
-    let value_el = if full_width {
+    let value_el = if full_width && truncate {
         let picked = flat.iter().find(|(v, _)| *v == value).map(|(_, l)| l.to_string()).unwrap_or_default();
         div()
             .flex_1()
