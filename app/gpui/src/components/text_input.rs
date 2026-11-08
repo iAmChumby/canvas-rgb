@@ -126,6 +126,10 @@ pub struct TextInput {
     /// The search box wears React's small radius (`.effect-search input`
     /// `r-sm`); a number field wears the input's `r-md`.
     radius_sm: bool,
+    /// The effects search's border is `--line-2` (motion.css
+    /// `.effect-search input`); a number or name field's is `--line`
+    /// (hardware.css's wells rule for `.num`/`.text-in`).
+    border_2: bool,
     /// The field's left inset: 8 px everywhere except the effects search,
     /// whose icon sits inside it (React's `padding-left: 30px`).
     left_pad: f32,
@@ -176,6 +180,7 @@ impl TextInput {
             line_height: None,
             v_pad: 0.0,
             radius_sm: false,
+            border_2: false,
             left_pad: 8.0,
             placeholder: None,
             placeholder_color: None,
@@ -189,6 +194,12 @@ impl TextInput {
         self.ui_left = true;
         self.radius_sm = true;
         self.placeholder = placeholder.map(SharedString::from);
+        cx.notify();
+    }
+
+    /// The effects-search border (`--line-2`).
+    pub fn set_border_2(&mut self, cx: &mut Context<Self>) {
+        self.border_2 = true;
         cx.notify();
     }
 
@@ -787,7 +798,7 @@ impl Render for TextInput {
         } else {
             field
                 .border_1()
-                .border_color(Theme::color(t.line))
+                .border_color(if self.border_2 { Theme::color(t.line_2) } else { Theme::color(t.line) })
                 .bg(Theme::color(t.sunk))
         };
         if disabled {

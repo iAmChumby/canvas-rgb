@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - The GPUI editor's phone header now matches the React editor: no easel beside the page title on pages that bring their own actions, the running-effect name truncates to the row's room so the green check clears it, and the Import key is the full-height key. Segmented controls have their lit dot's halo back, and tracked captions keep the font's kerning. (#244, #240)
+- The Effects library matches React's measured boxes: chips wear the raised face with a skirt (no more grid dots showing through them as fake glyphs in the filter dots), the card star sits on the panel face, the search field uses the line-2 border, and short windows (≤795 px tall) tighten the inspector's panels and rows like React's density rule. (#210)
 
 ### Added
 
