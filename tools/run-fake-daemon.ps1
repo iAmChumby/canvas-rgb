@@ -108,6 +108,16 @@ power = "running"
 Set-Content -Path $configPath -Value $config -Encoding UTF8
 Write-Host "run-fake-daemon: test home: $homeDir"
 
+# The two fake peripherals (#208) start with reads on and writes off, so the
+# Peripherals view in both editors shows their values with the controls
+# disabled, the same daemon state for every capture. Overwritten on every
+# start: a capture must never inherit an access change from an earlier run.
+$peripheralsPath = Join-Path $homeDir 'peripherals.json'
+$peripheralsSeed = @'
+{"schema_version":1,"peripherals":{"attack-shark-x6:1d57:fa60":{"reads":true,"writes":false},"eightbitdo-ultimate-2:2dc8":{"reads":true,"writes":false}}}
+'@
+[System.IO.File]::WriteAllText($peripheralsPath, $peripheralsSeed + "`n", (New-Object System.Text.UTF8Encoding $false))
+
 # --- build (debug only; fakes mode does not exist in release) ---------------
 $daemonExe = Join-Path $root 'target\debug\canvas-rgbd.exe'
 $fakeExe = Join-Path $root 'target\debug\examples\fake_openrgb.exe'

@@ -174,7 +174,8 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     // The peripherals: the mouse and the controller. They are enumerated, never opened, until
     // the owner says so in `peripherals.json` (see `canvas_daemon::peripherals`). Fakes mode
-    // has no peripherals at all.
+    // has two in-memory fakes, so the Peripherals view has a mouse and a controller to show
+    // (#208).
     let peripherals: Vec<Box<dyn canvas_daemon::peripherals::Peripheral>> =
         if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
             vec![
@@ -182,7 +183,10 @@ async fn daemon_main(fakes: bool) -> Exit {
                 Box::new(canvas_adapters::eightbitdo_ultimate2::EightBitDoUltimate2::new()),
             ]
         } else {
-            Vec::new()
+            vec![
+                Box::new(canvas_daemon::fakes::fake_mouse()),
+                Box::new(canvas_daemon::fakes::fake_controller()),
+            ]
         };
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
@@ -241,10 +245,8 @@ async fn daemon_main(fakes: bool) -> Exit {
     app.set_input_source(Some(app.capture_source()));
 
     // The peripherals the owner allowed are opened; the others stay closed.
-    // Fakes mode has no peripherals, so nothing is opened.
-    if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
-        canvas_daemon::peripherals::apply_saved(&app).await;
-    }
+    // Fakes mode opens the two in-memory fakes the same way.
+    canvas_daemon::peripherals::apply_saved(&app).await;
 
     // The zone sizes from disk.
     {

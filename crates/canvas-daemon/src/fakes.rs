@@ -13,8 +13,11 @@
 //!   to the fake OpenRGB server on [`FAKE_OPENRGB_PORT`] (or
 //!   `CANVAS_RGB_FAKE_OPENRGB_PORT`);
 //! - never opens HID devices (mouse, controller, ROYUAN keyboard, CHIONE
-//!   display): the peripheral and display adapters are empty/`NoDisplays` and
-//!   the composite's keyboard is disabled;
+//!   display): the display adapter is `NoDisplays`, the keyboard is disabled,
+//!   and the mouse and controller are the in-memory
+//!   [`FakePeripheral`] fakes (`fake_mouse` / `fake_controller`), shaped like
+//!   the React demo fixtures so the Peripherals view has two devices to show
+//!   (#208);
 //! - never captures the screen or audio, never runs the power watcher, the
 //!   SignalRGB conflict check, or the first run's SignalRGB reads;
 //! - touches no path outside its home: every path already follows
@@ -499,6 +502,475 @@ impl crate::pipe_client::PipeLink for FakePipeLink {
     }
 }
 
+// --- Fake peripherals -------------------------------------------------------
+//
+// The two devices the React demo fixtures describe (`app/web/src/lib/
+// peripheralFixtures.ts`): the Attack Shark X6 mouse and the 8BitDo Ultimate 2
+// controller, with the values the fixtures say the devices held when they were
+// read. In-memory only: connect/discover/describe/read/write touch nothing.
+
+use canvas_proto::device::DeviceId;
+use canvas_proto::peripheral::{PeripheralInfo, PeripheralKind, PeripheralSchema, PeripheralSection};
+use canvas_proto::props::{PropKind, PropValue, Props, PropertyDef};
+use canvas_proto::traits::{AdapterError, PeripheralAdapter};
+
+fn hex_color(s: &str) -> canvas_proto::Rgb8 {
+    s.parse().expect("a fixture colour is #rrggbb")
+}
+
+fn prop_number(key: &str, label: &str, min: f64, max: f64, step: f64, default: f64) -> PropertyDef {
+    PropertyDef { key: key.into(), label: label.into(), kind: PropKind::Number { min, max, step, default } }
+}
+
+fn prop_choice(options: &[&str], key: &str, label: &str, default: &str) -> PropertyDef {
+    PropertyDef {
+        key: key.into(),
+        label: label.into(),
+        kind: PropKind::Choice { options: options.iter().map(|o| o.to_string()).collect(), default: default.into() },
+    }
+}
+
+fn prop_color(key: &str, label: &str, default: &str) -> PropertyDef {
+    PropertyDef { key: key.into(), label: label.into(), kind: PropKind::Color { default: hex_color(default) } }
+}
+
+fn prop_bool(key: &str, label: &str, default: bool) -> PropertyDef {
+    PropertyDef { key: key.into(), label: label.into(), kind: PropKind::Bool { default } }
+}
+
+/// A fake peripheral that lives only in memory; the daemon's hub owns it by
+/// value, so no interior mutability is needed.
+#[derive(Debug)]
+pub struct FakePeripheral {
+    info: PeripheralInfo,
+    schema: PeripheralSchema,
+    values: Props,
+    connected: bool,
+    writes_enabled: bool,
+}
+
+/// The eight DPI stages the mouse holds, with the colour each one lights in
+/// (`MOUSE_STAGE_DPI` / `MOUSE_STAGE_COLOUR` in `peripheralFixtures.ts`).
+const MOUSE_STAGE_DPI: [f64; 8] = [800.0, 1200.0, 1600.0, 3200.0, 5600.0, 26000.0, 50.0, 50.0];
+const MOUSE_STAGE_COLOUR: [&str; 8] = [
+    "#ff0000", "#00ff00", "#0000ff", "#ffff00", "#00ffff", "#ff00ff", "#ff4000", "#ffffff",
+];
+
+/// The actions the mouse's buttons can be set to (`MOUSE_ACTIONS`).
+const MOUSE_ACTIONS: [&str; 15] = [
+    "off",
+    "left-click",
+    "right-click",
+    "middle-click",
+    "back",
+    "forward",
+    "double-click",
+    "fire",
+    "scroll-up",
+    "scroll-down",
+    "dpi-cycle",
+    "dpi-up",
+    "dpi-down",
+    "led-loop",
+    "other",
+];
+
+/// The buttons the mouse names, and what each one did when it was read
+/// (`MOUSE_BUTTONS`).
+const MOUSE_BUTTONS: [(&str, &str); 6] = [
+    ("button-1", "left-click"),
+    ("button-2", "right-click"),
+    ("button-3", "middle-click"),
+    ("button-4", "dpi-cycle"),
+    ("button-7", "forward"),
+    ("button-8", "back"),
+];
+
+fn fake_mouse_schema(device: &DeviceId) -> PeripheralSchema {
+    let mut dpi = vec![prop_number("dpi-stage-count", "DPI stages in use", 1.0, 8.0, 1.0, 6.0)];
+    for i in 0..8 {
+        dpi.push(prop_number(&format!("dpi-stage-{}", i + 1), &format!("DPI stage {}", i + 1), 50.0, 26000.0, 50.0, MOUSE_STAGE_DPI[i]));
+        dpi.push(prop_color(&format!("dpi-stage-{}-colour", i + 1), &format!("DPI stage {} colour", i + 1), MOUSE_STAGE_COLOUR[i]));
+    }
+    dpi.push(prop_choice(&["1", "2", "3", "4", "5", "6", "7", "8"], "dpi-active-stage", "Active DPI stage", "1"));
+    let buttons: Vec<PropertyDef> = MOUSE_BUTTONS
+        .iter()
+        .map(|(key, action)| prop_choice(&MOUSE_ACTIONS, key, &format!("Button {}", key.replace("button-", "")), action))
+        .collect();
+    let section = |id: &str, title: &str, properties: Vec<PropertyDef>| PeripheralSection {
+        id: id.into(),
+        title: title.into(),
+        properties,
+    };
+    let mut read_only: Vec<String> = MOUSE_BUTTONS.iter().map(|(key, _)| key.to_string()).collect();
+    read_only.push("dpi-active-stage".into());
+    read_only.push("profile".into());
+    let unreported: Vec<String> = [
+        "button-5", "button-6", "button-9", "button-10", "button-11", "button-12", "button-13", "button-14",
+        "button-15", "button-16", "button-17", "button-18", "ripple-control", "angle-snap", "motion-sync", "lift-off",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect();
+    PeripheralSchema {
+        device: device.clone(),
+        kind: PeripheralKind::Mouse,
+        sections: vec![
+            section("dpi", "DPI", dpi),
+            section(
+                "performance",
+                "Performance",
+                vec![
+                    prop_choice(&["125", "250", "500", "1000"], "polling", "Polling rate (Hz)", "1000"),
+                    prop_number("debounce-ms", "Key response time (ms)", 4.0, 50.0, 2.0, 8.0),
+                ],
+            ),
+            section(
+                "lighting",
+                "Lighting",
+                vec![
+                    prop_choice(
+                        &["off", "static", "breathing", "neon", "color-breathing", "static-dpi", "breathing-dpi"],
+                        "led-mode",
+                        "LED mode",
+                        "static",
+                    ),
+                    prop_color("led-colour", "LED colour", "#ef3fff"),
+                    prop_number("led-brightness", "LED brightness", 1.0, 8.0, 1.0, 8.0),
+                    prop_number("led-speed", "LED speed", 4.0, 8.0, 1.0, 6.0),
+                ],
+            ),
+            section(
+                "power",
+                "Power",
+                vec![
+                    prop_number("sleep-after-min", "Sleep after (min)", 0.5, 30.0, 0.5, 0.5),
+                    prop_number("deep-sleep-min", "Deep sleep after (min)", 1.0, 60.0, 1.0, 10.0),
+                ],
+            ),
+            section("buttons", "Buttons", buttons),
+            section("profile", "Profile", vec![prop_choice(&["1"], "profile", "Profile", "1")]),
+        ],
+        read_only,
+        unreported,
+    }
+}
+
+fn fake_mouse_values() -> Props {
+    let mut values = Props::new();
+    let insert = |values: &mut Props, key: &str, value: PropValue| {
+        values.insert(key.into(), value);
+    };
+    insert(&mut values, "dpi-stage-count", PropValue::Number(6.0));
+    insert(&mut values, "dpi-active-stage", PropValue::Choice("1".into()));
+    insert(&mut values, "polling", PropValue::Choice("1000".into()));
+    insert(&mut values, "debounce-ms", PropValue::Number(8.0));
+    insert(&mut values, "led-mode", PropValue::Choice("static".into()));
+    insert(&mut values, "led-colour", PropValue::Color(hex_color("#ef3fff")));
+    insert(&mut values, "led-brightness", PropValue::Number(8.0));
+    insert(&mut values, "led-speed", PropValue::Number(6.0));
+    insert(&mut values, "sleep-after-min", PropValue::Number(0.5));
+    insert(&mut values, "deep-sleep-min", PropValue::Number(10.0));
+    insert(&mut values, "profile", PropValue::Choice("1".into()));
+    for i in 0..8 {
+        insert(&mut values, &format!("dpi-stage-{}", i + 1), PropValue::Number(MOUSE_STAGE_DPI[i]));
+        insert(&mut values, &format!("dpi-stage-{}-colour", i + 1), PropValue::Color(hex_color(MOUSE_STAGE_COLOUR[i])));
+    }
+    for (key, action) in MOUSE_BUTTONS {
+        insert(&mut values, key, PropValue::Choice(action.into()));
+    }
+    values
+}
+
+/// The targets a button can be mapped to (`PAD_TARGETS` in `peripheralFixtures.ts`).
+const PAD_TARGETS: [&str; 28] = [
+    "none", "start", "left-stick-click", "right-stick-click", "select", "x", "y", "dpad-right", "dpad-left", "dpad-down",
+    "dpad-up", "left-bumper", "right-bumper", "b", "a", "left-trigger", "right-trigger", "menu", "home", "paddle-3",
+    "screenshot", "turbo-single", "turbo-auto", "paddle-1", "paddle-2", "paddle-4", "swap", "other",
+];
+
+/// The map slots of the active profile, with the label the schema gives each
+/// one (`PAD_SLOTS`).
+const PAD_SLOTS: [(&str, &str, &str); 18] = [
+    ("a", "A", "a"),
+    ("b", "B", "b"),
+    ("x", "X", "x"),
+    ("y", "Y", "y"),
+    ("l1", "L1", "left-bumper"),
+    ("r1", "R1", "right-bumper"),
+    ("l2", "L2", "left-trigger"),
+    ("r2", "R2", "right-trigger"),
+    ("l3", "L3", "left-stick-click"),
+    ("r3", "R3", "right-stick-click"),
+    ("select", "Select", "select"),
+    ("start", "Start", "start"),
+    ("menu", "Menu / Share", "menu"),
+    ("home", "Home", "home"),
+    ("dpad-up", "D-pad up", "dpad-up"),
+    ("dpad-down", "D-pad down", "dpad-down"),
+    ("dpad-left", "D-pad left", "dpad-left"),
+    ("dpad-right", "D-pad right", "dpad-right"),
+];
+
+/// The four paddles, as the schema names them (`PAD_PADDLES`).
+const PAD_PADDLES: [(u32, &str); 4] = [(1, "Paddle 1 (P1)"), (2, "Paddle 2 (P2)"), (3, "Paddle 3 (P3)"), (4, "Paddle 4 (P4)")];
+
+/// The stick and trigger range rows (`PAD_RANGES`).
+const PAD_RANGES: [(&str, &str); 8] = [
+    ("stick-left-start", "Left stick range start (%)"),
+    ("stick-left-end", "Left stick range end (%)"),
+    ("stick-right-start", "Right stick range start (%)"),
+    ("stick-right-end", "Right stick range end (%)"),
+    ("trigger-left-start", "Left trigger range start (%)"),
+    ("trigger-left-end", "Left trigger range end (%)"),
+    ("trigger-right-start", "Right trigger range start (%)"),
+    ("trigger-right-end", "Right trigger range end (%)"),
+];
+
+fn fake_controller_schema(device: &DeviceId) -> PeripheralSchema {
+    let mut profiles = vec![prop_choice(&["1", "2", "3"], "active-profile", "Active profile", "1")];
+    for p in [1, 2, 3] {
+        profiles.push(prop_bool(&format!("profile-{p}-in-use"), &format!("Profile {p} in use"), false));
+    }
+    let buttons: Vec<PropertyDef> = PAD_SLOTS
+        .iter()
+        .map(|(slot, label, _)| prop_choice(&PAD_TARGETS, &format!("button-{slot}"), label, "none"))
+        .collect();
+    let section = |id: String, title: String, properties: Vec<PropertyDef>| PeripheralSection { id, title, properties };
+    let mut profile_sections = Vec::new();
+    for p in [1, 2, 3] {
+        let mut properties = Vec::new();
+        for (suffix, label) in PAD_RANGES {
+            properties.push(prop_number(&format!("profile-{p}-{suffix}"), &format!("{label} (profile {p})"), 0.0, 100.0, 1.0, 0.0));
+        }
+        properties.push(prop_number(&format!("profile-{p}-vibration-left"), &format!("Left motor strength (%, profile {p})"), 0.0, 100.0, 20.0, 0.0));
+        properties.push(prop_number(&format!("profile-{p}-vibration-right"), &format!("Right motor strength (%, profile {p})"), 0.0, 100.0, 20.0, 0.0));
+        for (n, label) in PAD_PADDLES {
+            properties.push(prop_choice(&PAD_TARGETS, &format!("profile-{p}-paddle-{n}"), &format!("{label} (profile {p})"), "none"));
+        }
+        profile_sections.push(section(format!("profile-{p}"), format!("Profile {p}"), properties));
+    }
+    let mut read_only = vec!["active-profile".to_string()];
+    for p in [1, 2, 3] {
+        read_only.push(format!("profile-{p}-in-use"));
+        read_only.push(format!("profile-{p}-vibration-left"));
+        read_only.push(format!("profile-{p}-vibration-right"));
+    }
+    for (slot, _, _) in PAD_SLOTS {
+        read_only.push(format!("button-{slot}"));
+    }
+    let mut unreported = Vec::new();
+    for p in [1, 2, 3] {
+        unreported.extend([
+            format!("profile-{p}-name"),
+            format!("profile-{p}-ring-theme"),
+            format!("profile-{p}-macros"),
+            format!("profile-{p}-gyro-mapping"),
+            format!("profile-{p}-special-features"),
+            format!("profile-{p}-xinput-rumble-range"),
+        ]);
+    }
+    unreported.extend(["trigger-mode".to_string(), "firmware-version".to_string(), "battery-percent".to_string()]);
+    let mut sections = vec![
+        section("profiles".into(), "Profiles".into(), profiles),
+        section("buttons".into(), "Button remap (active profile)".into(), buttons),
+    ];
+    sections.extend(profile_sections);
+    PeripheralSchema {
+        device: device.clone(),
+        kind: PeripheralKind::GameController,
+        sections,
+        read_only,
+        unreported,
+    }
+}
+
+fn fake_controller_values() -> Props {
+    let mut values = Props::new();
+    values.insert("active-profile".into(), PropValue::Choice("1".into()));
+    values.insert("profile-1-in-use".into(), PropValue::Bool(true));
+    values.insert("profile-2-in-use".into(), PropValue::Bool(false));
+    values.insert("profile-3-in-use".into(), PropValue::Bool(false));
+    for (slot, _, target) in PAD_SLOTS {
+        values.insert(format!("button-{slot}"), PropValue::Choice(target.into()));
+    }
+    // What each profile held when the pad was read (`held` in `padValues`).
+    type HeldProfile<'a> = (u32, [f64; 8], [f64; 2], [&'a str; 4]);
+    let held: [HeldProfile; 3] = [
+        (1, [7.0, 50.0, 7.0, 50.0, 0.0, 100.0, 0.0, 100.0], [100.0, 100.0], ["none", "none", "none", "none"]),
+        (2, [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0], [0.0, 0.0], ["other", "other", "other", "other"]),
+        (3, [100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0, 100.0], [0.0, 0.0], ["other", "other", "other", "other"]),
+    ];
+    for (p, ranges, motors, paddles) in held {
+        for ((suffix, _), value) in PAD_RANGES.iter().zip(ranges) {
+            values.insert(format!("profile-{p}-{suffix}"), PropValue::Number(value));
+        }
+        values.insert(format!("profile-{p}-vibration-left"), PropValue::Number(motors[0]));
+        values.insert(format!("profile-{p}-vibration-right"), PropValue::Number(motors[1]));
+        for ((n, _), target) in PAD_PADDLES.iter().zip(paddles) {
+            values.insert(format!("profile-{p}-paddle-{n}"), PropValue::Choice(target.into()));
+        }
+    }
+    values
+}
+
+impl FakePeripheral {
+    fn build(info: PeripheralInfo, schema: PeripheralSchema, values: Props) -> Self {
+        Self { info, schema, values, connected: false, writes_enabled: false }
+    }
+}
+
+/// The fake mouse, with the X6's identity and the values the read brought back.
+pub fn fake_mouse() -> FakePeripheral {
+    let device = DeviceId("attack-shark-x6:1d57:fa60".into());
+    let schema = fake_mouse_schema(&device);
+    let info = PeripheralInfo {
+        id: device,
+        name: "Attack Shark X6".into(),
+        vendor: "Beken".into(),
+        kind: PeripheralKind::Mouse,
+        adapter: "attack-shark-x6".into(),
+        serial: String::new(),
+        location: "hid:1d57:fa60:usage000b".into(),
+        connected: true,
+    };
+    FakePeripheral::build(info, schema, fake_mouse_values())
+}
+
+/// The fake controller, with the Ultimate 2's identity and the values the read
+/// brought back.
+pub fn fake_controller() -> FakePeripheral {
+    let device = DeviceId("eightbitdo-ultimate-2:2dc8".into());
+    let schema = fake_controller_schema(&device);
+    let info = PeripheralInfo {
+        id: device,
+        name: "8BitDo Ultimate 2 Wireless (XInput)".into(),
+        vendor: "8BitDo".into(),
+        kind: PeripheralKind::GameController,
+        adapter: "eightbitdo-ultimate-2".into(),
+        serial: String::new(),
+        location: "hid:2dc8:310b".into(),
+        connected: true,
+    };
+    FakePeripheral::build(info, schema, fake_controller_values())
+}
+
+/// Checks a value against its kind, the way the real adapters do.
+fn check_fake_value(def: &PropertyDef, value: &PropValue) -> Result<(), AdapterError> {
+    let wrong = |value: &PropValue| AdapterError::Protocol(format!("{key} does not take that kind of value: {value:?}", key = def.key));
+    match (&def.kind, value) {
+        (PropKind::Number { min, max, .. }, PropValue::Number(number)) => {
+            if number < min || number > max {
+                return Err(AdapterError::Protocol(format!("{key} is {number}; it takes {min} to {max}", key = def.key)));
+            }
+            Ok(())
+        }
+        (PropKind::Number { .. }, other) => Err(wrong(other)),
+        (PropKind::Bool { .. }, PropValue::Bool(_)) => Ok(()),
+        (PropKind::Bool { .. }, other) => Err(wrong(other)),
+        (PropKind::Choice { options, .. }, PropValue::Choice(choice)) => {
+            if !options.contains(choice) {
+                return Err(AdapterError::Protocol(format!("{key} has no option {choice}", key = def.key)));
+            }
+            Ok(())
+        }
+        (PropKind::Choice { .. }, other) => Err(wrong(other)),
+        (PropKind::Color { .. }, PropValue::Color(_)) => Ok(()),
+        (PropKind::Color { .. }, other) => Err(wrong(other)),
+        (PropKind::Hue { .. }, PropValue::Hue(hue)) if (0.0..=360.0).contains(hue) => Ok(()),
+        (PropKind::Hue { .. }, other) => Err(wrong(other)),
+        (PropKind::Angle { .. }, PropValue::Angle(angle)) if (0.0..=360.0).contains(angle) => Ok(()),
+        (PropKind::Angle { .. }, other) => Err(wrong(other)),
+    }
+}
+
+impl canvas_adapters::resume::ResumeBehavior for FakePeripheral {
+    fn on_resume(&self) -> canvas_adapters::resume::OnResume {
+        // In memory: a sleep resets nothing.
+        canvas_adapters::resume::OnResume::NothingToRestore
+    }
+}
+
+#[async_trait::async_trait]
+impl PeripheralAdapter for FakePeripheral {
+    fn name(&self) -> &'static str {
+        "fake-peripheral"
+    }
+
+    async fn connect(&mut self) -> Result<(), AdapterError> {
+        self.connected = true;
+        Ok(())
+    }
+
+    async fn disconnect(&mut self) -> Result<(), AdapterError> {
+        self.connected = false;
+        Ok(())
+    }
+
+    fn is_connected(&self) -> bool {
+        self.connected
+    }
+
+    async fn discover(&mut self) -> Result<Vec<PeripheralInfo>, AdapterError> {
+        Ok(vec![self.info.clone()])
+    }
+
+    async fn describe(&mut self, device: &DeviceId) -> Result<PeripheralSchema, AdapterError> {
+        if &self.schema.device != device {
+            return Err(AdapterError::UnknownDevice(device.clone()));
+        }
+        Ok(self.schema.clone())
+    }
+
+    async fn read_settings(&mut self, device: &DeviceId) -> Result<Props, AdapterError> {
+        if &self.schema.device != device {
+            return Err(AdapterError::UnknownDevice(device.clone()));
+        }
+        if !self.connected {
+            return Err(AdapterError::NotConnected);
+        }
+        Ok(self.values.clone())
+    }
+
+    async fn write_settings(&mut self, device: &DeviceId, props: &Props) -> Result<(), AdapterError> {
+        if &self.schema.device != device {
+            return Err(AdapterError::UnknownDevice(device.clone()));
+        }
+        if !self.writes_enabled {
+            return Err(AdapterError::Unsupported(
+                "config writes are off: turn them on with set_writes_enabled(true) first",
+            ));
+        }
+        if props.is_empty() {
+            return Ok(());
+        }
+        for (key, value) in props {
+            let Some(def) = self.schema.property(key) else {
+                return Err(AdapterError::Protocol(format!("the device has no setting called {key}")));
+            };
+            if !self.schema.is_writable(key) {
+                return Err(AdapterError::Protocol(format!("{key} is read-only: this adapter cannot write it yet")));
+            }
+            check_fake_value(def, value)?;
+        }
+        for (key, value) in props {
+            self.values.insert(key.clone(), value.clone());
+        }
+        Ok(())
+    }
+
+    fn writes_enabled(&self) -> bool {
+        self.writes_enabled
+    }
+}
+
+#[async_trait::async_trait]
+impl crate::peripherals::Peripheral for FakePeripheral {
+    fn set_config_writes(&mut self, on: bool) {
+        self.writes_enabled = on;
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -729,5 +1201,91 @@ mod tests {
             PipeResponse::OpenRgb { port, .. } => assert_eq!(port, fake_openrgb_port()),
             other => panic!("expected openrgb state, got {other:?}"),
         }
+    }
+
+    /// The two fake peripherals (#208): each finds itself, describes the
+    /// fixture schema, reads its fixture values once connected, and validates
+    /// writes like the real adapters do. In memory: no device is opened.
+    #[tokio::test]
+    async fn the_fake_peripherals_find_describe_read_and_validate_writes() {
+        use crate::peripherals::Peripheral;
+        use canvas_proto::props::PropValue;
+        use canvas_proto::traits::PeripheralAdapter;
+
+        let mut mouse = fake_mouse();
+        let found = mouse.discover().await.expect("discover");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.0, "attack-shark-x6:1d57:fa60");
+        assert_eq!(found[0].name, "Attack Shark X6");
+        assert_eq!(found[0].kind, PeripheralKind::Mouse);
+        assert!(found[0].connected);
+        // Not connected yet: a read is refused, as a device that is not open is.
+        assert!(mouse.read_settings(&DeviceId("attack-shark-x6:1d57:fa60".into())).await.is_err());
+        mouse.connect().await.expect("connect");
+        assert!(mouse.is_connected());
+        let schema = mouse
+            .describe(&DeviceId("attack-shark-x6:1d57:fa60".into()))
+            .await
+            .expect("describe");
+        assert_eq!(schema.sections.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["dpi", "performance", "lighting", "power", "buttons", "profile"]);
+        assert!(schema.properties().count() > 20);
+        // The DPI section carries the eight stages and their colours.
+        let dpi = schema.sections.first().unwrap();
+        assert!(dpi.properties.iter().any(|p| p.key == "dpi-stage-6"));
+        assert!(dpi.properties.iter().any(|p| p.key == "dpi-stage-6-colour"));
+        let values = mouse
+            .read_settings(&DeviceId("attack-shark-x6:1d57:fa60".into()))
+            .await
+            .expect("read");
+        assert_eq!(values.get("dpi-stage-1"), Some(&PropValue::Number(800.0)));
+        assert_eq!(values.get("dpi-stage-count"), Some(&PropValue::Number(6.0)));
+        assert_eq!(values.get("polling"), Some(&PropValue::Choice("1000".into())));
+        // Writes are off until the daemon turns them on.
+        let mut write = Props::new();
+        write.insert("debounce-ms".into(), PropValue::Number(10.0));
+        assert!(mouse.write_settings(&DeviceId("attack-shark-x6:1d57:fa60".into()), &write).await.is_err());
+        mouse.set_config_writes(true);
+        mouse
+            .write_settings(&DeviceId("attack-shark-x6:1d57:fa60".into()), &write)
+            .await
+            .expect("write");
+        // A read-only key and an unknown key are refused, and nothing is sent.
+        let mut bad = Props::new();
+        bad.insert("dpi-active-stage".into(), PropValue::Choice("2".into()));
+        assert!(mouse.write_settings(&DeviceId("attack-shark-x6:1d57:fa60".into()), &bad).await.is_err());
+        let mut unknown = Props::new();
+        unknown.insert("no-such-key".into(), PropValue::Number(1.0));
+        assert!(mouse.write_settings(&DeviceId("attack-shark-x6:1d57:fa60".into()), &unknown).await.is_err());
+        mouse.disconnect().await.expect("disconnect");
+        assert!(!mouse.is_connected());
+
+        let mut pad = fake_controller();
+        let found = pad.discover().await.expect("discover");
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].id.0, "eightbitdo-ultimate-2:2dc8");
+        assert_eq!(found[0].kind, PeripheralKind::GameController);
+        pad.connect().await.expect("connect");
+        let schema = pad
+            .describe(&DeviceId("eightbitdo-ultimate-2:2dc8".into()))
+            .await
+            .expect("describe");
+        assert_eq!(
+            schema.sections.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(),
+            ["profiles", "buttons", "profile-1", "profile-2", "profile-3"]
+        );
+        let values = pad
+            .read_settings(&DeviceId("eightbitdo-ultimate-2:2dc8".into()))
+            .await
+            .expect("read");
+        assert_eq!(values.get("active-profile"), Some(&PropValue::Choice("1".into())));
+        assert_eq!(values.get("profile-1-stick-left-start"), Some(&PropValue::Number(7.0)));
+        assert!(values.contains_key("button-a"));
+        // A paddle of the active profile is writable while the slots are not.
+        pad.set_config_writes(true);
+        let mut paddle = Props::new();
+        paddle.insert("profile-1-paddle-1".into(), PropValue::Choice("left-bumper".into()));
+        pad.write_settings(&DeviceId("eightbitdo-ultimate-2:2dc8".into()), &paddle)
+            .await
+            .expect("paddle write");
     }
 }

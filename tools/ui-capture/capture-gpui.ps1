@@ -53,7 +53,12 @@ param(
     [switch]$Onboarding,
     [string]$OnboardingStep = 'hello',
     # Mirror a React demo ?state= token (--onboarding-state).
-    [string]$OnboardingState = ''
+    [string]$OnboardingState = '',
+    # #208: open the Peripherals page with a device already selected
+    # (--peri-device mouse|controller). The shot is named
+    # peripherals-<device>-gpui-<size>-<theme>.png so diff-pairs.ps1 pairs
+    # it with the React shot of the same name.
+    [string]$Device = ''
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
 if ($PaletteQuery -ne '') { $Palette = $true }
@@ -210,6 +215,7 @@ foreach ($theme in $Themes) {
       $psi.Arguments = "--page $page --theme $theme --min-size 390x600 --size $size --capture$paletteArgs$onboardArgs"
       if ($Editor -ne '') { $psi.Arguments += " --editor $Editor" }
       if ($Stack -ne '') { $psi.Arguments += " --stack `"$Stack`"" }
+      if ($Device -ne '') { $psi.Arguments += " --peri-device $Device"; Write-Host "capture-gpui: peripherals with $Device selected" }
       $psi.UseShellExecute = $false
       $psi.CreateNoWindow = $true
       $psi.RedirectStandardInput = [bool]$TrayStub
@@ -316,7 +322,7 @@ foreach ($theme in $Themes) {
         # viewport shot.
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
-        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } else { $page }
+        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } elseif ($Device -ne '') { "$page-$Device" } else { $page }
         $file = Join-Path $outDir "$viewName-gpui-${size}-$theme.png"
         $shot.Save($file, [System.Drawing.Imaging.ImageFormat]::Png)
         $shot.Dispose()
