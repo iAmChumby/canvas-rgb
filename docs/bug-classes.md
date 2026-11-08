@@ -547,6 +547,13 @@ state the message is about.
   down tone React's `error-line` uses (`FansView.tsx:1065-1069`, `:1120`). The search that found it
   looked at `views/fans.rs` only, and the editor's helpers live in `views/fans/editor.rs`. A test
   now pins the drawing.
+- [#246](https://github.com/iAmChumby/canvas-rgb/issues/246), the Peripherals Apply toast: `views/peripherals.rs`
+  `take_toast` read `toast` and nothing ever called it, so React's
+  `notify("The settings are on the device")` (`PeripheralsView.tsx:371`) never showed. The shell
+  has React's notification lane now (`NotifyHost`, #168; bottom right, clear of the phone dock)
+  and takes the hand-off on every page, because a notification is global chrome, not the page's.
+  Drawn in `.build/ui-capture/peripherals-toast-*-1440x900-dark.png` with the same box
+  (1036,838,380x38), text words and colours as React's.
 - **Class fix:** done (#246). One guard, `app/gpui/tests/status_drawn.rs` (part of
   `cargo test -p canvas-rgb-editor`), scans every view file for `pub` fields whose names end in
   `_error`, `_err`, `_notice`, `_warning`, `_problem` or `_message` (or are `notice`, `note`,
@@ -555,17 +562,18 @@ state the message is about.
   two structs in one module is checked in its own file, so two `save_error`s cannot pass on each
   other's reads. `#[cfg(test)]` code does not count (a test that names a field is not a place the
   app draws it). Each deliberately undrawn field needs an `ALLOWED` entry with its reason, and an
-  entry that matches nothing fails, so fixing one forces its removal.
+  entry that matches nothing fails, so fixing one forces its removal. A second test fails when a
+  view defines a `take_*` hand-off that nothing in the source calls: the read the first test counts
+  can be a message handed to a caller that does not exist, the shape #246 found in `take_toast`.
 - **Sibling search (#246), every view:** the only other status messages computed and not drawn are
   in `views/effects`, another builder's area, and are named in the guard's `ALLOWED` list:
   `views/effects/stack_builder.rs:58 save_error` (React `StackBuilder.tsx:1501-1508` draws an
   ErrorPanel) and `:61 naming_error` (React `:2120-2124` draws an error-line). Two more fields are
   set and never read but are not messages: `views/effects/stack_builder.rs:96 preset_name` (form
   state; React draws a NameField) and `views/peripherals.rs:630 progress_id` (an id). The
-  Peripherals toast is computed into `views/peripherals.rs:634 toast` and `take_toast` has no
-  caller, so React's "The settings are on the device" toast never shows; that is `views/peripherals`,
-  also another builder's area. Every other `*_error`/`notice`/`note`/`toast` field found is read in
-  the code that draws it.
+  Peripherals toast (`views/peripherals.rs:634 toast`) was computed and handed to `take_toast` with
+  no caller; the shell's lane takes it now. Every other `*_error`/`notice`/`note`/`toast` field
+  found is read in the code that draws it.
 - **How to check a new status field:** if a field names an error, notice or other message, draw it in
   the path that renders that state (a plain line, a `rule_box`, or an error panel with Details), and
   run `cargo test -p canvas-rgb-editor --test status_drawn`.

@@ -1077,7 +1077,7 @@ impl PeripheralsView {
                             }
                         }
                         this.load_detail(&id, true, false, cx);
-                        this.toast = Some(Toast { text: "The settings are on the device".to_string(), tone: "ok" });
+                        this.toast = Some(Self::toast_after_apply());
                     }
                     Err(e) => {
                         this.note_failure(&id, true);
@@ -1089,6 +1089,35 @@ impl PeripheralsView {
         })
         .detach();
         cx.notify();
+    }
+
+    /// Capture only (`--peri-toast`, #246): once the selected device's detail
+    /// has landed, send the change (`apply`) so the fake daemon's answer
+    /// raises React's toast. Nothing is staged, so the PATCH is empty and the
+    /// device's settings do not change; the shell holds the lane open with
+    /// `--toast-hold` so a still frame can compare it with React's.
+    pub fn capture_apply_when_ready(&mut self, cx: &mut Context<Self>) {
+        cx.spawn(async move |view, cx| {
+            for _ in 0..300 {
+                let done = view
+                    .update(cx, |this, cx| {
+                        if this.detail().is_some() {
+                            this.apply(cx);
+                            true
+                        } else {
+                            false
+                        }
+                    })
+                    .unwrap_or(false);
+                if done {
+                    return;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(100))
+                    .await;
+            }
+        })
+        .detach();
     }
 
     /// Revert (`revert()`): clears the device's staged edits and save error.
@@ -1176,8 +1205,10 @@ pub struct Toast {
 }
 
 impl PeripheralsView {
-    /// Takes the toast, if one is showing.
-    #[allow(dead_code)]
+    /// Takes the toast, if one is showing. The shell's notification lane is
+    /// the only caller (`Shell::render`); React's `notify` is global chrome
+    /// (`Notify.tsx:116`), so the toast is taken on every page, not just this
+    /// one (#246).
     pub fn take_toast(&mut self) -> Option<Toast> {
         self.toast.take()
     }
@@ -3185,8 +3216,8 @@ impl PeripheralsView {
 }
 
 impl PeripheralsView {
-    /// The toast after a saved write (React `notify("The settings are on the device")`, tone ok).
-    #[allow(dead_code)]
+    /// The toast after a saved write (React `notify("The settings are on the device")`, tone ok;
+    /// `PeripheralsView.tsx:371`).
     pub fn toast_after_apply() -> Toast {
         Toast { text: "The settings are on the device".to_string(), tone: "ok" }
     }
@@ -3215,6 +3246,15 @@ mod tests {
 
     fn number(v: f64) -> PropValue {
         PropValue::Number(v)
+    }
+
+    #[test]
+    fn the_apply_toast_is_reacts_words_and_tone() {
+        // React `PeripheralsView.tsx:371`: notify("The settings are on the
+        // device") with the default tone, ok (#246).
+        let toast = PeripheralsView::toast_after_apply();
+        assert_eq!(toast.text, "The settings are on the device");
+        assert_eq!(toast.tone, "ok");
     }
 
     #[test]

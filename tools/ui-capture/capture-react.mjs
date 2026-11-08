@@ -41,6 +41,10 @@
 //       are <view>-scroll<px>-react-<w>x<h>-<theme>.png.
 //   UI_CAPTURE_UPDATE=<preset>  (#206) the tray stub's update state: "available"
 //       (0.2.0 with notes). The Updates shot is named updates-<preset>-react-...
+//   UI_CAPTURE_TOAST=1  (#246) stage a Polling-rate change on the Peripherals
+//       page and press Apply, so React's notify() toast is on screen; use with
+//       UI_CAPTURE_VIEWS=peripherals and writes on for the mouse. The shot is
+//       named peripherals-toast-react-<w>x<h>-<theme>.png.
 //   UI_CAPTURE_STACK=<stack name>  (#214) open the stack builder on that
 //       stack ("new" for a stack that has never been saved). The shot is
 //       named stack-<slug>-react-<w>x<h>-<theme>.png.
@@ -141,6 +145,15 @@ const STACK_NAME = (process.env.UI_CAPTURE_STACK ?? "").trim();
 // ("mouse" | "controller"). The shot is named
 // peripherals-<device>-react-<w>x<h>-<theme>.png.
 const PERI_DEVICE = (process.env.UI_CAPTURE_DEVICE ?? "").trim();
+// #246: UI_CAPTURE_TOAST=1 stages one Polling-rate change on the Peripherals
+// page and presses Apply, so React's notify("The settings are on the device")
+// is on screen when the shot is taken. Needs writes on for the device (the
+// fake daemon starts with them off): PUT /api/v1/peripherals/<id>/access with
+// {"reads":true,"writes":true}. The shot is named
+// peripherals-toast-react-<w>x<h>-<theme>.png, pairing with
+// tools/ui-capture/capture-gpui.ps1 -Toast.
+const PERI_TOAST = process.env.UI_CAPTURE_TOAST === "1";
+const PERI_DEVICE_REF = PERI_TOAST && PERI_DEVICE === "" ? "mouse" : PERI_DEVICE;
 // #205: UI_CAPTURE_SCROLL=<px> scrolls the page that far down before the shot
 // (Settings has panels below the fold at every size but the largest). The shot
 // is named <view>-scroll<px>-react-<w>x<h>-<theme>.png.
@@ -515,21 +528,21 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
   await page.waitForTimeout(400);
   const viewFile = view.name === "updates" && UPDATE_PRESETS[UPDATE_PRESET] ? `updates-${UPDATE_PRESET}` : view.name;
   let fileName = `${viewFile}-react-${viewport.w}x${viewport.h}-${theme}.png`;
-  if (PERI_DEVICE && view.name === "peripherals") {
+  if (PERI_DEVICE_REF && view.name === "peripherals") {
     // The peripherals page (#208): select the device before the shot, so the
     // pair shows the same device on both sides. The mouse is the first key
     // and selected by default; clicking it again just re-reads it.
-    fileName = `peripherals-${PERI_DEVICE}-react-${viewport.w}x${viewport.h}-${theme}.png`;
-    const keyText = PERI_DEVICE === "controller" ? "8BitDo Ultimate" : "Attack Shark";
+    fileName = `peripherals-${PERI_DEVICE_REF}-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    const keyText = PERI_DEVICE_REF === "controller" ? "8BitDo Ultimate" : "Attack Shark";
     const key = page.locator(".rd-devkey", { hasText: keyText }).first();
     try {
       await key.waitFor({ timeout: 8000 });
       await key.click({ timeout: 8000 });
     } catch {
-      notLoaded.push(`the ${PERI_DEVICE} device key was not found`);
+      notLoaded.push(`the ${PERI_DEVICE_REF} device key was not found`);
     }
     // Wait for the picked device's detail to land (head name follows the pick).
-    const headText = PERI_DEVICE === "controller" ? "8BitDo Ultimate" : "Attack Shark";
+    const headText = PERI_DEVICE_REF === "controller" ? "8BitDo Ultimate" : "Attack Shark";
     try {
       await page.waitForFunction(
         (want) => (document.querySelector(".peripheral-head-name")?.textContent ?? "").includes(want),
@@ -537,9 +550,33 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
         { timeout: 10000 },
       );
     } catch {
-      notLoaded.push(`the ${PERI_DEVICE} detail did not land`);
+      notLoaded.push(`the ${PERI_DEVICE_REF} detail did not land`);
     }
     await page.waitForTimeout(800);
+  }
+  if (PERI_TOAST && view.name === "peripherals" && PERI_DEVICE_REF === "mouse") {
+    // #246: one change (Polling rate 1000 -> 500), then Apply. React's
+    // `notify` says "The settings are on the device" (`PeripheralsView.tsx:371`)
+    // and this shot catches it before its 3 s clock runs out.
+    fileName = `peripherals-toast-react-${viewport.w}x${viewport.h}-${theme}.png`;
+    const seg = page.locator('.seg[aria-label="Polling rate (Hz)"] .seg-item', { hasText: "500" }).first();
+    try {
+      await seg.click({ timeout: 8000 });
+    } catch {
+      notLoaded.push("the Polling rate segmented was not found or writes are off for the mouse");
+    }
+    const apply = page.getByRole("button", { name: "Apply" }).first();
+    try {
+      await apply.click({ timeout: 8000 });
+    } catch {
+      notLoaded.push("the Apply key was not found");
+    }
+    try {
+      await page.waitForSelector(".notify-body", { timeout: 8000 });
+    } catch {
+      notLoaded.push("the notify toast never appeared");
+    }
+    await page.waitForTimeout(150);
   }
   if (EDITOR_EFFECT) {
     // The code editor (#214): the library's card for the effect is clicked,

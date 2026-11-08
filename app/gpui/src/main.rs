@@ -67,6 +67,10 @@ struct ParsedArgs {
     editor: Option<String>,
     /// `--stack <name>` (debug only): the stack the builder opens on.
     stack: Option<String>,
+    /// `--stack-error <save|naming>` (debug only): the builder's save error
+    /// or its naming error, the way the builder's own flow reaches it (#246
+    /// captures).
+    stack_error: Option<String>,
     /// `--onboarding-step <step>` (debug builds only): open the onboarding at
     /// a step (`hello|case|parts|match|finish|finish-sweep`) for captures.
     onboarding_step: Option<String>,
@@ -76,6 +80,14 @@ struct ParsedArgs {
     /// `--peri-device <mouse|controller>` (debug builds only): open the
     /// Peripherals page with that device selected (#208 captures).
     peri_device: Option<String>,
+    /// `--peri-toast` (debug builds only): once the selected device's detail
+    /// has landed, apply the empty change so the daemon's answer raises the
+    /// Apply toast (#246 capture).
+    peri_toast: bool,
+    /// `--toast-hold <ms>` (debug builds only): how long the notification
+    /// lane keeps a message, so a capture can shoot it still (`TOAST_MS` is
+    /// React's 3000 in the app).
+    toast_hold: Option<u64>,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -88,9 +100,12 @@ fn parse_args() -> ParsedArgs {
     let mut palette_query = String::new();
     let mut editor = None;
     let mut stack = None;
+    let mut stack_error = None;
     let mut onboarding_step = None;
     let mut onboarding_state = None;
     let mut peri_device = None;
+    let mut peri_toast = false;
+    let mut toast_hold = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -135,6 +150,11 @@ fn parse_args() -> ParsedArgs {
                     stack = Some(v);
                 }
             }
+            "--stack-error" if cfg!(debug_assertions) => {
+                if let Some(v) = args.next() {
+                    stack_error = Some(v);
+                }
+            }
             "--onboarding-step" if cfg!(debug_assertions) => {
                 if let Some(v) = args.next() {
                     onboarding_step = Some(v);
@@ -150,6 +170,10 @@ fn parse_args() -> ParsedArgs {
                     peri_device = Some(v);
                 }
             }
+            "--peri-toast" if cfg!(debug_assertions) => peri_toast = true,
+            "--toast-hold" if cfg!(debug_assertions) => {
+                toast_hold = args.next().and_then(|v| v.parse().ok());
+            }
             _ => {}
         }
     }
@@ -163,9 +187,12 @@ fn parse_args() -> ParsedArgs {
         palette_query,
         editor,
         stack,
+        stack_error,
         onboarding_step,
         onboarding_state,
         peri_device,
+        peri_toast,
+        toast_hold,
     }
 }
 
@@ -187,9 +214,12 @@ fn main() {
         palette_query,
         editor,
         stack,
+        stack_error,
         onboarding_step,
         onboarding_state,
         peri_device,
+        peri_toast,
+        toast_hold,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -266,6 +296,13 @@ fn main() {
                             let name = name.clone();
                             shell.open_stack_builder(&name, cx);
                         }
+                        // Debug only: `--stack-error` reaches the builder's
+                        // save error or its naming error, the way the
+                        // builder's own flow reaches it (#246 captures).
+                        if let Some(which) = &stack_error {
+                            let which = which.clone();
+                            shell.capture_stack_error(&which, cx);
+                        }
                         // Debug only: `--peri-device` opens the Peripherals
                         // page with that device already selected (#208 pairs
                         // shot the mouse and the controller in turn).
@@ -276,6 +313,16 @@ fn main() {
                             };
                             let peripherals = shell.peripherals_view.clone();
                             peripherals.update(cx, |v, cx| v.pick_device(id, cx));
+                        }
+                        // Debug only (#246): hold the notification lane open
+                        // for a capture (`--toast-hold`), and raise the Apply
+                        // toast once the device has landed (`--peri-toast`).
+                        if let Some(ms) = toast_hold {
+                            shell.toast_hold_ms = ms;
+                        }
+                        if peri_toast {
+                            let peripherals = shell.peripherals_view.clone();
+                            peripherals.update(cx, |v, cx| v.capture_apply_when_ready(cx));
                         }
                         // Debug only: `--onboarding-step` opens the onboarding
                         // takeover at a step for captures (React `?state=` demo
