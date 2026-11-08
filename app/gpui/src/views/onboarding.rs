@@ -882,11 +882,22 @@ pub fn render_onboarding(view: &mut LayoutView, window: &mut Window, cx: &mut Co
     let has_conflict = status.as_ref().is_some_and(|s| s.conflicts.iter().any(|c| matches!(c, canvas_proto::api::Conflict::SignalRgb { .. })));
     let waking = status.as_ref().is_some_and(|s| s.openrgb == canvas_proto::api::LinkState::Connecting);
     let mode = hello_mode(has_conflict, waking, found, data.ladder);
-    if mode == HelloMode::Happy && !data.waved && !view.capture_frozen {
+    // The owner's run has the hello wave on the lights from the Hello screen
+    // onwards, and it is still on them on the screens after it. A capture
+    // opens the flow at a step, so the Hello screen never mounts and the
+    // wave never plays - but React's capture walks the flow from the Hello,
+    // so its desk shows the wave's light. The capture plays the wave too,
+    // and both shots wait for it to settle on its glow, so the two desks
+    // show the same light (the wave's phase is a property of when each
+    // capture is taken, not of the editor).
+    let want_wave = mode == HelloMode::Happy || (view.capture_frozen && step != StepKind::Finish);
+    if want_wave && !data.waved {
         if let Some(d) = view.onboarding.as_mut() {
             d.waved = true;
         }
-        remember_before(view);
+        if !view.capture_frozen {
+            remember_before(view);
+        }
         activate_effect(HELLO_EFFECT, &canvas_proto::props::Props::default());
     }
 
@@ -1326,7 +1337,11 @@ fn panel_for(
 /// height to whatever the window had left, and the sheet would then be taller
 /// than its content (React's sheet is exactly as tall as its content).
 fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body: Option<gpui::AnyElement>, foot: gpui::AnyElement) -> gpui::AnyElement {
-    let pad_v = if phone { px(20.0) } else { px(24.0) };
+    // React's `.step` padding: `--s6` (24 px) all round on the desktop, and
+    // `--s5 --s4 --s4` (20 px over, 16 px under) on a phone
+    // (`onboarding.module.css:162-167` and `:990-993`).
+    let pad_top = if phone { px(20.0) } else { px(24.0) };
+    let pad_bottom = if phone { px(16.0) } else { px(24.0) };
     let pad_h = if phone { px(16.0) } else { px(24.0) };
     // React's `.step` gap is `--s4` on a phone (the 960 px rule) and `--s5`
     // on the desktop.
@@ -1336,11 +1351,11 @@ fn step_frame(_t: Theme, phone: bool, center: bool, head: gpui::AnyElement, body
     // so it is as tall as it needs to be); on the desktop the panel has a
     // height of its own and the screen fills it.
     let mut col = if phone {
-        div().flex().flex_col().flex_none().px(pad_h).py(pad_v)
+        div().flex().flex_col().flex_none().px(pad_h).pt(pad_top).pb(pad_bottom)
     } else {
-        div().flex().flex_col().flex_1().min_h_0().px(pad_h).py(pad_v)
+        div().flex().flex_col().flex_1().min_h_0().px(pad_h).pt(pad_top).pb(pad_bottom)
     };
-    let mut inner = div().flex().flex_col().gap(gap);
+    let mut inner = div().flex().flex_col().gap(if center { px(20.0) } else { gap });
     inner = inner.child(head);
     if let Some(b) = body {
         inner = inner.child(b);
@@ -1425,7 +1440,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .pt(px(16.0))
+                .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
                 .child(foot_primary(t, "onb-gate-check", "Check again", None, false, cx, |this, cx| {
                     this.poll_status_effects(cx);
                     cx.notify();
@@ -1450,7 +1465,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .pt(px(16.0))
+                .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
                 .child(foot_primary(t, "onb-wake", "Map my PC", Some(("ArrowRight", "bold", 16.0)), true, cx, |_, _| {}))
                 .child(
                     div().flex().justify_between().items_center().min_h(px(32.0)).child(div().into_any_element()).child(foot_row_ghost(t, "onb-wake-later", "Set up later", None, false, cx, |this, cx| {
@@ -1540,7 +1555,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .pt(px(16.0))
+                .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
                 .child(foot_primary(t, "onb-ladder-rescan", if data.busy { "Looking…" } else { "Rescan" }, Some(("ArrowsClockwise", "", 16.0)), data.busy, cx, |this, cx| {
                     this.start_rescan(cx);
                 }))
@@ -1565,7 +1580,7 @@ fn hello_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, mode: HelloMo
                 .flex()
                 .flex_col()
                 .gap_2()
-                .pt(px(16.0))
+                .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
                 .child(foot_primary(t, "onb-hello-start", "Map my PC", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
                     // start(): rebuild steps and go to Case (setAt(1)).
                     if let Some(d) = this.onboarding.as_mut() {
@@ -1604,6 +1619,10 @@ fn greeting_el(t: Theme, phone: bool) -> gpui::AnyElement {
         .text_size(px(size))
         .font_weight(gpui::FontWeight::SEMIBOLD)
         .line_height(gpui::relative(1.0))
+        // React's `.greeting` keeps a line and a bit of room under the word
+        // (`min-height: 1.1em`), so the sheet below it does not jump when
+        // the word changes.
+        .min_h(px(size * 1.1))
         .font_family(crate::fonts::UI_FAMILY)
         .text_color(Theme::color(t.ink))
         .child(word.to_string())
@@ -1666,7 +1685,7 @@ fn case_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layou
         .flex()
         .flex_col()
         .gap_2()
-        .pt(px(16.0))
+        .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
         .child(foot_primary(t, "onb-case-ok", "Looks right", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
             this.set_case_locked(true);
             if let Some(d) = this.onboarding.as_mut() { d.next_step(); }
@@ -1802,7 +1821,7 @@ fn parts_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         .flex()
         .flex_col()
         .gap_2()
-        .pt(px(16.0))
+        .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
         .child(foot_primary(t, "onb-parts-next", "Match the lights", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
             if let Some(d) = this.onboarding.as_mut() { d.next_step(); }
             this.sync_onboarding_match_run();
@@ -1835,7 +1854,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
             .flex()
             .flex_col()
             .gap_2()
-            .pt(px(16.0))
+            .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
             .child(foot_primary(t, "onb-match-cont", "Continue", Some(("ArrowRight", "bold", 16.0)), false, cx, |this, cx| {
                 if let Some(d) = this.onboarding.as_mut() { d.next_step(); }
                 this.sync_onboarding_match_run();
@@ -1892,7 +1911,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
             .flex()
             .flex_col()
             .gap_2()
-            .pt(px(16.0))
+            .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
             .child(foot_primary(t, "onb-match-yes", if data.resizing { "That's all of it" } else { "Yes" }, Some(("Check", "bold", 16.0)), false, cx, |this, cx| {
                 this.advance_match(cx);
             }))
@@ -1923,7 +1942,7 @@ fn match_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Layo
         .flex()
         .flex_col()
         .gap_2()
-        .pt(px(16.0))
+        .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
         .child(foot_primary(t, "onb-match-nothing", "Nothing's lit", None, false, cx, |this, cx| {
             this.skip_match_run(cx);
         }))
@@ -1945,7 +1964,17 @@ fn finish_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Lay
     if !data.swept {
         let head = step_head(t, Some("Finish".to_string()), title_text(t, "Watch your PC.", phone), Some("A band of light crosses it."));
         let body = div().flex().items_center().gap_3().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.dim)).child(div().w_full().h(px(6.0)).rounded_full().bg(Theme::color(t.line_2))).into_any_element();
-        let foot = div().flex().flex_col().gap_2().pt(px(16.0)).child(foot_primary(t, "onb-finish-done-w", "Done", Some(("Check", "bold", 16.0)), true, cx, |_, _| {})).into_any_element();
+        // The row under the key is always there (React's `.footRow`), so the
+        // primary key stays where it is on every screen.
+        let foot = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .pt(if phone { px(12.0) } else { px(16.0) })
+            .pb(if phone { px(8.0) } else { px(0.0) })
+            .child(foot_primary(t, "onb-finish-done-w", "Done", Some(("Check", "bold", 16.0)), true, cx, |_, _| {}))
+            .child(div().flex().justify_between().items_center().gap_3().min_h(px(32.0)).child(div().into_any_element()).child(div().into_any_element()))
+            .into_any_element();
         return step_frame(t, phone, false, head, Some(body), foot);
     }
     let devs = devices.unwrap_or(&[]);
@@ -2001,7 +2030,7 @@ fn finish_body(view: &mut LayoutView, cx: &mut Context<LayoutView>, layout: &Lay
         .flex()
         .flex_col()
         .gap_2()
-        .pt(px(16.0))
+        .pt(if phone { px(12.0) } else { px(16.0) }).pb(if phone { px(8.0) } else { px(0.0) })
         .child(foot_primary(t, "onb-finish-done", "Done", Some(("Check", "bold", 16.0)), false, cx, |this, cx| {
             this.finish_onboarding(cx);
         }))

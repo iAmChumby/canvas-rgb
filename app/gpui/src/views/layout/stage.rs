@@ -311,9 +311,146 @@ pub fn desk_with_origin(
 
             // The selection frame and handles (one part picked).
             paint_selection_frame(window, &t, &zones, &landmarks, &selection, k, ox, oy, view);
+
+            // The tag over each picked part: its size, in the reader's unit
+            // (`PreviewStage.tsx:2295`, the `.desk .tag`).
+            paint_tags(
+                window,
+                &t,
+                &zones,
+                &landmarks,
+                &selection,
+                unit,
+                k,
+                ox,
+                oy,
+                view,
+                w,
+            );
         },
     );
     element.flex_1().min_h_0().min_w_0().into_any_element()
+}
+
+/// The tag over a picked part: the size of the part, in the reader's unit.
+///
+/// React draws it as a chip over the part (`PreviewStage.tsx:2295`,
+/// `desk.module.css` `.desk .tag`): the panel's colour on a 1 px line, a
+/// 3 px accent on its left edge, and the size in the figures face.
+fn paint_tags(
+    window: &mut Window,
+    t: &Theme,
+    zones: &[PlacedZone],
+    landmarks: &[Landmark],
+    selection: &[Sel],
+    unit: LengthUnit,
+    k: f32,
+    ox: f32,
+    oy: f32,
+    view: View,
+    stage_w: f32,
+) {
+    for sel in selection {
+        let (x, y, w, h) = match sel {
+            Sel::Zone(i) => {
+                let Some(z) = zones.get(*i) else { continue };
+                (
+                    z.x as f64 + view.pan_x,
+                    z.y as f64 + view.pan_y,
+                    z.width as f64,
+                    z.height as f64,
+                )
+            }
+            Sel::Landmark(i) => {
+                let Some(l) = landmarks.get(*i) else { continue };
+                (
+                    l.x as f64 + view.pan_x,
+                    l.y as f64 + view.pan_y,
+                    l.width as f64,
+                    l.height as f64,
+                )
+            }
+        };
+        let text = format!(
+            "{} × {}",
+            geometry::format_units(w, unit),
+            geometry::format_units(h, unit)
+        );
+        paint_tag(
+            window,
+            t,
+            &text,
+            ox + x as f32 * k,
+            oy + y as f32 * k,
+            oy + (y + h) as f32 * k,
+            stage_w,
+        );
+    }
+}
+
+/// One tag: the chip with the size in it.
+fn paint_tag(
+    window: &mut Window,
+    t: &Theme,
+    text: &str,
+    bx: f32,
+    by: f32,
+    bottom: f32,
+    stage_w: f32,
+) {
+    let hsla = gpui::Hsla::from(Theme::color(t.ink));
+    let font = label_font(true, gpui::FontWeight::NORMAL);
+    let runs = [gpui::TextRun {
+        len: text.len(),
+        font: font.clone(),
+        color: hsla,
+        background_color: None,
+        underline: None,
+        strikethrough: None,
+    }];
+    let layout = window.text_system().layout_line(text, px(14.0), &runs, None);
+    let text_w = f32::from(layout.width);
+    // The chip: the padding (6 px a side), the border (1 px) and the accent
+    // on the left (3 px).
+    let chip_w = text_w + 16.0;
+    // React keeps the tag on the desk (`clamp(b.x, 2, …)`) and puts it under
+    // the part when there is no room above it.
+    let x = bx.max(2.0).min((stage_w - chip_w - 2.0).max(2.0));
+    let mut y = by - 22.0 - 6.0;
+    if y < 2.0 {
+        y = bottom + 6.0;
+    }
+    let rect = Bounds {
+        origin: point(px(x), px(y)),
+        size: gpui::size(px(chip_w), px(22.0)),
+    };
+    let line = Theme::color(t.line_2);
+    let accent = Theme::color(t.line_2);
+    window.paint_quad(
+        gpui::fill(rect, Theme::color(t.panel)).corner_radii(gpui::Corners::all(px(4.0))),
+    );
+    window.paint_quad(
+        gpui::outline(rect, line, gpui::BorderStyle::default()).corner_radii(gpui::Corners::all(px(4.0))),
+    );
+    // The accent on the left edge, three pixels wide.
+    window.paint_quad(gpui::fill(
+        Bounds {
+            origin: point(px(x), px(y)),
+            size: gpui::size(px(3.0), px(22.0)),
+        },
+        accent,
+    ));
+    // The size, in the figures face, in the middle of the chip.
+    let baseline = y + 11.0 + f32::from(layout.ascent) / 2.0 - 1.0;
+    for run in &layout.runs {
+        for glyph in &run.glyphs {
+            let at = point(
+                px(x + 7.0 + f32::from(glyph.position.x)),
+                px(baseline + f32::from(glyph.position.y)),
+            );
+            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(14.0), hsla);
+        }
+    }
 }
 
 /// The snap guides (rose, `--a4`), the marquee band and the drag readout.
@@ -476,9 +613,12 @@ fn paint_selection_frame(
             gpui::BorderStyle::default(),
         ));
     }
-    // Stem + grip.
+    // Stem + grip. The stem hangs from the top edge of the box, not from its
+    // middle (React's `.stem` is `top: -24px; height: 24px` inside the
+    // frame's own box), so it never draws a line across the part.
+    let (sx, sy) = rotate(0.0, -height / 2.0);
     let (gx, gy) = rotate(0.0, -height / 2.0 - 24.0);
-    paint_line(window, cx, cy, gx, gy, 1.5, t.live());
+    paint_line(window, sx, sy, gx, gy, 1.5, t.live());
     window.paint_quad(gpui::fill(
         Bounds {
             origin: point(px(gx - 5.5), px(gy - 5.5)),
@@ -727,8 +867,11 @@ fn paint_furniture(
     }
     for m in &marks {
         if m.at <= EFFECT_H + 0.001 && m.major {
-            // The left-hand numbers stand on their side.
-            paint_text_rotated(
+            // The left-hand numbers stand on their side in React. gpui 0.2.2
+            // paints a glyph without a transform, so a turned digit is not
+            // reachable from the canvas: the digits go upright, in one line,
+            // in the same place and at the same size.
+            paint_text_ruler_left(
                 window,
                 &m.label,
                 left + (BAND_PX - 2.0) / k,
@@ -801,11 +944,17 @@ fn paint_text(
     }
 }
 
-/// The ruler's numbers on the left edge, turned on their side.
+/// The ruler's numbers on the left edge.
 ///
 /// React turns them with `rotate(-90 …)` and anchors them at their end, so
-/// the text runs up the edge from the mark.
-fn paint_text_rotated(
+/// the figures read up the edge from the mark. gpui 0.2.2 paints a glyph
+/// without a transform, so a turned digit is not reachable from the canvas:
+/// the figures are drawn upright, in one line, at the same size and in the
+/// same place as the turned ones - the ink of the turned figures is a band
+/// from the anchor down the edge, and the upright ones take that band's
+/// place. The residue is that the line is wider than the turned figures and
+/// reads across the edge instead of up it.
+fn paint_text_ruler_left(
     window: &mut Window,
     text: &str,
     x: f32,
@@ -824,14 +973,21 @@ fn paint_text_rotated(
         strikethrough: None,
     }];
     let layout = window.text_system().layout_line(text, px(size), &runs, None);
-    // The text is anchored at its end, so it starts `width` to the left.
-    let width = layout.width;
+    let width = f32::from(layout.width);
+    let ascent = f32::from(layout.ascent);
+    let descent = f32::from(layout.descent);
+    // The turned figures sit between the anchor and the anchor plus their
+    // own width, and they are as tall as the font's ascent. The upright line
+    // takes that band: its baseline is the band's lower edge less the
+    // descent, and its left edge is the anchor less the ascent.
+    let baseline = y + width - descent;
+    let left = x - ascent;
     for run in &layout.runs {
         for glyph in &run.glyphs {
-            // A turn of -90 degrees: (dx, dy) becomes (dy, -dx).
-            let gx = f32::from(glyph.position.y);
-            let gy = -(f32::from(glyph.position.x) - f32::from(width));
-            let at = point(px(x + gx), px(y + gy));
+            let at = point(
+                px(left + f32::from(glyph.position.x)),
+                px(baseline + f32::from(glyph.position.y)),
+            );
             let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
         }
     }

@@ -362,6 +362,24 @@ async function shootOnboarding(page, base, viewport, theme, step, daemonBase, to
     if (!(await clickPrimary())) break;
   }
   await page.waitForTimeout(600);
+  // The hello wave plays on the lights from the Hello screen onwards: it
+  // takes two seconds to cross the PC and then holds a steady glow. The two
+  // shots have to show the same light, and the wave's phase is a property
+  // of when each capture is taken, so both wait for it to settle: the glow
+  // is the same whatever moment the wave started at. The Finish screen
+  // plays the sweep instead, and its shot lands on the band while it is
+  // crossing, so that screen is not waited for.
+  if (step !== "finish") {
+    await page.waitForTimeout(4500);
+  }
+  // The pointer is left where the last click put it, so the key it clicked is
+  // caught in its hover colour and the part under it carries a name tag. The
+  // GPUI's capture never clicks anything, so the pairs would measure the
+  // hover state against the resting state. Park the pointer off the key (the
+  // top-left corner, over the header, where nothing is clickable) and let the
+  // hover transition finish before the shot.
+  await page.mouse.move(0, 0);
+  await page.waitForTimeout(400);
   await page.screenshot({ path: filePath });
   return { view: `onboarding-${step}`, path: "/", viewport: { width: viewport.w, height: viewport.h }, theme, file: fileName, pageErrors: [], consoleErrors: [], apiFailures: [], slowThumbnails: [], requestFailures: [], notLoaded: [] };
 }
@@ -435,6 +453,9 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
     await page.waitForTimeout(400);
   }
   const filePath = path.join(OUT_DIR, fileName);
+  // Park the pointer off any key, so a shot is the resting state and not a
+  // hover state (the onboarding capture clicks through the flow).
+  await page.mouse.move(0, 0);
   await page.screenshot({ path: filePath });
   page.off("pageerror", onPageError);
   page.off("console", onConsole);
