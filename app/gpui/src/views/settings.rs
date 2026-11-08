@@ -2286,7 +2286,7 @@ impl SettingsView {
             // ("AUDIO SOURCE" tracked, about 105 px) keeps its width and
             // the select takes the rest, clamped [160, 300]: a content-sized
             // flex_1 let the select overlap the title at 390.
-            let select_w = (inner_w - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0);
+            let select_w = (inner_w - 2.0 - AUDIO_TITLE_W - 12.0).clamp(160.0, 300.0);
             let select = self.audio_select("settings-audio-select", true, cx);
             let head_actions = div()
                 .flex_none()
@@ -2378,7 +2378,9 @@ impl SettingsView {
                 .flex()
                 .flex_col()
                 .px(px(pad))
-                .py_2()
+                // React: `.audio-compact` padding-block 8 loses to the
+                // phone `.panel` padding (12) declared later in app.css.
+                .py(px(if pad <= 12.0 { 12.0 } else { 8.0 }))
                 .r_lg()
                 .border_1()
                 .border_color(Theme::color(t.line))

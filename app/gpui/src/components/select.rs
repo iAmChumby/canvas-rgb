@@ -200,6 +200,26 @@ pub fn select_grouped(
         let label = if *v == value { label } else { label.invisible() };
         value_grid = value_grid.child(label);
     }
+    // React `.select-value` + `.one-line`: in a trigger of known width a value
+    // wider than the room truncates with an ellipsis. The stacked grid above
+    // only exists to give a shrink-wrapped trigger the widest label's width, so
+    // a full-width trigger shows just the picked label. No `whitespace_nowrap`:
+    // gpui only measures a truncation width for wrapping text and caches the
+    // first (untruncated) measure of a nowrap one.
+    let value_el = if full_width {
+        let picked = flat.iter().find(|(v, _)| *v == value).map(|(_, l)| l.to_string()).unwrap_or_default();
+        div()
+            .flex_1()
+            .min_w(px(0.0))
+            .overflow_hidden()
+            .text_ellipsis()
+            .text_left()
+            .font_weight(gpui::FontWeight::MEDIUM)
+            .child(picked)
+            .into_any_element()
+    } else {
+        value_grid.into_any_element()
+    };
     let trigger = div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
@@ -226,7 +246,7 @@ pub fn select_grouped(
             Theme::color(t.raised),
             if open { t.live() } else { Theme::color(t.line_2) },
         ))
-        .child(value_grid)
+        .child(value_el)
         .child(
             gpui::svg()
                 .path("icons/CaretDown-bold.svg")
