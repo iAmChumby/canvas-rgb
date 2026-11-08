@@ -1,5 +1,5 @@
 //! The desk's geometry, ported from `app/web/src/lib/zones.ts` (and the
-//! case tables in `lib/caseForms.ts`, in `case_forms.rs` beside this).
+//! case tables in `lib/caseForms.ts`: `case_dims` below is `caseDimsFor`).
 //!
 //! The canvas is 320 x 200 units: a placed zone is a rectangle in that space,
 //! and its LEDs sit inside the rectangle at the places the engine samples
@@ -9,6 +9,11 @@
 //! The tests at the bottom pin the numbers React's own code produces for the
 //! demo desk (`openrgb:mb#3`, `openrgb:kb#0`, `openrgb:mic#0`,
 //! `openrgb:dram-a#0`, `openrgb:dram-b#0`).
+//!
+//! Pure geometry, most of it exercised by the tests below and not yet by the
+//! round-2 interactions (drag, resize, reshape), so the module allows dead
+//! code the way the other views' geometry does.
+#![allow(dead_code)]
 
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::layout::{PartKind, PlacedZone, ZoneShape};
@@ -403,6 +408,51 @@ pub fn canvas_cell(t: &ZoneTransform, led: &LocalLed) -> CanvasCell {
     }
 }
 
+/// The desk rule: where the case stands and the peripherals sit
+/// (`DESK_Y` in `lib/caseForms.ts`).
+pub const DESK_Y: f64 = 152.0;
+
+/// The measurements of a case form, in canvas units (`caseDimsFor` in
+/// `lib/caseForms.ts`): real sizes at the desk's one scale (4 mm to a unit,
+/// so a 120 mm fan is 30 units in every case), standing on the desk rule in
+/// the middle of the canvas. `"none"` has no case.
+pub fn case_dims(form: canvas_proto::layout::CaseForm) -> Option<(f64, f64, f64, f64)> {
+    use canvas_proto::layout::CaseForm;
+    let mm = |v: f64| (v / MM_PER_UNIT).round();
+    let (h_mm, d_mm) = match form {
+        CaseForm::None => return None,
+        CaseForm::FullTower => (584.0, 576.0),
+        CaseForm::MidTower => (480.0, 488.0),
+        CaseForm::SmallFormFactor => (368.0, 336.0),
+        CaseForm::OpenFrame => (472.0, 480.0),
+    };
+    let w = mm(d_mm);
+    let h = mm(h_mm);
+    Some((160.0 - w / 2.0, DESK_Y - 3.0 - h, w, h))
+}
+
+/// The case box a saved form draws as (`caseLandmarkFor` in
+/// `lib/caseForms.ts`): the same measurements, as a landmark the owner can
+/// drag and resize. A layout saved before landmarks existed has a form and no
+/// box.
+pub fn case_landmark_for(
+    form: canvas_proto::layout::CaseForm,
+) -> Option<canvas_proto::layout::Landmark> {
+    let (x, y, width, height) = case_dims(form)?;
+    Some(canvas_proto::layout::Landmark {
+        kind: canvas_proto::layout::PartKind::Case,
+        x: x as f32,
+        y: y as f32,
+        width: width as f32,
+        height: height as f32,
+        rotation_deg: 0.0,
+        facing: canvas_proto::layout::Facing::Viewer,
+        visible: true,
+        label: None,
+        locked: false,
+    })
+}
+
 /// The shape a zone gets when it is first placed: fans are rings, RAM and
 /// ARGB headers are strips, a single-LED peripheral is a point and a matrix
 /// keeps its map.
@@ -474,7 +524,7 @@ pub fn reshape_box(z: &PlacedZone, shape: &ZoneShape) -> ReshapedBox {
     }
     if nw == w && nh == h {
         return ReshapedBox {
-            shape: shape.clone(),
+            shape: *shape,
             width: w,
             height: h,
             x: z.x as f64,
@@ -484,7 +534,7 @@ pub fn reshape_box(z: &PlacedZone, shape: &ZoneShape) -> ReshapedBox {
     let cx = z.x as f64 + w / 2.0;
     let cy = z.y as f64 + h / 2.0;
     ReshapedBox {
-        shape: shape.clone(),
+        shape: *shape,
         width: nw,
         height: nh,
         x: (cx - nw / 2.0).clamp(0.0, CANVAS_W - nw),
@@ -649,8 +699,7 @@ fn header_word(name: &str) -> Option<&'static str> {
         ("JPUMP", "Pump header"),
     ];
     for (prefix, word) in known {
-        if rest.starts_with(prefix) {
-            let tail = &rest[prefix.len()..];
+        if let Some(tail) = rest.strip_prefix(prefix) {
             if tail.is_empty() || tail.chars().all(|c| c.is_ascii_digit()) {
                 return Some(word);
             }
@@ -1097,6 +1146,21 @@ mod tests {
             default_rect(&header, DeviceKind::Motherboard, &ZoneShape::Strip),
             (120.0, 10.0)
         );
+    }
+
+    #[test]
+    fn the_case_forms_are_the_real_sizes_at_the_desk_scale() {
+        use canvas_proto::layout::CaseForm;
+        // Mid tower: 480 x 488 mm at 4 mm to the unit, standing on the desk
+        // rule (152) in the middle of the canvas.
+        assert_eq!(case_dims(CaseForm::MidTower), Some((99.0, 29.0, 122.0, 120.0)));
+        assert_eq!(case_dims(CaseForm::FullTower), Some((88.0, 3.0, 144.0, 146.0)));
+        assert_eq!(case_dims(CaseForm::SmallFormFactor), Some((118.0, 57.0, 84.0, 92.0)));
+        assert_eq!(case_dims(CaseForm::OpenFrame), Some((100.0, 31.0, 120.0, 118.0)));
+        assert_eq!(case_dims(CaseForm::None), None);
+        let case = case_landmark_for(CaseForm::MidTower).expect("a mid tower");
+        assert_eq!(case.kind, PartKind::Case);
+        assert_eq!((case.x, case.y, case.width, case.height), (99.0, 29.0, 122.0, 120.0));
     }
 
     #[test]

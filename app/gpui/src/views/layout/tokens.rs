@@ -9,7 +9,10 @@ use gpui::Rgba;
 
 use crate::theme::Theme;
 
-/// The desk's colours, for one theme.
+/// The desk's colours, for one theme. Every token is the CSS value, even
+/// when the round-1 desk does not paint it yet (the case badge, the part
+/// line): the table stays complete for round 2.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy)]
 pub struct DeskTokens {
     /// The plate a zone's outline sits on.

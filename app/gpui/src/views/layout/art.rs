@@ -97,6 +97,7 @@ fn quad(x1: f32, y1: f32, cx: f32, cy: f32, x2: f32, y2: f32) -> Stroke {
 }
 
 /// A curve: a start, two control points and an end (SVG's `C`).
+#[allow(clippy::too_many_arguments)]
 fn cubic(
     x1: f32,
     y1: f32,
@@ -357,7 +358,3 @@ pub fn paint(
     window.paint_path(path, stroke);
 }
 
-/// The part's drawing, for the layout's own tests: how many strokes it has.
-pub fn strokes_for(kind: PartKind, facing: Facing) -> usize {
-    art(kind, facing).len()
-}

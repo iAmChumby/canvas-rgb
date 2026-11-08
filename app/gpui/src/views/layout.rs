@@ -31,7 +31,7 @@ use crate::components::button::{Variant, button_icon, icon_button};
 use crate::components::panel::panel_with_padding;
 use crate::components::segmented::segmented;
 use crate::theme::{Theme, TokenRadius};
-use crate::views::layout::geometry::{LengthUnit, format_units};
+use crate::views::layout::geometry::LengthUnit;
 use crate::views::layout::preview::PreviewFeed;
 use crate::views::layout::stage::{DeskInput, Sel, StageMode, desk_with_hint, hero_view};
 use crate::views::layout::tokens::DeskTokens;
@@ -112,7 +112,6 @@ impl LayoutView {
 
     /// `GET /api/v1/layouts` and `GET /api/v1/devices`, off the UI thread.
     fn load(&mut self, cx: &mut Context<Self>) {
-        let started = std::time::Instant::now();
         let bg = cx.background_executor().spawn(async move {
             let client = DaemonClient::new();
             let layouts = client.get("/api/v1/layouts");
@@ -121,15 +120,6 @@ impl LayoutView {
         });
         cx.spawn(async move |view, cx| {
             let (layouts, devices) = bg.await;
-            let _ = std::fs::write(
-                "C:/Users/Luke/AppData/Local/Temp/opencode/layout-load.txt",
-                format!(
-                    "took {:?} layouts={:?} devices={:?}",
-                    started.elapsed(),
-                    layouts.as_ref().map(|b| b.len()),
-                    devices.as_ref().map(|b| b.len())
-                ),
-            );
             let _ = view.update(cx, |this, cx| {
                 match layouts {
                     Ok(body) => match serde_json::from_str::<LayoutsResponse>(&body) {
@@ -322,13 +312,19 @@ fn locale_region() -> Option<String> {
         if len <= 0 {
             return None;
         }
-        let name = String::from_utf16_lossy(&buf[..len as usize]);
+        // The return includes the null terminator: "en-US" is 6 with the
+        // terminating zero, and the region must not carry it.
+        let mut end = len as usize;
+        if end > 0 && buf[end - 1] == 0 {
+            end -= 1;
+        }
+        let name = String::from_utf16_lossy(&buf[..end]);
         // The region is the tag after the language: "en-US" -> "US".
         let parts: Vec<&str> = name.split(['-', '_']).collect();
         let region = parts
             .get(1)
             .filter(|part| part.len() == 2 && part.chars().all(|c| c.is_ascii_alphabetic()))?;
-        return Some(region.to_string());
+        Some(region.to_string())
     }
     #[cfg(not(windows))]
     None
@@ -374,7 +370,7 @@ pub fn inspector_width(container: f32) -> f32 {
 /// desk are the switcher and the bar; on a desktop the column is the page's
 /// own height and the bar is one row.
 pub fn desk_size(
-    window_w: f32,
+    _window_w: f32,
     window_h: f32,
     container: f32,
     inspector_w: f32,
@@ -386,7 +382,7 @@ pub fn desk_size(
         container - inspector_w - 16.0 - 2.0
     };
     let height = if one_column {
-        // The desk's column is 46 vh; the switcher and the bar are under it.
+        // The desk's column is 46 vh; the bar wraps to two rows under it.
         window_h * 0.46 - 32.0 - 2.0 - 91.0
     } else {
         // The strip, the page's padding and the bar.
@@ -532,6 +528,7 @@ pub fn render_page(
     let desk_input = DeskInput {
         zones: layout.zones.clone(),
         landmarks: layout.landmarks.clone(),
+        case_form: layout.case_form,
         devices: devices.clone(),
         unit: view.unit,
         mode: view.mode,
@@ -552,26 +549,30 @@ pub fn render_page(
         .overflow_hidden()
         .child(desk_with_hint(&t, &colours, desk_input, true))
         .child(stage_toolbar(view, &t, container, phone, cx));
-    let mut stage_column = div()
-        .flex()
-        .flex_col()
-        .flex_1()
-        .min_w_0()
-        .min_h_0()
-        .child(frame);
+    let mut stage_column = if one_column {
+        // The stage column is 46 vh tall on a phone (`.rd-lay-stage` at the
+        // 639 px container query); the frame inside it takes the rest. It
+        // cannot carry `flex_1`: that sets a zero flex basis, and the
+        // explicit height would lose.
+        div().flex().flex_col().min_w_0().min_h_0().child(frame)
+    } else {
+        div().flex().flex_col().flex_1().min_w_0().min_h_0().child(frame)
+    };
+    if one_column {
+        stage_column = stage_column.flex_none().flex_basis(px(view.height * 0.46));
+    }
     if one_column {
         stage_column = stage_column.child(phone_switcher(view, &t, cx));
     }
 
-    // The inspector: the unfinished work first, then the parts.
-    let inspector = div()
-        .flex()
-        .flex_col()
-        .gap_4()
-        .min_w_0()
-        .min_h_0()
-        .w(px(inspector_w))
-        .child(if one_column && view.phone_pane != PhonePane::Place {
+    // The inspector: the unfinished work first, then the parts. On a phone
+    // it is the full width of the page, not a fixed column.
+    let inspector = if one_column {
+        div().flex().flex_col().gap_4().min_w_0().min_h_0().w_full()
+    } else {
+        div().flex().flex_col().gap_4().min_w_0().min_h_0().w(px(inspector_w))
+    }
+    .child(if one_column && view.phone_pane != PhonePane::Place {
             div().hidden().into_any_element()
         } else {
             place_panel(view, &t, &devices, &layout)
@@ -1058,6 +1059,7 @@ fn parts_panel(
             .gap(px(8.0))
             .min_w(px(0.0))
             .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(Theme::color(t.ink))
             .child(
                 gpui::svg()
                     .path(format!("icons/{}.svg", row.icon))
@@ -1081,21 +1083,26 @@ fn parts_panel(
                 Some(n) => format!("{n}"),
                 None => "—".to_string(),
             });
-        body = body.child(
-            div()
-                .flex()
-                .items_center()
-                .gap(px(12.0))
-                .w_full()
-                .min_h(px(if one_column { 32.0 } else { 52.0 }))
-                .px(px(12.0))
-                .py(px(if one_column { 4.0 } else { 8.0 }))
-                .border_b_1()
-                .border_color(Theme::color(t.line))
-                .child(title)
-                .child(div().flex_1().min_w(px(0.0)).child(sub))
-                .child(count),
-        );
+        // The row is three columns (React `.row-button` grid): the title, the
+        // sub-line, and the count. On a phone the sub-line is hidden
+        // (`.row-sub` at the 639 px container query), and the grid collapses:
+        // the count moves up next to the title.
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(px(12.0))
+            .w_full()
+            .min_h(px(if one_column { 32.0 } else { 52.0 }))
+            .px(px(12.0))
+            .py(px(if one_column { 4.0 } else { 8.0 }))
+            .border_b_1()
+            .border_color(Theme::color(t.line))
+            .child(title);
+        if !one_column {
+            row = row.child(div().flex_1().min_w(px(0.0)).child(sub));
+        }
+        row = row.child(count);
+        body = body.child(row);
     }
     let panel = panel_with_padding(t, "lay-parts", "Parts", actions, body, None);
     let panel = if one_column {
@@ -1154,11 +1161,6 @@ fn render_panel(view: &mut LayoutView, t: &Theme) -> gpui::AnyElement {
         ));
     let panel = panel_with_padding(t, "lay-render", "Render", div(), body, None);
     panel.into_any_element()
-}
-
-/// The size of a part, in the reader's unit (`formatUnits`).
-pub fn part_size(units: f32, unit: LengthUnit) -> String {
-    format_units(units as f64, unit)
 }
 
 impl Render for LayoutView {

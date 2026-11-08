@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- The Layout page in the GPUI editor (round 1, static): the desk at parity with the React editor — the stage with its grid, rulers and desk rule, every placed part's outline and drawing, the LEDs' cells in the colours they read from the daemon's preview, the derived case drawn from its form, the "To place" and "Parts" panels with the cm/in unit switch, and the desk's bottom bar (mode, render scale, sampling, zoom). Every React breakpoint applies, including the phone layout. Dragging, resizing and keyboard nudges are round 2. (#213)
 - Command palette (Ctrl+K, or the strip's search button) in the GPUI editor: the short list (status, pages, lights, running/favourite effects), the full searchable list with group headings, arrow-key highlight that skips status rows, Enter/click to run, backdrop click and Escape to close. "Switch the theme" and "Toggle interface motion" cycle the Appearance prefs; "Pause/Resume the lights" and "Run <effect>" go through the existing output PATCH and effect activate POST. (#211)
 
 - Effects: the Effects library in the GPUI editor (gallery with thumbnails, categories and search, the preset keys, every property control, the new-from-code chooser). Opening an effect for editing still says "Not ported yet" — that is issue #214. (#210)

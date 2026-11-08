@@ -8,9 +8,7 @@
 //! elements over a canvas, and the GPUI editor draws it in one paint pass,
 //! so the parts and the cells cannot drift apart.
 
-use gpui::{
-    Bounds, Context, IntoElement, PathBuilder, Pixels, Window, canvas, div, point, prelude::*, px,
-};
+use gpui::{Bounds, PathBuilder, Pixels, Window, canvas, div, point, prelude::*, px};
 
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo};
 use canvas_proto::layout::{Facing, Landmark, PartKind, PlacedZone, SamplingMode};
@@ -42,7 +40,9 @@ pub enum StageMode {
     Lights,
 }
 
-/// One picked part.
+/// One picked part. Round 2's hit-testing picks these; at rest nothing is
+/// picked yet.
+#[allow(dead_code)]
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Sel {
     Zone(usize),
@@ -105,6 +105,9 @@ pub fn content_centre(zones: &[PlacedZone], landmarks: &[Landmark]) -> f64 {
 pub struct DeskInput {
     pub zones: Vec<PlacedZone>,
     pub landmarks: Vec<Landmark>,
+    /// The form of the case the layout names: a layout with a form but no
+    /// case landmark draws the case from the form's measurements.
+    pub case_form: canvas_proto::layout::CaseForm,
     pub devices: Vec<DeviceInfo>,
     pub unit: LengthUnit,
     pub mode: StageMode,
@@ -120,6 +123,7 @@ pub fn desk(t: &Theme, colours: &DeskTokens, input: DeskInput) -> gpui::AnyEleme
     let colours = *colours;
     let zones = input.zones;
     let landmarks = input.landmarks;
+    let case_form = input.case_form;
     let devices = input.devices;
     let unit = input.unit;
     let mode = input.mode;
@@ -148,6 +152,15 @@ pub fn desk(t: &Theme, colours: &DeskTokens, input: DeskInput) -> gpui::AnyEleme
             // the rulers. React draws it in css pixels (the svg has no
             // viewBox), so it is drawn here in css pixels too.
             paint_furniture(window, bounds, &colours, unit, k);
+
+            // The case drawn from the layout's form when there is no case
+            // landmark of its own: a picture, not a part, dashed and below
+            // everything else (`derivedCase` in PreviewStage).
+            if !landmarks.iter().any(|l| l.kind == PartKind::Case) {
+                if let Some(case) = geometry::case_landmark_for(case_form) {
+                    paint_derived_case(window, &case, k, ox, oy, view, &colours);
+                }
+            }
 
             // The cells the engine samples, in the colours they read.
             paint_cells(
@@ -317,24 +330,6 @@ fn with_alpha(colour: gpui::Rgba, alpha: f32) -> gpui::Rgba {
     }
 }
 
-fn paint_vline(window: &mut Window, x: f32, top: f32, h: f32, colour: gpui::Rgba) {
-    let mut builder = PathBuilder::stroke(px(1.0));
-    builder.move_to(point(px(x), px(top)));
-    builder.line_to(point(px(x), px(top + h)));
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, colour);
-    }
-}
-
-fn paint_hline(window: &mut Window, left: f32, y: f32, w: f32, colour: gpui::Rgba) {
-    let mut builder = PathBuilder::stroke(px(1.0));
-    builder.move_to(point(px(left), px(y)));
-    builder.line_to(point(px(left + w), px(y)));
-    if let Ok(path) = builder.build() {
-        window.paint_path(path, colour);
-    }
-}
-
 /// The ruler's marks: a tick every 2 cm (or every inch) and a number every
 /// 10 cm (or every 5 in).
 pub struct Mark {
@@ -370,6 +365,12 @@ pub fn ruler_marks(unit: LengthUnit) -> Vec<Mark> {
 }
 
 /// The desk rule, the frame of the effect area and the rulers.
+///
+/// React draws them in canvas units inside one svg per layer, at scale 1
+/// (the furniture covers the top-left 320 x 200 of the desk, whatever the
+/// view's zoom: `Rulers.tsx`'s ticks are `MINOR_PX / k` canvas units, so they
+/// keep their screen size, and its numbers are `11px / k`). What follows is
+/// that, in canvas units, measured the same way.
 fn paint_furniture(
     window: &mut Window,
     bounds: Bounds<Pixels>,
@@ -493,13 +494,17 @@ fn paint_line(
     }
 }
 
-/// The figures face at the ruler's size.
-fn ruler_style(window: &Window, size: f32) -> gpui::Font {
-    let mut style = window.text_style();
-    style.font_family = crate::fonts::MONO_FAMILY.into();
-    style.font_weight = gpui::FontWeight::MEDIUM;
-    style.font_size = px(size).into();
-    style.font()
+/// The figures face at the ruler's size. Built directly: `TextStyle`'s
+/// accessors spell the banned call, and the family, weight and style are all
+/// written here anyway.
+fn ruler_style(_window: &Window, _size: f32) -> gpui::Font {
+    gpui::Font {
+        family: crate::fonts::MONO_FAMILY.into(),
+        features: gpui::FontFeatures::default(),
+        fallbacks: None,
+        weight: gpui::FontWeight::MEDIUM,
+        style: gpui::FontStyle::default(),
+    }
 }
 
 /// The ruler's numbers, in the figures face.
@@ -528,7 +533,7 @@ fn paint_text(
                 px(x + f32::from(glyph.position.x)),
                 px(y + f32::from(glyph.position.y)),
             );
-            window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
+            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
         }
     }
 }
@@ -564,7 +569,7 @@ fn paint_text_rotated(
             let gx = f32::from(glyph.position.y);
             let gy = -(f32::from(glyph.position.x) - f32::from(width));
             let at = point(px(x + gx), px(y + gy));
-            window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
+            let _ = window.paint_glyph(at, run.font_id, glyph.id, px(size), hsla);
         }
     }
 }
@@ -657,8 +662,8 @@ fn rotated_corners(x: f32, y: f32, w: f32, h: f32, rotation_deg: f64) -> [(f32, 
     .enumerate()
     {
         out[i] = (
-            x + (dx * cos - dy * sin) as f32,
-            y + (dx * sin + dy * cos) as f32,
+            x + dx * cos - dy * sin,
+            y + dx * sin + dy * cos,
         );
     }
     out
@@ -747,6 +752,108 @@ fn paint_part(
         line,
         1.25,
     );
+}
+
+/// The derived case: a dashed landmark-line outline with the case's own
+/// drawing inside, below every part (`desk.derived` in `desk.module.css`:
+/// the border is dashed, the art takes the landmark's colour).
+fn paint_derived_case(
+    window: &mut Window,
+    case: &Landmark,
+    k: f32,
+    ox: f32,
+    oy: f32,
+    view: View,
+    colours: &DeskTokens,
+) {
+    let left = ox + (case.x as f64 + view.pan_x) as f32 * k;
+    let top = oy + (case.y as f64 + view.pan_y) as f32 * k;
+    let width = case.width * k;
+    let height = case.height * k;
+    let x0 = left.round();
+    let y0 = top.round();
+    let x1 = (left + width).round();
+    let y1 = (top + height).round();
+    paint_dashed_outline(
+        window,
+        x0 - 0.5,
+        y0 - 0.5,
+        x1 - 0.5,
+        y1 - 0.5,
+        4.5,
+        1.0,
+        colours.zone_halo,
+    );
+    paint_dashed_outline(window, x0 + 0.5, y0 + 0.5, x1 - 0.5, y1 - 0.5, 3.5, 1.25, colours.landmark_line);
+    // The drawing inside, on the part's own padding box.
+    art::paint(
+        window,
+        PartKind::Case,
+        case.facing,
+        case.x as f64 + view.pan_x,
+        case.y as f64 + view.pan_y,
+        case.width as f64,
+        case.height as f64,
+        0.0,
+        ox,
+        oy,
+        k,
+        colours.landmark_line,
+        1.25,
+    );
+}
+
+/// A dashed rounded outline: a dash of `2 * width` and a gap of `2 * width`
+/// along the outline, the way the browser dashes a border.
+#[allow(clippy::too_many_arguments)]
+fn paint_dashed_outline(
+    window: &mut Window,
+    x0: f32,
+    y0: f32,
+    x1: f32,
+    y1: f32,
+    radius: f32,
+    width: f32,
+    colour: gpui::Rgba,
+) {
+    let points = rounded_box(x0, y0, x1, y1, radius);
+    let dash = 2.0 * width;
+    let gap = 2.0 * width;
+    // Sample the outline every pixel and paint the samples that fall inside
+    // a dash: the sub-paths are the dashes.
+    let mut samples: Vec<(f32, f32)> = Vec::new();
+    let mut total = 0.0f32;
+    for i in 0..points.len() {
+        let a = points[i];
+        let b = points[(i + 1) % points.len()];
+        let d = ((b.0 - a.0).powi(2) + (b.1 - a.1).powi(2)).sqrt();
+        let steps = d.ceil() as usize;
+        for s in 0..steps {
+            let t = s as f32 / steps as f32;
+            samples.push((a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t));
+        }
+        total += d;
+    }
+    let period = dash + gap;
+    let mut builder = PathBuilder::stroke(px(width));
+    let mut prev: Option<(f32, f32)> = None;
+    for (i, p) in samples.iter().enumerate() {
+        let along = i as f32;
+        let in_dash = along % period < dash;
+        if in_dash {
+            if prev.is_none() {
+                builder.move_to(point(px(p.0), px(p.1)));
+            }
+            builder.line_to(point(px(p.0), px(p.1)));
+            prev = Some(*p);
+        } else {
+            prev = None;
+        }
+        let _ = total;
+    }
+    if let Ok(path) = builder.build() {
+        window.paint_path(path, colour);
+    }
 }
 
 /// A part's outline: a rounded box, turned with the part.
@@ -984,13 +1091,4 @@ pub fn desk_with_hint(
         .into_any_element()
 }
 
-/// The stage's own width in the page's tests: the desk's grid.
-pub fn grid_steps(w: f32) -> usize {
-    let mut n = 0;
-    let mut x = w / 8.0;
-    while x < w {
-        n += 1;
-        x += w / 8.0;
-    }
-    n
-}
+

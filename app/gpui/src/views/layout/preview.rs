@@ -10,6 +10,10 @@
 //! the dependency ledger stays as it is. The handshake's `Sec-WebSocket-Accept`
 //! is not checked: the daemon is on the loopback, the token is in the query,
 //! and the frames that arrive are checked by the daemon's own token check.
+//!
+//! Round 1 draws the desk at rest; the feed's error and liveness helpers are
+//! for the preview states round 2 names, so this module allows dead code.
+#![allow(dead_code)]
 
 use std::io::{Read, Write};
 use std::net::TcpStream;
@@ -276,7 +280,7 @@ fn random_key() -> [u8; 16] {
 fn base64(bytes: &[u8]) -> String {
     const ALPHABET: &[u8; 64] =
         b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
-    let mut out = String::with_capacity((bytes.len() + 2) / 3 * 4);
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
     for chunk in bytes.chunks(3) {
         let b0 = chunk[0] as u32;
         let b1 = *chunk.get(1).unwrap_or(&0) as u32;
@@ -305,12 +309,12 @@ mod tests {
     #[test]
     fn a_frame_is_read_from_its_header_and_its_bytes() {
         let mut payload = Vec::new();
-        payload.extend_from_slice(&320u16.to_le_bytes());
-        payload.extend_from_slice(&200u16.to_le_bytes());
+        payload.extend_from_slice(&2u16.to_le_bytes());
+        payload.extend_from_slice(&1u16.to_le_bytes());
         payload.extend_from_slice(&[1, 2, 3, 4, 5, 6]);
         let frame = parse_frame(&payload).expect("a frame");
-        assert_eq!(frame.width, 320);
-        assert_eq!(frame.height, 200);
+        assert_eq!(frame.width, 2);
+        assert_eq!(frame.height, 1);
         assert_eq!(frame.rgb, vec![1, 2, 3, 4, 5, 6]);
         assert_eq!(frame.at(0, 0), Some([1, 2, 3]));
         assert_eq!(frame.at(1, 0), Some([4, 5, 6]));
