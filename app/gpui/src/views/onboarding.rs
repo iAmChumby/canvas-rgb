@@ -765,7 +765,13 @@ fn step_head(t: Theme, kicker: Option<String>, title: gpui::AnyElement, lead: Op
                 .font_family(crate::fonts::UI_FAMILY)
                 .text_color(Theme::color(t.dim))
                 .child(l.to_string())
-                .min_w(px(0.0)),
+                .min_w(px(0.0))
+                // The browser does not count the space at the end of a line
+                // when it breaks one; the GPUI's text layout does, and a word
+                // that fits on the browser's line does not fit here. Four
+                // pixels of room (the font's own space) put the breaks
+                // back where the browser puts them.
+                .mr(px(-4.0)),
         );
     }
     col.into_any_element()
@@ -806,6 +812,11 @@ fn hint(t: Theme, text: &str) -> gpui::AnyElement {
         .text_color(Theme::color(t.mute))
         .child(text.to_string())
         .min_w(px(0.0))
+        // The browser does not count the space at the end of a line when it
+        // breaks one; the GPUI's text layout does, and a word that fits on
+        // the browser's line does not fit here. Four pixels of room (the
+        // font's own space) put the breaks back where the browser puts them.
+        .mr(px(-4.0))
         .into_any_element()
 }
 

@@ -246,17 +246,21 @@ foreach ($theme in $Themes) {
           Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
           exit 3
         }
-        # Settle, measured: probe the frame every 500 ms until two probes in
-        # a row are identical (painted and stable) AND at least 6 s have
+        # Settle, measured: probe the frame every 500 ms until several probes
+        # in a row are identical (painted and stable) AND at least 8 s have
         # passed since the window appeared. The minimum matters: the
         # "Daemon connecting" frame is itself stable, so stability alone
-        # shot it. 6 s covers the editor's first daemon fetch with margin:
+        # shot it. 8 s covers the editor's first daemon fetch with margin:
         # the onboarding only opens when the layout, the devices and the
         # status are all in, and a shot taken before that shows the Layout
         # page reading the layout instead of the takeover (#212).
-        $settleDeadline = (Get-Date).AddSeconds(20)
+        # Three probes in a row (1 s of stillness) also skips the one frame
+        # in which the takeover has opened but the shell has not redrawn its
+        # own chrome yet: that frame is stable too, and it is wrong.
+        $settleDeadline = (Get-Date).AddSeconds(30)
         $appearedAt = Get-Date
         $prevSum = $null
+        $sameCount = 0
         while ((Get-Date) -lt $settleDeadline) {
           Start-Sleep -Milliseconds 500
           $proc.Refresh()
@@ -267,7 +271,8 @@ foreach ($theme in $Themes) {
           $ch = $rect.Bottom - $rect.Top
           if ($cw -le 0 -or $ch -le 0) { continue }
           $sum = Get-ShotChecksum $handle $cw $ch
-          if ($null -ne $prevSum -and $sum -eq $prevSum -and ((Get-Date) - $appearedAt).TotalSeconds -ge 6) { break }
+          if ($null -ne $prevSum -and $sum -eq $prevSum) { $sameCount++ } else { $sameCount = 0 }
+          if ($sameCount -ge 2 -and ((Get-Date) - $appearedAt).TotalSeconds -ge 8) { break }
           $prevSum = $sum
         }
         $rect = New-Object Win32Capture+RECT
