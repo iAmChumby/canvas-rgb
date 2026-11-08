@@ -398,15 +398,21 @@ daemon runs on 19850/17162 (19830 and 17142 were taken by another run).
 
 | Step | 1440x900 r3 | 1440x900 r4 | 390x844 r3 | 390x844 r4 |
 |---|---|---|---|---|
-| hello | 5.98% | 5.95% | 24.95% | 11.81% |
-| case | 6.12% | 6.70% | 44.98% | 17.73% |
-| parts | 5.62% | 5.62% | 20.84% | 19.01% |
-| match | 7.12% | 7.12% | 19.79% | 13.62% |
-| finish | 6.67% | 6.67% | 23.82% | 21.50% |
+| hello | 5.98% | 5.98% | 24.95% | 11.81% |
+| case | 6.12% | 6.70% | 44.98% | 17.71% |
+| parts | 5.62% | 8.89% | 20.84% | 18.48% |
+| match | 7.12% | 7.08% | 19.79% | 13.62% |
+| finish | 6.67% | 6.67% | 23.82% | 21.51% |
 
 (The r3 column here is round 4's own "before" run: the same build, the same
 daemon, the same capture commands. It matches the numbers round 3 reported
-within the spread those pairs have between two runs.)
+within the spread those pairs have between two runs. The parts pair at
+1440 is the one that moves: React's shot is taken at the moment the hello
+wave settles (two seconds and three quarters after the wave starts), so
+the keyboard's cells read #010004 in one capture (the pair measures 5.62%)
+and #220058 in the next (the pair measures 8.89%). The GPUI's capture does
+not play the wave, so its cells read #000000 either way. See "The preview
+feed" below.)
 
 The layout, displays and devices pairs, the default daemon
 (`onboarding_complete = true`, the same daemon both editors see):
@@ -426,10 +432,10 @@ What round 4 changed, each measured:
   (`212-probe.json`, `case-390x844-dark`): the desk canvas is 16,72 358x324.52
   and the sheet's top edge is at 428.52; the GPUI's desk is now 16,72
   358x322.52 and the sheet's top edge is at 428.52 - checked by the pairs
-  `onboarding-case-390x844-dark` (44.98% -> 17.73%),
+  `onboarding-case-390x844-dark` (44.98% -> 17.71%),
   `onboarding-hello-390x844-dark` (24.95% -> 11.81%),
   `onboarding-match-390x844-dark` (19.79% -> 13.62%) and
-  `onboarding-finish-390x844-dark` (23.82% -> 21.50%).
+  `onboarding-finish-390x844-dark` (23.82% -> 21.51%).
 - [x] The phone sheet is the height of its own content. React's sheet is
   `position: sticky` and as tall as its content; the GPUI's panel grew to
   whatever the window had left, and the screen's centring split that extra
@@ -478,14 +484,20 @@ Still open (not ticked):
   compare."), the GPUI's takes three.
 - [ ] The preview feed: React's desk shows the parts lit with the running
   effect's colour, the GPUI desk shows them unlit in the capture. The wave
-  is the light: React's shot for the Case screen has the RAM sticks at
-  #090017 (the wave's tail crossing them), its shot for the Match screen at
-  #1f0052 (the run it is asking about) and its shot for the Parts screen at
-  #010004 (the wave has gone past); the GPUI's capture shows them #000000.
-  Playing the wave in the capture (the GPUI's `activate_effect`) lights them
-  #220058, which matches the Match shot (3.93% instead of 7.12%) and misses
-  the two shots the wave was still crossing, so it was not kept: the wave's
-  phase is a property of when each capture is taken, not of the editor.
+  is the light, and React's shots are taken at three different points of
+  it: the Case screen's shot has the RAM sticks at #090017 (the wave's tail
+  crossing them), the Match screen's shot at #1f0052 (the run it is asking
+  about), the Parts screen's shot at #010004 (the wave has not reached the
+  keyboard yet) or at #220058 (the wave's settled glow, when the shot lands
+  after the two seconds and three quarters the wave takes). The GPUI's
+  capture reads #000000 on every step. Playing the wave in the capture
+  (`activate_effect("onboard-hello")`) lights the GPUI's cells #220058,
+  which matches the Match shot (3.93% instead of 7.08%) and misses the
+  shots the wave was still crossing (the Case pair went 6.70% -> 8.96% and
+  the Parts pair 5.62% -> 8.88%), so it was not kept: the wave's phase is
+  a property of when each capture is taken, not of the editor. Fixing it
+  properly needs both captures to take their shot at the same point of the
+  wave.
 - [ ] The left ruler's numbers stand on their side in React (the digits are
   turned with `rotate(-90)`), and the GPUI's stand upright one above the
   other, so they overlap a little (the crops
