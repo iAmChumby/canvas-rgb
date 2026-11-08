@@ -94,6 +94,14 @@ pub const FIELD_V_PAD_PX: f32 = 1.0;
 /// starts 2 px into the input (x 479 at 1440x900).
 pub const FIELD_LEFT_PAD_PX: f32 = 2.0;
 
+/// How far right gpui's mono hint text is moved to sit where Chrome's does
+/// (one whole pixel: see the comment where it is applied).
+pub const HINT_SHIFT_PX: f32 = 1.0;
+
+/// The panel shadow's gpui blur radius (React: `0 18px 48px`, a gaussian of
+/// sigma 24; gpui takes the sigma directly).
+pub const PALETTE_SHADOW_BLUR_PX: f32 = 24.0;
+
 /// The placeholder's colour: the browser's default `darkgray`, #757575,
 /// the same in both themes (React's app CSS has no `::placeholder` rule).
 pub const PLACEHOLDER_GREY: u32 = 0x757575;
@@ -341,6 +349,14 @@ pub fn move_active(current: usize, action_count: usize, delta: i32) -> usize {
     (current as i32 + delta).rem_euclid(n) as usize
 }
 
+/// The row Enter runs (`CommandPalette.tsx:85-92`): `actionable[active]`,
+/// the `active`-th row that is not a status line. `None` (Enter does
+/// nothing and the palette stays open) when there are no action rows or the
+/// highlight is past the last one.
+pub fn highlighted_command(filtered: &[PaletteCommand], active: usize) -> Option<&PaletteCommand> {
+    filtered.iter().filter(|c| !c.status_row).nth(active)
+}
+
 /// Group headings: the name of the group each run of rows starts with, drawn
 /// once above its first row (`CommandPalette.tsx:105-112`).
 pub fn group_headings(filtered: &[PaletteCommand]) -> Vec<(String, usize)> {
@@ -559,11 +575,7 @@ impl CommandPaletteView {
                 cx.notify();
             }
             "enter" => {
-                let cmd = filtered
-                    .iter()
-                    .filter(|c| !c.status_row)
-                    .nth(self.state.active);
-                if let Some(cmd) = cmd {
+                if let Some(cmd) = highlighted_command(&filtered, self.state.active) {
                     let action = cmd.action.clone();
                     self.run(&action, window, cx);
                 }
@@ -629,6 +641,13 @@ impl CommandPaletteView {
             row = row.child(
                 div()
                     .flex_none()
+                    // Measured on the 1440x900 shots: gpui paints the mono
+                    // hint left of Chrome's (ink centroids of seven hints sit
+                    // -0.43 to -1.19 px, mean -0.6; labels sit within 0.3 px).
+                    // gpui snaps this text to whole pixels, so a shift under
+                    // 0.5 px changes nothing and one of 0.6 to 1.0 moves it a
+                    // whole pixel: the panel region went 9699 -> 9382 px.
+                    .mr(px(-HINT_SHIFT_PX))
                     .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
@@ -787,7 +806,11 @@ impl Render for CommandPaletteView {
                     a: 0.4,
                 }),
                 offset: gpui::point(px(0.0), px(18.0)),
-                blur_radius: px(48.0),
+                // CSS `blur 48px` is a gaussian with sigma 24; gpui's
+                // `blur_radius` is the sigma itself (measured: 48 here
+                // spread the shadow to sigma ~47 and darkened the scrim
+                // 60 px out), so 24 draws React's falloff.
+                blur_radius: px(PALETTE_SHADOW_BLUR_PX),
                 spread_radius: px(0.0),
             }])
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
@@ -1007,6 +1030,22 @@ mod tests {
     }
 
     #[test]
+    fn enter_runs_the_highlighted_action_row_and_never_a_status_row() {
+        let status = |id: &str| PaletteCommand { id: id.into(), group: "Status", label: id.into(), hint: None, status_row: true, action: PaletteAction::None };
+        let action = |id: &str| PaletteCommand { id: id.into(), group: "Pages", label: id.into(), hint: None, status_row: false, action: PaletteAction::Navigate(id.into()) };
+        let rows = vec![status("s1"), status("s2"), action("a0"), status("s3"), action("a1")];
+        // The highlight counts action rows only: 0 is `a0`, 1 is `a1`.
+        assert_eq!(highlighted_command(&rows, 0).map(|c| c.id.as_str()), Some("a0"));
+        assert_eq!(highlighted_command(&rows, 1).map(|c| c.id.as_str()), Some("a1"));
+        // Past the last action Enter does nothing (React: `actionable[active]` is undefined).
+        assert!(highlighted_command(&rows, 2).is_none());
+        // Only status rows (a filter that matches only the status lines): Enter does nothing.
+        let only_status = vec![status("s1"), status("s2")];
+        assert!(highlighted_command(&only_status, 0).is_none());
+        assert!(highlighted_command(&[], 0).is_none());
+    }
+
+    #[test]
     fn status_rows_are_skipped_by_the_action_index() {
         // Status, status, action, status, action: rows 2 and 4 are actions 0 and 1.
         let commands = vec![
@@ -1097,5 +1136,8 @@ mod tests {
         assert!((field_h - 25.1875).abs() < 0.05, "the field is {field_h} px");
         assert_eq!(FIELD_LEFT_PAD_PX, 2.0);
         assert_eq!(PLACEHOLDER_GREY, 0x757575);
+        // The shadow `0 18px 48px`: a CSS blur of 48 px is a gaussian of
+        // sigma 24, and gpui's blur radius is the sigma.
+        assert_eq!(PALETTE_SHADOW_BLUR_PX * 2.0, 48.0);
     }
 }
