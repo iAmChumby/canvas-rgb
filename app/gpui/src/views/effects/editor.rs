@@ -27,7 +27,7 @@ use crate::components::prop_controls::OnChange;
 use crate::components::text_input::TextInput;
 use crate::theme::{Theme, TokenRadius};
 
-use super::code_editor::code_pane;
+use super::code_editor::{CodeEditor, CodeError, OnError, code_pane, diagnostics_for, source_line_of};
 
 /// Sent this long after the last keystroke (`PREVIEW_DEBOUNCE_MS`).
 pub const PREVIEW_DEBOUNCE_MS: u64 = 400;
@@ -104,6 +104,11 @@ pub struct EffectEditor {
     pub expires_in: u32,
     /// The file name field, for a new file.
     pub file_input: Option<Entity<TextInput>>,
+    /// The code editor entity, for the code pane (lazily created, like the
+    /// file field). Its text is the source of truth beside this struct's
+    /// `source`: typing reaches this struct through its callback, and a
+    /// Revert reaches the entity through `set_text` without echoing.
+    pub code_editor: Option<Entity<CodeEditor>>,
     /// The page that opened the editor.
     pub page: Option<Entity<super::EffectsView>>,
     /// The colour picker that is open, by property key.
@@ -147,6 +152,7 @@ impl EffectEditor {
             draft_note: None,
             expires_in: 0,
             file_input: None,
+            code_editor: None,
             page,
             color_open: None,
             select_open: std::collections::HashMap::new(),
@@ -533,6 +539,31 @@ impl EffectEditor {
         if self.show_code && !narrow {
             // The pane is the editor's height (React `.eff-code` fills the
             // editor's box: 757 px at 1440x900).
+            let code_errors = self.code_errors();
+            let line_count = self.source.split('\n').count();
+            let code_entity = self.code_editor_entity(cx);
+            let seen = diagnostics_for(&self.source, &code_errors);
+            code_entity.update(cx, |this, cx| this.set_diagnostics(seen, cx));
+            let on_error: OnError = {
+                let entity = entity.clone();
+                let code_entity = code_entity.clone();
+                std::rc::Rc::new(move |index: usize, _window: &mut Window, cx: &mut gpui::App| {
+                    let errors = {
+                        let this = entity.read(cx);
+                        this.code_errors()
+                    };
+                    let line = errors.get(index).and_then(|e| e.line).unwrap_or(1);
+                    entity.update(cx, |this, cx| {
+                        this.show_code = true;
+                        this.code_touched = true;
+                        cx.notify();
+                    });
+                    code_entity.update(cx, |this, cx| this.focus_line(line, cx));
+                })
+            };
+            let error_rows: Vec<(String, Option<usize>)> =
+                code_errors.iter().map(|e| (e.message.clone(), e.line)).collect();
+            let preview_error = self.preview_error.clone();
             main = main.child(
                 div()
                     .flex_1()
@@ -541,7 +572,8 @@ impl EffectEditor {
                     .child(code_pane(
                         &t,
                         "eff-code",
-                        &self.source,
+                        code_entity,
+                        line_count,
                         narrow,
                         self.dirty() && !self.saving,
                         {
@@ -556,6 +588,9 @@ impl EffectEditor {
                                 entity.update(cx, |this, cx| this.revert(cx));
                             }
                         },
+                        &error_rows,
+                        preview_error.as_deref(),
+                        on_error,
                     )),
             );
         }
@@ -1264,6 +1299,50 @@ impl EffectEditor {
         self.queue_preview(cx, false);
         cx.notify();
     }
+
+    /// The daemon's errors as gutter diagnostics, with the script line
+    /// mapped into the file (`sourceLineOf`).
+    pub fn code_errors(&self) -> Vec<CodeError> {
+        self.preview
+            .as_ref()
+            .map(|p| {
+                p.errors
+                    .iter()
+                    .map(|error| CodeError {
+                        message: error.message.clone(),
+                        line: error.line.map(|n| source_line_of(&self.source, n as usize)),
+                        column: error.column.map(|n| n as usize),
+                    })
+                    .collect()
+            })
+            .unwrap_or_default()
+    }
+
+    /// The code editor entity, created once from the saved source; typing
+    /// writes through to `source` and queues the preview.
+    fn code_editor_entity(&mut self, cx: &mut Context<Self>) -> Entity<CodeEditor> {
+        if self.code_editor.is_none() {
+            let theme = self.theme;
+            let source = self.source.clone();
+            let entity = cx.entity();
+            let input = cx.new(|cx| {
+                let on_change: super::code_editor::OnChange = std::rc::Rc::new(move |text: &str, _window: &mut Window, cx: &mut gpui::App| {
+                    entity.update(cx, |this, cx| {
+                        this.source = text.to_string();
+                        this.queue_preview(cx, false);
+                        cx.notify();
+                    });
+                });
+                CodeEditor::new(&source, theme, on_change, cx)
+            });
+            self.code_editor = Some(input);
+        }
+        let entity = self.code_editor.clone().unwrap();
+        // An outside value (Revert) lands without echoing.
+        let source = self.source.clone();
+        entity.update(cx, |this, cx| this.set_text(&source, cx));
+        entity
+    }
 }
 
 /// The daemon's own sentence, or the client's (`messageOf`).
@@ -1310,6 +1389,7 @@ mod tests {
             draft_note: None,
             expires_in: 0,
             file_input: None,
+            code_editor: None,
             page: None,
             color_open: None,
             select_open: std::collections::HashMap::new(),
@@ -1355,6 +1435,7 @@ mod tests {
             draft_note: None,
             expires_in: 0,
             file_input: None,
+            code_editor: None,
             page: None,
             color_open: None,
             select_open: std::collections::HashMap::new(),

@@ -96,6 +96,25 @@ pub fn store(id: &str, thumb: Option<Thumb>) {
     }
 }
 
+/// Percent-encodes one path segment, as React's
+/// `encodeURIComponent(id)` does (`routes.effectThumbnail`).
+/// Stack ids are `stack:Sunset glow`: the raw `:` and the space made the
+/// request line invalid and the tile kept "···" while React drew the
+/// composed stack picture (effects library with the seeded stack).
+pub fn encode_segment(id: &str) -> String {
+    const UNRESERVED: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_.!~*'()";
+    let mut out = String::with_capacity(id.len());
+    for &b in id.as_bytes() {
+        if UNRESERVED.contains(&b) {
+            out.push(b as char);
+        } else {
+            out.push('%');
+            out.push_str(&format!("{b:02X}"));
+        }
+    }
+    out
+}
+
 /// Fetches one effect's thumbnail, off the UI thread, and puts it in the
 /// session cache when it lands, telling the view the picture is in.
 pub fn fetch<V: 'static>(
@@ -104,9 +123,10 @@ pub fn fetch<V: 'static>(
     cx: &mut Context<V>,
     on_loaded: impl Fn(&mut V, &mut Context<V>, &str) + 'static,
 ) {
+    let path = format!("/api/v1/effects/{}/thumbnail", encode_segment(&id));
     let bg = cx.background_executor().spawn(async move {
         let client = crate::client::DaemonClient::new();
-        let result = client.get_bytes(&format!("/api/v1/effects/{id}/thumbnail"));
+        let result = client.get_bytes(&path);
         (id, result)
     });
     let view_clone = view.clone();
@@ -265,6 +285,15 @@ mod tests {
         assert_eq!(decode_base64("aGVsbG8").unwrap(), b"hello".to_vec());
         assert_eq!(decode_base64("AAECAw==").unwrap(), vec![0, 1, 2, 3]);
         assert!(decode_base64("!!!").is_none());
+    }
+
+    #[test]
+    fn a_stack_id_is_one_encoded_segment() {
+        // React `routes.effectThumbnail` encodes the whole id: `stack:Sunset glow`
+        // reaches the daemon as one segment, not with a raw `:` and a space.
+        assert_eq!(encode_segment("stack:Sunset glow"), "stack%3ASunset%20glow");
+        assert_eq!(encode_segment("solid"), "solid");
+        assert_eq!(encode_segment("html:my-effect"), "html%3Amy-effect");
     }
 
     #[test]
