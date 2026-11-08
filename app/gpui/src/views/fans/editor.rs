@@ -421,6 +421,14 @@ impl FansView {
                         .copied();
                 let hot_value = self.hot_drag.or_else(|| hot_row.map(|h| h.limit_c));
                 let entity = cx.entity();
+                // The chart's width, from the page: the panel's border, its
+                // padding and the 10 px scrollbar gutter (React's
+                // `scrollbar-gutter: stable` measured at 10 px here).
+                let chart_width = if page <= 640.0 {
+                    page - 24.0 - 44.0
+                } else {
+                    (page - 16.0) / 2.1 - 44.0
+                };
                 let chart = fan_curve_chart(
                     &t,
                     &format!("fans-curve-{}", header.id),
@@ -432,6 +440,7 @@ impl FansView {
                     hot_value,
                     &header.id,
                     self.chart_box.clone(),
+                    chart_width,
                     {
                         let entity = entity.clone();
                         move |index, _, cx| {

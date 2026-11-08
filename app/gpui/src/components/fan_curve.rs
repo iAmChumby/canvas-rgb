@@ -1,4 +1,4 @@
-//! `FanCurveEditor`, after `app/web/src/views/FanCurveEditor.tsx`.
+﻿//! `FanCurveEditor`, after `app/web/src/views/FanCurveEditor.tsx`.
 //!
 //! A 2 to 8 point curve on a temperature by percent grid. The shaded band at
 //! the bottom is the floor. From the source's hot limit (issue #130: the
@@ -35,7 +35,7 @@ pub const ASPECT: f32 = 0.62;
 /// The hot line may not be set below this.
 pub const HOT_MIN: f32 = 40.0;
 /// The hatch strokes put down at full coverage: React's SVG line is 1.5 px
-/// wide with opacity 0.45, but a stroked 1.5 px line on a rotating 45° pattern
+/// wide with opacity 0.45, but a stroked 1.5 px line on a rotating 45Â° pattern
 /// never covers one output pixel fully; measured at y400 over the panel
 /// (18,20,23) the line peaks at (82,36,39), which over --down (229,72,77)
 /// solves to an effective alpha of about 0.30. `tint` paints past that here so
@@ -334,6 +334,10 @@ pub fn fan_curve_chart(
     hot_value: Option<f32>,
     header_id: &str,
     box_measure: ChartBox,
+    // The width the chart's column has, worked out from the page: the
+    // measured box is a frame behind on the first paint (and stayed behind
+    // for a whole capture at 1024x768, where the chart drew 16 px narrow).
+    width_hint: f32,
     on_point_down: impl Fn(usize, &mut Window, &mut gpui::App) + Clone + 'static,
     on_point_move: impl Fn(f32, f32, &mut Window, &mut gpui::App) + Clone + 'static,
     on_point_up: impl Fn(f32, f32, &mut Window, &mut gpui::App) + Clone + 'static,
@@ -341,7 +345,11 @@ pub fn fan_curve_chart(
     on_hot_move: impl Fn(f32, &mut Window, &mut gpui::App) + Clone + 'static,
     on_hot_up: impl Fn(f32, &mut Window, &mut gpui::App) + Clone + 'static,
 ) -> impl IntoElement {
-    let measured = box_measure.width();
+    let measured = if width_hint > 0.0 {
+        width_hint.min(520.0)
+    } else {
+        box_measure.width().min(520.0)
+    };
     let geom = curve_geometry(if measured > 0.0 { measured } else { 360.0 });
     let hot_value = hot_value
         .or_else(|| hot.map(|h| h.limit_c))
@@ -370,6 +378,8 @@ pub fn fan_curve_chart(
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
         .w_full()
+        // React `.curve { max-width: 520px }`: the plot keeps 520 px even when
+        // the editor's column is 744.58 px (measured at 1920x1040).
         .max_w(px(520.0))
         .h(px(geom.height));
 
@@ -398,23 +408,58 @@ pub fn fan_curve_chart(
                 let plot_right = MARGIN_LEFT + g.plot_w;
                 let plot_bottom = MARGIN_TOP + g.plot_h;
                 // The percent grid.
+                // React's SVG draws each gridline as a 1 px stroke centred on
+                // its coordinate, and Chromium lands it on the half-pixel
+                // between two rows (both rows at half coverage, measured
+                // 26,28,31 on rows 337 and 338). A 1 px path stroke here
+                // rasterised to ONE row, so every gridline differed at every
+                // pixel along it; the fills below are that half-pixel band.
+                let mut band = |x: f32, y: f32, w: f32, h: f32, alpha: f32| {
+                    let mut r = gpui::PathBuilder::fill();
+                    r.move_to(at(x, y));
+                    r.line_to(at(x + w, y));
+                    r.line_to(at(x + w, y + h));
+                    r.line_to(at(x, y + h));
+                    r.close();
+                    if let Ok(path) = r.build() {
+                        window.paint_path(
+                            path,
+                            gpui::Rgba {
+                                a: p.line.a * alpha,
+                                ..p.line
+                            },
+                        );
+                    }
+                };
                 for pct in [0.0_f32, 20.0, 40.0, 60.0, 80.0, 100.0] {
                     let y = y_of(&g, pct);
-                    let mut b = gpui::PathBuilder::stroke(px(1.0));
-                    b.move_to(at(MARGIN_LEFT, y));
-                    b.line_to(at(plot_right, y));
-                    if let Ok(path) = b.build() {
-                        window.paint_path(path, p.line);
+                    // React's 1 px stroke covers y-0.5 .. y+0.5 and Skia
+                    // spreads it over the rows it overlaps in proportion:
+                    // measured at 1024x768 the 100% line was 24,26,29 over
+                    // 26,28,31, and at 1440 the two rows were equal.
+                    let top = y - 0.5;
+                    let bottom = y + 0.5;
+                    let mut row = top.floor();
+                    while row < bottom {
+                        let overlap = (bottom.min(row + 1.0) - top.max(row)).clamp(0.0, 1.0);
+                        if overlap > 0.001 {
+                            band(MARGIN_LEFT, row, plot_right - MARGIN_LEFT, 1.0, overlap);
+                        }
+                        row += 1.0;
                     }
                 }
                 // The temperature grid.
                 for temp in [20.0_f32, 40.0, 60.0, 80.0, 100.0] {
                     let x = x_of(&g, temp);
-                    let mut b = gpui::PathBuilder::stroke(px(1.0));
-                    b.move_to(at(x, MARGIN_TOP));
-                    b.line_to(at(x, plot_bottom));
-                    if let Ok(path) = b.build() {
-                        window.paint_path(path, p.line);
+                    let left = x - 0.5;
+                    let right = x + 0.5;
+                    let mut col = left.floor();
+                    while col < right {
+                        let overlap = (right.min(col + 1.0) - left.max(col)).clamp(0.0, 1.0);
+                        if overlap > 0.001 {
+                            band(col, MARGIN_TOP, 1.0, plot_bottom - MARGIN_TOP, overlap);
+                        }
+                        col += 1.0;
                     }
                 }
                 // The floor band.
@@ -437,7 +482,11 @@ pub fn fan_curve_chart(
                     // degrees: the lines are `x + y = c`, one every 8 px of the
                     // pattern, and the pattern starts at the chart's corner.
                     let step = 8.0 * 2.0f32.sqrt();
-                    let mut k = ((cx + MARGIN_TOP) / step).ceil() * step;
+                    // React's pattern is anchored at the SVG's own origin, so
+                    // its lines are `x + y = m * step`; measured at 1440x900
+                    // they peak one pixel right of this family (1286 against
+                    // 1285), so the family starts 1 px over.
+                    let mut k = ((cx + MARGIN_TOP) / step).ceil() * step + 1.0;
                     while k <= plot_right + plot_bottom {
                         if let Some((x1, y1, x2, y2)) =
                             hatch_segment(cx, MARGIN_TOP, plot_right, plot_bottom, k)
@@ -545,8 +594,8 @@ pub fn fan_curve_chart(
                     let outlines = caption_outlines("Full speed", 14.0);
                     // GPUI 0.2.2 strokes with no join control: a 4 px mitered
                     // halo spikes on sharp glyph corners (SVG's default miter
-                    // limit 4 clips them). An offset-copy halo — a 2 px path
-                    // painted at the five 1 px offsets — gives the same 4 px
+                    // limit 4 clips them). An offset-copy halo â€” a 2 px path
+                    // painted at the five 1 px offsets â€” gives the same 4 px
                     // halo without the spikes.
                     let mut fill = gpui::PathBuilder::fill();
                     for contour in &outlines {
@@ -645,7 +694,11 @@ pub fn fan_curve_chart(
     } else {
         (plot_right, true)
     };
-    chart = chart.child(
+    // Deferred: the curve's canvas painted over the figure's glyphs (measured
+    // at 1440x900: the 2.5 px line crossed the "4" in React's gap, the glyph
+    // won there and lost here), so the figure is drawn at the end of the
+    // frame, over the drawing as React's SVG text is over its paths.
+    chart = chart.child(gpui::deferred(
         div()
             .absolute()
             .top(px(MARGIN_TOP + 1.0))
@@ -655,7 +708,7 @@ pub fn fan_curve_chart(
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.warn))
             .child(short),
-    );
+    ));
     // The ceiling's caption, standing up in the hatch, is drawn in the canvas
     // above (gpui 0.2.2 cannot turn text).
 

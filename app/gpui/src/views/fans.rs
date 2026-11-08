@@ -1,4 +1,4 @@
-//! `FansView`, after `app/web/src/views/FansView.tsx`, `FanBulk.tsx` and
+﻿//! `FansView`, after `app/web/src/views/FansView.tsx`, `FanBulk.tsx` and
 //! `FanCurveEditor.tsx`.
 //!
 //! The port keeps the React view's rules (the checklist is
@@ -30,8 +30,8 @@ use gpui::{div, prelude::*, px, Context, IntoElement, Rgba, Window};
 
 use crate::client::DaemonClient;
 use crate::components::fan_bits::{
-    chip, fans_button, fans_icon_button, fans_number_field, live, live_soft, meter, mix_srgb,
-    sparkline, tick_box, tint, BtnVariant,
+    chip, fans_button, fans_button_sized, fans_icon_button, fans_number_field, live, live_soft,
+    meter, mix_srgb, sparkline, tick_box, tint, BtnVariant,
 };
 use crate::components::fan_bulk::{
     action_words, applied_detail, can_drive, decide, fan_bulk_bar, is_handed_back, is_unavailable,
@@ -41,7 +41,7 @@ use crate::components::fan_curve::{
     base_floor, bounds_for, curve_geometry, default_curve, hot_row, pct_of_y, sorted_points,
     temp_of_x, ChartBox, HOT_MIN,
 };
-use crate::components::segmented::segmented;
+use crate::components::segmented::segmented_padded;
 use crate::components::text_input::{format_value, TextInput};
 use crate::theme::{Theme, TokenRadius};
 
@@ -340,7 +340,7 @@ pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
         .fold(0.0, f32::max)
         .max(MONO_20 * 4.0);
     let duty = duty_meter + 8.0 + 4.0 * MONO_14;
-    // Mode minimum is the header text "Mode" (4 chars at 14 px mono ≈ 33.6 px
+    // Mode minimum is the header text "Mode" (4 chars at 14 px mono â‰ˆ 33.6 px
     // of content, 37 px with its line box; use 37 as the floor).
     // Content width, before padding: subtracting the padding left 13 px at 1440 and
     // the header wrapped to "Mod/e" (#204 review).
@@ -376,7 +376,7 @@ pub fn table_columns(fans: &FansStatus, page: f32, width: f32) -> TableColumns {
     }
 }
 
-/// Whether the table is the narrow one (no history column) — from the page
+/// Whether the table is the narrow one (no history column) â€” from the page
 /// width, not from the computed columns.
 pub fn narrow_table(page: f32) -> bool {
     page <= 999.0
@@ -1543,11 +1543,21 @@ impl FansView {
             .collect();
         let entity = cx.entity();
         let selected_profile = fans.active_profile.clone();
-        let seg = segmented(
+        // React `.rd-actions .seg-item`: 8 px a side on a phone, 6 px below
+        // 431 px, the base 10 px on a desktop (app.css:5174,6971,6986).
+        let seg_pad = if self.window_width <= 430.0 {
+            6.0
+        } else if self.window_width <= 640.0 {
+            8.0
+        } else {
+            10.0
+        };
+        let seg = segmented_padded(
             t,
             "fans-profile-segmented",
             &options,
             &selected_profile,
+            seg_pad,
             move |value, _, cx| {
                 entity.update(cx, |view, cx| view.switch_profile(value, cx));
             },
@@ -1808,16 +1818,27 @@ impl FansView {
         let tone = temp_tone(t, celsius);
         let fill = ((celsius - 20.0) / 80.0).clamp(0.0, 1.0);
         let phone = page <= 640.0;
-        let label = div()
-            .flex_1()
+        // React's `.one-line` and `.fig` inherit the body's 1.45 line height
+        // (measured 20.3 px at 14 px): the cell's rows are 20.3 px, not the
+        // face's own 1.2 line.
+        let mut label = div()
             .min_w_0()
             .overflow_hidden()
             .text_size(px(14.0))
+            .line_height(gpui::relative(1.45))
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.dim))
             .child(temp.label.clone());
+        if !phone {
+            // Beside the value on a wide cell the label takes the room it has
+            // left; on a phone it is its own row (a column flex item with
+            // `flex_1` would collapse to zero height and clip, measured
+            // 390x844: the label's ink was 9 px against React's 11).
+            label = label.flex_1();
+        }
         let value = div()
             .text_size(px(14.0))
+            .line_height(gpui::relative(1.45))
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.ink))
             .child(format!("{celsius:.1} {}", "\u{00B0}C"));
@@ -1878,12 +1899,10 @@ impl FansView {
         let actions = if narrow {
             let entity = cx.entity();
             // React `.rd-fans .fan-select-key { min-height: 44px; min-width:
-            // 88px }` (motion.css:1867).
-            div()
-                .min_w(px(88.0))
-                .min_h(px(44.0))
-                .flex()
-                .child(fans_button(
+            // 88px }` (motion.css:1867): the key itself is that large, not a
+            // 36 x 28 key inside an invisible 88 x 44 box (measured at
+            // 390x844, React's key is 88 x 44 at x 273).
+            fans_button_sized(
                 t,
                 "fans-select-key",
                 if self.select_mode { "Done" } else { "Select" },
@@ -1895,6 +1914,7 @@ impl FansView {
                 true,
                 self.bulk_busy,
                 Some("ListChecks"),
+                Some((88.0, 44.0)),
                 move |_, _, cx| {
                     entity.update(cx, |view, cx| {
                         if view.select_mode {
@@ -1904,9 +1924,10 @@ impl FansView {
                         cx.notify();
                     });
                 },
-            ))
+            )
+                .into_any_element()
         } else {
-            div()
+            div().into_any_element()
         };
         if !narrow || self.select_mode {
             body = body.child(self.bulk_bar(fans, &checked, cx));

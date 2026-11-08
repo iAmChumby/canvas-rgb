@@ -285,6 +285,58 @@ Taken by `tools/ui-capture/` against the daemon on the fakes. 6 sizes × 2 theme
 | 960x1032 | | | |
 | 390x844 | | | |
 
+## Round 2 measurements (2026-11-08)
+
+The pairs below were shot against the fake daemon (`-ApiPort 19530 -OpenRgbPort 16842`)
+in one session: React headless (`capture-react.mjs`) and GPUI
+(`capture-gpui.ps1`), 4 sizes x 2 themes. React's boxes came from
+`probe-fans.mjs` (a DOM walk: rect, computed font, padding, gap); GPUI's from
+the pixels (`runs.ps1`, `ink.ps1`).
+
+Every item above that names "checked by pair" was re-checked this round. What
+changed, and its measurement line:
+
+- Phone strip (640 px page, the item at "640 px page width"): React's
+  `.rd-actions` at 390 is `[101.23,7.5 208.77x32]` with `seg-item` padding 6,
+  gap 4, the Save key `[242,9.5 36x28]` and the menu `[282,9.5 28x28]`. The
+  port had the keys 22 px right (Save 24 px right of React's) and the search
+  key off the window. After: `-Region 0,0,390,48` 30.29% -> 14.96%; the keys
+  now read Save 245, Pause 318, search glyph 364 against React's 242, 315, 362.
+- Temperature cells (the "Temperatures panel" item): React's `.one-line` and
+  `.fig` are 20.3 px rows (1.45 line height) and the phone cell is
+  54.59 px tall. The port used the face's 1.2 line (17 px) and, on a phone,
+  a `flex_1` label that collapsed to 9 px of ink. After: `-Region
+  0,48,390,140` 12.71% -> 6.95%; the label/value ink rows are React's
+  (`ink.ps1 -Pair 390x844-dark -X 29 -Y 100 -W 332 -H 60` gives the same
+  `x=33..360 y=100..155` on both sides).
+- Select/Done key (the "Select / Done key (phone only)" item): React's key is
+  `[273,201.84 88x44]`. The port drew a 36 x 28 key inside an 88 x 44 box;
+  it is the key's own box now.
+- Strip tail on a desktop (the shell items): React puts the page's actions
+  and Pause/Search in one `.strip-controls` with an 8 px gap; the port gave
+  them the strip row's 16 px, so the profile keys sat 8 px left. After: Save
+  Default's face is at 1065 against React's 1066 (was 1057), Pause 1255
+  against 1256.
+- Curve chart (the chart items): React's 1 px gridlines are spread over the
+  rows they overlap (`26,28,31` on two rows at 1440; `24/26` and `26/28` at
+  1024); the port painted one crisp row. The chart's geometry also came from
+  a measured box that lagged a frame (one 1024x768 capture drew it 16 px
+  narrow), and the ceiling hatch's family started at the band's corner
+  instead of the SVG's origin (stripes 1 px left of React's). The hot figure
+  now draws after the curve, as React's SVG text draws over its path.
+  `-Region 873,323,516,324` 8.58% -> 7.04%; the hatch band
+  `-Region 1272,336,108,264` 27.98% -> 17.42%.
+
+Residue: the page is text. `ink.ps1 -Pair 1440x900-dark -X 240 -Y 116 -W 582
+-H 46` (the three temperature cells) gives React `x=241..610 y=133..161` and
+GPUI `x=241..609 y=133..161` -- the same box to 1 px -- with 2.25% of pixels
+differing above 6, 0.99% above 24, 0.45% above 48 and 0.06% above 96. The
+whole pair falls the same way: 3.91% at the default threshold, 2.56% at 24,
+1.65% at 48, 0.75% at 96. GPUI's glyphs carry 14% fewer ink pixels at weight
+500/600 than Chromium's (`CPU fan`: 283 against 328), i.e. DirectWrite
+hints the stems thin where Skia anti-aliases them; that is the residue.
+
 ## Reviewer verdict
+
 Adversarial reviewer, date, what it compared, every mismatch it found and how each was fixed, and its final verdict
 (PASS, or the mismatches left). A percentage always sits beside its counts.

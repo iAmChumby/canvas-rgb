@@ -190,6 +190,24 @@ pub fn fans_button(
     icon: Option<&str>,
     on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
 ) -> impl IntoElement {
+    fans_button_sized(t, id, label, variant, small, disabled, icon, None, on_click)
+}
+
+/// The same button with React's `min-width`/`min-height` applied to the key
+/// itself, for `.rd-fans .fan-select-key` (88 x 44 on a phone): the border and
+/// the face stay the button's, the content is centred in the larger box.
+#[allow(clippy::too_many_arguments)]
+pub fn fans_button_sized(
+    t: &Theme,
+    id: &str,
+    label: &str,
+    variant: BtnVariant,
+    small: bool,
+    disabled: bool,
+    icon: Option<&str>,
+    size: Option<(f32, f32)>,
+    on_click: impl Fn(&ClickEvent, &mut Window, &mut gpui::App) + 'static,
+) -> impl IntoElement {
     let (bg, fg, border) = match variant {
         BtnVariant::Primary => (
             live(t),
@@ -233,7 +251,10 @@ pub fn fans_button(
         .items_center()
         .justify_center()
         .gap(px(6.0))
-        .h(if small { px(28.0) } else { px(32.0) })
+        .h(match size {
+            Some((_, h)) => px(h),
+            None => px(if small { 28.0 } else { 32.0 }),
+        })
         .px(if small { px(10.0) } else { px(12.0) })
         .r_md()
         .border_1()
@@ -243,6 +264,9 @@ pub fn fans_button(
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY);
+    if let Some((w, _)) = size {
+        row = row.w(px(w));
+    }
     if variant != BtnVariant::Ghost {
         row = row.shadow(skirt_shadow(t));
     }
@@ -250,7 +274,12 @@ pub fn fans_button(
         let svg = gpui::svg().path(format!("icons/{icon}.svg")).text_color(fg);
         row = row.child(if small { svg.size_3p5() } else { svg.size_4() });
     }
-    row = row.child(label.to_string());
+    // An empty label adds no glyph but would still take the row's gap: on a
+    // phone React hides the Save key's words (`.rd-btn-text { display: none }`)
+    // and the key is 36 px wide, not 42 (measured at 390x844).
+    if !label.is_empty() {
+        row = row.child(label.to_string());
+    }
     if disabled {
         row
     } else {
