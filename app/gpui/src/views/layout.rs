@@ -28,7 +28,7 @@ use canvas_proto::device::{DeviceInfo, DeviceKind};
 use canvas_proto::layout::{Layout, PartKind, RenderScale, SamplingMode};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button_icon, icon_button};
+use crate::components::button::{Variant, button_icon, button_sm, icon_button};
 use crate::components::fan_bits::rule_box;
 use crate::components::panel::panel_with_padding;
 use crate::components::segmented::segmented;
@@ -53,6 +53,12 @@ pub struct LayoutView {
     /// The daemon's layouts and the active one.
     pub layouts: Option<LayoutsResponse>,
     pub layouts_error: Option<String>,
+    /// A retry is in flight: React's `pending.includes("layouts")`
+    /// (`LayoutView.tsx:193`). The failed page reads as loading while it runs.
+    pub layouts_retrying: bool,
+    /// The stale notice's Details disclosure, closed by default
+    /// (`<details>` in `Loading.tsx:81-91`).
+    pub details_open: bool,
     /// The daemon's devices.
     pub devices: Option<Vec<DeviceInfo>>,
     /// The unit every size is read in.
@@ -162,6 +168,8 @@ impl LayoutView {
             theme,
             layouts: None,
             layouts_error: None,
+            layouts_retrying: false,
+            details_open: false,
             devices: None,
             unit,
             mode: StageMode::Effect,
@@ -1134,6 +1142,7 @@ impl LayoutView {
         cx.spawn(async move |view, cx| {
             let (layouts, devices, effects) = bg.await;
             let _ = view.update(cx, |this, cx| {
+                this.layouts_retrying = false;
                 match layouts {
                     Ok(body) => match serde_json::from_str::<LayoutsResponse>(&body) {
                         Ok(parsed) => {
@@ -1174,6 +1183,14 @@ impl LayoutView {
             });
         })
         .detach();
+    }
+
+    /// React's `retryLayouts` (`store.ts:347`, `retryArea`): the failed page
+    /// reads as loading while the read is in flight.
+    fn retry_layouts(&mut self, cx: &mut Context<Self>) {
+        self.layouts_retrying = true;
+        self.load(cx);
+        cx.notify();
     }
 
     /// The live preview feed: the daemon's WebSocket, read in the background.
@@ -1664,9 +1681,35 @@ pub fn render_page(
     }
 
     let Some(layout) = layout else {
+        // React's `LoadFrame` in its error state (`LayoutView.tsx:831-866`):
+        // a read that failed with no layout to show gets the error panel,
+        // with the raw answer behind Details and a Try again key. A retry in
+        // flight reads as loading, as `retrying` does in React.
+        if !view.layouts_retrying {
+            if let Some(err) = view.layouts_error.clone() {
+                return layout_error_panel(view, &t, err, cx);
+            }
+        }
         // Nothing to draw yet: the page says it is reading the layout.
         return page.child(reading(t)).into_any_element();
     };
+
+    let mut page = page;
+    let mut rule_count = 0usize;
+    // A refresh that failed after the layout was read keeps the desk and
+    // says it may be old (React `LayoutView.tsx:1065-1072`), with the raw
+    // answer behind Details.
+    if let Some(err) = &view.layouts_error {
+        let detail = details_row(&t, "lay-stale-details", err, view.details_open, cx.entity());
+        let body = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .child("The layout may be out of date.")
+            .child(detail);
+        page = page.child(rule_box(&t, "lay-stale", true, body));
+        rule_count += 1;
+    }
 
     // The page's own lines above the desk: React's `rule` boxes in React's
     // order (`LayoutView.tsx:1106-1116`). They are drawn here, before the
@@ -1678,8 +1721,7 @@ pub fn render_page(
     if let Some(err) = &view.save_error {
         rules.push((format!("The layout was not saved: {err}"), true));
     }
-    let rule_count = rules.len();
-    let mut page = page;
+    rule_count += rules.len();
     for (i, (text, down)) in rules.into_iter().enumerate() {
         page = page.child(rule_box(&t, &format!("lay-rule-{i}"), down, text));
     }
@@ -2590,6 +2632,117 @@ fn orig_rot(o: &Orig) -> f64 {
         .as_ref()
         .map(|z| z.rotation_deg as f64)
         .unwrap_or_else(|| o.landmark.as_ref().map(|l| l.rotation_deg as f64).unwrap_or(0.0))
+}
+
+/// The two lines of React's error panel for a layout read that failed
+/// (`LayoutView.tsx:845-851`): the panel's title and the one sentence the
+/// reader sees. The raw answer stays behind Details.
+pub fn load_failure_text() -> (&'static str, &'static str) {
+    (
+        "The layout could not be read",
+        "canvas-rgb could not read the layout. Nothing was changed.",
+    )
+}
+
+/// `<Details>` (`Loading.tsx:81-91`): a "Details" disclosure, its caret
+/// turned down while open, that shows the raw answer under it. Closed until
+/// asked for, as React's `<details>` is.
+fn details_row(
+    t: &Theme,
+    id: &str,
+    error: &str,
+    open: bool,
+    entity: gpui::Entity<LayoutView>,
+) -> impl IntoElement {
+    let text = error.to_string();
+    let summary = div()
+        .id(gpui::SharedString::from(id.to_string()))
+        .flex()
+        .items_center()
+        .gap_2()
+        .text_size(px(14.0))
+        .line_height(gpui::relative(1.45))
+        .font_family(crate::fonts::UI_FAMILY)
+        .text_color(Theme::color(t.mute))
+        .cursor_pointer()
+        .on_click(move |_, _, cx| {
+            entity.update(cx, |this, cx| {
+                this.details_open = !this.details_open;
+                cx.notify();
+            });
+        })
+        .child(
+            gpui::svg()
+                .path(if open {
+                    "icons/CaretDown.svg"
+                } else {
+                    "icons/CaretRight.svg"
+                })
+                .size(px(14.0))
+                .flex_none()
+                .text_color(Theme::color(t.mute)),
+        )
+        .child("Details");
+    let mut col = div()
+        .flex()
+        .flex_col()
+        .gap_2()
+        // `.load-detail { margin-top: var(--s3) }`.
+        .mt_3()
+        .child(summary);
+    if open {
+        col = col.child(
+            div()
+                .text_size(px(14.0))
+                .line_height(gpui::relative(1.45))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .child(text),
+        );
+    }
+    col
+}
+
+/// React's `ErrorPanel` for a layout read that failed with no desk to show
+/// (`LayoutView.tsx:845-851`): the title, the one-line summary, the raw
+/// answer behind Details and a Try again key.
+fn layout_error_panel(
+    view: &mut LayoutView,
+    t: &Theme,
+    error: String,
+    cx: &mut Context<LayoutView>,
+) -> gpui::AnyElement {
+    let (title, summary) = load_failure_text();
+    let detail = details_row(t, "lay-error-details", &error, view.details_open, cx.entity());
+    let retry = button_sm(
+        t,
+        "lay-try-again",
+        "Try again",
+        Variant::Default,
+        view.layouts_retrying,
+        {
+            let entity = cx.entity();
+            move |_, _, cx| {
+                entity.update(cx, |this, cx| this.retry_layouts(cx));
+            }
+        },
+    );
+    let body = div()
+        .flex()
+        .flex_col()
+        .items_start()
+        .gap_2()
+        .child(
+            div()
+                .text_size(px(14.0))
+                .line_height(gpui::relative(1.45))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.down))
+                .child(summary),
+        )
+        .child(detail)
+        .child(retry);
+    panel_with_padding(t, "lay-error", title, div(), body, None).into_any_element()
 }
 
 /// The loading frame: the page says it is reading the layout.
@@ -3735,8 +3888,7 @@ mod tests {
     /// grid.
     #[test]
     fn the_page_draws_the_rules_above_the_grid() {
-        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/views/layout.rs"))
-            .expect("read layout.rs");
+        let source = layout_source();
         let asked = source
             .find("if let Some(line) = view.preview_line()")
             .expect("render_page asks for the preview line");
@@ -3748,6 +3900,90 @@ mod tests {
         assert!(
             drawn < grid,
             "the rule is drawn at {drawn} but the grid at {grid}: the banner must sit above the desk"
+        );
+    }
+
+    fn layout_source() -> String {
+        std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/views/layout.rs"))
+            .expect("read layout.rs")
+    }
+
+    /// React's stale-layouts notice (`LayoutView.tsx:1065-1072`): a refresh
+    /// that failed after the desk was read keeps the desk and says it may be
+    /// old, with the raw answer behind Details. The GPUI computed
+    /// `layouts_error` and never drew it (#246).
+    #[test]
+    fn the_stale_layouts_notice_is_drawn_above_the_desk() {
+        let source = layout_source();
+        let read = source
+            .find("if let Some(err) = &view.layouts_error")
+            .expect("render_page reads layouts_error");
+        let drawn = source
+            .find("rule_box(&t, \"lay-stale\", true,")
+            .expect("the notice is drawn as a warning rule");
+        let line = source
+            .find("if let Some(line) = view.preview_line()")
+            .expect("the preview line");
+        let grid = source.find(".child(grid)").expect("the page's grid");
+        assert!(read < drawn, "the field is read after the notice is drawn");
+        assert!(
+            drawn < line,
+            "React draws the stale notice before the preview line"
+        );
+        assert!(drawn < grid, "the notice must sit above the desk");
+        let block = &source[read..drawn];
+        assert!(
+            block.contains("The layout may be out of date."),
+            "the warning's own sentence is missing"
+        );
+        assert!(
+            block.contains("details_row(&t, \"lay-stale-details\", err, view.details_open, cx.entity())"),
+            "the raw answer's Details row is missing"
+        );
+    }
+
+    /// React's `ErrorPanel` for a read that failed with no layout to show
+    /// (`LayoutView.tsx:845-851`): the GPUI stayed on "Reading the layout"
+    /// for good.
+    #[test]
+    fn a_layout_that_failed_to_load_is_drawn_as_the_error_panel() {
+        let source = layout_source();
+        let read = source
+            .find("if let Some(err) = view.layouts_error.clone()")
+            .expect("the failed page reads layouts_error");
+        let call = source
+            .find("layout_error_panel(view, &t, err, cx)")
+            .expect("the failure is drawn as the error panel");
+        assert!(read < call, "the error is read after it is drawn");
+        let helper = source.find("fn layout_error_panel").expect("the panel");
+        let end = source
+            .find("/// The loading frame: the page says it is reading the layout.")
+            .expect("the next item");
+        let body = &source[helper..end];
+        assert!(
+            body.contains("load_failure_text()"),
+            "the panel's words come from the React pair"
+        );
+        assert!(
+            body.contains("details_row(t, \"lay-error-details\""),
+            "the raw answer's Details row is missing"
+        );
+        assert!(
+            body.contains("\"lay-try-again\""),
+            "the Try again key is missing"
+        );
+    }
+
+    /// The panel's two visible lines, exactly as React writes them
+    /// (`LayoutView.tsx:845-851`).
+    #[test]
+    fn the_layout_failure_text_is_reacts() {
+        assert_eq!(
+            load_failure_text(),
+            (
+                "The layout could not be read",
+                "canvas-rgb could not read the layout. Nothing was changed.",
+            )
         );
     }
 }

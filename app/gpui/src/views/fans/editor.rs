@@ -868,4 +868,35 @@ mod tests {
         ];
         assert_eq!(bounds_for(&points, 0), (20.0, 49.0));
     }
+
+    /// React's hot-line error (`FansView.tsx:1065-1069`, drawn at `:1120`):
+    /// the "don't exceed" rule shows the daemon's refusal under its control,
+    /// in the `error-line` down tone. The field is computed in `views/fans.rs`
+    /// (`commit_hot`); this pins that the editor still draws it (#246).
+    #[test]
+    fn the_hot_error_is_drawn_in_the_floor_rule() {
+        let source = std::fs::read_to_string(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/src/views/fans/editor.rs"
+        ))
+        .expect("read editor.rs");
+        let read = source
+            .find("if let Some(error) = &self.hot_error")
+            .expect("the editor reads hot_error");
+        let drawn = source
+            .find(".child(error.clone())")
+            .expect("the error's words are drawn");
+        let rule = source
+            .find("&format!(\"fans-floor-{}\", header.id)")
+            .expect("the floor rule");
+        assert!(
+            read < drawn && drawn < rule,
+            "the error is read at {read} and drawn at {drawn}, but the rule starts at {rule}"
+        );
+        let line = &source[read..rule];
+        assert!(
+            line.contains("text_color(Theme::color(t.down))"),
+            "React draws the hot error in `.error-line`'s down tone"
+        );
+    }
 }
