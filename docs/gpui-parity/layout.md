@@ -14,7 +14,7 @@ Source notes: line numbers are for the React tree at `0937970`. `git log 0937970
 - [x] Toolbar frame: the desk fills `div.rd-lay-stage-frame` (container `lay-stage`, inline size) and its toolbar sits along the bottom edge, wrapping rather than overlapping — `app/web/src/views/LayoutView.tsx:1119-1137`, `app/web/src/styles/app.css:2174-2212` — checked by pair at 1440x900 and 1024x768 (layout-1440x900-dark 3.84%, layout-1024x768-dark 4.11%)
 - [ ] Mode segmented "What the canvas shows": options "Effect" and "Lights", value `mode`, tooltip shows the mode note (composed: the Effect or Lights sentence, plus " Tap anything for its name." on a phone); a change calls `setMode`, which writes `canvas-rgb.mode` to localStorage, default "effect" — `app/web/src/views/PreviewStage.tsx:2830-2839`, `:2244-2247`, `:2835-2836`, `app/web/src/views/LayoutView.tsx:225-233`, `:256-262`, `:94` — checked by GPUI test (to write) for the saved value and pair at 1440x900 with Lights selected
 - [x] Zoom out (`IconButton` label "Zoom out", Minus 13, sm): divides the scale by 1.3 about the view centre, eased 180 ms; no API call — `app/web/src/views/PreviewStage.tsx:2844`, `:2187`, `:224` — checked by GPUI test `interact::tests::zoom_and_wheel_numbers` (zoom_scale 1.0→1.3 by 1.3, →0.769 by 1/1.3, clamps 8 and 0.25) and pair layout-1440x900-dark (135% readout)
-- [x] Zoom readout: text `${Math.round(view.scale*100)}%` — `app/web/src/views/PreviewStage.tsx:2845` — checked by pair at 1440x900 (layout-1440x900-dark 3.84%: 135% in both) and 390x844 (layout-390x844-dark 5.96%: 118% in both); GPUI test `interact::tests::zoom_and_wheel_numbers` (zoom_percent(1.35)=135)
+- [x] Zoom readout: text `${Math.round(view.scale*100)}%` — `app/web/src/views/PreviewStage.tsx:2845` — checked by pair at 1440x900 (layout-1440x900-dark 3.84%: 135% in both) and 390x844 (layout-390x844-dark 5.96%: 118% in both); with the preview line drawn (no effect running) both read 131% at 1440x900 and 118% at 390x844 in round 4's pairs (`layout::tests::a_rule_line_takes_its_height_and_the_gap_out_of_the_desk`); GPUI test `interact::tests::zoom_and_wheel_numbers` (zoom_percent(1.35)=135)
 - [x] Zoom in (`IconButton` label "Zoom in", Plus 13, sm): multiplies the scale by 1.3, same path as Zoom out — `app/web/src/views/PreviewStage.tsx:2846` — checked by GPUI test `interact::tests::zoom_and_wheel_numbers`; the buttons wire to LayoutView::zoom_by
 - [x] Fit the canvas (`IconButton` label "Fit the canvas", ArrowsOut 13, sm): eases to the whole-view fit — `app/web/src/views/PreviewStage.tsx:2847`, `:2202` — checked by GPUI test `interact::tests::zoom_and_wheel_numbers` (whole_view 320x200 → scale 1); the button wires to LayoutView::zoom_fit
 - [x] Wheel zoom (no button): zooms about the pointer with factor `exp(-deltaY*0.0016)`, clamped to 0.25 to 8; a notch eases over 120 ms, a trackpad delta applies at once and is written back after 140 ms — `app/web/src/views/PreviewStage.tsx:2148-2178`, `:219-220`, `:226`, `:222` — checked by GPUI test `interact::tests::zoom_and_wheel_numbers` (wheel_factor exp(-deltaY*0.0016)); the desk wires on_scroll_wheel to LayoutView::wheel_zoom
@@ -145,7 +145,7 @@ Source notes: line numbers are for the React tree at `0937970`. `git log 0937970
 - [ ] Empty (layouts read, none active): `EmptyState` titled "There is no layout yet" with the body "Make one here: the desk canvas is this page, and nothing can run until it has a zone in it." — `app/web/src/views/LayoutView.tsx:853-860` — checked by pair with `?state=no-layout` at 1440x900 (`app/web/src/lib/demoScenarios.ts:41`)
 - [ ] Error (first read failed): `ErrorPanel` titled "The layout could not be read", summary "canvas-rgb could not read the layout. Nothing was changed.", the raw message under Details, and "Try again" (`app/web/src/components/Loading.tsx:123`) calls `retryLayouts` — `app/web/src/views/LayoutView.tsx:844-852`, `app/web/src/lib/store.ts:347` — checked by GPUI test (to write) with a failing `GET /api/v1/layouts`
 - [ ] Stale (a refresh failed after a good read): the desk stays and a `rule rule-warn` role status reads "The layout may be out of date." with Details holding the raw error — `app/web/src/views/LayoutView.tsx:1065-1072` — checked by existing React test `app/web/src/views/__tests__/LoadingRetry.test.tsx` "keeps the desk and says the layout may be old" (line 162)
-- [ ] Save failed: role status "The layout was not saved: X" (`rule rule-warn`); cleared by the next Save or by Revert — `app/web/src/views/LayoutView.tsx:1112-1116`, `:676`, `:670` — checked by GPUI test (to write) with a 500 on `PUT` (demo `save-error`, `app/web/src/lib/demoScenarios.ts:45`)
+- [ ] Save failed: role status "The layout was not saved: X" (`rule rule-warn`); cleared by the next Save or by Revert — `app/web/src/views/LayoutView.tsx:1112-1116`, `:676`, `:670` — the rule is drawn now (same box as the preview line, above the grid, and its height is taken out of the desk's fit; GPUI test `layout::tests::the_page_draws_the_rules_above_the_grid`), but the state itself needs a 500 on `PUT` (demo `save-error`, `app/web/src/lib/demoScenarios.ts:45`) which the fake daemon cannot serve, so the pair stays UNKNOWN.
 - [ ] Unsaved layout: "Unsaved" (warn text), Save and Revert enabled — `app/web/src/views/LayoutView.tsx:1028-1051` — checked by pair with one edit at 1440x900
 - [ ] Saved layout: "Saved" (mute), Save and Revert disabled — `app/web/src/views/LayoutView.tsx:1028-1051` — checked by pair at 1440x900
 - [ ] Saving: Save reads "Saving" with `aria-label` "Saving the layout" and is disabled — `app/web/src/views/LayoutView.tsx:1046-1050` — checked by pair with a delayed `PUT`
@@ -157,12 +157,12 @@ Source notes: line numbers are for the React tree at `0937970`. `git log 0937970
 - [ ] Before the first status answer: nothing is drawn in `main` — `app/web/src/shell/Shell.tsx:62`, `:275` — checked by GPUI test (to write) with `?state=slow` (`app/web/src/lib/demoScenarios.ts:43`)
 
 ### Live preview and the desk picture
-- [x] Preview live: no preview line; daemon frames paint the desk — `app/web/src/views/LayoutView.tsx:429-430`, `app/web/src/views/PreviewStage.tsx:1336-1353` — checked by pair at 1440x900 (layout-1440x900-dark 3.84%, no preview line in either; the fake daemon serves a static frame with no running effect)
-- [ ] Preview line "Preview drawn by the editor · the live preview is not available yet" (not a warning): shown when the preview is not live, an effect runs and it does not read input; the editor draws the effect on the desk — `app/web/src/views/LayoutView.tsx:426`, `:431-436`, `app/web/src/views/PreviewStage.tsx:1295`, `:1294-1305` — checked by pair with the preview not live at 1440x900
+- [x] Preview live: no preview line; daemon frames paint the desk — `app/web/src/views/LayoutView.tsx:429-430`, `app/web/src/views/PreviewStage.tsx:1336-1353` — checked by pair at 1440x900 (layout-1440x900-dark 3.84%, no preview line in either; the fake daemon serves a static frame with no running effect) and again in round 4 with an effect running (`layout-*-1440x900-dark` 4.40%, no line in either)
+- [ ] Preview line "Preview drawn by the editor · the live preview is not available yet" (not a warning): shown when the preview is not live, an effect runs and it does not read input; the editor draws the effect on the desk — `app/web/src/views/LayoutView.tsx:426`, `:431-436`, `app/web/src/views/PreviewStage.tsx:1295`, `:1294-1305` — the port returns React's line for React's state (GPUI test `layout::tests::the_preview_line_is_the_one_react_draws`), but the GPUI has no editor-draw layer yet, so the sentence names what React does; the pair waits for that layer.
 - [ ] Preview line "The live preview is not connected. X" (warning; X = the preview error, trimmed): shown when the socket is refused and the editor does not draw; with a running effect that does not read input, the editor line wins over this one — `app/web/src/views/LayoutView.tsx:437-442`, `:431` — checked by GPUI test (to write) with a refused socket and no effect running
 - [ ] Preview line "This effect reads the screen or the audio, so the preview is the frame from canvas-rgb." (warning): shown when the preview is not live and the running effect reads input — `app/web/src/views/LayoutView.tsx:443-448` — checked by pair with a screen-capture effect running at 1440x900
-- [ ] Preview line "No effect is running on this layout." (warning): shown when the preview is not live, no refusal is recorded and no effect runs — `app/web/src/views/LayoutView.tsx:449-451` — checked by pair with no effect on the layout
-- [ ] Preview line "The live preview is not available yet." (`app/web/src/views/LayoutView.tsx:452`): UNREACHABLE in the React code. Reaching line 452 needs the preview not live, a running effect and no input-reading effect; that combination sets `editorDraws` true and returns the editor line at `app/web/src/views/LayoutView.tsx:431` first. Every other combination returns at lines 437, 443 or 449. Settler: a GPUI unit test over the combinations of `preview.state` and the running effect, which shows whether line 452 is reached; until then the port may omit the string, and the port must say which it did.
+- [x] Preview line "No effect is running on this layout." (warning): shown when the preview is not live, no refusal is recorded and no effect runs — `app/web/src/views/LayoutView.tsx:449-451` — checked by pair with no effect on the layout (`layout-*-1440x900-dark` 4.85%, `layout-*-390x844-dark` 9.27%: the banner box measured 224,71 1192x38.3 in both, and the desk below it moves down — 131% at 1440x900 and 118% at 390x844 in both; before this round the GPUI drew no line and read 135%, so the pair read 16.45% / 37.70%) and by GPUI test `layout::tests::the_no_effect_state_names_itself_in_a_warning`. The state is the daemon's: effect `null`, the engine paused so the preview socket delivers no frame (`PATCH /api/v1/output {"power":"paused"}`). The line is drawn by `rule_box` (`.rule`/`.rule-warn`): 8 px padding, 1 px border, `--r-md`, 14 px text on the body's 1.45, `--dim` ink.
+- [x] Preview line "The live preview is not available yet." (`app/web/src/views/LayoutView.tsx:452`): UNREACHABLE in the React code. Reaching line 452 needs the preview not live, a running effect and no input-reading effect; that combination sets `editorDraws` true and returns the editor line at `app/web/src/views/LayoutView.tsx:431` first. Every other combination returns at lines 437, 443 or 449. Checked by GPUI test `layout::tests::the_preview_line_is_the_one_react_draws`, which walks every combination and shows the earlier lines win; the port keeps the string for the same unreachable combination, as React has it.
 - [ ] Frame size: a daemon frame is painted on the desk only when its size is 320 × 200; other sizes are kept but not drawn — `app/web/src/views/PreviewStage.tsx:1336-1352`, `app/web/src/lib/preview.ts:28-29` — checked by GPUI test (to write) with a 16 × 16 frame
 - [ ] No picture (no frames and no editor draw): every LED cell paints the unlit colour, and every LED dot paints a dark ring with an unlit core — `app/web/src/views/PreviewStage.tsx:1130`, `:1193-1201` — checked by pair in Lights mode with no picture at 1440x900
 - [ ] Editor draw read-back failure: a failed `getImageData` clears the picture with no message — `app/web/src/views/PreviewStage.tsx:1285-1290` — checked by GPUI test (to write)
@@ -251,7 +251,7 @@ Source notes: line numbers are for the React tree at `0937970`. `git log 0937970
 - [ ] `POST /api/v1/devices/{id}/identify` (`app/web/src/lib/endpoints.ts:77-78`): one request per walk step with `{zone, led, count?, stop}`; the stop request `{zone, led: 0, stop: true}` on Stop, pick change, leaving the page and removing the zone; errors are swallowed — `app/web/src/views/LayoutView.tsx:312-319`, `:338-345`, `:661` — checked by GPUI test (to write) with a 503 (no message is shown)
 - [ ] `GET /api/v1/effects/{id}` (`app/web/src/lib/endpoints.ts:81`): fetched when the running effect id changes; fills the live values the desk draws with; a failure is swallowed (the desk still draws the effect) — `app/web/src/views/LayoutView.tsx:398-419` — checked by GPUI test (to write) with a 500
 - [ ] `GET /api/v1/devices` (`app/web/src/lib/endpoints.ts:72`): via the store on load and on the slow tick; feeds the To place list, the names and the LED counts — `app/web/src/lib/store.ts:257`, `:404-416` — checked by GPUI test (to write)
-- [ ] `GET /api/v1/effects` (store): feeds `needs.screen` and `needs.audio`, which choose the editor draw and the preview line — `app/web/src/views/LayoutView.tsx:420-424` — checked by GPUI test (to write)
+- [x] `GET /api/v1/effects` (store): feeds `needs.screen` and `needs.audio`, which choose the editor draw and the preview line — `app/web/src/views/LayoutView.tsx:420-424` — checked by command: `LayoutView::load` now reads `/api/v1/effects` with the layouts and devices every 4 s (`app/gpui/src/views/layout.rs`), and the parsed `needs` picks the line (`LayoutView::preview_line`); GPUI test `layout::tests::the_preview_line_is_the_one_react_draws` covers the input-reading state.
 - [ ] `GET /api/v1/status` (`app/web/src/lib/endpoints.ts:64`): via the store; `onboarding_complete` decides the auto-open, and a null status with an error replaces the page with DaemonDown — `app/web/src/views/LayoutView.tsx:736-737`, `app/web/src/shell/Shell.tsx:59` — checked by GPUI test (to write)
 - [ ] `POST /api/v1/onboarding/session` `{active}` (`app/web/src/lib/endpoints.ts:193-194`): from the onboarding only; every 2 s while active, `{active: false}` on exit; errors swallowed — `app/web/src/views/editor/Onboarding.tsx:130-135` — checked by GPUI test (to write)
 - [ ] `POST /api/v1/onboarding/complete` (`app/web/src/lib/endpoints.ts:191`): on Finish in the onboarding only — `app/web/src/views/editor/Onboarding.tsx:275` — checked by GPUI test (to write)
@@ -308,6 +308,42 @@ false` (1440x900 dark / 390x844 dark):
 `onboarding-hello 2.55% / 5.22%`, `onboarding-case 3.87% / 10.42%`,
 `onboarding-parts 3.87% / 9.64%`, `onboarding-match 2.91% / 7.06%`,
 `onboarding-finish 5.63% / 9.16%`.
+
+Round 4 (the preview line, #213). Two daemon states, each shot with React and
+GPUI back to back against one daemon: **A** is no effect on the layout
+(`effect: null`) with the engine paused (`PATCH /api/v1/output
+{"power":"paused"}`), so the preview socket connects and delivers no frame —
+React's "No effect is running on this layout." state; **B** is an effect
+running (`solid`, colour `#000000`) with the engine running, so the preview is
+live and neither editor draws a line. The fake daemon's first run leaves a case
+landmark in the layout, and every pair below carries it. 4 sizes × 2 themes × 2
+states = 16 pairs, nothing masked (the mask count is 0 on every pair).
+
+State A (the line drawn), 1440x900 dark before this round's code and after it:
+
+| Size | Before | After |
+|---|---|---|
+| 1920x1040 | dark 256820/1996800 (12.86%), light 282892/1996800 (14.17%) | dark 63525/1996800 (3.18%), light 59922/1996800 (3.00%) |
+| 1440x900 | dark 213230/1296000 (16.45%), light 233580/1296000 (18.02%) | dark 62880/1296000 (4.85%), light 61242/1296000 (4.73%) |
+| 1024x768 | dark 154630/786432 (19.66%), light 164355/786432 (20.90%) | dark 39110/786432 (4.97%), light 37278/786432 (4.74%) |
+| 390x844 | dark 124106/329160 (37.70%), light 129854/329160 (39.45%) | dark 30525/329160 (9.27%), light 29879/329160 (9.08%) |
+
+State B (no line in either editor), before and after (the change draws nothing
+in this state, so the pairs are unchanged apart from the live picture):
+
+| Size | Before | After |
+|---|---|---|
+| 1920x1040 | dark 62453/1996800 (3.13%), light 62823/1996800 (3.15%) | dark 60631/1996800 (3.04%), light 62607/1996800 (3.14%) |
+| 1440x900 | dark 56988/1296000 (4.40%), light 59046/1296000 (4.56%) | dark 56781/1296000 (4.38%), light 59046/1296000 (4.56%) |
+| 1024x768 | dark 36760/786432 (4.67%), light 37131/786432 (4.72%) | dark 36969/786432 (4.70%), light 37347/786432 (4.75%) |
+| 390x844 | dark 21721/329160 (6.60%), light 22672/329160 (6.89%) | dark 21926/329160 (6.66%), light 22672/329160 (6.89%) |
+
+Round 3's 3.84% was a state without the case landmark. The case costs about
+0.6 of a point on the pair: state B without the case read 3.78% at 1440x900
+dark (the live no-effect pair shot at the start of this round) where state B
+with the case reads 4.38%, and state A before the case appeared read 15.28%
+where the same state with the case reads 16.45%. The banner's own box is 0.04%
+of the pair at threshold 80 (19/45296 pixels) at 1440x900 dark.
 
 ## Reviewer verdict
 Adversarial reviewer, date, what it compared, every mismatch it found and how each was fixed, and its final verdict

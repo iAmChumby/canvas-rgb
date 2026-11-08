@@ -23,12 +23,13 @@ pub mod tokens;
 
 use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 
-use canvas_proto::api::{DevicesResponse, LayoutsResponse};
+use canvas_proto::api::{DevicesResponse, EffectsResponse, LayoutsResponse};
 use canvas_proto::device::{DeviceInfo, DeviceKind};
 use canvas_proto::layout::{Layout, PartKind, RenderScale, SamplingMode};
 
 use crate::client::DaemonClient;
 use crate::components::button::{Variant, button_icon, icon_button};
+use crate::components::fan_bits::rule_box;
 use crate::components::panel::panel_with_padding;
 use crate::components::segmented::segmented;
 use crate::components::slider::Origin;
@@ -222,6 +223,33 @@ impl LayoutView {
 
     pub fn dirty(&self) -> bool {
         interact::is_dirty(self.history.draft.as_ref(), self.base.as_ref())
+    }
+
+    /// The preview line the page draws under the strip (React `previewLine`,
+    /// `LayoutView.tsx:429-453`).
+    ///
+    /// React reads three things: whether the preview socket is live, the
+    /// running effect on the *server* copy of the layout, and whether that
+    /// effect reads the screen or the audio (from the effects list). The
+    /// editor-draw sentence is React's own rule; the GPUI has no editor-draw
+    /// layer yet, so the sentence names what React does (see the checklist).
+    pub fn preview_line(&self) -> Option<(String, bool)> {
+        let running = self
+            .server_layout()
+            .and_then(|l| l.effect.as_ref())
+            .map(|e| e.id.clone());
+        let needs_input = running.as_ref().is_some_and(|id| {
+            self.effects
+                .as_ref()
+                .and_then(|list| list.effects.iter().find(|e| &e.id == id))
+                .is_some_and(|e| e.needs.screen || e.needs.audio)
+        });
+        preview_line_of(
+            self.feed.is_live(),
+            self.feed.error().as_deref(),
+            running.as_deref(),
+            needs_input,
+        )
     }
 
     pub fn undo(&mut self) {
@@ -1097,10 +1125,14 @@ impl LayoutView {
             let client = DaemonClient::new();
             let layouts = client.get("/api/v1/layouts");
             let devices = client.get("/api/v1/devices");
-            (layouts, devices)
+            // The effects list says whether the running effect reads the
+            // screen or the audio, which chooses the preview line
+            // (LayoutView.tsx:420-424); React reads it from the store.
+            let effects = client.get("/api/v1/effects");
+            (layouts, devices, effects)
         });
         cx.spawn(async move |view, cx| {
-            let (layouts, devices) = bg.await;
+            let (layouts, devices, effects) = bg.await;
             let _ = view.update(cx, |this, cx| {
                 match layouts {
                     Ok(body) => match serde_json::from_str::<LayoutsResponse>(&body) {
@@ -1124,6 +1156,11 @@ impl LayoutView {
                 if let Ok(body) = devices {
                     if let Ok(parsed) = serde_json::from_str::<DevicesResponse>(&body) {
                         this.devices = Some(parsed.devices);
+                    }
+                }
+                if let Ok(body) = effects {
+                    if let Ok(parsed) = serde_json::from_str::<EffectsResponse>(&body) {
+                        this.effects = Some(parsed);
                     }
                 }
                 cx.notify();
@@ -1394,19 +1431,55 @@ pub fn inspector_width(container: f32) -> f32 {
     }
 }
 
+/// One `rule` line's height (`.rule`, `app.css:4383`): its 8 px padding top
+/// and bottom, a 1 px border each side, and 14 px text on the body's 1.45
+/// line height (20.3 px). React's banner box measured 38.3 px tall at
+/// 1440x900 (`probe-layout.mjs`).
+pub const RULE_H: f32 = 2.0 + 16.0 + 14.0 * crate::theme::LINE_HEIGHT;
+
+/// The page's own gap between two children (`.rd-page`, `--s4`).
+pub const PAGE_GAP: f32 = 16.0;
+
+/// React's `previewLine` (`LayoutView.tsx:429-453`) as a pure function.
+///
+/// `live` is the preview socket's liveness; `error` its refusal, in the
+/// daemon's own words; `running_effect` the effect saved on the server copy
+/// of the layout; `needs_input` whether that effect reads the screen or the
+/// audio. The state names are React's `PreviewState` values.
+pub fn preview_line_of(
+    live: bool,
+    error: Option<&str>,
+    running_effect: Option<&str>,
+    needs_input: bool,
+) -> Option<(String, bool)> {
+    let state = if live {
+        "live"
+    } else if error.is_some() {
+        "refused"
+    } else {
+        "connecting"
+    };
+    let running = running_effect.is_some();
+    let editor_draws = state != "live" && running && !needs_input;
+    interact::preview_line(state, error, editor_draws, needs_input, running)
+}
+
 /// The desk's own box, in css pixels: the size the desk's view is measured
 /// from.
 ///
 /// The desk fills the frame, and the frame fills the desk's column of the
 /// page's grid. On a phone the column is 46 vh tall and the panes below the
 /// desk are the switcher and the bar; on a desktop the column is the page's
-/// own height and the bar is one row.
+/// own height and the bar is one row. Each rule line the page draws above
+/// the grid (the preview line, the save error) takes its height and the
+/// page's gap out of the grid, so the desk's fit shrinks with it.
 pub fn desk_size(
     _window_w: f32,
     window_h: f32,
     container: f32,
     inspector_w: f32,
     one_column: bool,
+    rule_lines: usize,
 ) -> (f32, f32) {
     let width = if one_column {
         container - 2.0
@@ -1415,10 +1488,14 @@ pub fn desk_size(
     };
     let height = if one_column {
         // The desk's column is 46 vh; the bar wraps to two rows under it.
+        // The rules above the grid do not touch it: the column is a fixed
+        // height and the page below it scrolls instead.
         window_h * 0.46 - 32.0 - 2.0 - 91.0
     } else {
-        // The strip, the page's padding and the bar.
-        window_h - 55.0 - 16.0 - 24.0 - 2.0 - 51.0
+        // The strip, the page's padding, the bar, and every rule above the
+        // grid (each with the page's gap).
+        let rules = rule_lines as f32 * (RULE_H + PAGE_GAP);
+        window_h - 55.0 - 16.0 - 24.0 - 2.0 - 51.0 - rules
     };
     (width, height)
 }
@@ -1591,6 +1668,22 @@ pub fn render_page(
         return page.child(reading(t)).into_any_element();
     };
 
+    // The page's own lines above the desk: React's `rule` boxes in React's
+    // order (`LayoutView.tsx:1106-1116`). They are drawn here, before the
+    // grid, and the desk's fit takes their height out (desk_size).
+    let mut rules: Vec<(String, bool)> = Vec::new();
+    if let Some(line) = view.preview_line() {
+        rules.push(line);
+    }
+    if let Some(err) = &view.save_error {
+        rules.push((format!("The layout was not saved: {err}"), true));
+    }
+    let rule_count = rules.len();
+    let mut page = page;
+    for (i, (text, down)) in rules.into_iter().enumerate() {
+        page = page.child(rule_box(&t, &format!("lay-rule-{i}"), down, text));
+    }
+
     // The desk, in its frame, with the bar along the frame's bottom edge.
     let desk_input = DeskInput {
         zones: layout.zones.clone(),
@@ -1623,7 +1716,7 @@ pub fn render_page(
         .bg(Theme::color(t.sunk))
         .overflow_hidden()
         .child(desk_el)
-        .child(stage_toolbar(view, &t, container, phone, cx));
+        .child(stage_toolbar(view, &t, container, phone, rule_count, cx));
     let mut stage_column = if one_column {
         // The stage column is 46 vh tall on a phone (`.rd-lay-stage` at the
         // 639 px container query); the frame inside it takes the rest. It
@@ -2798,13 +2891,21 @@ fn stage_toolbar(
     t: &Theme,
     container: f32,
     phone: bool,
+    rule_lines: usize,
     cx: &mut Context<LayoutView>,
 ) -> gpui::AnyElement {
     let layout = view.layout().cloned();
     let container_width = container;
     let one_column = container_width <= 639.0;
     let inspector_w = inspector_width(container_width);
-    let (desk_w, desk_h) = desk_size(view.width, view.height, container_width, inspector_w, one_column);
+    let (desk_w, desk_h) = desk_size(
+        view.width,
+        view.height,
+        container_width,
+        inspector_w,
+        one_column,
+        rule_lines,
+    );
     let centre = stage::content_centre(
         &layout.as_ref().map(|l| l.zones.clone()).unwrap_or_default(),
         &layout.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default(),
@@ -3560,3 +3661,95 @@ impl Render for LayoutView {
         render_page(self, window, cx)
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The line the bug was about: no effect on the layout and the preview
+    /// socket not live. React draws it as a warning (`LayoutView.tsx:449-451`),
+    /// and the GPUI computed it (`interact::preview_line`) but never drew it.
+    #[test]
+    fn the_no_effect_state_names_itself_in_a_warning() {
+        assert_eq!(
+            preview_line_of(false, None, None, false),
+            Some(("No effect is running on this layout.".to_string(), true))
+        );
+    }
+
+    /// Every state React's `previewLine` can be in, in React's order
+    /// (`LayoutView.tsx:429-453`).
+    #[test]
+    fn the_preview_line_is_the_one_react_draws() {
+        // Live: no line, whatever else is true.
+        assert_eq!(preview_line_of(true, None, Some("solid"), false), None);
+        assert_eq!(preview_line_of(true, Some("refused"), None, false), None);
+        // Refused: the daemon's words, as a warning.
+        let (text, down) = preview_line_of(false, Some("no token"), None, false).unwrap();
+        assert_eq!(text, "The live preview is not connected. no token");
+        assert!(down);
+        // An effect that runs and draws in the editor: the quiet line.
+        let (text, down) = preview_line_of(false, None, Some("solid"), false).unwrap();
+        assert_eq!(
+            text,
+            "Preview drawn by the editor · the live preview is not available yet"
+        );
+        assert!(!down);
+        // An effect that reads the screen or the audio: a warning.
+        let (text, down) = preview_line_of(false, None, Some("screen_ambience"), true).unwrap();
+        assert_eq!(
+            text,
+            "This effect reads the screen or the audio, so the preview is the frame from canvas-rgb."
+        );
+        assert!(down);
+        // A socket that has not delivered a frame yet and no effect: the bug's
+        // state.
+        assert_eq!(
+            preview_line_of(false, None, None, false),
+            Some(("No effect is running on this layout.".to_string(), true))
+        );
+    }
+
+    /// A rule line takes its own height and the page's gap out of the desk's
+    /// fit, which is why React's zoom reads 131% where the GPUI read 135%.
+    #[test]
+    fn a_rule_line_takes_its_height_and_the_gap_out_of_the_desk() {
+        let (_, none) = desk_size(1440.0, 900.0, 1192.0, 320.0, false, 0);
+        let (_, one) = desk_size(1440.0, 900.0, 1192.0, 320.0, false, 1);
+        let (_, two) = desk_size(1440.0, 900.0, 1192.0, 320.0, false, 2);
+        assert_eq!(none, 752.0);
+        assert!((none - one - (RULE_H + PAGE_GAP)).abs() < 0.001);
+        assert!((none - two - 2.0 * (RULE_H + PAGE_GAP)).abs() < 0.001);
+        // React's banner box measured 38.3 px tall at 1440x900.
+        assert!((RULE_H - 38.3).abs() < 0.001, "RULE_H is {}", RULE_H);
+        // The phone's column is 46 vh whatever the page holds above the grid:
+        // the document scrolls instead (`.rd-lay-stage` at the 639 px query).
+        let (_, phone_none) = desk_size(390.0, 844.0, 358.0, 280.0, true, 0);
+        let (_, phone_one) = desk_size(390.0, 844.0, 358.0, 280.0, true, 1);
+        assert_eq!(phone_none, phone_one);
+    }
+
+    /// The bug itself was a line computed and never drawn. The order cannot
+    /// be seen in a screenshot once it is right, so the source is pinned:
+    /// `render_page` asks for the line and draws the rule boxes before the
+    /// grid.
+    #[test]
+    fn the_page_draws_the_rules_above_the_grid() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/views/layout.rs"))
+            .expect("read layout.rs");
+        let asked = source
+            .find("if let Some(line) = view.preview_line()")
+            .expect("render_page asks for the preview line");
+        let drawn = source
+            .find("rule_box(&t, &format!(\"lay-rule-{i}\")")
+            .expect("the rule is drawn");
+        let grid = source.find(".child(grid)").expect("the page's grid");
+        assert!(asked < drawn, "the line is asked for after it is drawn");
+        assert!(
+            drawn < grid,
+            "the rule is drawn at {drawn} but the grid at {grid}: the banner must sit above the desk"
+        );
+    }
+}
+
+
