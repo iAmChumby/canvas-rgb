@@ -48,7 +48,11 @@ impl EffectsView {
         let entity = cx.entity();
         let editing = self.editing();
         let phone = self.width <= 640.0;
-        let mut row = div().flex().items_center().gap_2();
+        // The strip row's gap is `--s1` (4) on a phone, `--s2` (8) above.
+        let mut row = div()
+            .flex()
+            .items_center()
+            .gap(if phone { px(4.0) } else { px(8.0) });
         let entity_new = entity.clone();
         row = row.child(button_icon(
             t,
@@ -143,7 +147,8 @@ impl EffectsView {
         // Import: React's FileButton is a hidden <input type=file>, which
         // needs no tray; GPUI's native path prompt is the same door
         // (Settings' config import uses it). Disabled while importing or
-        // editing, as React's is.
+        // editing, as React's is. It is the default (32 px) key, not sm:
+        // measured 42x32 at 390 against GPUI's 38x28 (#244).
         let entity_import = entity.clone();
         row = row.child(button_icon(
             t,
@@ -151,7 +156,7 @@ impl EffectsView {
             if phone { "" } else { "Import" },
             Variant::Default,
             self.importing || editing,
-            true,
+            false,
             "UploadSimple",
             "",
             16.0,

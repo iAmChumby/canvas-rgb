@@ -46,13 +46,35 @@ pub fn segmented(
         let value = value.to_string();
         let change = on_change.clone();
         // The LED dot: unlit (`--led-off`) on the quiet options, live on the
-        // checked one (hardware.css `seg-item::before`).
-        let dot_color = if is_selected {
-            t.live()
+        // checked one (hardware.css `seg-item::before`). The lit dot carries
+        // a 2 px halo of live at 22% (`box-shadow: 0 0 0 2px`): box-shadow
+        // is paint-only, so the halo draws as a 9 px disc centred on the
+        // 5 px core, absolutely placed, and the cell keeps React's width
+        // (#240).
+        let live = t.live();
+        let dot = if is_selected {
+            let halo = gpui::Rgba { a: 0.22, ..live };
+            div()
+                .relative()
+                .flex_none()
+                .size(px(5.0))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(-2.0))
+                        .top(px(-2.0))
+                        .size(px(9.0))
+                        .rounded_full()
+                        .bg(halo),
+                )
+                .child(div().size(px(5.0)).rounded_full().bg(live))
         } else {
-            Theme::color(t.dot)
+            div()
+                .flex_none()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(Theme::color(t.dot))
         };
-        let dot = div().size(px(5.0)).rounded_full().bg(dot_color);
         // React Segmented.tsx:129 wraps a label holding a digit in `.fig`
         // (the mono figures face, tabular-nums): the Decimals "0"/"1".
         let family = if label.chars().any(|c| c.is_ascii_digit()) {
@@ -135,8 +157,30 @@ pub fn segmented_disabled(
         } else {
             crate::fonts::UI_FAMILY
         };
-        let dot_color = if is_selected { t.live() } else { Theme::color(t.dot) };
-        let dot = div().size(px(5.0)).rounded_full().bg(dot_color);
+        let live = t.live();
+        let dot = if is_selected {
+            let halo = gpui::Rgba { a: 0.22, ..live };
+            div()
+                .relative()
+                .flex_none()
+                .size(px(5.0))
+                .child(
+                    div()
+                        .absolute()
+                        .left(px(-2.0))
+                        .top(px(-2.0))
+                        .size(px(9.0))
+                        .rounded_full()
+                        .bg(halo),
+                )
+                .child(div().size(px(5.0)).rounded_full().bg(live))
+        } else {
+            div()
+                .flex_none()
+                .size(px(5.0))
+                .rounded_full()
+                .bg(Theme::color(t.dot))
+        };
         let cell = div()
             .id(gpui::SharedString::from(format!("{id}-{value}")))
             .relative()

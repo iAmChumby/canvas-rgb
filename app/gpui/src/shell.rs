@@ -1536,10 +1536,18 @@ impl Shell {
         // 1 px = 55 total, the border at y54-55 (GPUI drew the border inside
         // 54, at 53-54, shifting everything below 1 px up). The phone strip
         // is `.strip{height:48px}` with the border inside it, as drawn.
+        // The phone row's gap is `--s2` (8), but a page with its own actions
+        // drops it to `--s1` (4) (`.strip-inner:has(.rd-actions)`), and the
+        // brand goes too; both settle the effects/fans phone header (#244).
+        let has_actions = page_actions.is_some();
         let mut inner = div()
             .flex()
             .items_center()
-            .gap(if phone { px(8.0) } else { px(16.0) })
+            .gap(if phone {
+                if has_actions { px(4.0) } else { px(8.0) }
+            } else {
+                px(16.0)
+            })
             .h(if phone { px(48.0) } else { px(55.0) })
             .px(if phone { px(8.0) } else { px(24.0) })
             .border_b_1()
@@ -1581,15 +1589,15 @@ impl Shell {
         } else {
             title_text
         };
-        title_row = title_row.child(
-            div()
-                .text_xl()
-                .line_height(gpui::relative(1.0))
-                .font_weight(gpui::FontWeight::SEMIBOLD)
-                .font_family(crate::fonts::UI_FAMILY)
-                .text_color(Theme::color(t.ink))
-                .child(title_text.to_string()),
-        );
+        title_row = title_row.child(crate::components::panel::tracked_text_lh(
+            &title_text,
+            20.0,
+            -0.01,
+            gpui::FontWeight::SEMIBOLD,
+            crate::fonts::UI_FAMILY,
+            Theme::color(t.ink),
+            1.0,
+        ));
         if !context_text.is_empty() && !phone {
             // React's strip gives the room to a page that brings actions of
             // its own: below 1100 px the page's context line goes too
@@ -1611,9 +1619,13 @@ impl Shell {
         if let Some(leading) = page_leading {
             inner = inner.child(leading);
         }
-        inner = inner.child(title_row);        // Now playing: hidden at 1280 px and up (the deck carries it there).
+        inner = inner.child(title_row);
+        // Now playing: hidden at 1280 px and up (the deck carries it there).
         if self.width < 1280.0 {
+            // React `.strip-swatch` is `flex: none`: without it GPUI's flex
+            // squashes the swatch into a thin bar under row pressure.
             let swatch = div()
+                .flex_none()
                 .size(px(12.0))
                 .r_sm()
                 .bg(t.live());
@@ -1625,46 +1637,111 @@ impl Shell {
             let mut now_row = div().flex().items_center().gap_2().child(swatch);
             if page_actions.is_none() || phone {
                 let now_name = if phone {
-                    // React's phone strip truncates the now-playing name
-                    // (`.strip-now` overflow): on the stack builder the
-                    // truncated title gives the name more room, so React
-                    // reads "Nothing is ru…" there ("Nothing…" on the
-                    // other pages); the builder is the page with a leading
-                    // back key.
-                    let max_w = if has_leading { 88.0 } else { 64.0 };
-                    ellipsize(window, &now_name, max_w, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+                    // The stack builder (the page with a leading back key)
+                    // keeps its measured 88 px: React reads "Nothing is ru…"
+                    // there. Every other page uses the leftover-room budget.
+                    if has_leading {
+                        ellipsize(window, &now_name, 88.0, 14.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY)
+                    } else {
+                        // React's phone strip truncates the now-playing name to
+                        // the row's leftover room (`.strip-now` flex 0 1 auto,
+                        // overflow hidden): measured "Nothing…" at ~64 px on
+                        // Effects, the full "Nothing is running" on Displays, and
+                        // zero width on Fans where the profile strip fills the
+                        // row. The budget below is that leftover room measured
+                        // from React's strip boxes at 390 (#244): the row's
+                        // 374 px of content less the brand (when drawn), the
+                        // title, the swatch, the 22 px mark (14 icon + 8
+                        // padding), the 68 px controls (36 + 4 + 28), the page
+                        // actions by page, and the row gaps.
+                        let gap = if has_actions { 4.0 } else { 8.0 };
+                        let brand_w = if page_actions.is_none() { 16.0 } else { 0.0 };
+                        let title_w = text_width(
+                            window,
+                            &title_text,
+                            20.0,
+                            gpui::FontWeight::SEMIBOLD,
+                            crate::fonts::UI_FAMILY,
+                        );
+                        let actions_w = match self.page.as_str() {
+                            "effects" => 119.0,
+                            "fans" => 209.0,
+                            "layout" => 210.0,
+                            "peripherals" => 130.0,
+                            _ => 0.0,
+                        };
+                        // Phone gap per adjacency of brand/title/now/mark/actions,
+                        // plus the actions-to-controls gap (Effects: 4 × 4 = 16;
+                        // Displays: 3 × 8 = 24).
+                        let left_items = (if brand_w > 0.0 { 1.0 } else { 0.0 })
+                            + 1.0
+                            + 1.0
+                            + 1.0
+                            + if actions_w > 0.0 { 1.0 } else { 0.0 };
+                        let gaps =
+                            gap * ((left_items - 1.0) + if actions_w > 0.0 { 1.0 } else { 0.0 });
+                        let budget = self.width - 16.0 - brand_w - title_w - 12.0 - 22.0 - 68.0
+                            - actions_w
+                            - gaps
+                            - 8.0
+                            // With actions the room is tight and the longest
+                            // fitting prefix lands a few px short of React's
+                            // "Nothing…" box (browser subpixel placement): the
+                            // measured check sat 7 px left before this (Effects,
+                            // #244); Fans stays at zero either way.
+                            + if has_actions { 4.0 } else { 0.0 };
+                        if budget <= 1.0 {
+                            String::new()
+                        } else {
+                            ellipsize(
+                                window,
+                                &now_name,
+                                budget,
+                                14.0,
+                                gpui::FontWeight::SEMIBOLD,
+                                crate::fonts::UI_FAMILY,
+                            )
+                        }
+                    }
                 } else {
                     now_name.clone()
                 };
-                let mut detail_text = div()
-                    .flex()
-                    .items_baseline()
-                    .gap_2()
-                    .child(
-                        div()
-                            .text_sm()
-                            .font_weight(gpui::FontWeight::SEMIBOLD)
-                            .font_family(crate::fonts::UI_FAMILY)
-                            .text_color(Theme::color(t.ink))
-                            .child(now_name),
-                    );
-                if !phone {
-                    detail_text = detail_text.child(
-                        div()
-                            .text_sm()
-                            .font_family(crate::fonts::UI_FAMILY)
-                            .text_color(Theme::color(t.mute))
-                            .child(now_detail.clone()),
-                    );
+                if !now_name.is_empty() {
+                    // On a phone the detail line is hidden
+                    // (`.strip-now-detail[data-count]` holds the count, and
+                    // the phone keeps the name only): the name alone is the
+                    // row. The React fan header is the proof: the name gets
+                    // zero width there, and only the swatch draws.
+                    let mut detail_text = div()
+                        .flex()
+                        .items_baseline()
+                        .gap_2()
+                        .child(
+                            div()
+                                .text_sm()
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child(now_name),
+                        );
+                    if !phone {
+                        detail_text = detail_text.child(
+                            div()
+                                .text_sm()
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child(now_detail.clone()),
+                        );
+                    }
+                    now_row = now_row
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .flex()
+                                .min_w(px(0.0))
+                                .child(detail_text),
+                        );
                 }
-                now_row = now_row
-                    .min_w(px(0.0))
-                    .child(
-                        div()
-                            .flex()
-                            .min_w(px(0.0))
-                            .child(detail_text),
-                    );
             }
             inner = inner.child(now_row);
         }
@@ -1672,11 +1749,16 @@ impl Shell {
         // has no flex gap between icon and words; GPUI's title advance runs
         // 4 px short of the browser's at 1440, so at 1280 and up the row
         // carries 4 px of left margin and no gap (dot and words both land on
-        // React's 333/342 at 1440).
+        // React's 333/342 at 1440). On a phone the mark is 22 px wide
+        // (14 icon + `--s1` padding each side, `.strip-mark` phone rule):
+        // without the padding the icon sat where the name ends.
         let mut mark_row = div()
             .flex()
             .items_center()
-            .child(gpui::svg().path(mark_icon).size(px(14.0)).text_color(tone_color));
+            .child(gpui::svg().path(mark_icon).size(px(14.0)).flex_none().text_color(tone_color));
+        if phone {
+            mark_row = mark_row.flex_none().px(px(4.0));
+        }
         if self.width >= 1280.0 {
             mark_row = mark_row.ml(px(4.0));
         }
@@ -1697,6 +1779,7 @@ impl Shell {
         if let Some(actions) = page_actions {
             let mut box_ = div()
                 .flex()
+                .flex_none()
                 .items_center()
                 .gap_2()
                 .pr_3()
@@ -1714,8 +1797,15 @@ impl Shell {
         }
         // Controls at the right (React `.strip-controls`: an inline-flex
         // group with `margin-left: auto` and an 8 px (`--s2`) gap between
-        // Pause lights and search, not the strip row's 16 px gap).
-        let mut controls = div().flex().items_center().gap(px(8.0));
+        // Pause lights and search, not the strip row's 16 px gap). On a
+        // phone the controls group drops to `--s1` (4) with the rest of the
+        // row (`.strip-inner:has(.rd-actions)`,`.strip-controls` phone
+        // rules): at 8 the Pause key sat 4 px left of React's (#240).
+        let mut controls = div()
+            .flex()
+            .flex_none()
+            .items_center()
+            .gap(if phone { px(4.0) } else { px(8.0) });
         if known {
             if phone {
                 // The same sm button as the row's (Pause lights), with the

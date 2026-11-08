@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The GPUI editor's phone header now matches the React editor: no easel beside the page title on pages that bring their own actions, the running-effect name truncates to the row's room so the green check clears it, and the Import key is the full-height key. Segmented controls have their lit dot's halo back, and tracked captions keep the font's kerning. (#244, #240)
+
 ### Added
 
 - Effect editor and stack builder (round 5) in the GPUI editor (#214): the phone editor and stack layouts now sit on React's measured boxes — the editor sheet hides the bottom dock (React's opaque sheet covers it) so the Speed row is visible at 390, the editor's inner block takes the full 358 px column (the live picture is no longer 8 px narrow and rescaled), the file-name row is 22 px tall, the layer rows draw their six-dot drag grip (it never painted: the glyph needed its own colour) with the correct 12 px/8 px head margins on the stage and layers panels, the strip title keeps React's 81 px ellipsize budget ("Sunse…" against React's "Sunset…"), the picked-layer summary uses the phone padding s3 (12 px), and the Change area key is the sm 28 px key (the property separators moved from 354/418/470 to React's 350/414/466). Editor, stack, Effects library, layout, displays and devices pairs are recorded in `.build/reports/214-r5.md`.
