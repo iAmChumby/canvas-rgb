@@ -773,9 +773,17 @@ impl StackBuilder {
         let entity = cx.entity();
         let side_w = if self.width > 1150.0 { 360.0 } else { 320.0 };
 
+        // The phone's column reads stage, layers, then the picked layer's
+        // summary (React `rd-stack-main` + `rd-layer-summary`); the desktop
+        // puts the picked panel in the side instead.
         let mut main = div().flex().flex_col().gap_4().min_w(px(0.0)).min_h(px(0.0)).flex_1();
         main = main.child(self.stage(cx));
         main = main.child(self.layers_panel(cx));
+        if narrow {
+            if self.picked_layer().is_some() {
+                main = main.child(self.layer_summary(cx));
+            }
+        }
 
         let mut side = div()
             .flex()
@@ -789,14 +797,30 @@ impl StackBuilder {
             side = side.child(self.presets_panel(cx));
         }
 
-        let body = div()
-            .flex()
-            .gap_4()
-            .flex_1()
-            .min_h(px(0.0))
-            .min_w(px(0.0))
-            .child(main)
-            .child(side);
+        // The phone's body is the main column alone (the side's sheet is
+        // hidden until Tune opens it, and the summary already sits in the
+        // column); the desktop is main beside the side.
+        let body = if narrow {
+            div()
+                .flex()
+                .flex_col()
+                .gap_4()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .child(main)
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .gap_4()
+                .flex_1()
+                .min_h(px(0.0))
+                .min_w(px(0.0))
+                .child(main)
+                .child(side)
+                .into_any_element()
+        };
 
         let mut page = div().flex().flex_col().gap_4().flex_1().min_h(px(0.0)).min_w(px(0.0));
         if !narrow && self.height > 0.0 {
@@ -998,20 +1022,56 @@ impl StackBuilder {
                     )),
             );
 
-        let picture = stack_preview(
-            &t,
-            "rd-canvas",
-            self.frame.clone(),
-            area,
-            editable,
-            super::stack_preview::StageBox::new(),
-            {
-                let entity = entity.clone();
-                move |_at, _window, _cx| {
-                    let _ = &entity;
-                }
-            },
-        );
+        // An empty stack's stage: the centred words (`StackPreviewCanvas`'s
+        // `.rd-canvas-empty` replaces the canvas while the stack has no
+        // layer: "Nothing to show yet" over "Add a layer and its picture
+        // appears here.").
+        let picture: gpui::AnyElement = if count == 0 {
+            div()
+                .flex_1()
+                .min_h(px(0.0))
+                .r_md()
+                .bg(Theme::color(t.sunk))
+                .flex()
+                .flex_col()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(
+                    div()
+                        .text_size(px(15.0))
+                        .line_height(gpui::relative(1.45))
+                        .font_weight(gpui::FontWeight::SEMIBOLD)
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.ink))
+                        .child("Nothing to show yet"),
+                )
+                .child(
+                    div()
+                        .text_size(px(14.0))
+                        .line_height(gpui::relative(1.45))
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.mute))
+                        .child("Add a layer and its picture appears here."),
+                )
+                .into_any_element()
+        } else {
+            stack_preview(
+                &t,
+                "rd-canvas",
+                self.frame.clone(),
+                area,
+                editable,
+                super::stack_preview::StageBox::new(),
+                {
+                    let entity = entity.clone();
+                    move |_at, _window, _cx| {
+                        let _ = &entity;
+                    }
+                },
+            )
+            .into_any_element()
+        };
 
         let foot: gpui::AnyElement = if self.draft_state == super::editor::DraftState::Off {
             let note = if let Some(err) = self.preview_error.clone() {
@@ -1176,18 +1236,32 @@ impl StackBuilder {
                         .text_color(Theme::color(t.dim))
                         .child("No layers yet. A stack is a list of effects drawn one over the other, bottom to top."),
                 )
+                // The dashes are drawn bars (`.rd-how-list li::before` is
+                // an 8 x 2 px run of the divider colour, not a bullet).
                 .child(
                     div()
                         .flex()
                         .flex_col()
-                        .gap_1()
+                        .gap(px(4.0))
                         .text_size(px(14.0))
                         .line_height(gpui::relative(1.5))
                         .font_family(crate::fonts::UI_FAMILY)
                         .text_color(Theme::color(t.mute))
-                        .child("• The bottom layer is painted first, then each layer over it.")
-                        .child("• A layer paints on its canvas, a device, a zone or a rectangle.")
-                        .child("• Blend and opacity mix it over what is under it."),
+                        .child(
+                            div().flex().items_center().gap_2().child(
+                                div().flex_none().w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
+                            ).child("The bottom layer is painted first, then each layer over it."),
+                        )
+                        .child(
+                            div().flex().items_center().gap_2().child(
+                                div().flex_none().w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
+                            ).child("A layer paints on its canvas, a device, a zone or a rectangle."),
+                        )
+                        .child(
+                            div().flex().items_center().gap_2().child(
+                                div().flex_none().w(px(8.0)).h(px(2.0)).bg(Theme::color(t.line_2)),
+                            ).child("Blend and opacity mix it over what is under it."),
+                        ),
                 )
                 .child(button_icon(
                     &t,
@@ -1328,6 +1402,74 @@ impl StackBuilder {
             entity_row.update(cx, |this, cx| this.pick(&id, cx));
         })
         .into_any_element()
+    }
+
+    /// The phone's picked-layer summary (`section.panel.rd-layer-summary`):
+    /// the thumbnail, the name, "effect · area" and the Tune key that opens
+    /// the layer sheet. The sheet is a dialog over the stack whose Escape
+    /// and Tab behaviours the pair below cannot observe until it is open.
+    fn layer_summary(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = self.theme;
+        let entity = cx.entity();
+        let Some(picked) = self.picked_layer().cloned() else {
+            return div().into_any_element();
+        };
+        let label = self.layer_label(&picked.effect);
+        // React's `.panel` without a title: the summary carries no tracked
+        // title row, just the head (`layer-edit-head`).
+        div()
+            .id(gpui::SharedString::from("rd-layer-summary"))
+            .p_4()
+            .r_lg()
+            .border_1()
+            .border_color(Theme::color(t.line))
+            .bg(Theme::color(t.panel))
+            .flex()
+            .items_center()
+            .gap_3()
+            .child(thumb(&t, &picked.effect, 48.0, 30.0, cached(&picked.effect), false))
+            .child(
+                div()
+                    .flex_1()
+                    .min_w(px(0.0))
+                    .flex()
+                    .flex_col()
+                    .child(
+                        div()
+                            .text_size(px(16.0))
+                            .line_height(gpui::relative(1.25))
+                            .font_weight(gpui::FontWeight::SEMIBOLD)
+                            .font_family(crate::fonts::UI_FAMILY)
+                            .text_color(Theme::color(t.ink))
+                            .child(picked.name.clone()),
+                    )
+                    .child(
+                        div()
+                            .text_size(px(14.0))
+                            .line_height(gpui::relative(1.3))
+                            .font_family(crate::fonts::MONO_FAMILY)
+                            .text_color(Theme::color(t.mute))
+                            .child(format!("{} · {}", label, area_name(&picked.area, None, None))),
+                    ),
+            )
+            .child(button_icon(
+                &t,
+                "rd-tune",
+                "Tune",
+                Variant::Default,
+                false,
+                true,
+                "SlidersHorizontal",
+                "",
+                15.0,
+                move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        this.sheet_open = true;
+                        cx.notify();
+                    });
+                },
+            ))
+            .into_any_element()
     }
 
     /// The picked layer's panel.
