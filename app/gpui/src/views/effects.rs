@@ -986,9 +986,18 @@ impl EffectsView {
         self.stack_route.go(name);
         let entity = cx.entity();
         let page = entity.clone();
-        self.builder = Some(cx.new(|cx| {
+        let builder = cx.new(|cx| {
             stack_builder::StackBuilder::new(self.theme, name, Some(page), cx)
-        }));
+        });
+        // Debug only (#246): the capture asks for the builder's save error or
+        // its naming error, the way the builder's own flow reaches it
+        // (`CANVAS_RGB_CAPTURE_STACK_ERROR=save|naming`).
+        #[cfg(debug_assertions)]
+        if let Some(which) = std::env::var_os("CANVAS_RGB_CAPTURE_STACK_ERROR") {
+            let which = which.to_string_lossy().to_string();
+            builder.update(cx, |b, cx| b.capture_error(&which, cx));
+        }
+        self.builder = Some(builder);
         cx.notify();
     }
 

@@ -12,11 +12,12 @@ use canvas_proto::api::{StackDetail, StackLayerStatus, StacksResponse};
 use canvas_proto::props::Preset;
 use canvas_proto::stack::{BlendMode, LayerArea, Stack, StackLayer};
 
-use gpui::{Context, Entity, IntoElement, div, prelude::*, px};
+use gpui::{Context, Entity, IntoElement, Styled, Window, div, prelude::*, px};
 
 use crate::client::DaemonClient;
-use crate::components::button::{Variant, button, button_icon, icon_button};
+use crate::components::button::{Variant, button, button_icon, button_sm, icon_button};
 use crate::components::panel::panel_with_padding;
+use crate::components::text_input::TextInput;
 use crate::components::thumb::{cached, thumb};
 use crate::theme::{Theme, TokenRadius};
 
@@ -56,9 +57,13 @@ pub struct StackBuilder {
     pub sheet_open: bool,
     pub saving: bool,
     pub save_error: Option<String>,
+    /// The save error's "Details" disclosure (React's `<details>`).
+    pub save_details_open: bool,
     pub clash: Option<String>,
     pub naming: bool,
     pub naming_error: Option<String>,
+    /// The naming dialog's name field.
+    pub name_input: Option<Entity<TextInput>>,
     pub leaving: bool,
     pub preview_error: Option<String>,
     pub feed_problem: Option<String>,
@@ -138,9 +143,11 @@ impl StackBuilder {
             sheet_open: false,
             saving: false,
             save_error: None,
+            save_details_open: false,
             clash: None,
             naming: false,
             naming_error: None,
+            name_input: None,
             leaving: false,
             preview_error: None,
             feed_problem: None,
@@ -445,7 +452,16 @@ impl StackBuilder {
     /// The stack as the daemon must receive it.
     pub fn stack_for_server(&self) -> Stack {
         let id = if self.is_new() {
-            format!("stack:{}", self.name_draft.trim())
+            // React's `stackForServer` (StackBuilder.tsx:570-575): a new
+            // stack that has no name yet previews under the name "New
+            // stack", so the daemon has a legal id for the preview before
+            // the naming dialog has collected one.
+            let name = self.name_draft.trim();
+            if name.is_empty() {
+                "stack:New stack".to_string()
+            } else {
+                format!("stack:{name}")
+            }
         } else {
             self.base
                 .as_ref()
@@ -535,8 +551,9 @@ impl StackBuilder {
             self.name()
         };
         if wanted.is_empty() {
-            self.naming = true;
-            self.naming_error = None;
+            // React's `save` (StackBuilder.tsx:952-956): a stack with no
+            // name asks for one first.
+            self.open_naming(cx);
             return;
         }
         if replace_id.is_none() {
@@ -605,6 +622,98 @@ impl StackBuilder {
             }
         })
         .detach();
+    }
+
+    // -- the naming dialog ---------------------------------------------------------
+
+    /// The naming dialog opens (React's `setNaming(true)`): the card over
+    /// the scrim, with the name field in it.
+    pub fn open_naming(&mut self, cx: &mut Context<Self>) {
+        self.naming = true;
+        self.naming_error = None;
+        let initial = self.name_draft.clone();
+        let theme = self.theme;
+        let entity = cx.entity();
+        let entity_text = entity.clone();
+        let entity_submit = entity.clone();
+        let entity_escape = entity.clone();
+        let input = match &self.name_input {
+            Some(existing) => {
+                let existing = existing.clone();
+                existing.update(cx, |input, cx| input.set_value(&initial, cx));
+                existing
+            }
+            None => {
+                let input = cx.new(|cx| {
+                    let mut input = TextInput::new(
+                        &initial,
+                        false,
+                        0.0,
+                        0.0,
+                        0,
+                        theme,
+                        std::rc::Rc::new(|_, _, _| {}),
+                        cx,
+                    );
+                    // React's `NameField` in the naming dialog: a plain text
+                    // field with a placeholder, 12 px of room on each side
+                    // (`.text-in { padding: 0 var(--s3) }`) and the input's
+                    // own radius (`r-md`).
+                    input.set_text_mode(Some("Sunset glow"), cx);
+                    input.set_radius_md(cx);
+                    input.set_left_pad(12.0, cx);
+                    input.set_right_pad(12.0, cx);
+                    input.set_on_text_change(std::rc::Rc::new(
+                        move |text: &str, _w: &mut Window, cx: &mut gpui::App| {
+                            entity_text.update(cx, |this, cx| {
+                                this.name_draft = text.to_string();
+                                // React clears the reason when the name
+                                // changes (StackBuilder.tsx:2113-2116).
+                                this.naming_error = None;
+                                cx.notify();
+                            });
+                        },
+                    ));
+                    input.set_on_submit_escape(
+                        std::rc::Rc::new(move |_w: &mut Window, cx: &mut gpui::App| {
+                            entity_submit.update(cx, |this, cx| this.name_the_stack(cx));
+                        }),
+                        std::rc::Rc::new(move |_w: &mut Window, cx: &mut gpui::App| {
+                            entity_escape.update(cx, |this, cx| this.close_naming(cx));
+                        }),
+                    );
+                    input
+                });
+                self.name_input = Some(input.clone());
+                input
+            }
+        };
+        let _ = input;
+        cx.notify();
+    }
+
+    /// The naming dialog closes with no name (React's `setNaming(false)`).
+    pub fn close_naming(&mut self, cx: &mut Context<Self>) {
+        self.naming = false;
+        self.naming_error = None;
+        cx.notify();
+    }
+
+    /// The naming dialog's Save (`nameTheStack` in React,
+    /// StackBuilder.tsx:1042-1056): a name with a problem keeps the dialog
+    /// open with the reason under the field; a name that is good is the
+    /// stack's name and the save goes on.
+    pub fn name_the_stack(&mut self, cx: &mut Context<Self>) {
+        let wanted = self.name_draft.trim().to_string();
+        if let Some(problem) = stack_draft::stack_name_problem(&wanted, &self.other_names) {
+            self.naming_error = Some(problem);
+            cx.notify();
+            return;
+        }
+        self.naming_error = None;
+        self.name_draft = wanted;
+        self.naming = false;
+        self.save(None, cx);
     }
 
     // -- the draft on the lights -------------------------------------------------
@@ -781,6 +890,11 @@ impl StackBuilder {
         // `.rd-page`) to `s3` under `.rd-stacks-phone`.
         let col_gap = if narrow { gpui::px(12.0) } else { gpui::px(16.0) };
         let mut main = div().flex().flex_col().gap(col_gap).min_w(px(0.0)).min_h(px(0.0)).flex_1();
+        // React's `saveError` panel is the first thing in `.rd-stack-main`
+        // (StackBuilder.tsx:1501-1508), above the stage.
+        if self.save_error.is_some() {
+            main = main.child(self.save_error_panel(cx));
+        }
         main = main.child(self.stage(cx));
         main = main.child(self.layers_panel(cx));
         if narrow && self.picked_layer().is_some() {
@@ -965,7 +1079,241 @@ impl StackBuilder {
                 );
             }
         }
+        // The naming dialog, when it is open.
+        if self.naming {
+            page = page.child(self.naming_dialog(cx));
+        }
         page.into_any_element()
+    }
+
+    /// React's `ErrorPanel` for a save that failed (`StackBuilder.tsx:1501-1508`):
+    /// the title, the one-line summary, the raw answer behind "Details" and a
+    /// "Try again" key that saves again (#246).
+    fn save_error_panel(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = self.theme;
+        let entity = cx.entity();
+        let Some(message) = self.save_error.clone() else {
+            return div().into_any_element();
+        };
+        // `<Details>` (`Loading.tsx:81-91`): a "Details" disclosure, its
+        // caret turned down while open, with the raw answer under it.
+        let open = self.save_details_open;
+        let mut details = div()
+            .w_full()
+            .flex()
+            .flex_col()
+            // `.load-detail { margin-top: var(--s3) }`.
+            .mt_3()
+            .child(
+                div()
+                    .id(gpui::SharedString::from("rd-save-details"))
+                    .flex()
+                    .items_center()
+                    .gap_2()
+                    .text_size(px(14.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .cursor_pointer()
+                    .on_click(move |_, _, cx| {
+                        entity.update(cx, |this, cx| {
+                            this.save_details_open = !this.save_details_open;
+                            cx.notify();
+                        });
+                    })
+                    .child(
+                        gpui::svg()
+                            .path(if open {
+                                "icons/CaretDown.svg"
+                            } else {
+                                "icons/CaretRight.svg"
+                            })
+                            .size(px(14.0))
+                            .flex_none()
+                            .text_color(Theme::color(t.mute)),
+                    )
+                    .child("Details"),
+            );
+        if open {
+            details = details.child(
+                div()
+                    .w_full()
+                    // `.load-detail > .state-detail { margin-top: var(--s2) }`.
+                    .mt_2()
+                    .text_size(px(14.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child(message),
+            );
+        }
+        let entity = cx.entity();
+        let body = div()
+            .flex()
+            .flex_col()
+            .items_start()
+            // `.error-line` (app.css:960-963): the down colour at 14 px.
+            .child(
+                div()
+                    .w_full()
+                    .text_size(px(14.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.down))
+                    .child("canvas-rgb could not save that stack. Nothing on the lights changed."),
+            )
+            .child(details)
+            // `.load-note-action { margin-top: var(--s3) }`.
+            .child(
+                div().mt_3().child(button_sm(&t, "rd-save-try-again", "Try again", Variant::Default, self.saving, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.save(None, cx));
+                    }
+                })),
+            );
+        panel_with_padding(&t, "rd-save-error", "The stack could not be saved", div(), body, None)
+            .into_any_element()
+    }
+
+    /// React's naming dialog (`StackBuilder.tsx:2089-2141`): the card over
+    /// the scrim, with the name field, the reason the name was refused under
+    /// it, and the foot (#246).
+    fn naming_dialog(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
+        let t = self.theme;
+        let entity = cx.entity();
+        let narrow = self.width <= 720.0;
+        // `.rd-picker` is a card on the desktop and a sheet on a phone
+        // (app.css:7606-7625 and the phone block at 8044-8055).
+        let mut dialog = div()
+            .id(gpui::SharedString::from("rd-naming"))
+            .relative()
+            .flex()
+            .flex_col()
+            .gap_3()
+            .r_lg()
+            .border_1()
+            .border_color(Theme::color(t.line_2))
+            .bg(Theme::color(t.panel));
+        if narrow {
+            // The phone sheet: the full width, the top corners only, and the
+            // room the dock needs under it.
+            dialog = r_top_lg(
+                dialog
+                    .w_full()
+                    .px_3()
+                    .pt_3()
+                    .pb(px(77.0)),
+            );
+        } else {
+            // `.rd-naming { width: 420px }` and `.rd-picker { padding: var(--s4) }`.
+            dialog = dialog.w(px(420.0)).p_4();
+        }
+        // The head.
+        dialog = dialog.child(
+            div()
+                .flex()
+                .items_start()
+                .justify_between()
+                .gap_3()
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w(px(0.0))
+                        .child(
+                            div()
+                                .text_size(px(16.0))
+                                .line_height(gpui::relative(1.25))
+                                .font_weight(gpui::FontWeight::SEMIBOLD)
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.ink))
+                                .child("Name this stack"),
+                        )
+                        .child(
+                            div()
+                                .mt(px(2.0))
+                                .text_size(px(14.0))
+                                .line_height(gpui::relative(1.45))
+                                .font_family(crate::fonts::UI_FAMILY)
+                                .text_color(Theme::color(t.mute))
+                                .child(
+                                    "A name is not another effect's, and it is not shared with another stack.",
+                                ),
+                        ),
+                )
+                .child(icon_button(&t, "rd-naming-close", "X", "", false, false, false, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.close_naming(cx));
+                    }
+                })),
+        );
+        // The name field (React's `NameField`, a `.text-in.name-field`).
+        if let Some(input) = self.name_input.clone() {
+            dialog = dialog.child(div().w_full().min_w(px(0.0)).child(input));
+        }
+        // The reason the name was refused: React's `.error-line` under the
+        // field (StackBuilder.tsx:2120-2124).
+        if let Some(reason) = self.naming_error.clone() {
+            dialog = dialog.child(
+                div()
+                    .w_full()
+                    .text_size(px(14.0))
+                    .line_height(gpui::relative(1.45))
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.down))
+                    .child(reason),
+            );
+        }
+        // The foot.
+        let entity = cx.entity();
+        dialog = dialog.child(
+            div()
+                .flex()
+                .items_center()
+                .justify_end()
+                .gap_2()
+                .child(button(&t, "rd-naming-cancel", "Cancel", Variant::Ghost, false, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.close_naming(cx));
+                    }
+                }))
+                .child(button(&t, "rd-naming-save", "Save", Variant::Primary, false, {
+                    let entity = entity.clone();
+                    move |_, _, cx| {
+                        entity.update(cx, |this, cx| this.name_the_stack(cx));
+                    }
+                })),
+        );
+        // The scrim.
+        div()
+            .id(gpui::SharedString::from("rd-naming-scrim"))
+            .absolute()
+            .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
+            .p_6()
+            .bg(Theme::color(t.scrim))
+            .child(dialog)
+            .into_any_element()
+    }
+
+    /// Debug only (#246): reaches the state the builder's own flow reaches,
+    /// so a capture can shoot it. "save" names the stack after an effect
+    /// ("Fire"), which the daemon refuses, so the save fails; "naming" names
+    /// it "preview", which the name rule refuses, so the dialog keeps the
+    /// reason under the field.
+    pub fn capture_error(&mut self, which: &str, cx: &mut Context<Self>) {
+        self.add_layer(cx);
+        self.name_draft = if which == "naming" {
+            "preview".to_string()
+        } else {
+            "Fire".to_string()
+        };
+        self.open_naming(cx);
+        self.name_the_stack(cx);
     }
 
     /// The stage: the picture and its foot.
@@ -2391,6 +2739,20 @@ impl StackBuilder {
 /// The name of a stack, from its id.
 pub fn name_of(id: &str) -> String {
     id.strip_prefix("stack:").unwrap_or(id).to_string()
+}
+
+/// The top corners only, at the `--r-lg` radius (React's phone sheet:
+/// `border-radius: var(--r-lg) var(--r-lg) 0 0`). The generated
+/// `rounded_t_lg` is not used: GPUI's own radius suffixes are not the
+/// repo's tokens.
+fn r_top_lg<T: Styled>(mut el: T) -> T {
+    let radius = gpui::AbsoluteLength::Pixels(gpui::px(16.0));
+    let none = gpui::AbsoluteLength::Pixels(gpui::px(0.0));
+    el.style().corner_radii.top_left = Some(radius);
+    el.style().corner_radii.top_right = Some(radius);
+    el.style().corner_radii.bottom_right = Some(none);
+    el.style().corner_radii.bottom_left = Some(none);
+    el
 }
 
 /// The strip's title and context for the builder: the stack's name and

@@ -133,6 +133,9 @@ pub struct TextInput {
     /// The field's left inset: 8 px everywhere except the effects search,
     /// whose icon sits inside it (React's `padding-left: 30px`).
     left_pad: f32,
+    /// The field's right inset: 8 px everywhere except React's `.text-in`
+    /// (a name field), whose padding is `var(--s3)` (12 px) on each side.
+    right_pad: f32,
     /// Shown dimmed while nothing is typed (the search placeholder).
     placeholder: Option<SharedString>,
     /// The placeholder's colour. `None` uses the theme's mute.
@@ -182,6 +185,7 @@ impl TextInput {
             radius_sm: false,
             border_2: false,
             left_pad: 8.0,
+            right_pad: 8.0,
             placeholder: None,
             placeholder_color: None,
             blur: None,
@@ -207,6 +211,19 @@ impl TextInput {
     /// 8 px, so its text starts 30 px in, as React's `padding-left` does).
     pub fn set_left_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
         self.left_pad = pad;
+        cx.notify();
+    }
+
+    /// The field's right inset (React's `.text-in` has 12 px on each side).
+    pub fn set_right_pad(&mut self, pad: f32, cx: &mut Context<Self>) {
+        self.right_pad = pad;
+        cx.notify();
+    }
+
+    /// The input's own radius (React's `.text-in` wears `r-md`; the search
+    /// box wears the small one).
+    pub fn set_radius_md(&mut self, cx: &mut Context<Self>) {
+        self.radius_sm = false;
         cx.notify();
     }
 
@@ -775,7 +792,7 @@ impl Render for TextInput {
             .justify_end()
             .w_full()
             .pl(px(self.left_pad))
-            .pr(if bare { px(0.0) } else { px(8.0) });
+            .pr(if bare { px(0.0) } else { px(self.right_pad) });
         if !bare {
             field = field.h(px(32.0));
         }
