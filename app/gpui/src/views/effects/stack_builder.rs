@@ -101,7 +101,7 @@ pub struct StackBuilder {
     pub preset_name: Option<String>,
     /// The window-level overlay host (#246): the naming dialog is drawn
     /// over the whole window, the way React's fixed scrim is.
-    pub overlay: gpui::Entity<crate::shell::WindowOverlay>,
+    pub overlay: Option<gpui::Entity<crate::shell::WindowOverlay>>,
 }
 
 /// A drag on the picture's area frame.
@@ -173,7 +173,7 @@ impl StackBuilder {
             effect_open: false,
             preset_problem: None,
             preset_name: None,
-            overlay,
+            overlay: Some(overlay),
         };
         if !is_new {
             builder.load(cx);
@@ -786,8 +786,10 @@ impl StackBuilder {
     /// whole window, and it is built when the host draws it, so the host
     /// has to be told that the dialog's own state changed.
     fn refresh_overlay(&self, cx: &mut Context<Self>) {
+        let Some(overlay) = self.overlay.clone() else {
+            return;
+        };
         let builder = cx.weak_entity();
-        let overlay = self.overlay.clone();
         overlay.update(cx, |host, cx| {
             host.set(
                 Some(Box::new(move |_window: &mut Window, cx: &mut gpui::App| {
@@ -797,7 +799,7 @@ impl StackBuilder {
                         // window.
                         Err(_) => div().into_any_element(),
                     }
-                })),
+                }) as crate::shell::OverlayBuilder),
                 cx,
             );
         });
@@ -805,7 +807,9 @@ impl StackBuilder {
 
     /// Nothing is over the window any more (the naming dialog closed).
     fn clear_overlay(&self, cx: &mut Context<Self>) {
-        let overlay = self.overlay.clone();
+        let Some(overlay) = self.overlay.clone() else {
+            return;
+        };
         overlay.update(cx, |host, cx| host.set(None, cx));
     }
 
@@ -2696,6 +2700,12 @@ impl StackBuilder {
     }
 
     /// A layer is added: the first effect of the library.
+    ///
+    /// React's `addOne` (`StackBuilder.tsx:1173-1209`) reads the effect's
+    /// detail, so the layer takes the effect's name and its saved values
+    /// and the effect's picture comes with it. That is not done here yet:
+    /// the GPUI's layer is named "Layer" and its picture is still pending,
+    /// so the layer row reads "Layer" where React reads the effect's name.
     pub fn add_layer(&mut self, cx: &mut Context<Self>) {
         let Some(id) = stack_draft::next_layer_id(&self.draft.layers) else {
             return;
@@ -3057,6 +3067,7 @@ mod tests {
             effect_open: false,
             preset_problem: None,
             preset_name: None,
+            overlay: None,
         };
         assert!(!builder.dirty());
         builder.draft.layers[0].opacity = 50;

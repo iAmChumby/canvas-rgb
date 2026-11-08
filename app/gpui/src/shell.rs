@@ -44,6 +44,10 @@ use crate::views::peripherals::PeripheralsView;
 use crate::views::settings::{SettingsView, ThemeCell};
 use crate::views::updates::UpdatesView;
 
+/// The overlay the page wants over the window, built when the host draws
+/// it (the page's state changes under it).
+pub type OverlayBuilder = Box<dyn Fn(&mut Window, &mut gpui::App) -> gpui::AnyElement>;
+
 /// The window-level overlay host (#246).
 ///
 /// React's `.rd-scrim` is `position: fixed`, so the stack builder's naming
@@ -54,7 +58,7 @@ pub struct WindowOverlay {
     /// The overlay the page wants over the window. It is built when the
     /// host draws it, not kept as an element, because the page's state
     /// changes under it (the name, the reason under the field).
-    build: Option<Box<dyn Fn(&mut Window, &mut gpui::App) -> gpui::AnyElement>>,
+    build: Option<OverlayBuilder>,
 }
 
 impl WindowOverlay {
@@ -63,11 +67,7 @@ impl WindowOverlay {
     }
 
     /// The page sets the overlay, or takes it away with `None`.
-    pub fn set(
-        &mut self,
-        build: Option<Box<dyn Fn(&mut Window, &mut gpui::App) -> gpui::AnyElement>>,
-        cx: &mut Context<Self>,
-    ) {
+    pub fn set(&mut self, build: Option<OverlayBuilder>, cx: &mut Context<Self>) {
         self.build = build;
         cx.notify();
     }
