@@ -101,6 +101,19 @@ pub fn content_centre(zones: &[PlacedZone], landmarks: &[Landmark]) -> f64 {
     (min_x + max_x) / 2.0
 }
 
+/// What a drag is drawing over the desk: the marquee, the snap guides and
+/// the readout. All in css pixels relative to the desk, except the guides,
+/// which are in canvas units as React draws them as spans over the desk.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct DragOverlay {
+    /// The marquee band, css px (x, y, w, h).
+    pub marquee: Option<(f32, f32, f32, f32)>,
+    /// Snap guides, canvas units (vertical, second vertical, horizontal).
+    pub guides: (Option<f64>, Option<f64>, Option<f64>),
+    /// The move/resize/rotate readout, css px (text, x, y).
+    pub readout: Option<(String, f32, f32)>,
+}
+
 /// Everything the desk draws.
 pub struct DeskInput {
     pub zones: Vec<PlacedZone>,
@@ -115,10 +128,18 @@ pub struct DeskInput {
     /// The daemon's newest frame, when one has arrived.
     pub frame: Option<PreviewFrame>,
     pub selection: Vec<Sel>,
+    /// The view the desk is zoomed/panned to: `None` is the hero view.
+    pub view: Option<View>,
+    pub overlay: DragOverlay,
 }
 
 /// The desk: a canvas that draws the whole picture.
-pub fn desk(t: &Theme, colours: &DeskTokens, input: DeskInput) -> gpui::AnyElement {
+pub fn desk_with_origin(
+    t: &Theme,
+    colours: &DeskTokens,
+    input: DeskInput,
+    origin: crate::components::slider::Origin,
+) -> gpui::AnyElement {
     let t = *t;
     let colours = *colours;
     let zones = input.zones;
@@ -130,16 +151,28 @@ pub fn desk(t: &Theme, colours: &DeskTokens, input: DeskInput) -> gpui::AnyEleme
     let sampling = input.sampling;
     let frame = input.frame;
     let selection = input.selection;
+    let stored_view = input.view;
+    let overlay = input.overlay;
 
+    let measure = origin.clone();
     let element = canvas(
-        move |_bounds, _window, _cx| (),
+        move |bounds, _window, _cx| {
+            measure.set(
+                f32::from(bounds.origin.x),
+                f32::from(bounds.origin.y),
+                f32::from(bounds.size.width),
+                f32::from(bounds.size.height),
+            );
+        },
         move |bounds, _ready, window, _cx| {
             let w: f32 = bounds.size.width.into();
             let h: f32 = bounds.size.height.into();
             if w <= 0.0 || h <= 0.0 {
                 return;
             }
-            let view = hero_view(w as f64, h as f64, content_centre(&zones, &landmarks));
+            let view = stored_view.unwrap_or_else(|| {
+                hero_view(w as f64, h as f64, content_centre(&zones, &landmarks))
+            });
             let base = w as f64 / CANVAS_W;
             let k = (base * view.scale) as f32;
             let ox: f32 = bounds.origin.x.into();
@@ -228,9 +261,195 @@ pub fn desk(t: &Theme, colours: &DeskTokens, input: DeskInput) -> gpui::AnyEleme
                     &colours,
                 );
             }
+
+            // The drag overlay: snap guides, marquee and readout.
+            paint_overlay(window, bounds, &t, &overlay, k, ox, oy);
+
+            // The selection frame and handles (one part picked).
+            paint_selection_frame(window, &t, &zones, &landmarks, &selection, k, ox, oy, view);
         },
     );
     element.flex_1().min_h_0().min_w_0().into_any_element()
+}
+
+/// The snap guides (rose, `--a4`), the marquee band and the drag readout.
+fn paint_overlay(
+    window: &mut Window,
+    bounds: Bounds<Pixels>,
+    t: &Theme,
+    overlay: &DragOverlay,
+    k: f32,
+    ox: f32,
+    oy: f32,
+) {
+    let rose = Theme::color(t.a4);
+    let (gx, gx2, gy) = overlay.guides;
+    if let Some(x) = gx {
+        let px_x = ox + x as f32 * k;
+        window.paint_quad(gpui::fill(
+            Bounds {
+                origin: point(px(px_x), px(oy)),
+                size: gpui::size(px(1.0), bounds.size.height),
+            },
+            rose,
+        ));
+    }
+    if let Some(x) = gx2 {
+        let px_x = ox + x as f32 * k;
+        window.paint_quad(gpui::fill(
+            Bounds {
+                origin: point(px(px_x), px(oy)),
+                size: gpui::size(px(1.0), bounds.size.height),
+            },
+            rose,
+        ));
+    }
+    if let Some(y) = gy {
+        let px_y = oy + y as f32 * k;
+        window.paint_quad(gpui::fill(
+            Bounds {
+                origin: point(px(ox), px(px_y)),
+                size: gpui::size(bounds.size.width, px(1.0)),
+            },
+            rose,
+        ));
+    }
+    if let Some((x, y, w, h)) = overlay.marquee {
+        let rect = Bounds {
+            origin: point(px(ox + x), px(oy + y)),
+            size: gpui::size(px(w), px(h)),
+        };
+        let fill = gpui::Rgba {
+            r: 0.5,
+            g: 0.7,
+            b: 1.0,
+            a: 0.12,
+        };
+        window.paint_quad(gpui::fill(rect, fill));
+        window.paint_quad(gpui::outline(rect, t.live(), gpui::BorderStyle::default()));
+    }
+    if let Some((text, rx, ry)) = &overlay.readout {
+        paint_text(
+            window,
+            text,
+            ox + rx + 7.0,
+            oy + ry + 12.0,
+            14.0,
+            Theme::color(t.ink),
+        );
+    }
+}
+
+/// The selection frame: a live outline, eight handles and the rotate grip,
+/// for exactly one picked part (PreviewStage `.frame`).
+#[allow(clippy::too_many_arguments)]
+fn paint_selection_frame(
+    window: &mut Window,
+    t: &Theme,
+    zones: &[PlacedZone],
+    landmarks: &[Landmark],
+    selection: &[Sel],
+    k: f32,
+    ox: f32,
+    oy: f32,
+    view: View,
+) {
+    if selection.len() != 1 {
+        return;
+    }
+    let (x, y, w, h, rot, locked): (f64, f64, f64, f64, f64, bool) = match selection[0] {
+        Sel::Zone(i) => {
+            let Some(z) = zones.get(i) else { return };
+            (
+                z.x as f64 + view.pan_x,
+                z.y as f64 + view.pan_y,
+                z.width as f64,
+                z.height as f64,
+                z.rotation_deg as f64,
+                z.locked,
+            )
+        }
+        Sel::Landmark(i) => {
+            let Some(l) = landmarks.get(i) else { return };
+            (
+                l.x as f64 + view.pan_x,
+                l.y as f64 + view.pan_y,
+                l.width as f64,
+                l.height as f64,
+                l.rotation_deg as f64,
+                l.locked,
+            )
+        }
+    };
+    let left = ox + x as f32 * k;
+    let top = oy + y as f32 * k;
+    let width = w as f32 * k;
+    let height = h as f32 * k;
+    let x0 = left.round() - 0.5;
+    let y0 = top.round() - 0.5;
+    let x1 = (left + width).round() - 0.5;
+    let y1 = (top + height).round() - 0.5;
+    paint_outline(window, x0, y0, x1, y1, 3.0, 1.5, t.live());
+    if locked {
+        return;
+    }
+    // Handles: 9 px squares, the rotate grip 11 px on a 24 px stem.
+    let rad = rot.to_radians();
+    let (s, c) = (rad.sin() as f32, rad.cos() as f32);
+    let cx = left + width / 2.0;
+    let cy = top + height / 2.0;
+    let rotate = |lx: f32, ly: f32| (cx + lx * c - ly * s, cy + lx * s + ly * c);
+    let narrow_x = width < 44.0;
+    let narrow_y = height < 44.0;
+    let handles: [(f32, f32, bool); 8] = [
+        (-width / 2.0, -height / 2.0, true),
+        (0.0, -height / 2.0, !narrow_x),
+        (width / 2.0, -height / 2.0, true),
+        (width / 2.0, 0.0, !narrow_y),
+        (width / 2.0, height / 2.0, true),
+        (0.0, height / 2.0, !narrow_x),
+        (-width / 2.0, height / 2.0, true),
+        (-width / 2.0, 0.0, !narrow_y),
+    ];
+    for (lx, ly, show) in handles {
+        if !show {
+            continue;
+        }
+        let (hx, hy) = rotate(lx, ly);
+        window.paint_quad(gpui::fill(
+            Bounds {
+                origin: point(px(hx - 4.5), px(hy - 4.5)),
+                size: gpui::size(px(9.0), px(9.0)),
+            },
+            Theme::color(t.panel),
+        ));
+        window.paint_quad(gpui::outline(
+            Bounds {
+                origin: point(px(hx - 4.5), px(hy - 4.5)),
+                size: gpui::size(px(9.0), px(9.0)),
+            },
+            t.live(),
+            gpui::BorderStyle::default(),
+        ));
+    }
+    // Stem + grip.
+    let (gx, gy) = rotate(0.0, -height / 2.0 - 24.0);
+    paint_line(window, cx, cy, gx, gy, 1.5, t.live());
+    window.paint_quad(gpui::fill(
+        Bounds {
+            origin: point(px(gx - 5.5), px(gy - 5.5)),
+            size: gpui::size(px(11.0), px(11.0)),
+        },
+        Theme::color(t.panel),
+    ));
+    window.paint_quad(gpui::outline(
+        Bounds {
+            origin: point(px(gx - 5.5), px(gy - 5.5)),
+            size: gpui::size(px(11.0), px(11.0)),
+        },
+        t.live(),
+        gpui::BorderStyle::default(),
+    ));
 }
 
 /// The desk's grid: a line every 12.5% of the desk, in the dot colour.
@@ -1034,9 +1253,10 @@ pub fn desk_with_hint(
     t: &Theme,
     colours: &DeskTokens,
     input: DeskInput,
+    origin: crate::components::slider::Origin,
     hint: bool,
 ) -> gpui::AnyElement {
-    let canvas = desk(t, colours, input);
+    let canvas = desk_with_origin(t, colours, input, origin);
     if !hint {
         return canvas;
     }

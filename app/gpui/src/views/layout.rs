@@ -16,6 +16,7 @@
 
 pub mod art;
 pub mod geometry;
+pub mod interact;
 pub mod preview;
 pub mod stage;
 pub mod tokens;
@@ -24,16 +25,17 @@ use gpui::{Context, IntoElement, Render, Window, div, prelude::*, px};
 
 use canvas_proto::api::{DevicesResponse, LayoutsResponse};
 use canvas_proto::device::{DeviceInfo, DeviceKind};
-use canvas_proto::layout::{Layout, SamplingMode};
+use canvas_proto::layout::{Layout, PartKind, RenderScale, SamplingMode};
 
 use crate::client::DaemonClient;
 use crate::components::button::{Variant, button_icon, icon_button};
 use crate::components::panel::panel_with_padding;
 use crate::components::segmented::segmented;
+use crate::components::slider::Origin;
 use crate::theme::{Theme, TokenRadius};
 use crate::views::layout::geometry::LengthUnit;
 use crate::views::layout::preview::PreviewFeed;
-use crate::views::layout::stage::{DeskInput, Sel, StageMode, desk_with_hint, hero_view};
+use crate::views::layout::stage::{DeskInput, DragOverlay, Sel, StageMode, View as StageView, desk_with_hint, hero_view};
 use crate::views::layout::tokens::DeskTokens;
 
 /// The panes below the desk on a phone: one of them at a time.
@@ -69,6 +71,70 @@ pub struct LayoutView {
     pub width: f32,
     /// The window's height.
     pub height: f32,
+    pub history: interact::History,
+    pub base: Option<Layout>,
+    pub saving: bool,
+    pub save_error: Option<String>,
+    pub view: Option<StageView>,
+    pub desk_origin: Origin,
+    pub drag: Option<Drag>,
+    pub overlay: DragOverlay,
+    pub render_open: bool,
+    pub add_open: bool,
+    pub identifying: Option<usize>,
+}
+
+/// One pointer drag on the desk (PreviewStage `Drag`).
+#[derive(Debug, Clone)]
+pub struct Drag {
+    pub kind: DragKind,
+    pub sel: Sel,
+    pub origs: Vec<Orig>,
+    pub riders: Vec<Orig>,
+    pub start: interact::Pt,
+    pub start_px: (f32, f32),
+    pub handle: Option<interact::Handle>,
+    pub pending: bool,
+    pub locked: bool,
+    pub collapse: bool,
+    pub pre: Option<Layout>,
+    pub view_origin: Option<StageView>,
+}
+
+#[derive(Debug, Clone)]
+pub enum DragKind {
+    Move,
+    Resize,
+    Rotate,
+    Marquee,
+    Pan,
+}
+
+#[derive(Debug, Clone)]
+pub struct Orig {
+    pub sel: Sel,
+    pub zone: Option<canvas_proto::layout::PlacedZone>,
+    pub landmark: Option<canvas_proto::layout::Landmark>,
+}
+
+impl Orig {
+    fn rect(&self) -> Option<interact::Rect> {
+        if let Some(z) = &self.zone {
+            Some(interact::Rect {
+                x: z.x as f64,
+                y: z.y as f64,
+                w: z.width as f64,
+                h: z.height as f64,
+            })
+        } else {
+            self.landmark.as_ref().map(|l| interact::Rect {
+                x: l.x as f64,
+                y: l.y as f64,
+                w: l.width as f64,
+                h: l.height as f64,
+            })
+        }
+    }
 }
 
 impl LayoutView {
@@ -87,6 +153,17 @@ impl LayoutView {
             frames: 0,
             width: 1280.0,
             height: 860.0,
+            history: interact::History::new(),
+            base: None,
+            saving: false,
+            save_error: None,
+            view: None,
+            desk_origin: Origin::new(),
+            drag: None,
+            overlay: DragOverlay::default(),
+            render_open: false,
+            add_open: false,
+            identifying: None,
         };
         view.load(cx);
         view.start_feed();
@@ -94,8 +171,11 @@ impl LayoutView {
         view
     }
 
-    /// The layout the daemon has active.
+    /// The layout the daemon has active, or the draft of it.
     pub fn layout(&self) -> Option<&Layout> {
+        if let Some(draft) = self.history.draft.as_ref() {
+            return Some(draft);
+        }
         let layouts = self.layouts.as_ref()?;
         let active = &layouts.active;
         layouts
@@ -103,6 +183,270 @@ impl LayoutView {
             .iter()
             .find(|l| &l.id == active)
             .or_else(|| layouts.layouts.first())
+    }
+
+    pub fn server_layout(&self) -> Option<&Layout> {
+        let layouts = self.layouts.as_ref()?;
+        let active = &layouts.active;
+        layouts
+            .layouts
+            .iter()
+            .find(|l| &l.id == active)
+            .or_else(|| layouts.layouts.first())
+    }
+
+    pub fn dirty(&self) -> bool {
+        interact::is_dirty(self.history.draft.as_ref(), self.base.as_ref())
+    }
+
+    pub fn undo(&mut self) {
+        self.history.undo();
+    }
+
+    pub fn redo(&mut self) {
+        self.history.redo();
+    }
+
+    pub fn commit(&mut self, f: impl FnOnce(&Layout) -> Layout) {
+        self.history.commit(f);
+    }
+
+    pub fn revert(&mut self) {
+        if let Some(base) = self.base.clone() {
+            self.commit(move |_| base);
+        }
+        self.save_error = None;
+    }
+
+    pub fn save(&mut self, cx: &mut Context<Self>) {
+        let (Some(draft), Some(server)) = (self.history.draft.clone(), self.server_layout().cloned())
+        else {
+            return;
+        };
+        if self.saving {
+            return;
+        }
+        self.saving = true;
+        self.save_error = None;
+        let body = interact::save_body(&draft, server.effect.clone());
+        let id = draft.id.clone();
+        let body_text = serde_json::to_string(&body).unwrap_or_default();
+        cx.spawn(async move |view, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = DaemonClient::new();
+                    client.put_json(&format!("/api/v1/layouts/{id}"), &body_text)
+                })
+                .await;
+            let read = cx
+                .background_executor()
+                .spawn(async move {
+                    let client = DaemonClient::new();
+                    client.get("/api/v1/layouts")
+                })
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                this.saving = false;
+                match result {
+                    Ok(_) => {
+                        this.base = Some(body.clone());
+                        this.history.draft = Some(body);
+                        if let Ok(text) = read {
+                            if let Ok(parsed) = serde_json::from_str::<LayoutsResponse>(&text) {
+                                this.layouts = Some(parsed);
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        this.save_error = Some(e.to_string());
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
+    }
+
+    fn sync_server(&mut self, server: Layout) {
+        if interact::is_dirty(self.history.draft.as_ref(), self.base.as_ref()) {
+            return;
+        }
+        if self.drag.is_some() {
+            return;
+        }
+        self.base = Some(server.clone());
+        self.history.reset(server);
+    }
+
+    #[allow(clippy::collapsible_if)]
+    pub fn select(&mut self, sel: Vec<Sel>) {
+        let first = sel.first().copied();
+        if let Some(id) = self.identifying {
+            if !matches!(first, Some(Sel::Zone(i)) if i == id) {
+                self.stop_identify();
+            }
+        }
+        self.selection = sel;
+    }
+
+    pub fn stop_identify(&mut self) {
+        let Some(index) = self.identifying else { return };
+        self.identifying = None;
+        let draft = self.history.draft.clone();
+        if let Some(layout) = draft {
+            if let Some(z) = layout.zones.get(index) {
+                let device_id = z.device_id.0.clone();
+                let zone = z.zone_index;
+                std::thread::spawn(move || {
+                    let client = DaemonClient::new();
+                    let body = serde_json::json!({"zone": zone, "led": 0, "stop": true}).to_string();
+                    let _ = client.post_json(
+                        &format!("/api/v1/devices/{device_id}/identify"),
+                        &body,
+                    );
+                });
+            }
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn start_identify(&mut self, index: usize, cx: &mut Context<Self>) {
+        self.stop_identify();
+        let Some(layout) = self.history.draft.clone() else { return };
+        let Some(z) = layout.zones.get(index).cloned() else { return };
+        let device_id = z.device_id.0.clone();
+        let zone_index = z.zone_index;
+        let count = self
+            .devices()
+            .iter()
+            .find(|d| d.id.0 == device_id)
+            .and_then(|d| d.zones.iter().find(|zz| zz.index == zone_index))
+            .map(|zz| zz.led_count.max(1))
+            .unwrap_or(1);
+        self.identifying = Some(index);
+        let mut tick = 0u32;
+        cx.spawn(async move |view, cx| {
+            loop {
+                if tick >= 40 {
+                    break;
+                }
+                let did = device_id.clone();
+                let led = tick % count;
+                cx.background_executor()
+                    .spawn(async move {
+                        let client = DaemonClient::new();
+                        let body =
+                            serde_json::json!({"zone": zone_index, "led": led, "stop": false}).to_string();
+                        let _ = client.post_json(
+                            &format!("/api/v1/devices/{did}/identify"),
+                            &body,
+                        );
+                    })
+                    .await;
+                tick += 1;
+                let still = view
+                    .update(cx, |this: &mut LayoutView, _cx| this.identifying == Some(index))
+                    .unwrap_or(false);
+                if !still {
+                    break;
+                }
+                cx.background_executor()
+                    .timer(std::time::Duration::from_millis(125))
+                    .await;
+            }
+            let _ = view.update(cx, |this: &mut LayoutView, cx| {
+                if this.identifying == Some(index) {
+                    this.identifying = None;
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    pub fn zoom_by(&mut self, factor: f64, desk: (f64, f64)) {
+        let (w, h) = desk;
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let centre = stage::content_centre(
+            &self.history.draft.as_ref().map(|l| l.zones.clone()).unwrap_or_default(),
+            &self.history.draft.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default(),
+        );
+        let cur = self.view.unwrap_or_else(|| hero_view(w, h, centre));
+        let base = w / geometry::CANVAS_W;
+        let scale = interact::zoom_scale(cur.scale, factor);
+        let (cx, cy) = (w / 2.0, h / 2.0);
+        let lx = cx / (base * cur.scale) - cur.pan_x;
+        let ly = cy / (base * cur.scale) - cur.pan_y;
+        let (scale, pan_x, pan_y) =
+            interact::clamp_view(scale, cx / (base * scale) - lx, cy / (base * scale) - ly);
+        self.view = Some(StageView { scale, pan_x, pan_y });
+    }
+
+    pub fn zoom_fit(&mut self, desk: (f64, f64)) {
+        let (w, h) = desk;
+        let (scale, pan_x, pan_y) = interact::whole_view(w, h);
+        self.view = Some(StageView { scale, pan_x, pan_y });
+    }
+
+    pub fn wheel_zoom(&mut self, delta_y: f64, at_px: (f64, f64), desk: (f64, f64)) {
+        let (w, h) = desk;
+        if w <= 0.0 || h <= 0.0 {
+            return;
+        }
+        let centre = stage::content_centre(
+            &self.history.draft.as_ref().map(|l| l.zones.clone()).unwrap_or_default(),
+            &self.history.draft.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default(),
+        );
+        let cur = self.view.unwrap_or_else(|| hero_view(w, h, centre));
+        let base = w / geometry::CANVAS_W;
+        let scale = interact::zoom_scale(cur.scale, interact::wheel_factor(delta_y));
+        let (px_x, px_y) = at_px;
+        let lx = px_x / (base * cur.scale) - cur.pan_x;
+        let ly = px_y / (base * cur.scale) - cur.pan_y;
+        let (scale, pan_x, pan_y) =
+            interact::clamp_view(scale, px_x / (base * scale) - lx, px_y / (base * scale) - ly);
+        self.view = Some(StageView { scale, pan_x, pan_y });
+    }
+
+    pub fn place_zone(&mut self, device_id: &str, zone_index: u32, at: Option<(f64, f64)>) {
+        let info = self
+            .devices()
+            .iter()
+            .find(|d| d.id.0 == device_id)
+            .and_then(|d| d.zones.iter().find(|z| z.index == zone_index))
+            .map(|z| (z.clone(), self.devices().iter().find(|d| d.id.0 == device_id).unwrap().kind));
+        let Some((zone_info, device_kind)) = info else { return };
+        let shape = geometry::default_shape(device_kind, &zone_info);
+        let (w, h) = geometry::default_rect(&zone_info, device_kind, &shape);
+        let placed = interact::placed_zone(device_id.to_string(), zone_index, shape, w, h, at);
+        let index = self.history.draft.as_ref().map(|l| l.zones.len()).unwrap_or(0);
+        self.commit(|l| Layout {
+            zones: {
+                let mut zones = l.zones.clone();
+                zones.push(placed.clone());
+                zones
+            },
+            ..l.clone()
+        });
+        self.selection = vec![Sel::Zone(index)];
+    }
+
+    pub fn add_landmark(&mut self, kind: PartKind) {
+        let landmark = interact::landmark_at_centre(kind);
+        let index = self.history.draft.as_ref().map(|l| l.landmarks.len()).unwrap_or(0);
+        self.commit(|l| Layout {
+            landmarks: {
+                let mut landmarks = l.landmarks.clone();
+                landmarks.push(landmark);
+                landmarks
+            },
+            ..l.clone()
+        });
+        self.selection = vec![Sel::Landmark(index)];
     }
 
     /// The devices, or none yet.
@@ -124,8 +468,17 @@ impl LayoutView {
                 match layouts {
                     Ok(body) => match serde_json::from_str::<LayoutsResponse>(&body) {
                         Ok(parsed) => {
+                            let server = parsed
+                                .layouts
+                                .iter()
+                                .find(|l| l.id == parsed.active)
+                                .or_else(|| parsed.layouts.first())
+                                .cloned();
                             this.layouts = Some(parsed);
                             this.layouts_error = None;
+                            if let Some(server) = server {
+                                this.sync_server(server);
+                            }
                         }
                         Err(e) => this.layouts_error = Some(e.to_string()),
                     },
@@ -192,11 +545,8 @@ impl LayoutView {
 
     /// The page's own actions: undo and redo, the zone count, the save state,
     /// Revert, Save and "Map my PC again".
-    fn actions_row(&self, _cx: &mut Context<Self>) -> impl IntoElement {
+    fn actions_row(&self, cx: &mut Context<Self>) -> impl IntoElement {
         let t = self.theme;
-        // React's media queries: below 1439 the quiet key keeps its icon,
-        // below 1100 the zone count goes, and below 720 the undo and redo
-        // keys move to the desk and the save keys keep their icons.
         let narrow = self.width <= 1439.0;
         let no_count = self.width <= 1099.0;
         let phone = self.width <= 719.0;
@@ -207,29 +557,37 @@ impl LayoutView {
             ),
             None => (0, 0),
         };
+        let dirty = self.dirty();
+        let saving = self.saving;
+        let can_save = dirty && !saving;
+        let entity = cx.entity();
+        let undo_entity = entity.clone();
+        let redo_entity = entity.clone();
+        let revert_entity = entity.clone();
+        let save_entity = entity.clone();
+        let remap_entity = entity;
         let mut row = div().flex().items_center().gap_2();
         if !phone {
-            // The undo and redo keys undo work done on the desk.
+            let past_empty = self.history.past.is_empty();
+            let future_empty = self.history.future.is_empty();
             row = row
                 .child(icon_button(
-                    &t,
-                    "lay-undo",
-                    "ArrowUUpLeft",
-                    "",
-                    true,
-                    false,
-                    true,
-                    |_, _, _| {},
+                    &t, "lay-undo", "ArrowUUpLeft", "", true, false, past_empty,
+                    move |_, _window, app| {
+                        undo_entity.update(app, |this: &mut LayoutView, cx| {
+                            this.undo();
+                            cx.notify();
+                        });
+                    },
                 ))
                 .child(icon_button(
-                    &t,
-                    "lay-redo",
-                    "ArrowUUpRight",
-                    "",
-                    true,
-                    false,
-                    true,
-                    |_, _, _| {},
+                    &t, "lay-redo", "ArrowUUpRight", "", true, false, future_empty,
+                    move |_, _window, app| {
+                        redo_entity.update(app, |this: &mut LayoutView, cx| {
+                            this.redo();
+                            cx.notify();
+                        });
+                    },
                 ));
         }
         if !no_count {
@@ -241,38 +599,56 @@ impl LayoutView {
                     .child(format!("{visible}/{total} zones")),
             );
         }
-        // The save state sits beside the save.
         row = row
             .child(
                 div()
                     .text_sm()
                     .font_family(crate::fonts::MONO_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child("Saved"),
+                    .text_color(if dirty {
+                        Theme::color(t.warn)
+                    } else {
+                        Theme::color(t.mute)
+                    })
+                    .child(if dirty { "Unsaved" } else { "Saved" }),
             )
             .child(button_icon(
                 &t,
                 "lay-revert",
                 if phone { "" } else { "Revert" },
                 Variant::Ghost,
-                true,
+                !can_save,
                 true,
                 "ArrowCounterClockwise",
                 "",
                 16.0,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    revert_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.revert();
+                        cx.notify();
+                    });
+                },
             ))
             .child(button_icon(
                 &t,
                 "lay-save",
-                if phone { "" } else { "Save layout" },
+                if phone {
+                    ""
+                } else if saving {
+                    "Saving"
+                } else {
+                    "Save layout"
+                },
                 Variant::Primary,
-                true,
+                !can_save,
                 true,
                 "FloppyDisk",
                 "bold",
                 16.0,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    save_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.save(cx);
+                    });
+                },
             ));
         if !phone {
             row = row.child(button_icon(
@@ -285,7 +661,9 @@ impl LayoutView {
                 "CompassTool",
                 "",
                 16.0,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    remap_entity.update(app, |_this: &mut LayoutView, _cx| {});
+                },
             ));
         }
         row
@@ -449,23 +827,30 @@ pub fn kind_icon(kind: Option<DeviceKind>, fan: bool) -> &'static str {
 
 /// The row of a part in the parts list.
 pub struct PartRow {
-    /// The plain name of the zone.
     pub name: String,
-    /// The owner's own name and the device's, in the list's own order.
     pub sub: String,
-    /// How many LEDs the part has.
     pub leds: Option<u32>,
-    /// The icon beside the name.
     pub icon: &'static str,
+    pub sel: Sel,
+    pub width_text: Option<String>,
 }
 
 /// The parts list: the zones, then the landmarks.
+#[allow(dead_code)]
 pub fn part_rows(layout: Option<&Layout>, devices: &[DeviceInfo]) -> Vec<PartRow> {
+    part_rows_unit(layout, devices, LengthUnit::Cm)
+}
+
+pub fn part_rows_unit(
+    layout: Option<&Layout>,
+    devices: &[DeviceInfo],
+    unit: LengthUnit,
+) -> Vec<PartRow> {
     let mut out = Vec::new();
     let Some(layout) = layout else {
         return out;
     };
-    for z in &layout.zones {
+    for (zi, z) in layout.zones.iter().enumerate() {
         let device = devices.iter().find(|d| d.id.0 == z.device_id.0);
         let info = device.and_then(|d| d.zones.iter().find(|zone| zone.index == z.zone_index));
         let plain = geometry::plain_name(devices, &z.device_id.0, z.zone_index);
@@ -494,6 +879,24 @@ pub fn part_rows(layout: Option<&Layout>, devices: &[DeviceInfo]) -> Vec<PartRow
             sub: parts.join(" · "),
             leds,
             icon: kind_icon(plain.kind, plain.fan),
+            sel: Sel::Zone(zi),
+            width_text: None,
+        });
+    }
+    for (li, l) in layout.landmarks.iter().enumerate() {
+        let name = l
+            .label
+            .as_ref()
+            .map(|s| s.trim().to_string())
+            .filter(|s| !s.is_empty())
+            .unwrap_or_else(|| interact::part_label(l.kind).to_string());
+        out.push(PartRow {
+            name,
+            sub: "no lights of its own".to_string(),
+            leds: None,
+            icon: "",
+            sel: Sel::Landmark(li),
+            width_text: Some(geometry::format_units(l.width as f64, unit)),
         });
     }
     out
@@ -535,7 +938,13 @@ pub fn render_page(
         sampling: layout.sampling,
         frame: view.feed.frame(),
         selection: view.selection.clone(),
+        view: view.view,
+        overlay: view.overlay.clone(),
     };
+    let desk_entity = cx.entity();
+    let desk_origin = view.desk_origin.clone();
+    let desk_el = desk_with_hint(&t, &colours, desk_input, desk_origin, true);
+    let desk_el = desk_handlers(desk_el, desk_entity);
     let frame = div()
         .flex()
         .flex_col()
@@ -547,7 +956,7 @@ pub fn render_page(
         .r_lg()
         .bg(Theme::color(t.sunk))
         .overflow_hidden()
-        .child(desk_with_hint(&t, &colours, desk_input, true))
+        .child(desk_el)
         .child(stage_toolbar(view, &t, container, phone, cx));
     let mut stage_column = if one_column {
         // The stage column is 46 vh tall on a phone (`.rd-lay-stage` at the
@@ -575,15 +984,15 @@ pub fn render_page(
     .child(if one_column && view.phone_pane != PhonePane::Place {
             div().hidden().into_any_element()
         } else {
-            place_panel(view, &t, &devices, &layout)
+            place_panel(view, &t, &devices, &layout, cx)
         })
         .child(if one_column && view.phone_pane != PhonePane::Parts {
             div().hidden().into_any_element()
         } else {
-            parts_panel(view, &t, &devices, &layout, one_column, cx)
+            parts_panel(view, &t, &devices, &layout, one_column, cx, window)
         });
     let inspector = if one_column && view.phone_pane == PhonePane::Render {
-        inspector.child(render_panel(view, &t))
+        inspector.child(render_panel(view, &t, cx))
     } else {
         inspector
     };
@@ -607,6 +1016,816 @@ pub fn render_page(
             .child(inspector)
     };
     page.child(grid).into_any_element()
+}
+
+/// The desk's pointer and wheel handlers: picking, dragging, rubber band,
+/// marquee, middle pan and wheel zoom (PreviewStage's stage handlers).
+fn desk_handlers(
+    el: gpui::AnyElement,
+    entity: gpui::Entity<LayoutView>,
+) -> gpui::AnyElement {
+    let down_entity = entity.clone();
+    let middle_entity = entity.clone();
+    let move_entity = entity.clone();
+    let up_entity = entity.clone();
+    let wheel_entity = entity.clone();
+    let key_entity = entity;
+    div()
+        .flex()
+        .flex_col()
+        .flex_1()
+        .min_w_0()
+        .min_h_0()
+        .child(el)
+        .on_mouse_down(
+            gpui::MouseButton::Left,
+            move |event: &gpui::MouseDownEvent, _window, app| {
+                down_entity.update(app, |this: &mut LayoutView, cx| {
+                    this.on_desk_down(
+                        f32::from(event.position.x),
+                        f32::from(event.position.y),
+                        event.modifiers.shift,
+                        event.modifiers.alt,
+                        false,
+                        cx,
+                    );
+                    cx.notify();
+                });
+            },
+        )
+        .on_mouse_down(
+            gpui::MouseButton::Middle,
+            move |event: &gpui::MouseDownEvent, _window, app| {
+                middle_entity.update(app, |this: &mut LayoutView, cx| {
+                    this.on_desk_pan_down(
+                        f32::from(event.position.x),
+                        f32::from(event.position.y),
+                        cx,
+                    );
+                    cx.notify();
+                });
+            },
+        )
+        .on_mouse_move(move |event: &gpui::MouseMoveEvent, _window, app| {
+            move_entity.update(app, |this: &mut LayoutView, cx| {
+                this.on_desk_move(
+                    f32::from(event.position.x),
+                    f32::from(event.position.y),
+                    event.modifiers.shift,
+                    event.modifiers.alt,
+                    event.modifiers.control || event.modifiers.platform,
+                    cx,
+                );
+                cx.notify();
+            });
+        })
+        .on_mouse_up(
+            gpui::MouseButton::Left,
+            move |event: &gpui::MouseUpEvent, _window, app| {
+                let _ = event;
+                up_entity.update(app, |this: &mut LayoutView, cx| {
+                    this.on_desk_up(cx);
+                    cx.notify();
+                });
+            },
+        )
+        .on_scroll_wheel(move |event: &gpui::ScrollWheelEvent, _window, app| {
+            let delta_y = match event.delta {
+                gpui::ScrollDelta::Pixels(p) => f32::from(p.y),
+                gpui::ScrollDelta::Lines(p) => p.y * 24.0,
+            } as f64;
+            wheel_entity.update(app, |this: &mut LayoutView, cx| {
+                this.on_desk_wheel(
+                    delta_y,
+                    f32::from(event.position.x) as f64,
+                    f32::from(event.position.y) as f64,
+                    cx,
+                );
+                cx.notify();
+            });
+        })
+        .on_key_down(move |event: &gpui::KeyDownEvent, _window, app| {
+            key_entity.update(app, |this: &mut LayoutView, cx| {
+                this.on_desk_key(event, cx);
+                cx.notify();
+            });
+        })
+        .into_any_element()
+}
+
+impl LayoutView {
+    fn hit_parts(&self) -> Vec<interact::HitPart> {
+        let Some(layout) = self.history.draft.clone() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for (i, z) in layout.zones.iter().enumerate() {
+            out.push(interact::HitPart {
+                r: interact::Ref::Zone(i),
+                x: z.x as f64,
+                y: z.y as f64,
+                w: z.width as f64,
+                h: z.height as f64,
+                rot: z.rotation_deg as f64,
+                is_case: false,
+                locked: z.locked,
+            });
+        }
+        for (i, l) in layout.landmarks.iter().enumerate() {
+            if !l.visible {
+                continue;
+            }
+            out.push(interact::HitPart {
+                r: interact::Ref::Landmark(i),
+                x: l.x as f64,
+                y: l.y as f64,
+                w: l.width as f64,
+                h: l.height as f64,
+                rot: l.rotation_deg as f64,
+                is_case: l.kind == PartKind::Case,
+                locked: l.locked,
+            });
+        }
+        out
+    }
+
+    fn sel_to_ref(sel: Sel) -> interact::Ref {
+        match sel {
+            Sel::Zone(i) => interact::Ref::Zone(i),
+            Sel::Landmark(i) => interact::Ref::Landmark(i),
+        }
+    }
+
+    fn ref_to_sel(r: interact::Ref) -> Sel {
+        match r {
+            interact::Ref::Zone(i) => Sel::Zone(i),
+            interact::Ref::Landmark(i) => Sel::Landmark(i),
+        }
+    }
+
+    fn desk_box(&self) -> Option<(f32, f32, f32, f32, StageView, f64)> {
+        let (ox, oy, w, h) = self.desk_origin.get();
+        if w <= 0.0 || h <= 0.0 {
+            return None;
+        }
+        let centre = stage::content_centre(
+            &self.history.draft.as_ref().map(|l| l.zones.clone()).unwrap_or_default(),
+            &self.history.draft.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default(),
+        );
+        let view = self.view.unwrap_or_else(|| hero_view(w as f64, h as f64, centre));
+        let k = w as f64 / geometry::CANVAS_W * view.scale;
+        Some((ox, oy, w, h, view, k))
+    }
+
+    fn to_canvas(&self, x: f32, y: f32) -> Option<interact::Pt> {
+        let (ox, oy, _w, _h, view, k) = self.desk_box()?;
+        Some(interact::Pt {
+            x: (x - ox) as f64 / k - view.pan_x,
+            y: (y - oy) as f64 / k - view.pan_y,
+        })
+    }
+
+    fn on_desk_pan_down(&mut self, x: f32, y: f32, _cx: &mut Context<Self>) {
+        let Some(pt) = self.to_canvas(x, y) else { return };
+        let orig = self.desk_box().map(|b| b.4).unwrap_or(StageView {
+            scale: 1.0,
+            pan_x: 0.0,
+            pan_y: 0.0,
+        });
+        self.drag = Some(Drag {
+            kind: DragKind::Pan,
+            sel: Sel::Zone(0),
+            origs: Vec::new(),
+            riders: Vec::new(),
+            start: pt,
+            start_px: (x - self.desk_origin.get().0, y - self.desk_origin.get().1),
+            handle: None,
+            pending: false,
+            locked: false,
+            collapse: false,
+            pre: None,
+            view_origin: Some(orig),
+        });
+        self.view = Some(orig);
+    }
+
+    fn on_desk_down(
+        &mut self,
+        x: f32,
+        y: f32,
+        shift: bool,
+        alt: bool,
+        touch: bool,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some(point) = self.to_canvas(x, y) else { return };
+        let Some((_ox, _oy, _w, _h, _view, k)) = self.desk_box() else { return };
+        let parts = self.hit_parts();
+        let selection_refs: Vec<interact::Ref> =
+            self.selection.iter().map(|s| Self::sel_to_ref(*s)).collect();
+        let hit = interact::hit_test(&parts, &selection_refs, point, k, touch, alt);
+        match hit {
+            interact::Hit::Handle(r, handle) => {
+                self.begin_drag(DragKind::Resize, Self::ref_to_sel(r), point, Some(handle), x, y);
+            }
+            interact::Hit::Rotate(r) => {
+                self.begin_drag(DragKind::Rotate, Self::ref_to_sel(r), point, None, x, y);
+            }
+            interact::Hit::Desk => {
+                self.select(Vec::new());
+                let (ox, oy, _, _, _, _) = self.desk_box().unwrap();
+                self.drag = Some(Drag {
+                    kind: DragKind::Marquee,
+                    sel: Sel::Zone(0),
+                    origs: Vec::new(),
+                    riders: Vec::new(),
+                    start: point,
+                    start_px: (x - ox, y - oy),
+                    handle: None,
+                    pending: false,
+                    locked: false,
+                    collapse: false,
+                    pre: None,
+                    view_origin: None,
+                });
+                self.overlay.marquee = Some((x - ox, y - oy, 0.0, 0.0));
+            }
+            interact::Hit::Part(r, locked)
+            | interact::Hit::CaseEdge(r, locked)
+            | interact::Hit::CaseBody(r, locked) => {
+                let sel = Self::ref_to_sel(r);
+                let picked = self.selection.contains(&sel);
+                if shift && !alt {
+                    if picked {
+                        self.selection.retain(|s| *s != sel);
+                    } else {
+                        self.selection.push(sel);
+                    }
+                    return;
+                }
+                if !picked {
+                    self.select(vec![sel]);
+                }
+                let (ox, oy, _, _, _, _) = self.desk_box().unwrap();
+                self.drag = Some(Drag {
+                    kind: DragKind::Move,
+                    sel,
+                    origs: Vec::new(),
+                    riders: Vec::new(),
+                    start: point,
+                    start_px: (x - ox, y - oy),
+                    handle: None,
+                    pending: true,
+                    locked,
+                    collapse: picked && self.selection.len() > 1,
+                    pre: None,
+                    view_origin: None,
+                });
+            }
+        }
+    }
+
+    fn orig_of(&self, sel: Sel) -> Option<Orig> {
+        let layout = self.history.draft.as_ref()?;
+        match sel {
+            Sel::Zone(i) => layout.zones.get(i).map(|z| Orig {
+                sel,
+                zone: Some(z.clone()),
+                landmark: None,
+            }),
+            Sel::Landmark(i) => layout.landmarks.get(i).map(|l| Orig {
+                sel,
+                zone: None,
+                landmark: Some(l.clone()),
+            }),
+        }
+    }
+
+    fn begin_drag(
+        &mut self,
+        kind: DragKind,
+        sel: Sel,
+        start: interact::Pt,
+        handle: Option<interact::Handle>,
+        x: f32,
+        y: f32,
+    ) {
+        let already = self.selection.contains(&sel);
+        let is_move = matches!(kind, DragKind::Move);
+        if !already || !is_move {
+            self.select(vec![sel]);
+        }
+        let members: Vec<Sel> = if already && is_move {
+            self.selection.clone()
+        } else {
+            vec![sel]
+        };
+        let mut origs: Vec<Orig> = Vec::new();
+        for m in &members {
+            let Some(o) = self.orig_of(*m) else { continue };
+            let locked = o
+                .zone
+                .as_ref()
+                .map(|z| z.locked)
+                .unwrap_or_else(|| o.landmark.as_ref().map(|l| l.locked).unwrap_or(false));
+            let is_primary = *m == sel;
+            if is_move && locked && !is_primary {
+                continue;
+            }
+            origs.push(o);
+        }
+        if !origs.iter().any(|o| o.sel == sel) {
+            if let Some(o) = self.orig_of(sel) {
+                origs.push(o);
+            }
+        }
+        let mut riders: Vec<Orig> = Vec::new();
+        if is_move {
+            let parts = self.hit_parts();
+            for o in &origs {
+                if o.landmark.as_ref().map(|l| l.kind) != Some(PartKind::Case) {
+                    continue;
+                }
+                let Some(case) = parts.iter().find(|p| p.r == Self::sel_to_ref(o.sel)).copied() else {
+                    continue;
+                };
+                for r in interact::parts_inside_case(&case, &parts) {
+                    let sel_r = Self::ref_to_sel(r);
+                    if origs.iter().any(|x| x.sel == sel_r) || riders.iter().any(|x| x.sel == sel_r) {
+                        continue;
+                    }
+                    if let Some(ro) = self.orig_of(sel_r) {
+                        riders.push(ro);
+                    }
+                }
+            }
+        }
+        let pre = self.history.draft.clone();
+        let (ox, oy) = (self.desk_origin.get().0, self.desk_origin.get().1);
+        self.drag = Some(Drag {
+            kind,
+            sel,
+            origs,
+            riders,
+            start,
+            start_px: (x - ox, y - oy),
+            handle,
+            pending: false,
+            locked: false,
+            collapse: false,
+            pre,
+            view_origin: None,
+        });
+    }
+
+    fn on_desk_move(
+        &mut self,
+        x: f32,
+        y: f32,
+        shift: bool,
+        alt: bool,
+        free: bool,
+        _cx: &mut Context<Self>,
+    ) {
+        let Some((_ox, _oy, _w, _h, _view, k)) = self.desk_box() else { return };
+        let Some(point) = self.to_canvas(x, y) else { return };
+        if matches!(self.drag.as_ref().map(|d| &d.kind), Some(DragKind::Pan)) {
+            let d = self.drag.clone().unwrap();
+            let (ox, oy, dw, _dh, orig, _k0) = self.desk_box().unwrap();
+            let orig = d.view_origin.unwrap_or(orig);
+            let base = dw as f64 / geometry::CANVAS_W;
+            let kk = base * orig.scale;
+            let direct = StageView {
+                scale: orig.scale,
+                pan_x: orig.pan_x + (((x - ox) as f64) - d.start_px.0 as f64) / kk,
+                pan_y: orig.pan_y + (((y - oy) as f64) - d.start_px.1 as f64) / kk,
+            };
+            let (scale, pan_x, pan_y) = interact::clamp_view(direct.scale, direct.pan_x, direct.pan_y);
+            self.view = Some(StageView { scale, pan_x, pan_y });
+            return;
+        }
+        if matches!(self.drag.as_ref().map(|d| d.pending), Some(true)) {
+            let d = self.drag.clone().unwrap();
+            if d.locked {
+                return;
+            }
+            let dist = ((x - self.desk_origin.get().0) - d.start_px.0)
+                .hypot((y - self.desk_origin.get().1) - d.start_px.1);
+            if dist < interact::drag_threshold_px(false) as f32 {
+                return;
+            }
+            self.begin_drag(DragKind::Move, d.sel, d.start, None, x, y);
+        }
+        if matches!(self.drag.as_ref().map(|d| &d.kind), Some(DragKind::Marquee)) {
+            let d = self.drag.clone().unwrap();
+            let (ox, oy, _, _, _, _) = self.desk_box().unwrap();
+            let px = x - ox;
+            let py = y - oy;
+            self.overlay.marquee = Some((
+                d.start_px.0.min(px),
+                d.start_px.1.min(py),
+                (px - d.start_px.0).abs(),
+                (py - d.start_px.1).abs(),
+            ));
+            return;
+        }
+        let Some(drag) = self.drag.clone() else { return };
+        let Some(orig) = drag.origs.iter().find(|o| o.sel == drag.sel) else { return };
+        let Some(src) = orig.rect() else { return };
+        let (dx, dy) = (point.x - drag.start.x, point.y - drag.start.y);
+        match drag.kind {
+            DragKind::Move => {
+                let threshold = interact::SNAP_PIXELS / k;
+                let moving: Vec<Sel> = drag
+                    .origs
+                    .iter()
+                    .chain(drag.riders.iter())
+                    .map(|o| o.sel)
+                    .collect();
+                let mut others: Vec<interact::Rect> = Vec::new();
+                if let Some(layout) = self.history.draft.clone() {
+                    for (i, z) in layout.zones.iter().enumerate() {
+                        if moving.contains(&Sel::Zone(i)) {
+                            continue;
+                        }
+                        others.push(interact::Rect { x: z.x as f64, y: z.y as f64, w: z.width as f64, h: z.height as f64 });
+                    }
+                    for (i, l) in layout.landmarks.iter().enumerate() {
+                        if moving.contains(&Sel::Landmark(i)) {
+                            continue;
+                        }
+                        others.push(interact::Rect { x: l.x as f64, y: l.y as f64, w: l.width as f64, h: l.height as f64 });
+                    }
+                }
+                let case_moves = drag.origs.iter().any(|o| {
+                    o.landmark.as_ref().map(|l| l.kind == PartKind::Case).unwrap_or(false)
+                });
+                let (panels_x, panels_y): (Vec<f64>, Vec<f64>) = if case_moves {
+                    (Vec::new(), Vec::new())
+                } else if let Some(layout) = self.history.draft.clone() {
+                    let derived = geometry::case_landmark_for(layout.case_form);
+                    let case_landmark = layout
+                        .landmarks
+                        .iter()
+                        .find(|l| l.kind == PartKind::Case)
+                        .or(derived.as_ref());
+                    if let Some(case) = case_landmark {
+                        let (cx, cy, cw, ch) = (case.x as f64, case.y as f64, case.width as f64, case.height as f64);
+                        (vec![cx, cx + cw / 2.0, cx + cw], vec![cy, cy + ch / 2.0, cy + ch])
+                    } else {
+                        (Vec::new(), Vec::new())
+                    }
+                } else {
+                    (Vec::new(), Vec::new())
+                };
+                let want = interact::Rect {
+                    x: interact::rubber_band(src.x + dx, -src.w / 2.0, geometry::CANVAS_W - src.w / 2.0),
+                    y: interact::rubber_band(src.y + dy, -src.h / 2.0, geometry::CANVAS_H - src.h / 2.0),
+                    w: src.w,
+                    h: src.h,
+                };
+                let canvas_box = interact::Rect { x: 0.0, y: 0.0, w: geometry::CANVAS_W, h: geometry::CANVAS_H };
+                let mut all_others = vec![canvas_box];
+                all_others.extend(others.clone());
+                let snap = interact::snap_move(want, &all_others, &panels_x, &panels_y, threshold, free);
+                let eq = if free { None } else { Some(interact::equal_spacing(want, &others, threshold)) };
+                let next_x = eq.as_ref().and_then(|e| e.x).unwrap_or(snap.x);
+                let next_y = eq.as_ref().and_then(|e| e.y).unwrap_or(snap.y);
+                let (delta_x, delta_y) = (next_x - src.x, next_y - src.y);
+                if let Some(layout) = self.history.draft.as_mut() {
+                    for o in drag.origs.clone().iter().chain(drag.riders.clone().iter()) {
+                        match o.sel {
+                            Sel::Zone(i) => {
+                                if let Some(z) = layout.zones.get_mut(i) {
+                                    if let Some(oz) = o.zone.clone() {
+                                        z.x = oz.x + delta_x as f32;
+                                        z.y = oz.y + delta_y as f32;
+                                    }
+                                }
+                            }
+                            Sel::Landmark(i) => {
+                                if let Some(l) = layout.landmarks.get_mut(i) {
+                                    if let Some(ol) = o.landmark.clone() {
+                                        l.x = ol.x + delta_x as f32;
+                                        l.y = ol.y + delta_y as f32;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                self.overlay.guides = (
+                    eq.as_ref().and_then(|e| e.line_a).or(snap.guide_x),
+                    eq.as_ref().and_then(|e| e.line_b),
+                    snap.guide_y,
+                );
+                let where_text = if eq.is_some_and(|e| e.x.is_some() || e.y.is_some()) {
+                    " \u{b7} even spacing"
+                } else if snap.gap_x.is_some_and(|g| g < 0.05) {
+                    " \u{b7} on the guide"
+                } else {
+                    ""
+                };
+                let unit = self.unit;
+                self.overlay.readout = Some((
+                    format!(
+                        "{} \u{b7} {}{}",
+                        geometry::format_units(next_x, unit),
+                        geometry::format_units(next_y, unit),
+                        where_text
+                    ),
+                    (point.x * k) as f32 + 12.0,
+                    (point.y * k) as f32 + 12.0,
+                ));
+            }
+            DragKind::Resize => {
+                let handle = drag.handle.unwrap_or(interact::Handle::Se);
+                let q = interact::Pt {
+                    x: interact::rubber_band(point.x, 0.0, geometry::CANVAS_W),
+                    y: interact::rubber_band(point.y, 0.0, geometry::CANVAS_H),
+                };
+                let next = interact::resize_by(src, orig_rot(orig), handle, q, shift, alt);
+                if let Some(layout) = self.history.draft.as_mut() {
+                    match drag.sel {
+                        Sel::Zone(i) => {
+                            if let Some(z) = layout.zones.get_mut(i) {
+                                z.x = next.x as f32;
+                                z.y = next.y as f32;
+                                z.width = next.w as f32;
+                                z.height = next.h as f32;
+                            }
+                        }
+                        Sel::Landmark(i) => {
+                            if let Some(l) = layout.landmarks.get_mut(i) {
+                                l.x = next.x as f32;
+                                l.y = next.y as f32;
+                                l.width = next.w as f32;
+                                l.height = next.h as f32;
+                            }
+                        }
+                    }
+                }
+                let unit = self.unit;
+                self.overlay.readout = Some((
+                    format!(
+                        "{} \u{d7} {}{}",
+                        geometry::format_units(next.w, unit),
+                        geometry::format_units(next.h, unit),
+                        if shift { " \u{b7} locked" } else { "" }
+                    ),
+                    (point.x * k) as f32 + 12.0,
+                    (point.y * k) as f32 + 12.0,
+                ));
+                self.overlay.guides = (None, None, None);
+            }
+            DragKind::Rotate => {
+                let centre = interact::Pt { x: src.x + src.w / 2.0, y: src.y + src.h / 2.0 };
+                let deg = interact::rotate_angle(centre, point, shift);
+                if let Some(layout) = self.history.draft.as_mut() {
+                    match drag.sel {
+                        Sel::Zone(i) => {
+                            if let Some(z) = layout.zones.get_mut(i) {
+                                z.rotation_deg = deg as f32;
+                            }
+                        }
+                        Sel::Landmark(i) => {
+                            if let Some(l) = layout.landmarks.get_mut(i) {
+                                l.rotation_deg = deg as f32;
+                            }
+                        }
+                    }
+                }
+                self.overlay.readout = Some((
+                    format!("{deg:.1}\u{b0}{}", if shift { " \u{b7} 15\u{b0} steps" } else { "" }),
+                    (point.x * k) as f32 + 12.0,
+                    (point.y * k) as f32 + 12.0,
+                ));
+                self.overlay.guides = (None, None, None);
+            }
+            _ => {}
+        }
+    }
+
+    fn on_desk_up(&mut self, _cx: &mut Context<Self>) {
+        let Some(drag) = self.drag.clone() else {
+            self.overlay = DragOverlay::default();
+            return;
+        };
+        if drag.pending {
+            if drag.collapse {
+                self.select(vec![drag.sel]);
+            }
+            self.drag = None;
+            self.overlay = DragOverlay::default();
+            return;
+        }
+        if matches!(drag.kind, DragKind::Pan) {
+            self.drag = None;
+            return;
+        }
+        if matches!(drag.kind, DragKind::Marquee) {
+            if let Some((x, y, w, h)) = self.overlay.marquee {
+                if w > 4.0 || h > 4.0 {
+                    if let Some((_ox, _oy, _dw, _dh, view, k)) = self.desk_box() {
+                        let band = interact::Rect {
+                            x: x as f64 / k - view.pan_x,
+                            y: y as f64 / k - view.pan_y,
+                            w: w as f64 / k,
+                            h: h as f64 / k,
+                        };
+                        let parts = self.hit_parts();
+                        let picked = interact::marquee_pick(band, &parts);
+                        self.select(picked.iter().map(|r| Self::ref_to_sel(*r)).collect());
+                    }
+                }
+            }
+            self.drag = None;
+            self.overlay = DragOverlay::default();
+            return;
+        }
+        if let Some(layout) = self.history.draft.as_mut() {
+            for o in drag.origs.iter().chain(drag.riders.iter()) {
+                let now = match o.sel {
+                    Sel::Zone(i) => layout.zones.get(i).map(|z| (z.x as f64, z.y as f64, z.width as f64, z.height as f64)),
+                    Sel::Landmark(i) => layout.landmarks.get(i).map(|l| (l.x as f64, l.y as f64, l.width as f64, l.height as f64)),
+                };
+                let Some((x, y, w, h)) = now else { continue };
+                let settled = interact::settle_rect(
+                    interact::Rect { x, y, w, h },
+                    geometry::CANVAS_W,
+                    geometry::CANVAS_H,
+                    interact::MIN_SIZE,
+                );
+                match o.sel {
+                    Sel::Zone(i) => {
+                        if let Some(z) = layout.zones.get_mut(i) {
+                            z.x = settled.x as f32;
+                            z.y = settled.y as f32;
+                            z.width = settled.w as f32;
+                            z.height = settled.h as f32;
+                        }
+                    }
+                    Sel::Landmark(i) => {
+                        if let Some(l) = layout.landmarks.get_mut(i) {
+                            l.x = settled.x as f32;
+                            l.y = settled.y as f32;
+                            l.width = settled.w as f32;
+                            l.height = settled.h as f32;
+                        }
+                    }
+                }
+            }
+        }
+        self.drag = None;
+        self.overlay = DragOverlay::default();
+        if let Some(pre) = drag.pre.clone() {
+            if self.history.draft.is_some() {
+                self.history.past.push(pre);
+                self.history.future.clear();
+            }
+        }
+    }
+
+    fn on_desk_wheel(&mut self, delta_y: f64, x: f64, y: f64, _cx: &mut Context<Self>) {
+        let (ox, oy, dw, dh, _view, _k) = self
+            .desk_box()
+            .unwrap_or((0.0, 0.0, 0.0, 0.0, StageView { scale: 1.0, pan_x: 0.0, pan_y: 0.0 }, 1.0));
+        self.wheel_zoom(delta_y, (x - ox as f64, y - oy as f64), (dw as f64, dh as f64));
+    }
+
+    fn on_desk_key(&mut self, event: &gpui::KeyDownEvent, cx: &mut Context<Self>) {
+        let key = event.keystroke.key.as_str();
+        let mods = &event.keystroke.modifiers;
+        if mods.control || mods.platform {
+            let k = key.to_lowercase();
+            if k == "z" && !mods.shift {
+                self.undo();
+                return;
+            }
+            if (k == "z" && mods.shift) || k == "y" {
+                self.redo();
+                return;
+            }
+        }
+        let k = key.to_lowercase();
+        if k == "l" && !mods.control && !mods.platform && !mods.alt {
+            self.mode = StageMode::Lights;
+            cx.notify();
+            return;
+        }
+        if k == "e" && !mods.control && !mods.platform && !mods.alt {
+            self.mode = StageMode::Effect;
+            cx.notify();
+            return;
+        }
+        if mods.control || mods.platform || mods.alt {
+            return;
+        }
+        let Some(sel) = self.selection.first().copied() else {
+            if k == "escape" {
+                self.select(Vec::new());
+            }
+            return;
+        };
+        if key == "Escape" {
+            self.select(Vec::new());
+            return;
+        }
+        if key == "Enter" {
+            return;
+        }
+        let step = interact::nudge_step(mods.shift);
+        match sel {
+            Sel::Zone(i) => {
+                let Some(layout) = self.history.draft.clone() else { return };
+                let Some(z) = layout.zones.get(i).cloned() else { return };
+                #[allow(clippy::needless_late_init)]
+                let patch: Option<(f32, f32, Option<bool>)>;
+                match key {
+                    "ArrowLeft" => patch = Some((
+                        interact::clamp(z.x as f64 - step, -z.width as f64 / 2.0, geometry::CANVAS_W - z.width as f64 / 2.0) as f32,
+                        z.y,
+                        None,
+                    )),
+                    "ArrowRight" => patch = Some((
+                        interact::clamp(z.x as f64 + step, -z.width as f64 / 2.0, geometry::CANVAS_W - z.width as f64 / 2.0) as f32,
+                        z.y,
+                        None,
+                    )),
+                    "ArrowUp" => patch = Some((
+                        z.x,
+                        interact::clamp(z.y as f64 - step, -z.height as f64 / 2.0, geometry::CANVAS_H - z.height as f64 / 2.0) as f32,
+                        None,
+                    )),
+                    "ArrowDown" => patch = Some((
+                        z.x,
+                        interact::clamp(z.y as f64 + step, -z.height as f64 / 2.0, geometry::CANVAS_H - z.height as f64 / 2.0) as f32,
+                        None,
+                    )),
+                    "Delete" | "Backspace" => patch = Some((z.x, z.y, Some(false))),
+                    _ => return,
+                }
+                let Some((px, py, visible)) = patch else { return };
+                self.commit(|l| Layout {
+                    zones: l
+                        .zones
+                        .iter()
+                        .enumerate()
+                        .map(|(zi, zz)| {
+                            if zi == i {
+                                let mut zz = zz.clone();
+                                zz.x = px;
+                                zz.y = py;
+                                if let Some(v) = visible {
+                                    zz.visible = v;
+                                }
+                                zz
+                            } else {
+                                zz.clone()
+                            }
+                        })
+                        .collect(),
+                    ..l.clone()
+                });
+            }
+            Sel::Landmark(i) => {
+                let Some(layout) = self.history.draft.clone() else { return };
+                let Some(l) = layout.landmarks.get(i).cloned() else { return };
+                let patch = match key {
+                    "ArrowLeft" => (l.x - step as f32, l.y),
+                    "ArrowRight" => (l.x + step as f32, l.y),
+                    "ArrowUp" => (l.x, l.y - step as f32),
+                    "ArrowDown" => (l.x, l.y + step as f32),
+                    _ => return,
+                };
+                self.commit(|l| Layout {
+                    landmarks: l
+                        .landmarks
+                        .iter()
+                        .enumerate()
+                        .map(|(li, ll)| {
+                            if li == i {
+                                let mut ll = ll.clone();
+                                ll.x = patch.0;
+                                ll.y = patch.1;
+                                ll
+                            } else {
+                                ll.clone()
+                            }
+                        })
+                        .collect(),
+                    ..l.clone()
+                });
+            }
+        }
+    }
+}
+
+fn orig_rot(o: &Orig) -> f64 {
+    o.zone
+        .as_ref()
+        .map(|z| z.rotation_deg as f64)
+        .unwrap_or_else(|| o.landmark.as_ref().map(|l| l.rotation_deg as f64).unwrap_or(0.0))
 }
 
 /// The loading frame: the page says it is reading the layout.
@@ -676,8 +1895,11 @@ fn stage_toolbar(
         &layout.as_ref().map(|l| l.zones.clone()).unwrap_or_default(),
         &layout.as_ref().map(|l| l.landmarks.clone()).unwrap_or_default(),
     );
-    let view_state = hero_view(desk_w as f64, desk_h as f64, centre);
-    let scale_percent = (view_state.scale * 100.0).round() as i64;
+    let view_state = view
+        .view
+        .unwrap_or_else(|| hero_view(desk_w as f64, desk_h as f64, centre));
+    let scale_percent = interact::zoom_percent(view_state.scale);
+    let desk_box = (desk_w as f64, desk_h as f64);
 
     let mut row = div()
         .flex()
@@ -685,6 +1907,7 @@ fn stage_toolbar(
         .items_center()
         .gap(px(8.0))
         .flex_none()
+        .w_full()
         .border_t_1()
         .border_color(Theme::color(t.line))
         .bg(Theme::color(t.panel))
@@ -729,17 +1952,26 @@ fn stage_toolbar(
                 .as_ref()
                 .map(|l| l.render_scale.percent())
                 .unwrap_or(50);
+            let scale_entity = entity.clone();
             segs = segs.child(segmented(
                 t,
                 "lay-scale",
                 &[("25", "¼"), ("50", "½"), ("100", "All")],
                 &scale.to_string(),
-                |_value, _window, _cx| {},
+                move |value, _window, cx| {
+                    scale_entity.update(cx, |this: &mut LayoutView, cx| {
+                        let pct: u8 = value.parse().unwrap_or(50);
+                        let rs: RenderScale = pct.try_into().unwrap_or(RenderScale::P50);
+                        this.commit(|l| Layout { render_scale: rs, ..l.clone() });
+                        cx.notify();
+                    });
+                },
             ));
             let sampling = layout
                 .as_ref()
                 .map(|l| sampling_key(l.sampling))
                 .unwrap_or("nearest");
+            let sampling_entity = entity.clone();
             segs = segs.child(segmented(
                 t,
                 "lay-sampling",
@@ -749,9 +1981,20 @@ fn stage_toolbar(
                     ("area_average", "All px"),
                 ],
                 sampling,
-                |_value, _window, _cx| {},
+                move |value, _window, cx| {
+                    sampling_entity.update(cx, |this: &mut LayoutView, cx| {
+                        let sm = match value.as_str() {
+                            "nearest" => SamplingMode::Nearest,
+                            "bilinear" => SamplingMode::Bilinear,
+                            _ => SamplingMode::AreaAverage,
+                        };
+                        this.commit(|l| Layout { sampling: sm, ..l.clone() });
+                        cx.notify();
+                    });
+                },
             ));
         } else {
+            let render_entity = entity.clone();
             segs = segs.child(button_icon(
                 t,
                 "lay-render-key",
@@ -762,12 +2005,21 @@ fn stage_toolbar(
                 "SlidersHorizontal",
                 "",
                 15.0,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    render_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.render_open = !this.render_open;
+                        cx.notify();
+                    });
+                },
             ));
         }
     } else {
         // On a phone the undo and redo keys move here, to the desk where the
         // work they undo happens.
+        let past_empty = view.history.past.is_empty();
+        let future_empty = view.history.future.is_empty();
+        let undo_entity = entity.clone();
+        let redo_entity = entity.clone();
         segs = segs
             .child(icon_button(
                 t,
@@ -776,8 +2028,13 @@ fn stage_toolbar(
                 "",
                 true,
                 false,
-                true,
-                |_, _, _| {},
+                past_empty,
+                move |_, _window, app| {
+                    undo_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.undo();
+                        cx.notify();
+                    });
+                },
             ))
             .child(icon_button(
                 t,
@@ -786,12 +2043,21 @@ fn stage_toolbar(
                 "",
                 true,
                 false,
-                true,
-                |_, _, _| {},
+                future_empty,
+                move |_, _window, app| {
+                    redo_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.redo();
+                        cx.notify();
+                    });
+                },
             ));
     }
     row = row.child(segs);
+    row = row.child(div().flex_1());
     // The zoom, on the right.
+    let zoom_out_entity = entity.clone();
+    let zoom_in_entity = entity.clone();
+    let fit_entity = entity.clone();
     row = row.child(
         div()
             .flex()
@@ -811,7 +2077,12 @@ fn stage_toolbar(
                 true,
                 false,
                 false,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    zoom_out_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.zoom_by(1.0 / 1.3, desk_box);
+                        cx.notify();
+                    });
+                },
             ))
             .child(
                 div()
@@ -830,7 +2101,12 @@ fn stage_toolbar(
                 true,
                 false,
                 false,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    zoom_in_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.zoom_by(1.3, desk_box);
+                        cx.notify();
+                    });
+                },
             ))
             .child(icon_button(
                 t,
@@ -840,10 +2116,75 @@ fn stage_toolbar(
                 true,
                 false,
                 false,
-                |_, _, _| {},
+                move |_, _window, app| {
+                    fit_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.zoom_fit(desk_box);
+                        cx.notify();
+                    });
+                },
             )),
     );
+    if view.render_open {
+        row = row.child(render_popover(view, t, cx));
+    }
     row.into_any_element()
+}
+
+/// "How the desk is drawn and read": render scale and sampling, with notes.
+fn render_popover(view: &mut LayoutView, t: &Theme, cx: &mut Context<LayoutView>) -> gpui::AnyElement {
+    let layout = view.layout().cloned();
+    let scale = layout.as_ref().map(|l| l.render_scale.percent()).unwrap_or(50);
+    let sampling = layout.as_ref().map(|l| sampling_key(l.sampling)).unwrap_or("nearest");
+    let render_note = match scale {
+        25 => "A quarter of the desk: the effect is drawn small and then scaled up, so the edges are softer and the work is lighter.",
+        100 => "The whole desk: every LED reads the picture at the desk's own size, which is the sharpest and the most work.",
+        _ => "Half of the desk: a balance between the detail of the picture and the work of drawing it.",
+    };
+    let sampling_note = match sampling {
+        "nearest" => "Each LED takes the colour of the one pixel it sits on: the sharpest, and the lightest.",
+        "bilinear" => "Each LED blends the four pixels around it, so the edge between them fades.",
+        _ => "Each LED takes the average of every pixel it covers, so it is lit evenly.",
+    };
+    let entity = cx.entity();
+    let scale_entity = entity.clone();
+    let sampling_entity = entity;
+    let body = div()
+        .flex()
+        .flex_col()
+        .gap(px(8.0))
+        .p_2()
+        .child(
+            div().flex().items_center().gap(px(8.0))
+                .child(div().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child("Render"))
+                .child(segmented(t, "lay-pop-scale", &[("25", "¼"), ("50", "½"), ("100", "All")], &scale.to_string(),
+                    move |value, _window, cx| {
+                        scale_entity.update(cx, |this: &mut LayoutView, cx| {
+                            let pct: u8 = value.parse().unwrap_or(50);
+                            let rs: RenderScale = pct.try_into().unwrap_or(RenderScale::P50);
+                            this.commit(|l| Layout { render_scale: rs, ..l.clone() });
+                            cx.notify();
+                        });
+                    })),
+        )
+        .child(div().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child(render_note))
+        .child(
+            div().flex().items_center().gap(px(8.0))
+                .child(div().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child("Sampling"))
+                .child(segmented(t, "lay-pop-sampling", &[("nearest", "1"), ("bilinear", "4"), ("area_average", "All px")], sampling,
+                    move |value, _window, cx| {
+                        sampling_entity.update(cx, |this: &mut LayoutView, cx| {
+                            let sm = match value.as_str() {
+                                "nearest" => SamplingMode::Nearest,
+                                "bilinear" => SamplingMode::Bilinear,
+                                _ => SamplingMode::AreaAverage,
+                            };
+                            this.commit(|l| Layout { sampling: sm, ..l.clone() });
+                            cx.notify();
+                        });
+                    })),
+        )
+        .child(div().text_sm().font_family(crate::fonts::UI_FAMILY).text_color(Theme::color(t.mute)).child(sampling_note));
+    div().w_full().child(body).into_any_element()
 }
 
 /// The sampling's name, as the segment says it.
@@ -919,11 +2260,14 @@ pub fn scale_bar_length(unit: LengthUnit, scale: f64, desk_w: f32) -> (String, f
 
 /// The "To place" panel: the zones that are not on the desk yet.
 fn place_panel(
-    view: &LayoutView,
+    view: &mut LayoutView,
     t: &Theme,
     devices: &[DeviceInfo],
     layout: &Layout,
+    cx: &mut Context<LayoutView>,
 ) -> gpui::AnyElement {
+    let entity_for_place = cx.entity();
+    let _ = view;
     let rows = unplaced(Some(layout), devices);
     let count = rows.len();
     let actions = div()
@@ -950,6 +2294,7 @@ fn place_panel(
             .gap(px(8.0))
             .min_w_0()
             .font_weight(gpui::FontWeight::SEMIBOLD)
+            .text_color(Theme::color(t.ink))
             .child(u.zone_name.clone())
             .child(
                 div()
@@ -978,20 +2323,28 @@ fn place_panel(
         if i + 1 < count {
             row = row.border_b_1().border_color(Theme::color(t.line));
         }
+        let entity = entity_for_place.clone();
+        let place_id = format!("lay-place-{}-{}", u.device_id, u.zone_index);
+        let u_device = u.device_id.clone();
+        let u_zone = u.zone_index;
         row = row.child(icon_button(
             t,
-            &format!("lay-place-{}-{}", u.device_id, u.zone_index),
+            &place_id,
             "Plus",
             "bold",
             true,
             false,
             false,
-            |_, _, _| {},
+            move |_, _window, app| {
+                entity.update(app, |this: &mut LayoutView, cx| {
+                    this.place_zone(&u_device, u_zone, None);
+                    cx.notify();
+                });
+            },
         ));
         body = body.child(row);
     }
     let panel = panel_with_padding(t, "lay-place", "To place", actions, body, None);
-    let _ = view;
     div().flex_none().min_h_0().child(panel).into_any_element()
 }
 
@@ -1003,6 +2356,7 @@ fn parts_panel(
     layout: &Layout,
     one_column: bool,
     cx: &mut Context<LayoutView>,
+    window: &mut Window,
 ) -> gpui::AnyElement {
     let entity = cx.entity();
     let unit = view.unit;
@@ -1031,19 +2385,66 @@ fn parts_panel(
                 });
             },
         ))
-        .child(button_icon(
-            t,
-            "lay-add-part",
-            "Add part",
-            Variant::Ghost,
-            false,
-            true,
-            "Plus",
-            "",
-            14.0,
-            |_, _, _| {},
-        ));
-    let rows = part_rows(Some(layout), devices);
+        .child({
+            let add_entity = entity.clone();
+            button_icon(
+                t,
+                "lay-add-part",
+                "Add part",
+                Variant::Ghost,
+                false,
+                true,
+                "Plus",
+                "",
+                14.0,
+                move |_, _window, app| {
+                    add_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.add_open = !this.add_open;
+                        cx.notify();
+                    });
+                },
+            )
+        });
+    let add_popover = if view.add_open {
+        let add_entity = entity.clone();
+        let mut chips = div()
+            .flex()
+            .flex_wrap()
+            .gap(px(8.0))
+            .mt_3()
+            .child(
+                div()
+                    .text_sm()
+                    .font_family(crate::fonts::UI_FAMILY)
+                    .text_color(Theme::color(t.mute))
+                    .child("Add a part to the desk"),
+            );
+        for kind in interact::LANDMARK_KINDS {
+            let chip_entity = add_entity.clone();
+            chips = chips.child(button_icon(
+                t,
+                &format!("lay-add-{}", interact::part_label(kind)),
+                &format!("Add a {}", interact::part_label(kind)),
+                Variant::Default,
+                false,
+                true,
+                "Plus",
+                "",
+                14.0,
+                move |_, _window, app| {
+                    chip_entity.update(app, |this: &mut LayoutView, cx| {
+                        this.add_open = false;
+                        this.add_landmark(kind);
+                        cx.notify();
+                    });
+                },
+            ));
+        }
+        chips
+    } else {
+        div().hidden()
+    };
+    let rows = part_rows_unit(Some(layout), devices, unit);
     let mut body = div()
         .id("lay-parts-body")
         .flex()
@@ -1052,7 +2453,38 @@ fn parts_panel(
         .mt_3();
     if !one_column {
         body = body.flex_1().min_h_0().overflow_y_scroll();    }
+    body = body.child(add_popover);
+    let inspector_w_now = inspector_width(container_width(view.width));
     for row in rows {
+        let title_text_w = crate::shell::text_width(
+            window,
+            &row.name,
+            15.0,
+            gpui::FontWeight::SEMIBOLD,
+            crate::fonts::UI_FAMILY,
+        );
+        let title_w = title_text_w + if row.icon.is_empty() { 0.0 } else { 23.0 };
+        let count_text = row
+            .width_text
+            .clone()
+            .or_else(|| row.leds.map(|n| format!("{n}")))
+            .unwrap_or_else(|| "\u{2014}".to_string());
+        let count_w = crate::shell::text_width(
+            window,
+            &count_text,
+            14.0,
+            gpui::FontWeight::NORMAL,
+            crate::fonts::MONO_FAMILY,
+        );
+        let sub_w = (inspector_w_now - 32.0 - 24.0 - title_w - count_w - 24.0).max(40.0);
+        let ellipsized = crate::shell::ellipsize(
+            window,
+            &row.sub,
+            sub_w,
+            14.0,
+            gpui::FontWeight::NORMAL,
+            crate::fonts::UI_FAMILY,
+        );
         let title = div()
             .flex()
             .items_center()
@@ -1060,34 +2492,31 @@ fn parts_panel(
             .min_w(px(0.0))
             .font_weight(gpui::FontWeight::SEMIBOLD)
             .text_color(Theme::color(t.ink))
-            .child(
-                gpui::svg()
-                    .path(format!("icons/{}.svg", row.icon))
-                    .size(px(15.0))
-                    .flex_none()
-                    .text_color(Theme::color(t.ink)),
-            )
+            .child(if row.icon.is_empty() {
+                div()
+            } else {
+                div().child(
+                    gpui::svg()
+                        .path(format!("icons/{}.svg", row.icon))
+                        .size(px(15.0))
+                        .flex_none()
+                        .text_color(Theme::color(t.ink)),
+                )
+            })
             .child(row.name.clone())
             .truncate();
         let sub = div()
             .text_sm()
             .font_family(crate::fonts::UI_FAMILY)
             .text_color(Theme::color(t.mute))
-            .child(row.sub.clone())
+            .child(ellipsized)
             .truncate();
         let count = div()
             .text_sm()
             .font_family(crate::fonts::MONO_FAMILY)
             .text_color(Theme::color(t.mute))
-            .child(match row.leds {
-                Some(n) => format!("{n}"),
-                None => "—".to_string(),
-            });
-        // The row is three columns (React `.row-button` grid): the title, the
-        // sub-line, and the count. On a phone the sub-line is hidden
-        // (`.row-sub` at the 639 px container query), and the grid collapses:
-        // the count moves up next to the title.
-        let mut row = div()
+            .child(count_text);
+        let mut row_el = div()
             .flex()
             .items_center()
             .gap(px(12.0))
@@ -1099,12 +2528,31 @@ fn parts_panel(
             .border_color(Theme::color(t.line))
             .child(title);
         if !one_column {
-            row = row.child(div().flex_1().min_w(px(0.0)).child(sub));
+            row_el = row_el.child(div().flex_1().min_w(px(0.0)).child(sub));
         }
-        row = row.child(count);
-        body = body.child(row);
+        row_el = row_el.child(count);
+        let sel = row.sel;
+        let row_entity = entity.clone();
+        let row_el = row_el
+            .id(("lay-row", match sel { Sel::Zone(i) => 1000 + i, Sel::Landmark(i) => 2000 + i }))
+            .cursor_pointer()
+            .on_click(move |_, _window, app| {
+                row_entity.update(app, |this: &mut LayoutView, cx| {
+                    this.select(vec![sel]);
+                    cx.notify();
+                });
+            });
+        body = body.child(row_el);
     }
-    let panel = panel_with_padding(t, "lay-parts", "Parts", actions, body, None);
+    let panel_title = if view.selection.is_empty() {
+        "Parts"
+    } else {
+        match view.selection[0] {
+            Sel::Zone(_) => "Zone",
+            Sel::Landmark(_) => "Part",
+        }
+    };
+    let panel = panel_with_padding(t, "lay-parts", panel_title, actions, body, None);
     let panel = if one_column {
         panel
     } else {
@@ -1125,8 +2573,16 @@ fn parts_panel(
     pane.into_any_element()
 }
 
+#[allow(dead_code)]
+fn sel_debug(sel: Sel) -> &'static str {
+    match sel {
+        Sel::Zone(_) => "zone",
+        Sel::Landmark(_) => "landmark",
+    }
+}
+
 /// The Render pane: the desk's own settings, on a phone.
-fn render_panel(view: &mut LayoutView, t: &Theme) -> gpui::AnyElement {
+fn render_panel(view: &mut LayoutView, t: &Theme, cx: &mut Context<LayoutView>) -> gpui::AnyElement {
     let layout = view.layout().cloned();
     let scale = layout
         .as_ref()
@@ -1136,6 +2592,8 @@ fn render_panel(view: &mut LayoutView, t: &Theme) -> gpui::AnyElement {
         .as_ref()
         .map(|l| sampling_key(l.sampling))
         .unwrap_or("nearest");
+    let scale_entity = cx.entity();
+    let sampling_entity = cx.entity();
     let body = div()
         .flex()
         .items_center()
@@ -1146,7 +2604,14 @@ fn render_panel(view: &mut LayoutView, t: &Theme) -> gpui::AnyElement {
             "lay-pane-scale",
             &[("25", "¼"), ("50", "½"), ("100", "All")],
             &scale.to_string(),
-            |_value, _window, _cx| {},
+            move |value, _window, cx| {
+                scale_entity.update(cx, |this: &mut LayoutView, cx| {
+                    let pct: u8 = value.parse().unwrap_or(50);
+                    let rs: RenderScale = pct.try_into().unwrap_or(RenderScale::P50);
+                    this.commit(|l| Layout { render_scale: rs, ..l.clone() });
+                    cx.notify();
+                });
+            },
         ))
         .child(segmented(
             t,
@@ -1157,7 +2622,17 @@ fn render_panel(view: &mut LayoutView, t: &Theme) -> gpui::AnyElement {
                 ("area_average", "All px"),
             ],
             sampling,
-            |_value, _window, _cx| {},
+            move |value, _window, cx| {
+                sampling_entity.update(cx, |this: &mut LayoutView, cx| {
+                    let sm = match value.as_str() {
+                        "nearest" => SamplingMode::Nearest,
+                        "bilinear" => SamplingMode::Bilinear,
+                        _ => SamplingMode::AreaAverage,
+                    };
+                    this.commit(|l| Layout { sampling: sm, ..l.clone() });
+                    cx.notify();
+                });
+            },
         ));
     let panel = panel_with_padding(t, "lay-render", "Render", div(), body, None);
     panel.into_any_element()
