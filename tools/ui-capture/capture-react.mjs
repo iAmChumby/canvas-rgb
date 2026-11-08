@@ -311,6 +311,20 @@ function tauriInit({ daemonBase, token, theme }) {
 
 const STEPS = ["hello", "case", "parts", "match", "finish"];
 
+// The text each screen's panel carries. The walk clicks the primary key and
+// reads `data-step` back, but a headless page sometimes paints the header of
+// the new screen over the body of the old one: the step attribute says
+// "parts" while the panel still shows the Hello screen. The shot is checked
+// against the text the screen must carry, so a half-painted page is retaken
+// rather than saved.
+const STEP_TEXT = {
+  hello: "Map my PC",
+  case: "Is this your case?",
+  parts: "Put in what's in your PC.",
+  match: "Which part is lit?",
+  finish: "Watch your PC.",
+};
+
 // The onboarding takeover (#212): when UI_CAPTURE_ONBOARDING is set (a comma
 // list of steps), only onboarding shots run in demo mode: no __TAURI__, so
 // request() answers from demoRequest() with the ?state= token in
@@ -380,6 +394,21 @@ async function shootOnboarding(page, base, viewport, theme, step, daemonBase, to
   // hover transition finish before the shot.
   await page.mouse.move(0, 0);
   await page.waitForTimeout(400);
+  // The screen must be the one that was asked for: the step attribute says
+  // so, and the panel's own words say so too. A half-painted page (the
+  // header of the new screen over the body of the old one) is waited out.
+  const want = STEP_TEXT[step];
+  for (let i = 0; i < 20; i++) {
+    const seen = await page.evaluate((t) => {
+      const panel = document.querySelector('[data-step] section');
+      return (panel?.textContent ?? "").includes(t);
+    }, want);
+    if (seen) break;
+    if (i === 19) {
+      throw new Error(`the onboarding screen "${step}" never showed its own text ("${want}")`);
+    }
+    await page.waitForTimeout(500);
+  }
   await page.screenshot({ path: filePath });
   return { view: `onboarding-${step}`, path: "/", viewport: { width: viewport.w, height: viewport.h }, theme, file: fileName, pageErrors: [], consoleErrors: [], apiFailures: [], slowThumbnails: [], requestFailures: [], notLoaded: [] };
 }
