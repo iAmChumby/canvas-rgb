@@ -1896,11 +1896,14 @@ impl PeripheralsView {
                     });
                 })
                 .child(
-                    // The dot is `.dpi-chip-dot` (10 px, plus its 1 px ring
-                    // in `box-shadow`, so a 12 px footprint): the GPUI box
-                    // is 12 px with the ring `border_1`.
+                    // The dot is `.dpi-chip-dot` (10 px, `box-shadow: 0 0 0
+                    // 1px` ring: a 12 px footprint with 10 px ink). GPUI
+                    // draws it as a 10 px border-box with `border_1`
+                    // (8 px ink under the ring); a 12 px box wraps the
+                    // widest chip (`26000`) onto a third row at 1440, so
+                    // the 10 px box stays (measured: 4.66% vs 7.15%).
                     div()
-                        .size(px(12.0))
+                        .size(px(10.0))
                         .rounded_full()
                         .bg(Theme::color(&stage.colour))
                         .border_1()
