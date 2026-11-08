@@ -39,6 +39,7 @@ use crate::views::devices::DevicesView;
 use crate::views::displays::DisplaysView;
 use crate::views::effects::EffectsView;
 use crate::views::fans::FansView;
+use crate::views::layout::LayoutView;
 use crate::views::peripherals::PeripheralsView;
 use crate::views::settings::{SettingsView, ThemeCell};
 use crate::views::updates::UpdatesView;
@@ -247,6 +248,8 @@ pub struct Shell {
     pub peripherals_view: gpui::Entity<PeripheralsView>,
     /// The Effects page (#210).
     pub effects_view: gpui::Entity<EffectsView>,
+    /// The Layout page (#213).
+    pub layout_view: gpui::Entity<LayoutView>,
     /// The theme the shell and the settings view share (the Appearance
     /// radio writes it; every render reads it).
     pub theme_cell: ThemeCell,
@@ -309,6 +312,7 @@ impl Shell {
         });
         let peripherals_view = cx.new(|cx| PeripheralsView::new(theme, cx));
         let effects_view = cx.new(|cx| EffectsView::new(theme, cx));
+        let layout_view = cx.new(|cx| LayoutView::new(theme, cx));
         let palette = cx.new(|cx| CommandPaletteView::new(theme, cx));
         // The palette's callbacks run through the shell: rows execute an
         // action and then close it (`Shell.tsx` `togglePower`/`runEffect`).
@@ -348,6 +352,7 @@ impl Shell {
             updates_view,
             peripherals_view,
             effects_view,
+            layout_view,
             settings_view,
             theme_cell,
             width: 1280.0,
@@ -1428,6 +1433,10 @@ impl Shell {
         } else if self.page == "effects" {
             self.effects_view
                 .update(cx, |u, cx2| u.strip_title(cx2).1.unwrap_or_default())
+        } else if self.page == "layout" {
+            // The layout's own name stands beside the page's name.
+            self.layout_view
+                .update(cx, |u, _| u.strip_title().1.unwrap_or_default())
         } else {
             String::new()
         };
@@ -1459,7 +1468,21 @@ impl Shell {
             context_text = context.unwrap_or_default();
             page_actions = Some(actions);
             page_leading = leading;
-        }        // The peripherals page's actions (React `PageActions`): the pending
+        }
+        if self.page == "layout" {
+            // The Layout page's own actions: undo and redo, the zone count,
+            // the save state, Revert, Save and "Map my PC again".
+            let layout_view = self.layout_view.clone();
+            let (title, context, actions) = layout_view.update(cx, |view, cx| {
+                let (title, context) = view.strip_title();
+                let actions = crate::views::layout::LayoutView::strip_actions(view, cx);
+                (title, context, actions)
+            });
+            title_text = title;
+            context_text = context.unwrap_or_default();
+            page_actions = Some(actions);
+        }
+        // The peripherals page's actions (React `PageActions`): the pending
         // count, Revert and Apply, before Pause and Search. Empty unless
         // there are pending edits.
         if self.page == "peripherals" {
@@ -1770,6 +1793,9 @@ impl Shell {
         if self.page == "displays" {
             return self.displays.clone().into_any_element();
         }
+        if self.page == "layout" {
+            return self.layout_view.clone().into_any_element();
+        }
         if self.page == "devices" {
             return self.devices_view.clone().into_any_element();
         }
@@ -1921,6 +1947,7 @@ impl Render for Shell {
             self.updates_view.update(cx, |u, _| u.theme = shared);
             self.peripherals_view.update(cx, |v, _| v.theme = shared);
             self.effects_view.update(cx, |v, _| v.theme = shared);
+            self.layout_view.update(cx, |v, _| v.theme = shared);
         }
         // The Updates page's tray state comes from the settings view (the
         // single reader of the stdio receiver). Copy it here when the

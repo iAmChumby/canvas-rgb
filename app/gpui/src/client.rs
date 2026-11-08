@@ -19,22 +19,22 @@ pub fn base_url() -> String {
 /// The request deadline, matching the React client's `REQUEST_TIMEOUT_MS`.
 pub const TIMEOUT: Duration = Duration::from_secs(10);
 
-/// The API token, read after the owner check has passed.
-///
-/// The preview's WebSocket handshake cannot carry a header (a browser cannot
-/// set one either), so the token rides in the query string.
-pub fn api_token() -> Result<String, ClientError> {
-    token_for(&base_url())
+/// The API token, for the calls that cannot carry a header: the preview
+/// WebSocket takes it as `?token=`, because a WebSocket handshake has no
+/// header to put it in. The owner check runs first, exactly as it does for
+/// every other call.
+pub fn api_token() -> Option<String> {
+    token_for(&base_url()).ok()
 }
 
-/// The port the client talks to.
+/// The daemon's API port, which is where the preview socket lives.
 pub fn api_port() -> u16 {
     base_url()
         .trim_end_matches('/')
         .rsplit(':')
         .next()
         .and_then(|p| p.parse().ok())
-        .unwrap_or(canvas_proto::consts::API_PORT)
+        .unwrap_or(consts::API_PORT)
 }
 
 #[derive(Debug, Clone)]

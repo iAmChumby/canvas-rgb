@@ -82,6 +82,13 @@ pub const ICONS: &[&str] = &[
     "Star",
     "Waveform",
     "Check",
+    // The Layout page (#213).
+    "ArrowUUpLeft",
+    "ArrowUUpRight",
+    "ArrowsOut",
+    "Headphones",
+    "Minus",
+    "SlidersHorizontal",
 ];
 
 fn icon_svg(name: &str) -> Option<&'static str> {
@@ -151,6 +158,12 @@ fn icon_svg(name: &str) -> Option<&'static str> {
         "Star" => include_str!("../assets/icons/Star.svg"),
         "Waveform" => include_str!("../assets/icons/Waveform.svg"),
         "Check" => include_str!("../assets/icons/Check.svg"),
+        "ArrowUUpLeft" => include_str!("../assets/icons/ArrowUUpLeft.svg"),
+        "ArrowUUpRight" => include_str!("../assets/icons/ArrowUUpRight.svg"),
+        "ArrowsOut" => include_str!("../assets/icons/ArrowsOut.svg"),
+        "Headphones" => include_str!("../assets/icons/Headphones.svg"),
+        "Minus" => include_str!("../assets/icons/Minus.svg"),
+        "SlidersHorizontal" => include_str!("../assets/icons/SlidersHorizontal.svg"),
         _ => return None,
     })
 }
@@ -253,6 +266,8 @@ impl AssetSource for IconAssets {
                         "Star" => include_str!("../assets/icons/Star-bold.svg"),
                         "Waveform" => include_str!("../assets/icons/Waveform-bold.svg"),
                         "Check" => include_str!("../assets/icons/Check-bold.svg"),
+                        // The Layout page's "place it" key (#213).
+                        "Plus" => include_str!("../assets/icons/Plus-bold.svg"),
                         _ => icon_svg(base).unwrap_or(""),
                     };
                     Some(Cow::Borrowed(svg.as_bytes()))
