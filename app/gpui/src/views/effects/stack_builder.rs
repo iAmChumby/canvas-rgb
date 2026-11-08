@@ -901,7 +901,7 @@ impl StackBuilder {
     pub fn layer_label(&self, effect: &str) -> String {
         match self.schemas.get(effect) {
             Some(Some(schema)) if !schema.name.is_empty() => schema.name.clone(),
-            _ => "Loading…".to_string(),
+            _ => "Loadingâ€¦".to_string(),
         }
     }
 
@@ -1294,7 +1294,9 @@ impl StackBuilder {
             .r_lg()
             .border_1()
             .border_color(Theme::color(t.line_2))
-            .bg(Theme::color(t.panel));
+            .bg(Theme::color(t.panel))
+            // `.rd-picker { box-shadow: var(--pop) }` (`app.css:7619`).
+            .shadow(pop_shadow(&t));
         if narrow {
             // The phone sheet: the full width, the top corners only, and the
             // room the dock needs under it.
@@ -1449,7 +1451,7 @@ impl StackBuilder {
         let narrow = self.width <= 720.0;
         // The phone stage's picture height: React's `.rd-canvas-wrap` takes
         // its height from its width (`aspect-ratio: 320 / 200`), so the
-        // picture is (panel inner width) / 1.6 tall — about 212 px at 390
+        // picture is (panel inner width) / 1.6 tall â€” about 212 px at 390
         // (panel x 12-378 less 12 px padding and the 1 px border each
         // side), not a flex row's leftover. The builder's width is the
         // window width less the shell's 16 px phone content padding on
@@ -1470,7 +1472,7 @@ impl StackBuilder {
             Some((
                 bounds,
                 format!(
-                    "{} · {}",
+                    "{} Â· {}",
                     layer.name,
                     area_name(&layer.area, None, None)
                 ),
@@ -1492,7 +1494,7 @@ impl StackBuilder {
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
                     .text_color(Theme::color(t.mute))
-                    .child("320 × 200 · 15 fps"),
+                    .child("320 Ã— 200 Â· 15 fps"),
             );
         if !narrow {
             head = head.child(
@@ -1628,11 +1630,11 @@ impl StackBuilder {
             } else if count == 0 {
                 "An empty stack runs nothing; the lights keep their effect.".to_string()
             } else {
-                "Preview only — nothing is on the lights.".to_string()
+                "Preview only â€” nothing is on the lights.".to_string()
             };
             // React's foot is `flex-wrap`: a long note (the empty stack's)
             // takes the full row and the Try key wraps below it; a short
-            // note ("Preview only — …") leaves the key on the same row.
+            // note ("Preview only â€” â€¦") leaves the key on the same row.
             // A flex key beside a shrinking note never wraps in GPUI, so
             // the long case is a column: note full width, key under it.
             let long_note = note.chars().count() > 44;
@@ -1684,12 +1686,12 @@ impl StackBuilder {
                 .into_any_element()
         } else {
             let text = match self.draft_state {
-                super::editor::DraftState::Starting => "Starting the draft…".to_string(),
+                super::editor::DraftState::Starting => "Starting the draftâ€¦".to_string(),
                 super::editor::DraftState::Running => "Draft on the lights".to_string(),
                 super::editor::DraftState::Expiring => {
                     format!("Draft on the lights, expiring in {}s", self.expires_in)
                 }
-                super::editor::DraftState::Restoring => "Restoring the previous effect…".to_string(),
+                super::editor::DraftState::Restoring => "Restoring the previous effectâ€¦".to_string(),
                 super::editor::DraftState::RestoreError => {
                     "The previous effect could not be restored.".to_string()
                 }
@@ -1839,7 +1841,7 @@ impl StackBuilder {
                 .min_w(px(0.0))
                 // The text's box is four pixels wider than React's: gpui's
                 // text layout breaks a line a little before the string's
-                // advance width says it should (the browser fits "…then each
+                // advance width says it should (the browser fits "â€¦then each
                 // layer", 313.01 px at 14 px, in React's 316 px box; gpui
                 // needs 320). The room is on the right, so the words still
                 // start where React's do (x 45) and still end where React's
@@ -1890,7 +1892,7 @@ impl StackBuilder {
                 // is the list's content box less those 16 px and the line
                 // breaks where React's do. A flex row with the dash in the
                 // flow gave the text a `flex: 1 1 0%` box, and it broke
-                // 10 px early: "…then each" against React's "…then each
+                // 10 px early: "â€¦then each" against React's "â€¦then each
                 // layer".
                 .child(
                     div()
@@ -1973,7 +1975,7 @@ impl StackBuilder {
         let meta = match &words {
             Some(words) => words.clone(),
             None => format!(
-                "{} {}% · {}",
+                "{} {}% Â· {}",
                 blend_label(layer.blend),
                 layer.opacity,
                 area_name(&layer.area, None, None)
@@ -2069,7 +2071,7 @@ impl StackBuilder {
     }
 
     /// The phone's picked-layer summary (`section.panel.rd-layer-summary`):
-    /// the thumbnail, the name, "effect · area" and the Tune key that opens
+    /// the thumbnail, the name, "effect Â· area" and the Tune key that opens
     /// the layer sheet. The sheet is a dialog over the stack whose Escape
     /// and Tab behaviours the pair below cannot observe until it is open.
     fn layer_summary(&mut self, cx: &mut Context<Self>) -> gpui::AnyElement {
@@ -2121,7 +2123,7 @@ impl StackBuilder {
                             .text_color(Theme::color(t.mute))
                             .whitespace_nowrap()
                             .overflow_hidden()
-                            .child(format!("{} · {}", label, area_name(&picked.area, None, None))),
+                            .child(format!("{} Â· {}", label, area_name(&picked.area, None, None))),
                     ),
             )
             .child(button_icon(
@@ -2212,7 +2214,7 @@ impl StackBuilder {
                                     .text_color(Theme::color(t.mute))
                                     .whitespace_nowrap()
                                     .overflow_hidden()
-                                    .child(format!("{label} · layer {index} of {count}")),
+                                    .child(format!("{label} Â· layer {index} of {count}")),
                             ),
                     ),
             )
@@ -2868,6 +2870,34 @@ pub fn name_of(id: &str) -> String {
     id.strip_prefix("stack:").unwrap_or(id).to_string()
 }
 
+/// React's `--pop` shadow (`tokens.css:73`, `app.css:7619`): the card
+/// over the scrim wears it. The token is read whole, so the light theme's
+/// own shadow is the one that is drawn.
+///
+/// gpui's `blur_radius` is the gaussian's sigma, and CSS's blur radius is
+/// twice the sigma, so the token's 32 px blur is 16 here (the command
+/// palette measured the same for its 48 px blur).
+fn pop_shadow(t: &Theme) -> Vec<gpui::BoxShadow> {
+    let (spec, colour) = match t.pop.find("rgba(") {
+        Some(at) => (&t.pop[..at], &t.pop[at..]),
+        None => (t.pop, "rgba(0, 0, 0, 0.5)"),
+    };
+    let parts: Vec<&str> = spec.split_whitespace().collect();
+    let px_at = |i: usize| -> f32 {
+        parts
+            .get(i)
+            .and_then(|v| v.strip_suffix("px"))
+            .and_then(|v| v.parse::<f32>().ok())
+            .unwrap_or(0.0)
+    };
+    vec![gpui::BoxShadow {
+        color: gpui::Hsla::from(Theme::color(colour)),
+        offset: gpui::point(px(0.0), px(px_at(1))),
+        blur_radius: px(px_at(2) / 2.0),
+        spread_radius: px(0.0),
+    }]
+}
+
 /// The top corners only, at the `--r-lg` radius (React's phone sheet:
 /// `border-radius: var(--r-lg) var(--r-lg) 0 0`). The generated
 /// `rounded_t_lg` is not used: GPUI's own radius suffixes are not the
@@ -2904,12 +2934,12 @@ pub fn name_the_stack_result(name: &str, others: &[String]) -> Result<String, St
 }
 
 /// The strip's title and context for the builder: the stack's name and
-/// "Stack · N layers".
+/// "Stack Â· N layers".
 pub fn strip_title(builder: &StackBuilder) -> (String, Option<String>) {
     let count = builder.count();
     (
         builder.name(),
-        Some(format!("Stack · {count} {}", if count == 1 { "layer" } else { "layers" })),
+        Some(format!("Stack Â· {count} {}", if count == 1 { "layer" } else { "layers" })),
     )
 }
 
@@ -2950,7 +2980,7 @@ pub fn strip_actions(builder: &StackBuilder, entity: gpui::Entity<StackBuilder>,
         "rd-strip-save",
         // On a phone the save key keeps its icon and drops its label
         // (`.rd-btn-text` under `@media (max-width: 640px)`).
-        if narrow { "" } else if builder.saving { "Saving…" } else { "Save" },
+        if narrow { "" } else if builder.saving { "Savingâ€¦" } else { "Save" },
         Variant::Primary,
         builder.count() == 0 || builder.saving,
         true,
@@ -3157,6 +3187,11 @@ mod tests {
         assert!(
             body.contains("\"rd-naming-scrim\""),
             "the dialog's scrim is missing"
+        );
+        // The card wears React's `--pop` shadow (`app.css:7619`).
+        assert!(
+            body.contains("pop_shadow(&t)"),
+            "the card does not wear the --pop shadow"
         );
         // The dialog is over the whole window, the way React's fixed scrim
         // is, so the shell draws it and not the page.
