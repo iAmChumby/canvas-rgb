@@ -636,7 +636,7 @@ async function shootPage(page, base, view, viewport, theme, daemonBase, token, p
     // named <view>-scroll<px>-react-... and the GPUI shot pairs with it.
     fileName = `${viewFile}-scroll${SCROLL_PX}-react-${viewport.w}x${viewport.h}-${theme}.png`;
     const how = await page.evaluate((y) => {
-      const pane = document.querySelector(".rd-settings-scroll, .rd-updates-grid, .rd-updates-notes");
+      const pane = document.querySelector(".rd-settings-scroll, .rd-updates-grid, .rd-updates-notes, .peripheral-detail");
       if (pane && pane.scrollHeight > pane.clientHeight + 1 && getComputedStyle(pane).overflowY !== "visible") {
         pane.scrollTop = y;
         return `pane ${pane.className}: scrollTop ${pane.scrollTop} of ${pane.scrollHeight - pane.clientHeight}`;

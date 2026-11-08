@@ -102,6 +102,25 @@ async function measure(w, h, theme, device) {
       return { kind: r.dataset.kind, label: label?.textContent?.trim(), row: box(r), labelBox: box(label), controlBox: box(control), sliderBox: box(slider), numBox: box(num), segBox: box(seg), valueBox: box(btn) };
     });
     res.chips = [...document.querySelectorAll(".dpi-chip")].map((c) => box(c));
+    // The controller's plan of the pad (#208): the sunk wrap, the plan itself,
+    // the rear view and the mapping list, so the two editors' boxes compare.
+    res.padGrid = box(document.querySelector(".pad-grid"));
+    res.padPlanWrap = box(document.querySelector(".pad-plan-wrap"));
+    res.padPlan = box(document.querySelector(".pad-plan-wrap .pad-views > .pad-plan"));
+    res.padRear = box(document.querySelector(".pad-rear"));
+    res.padRearPlan = box(document.querySelector(".pad-rear .pad-plan"));
+    res.padMap = box(document.querySelector(".pad-map"));
+    res.padMapRows = [...document.querySelectorAll(".pad-map-row")].map(box);
+    res.padPlanWrapStyle = cs(document.querySelector(".pad-plan-wrap"), [
+      "position",
+      "padding",
+      "borderWidth",
+      "borderRadius",
+      "backgroundColor",
+      "top",
+    ]);
+    res.padPlanStyle = cs(document.querySelector(".pad-plan-wrap .pad-views > .pad-plan"), ["width", "height"]);
+    res.padMapStyle = cs(document.querySelector(".pad-map"), ["gridTemplateColumns", "gap"]);
     res.sliderStyle = cs(document.querySelector(".slider"), ["flex", "width"]);
     res.segStyle = cs(document.querySelector(".seg"), ["height", "fontSize", "padding"]);
     res.chipStyle = cs(document.querySelector(".dpi-chip"), ["height", "fontSize", "padding"]);

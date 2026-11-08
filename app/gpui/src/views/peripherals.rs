@@ -36,6 +36,8 @@ use crate::components::slider::Origin;
 use crate::components::toggle::{toggle, toggle_disabled};
 use crate::theme::{Theme, TokenRadius};
 
+use super::capture_scroll;
+
 // ---------------------------------------------------------------------------
 // Logic, ported from PeripheralsView.tsx / PropertyControls.tsx /
 // peripherals.ts / ControllerOutline.tsx and covered by the tests below.
@@ -96,6 +98,66 @@ fn pr(name: impl Into<String>, el: impl IntoElement) -> gpui::AnyElement {
                 .inset_0(),
         )
         .into_any_element()
+}
+
+/// Debug only (#208): the line metrics GPUI lays the page's text sizes out
+/// with, written beside the box probe when `CANVAS_RGB_CAPTURE_PROBE` names a
+/// file. React's are measured headlessly by `tools/ui-capture/probe-text.mjs`;
+/// the two settle why the 13.33, 14 and 20 px runs' ink sits one pixel higher
+/// than the browser's while 15 px matches. It writes once and does nothing
+/// without the variable.
+fn line_metrics_probe(window: &gpui::Window) {
+    use std::sync::OnceLock;
+    static ONCE: OnceLock<()> = OnceLock::new();
+    if ONCE.set(()).is_err() {
+        return;
+    }
+    let target = std::env::var("CANVAS_RGB_CAPTURE_PROBE").unwrap_or_default();
+    if target.len() < 2 {
+        return;
+    }
+    // (size, weight, family, line height, the run's text): the runs the page
+    // draws at 13.333, 14, 15 and 20 px.
+    let styles: &[(f32, gpui::FontWeight, &str, f32, &str)] = &[
+        (20.0, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY, 25.0, "8BitDo Ultimate 2 Wireless (XInput)"),
+        (14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY, 20.3, "Game controller"),
+        (15.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY, 21.75, "Polling rate (Hz)"),
+        (13.333, gpui::FontWeight::SEMIBOLD, crate::fonts::UI_FAMILY, 19.333, "8BitDo Ultimate"),
+        (13.333, gpui::FontWeight::NORMAL, crate::fonts::MONO_FAMILY, 19.333, "26000"),
+    ];
+    let mut out = String::new();
+    for (size, weight, family, line_height, text) in styles {
+        let font = gpui::Font {
+            family: family.to_string().into(),
+            weight: *weight,
+            style: gpui::FontStyle::Normal,
+            features: crate::fonts::kerning(),
+            fallbacks: None,
+        };
+        let run = gpui::TextRun {
+            len: text.len(),
+            font,
+            color: gpui::black(),
+            underline: None,
+            strikethrough: None,
+            background_color: None,
+        };
+        let layout = window.text_system().layout_line(text, px(*size), &[run], None);
+        let ascent = f32::from(layout.ascent);
+        let descent = f32::from(layout.descent);
+        // `paint_line`'s baseline: half the line's spare height over the
+        // font's ascent (`gpui::text_system::line::paint_line`).
+        let baseline = (line_height - ascent - descent) / 2.0 + ascent;
+        out.push_str(&format!(
+            "text size={size} weight={} family={family} lh={line_height} ascent={ascent:.4} descent={descent:.4} baseline={baseline:.4} w={:.4} text=\"{text}\"\n",
+            weight.0.round() as u16,
+            f32::from(layout.width)
+        ));
+    }
+    use std::io::Write;
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&target) {
+        let _ = f.write_all(out.as_bytes());
+    }
 }
 
 /// A peripheral as the list shows it. The spine's `PeripheralInfo` has no
@@ -2079,9 +2141,33 @@ impl PeripheralsView {
         let picked = self.picked_button.clone();
         // The plan.
         let plan_buttons: Vec<(String, String)> = rows.iter().map(|p| (p.key.clone(), p.label.clone())).collect();
-        let plan = self.controller_outline(&plan_buttons, picked.as_deref(), view_entity.clone(), content_w);
-        // The map list.
         let narrow_grid = content_w <= 960.0;
+        // `.pad-plan-wrap` is the box the plan sits in: 12 px padding and a
+        // 1 px border on a `--sunk` bed. At a desk the grid's first column is
+        // 420 px wide (`minmax(280px, 420px)`); when the grid is one column
+        // (960 and below) the wrap is the panel's whole content box (panel
+        // padding 12 on a phone, 16 above it). The plan fills the wrap's
+        // content box, so it is 394 px at a desk and 306 on a phone, not the
+        // 326 the cell alone gave (React's `.pad-plan` is 306 at 390).
+        let board_w = content_w - if content_w < 640.0 { 26.0 } else { 34.0 };
+        let wrap_w = if narrow_grid { board_w } else { 420.0 };
+        let plan = self.controller_outline(&plan_buttons, picked.as_deref(), view_entity.clone(), wrap_w - 26.0);
+        let plan_wrap = pr(
+            "pad-plan-wrap",
+            div()
+                .flex()
+                .flex_col()
+                .items_center()
+                .w(px(wrap_w))
+                .flex_none()
+                .p_3()
+                .r_md()
+                .border_1()
+                .border_color(Theme::color(t.line))
+                .bg(Theme::color(t.sunk))
+                .child(plan),
+        );
+        // The map list.
         let mut map = div().flex().flex_col().gap_2().flex_1().min_w(px(0.0));
         for def in &rows {
             let current = plain_choice(values, &def.key).unwrap_or_default();
@@ -2157,14 +2243,14 @@ impl PeripheralsView {
                 .flex()
                 .flex_col()
                 .gap_5()
-                .child(plan)
+                .child(plan_wrap)
                 .child(map_grid)
         } else {
             div()
                 .flex()
                 .gap_5()
                 .items_start()
-                .child(div().w(px(420.0)).flex_none().min_w(px(280.0)).child(plan))
+                .child(plan_wrap)
                 .child(map_grid)
         };
         pr("panel-controller", self.panel("controller-panel", &detail.info.name, grid, content_w < 640.0))
@@ -2176,7 +2262,7 @@ impl PeripheralsView {
         buttons: &[(String, String)],
         selected: Option<&str>,
         view_entity: gpui::Entity<Self>,
-        content_w: f32,
+        plan_w: f32,
     ) -> impl IntoElement {
         let t = &self.theme;
         let front: Vec<(String, String, PlacedSpot)> = buttons
@@ -2187,8 +2273,7 @@ impl PeripheralsView {
             .iter()
             .filter_map(|(key, label)| rear_spot(&place_of(key)).map(|spot| (key.clone(), label.clone(), spot)))
             .collect();
-        // The front view: 340x244 at the available width.
-        let plan_w = (content_w - 32.0).clamp(280.0, 420.0);
+        // The front view: 340x244 in the wrap's content box (`width: 100%`).
         let plan_h = plan_w * 244.0 / 340.0;
         let front_canvas = self.pad_canvas(BODY_PATH, &front, true, plan_w, plan_h);
         let mut front_wrap = div()
@@ -3031,6 +3116,9 @@ fn paint_glyphs(window: &mut Window, centre: gpui::Point<gpui::Pixels>, name: &s
 impl Render for PeripheralsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.width = f32::from(window.window_bounds().get_bounds().size.width);
+        if probe_on() {
+            line_metrics_probe(window);
+        }
         let t = &self.theme;
         let view_entity = cx.entity();
         // The content box width (window minus rail and content padding), the
@@ -3179,9 +3267,19 @@ impl Render for PeripheralsView {
         // The detail pane scrolls inside its own pane on desktop (React
         // `.rd-peripherals .peripheral-detail` `overflow-y: auto`); on a phone
         // the page scrolls instead.
+        // #208: `capture-gpui.ps1 -Scroll` reaches the panels below the fold.
+        // React's scrolled shot moves the detail pane at a desk and the
+        // document on a phone; this does the same, so the keys row stays put
+        // on a desk and moves with the page on a phone.
+        let scroll = capture_scroll();
         let detail_wrapped: gpui::AnyElement = if phone {
             div().flex().flex_col().flex_1().min_h(px(0.0)).child(detail_pane).into_any_element()
         } else {
+            let inner: gpui::AnyElement = if scroll > 0.0 {
+                div().relative().top(px(-scroll)).child(detail_pane).into_any_element()
+            } else {
+                detail_pane
+            };
             div()
                 .id(gpui::SharedString::from("peri-detail-scroll"))
                 .flex()
@@ -3189,11 +3287,16 @@ impl Render for PeripheralsView {
                 .flex_1()
                 .min_h(px(0.0))
                 .overflow_y_scroll()
-                .child(detail_pane)
+                .child(inner)
                 .into_any_element()
         };
         page = page.child(detail_wrapped);
-        page
+        if phone && scroll > 0.0 {
+            // The phone page scrolls as a document (React); the shift is the
+            // whole of the scrolling a still capture needs (`capture_scroll`).
+            return page.relative().top(px(-scroll)).into_any_element();
+        }
+        page.into_any_element()
     }
 }
 
