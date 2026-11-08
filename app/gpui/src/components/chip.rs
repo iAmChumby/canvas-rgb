@@ -11,6 +11,7 @@
 
 use gpui::{ClickEvent, IntoElement, Window, div, prelude::*, px};
 
+use crate::components::button::skirt_layers;
 use crate::theme::{Theme, TokenRadius};
 
 /// The chip's tone.
@@ -161,7 +162,13 @@ fn chip_inner(
     // A latched chip stays down (hardware.css `.chip[aria-pressed]`): no
     // skirt, a raised-press face, ink words. The app.css pressed accent is
     // the underlying rule the skin overrides.
-    let transparent = gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.0 };
+    //
+    // Every other chip is a key with a face and a skirt (hardware.css
+    // `.btn, .select-trigger, .chip`: border line-2, raised face, the 2 px
+    // skirt). The face is opaque, so the page's dotted grid never shows
+    // through a chip — at some sizes a grid dot landed beside an LED and
+    // read as a glyph in it (#210 round 3).
+    let skirted = !pressed;
     let (fg, border, bg) = match tone {
         // React `.chip-html`/`.chip-stack` colour the words `--a2`/`--a3`,
         // but hardware.css's later `.chip` (border line-2, raised face)
@@ -170,25 +177,31 @@ fn chip_inner(
         ChipTone::Html => (Theme::color(t.a2), Theme::color(t.line_2), Theme::color(t.raised)),
         ChipTone::Stack => (Theme::color(t.a3), Theme::color(t.line_2), Theme::color(t.raised)),
         ChipTone::Plain if pressed => (Theme::color(t.ink), Theme::color(t.line_2), raised_press(t)),
-        _ => (Theme::color(t.dim), Theme::color(t.line), transparent),
+        _ => (Theme::color(t.dim), Theme::color(t.line_2), Theme::color(t.raised)),
     };
-    let mut el = div()
+    let el = div()
         .id(gpui::SharedString::from(id.to_string()))
+        .relative()
         .flex()
         .items_center()
         .gap(px(4.0))
         .h(px(28.0))
-        .px(px(10.0))
-        .r_sm()
-        .border_1()
-        .border_color(border)
-        .bg(bg)
+        // A skirted key draws its border on the face layer, so it gets the
+        // border's 1 px back as padding, like `buttons` (without it the key
+        // measures 2 px narrow and the LED leaves the CSS padding).
+        .px(if skirted { px(11.0) } else { px(10.0) })
         .text_color(fg)
         .text_sm()
         .font_weight(gpui::FontWeight::MEDIUM)
         .font_family(crate::fonts::UI_FAMILY)
         .flex_none()
         .whitespace_nowrap();
+    let el = if skirted {
+        el.child(skirt_layers(t.skirt(), 8.0, 28.0, bg, border))
+    } else {
+        el.r_sm().border_1().border_color(border).bg(bg)
+    };
+    let mut el = el;
     // The LED dot: only a key (a `button.chip`) carries one (hardware.css);
     // a label chip is a span and has none.
     let has_dot = on_click.is_some();
