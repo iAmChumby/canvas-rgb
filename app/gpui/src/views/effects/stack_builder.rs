@@ -779,10 +779,8 @@ impl StackBuilder {
         let mut main = div().flex().flex_col().gap_4().min_w(px(0.0)).min_h(px(0.0)).flex_1();
         main = main.child(self.stage(cx));
         main = main.child(self.layers_panel(cx));
-        if narrow {
-            if self.picked_layer().is_some() {
-                main = main.child(self.layer_summary(cx));
-            }
+        if narrow && self.picked_layer().is_some() {
+            main = main.child(self.layer_summary(cx));
         }
 
         let mut side = div()

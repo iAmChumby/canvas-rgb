@@ -1119,6 +1119,7 @@ impl EffectEditor {
     /// padding, a 1 px divider under every row but the last; number, hue and
     /// angle rows take the narrow 96 px label column and a 12 px gap, the
     /// rest 170 px and 16 px).
+    #[allow(clippy::too_many_arguments)]
     fn prop_row(
         &self,
         def: &canvas_proto::props::PropertyDef,
