@@ -94,6 +94,13 @@ pub const FIELD_V_PAD_PX: f32 = 1.0;
 /// starts 2 px into the input (x 479 at 1440x900).
 pub const FIELD_LEFT_PAD_PX: f32 = 2.0;
 
+/// How far right gpui's mono hint text is moved to sit where Chrome's does.
+pub const HINT_SHIFT_PX: f32 = 1.0;
+
+/// The panel shadow's gpui blur radius (React: `0 18px 48px`, a gaussian of
+/// sigma 24; gpui takes the sigma directly).
+pub const PALETTE_SHADOW_BLUR_PX: f32 = 24.0;
+
 /// The placeholder's colour: the browser's default `darkgray`, #757575,
 /// the same in both themes (React's app CSS has no `::placeholder` rule).
 pub const PLACEHOLDER_GREY: u32 = 0x757575;
@@ -629,6 +636,11 @@ impl CommandPaletteView {
             row = row.child(
                 div()
                     .flex_none()
+                    // Measured on the 1440x900 shots: gpui paints the mono
+                    // hint 0.6 px left of Chrome's (centroids of seven hints
+                    // sit -0.43 to -0.71 px, mean -0.6; labels sit +0.1 px),
+                    // so the box moves right by that.
+                    .mr(px(-HINT_SHIFT_PX))
                     .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::MONO_FAMILY)
@@ -787,7 +799,11 @@ impl Render for CommandPaletteView {
                     a: 0.4,
                 }),
                 offset: gpui::point(px(0.0), px(18.0)),
-                blur_radius: px(48.0),
+                // CSS `blur 48px` is a gaussian with sigma 24; gpui's
+                // `blur_radius` is the sigma itself (measured: 48 here
+                // spread the shadow to sigma ~47 and darkened the scrim
+                // 60 px out), so 24 draws React's falloff.
+                blur_radius: px(PALETTE_SHADOW_BLUR_PX),
                 spread_radius: px(0.0),
             }])
             .on_mouse_down(gpui::MouseButton::Left, |_, _, cx| cx.stop_propagation())
