@@ -80,6 +80,17 @@ pub struct StackBuilder {
     pub blend_open: bool,
     /// The opacity slider's own box.
     pub slider_origin: crate::components::slider::Origin,
+    /// Thumbnail fetches in flight: one per effect per session (React
+    /// `loadThumb`, which caches one request per effect).
+    pub thumbs_pending: std::collections::HashSet<String>,
+    /// The library's effects, for the Effect select (React's `effects` prop:
+    /// every non-stack effect).
+    pub effects: Vec<canvas_proto::api::EffectSummary>,
+    /// The Effect select is open.
+    pub effect_open: bool,
+    /// The preset-save problem or the name field above the preset line.
+    pub preset_problem: Option<String>,
+    pub preset_name: Option<String>,
 }
 
 /// A drag on the picture's area frame.
@@ -142,10 +153,16 @@ impl StackBuilder {
             drag: None,
             blend_open: false,
             slider_origin: crate::components::slider::Origin::new(),
+            thumbs_pending: std::collections::HashSet::new(),
+            effects: Vec::new(),
+            effect_open: false,
+            preset_problem: None,
+            preset_name: None,
         };
         if !is_new {
             builder.load(cx);
         }
+        builder.load_effects(cx);
         builder.load_names(cx);
         builder.start_feed(cx);
         builder
@@ -219,6 +236,11 @@ impl StackBuilder {
                                 .collect();
                             this.picked = detail.stack.layers.last().map(|l| l.id.clone());
                             this.load_details(cx);
+                            // The first draft sends at once (StackBuilder.tsx:
+                            // the preview's first PUT goes out on open, so the
+                            // feed has an engine to show).
+                            this.send_preview(cx);
+                            this.fetch_thumbs(cx);
                         }
                         Err(e) => this.save_error = Some(e.to_string()),
                     },
@@ -281,6 +303,48 @@ impl StackBuilder {
                 });
             })
             .detach();
+        }
+    }
+
+    /// `GET /api/v1/effects`: the library, for the Effect select.
+    fn load_effects(&mut self, cx: &mut Context<Self>) {
+        let bg = cx.background_executor().spawn(async move {
+            let client = DaemonClient::new();
+            client.get("/api/v1/effects")
+        });
+        cx.spawn(async move |builder, cx| {
+            let result = bg.await;
+            let _ = builder.update(cx, |this, cx| {
+                if let Ok(body) = result {
+                    if let Ok(parsed) = serde_json::from_str::<canvas_proto::api::EffectsResponse>(&body) {
+                        this.effects = parsed.effects;
+                    }
+                }
+                cx.notify();
+            });
+        })
+        .detach();
+    }
+
+    /// Fetch a thumbnail for every layer's effect that has none yet, one
+    /// request per effect per session (React `Thumb`, which loads on mount).
+    fn fetch_thumbs(&mut self, cx: &mut Context<Self>) {
+        use crate::components::thumb::{cached, fetch as fetch_thumb};
+        let need: Vec<String> = self
+            .draft
+            .layers
+            .iter()
+            .map(|l| l.effect.clone())
+            .collect::<std::collections::HashSet<_>>()
+            .into_iter()
+            .filter(|id| cached(id).is_none() && !self.thumbs_pending.contains(id))
+            .collect();
+        for id in need {
+            self.thumbs_pending.insert(id.clone());
+            fetch_thumb(id, cx.entity(), cx, |this, cx, _id| {
+                cx.notify();
+                let _ = this;
+            });
         }
     }
 
@@ -629,6 +693,70 @@ impl StackBuilder {
             Some(Some(schema)) if !schema.name.is_empty() => schema.name.clone(),
             _ => "Loading…".to_string(),
         }
+    }
+
+    /// The Effect select's options: every non-stack effect from the library,
+    /// with the picked layer's own entry kept when its effect is gone
+    /// ("Missing effect"), as React's `Select` for the picked layer does.
+    fn effect_options(&self) -> Vec<(&str, &str)> {
+        let picked_effect = self.picked_layer().map(|l| l.effect.as_str()).unwrap_or("");
+        let mut out: Vec<(&str, &str)> = Vec::new();
+        if !picked_effect.is_empty() && self.effects.iter().all(|e| e.id != picked_effect) {
+            out.push((picked_effect, "Missing effect"));
+        }
+        for e in self.effects.iter().filter(|e| !e.id.starts_with("stack:")) {
+            out.push((e.id.as_str(), e.name.as_str()));
+        }
+        out
+    }
+
+    /// The picked layer takes the chosen effect: its schema is read, the
+    /// layer takes the effect's saved values and its own defaults, over the
+    /// HTML-layer cap with the problem sentence (StackBuilder.tsx).
+    pub fn choose_effect(&mut self, effect: &str, cx: &mut Context<Self>) {
+        self.effect_open = false;
+        let Some(picked_id) = self.picked.clone() else { return; };
+        // HTML-layer cap: two HTML layers at most.
+        let is_html = effect.starts_with("html:");
+        let currently_html = self.picked_layer().map(|l| l.effect.starts_with("html:")).unwrap_or(false);
+        if is_html && !currently_html {
+            let html_count = self.draft.layers.iter().filter(|l| l.effect.starts_with("html:")).count();
+            if html_count >= stack_draft::MAX_HTML_LAYERS {
+                self.save_error = Some(format!("A stack holds {} HTML layers", stack_draft::MAX_HTML_LAYERS));
+                cx.notify();
+                return;
+            }
+        }
+        self.save_error = None;
+        let id_bg = effect.to_string();
+        let id_for_fetch = id_bg.clone();
+        let bg = cx.background_executor().spawn(async move {
+            let client = DaemonClient::new();
+            client.get(&format!("/api/v1/effects/{}", encode(&id_for_fetch)))
+        });
+        let picked_bg = picked_id.clone();
+        cx.spawn(async move |builder, cx| {
+            let result = bg.await;
+            let _ = builder.update(cx, |this, cx| {
+                let (schema, saved_props) = match result {
+                    Ok(body) => match serde_json::from_str::<canvas_proto::api::EffectDetail>(&body) {
+                        Ok(detail) => (Some(detail.schema), detail.props),
+                        Err(_) => (None, Default::default()),
+                    },
+                    Err(_) => (None, Default::default()),
+                };
+                this.schemas.insert(id_bg.clone(), schema.clone());
+                if let Some(layer) = this.draft.layers.iter_mut().find(|l| l.id == picked_bg) {
+                    layer.effect = id_bg.clone();
+                    layer.props = stack_draft::layer_values(schema.as_ref(), &saved_props);
+                }
+                this.fetch_thumbs(cx);
+                this.send_preview(cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        cx.notify();
     }
 
     // -- the render --------------------------------------------------------------
@@ -1282,14 +1410,30 @@ impl StackBuilder {
                         .text_color(Theme::color(t.dim))
                         .child("Effect"),
                 )
-                .child(
-                    div()
-                        .text_size(px(14.0))
-                        .line_height(gpui::relative(1.45))
-                        .font_family(crate::fonts::UI_FAMILY)
-                        .text_color(Theme::color(t.ink))
-                        .child(label.clone()),
-                ),
+                .child(crate::components::select::select_field(
+                    &t,
+                    "rd-effect",
+                    "Effect",
+                    &self.effect_options(),
+                    &picked.effect,
+                    self.effect_open,
+                    false,
+                    true,
+                    {
+                        let entity = entity.clone();
+                        move |_w, cx| {
+                            entity.update(cx, |this, _cx| {
+                                this.effect_open = !this.effect_open;
+                            });
+                        }
+                    },
+                    {
+                        let entity = entity.clone();
+                        move |value: String, _window, cx| {
+                            entity.update(cx, |this, cx| this.choose_effect(&value, cx));
+                        }
+                    },
+                )),
         );
         let blends: Vec<(&str, &str)> = vec![
             ("normal", "Normal"),
@@ -1616,18 +1760,50 @@ impl StackBuilder {
                 },
             ));
         }
-        let body = div()
+        chips = chips.child(crate::components::chip::chip_add(
+            &t,
+            "rd-preset-save",
+            "Save current",
+            false,
+            {
+                let entity = entity.clone();
+                move |_, _, cx| {
+                    entity.update(cx, |this, cx| {
+                        if this.base.is_none() {
+                            this.preset_problem = Some("Save the stack before saving a preset".to_string());
+                        } else {
+                            this.preset_problem = None;
+                            this.preset_name = Some(String::new());
+                        }
+                        cx.notify();
+                    });
+                }
+            },
+        ));
+        // The chip's text is "+ Save current"; the shared chip takes the
+        // label as its text, so the text goes in the label here.
+        let mut body = div()
             .flex()
             .flex_col()
             .gap_2()
-            .child(chips)
-            .child(
+            .child(chips);
+        if let Some(problem) = self.preset_problem.clone() {
+            body = body.child(
                 div()
                     .text_size(px(14.0))
                     .line_height(gpui::relative(1.45))
                     .font_family(crate::fonts::UI_FAMILY)
-                    .text_color(Theme::color(t.mute))
-                    .child("Custom values"),
+                    .text_color(Theme::color(t.down))
+                    .child(problem),
+            );
+        }
+        body = body.child(
+            div()
+                .text_size(px(14.0))
+                .line_height(gpui::relative(1.45))
+                .font_family(crate::fonts::UI_FAMILY)
+                .text_color(Theme::color(t.mute))
+                .child("Custom values"),
             );
         panel_with_padding(&t, "rd-presets", "Presets", div(), body, Some(12.0)).into_any_element()
     }
@@ -1987,6 +2163,11 @@ mod tests {
             drag: None,
             blend_open: false,
             slider_origin: crate::components::slider::Origin::new(),
+            thumbs_pending: std::collections::HashSet::new(),
+            effects: Vec::new(),
+            effect_open: false,
+            preset_problem: None,
+            preset_name: None,
         };
         assert!(!builder.dirty());
         builder.draft.layers[0].opacity = 50;

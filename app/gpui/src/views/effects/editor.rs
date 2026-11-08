@@ -86,6 +86,9 @@ pub struct EffectEditor {
     pub file_name: String,
     pub values: Props,
     pub show_code: bool,
+    /// The Show/Hide code key has been pressed: the initial code visibility
+    /// (open on desktop, closed on the phone) only applies before that.
+    pub code_touched: bool,
     pub saving: bool,
     pub save_error: Option<String>,
     /// A new file whose name is taken: the same replace prompt the import
@@ -131,6 +134,7 @@ impl EffectEditor {
             file_name,
             values,
             show_code: !narrow,
+            code_touched: false,
             saving: false,
             save_error: None,
             clash: None,
@@ -778,6 +782,7 @@ impl EffectEditor {
             move |_, _, cx| {
                 entity_show.update(cx, |this, cx| {
                     this.show_code = !this.show_code;
+                    this.code_touched = true;
                     cx.notify();
                 });
             },
@@ -1284,6 +1289,7 @@ mod tests {
             file_name: "my-effect.html".into(),
             values: Props::new(),
             show_code: true,
+            code_touched: false,
             saving: false,
             save_error: None,
             clash: None,
@@ -1328,6 +1334,7 @@ mod tests {
             file_name: "x.html".into(),
             values: Props::new(),
             show_code: true,
+            code_touched: false,
             saving: false,
             save_error: None,
             clash: None,

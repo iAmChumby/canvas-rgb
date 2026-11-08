@@ -1175,6 +1175,13 @@ impl EffectsView {
                     return editor.update(cx, |e, cx| {
                         e.width = editor_w;
                         e.height = editor_h;
+                        // The code starts open on desktop and closed on the
+                        // phone (React's `useState(!narrow)`): until the
+                        // Show/Hide key is pressed, a narrow editor renders
+                        // with the code hidden.
+                        if !e.code_touched {
+                            e.show_code = editor_w > 720.0;
+                        }
                         e.render(cx)
                     });
                 }

@@ -886,9 +886,12 @@ impl EffectsView {
         self.new_open = false;
         self.new_error = None;
         self.editor = EditorState::Loading;
-        if self.width <= 720.0 {
-            self.pushed = true;
-        }
+        // The width is only known after the first render (it starts at
+        // 1280), so the phone push is set here unconditionally: the
+        // desktop body ignores `pushed` and the phone body needs it from
+        // the first frame (#214 capture at 390 otherwise stays on the
+        // gallery).
+        self.pushed = true;
         let id_bg = id.to_string();
         let id_out = id_bg.clone();
         let bg = cx.background_executor().spawn(async move {
@@ -962,9 +965,7 @@ impl EffectsView {
         self.editor = EditorState::Closed;
         self.editor_view = None;
         self.new_open = false;
-        if self.width <= 720.0 {
-            self.pushed = false;
-        }
+        self.pushed = false;
     }
 
     /// Opens the code editor on an effect (the capture entry, and the
@@ -1000,9 +1001,7 @@ impl EffectsView {
             name: "My effect".to_string(),
             file_name: blank_file_name(&taken),
         });
-        if self.width <= 720.0 {
-            self.pushed = true;
-        }
+        self.pushed = true;
     }
 
     /// New from code > Copy.
@@ -1027,9 +1026,7 @@ impl EffectsView {
                             let file_name = copy_file_name(&source.file_name, &taken);
                             this.new_open = false;
                             this.editor = EditorState::Open(EditorTarget { name, file_name });
-                            if this.width <= 720.0 {
-                                this.pushed = true;
-                            }
+                            this.pushed = true;
                         }
                     }
                     Err(e) => this.new_error = Some(e.to_string()),
