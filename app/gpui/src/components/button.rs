@@ -339,14 +339,23 @@ pub fn icon_button(
         format!("icons/{icon}-{weight}.svg")
     };
     let size = if small { 28.0 } else { 32.0 };
+    // React `.ibtn`: the icon is centred in the button's content box. The
+    // small button's content box is 28 − 2 (border) − 12 (the button's own
+    // padding) = 14 px wide, so a 16 px icon overflows it and the browser
+    // aligns it to the start: the icon sits 7 px from the button's left edge,
+    // not the 6 a centred one would give.
     let el = div()
         .id(gpui::SharedString::from(id.to_string()))
         .relative()
         .flex()
         .items_center()
-        .justify_center()
         .size(px(size))
         .text_color(Theme::color(t.dim));
+    let el = if small {
+        el.justify_start().pl(px(7.0))
+    } else {
+        el.justify_center()
+    };
     let el = if bordered {
         el.child(skirt_layers(
             t.skirt(),
