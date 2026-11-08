@@ -215,6 +215,10 @@ pub enum EditorState {
 pub struct EffectsView {
     pub theme: Theme,
     pub width: f32,
+    /// The short-window density (`@container page (max-height: 700px)`):
+    /// inspector panels pad s2 instead of s3 and property rows measure
+    /// 36 px minimum. Set by `render` from the window height.
+    pub tight: bool,
     // Gallery list (`GET /api/v1/effects`).
     pub effects: Option<EffectsResponse>,
     pub list_error: Option<String>,
@@ -283,13 +287,16 @@ impl EffectsView {
         let search_input = cx.new(|cx| {
             let mut input = TextInput::new("", false, 0.0, 0.0, 0, theme, std::rc::Rc::new(|_, _, _| {}), cx);
             // The icon sits inside the field (React `.effect-search`), so
-            // the text starts 30 px in.
+            // the text starts 30 px in; the border is `--line-2` (motion.css
+            // `.effect-search input`), not the wells rule's `--line`.
             input.set_left_pad(30.0, cx);
+            input.set_border_2(cx);
             input
         });
         let mut view = EffectsView {
             theme,
             width: 1280.0,
+            tight: false,
             effects: None,
             list_error: None,
             list_busy: false,

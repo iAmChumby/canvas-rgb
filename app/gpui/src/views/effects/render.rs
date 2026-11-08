@@ -281,19 +281,31 @@ impl EffectsView {
             let entity_fav = entity.clone();
             let fav_id = e.id.clone();
             let favorite = e.favorite;
-            let is_fav_editing = editing;
-            let star = icon_button(
-                t,
-                &format!("eff-fav-{}", e.id),
-                "Star",
-                if favorite { "fill" } else { "" },
-                false,
-                true,
-                is_fav_editing,
-                move |_, _, cx| {
+            // React `.effect-card-fav` (motion.css): an `IconButton` over the
+            // panel face with a line-2 border, no skirt (`app.css .ibtn` is
+            // transparent; the fav rule gives it `--panel` and `--line-2`).
+            let star = div()
+                .id(gpui::SharedString::from(format!("eff-fav-{}", e.id)))
+                .relative()
+                .flex()
+                .items_center()
+                .justify_center()
+                .size(px(28.0))
+                .r_md()
+                .border_1()
+                .border_color(Theme::color(t.line_2))
+                .bg(Theme::color(t.panel))
+                .text_color(Theme::color(t.dim))
+                .child(
+                    gpui::svg()
+                        .path(if favorite { "icons/Star-fill.svg" } else { "icons/Star.svg" })
+                        .size(px(16.0))
+                        .text_color(Theme::color(t.dim)),
+                )
+                .cursor_pointer()
+                .on_click(move |_, _, cx| {
                     entity_fav.update(cx, |this, cx| this.toggle_favorite(&fav_id, !favorite, cx));
-                },
-            );
+                });
             card = card.child(div().absolute().top(px(8.0)).right(px(8.0)).child(star));
         }
         let entity_open = entity.clone();
@@ -663,6 +675,7 @@ impl EffectsView {
             stale,
             undo,
             self.width <= 720.0,
+            self.tight,
         );
         let body: gpui::AnyElement = if is_stack {
             let mut col = div().flex().flex_col().gap_3();
@@ -745,7 +758,7 @@ impl EffectsView {
             if is_stack { "Layers" } else { "Properties" },
             div(),
             body,
-            Some(12.0),
+            Some(if self.tight { 8.0 } else { 12.0 }),
         );
         if let Some(err) = error_line {
             props_panel = props_panel.child(
@@ -880,7 +893,9 @@ impl EffectsView {
             .flex()
             .flex_col()
             .gap_2()
-            .p_3()
+            // The short-window rule (`@container page (max-height: 700px)`):
+            // the inspector's panels pad s2, not s3.
+            .p(if self.tight { px(8.0) } else { px(12.0) })
             .r_lg()
             .border_1()
             .border_color(Theme::color(t.line))
@@ -1115,11 +1130,12 @@ impl EffectsView {
             row.child(label_el).child(control_el)
         } else if kind_name == "number" {
             // React number: minmax(64,96) label, 1fr slider, 64 num, gap 12.
+            // The short-window rule drops the inspector row minimum to 36.
             let mut row = div()
                 .flex()
                 .items_center()
                 .gap_3()
-                .min_h(px(40.0))
+                .min_h(px(if self.tight { 36.0 } else { 40.0 }))
                 .py_1();
             if !last {
                 row = row.border_b_1().border_color(Theme::color(t.line));
@@ -1128,11 +1144,12 @@ impl EffectsView {
                 .child(div().flex().items_center().gap_3().flex_1().min_w(px(0.0)).child(control_el))
         } else if kind_name == "hue" || kind_name == "angle" {
             // React hue/angle: minmax(64,96) label, 1fr control, gap 16.
+            // The short-window rule drops the inspector row minimum to 36.
             let mut row = div()
                 .flex()
                 .items_center()
                 .gap(px(16.0))
-                .min_h(px(40.0))
+                .min_h(px(if self.tight { 36.0 } else { 40.0 }))
                 .py_1();
             if !last {
                 row = row.border_b_1().border_color(Theme::color(t.line));
@@ -1148,7 +1165,7 @@ impl EffectsView {
                 .flex()
                 .items_center()
                 .gap(px(16.0))
-                .min_h(px(40.0))
+                .min_h(px(if self.tight { 36.0 } else { 40.0 }))
                 .py_1();
             if !last {
                 row = row.border_b_1().border_color(Theme::color(t.line));
@@ -1472,7 +1489,9 @@ fn ellipsized_desc(window: &Window, view: &EffectsView, description: &str, note_
     } else {
         360.0
     };
-    let inner_w = inspector_w - 26.0;
+    // The panel's padding: s3 (24 px of padding plus the 2 px of border)
+    // normally, s2 in the short-window density (18 px total).
+    let inner_w = inspector_w - if view.tight { 18.0 } else { 26.0 };
     let note_w = text_width(window, note_word, 14.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY);
     let max_w = (inner_w - note_w - 12.0).max(0.0);
     crate::shell::ellipsize(window, description, max_w, 15.0, gpui::FontWeight::NORMAL, crate::fonts::UI_FAMILY)
@@ -1521,6 +1540,13 @@ fn marked_name(t: &Theme, name: &str, ranges: &[(usize, usize)]) -> impl IntoEle
 impl Render for EffectsView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         self.width = f32::from(window.window_bounds().get_bounds().size.width);
+        // React `@container page (max-height: 700px)`: the page box is the
+        // window less the 48 px strip and the content padding, so it hits
+        // 700 at a 795 px window (measured: tight at 794, normal at 796).
+        // The density touches only the inspector: panel padding s2 and the
+        // property rows' 36 px minimum.
+        let win_h = f32::from(window.window_bounds().get_bounds().size.height);
+        self.tight = self.width > 720.0 && win_h - 95.0 <= 700.0;
         let t = self.theme;
         let phone = self.width <= 720.0;
         let content_w = self.width

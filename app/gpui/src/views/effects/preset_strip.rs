@@ -120,6 +120,7 @@ pub fn render(
     disabled: bool,
     undo: Option<&Undo>,
     narrow: bool,
+    tight: bool,
 ) -> impl IntoElement {
     let running_user = running.and_then(|r| user.iter().find(|p| p.name == r.name));
     let running_any = running.and_then(|r| {
@@ -405,7 +406,8 @@ pub fn render(
             )
             .child(note)
             .child(preset_menu(t, entity, state, user)),
-        Some(12.0),
+        // The short-window rule pads the inspector's panels s2, not s3.
+        Some(if tight { 8.0 } else { 12.0 }),
     )
 }
 
