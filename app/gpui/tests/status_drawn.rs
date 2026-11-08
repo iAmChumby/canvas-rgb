@@ -19,6 +19,12 @@
 //! removal. What the scan cannot catch: a field that is read for a condition
 //! (a colour, a branch) but whose words are never drawn, and a message built
 //! inline with no field at all.
+//!
+//! The read the first test counts can be a hand-off that nobody takes: the
+//! Peripherals view's `take_toast` read `toast` for the whole time the toast
+//! never reached the screen (React's `notify` in `PeripheralsView.tsx:371`).
+//! The second test closes that shape: every `fn take_*` a view defines must be
+//! called from the app's source, never only from its tests.
 
 use std::collections::HashMap;
 use std::fs;
@@ -173,6 +179,30 @@ fn mentions(text: &str, name: &str) -> (usize, usize) {
     (reads, writes)
 }
 
+/// Every `fn take_<name>` a file defines: the line number and the name.
+fn hand_offs(text: &str) -> Vec<(usize, String)> {
+    text.lines()
+        .enumerate()
+        .filter_map(|(i, line)| {
+            let t = line.trim_start();
+            let t = t.strip_prefix("pub ").unwrap_or(t);
+            let rest = t.strip_prefix("fn ")?;
+            let name = rest.split('(').next()?.trim();
+            if name.starts_with("take_") {
+                Some((i + 1, name.to_string()))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// How many places call `.name(` in `text`.
+fn callers(text: &str, name: &str) -> usize {
+    let needle = format!(".{name}(");
+    text.match_indices(&needle).count()
+}
+
 #[test]
 fn every_status_field_a_view_computes_is_read_where_it_renders() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
@@ -262,6 +292,55 @@ fn every_status_field_a_view_computes_is_read_where_it_renders() {
 }
 
 #[test]
+fn every_take_hand_off_a_view_defines_has_a_caller() {
+    // #246: `views/peripherals.rs` `take_toast` read the `toast` field, so the
+    // status scan above was satisfied, and nothing ever called it: React's
+    // `notify("The settings are on the device")` never reached the GPUI
+    // screen. A `take_*` reader is a hand-off; only its caller shows the
+    // message.
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let src = manifest.join("src");
+    let views = src.join("views");
+    let mut files = Vec::new();
+    rust_files(&src, &mut files);
+    files.sort();
+    assert!(!files.is_empty(), "no source files found under {src:?}");
+
+    let mut texts: HashMap<PathBuf, String> = HashMap::new();
+    for file in &files {
+        let text = fs::read_to_string(file).unwrap_or_else(|e| panic!("read {file:?}: {e}"));
+        texts.insert(file.clone(), without_tests(&text));
+    }
+
+    let mut unexplained = Vec::new();
+    for file in &files {
+        if !file.starts_with(&views) {
+            continue;
+        }
+        let Some(text) = texts.get(file) else {
+            continue;
+        };
+        for (line, name) in hand_offs(text) {
+            let called: usize = texts.values().map(|t| callers(t, &name)).sum();
+            if called == 0 {
+                let rel = file
+                    .strip_prefix(manifest)
+                    .unwrap_or(file)
+                    .to_string_lossy()
+                    .replace('\\', "/");
+                unexplained.push(format!("{rel}:{line} {name}"));
+            }
+        }
+    }
+    assert!(
+        unexplained.is_empty(),
+        "take_* hand-offs no one calls, so what they hand off never reaches the screen \
+         (call each from the code that draws it): {}",
+        unexplained.join(", ")
+    );
+}
+
+#[test]
 fn the_scan_tells_a_write_from_a_read_and_ignores_other_names() {
     assert_eq!(mentions("self.hot_error = None;", "hot_error"), (0, 1));
     assert_eq!(mentions("if let Some(e) = &self.hot_error {", "hot_error"), (1, 0));
@@ -271,4 +350,9 @@ fn the_scan_tells_a_write_from_a_read_and_ignores_other_names() {
     assert!(is_status("notice"));
     assert!(!is_status("progress_id"));
     assert!(!is_status("save_error_id"));
+    assert_eq!(hand_offs("    pub fn take_toast(&mut self) -> Option<Toast> {"), vec![(1, "take_toast".to_string())]);
+    assert!(hand_offs("    fn give_nothing(self) {}").is_empty());
+    assert!(hand_offs("    pub fn toast_after_apply() -> Toast {").is_empty());
+    assert_eq!(callers("v.take_toast()", "take_toast"), 1);
+    assert_eq!(callers("pub fn take_toast(&mut self) {}", "take_toast"), 0);
 }

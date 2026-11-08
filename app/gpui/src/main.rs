@@ -76,6 +76,14 @@ struct ParsedArgs {
     /// `--peri-device <mouse|controller>` (debug builds only): open the
     /// Peripherals page with that device selected (#208 captures).
     peri_device: Option<String>,
+    /// `--peri-toast` (debug builds only): once the selected device's detail
+    /// has landed, apply the empty change so the daemon's answer raises the
+    /// Apply toast (#246 capture).
+    peri_toast: bool,
+    /// `--toast-hold <ms>` (debug builds only): how long the notification
+    /// lane keeps a message, so a capture can shoot it still (`TOAST_MS` is
+    /// React's 3000 in the app).
+    toast_hold: Option<u64>,
 }
 
 fn parse_args() -> ParsedArgs {
@@ -91,6 +99,8 @@ fn parse_args() -> ParsedArgs {
     let mut onboarding_step = None;
     let mut onboarding_state = None;
     let mut peri_device = None;
+    let mut peri_toast = false;
+    let mut toast_hold = None;
     let mut args = std::env::args().skip(1);
     while let Some(arg) = args.next() {
         match arg.as_str() {
@@ -150,6 +160,10 @@ fn parse_args() -> ParsedArgs {
                     peri_device = Some(v);
                 }
             }
+            "--peri-toast" if cfg!(debug_assertions) => peri_toast = true,
+            "--toast-hold" if cfg!(debug_assertions) => {
+                toast_hold = args.next().and_then(|v| v.parse().ok());
+            }
             _ => {}
         }
     }
@@ -166,6 +180,8 @@ fn parse_args() -> ParsedArgs {
         onboarding_step,
         onboarding_state,
         peri_device,
+        peri_toast,
+        toast_hold,
     }
 }
 
@@ -190,6 +206,8 @@ fn main() {
         onboarding_step,
         onboarding_state,
         peri_device,
+        peri_toast,
+        toast_hold,
     } = parse_args();
     if !shell::is_valid_page(&page) {
         eprintln!(
@@ -276,6 +294,16 @@ fn main() {
                             };
                             let peripherals = shell.peripherals_view.clone();
                             peripherals.update(cx, |v, cx| v.pick_device(id, cx));
+                        }
+                        // Debug only (#246): hold the notification lane open
+                        // for a capture (`--toast-hold`), and raise the Apply
+                        // toast once the device has landed (`--peri-toast`).
+                        if let Some(ms) = toast_hold {
+                            shell.toast_hold_ms = ms;
+                        }
+                        if peri_toast {
+                            let peripherals = shell.peripherals_view.clone();
+                            peripherals.update(cx, |v, cx| v.capture_apply_when_ready(cx));
                         }
                         // Debug only: `--onboarding-step` opens the onboarding
                         // takeover at a step for captures (React `?state=` demo

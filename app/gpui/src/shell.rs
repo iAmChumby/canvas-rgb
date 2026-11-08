@@ -40,7 +40,7 @@ use crate::views::displays::DisplaysView;
 use crate::views::effects::EffectsView;
 use crate::views::fans::FansView;
 use crate::views::layout::LayoutView;
-use crate::views::peripherals::PeripheralsView;
+use crate::views::peripherals::{PeripheralsView, Toast};
 use crate::views::settings::{SettingsView, ThemeCell};
 use crate::views::updates::UpdatesView;
 
@@ -274,6 +274,11 @@ pub fn strip_state(status: Option<&Status>, error: Option<&str>) -> (String, Str
     }
 }
 
+/// How long a plain note stays up (React `Notify.tsx` `NOTE_MS`). An error, a
+/// warning or a note with an answer stays until dismissed in React; the lane
+/// here holds those too until the same rule is ported (`keeps` in `notify`).
+pub const TOAST_MS: u64 = 3000;
+
 pub struct Shell {
     pub theme: Theme,
     pub page: String,
@@ -319,6 +324,16 @@ pub struct Shell {
     /// popover itself lives with the strip slice, so this flag only records
     /// the palette action for now.
     pub details_open: bool,
+    /// The notification lane's message (React `NotifyHost`, #168): what a page
+    /// handed off through a `take_*` hand-off. The shell draws it at the
+    /// bottom right, over the page and the dock.
+    pub toast: Option<Toast>,
+    /// Bumped by every toast, so the clock of an older one cannot take a
+    /// newer one away.
+    pub toast_generation: u64,
+    /// How long a note stays up. React's `NOTE_MS`; `--toast-hold` lengthens
+    /// it for a capture so a still frame can compare the lane.
+    pub toast_hold_ms: u64,
 }
 
 impl Shell {
@@ -414,6 +429,9 @@ impl Shell {
             palette_open: false,
             palette_query: String::new(),
             details_open: false,
+            toast: None,
+            toast_generation: 0,
+            toast_hold_ms: TOAST_MS,
         };
         shell.poll_all(cx);
         shell
@@ -424,6 +442,94 @@ impl Shell {
         if is_valid_page(page) {
             self.page = page.to_string();
         }
+    }
+
+    /// Puts a message on the notification lane (React `notify`, `Notify.tsx:116`).
+    /// A second message replaces the one showing, as React's lane identifies a
+    /// message by its tone and words and updates the one it finds.
+    pub fn show_toast(&mut self, toast: Toast, cx: &mut Context<Self>) {
+        self.toast = Some(toast);
+        self.toast_generation += 1;
+        let generation = self.toast_generation;
+        let hold = self.toast_hold_ms;
+        cx.spawn(async move |view, cx| {
+            cx.background_executor()
+                .timer(std::time::Duration::from_millis(hold))
+                .await;
+            let _ = view.update(cx, |this, cx| {
+                if generation == this.toast_generation {
+                    this.toast = None;
+                    cx.notify();
+                }
+            });
+        })
+        .detach();
+    }
+
+    /// React's notification lane (`Notify.tsx` `NotifyHost`, `notify.css`):
+    /// bottom right, 24 px in on a wide window and clear of the 65 px phone
+    /// dock by 12. On a phone `sonner` spans the window's 12 px gutters and
+    /// the card stands at the lane's left edge (`max-width: 600px`: `left:
+    /// var(--mobile-offset-left)`, card `100vw - 32`), so the card is 12 px
+    /// from the left and 20 from the right. The card is the app's own panel:
+    /// 380 px wide (the window less 32 on a phone), the line-2 border,
+    /// `--r-md`, `--pop`, and the message's mark and words at 14 px with
+    /// 8/12 padding.
+    fn toast_lane(&self) -> Option<impl IntoElement> {
+        let toast = self.toast.clone()?;
+        let t = &self.theme;
+        let phone = self.width <= 720.0;
+        let (tone, icon) = match toast.tone {
+            "warn" => (t.warn, "Warning-fill"),
+            "down" => (t.down, "WarningOctagon-fill"),
+            "info" => (t.work, "Info-fill"),
+            _ => (t.ok, "CheckCircle-fill"),
+        };
+        Some(
+            div()
+                .absolute()
+                .right(px(if phone { 20.0 } else { 24.0 }))
+                .bottom(px(if phone { 77.0 } else { 24.0 }))
+                .w(px(if phone {
+                    self.width - 32.0
+                } else {
+                    (self.width - 32.0).min(380.0)
+                }))
+                .flex()
+                .items_center()
+                .gap(px(8.0))
+                .py(px(8.0))
+                .px(px(12.0))
+                .r_md()
+                .border_1()
+                .border_color(Theme::color(t.line_2))
+                .bg(Theme::color(t.panel))
+                // CSS `box-shadow: 0 12px 32px rgba(0,0,0,.5)`: gpui's
+                // `blur_radius` is the sigma, so a 32 px CSS blur is 16.
+                .shadow(vec![gpui::BoxShadow {
+                    color: gpui::Hsla::from(gpui::Rgba { r: 0.0, g: 0.0, b: 0.0, a: 0.5 }),
+                    offset: point(px(0.0), px(12.0)),
+                    blur_radius: px(16.0),
+                    spread_radius: px(0.0),
+                }])
+                .child(
+                    gpui::svg()
+                        .path(format!("icons/{icon}.svg"))
+                        .size(px(16.0))
+                        .flex_none()
+                        .text_color(Theme::color(tone)),
+                )
+                .child(
+                    div()
+                        .flex_1()
+                        .min_w_0()
+                        .text_size(px(14.0))
+                        .line_height(gpui::relative(1.4))
+                        .font_family(crate::fonts::UI_FAMILY)
+                        .text_color(Theme::color(t.ink))
+                        .child(toast.text),
+                ),
+        )
     }
 
     /// After a navigate: tell the settings view whether it is on screen
@@ -2150,6 +2256,14 @@ impl Render for Shell {
             self.effects_view.update(cx, |v, _| v.theme = shared);
             self.layout_view.update(cx, |v, _| v.theme = shared);
         }
+        // The notification lane: a page hands off what React's global
+        // `notify` would say, and it is drawn in this frame, over the page
+        // (React's `NotifyHost` sits above the app chrome). Taken on every
+        // page, because the message is not the page's: the Peripherals Apply
+        // is the first hand-off (#246).
+        if let Some(toast) = self.peripherals_view.update(cx, |v, _| v.take_toast()) {
+            self.show_toast(toast, cx);
+        }
         // The Updates page's tray state comes from the settings view (the
         // single reader of the stdio receiver). Copy it here when the
         // Updates page is open so progress ticks and the strip context
@@ -2337,6 +2451,11 @@ impl Render for Shell {
             .child(body)
             .child(self.spectrum_line());
         root = crate::fonts::with_kerning(root);
+        // The lane sits above the app's own chrome and below the palette
+        // (`notify.css` z-index 65; the palette draws after it).
+        if let Some(lane) = self.toast_lane() {
+            root = root.child(lane);
+        }
         // The palette is rendered outside the page area it covers, so it
         // still opens over the daemon-down page and before the first answer
         // (`Shell.tsx:269-285`).
@@ -2408,6 +2527,33 @@ mod tests {
         assert_eq!(strip_state(None, None).1, "work");
         assert_eq!(strip_state(None, Some("x")).1, "down");
         assert_eq!(strip_state(None, Some("x")).0, "Daemon offline");
+    }
+
+    /// The Peripherals Apply toast reaches the lane (#246).
+    ///
+    /// The view computes the message into `toast` and offers it through
+    /// `take_toast`; before #246 nothing called that hand-off, so React's
+    /// `notify("The settings are on the device")` never showed in GPUI. The
+    /// order is pinned in the source: the shell takes the hand-off, puts it on
+    /// the lane, and draws the lane.
+    #[test]
+    fn the_shell_takes_the_peripherals_toast_onto_the_lane() {
+        let source = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/src/shell.rs"))
+            .expect("read shell.rs");
+        let take = source
+            .find("v.take_toast()")
+            .expect("the shell must take the view's toast hand-off");
+        let show = source
+            .find("self.show_toast(toast, cx)")
+            .expect("the toast taken from the view must go on the lane");
+        let draw = source
+            .find("self.toast_lane()")
+            .expect("the lane must be drawn over the page");
+        assert!(
+            take < show && show < draw,
+            "the toast hand-off is taken at {take}, shown at {show} and drawn at {draw}: \
+             a message the view sets must be taken and drawn in the same render"
+        );
     }
 
     #[test]

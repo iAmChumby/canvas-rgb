@@ -59,6 +59,12 @@ param(
     # peripherals-<device>-gpui-<size>-<theme>.png so diff-pairs.ps1 pairs
     # it with the React shot of the same name.
     [string]$Device = '',
+    # #246: raise the Peripherals Apply toast (--peri-toast) and hold the
+    # notification lane open for the shot (--toast-hold 30000). Needs writes
+    # on for the device on the fake daemon. The shot is named
+    # peripherals-toast-gpui-<size>-<theme>.png, pairing with
+    # capture-react.mjs UI_CAPTURE_TOAST=1.
+    [switch]$Toast,
     # #205: scroll the page down this many pixels before the shot (debug builds
     # read CANVAS_RGB_CAPTURE_SCROLL). Files are <page>-scroll<px>-gpui-...,
     # pairing with capture-react.mjs UI_CAPTURE_SCROLL.
@@ -79,6 +85,7 @@ param(
     [switch]$Probe
 )
 if ($ApiPort -eq 9430) { throw "-ApiPort 9430 is the real daemon's port; captures run only against the fakes" }
+if ($Toast -and $Device -eq '') { $Device = 'mouse' }
 if ($PaletteQuery -ne '') { $Palette = $true }
 $paletteSuffix = ''
 if ($Palette) {
@@ -297,6 +304,7 @@ foreach ($theme in $Themes) {
       if ($Editor -ne '') { $psi.Arguments += " --editor $Editor" }
       if ($Stack -ne '') { $psi.Arguments += " --stack `"$Stack`"" }
       if ($Device -ne '') { $psi.Arguments += " --peri-device $Device"; Write-Host "capture-gpui: peripherals with $Device selected" }
+      if ($Toast) { $psi.Arguments += " --peri-toast --toast-hold 30000"; Write-Host "capture-gpui: peripherals Apply toast, lane held 30 s" }
       if ($Probe) {
         # One file per shot: the editor appends `<name> x,y WxH` lines to it (settings.rs `pr`).
         $probeFile = Join-Path $outDir "probe-$page-gpui-${size}-$theme.txt"
@@ -417,7 +425,7 @@ foreach ($theme in $Themes) {
         # viewport shot.
         $shot = $bmp.Clone((New-Object System.Drawing.Rectangle($ox, $oy, $clientW, $clientH)), $bmp.PixelFormat)
         $bmp.Dispose()
-        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } elseif ($Device -ne '') { "$page-$Device" } else { $page }
+        $viewName = if ($Palette) { "palette$paletteSuffix" } elseif ($Onboarding) { "onboarding-$OnboardingStep" } elseif ($Editor -ne '') { "editor" } elseif ($Stack -ne '') { "stack-$((($Stack.ToLower() -replace '[^a-z0-9]+', '-')).Trim('-'))" } elseif ($Toast) { "peripherals-toast" } elseif ($Device -ne '') { "$page-$Device" } else { $page }
         if ($UpdateState -ne '' -and $page -eq 'updates') { $viewName = "updates-$UpdateState" }
         if ($Scroll -gt 0) { $viewName = "$viewName-scroll$Scroll" }
         if ($Tag -ne '') { $viewName = "$viewName-$Tag" }
