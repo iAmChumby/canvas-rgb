@@ -136,8 +136,10 @@ pub fn kelvin_to_led(kelvin: f32) -> [f32; 3] {
 ///
 /// [`KELVIN_MAX`] and above (and a non-finite value) is the identity, `[1, 1, 1]`: the stage
 /// is off. Below it, each channel is scaled by the LED white of `kelvin` relative to the LED
-/// white of [`KELVIN_MAX`], so a white canvas comes out as [`kelvin_to_led`]`(kelvin)` and
-/// every effect shifts warmer by the same amount.
+/// white of [`KELVIN_MAX`]. The ratio, not [`kelvin_to_led`] itself, is what keeps 6500 K
+/// exactly neutral; it also means a white canvas under the stage is a little bluer than the
+/// White effect at the same kelvin (1800 K: green about 0.212 against 0.210, blue
+/// about 0.014 against 0.013 of full), because the LED white of 6500 K is itself slightly warm.
 pub fn warmth_gains(kelvin: f32) -> [f32; 3] {
     if !kelvin.is_finite() || kelvin >= KELVIN_MAX {
         return [1.0; 3];

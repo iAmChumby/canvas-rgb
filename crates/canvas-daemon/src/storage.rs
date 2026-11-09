@@ -450,8 +450,26 @@ pub enum ImportError {
     HotLimits(#[from] HotLimitError),
     #[error("display config refused: {0}")]
     Displays(String),
+    #[error("settings refused: {0}")]
+    Settings(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// The ranges `PUT /api/v1/settings` and a config import hold `Settings` to, so what is
+/// stored is what the engine applies.
+pub fn validate_settings(settings: &canvas_proto::config::Settings) -> Result<(), String> {
+    use canvas_proto::consts::{FPS_MAX, FPS_MIN, WARMTH_MIN, WARMTH_OFF};
+    if !(FPS_MIN..=FPS_MAX).contains(&settings.fps) {
+        return Err(format!("fps must be {FPS_MIN}..={FPS_MAX}, got {}", settings.fps));
+    }
+    if settings.brightness > 100 {
+        return Err(format!("brightness must be 0..100, got {}", settings.brightness));
+    }
+    if !(WARMTH_MIN..=WARMTH_OFF).contains(&settings.warmth) {
+        return Err(format!("warmth must be {WARMTH_MIN}..={WARMTH_OFF} K, got {}", settings.warmth));
+    }
+    Ok(())
 }
 
 /// Validates an export bundle. Fan values below the floors are refused.
@@ -472,6 +490,7 @@ pub fn validate_bundle_rated(
     if bundle.schema_version != EXPORT_SCHEMA {
         return Err(ImportError::Schema { found: bundle.schema_version, expected: EXPORT_SCHEMA });
     }
+    validate_settings(&bundle.settings).map_err(ImportError::Settings)?;
     for profile in &bundle.fans.profiles {
         validate_profile(profile, bundle.fans.floor_percent).map_err(ImportError::Fans)?;
     }
@@ -727,6 +746,31 @@ power = "running"
         // And `Settings` itself carries no audio_source field to write.
         let settings_json = serde_json::to_string(&config.settings).unwrap();
         assert!(!settings_json.contains("audio_source"), "{settings_json}");
+    }
+
+    /// #50: an import holds the bundle's settings to the same ranges as `PUT /settings`.
+    #[test]
+    fn an_import_with_out_of_range_settings_is_refused() {
+        let bundle = |settings: Settings| ExportBundle {
+            schema_version: EXPORT_SCHEMA,
+            exported_at: "2026-11-08T00:00:00Z".into(),
+            app_version: "0.0.0".into(),
+            settings,
+            layouts: default_layouts(),
+            zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
+            effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
+            fans: canvas_proto::config::FansFile::default(),
+            displays: Vec::new(),
+            stacks: Vec::new(),
+        };
+        assert!(validate_bundle(&bundle(Settings::default())).is_ok());
+        for bad in [
+            Settings { warmth: 100, ..Settings::default() },
+            Settings { brightness: 200, ..Settings::default() },
+            Settings { fps: 500, ..Settings::default() },
+        ] {
+            assert!(matches!(validate_bundle(&bundle(bad.clone())), Err(ImportError::Settings(_))), "{bad:?}");
+        }
     }
 
     /// #166: a config import keeps this machine's current audio_source.

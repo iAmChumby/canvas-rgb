@@ -96,7 +96,8 @@ pub async fn patch_zone(
 ///
 /// An engine override (see [`crate::identify`]): while it is active every device is black
 /// except `count` LEDs from `led` in `zone` of this device, at full brightness, even with
-/// output paused. `stop: true` ends it; so does silence for [`crate::identify::WATCHDOG`].
+/// output paused. The flash ignores the warmth stage and the white balance too, by design:
+/// it must be found, not matched. `stop: true` ends it; so does silence for [`crate::identify::WATCHDOG`].
 pub async fn identify(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -180,15 +181,29 @@ pub const WHITE_BALANCE_MAX_DEVICES: usize = 128;
 /// The longest device fingerprint a white balance is kept for.
 pub const WHITE_BALANCE_MAX_ID_LEN: usize = 256;
 
+/// The entries of the config's white balance the API would have accepted: a hand-edited
+/// `config.toml` with a NaN or 1.5 gain, an overlong id or more than the cap is trimmed, so
+/// the engine, `GET /white-balance` and the API's rules agree.
+fn valid_balances(
+    config: &canvas_proto::config::ConfigFile,
+) -> impl Iterator<Item = (&DeviceId, &WhiteBalance)> {
+    config
+        .white_balance
+        .iter()
+        .filter(|(id, wb)| !id.0.is_empty() && id.0.len() <= WHITE_BALANCE_MAX_ID_LEN && wb.is_valid())
+        .take(WHITE_BALANCE_MAX_DEVICES)
+}
+
 /// The config's white balances as the engine takes them.
 pub fn white_balance_map(
     config: &canvas_proto::config::ConfigFile,
 ) -> std::collections::HashMap<DeviceId, WhiteBalance> {
-    config.white_balance.iter().map(|(id, wb)| (id.clone(), *wb)).collect()
+    valid_balances(config).map(|(id, wb)| (id.clone(), *wb)).collect()
 }
 
 async fn white_balances(app: &Arc<App>) -> WhiteBalances {
-    WhiteBalances { devices: app.store.read().await.config.white_balance.clone() }
+    let store = app.store.read().await;
+    WhiteBalances { devices: valid_balances(&store.config).map(|(id, wb)| (id.clone(), *wb)).collect() }
 }
 
 /// `GET /api/v1/white-balance`.
@@ -234,6 +249,8 @@ async fn set_white_balance(
     let device_id = DeviceId(id);
     let balances = {
         let mut store = app.store.write().await;
+        // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
+        let before = store.config.white_balance.clone();
         let map = &mut store.config.white_balance;
         if balance == WhiteBalance::NEUTRAL {
             map.remove(&device_id);
@@ -245,9 +262,10 @@ async fn set_white_balance(
             }
             map.insert(device_id.clone(), balance);
         }
-        store
-            .save_config()
-            .map_err(|e| ApiFailure::internal(format!("could not save the config: {e}")))?;
+        if let Err(e) = store.save_config() {
+            store.config.white_balance = before;
+            return Err(ApiFailure::internal(format!("could not save the config: {e}")));
+        }
         white_balance_map(&store.config)
     };
     app.engine.set_white_balance(balances);

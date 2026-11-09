@@ -4004,3 +4004,106 @@ async fn a_white_balance_is_validated_applied_saved_and_cleared() {
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(app.store.read().await.config.white_balance.len(), 1);
 }
+
+#[tokio::test]
+async fn a_settings_put_without_warmth_keeps_the_stored_warmth() {
+    let (router, app, fake, home) = build_with_engine();
+    router
+        .clone()
+        .oneshot(request_with_body("PATCH", routes::OUTPUT, r#"{"warmth":2700}"#))
+        .await
+        .expect("the router answers");
+    // A client older than #50: its settings snapshot has no warmth.
+    let mut old = serde_json::to_value(&app.store.read().await.config.settings).unwrap();
+    old.as_object_mut().unwrap().remove("warmth");
+    old["fps"] = serde_json::json!(45);
+    let response = router
+        .oneshot(request_with_body("PUT", routes::SETTINGS, &old.to_string()))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await.get("warmth").and_then(|v| v.as_u64()), Some(2700));
+    assert_eq!(app.store.read().await.config.settings.warmth, 2700);
+    assert_eq!(fake.warmth.load(std::sync::atomic::Ordering::SeqCst), 2700);
+    let saved = std::fs::read_to_string(home.path.join("config.toml")).unwrap();
+    assert!(saved.contains("warmth = 2700") && saved.contains("fps = 45"), "{saved}");
+}
+
+#[tokio::test]
+async fn the_warmth_range_ends_are_accepted_and_a_refused_patch_changes_nothing() {
+    let (router, app, fake, _home) = build_with_engine();
+    for ok in [1800, 6500] {
+        let response = router
+            .clone()
+            .oneshot(request_with_body("PATCH", routes::OUTPUT, &format!(r#"{{"warmth":{ok}}}"#)))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::OK, "{ok}");
+    }
+    // Brightness is valid, warmth is not: neither is applied.
+    let response = router
+        .oneshot(request_with_body("PATCH", routes::OUTPUT, r#"{"brightness":40,"warmth":7000}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(fake.brightness.load(std::sync::atomic::Ordering::SeqCst), 100);
+    assert_eq!(app.store.read().await.config.settings.brightness, 100);
+}
+
+#[tokio::test]
+async fn white_balance_refuses_infinity_and_long_ids_and_a_neutral_put_clears() {
+    let (router, app, _fake, _home) = build_with_engine();
+    let path = routes::DEVICE_WHITE_BALANCE.replace("{id}", "openrgb:KB-1");
+    // 1e999 is out of range for serde_json, which refuses it before the handler runs.
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &path, r#"{"red":1e999,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    assert!(response.status().is_client_error(), "1e999 answered {}", response.status());
+    assert!(app.store.read().await.config.white_balance.is_empty());
+    let long = routes::DEVICE_WHITE_BALANCE.replace("{id}", &"a".repeat(257));
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &long, r#"{"red":0.5,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    router
+        .clone()
+        .oneshot(request_with_body("PUT", &path, r#"{"red":0.5,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(app.store.read().await.config.white_balance.len(), 1);
+    let response = router
+        .oneshot(request_with_body("PUT", &path, r#"{"red":1,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.store.read().await.config.white_balance.is_empty(), "neutral is stored as no entry");
+}
+
+#[tokio::test]
+async fn white_balance_stops_at_the_device_cap() {
+    let (router, app, _fake, _home) = build_with_engine();
+    for i in 0..canvas_daemon::api::devices::WHITE_BALANCE_MAX_DEVICES {
+        app.store.write().await.config.white_balance.insert(
+            canvas_proto::device::DeviceId(format!("fake:{i}")),
+            canvas_proto::color::WhiteBalance { red: 0.5, green: 1.0, blue: 1.0 },
+        );
+    }
+    let path = routes::DEVICE_WHITE_BALANCE.replace("{id}", "fake:one-more");
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &path, r#"{"red":0.5,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    // A device already in the map can still be changed at the cap.
+    let path = routes::DEVICE_WHITE_BALANCE.replace("{id}", "fake:0");
+    let response = router
+        .oneshot(request_with_body("PUT", &path, r#"{"red":0.25,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+}

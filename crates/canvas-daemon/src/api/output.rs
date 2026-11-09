@@ -29,16 +29,19 @@ pub async fn patch_output(
     State(app): State<Arc<App>>,
     Json(patch): Json<PatchOutput>,
 ) -> ApiResult<Json<OutputState>> {
+    // Everything is validated before anything is applied: a refused PATCH changes nothing.
     if let Some(brightness) = patch.brightness {
         if brightness > 100 {
             return Err(crate::api::ApiFailure::validation(format!(
                 "brightness must be 0..100, got {brightness}"
             )));
         }
-        app.engine.set_brightness(brightness);
     }
     if let Some(warmth) = patch.warmth {
         validate_warmth(warmth)?;
+    }
+    if let Some(brightness) = patch.brightness {
+        app.engine.set_brightness(brightness);
     }
     if let Some(warmth) = patch.warmth {
         app.engine.set_warmth(warmth);

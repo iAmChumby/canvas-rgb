@@ -18,28 +18,20 @@ pub async fn get_settings(State(app): State<Arc<App>>) -> Json<Settings> {
 
 /// `PUT /api/v1/settings`.
 ///
-/// The editor's Settings page. The fps, brightness and power are applied to the engine
-/// as well as saved.
+/// The editor's Settings page. The fps, brightness, warmth and power are applied to the
+/// engine as well as saved. A body without `warmth` (a client older than #50) keeps the
+/// stored warmth: a whole-object write from an old snapshot must never reset it to off.
 pub async fn put_settings(
     State(app): State<Arc<App>>,
-    Json(settings): Json<Settings>,
+    Json(body): Json<serde_json::Value>,
 ) -> ApiResult<Json<Settings>> {
-    if !(canvas_proto::consts::FPS_MIN..=canvas_proto::consts::FPS_MAX).contains(&settings.fps) {
-        return Err(ApiFailure::validation(format!(
-            "fps must be {}..={}, got {}",
-            canvas_proto::consts::FPS_MIN,
-            canvas_proto::consts::FPS_MAX,
-            settings.fps
-        )));
+    let has_warmth = body.get("warmth").is_some();
+    let mut settings: Settings = serde_json::from_value(body)
+        .map_err(|e| ApiFailure::validation(format!("the settings do not parse: {e}")))?;
+    if !has_warmth {
+        settings.warmth = app.store.read().await.config.settings.warmth;
     }
-    if settings.brightness > 100 {
-        return Err(ApiFailure::validation(format!(
-            "brightness must be 0..100, got {}",
-            settings.brightness
-        )));
-    }
-
-    crate::api::output::validate_warmth(settings.warmth)?;
+    crate::storage::validate_settings(&settings).map_err(ApiFailure::validation)?;
 
     app.engine.set_fps(settings.fps);
     app.engine.set_brightness(settings.brightness);

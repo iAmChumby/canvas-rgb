@@ -165,7 +165,9 @@ pub trait Engine: Send + Sync {
     fn remove_sink(&self, device: &DeviceId);
     fn set_preview(&self, sink: Option<Arc<dyn PreviewSink>>);
     fn set_input_source(&self, source: Option<Arc<dyn InputSource>>);
-    /// Writes one solid color to every sink now (quit, sleep, identify background).
+    /// Writes one solid color to every sink now (quit, sleep, identify background). A raw
+    /// write: the brightness, the warmth stage and the white balance are not applied (every
+    /// caller writes black, on which they change nothing).
     fn write_solid(&self, color: Rgb8);
     fn stats(&self) -> RenderStats;
     /// Stops the thread. Does not write anything; callers write black first if wanted.
