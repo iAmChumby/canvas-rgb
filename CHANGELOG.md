@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.10.1] - 2026-11-08
+
 ### Fixed
 
 - The White effect's warm whites now look as warm on the lights as a lamp set to the same number: 1800 K is a deep amber instead of a yellow-white. (#50)
@@ -237,7 +239,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.1...HEAD
+[0.10.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...v0.9.0
 [0.8.4]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.3...v0.8.4
