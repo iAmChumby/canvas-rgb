@@ -7,6 +7,9 @@ export const routes = {
   devices: "/api/v1/devices",
   deviceZone: (id: string, zone: number) => `/api/v1/devices/${encodeURIComponent(id)}/zones/${zone}`,
   deviceIdentify: (id: string) => `/api/v1/devices/${encodeURIComponent(id)}/identify`,
+  // GET every device's white balance (#50); PUT one device's; DELETE sets it back to neutral.
+  whiteBalance: "/api/v1/white-balance",
+  deviceWhiteBalance: (id: string) => `/api/v1/devices/${encodeURIComponent(id)}/white-balance`,
   effects: "/api/v1/effects",
   effect: (id: string) => `/api/v1/effects/${id}`,
   effectActivate: (id: string) => `/api/v1/effects/${id}/activate`,

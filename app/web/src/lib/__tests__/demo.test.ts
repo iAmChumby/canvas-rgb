@@ -44,6 +44,44 @@ describe("the demo's header availability answer (#146)", () => {
   });
 });
 
+describe("the demo's white balance (#50)", () => {
+  const deviceId = "openrgb:strip-1";
+  const put = (gain: number) =>
+    demoRequest("PUT", `/api/v1/devices/${encodeURIComponent(deviceId)}/white-balance`, {
+      red: gain,
+      green: 1,
+      blue: 1,
+    });
+
+  it("answers an empty map, then PUT/GET/DELETE round-trip one device", async () => {
+    window.history.replaceState({}, "", "/devices/");
+    const empty = await demoRequest("GET", "/api/v1/white-balance", undefined) as { devices: unknown };
+    expect(empty.devices).toEqual({});
+    const putRes = await put(0.8) as { devices: Record<string, unknown> };
+    expect(putRes.devices[deviceId]).toEqual({ red: 0.8, green: 1, blue: 1 });
+    const got = await demoRequest("GET", "/api/v1/white-balance", undefined) as { devices: Record<string, unknown> };
+    expect(got.devices[deviceId]).toEqual({ red: 0.8, green: 1, blue: 1 });
+    const del = await demoRequest(
+      "DELETE",
+      `/api/v1/devices/${encodeURIComponent(deviceId)}/white-balance`,
+      undefined,
+    ) as { devices: Record<string, unknown> };
+    expect(del.devices[deviceId]).toBeUndefined();
+    expect(await demoRequest("GET", "/api/v1/white-balance", undefined)).toEqual({ devices: {} });
+  });
+
+  it("refuses a gain outside 0..1 with 422 validation, like the daemon", async () => {
+    window.history.replaceState({}, "", "/devices/");
+    const err = await put(1.5).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiFailure);
+    expect((err as ApiFailure).status).toBe(422);
+    expect((err as ApiFailure).code).toBe("validation");
+  });
+});
+
 describe("the demo's value validator (#106)", () => {
   const device = {
     info: { id: "test:1", name: "Test", vendor: "", kind: "mouse", adapter: "test", serial: "", location: "" },

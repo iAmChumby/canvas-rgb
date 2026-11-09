@@ -178,6 +178,8 @@ interface DemoState {
   audioLeases: Record<string, { listen: boolean }>;
   /** The next audio lease counter. */
   audioLeaseCounter: number;
+  /** The per-device white balances (#50), by device id; a device not listed is neutral. */
+  whiteBalances: Record<string, { red: number; green: number; blue: number }>;
 }
 
 /**
@@ -326,6 +328,7 @@ function initialState(): DemoState {
     audioSource: { kind: "follow_default" },
     audioLeases: {},
     audioLeaseCounter: 0,
+    whiteBalances: {},
   };
 }
 
@@ -463,6 +466,24 @@ function endDraft(s: DemoState): DraftStatus {
     lease_ms: scenario().has("fast-draft") ? 900 : 15000,
     ...(note ? { note } : {}),
   };
+}
+
+/** What the demo answers for the white balances (#50): a copy, so a caller cannot mutate the state. */
+function whiteBalancesAnswer(s: DemoState) {
+  return {
+    devices: Object.fromEntries(
+      Object.entries(s.whiteBalances).map(([id, wb]) => [id, { ...wb }]),
+    ),
+  };
+}
+
+/** The daemon's own validation for one device's white balance (#50): every gain 0..1. */
+function checkWhiteBalance(wb: { red: number; green: number; blue: number }): void {
+  for (const [channel, gain] of Object.entries(wb) as [string, number][]) {
+    if (typeof gain !== "number" || gain < 0 || gain > 1) {
+      fail(422, "validation", `${channel} gain must be 0..1, got ${gain}`);
+    }
+  }
 }
 
 function activeLayout(): Layout {
@@ -1085,6 +1106,27 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       (globalThis as { __identify?: unknown[] }).__identify?.push({ id, at: Date.now(), ...(body as object) });
       return { ok: true };
     }
+    if (seg.length === 3 && seg[2] === "white-balance") {
+      const id = seg[1] ?? "";
+      const device = s.devices.find((d) => d.id === id);
+      if (!device) fail(404, "not_found", `no device ${id}`);
+      if (method === "PUT") {
+        const wb = body as { red: number; green: number; blue: number };
+        checkWhiteBalance(wb);
+        s.whiteBalances[id] = { red: wb.red, green: wb.green, blue: wb.blue };
+        return whiteBalancesAnswer(s);
+      }
+      if (method === "DELETE") {
+        delete s.whiteBalances[id];
+        return whiteBalancesAnswer(s);
+      }
+      return bad();
+    }
+    return bad();
+  }
+
+  if (head === "white-balance") {
+    if (seg.length === 1 && method === "GET") return whiteBalancesAnswer(s);
     return bad();
   }
 

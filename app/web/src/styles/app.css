@@ -3518,6 +3518,59 @@ button.chip:hover {
 }
 
 /* A device with several zones: a header row, then one indented row per zone. */
+
+/* White balance (#50): one row per channel, the swatch, and Reset while a gain is not neutral. */
+.rd-devices .rd-wb {
+  padding: var(--s2) var(--s4) var(--s3) calc(var(--s4) + var(--s8) + var(--s3));
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.rd-devices .rd-wb-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.rd-devices .rd-wb-title {
+  font-weight: 600;
+}
+
+.rd-devices .wb-swatch {
+  width: 28px;
+  height: 14px;
+  flex: none;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+}
+
+.rd-devices .rd-wb-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+}
+
+.rd-devices .rd-wb-label {
+  flex: 0 0 48px;
+}
+
+.rd-devices .rd-wb-row .slider {
+  flex: 1 1 120px;
+  min-width: 80px;
+}
+
+.rd-devices .rd-wb-fig {
+  flex: none;
+  min-width: 40px;
+  text-align: right;
+}
+
+.rd-devices .rd-wb-hint {
+  margin: 0;
+  font-size: var(--t14);
+}
 .rd-devices .rd-zone {
   display: flex;
   align-items: center;

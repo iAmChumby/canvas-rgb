@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type CSSProperties, type ReactElement } from "react";
+import { useEffect, useState, type CSSProperties, type ReactElement } from "react";
 import {
   ArrowClockwise,
   Cpu,
@@ -16,11 +16,16 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
+import { Slider } from "@/components/Slider";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
+import { api } from "@/lib/endpoints";
+import { messageOf } from "@/lib/errors";
 import { refreshDevices, retryDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
+import type { WhiteBalance } from "@/proto/WhiteBalance";
+import type { WhiteBalances } from "@/proto/WhiteBalances";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { IdentifyWalker } from "@/views/editor/IdentifyWalker";
@@ -150,6 +155,84 @@ interface WalkTarget {
   zoneIndex: number;
 }
 
+const NEUTRAL: WhiteBalance = { red: 1, green: 1, blue: 1 };
+
+const CHANNELS = [
+  { key: "red", label: "Red" },
+  { key: "green", label: "Green" },
+  { key: "blue", label: "Blue" },
+] as const;
+
+type Channel = (typeof CHANNELS)[number]["key"];
+
+/**
+ * One device's white balance (#50): one gain per LED channel, shown as 0..100 %. The
+ * swatch shows what pure white becomes with these gains on this device, and Reset is
+ * there only while the device is not neutral.
+ */
+function WhiteBalanceSection({
+  device,
+  balances,
+  drafts,
+  onDraft,
+  onPut,
+  onReset,
+  error,
+}: {
+  device: DeviceInfo;
+  balances: WhiteBalances | null;
+  drafts: Record<string, WhiteBalance>;
+  onDraft: (deviceId: string, wb: WhiteBalance) => void;
+  onPut: (deviceId: string, wb: WhiteBalance) => Promise<void>;
+  onReset: (deviceId: string) => Promise<void>;
+  error: string | null;
+}) {
+  const saved = balances?.devices[device.id] ?? NEUTRAL;
+  const shown = drafts[device.id] ?? saved;
+  const neutral = saved.red === 1 && saved.green === 1 && saved.blue === 1;
+  const swatch = `rgb(${Math.round(255 * shown.red)}, ${Math.round(255 * shown.green)}, ${Math.round(255 * shown.blue)})`;
+
+  const commit = (channel: Channel) => (pct: number) => {
+    const next = { ...shown, [channel]: pct / 100 };
+    void onPut(device.id, next);
+  };
+  const drag = (channel: Channel) => (pct: number) => {
+    onDraft(device.id, { ...shown, [channel]: pct / 100 });
+  };
+
+  return (
+    <div className="rd-wb" aria-label={`White balance for ${device.name}`}>
+      <div className="rd-wb-head">
+        <span className="rd-wb-title">White balance</span>
+        <span className="wb-swatch" style={{ backgroundColor: swatch }} aria-hidden="true" />
+        {!neutral && (
+          <Button size="sm" variant="ghost" onClick={() => void onReset(device.id)}>
+            Reset
+          </Button>
+        )}
+      </div>
+      {CHANNELS.map(({ key, label }) => (
+        <div className="rd-wb-row" key={key}>
+          <span className="rd-wb-label">{label}</span>
+          <Slider
+            label={`${label} gain for ${device.name}`}
+            min={0}
+            max={100}
+            value={Math.round(shown[key] * 100)}
+            onChange={drag(key)}
+            onCommit={commit(key)}
+          />
+          <span className="fig rd-wb-fig">{Math.round(shown[key] * 100)}%</span>
+        </div>
+      ))}
+      <p className="mute rd-wb-hint">
+        Show the White effect on every light, then pull down the channel this device has too much of until it matches the others.
+      </p>
+      {error && <p className="error-line">{error}</p>}
+    </div>
+  );
+}
+
 export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
@@ -187,6 +270,62 @@ export function DevicesView() {
 
   const walkDevice = devices?.find((d) => d.id === walk?.deviceId) ?? null;
   const walkZone = walkDevice?.zones.find((z) => z.index === walk?.zoneIndex) ?? null;
+
+  // The white balances, read once when the view mounts (#50); a device not listed is neutral.
+  const [whiteBalances, setWhiteBalances] = useState<WhiteBalances | null>(null);
+  const [wbDrafts, setWbDrafts] = useState<Record<string, WhiteBalance>>({});
+  const [wbError, setWbError] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .getWhiteBalance()
+      .then((wb) => {
+        if (live) setWhiteBalances(wb);
+      })
+      .catch((e: unknown) => {
+        if (live) setWbError(messageOf(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const wbDraft = (deviceId: string, wb: WhiteBalance) =>
+    setWbDrafts((d) => ({ ...d, [deviceId]: wb }));
+
+  const wbPut = async (deviceId: string, wb: WhiteBalance) => {
+    try {
+      setWhiteBalances(await api.putWhiteBalance(deviceId, wb));
+      setWbDrafts((d) => {
+        const next = { ...d };
+        delete next[deviceId];
+        return next;
+      });
+      setWbError(null);
+    } catch (e) {
+      // The control goes back to the value the daemon has: nothing fails silently.
+      setWbDrafts((d) => {
+        const next = { ...d };
+        delete next[deviceId];
+        return next;
+      });
+      setWbError(messageOf(e));
+    }
+  };
+
+  const wbReset = async (deviceId: string) => {
+    try {
+      setWhiteBalances(await api.deleteWhiteBalance(deviceId));
+      setWbDrafts((d) => {
+        const next = { ...d };
+        delete next[deviceId];
+        return next;
+      });
+      setWbError(null);
+    } catch (e) {
+      setWbError(messageOf(e));
+    }
+  };
 
   // The list in the order it is read: what is not there first, then by kind.
   const sorted = [...(devices ?? [])].sort((a, b) => {
@@ -378,6 +517,16 @@ export function DevicesView() {
                     />
                   </div>
                 )}
+
+                <WhiteBalanceSection
+                  device={d}
+                  balances={whiteBalances}
+                  drafts={wbDrafts}
+                  onDraft={wbDraft}
+                  onPut={wbPut}
+                  onReset={wbReset}
+                  error={wbError}
+                />
               </section>
             );
           })}
