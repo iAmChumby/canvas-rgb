@@ -19,7 +19,7 @@ impl White {
         // 2700-6500 K is govee-cli's Set Temperature range, so a desk lamp and the PC can be
         // set to the same number; the range reaches down to candlelight below that.
         SchemaBuilder::new("white", "White", "A white of the colour temperature you pick, warm to cool.")
-            .number("temperature", "Temperature (K)", KELVIN_MIN as f64, KELVIN_MAX as f64, 100.0, DEFAULT_KELVIN)
+            .number("temperature", "Kelvin", KELVIN_MIN as f64, KELVIN_MAX as f64, 100.0, DEFAULT_KELVIN)
             .preset_values("Candle", vec![("temperature", num(1800.0))])
             .preset_values("Warm", vec![("temperature", num(2700.0))])
             .preset_values("Neutral", vec![("temperature", num(4000.0))])

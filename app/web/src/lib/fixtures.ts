@@ -104,7 +104,7 @@ export const EFFECTS: DemoEffect[] = [
       { name: "Teal", over: { color: c("#00d8c0") } },
     ], false),
   build("white", "White", "A white of the colour temperature you pick, warm to cool.", NO_INPUT,
-    [{ key: "temperature", label: "Temperature (K)", kind: numberKind(1800, 6500, 100, 4000) }],
+    [{ key: "temperature", label: "Kelvin", kind: numberKind(1800, 6500, 100, 4000) }],
     [
       { name: "Candle", over: { temperature: n(1800) } },
       { name: "Warm", over: { temperature: n(2700) } },

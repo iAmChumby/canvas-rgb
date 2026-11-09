@@ -194,6 +194,18 @@ mod tests {
         }
     }
 
+    /// Pinned to the published fit, worked by hand: a wrong coefficient that still rises
+    /// with the temperature fails here.
+    #[test]
+    fn the_curve_matches_the_published_fit() {
+        for (k, want) in [(2700.0, [255.0, 166.7, 87.4]), (4000.0, [255.0, 205.8, 166.1])] {
+            let got = kelvin_to_rgb(k);
+            for i in 0..3 {
+                assert!((got[i] * 255.0 - want[i]).abs() < 0.6, "{k} K channel {i}: {} against {}", got[i] * 255.0, want[i]);
+            }
+        }
+    }
+
     #[test]
     fn the_warmest_white_keeps_its_blue_floor() {
         let c = kelvin_to_rgb(KELVIN_MIN);
