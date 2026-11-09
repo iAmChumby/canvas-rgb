@@ -311,7 +311,11 @@ export function DevicesView() {
   const wbPut = async (deviceId: string, wb: WhiteBalance) => {
     try {
       setWhiteBalances(await api.putWhiteBalance(deviceId, wb));
+      // A drag that started while this PUT was out keeps its draft: only the draft this PUT
+      // sent is cleared.
       setWbDrafts((d) => {
+        const cur = d[deviceId];
+        if (cur && (cur.red !== wb.red || cur.green !== wb.green || cur.blue !== wb.blue)) return d;
         const next = { ...d };
         delete next[deviceId];
         return next;

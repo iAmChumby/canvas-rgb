@@ -306,10 +306,15 @@ impl Store {
         let _ = std::fs::create_dir_all(&home);
 
         let config_value: Option<ConfigFile> =
-            read_parsed(&config, CONFIG_SCHEMA, "config.toml").unwrap_or_else(|e| {
-                tracing::error!(error = %e, "config.toml could not be read");
-                None
-            });
+            read_parsed(&config, CONFIG_SCHEMA, "config.toml")
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "config.toml could not be read");
+                    None
+                })
+                .map(|mut c: ConfigFile| {
+                    clamp_settings(&mut c.settings);
+                    c
+                });
         let layouts_value: Option<LayoutsFile> = read_parsed(&layouts, LAYOUTS_SCHEMA, "layouts.json")
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "layouts.json could not be read");
@@ -454,6 +459,26 @@ pub enum ImportError {
     Settings(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Holds settings read from disk to the ranges [`validate_settings`] checks (#50): a
+/// hand-edited `config.toml` with `warmth = 100` would otherwise report one thing and apply
+/// another, and every whole-object settings PUT from the editor's snapshot would then be
+/// refused. Each value out of range is logged and moved to the nearest end.
+pub fn clamp_settings(settings: &mut canvas_proto::config::Settings) {
+    use canvas_proto::consts::{FPS_MAX, FPS_MIN, WARMTH_MIN, WARMTH_OFF};
+    let fps = settings.fps.clamp(FPS_MIN, FPS_MAX);
+    let brightness = settings.brightness.min(100);
+    let warmth = settings.warmth.clamp(WARMTH_MIN, WARMTH_OFF);
+    if (fps, brightness, warmth) != (settings.fps, settings.brightness, settings.warmth) {
+        tracing::warn!(
+            fps = settings.fps, brightness = settings.brightness, warmth = settings.warmth,
+            "config.toml held settings out of range; they were moved into range"
+        );
+    }
+    settings.fps = fps;
+    settings.brightness = brightness;
+    settings.warmth = warmth;
 }
 
 /// The ranges `PUT /api/v1/settings` and a config import hold `Settings` to, so what is
@@ -746,6 +771,36 @@ power = "running"
         // And `Settings` itself carries no audio_source field to write.
         let settings_json = serde_json::to_string(&config.settings).unwrap();
         assert!(!settings_json.contains("audio_source"), "{settings_json}");
+    }
+
+    /// #50: settings read from a hand-edited config.toml are moved into range, and a restart
+    /// keeps the warmth and the white balance.
+    #[test]
+    fn a_config_is_loaded_into_range_and_keeps_warmth_and_balance() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-load-range-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = ConfigFile::default();
+        config.settings.warmth = 2700;
+        config.white_balance.insert(
+            canvas_proto::device::DeviceId("openrgb:kb".into()),
+            canvas_proto::color::WhiteBalance { red: 0.8, green: 1.0, blue: 1.0 },
+        );
+        write_toml(&dir.join(CONFIG_FILE), &config).unwrap();
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.config.settings.warmth, 2700, "a restart keeps the warmth");
+        assert_eq!(loaded.config.white_balance, config.white_balance, "a restart keeps the balance");
+
+        config.settings.warmth = 100;
+        config.settings.brightness = 250;
+        config.settings.fps = 500;
+        write_toml(&dir.join(CONFIG_FILE), &config).unwrap();
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.config.settings.warmth, canvas_proto::consts::WARMTH_MIN);
+        assert_eq!(loaded.config.settings.brightness, 100);
+        assert_eq!(loaded.config.settings.fps, canvas_proto::consts::FPS_MAX);
+        assert!(validate_settings(&loaded.config.settings).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     /// #50: an import holds the bundle's settings to the same ranges as `PUT /settings`.

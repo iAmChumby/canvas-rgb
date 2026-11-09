@@ -247,7 +247,7 @@ async fn set_white_balance(
         )));
     }
     let device_id = DeviceId(id);
-    let balances = {
+    {
         let mut store = app.store.write().await;
         // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
         let before = store.config.white_balance.clone();
@@ -266,9 +266,9 @@ async fn set_white_balance(
             store.config.white_balance = before;
             return Err(ApiFailure::internal(format!("could not save the config: {e}")));
         }
-        white_balance_map(&store.config)
-    };
-    app.engine.set_white_balance(balances);
+        // Applied under the store lock: two PUTs reach the engine in the order they reach the disk.
+        app.engine.set_white_balance(white_balance_map(&store.config));
+    }
     tracing::info!(
         device = %device_id, red = balance.red, green = balance.green, blue = balance.blue,
         "white balance set"
