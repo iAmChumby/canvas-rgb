@@ -109,6 +109,7 @@ fn a_parked_engine_wakes_on_its_period_and_renders_nothing() {
         fps: 30,
         power: Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     // Wait for the engine to settle into the parked state (up to 10 s: a loaded runner can take
     // longer than a fixed sleep), then count.
@@ -153,6 +154,7 @@ fn a_parked_engine_costs_almost_no_cpu() {
         fps: 30,
         power: Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let thread_id = render_thread_id(&engine);
     // Let it settle into the parked state.
@@ -195,6 +197,7 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
         fps: 30,
         power: Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let thread_id = render_thread_id(&engine);
 

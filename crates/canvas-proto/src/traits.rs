@@ -131,6 +131,9 @@ pub struct EngineSettings {
     pub power: Power,
     /// 0..100, applied after sampling.
     pub brightness: u8,
+    /// Kelvin, applied with the brightness ([`crate::color::warmth_gains`]);
+    /// [`crate::consts::WARMTH_OFF`] is off.
+    pub warmth: u16,
 }
 
 #[derive(Debug, Clone, Default)]
@@ -153,6 +156,11 @@ pub trait Engine: Send + Sync {
     fn set_fps(&self, fps: u32);
     fn set_power(&self, power: Power);
     fn set_brightness(&self, brightness: u8);
+    /// #50: the global warmth stage, in kelvin. Applied to every device with the brightness.
+    fn set_warmth(&self, kelvin: u16);
+    /// #50: each device's white balance, replacing the whole map. A device not in it is
+    /// neutral. Applied to that device's colours with the brightness and warmth.
+    fn set_white_balance(&self, balances: std::collections::HashMap<DeviceId, crate::color::WhiteBalance>);
     fn add_sink(&self, device: DeviceId, sink: Arc<dyn FrameSink>);
     fn remove_sink(&self, device: &DeviceId);
     fn set_preview(&self, sink: Option<Arc<dyn PreviewSink>>);

@@ -5,4 +5,8 @@ export type OutputState = { power: Power,
 /**
  * 0..100
  */
-brightness: number, };
+brightness: number, 
+/**
+ * #50: the global warmth stage in kelvin; [`crate::consts::WARMTH_OFF`] is off.
+ */
+warmth: number, };

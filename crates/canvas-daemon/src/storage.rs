@@ -505,15 +505,16 @@ pub fn import_bundle_rated(
 
     // Endpoint ids are machine-specific: an import keeps this machine's
     // current audio_source, whatever the bundle came from (#166).
-    let current_audio_source = read_parsed::<ConfigFile>(&home.join(CONFIG_FILE), CONFIG_SCHEMA, "config.toml")
+    // The same goes for the white balance (#50): it is how this machine's LEDs mix, by device.
+    let current = read_parsed::<ConfigFile>(&home.join(CONFIG_FILE), CONFIG_SCHEMA, "config.toml")
         .unwrap_or(None)
-        .map(|config| config.audio_source)
         .unwrap_or_default();
 
     let config = ConfigFile {
         schema_version: CONFIG_SCHEMA,
         settings: bundle.settings.clone(),
-        audio_source: current_audio_source,
+        audio_source: current.audio_source,
+        white_balance: current.white_balance,
         ..ConfigFile::default()
     };
 
@@ -697,6 +698,9 @@ power = "running"
 "#;
         let config: ConfigFile = toml::from_str(text).unwrap();
         assert_eq!(config.audio_source, AudioSource::FollowDefault);
+        // #50: nor the warmth or the white balance: off and empty.
+        assert_eq!(config.settings.warmth, canvas_proto::consts::WARMTH_OFF);
+        assert!(config.white_balance.is_empty());
     }
 
     /// #166: `PUT /settings` replaces only `Settings`, so it can never undo a
@@ -739,6 +743,13 @@ power = "running"
                 flow: AudioFlow::Render,
                 name_hint: "This machine".into(),
             },
+            // #50: this machine's white balance, by its own devices.
+            white_balance: [(
+                canvas_proto::device::DeviceId("royuan:KB".into()),
+                canvas_proto::color::WhiteBalance { red: 0.7, green: 1.0, blue: 1.0 },
+            )]
+            .into_iter()
+            .collect(),
             ..ConfigFile::default()
         };
         write_toml(&dir.join(CONFIG_FILE), &current).unwrap();
@@ -763,6 +774,7 @@ power = "running"
             AudioSource::Endpoint { id: "this-machines-id".into(), flow: AudioFlow::Render, name_hint: "This machine".into() },
             "the import keeps this machine's pick"
         );
+        assert_eq!(loaded.config.white_balance, current.white_balance, "the import keeps this machine's white balance");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

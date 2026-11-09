@@ -150,6 +150,7 @@ async fn a_resume_from_sleep_sends_the_last_good_frame_again_after_an_effect_pan
         fps: 30,
         power: Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     engine.set_layout(layout_for(&device), vec![device.clone()]);
 

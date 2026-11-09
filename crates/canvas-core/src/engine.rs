@@ -8,13 +8,13 @@
 //! - Callers (`set_fps`, `set_layout`, ...) mutate the state under the lock and nudge
 //!   the condvar so the thread reacts immediately.
 
-use std::collections::VecDeque;
+use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::{Duration, Instant};
 
 use canvas_proto::api::Power;
-use canvas_proto::color::Rgb8;
+use canvas_proto::color::{warmth_gains, Rgb8, WhiteBalance};
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::layout::{Layout, SamplingMode};
 use canvas_proto::props::{InputNeeds, Props};
@@ -61,6 +61,11 @@ struct State {
     fps: u32,
     power: Power,
     brightness: u8,
+    /// #50: the global warmth stage's per-channel gains ([`warmth_gains`]).
+    warmth: [f32; 3],
+    /// #50: each device's white-balance gains. Behind an `Arc` so the render thread's
+    /// per-frame snapshot is a pointer copy.
+    white_balance: Arc<HashMap<DeviceId, [f32; 3]>>,
     /// The active layout's precomputed sample plan.
     plan: Option<LayoutPlan>,
     /// Bumped whenever `plan` is replaced, so the render thread knows to pick it up.
@@ -130,6 +135,8 @@ impl State {
             fps: settings.fps.clamp(FPS_MIN, FPS_MAX),
             power: settings.power,
             brightness: settings.brightness.min(100),
+            warmth: warmth_gains(f32::from(settings.warmth)),
+            white_balance: Arc::new(HashMap::new()),
             plan: None,
             plan_generation: 0,
             devices: Vec::new(),
@@ -447,6 +454,22 @@ impl Engine for CoreEngine {
         self.mutate(|state| state.brightness = clamped);
     }
 
+    fn set_warmth(&self, kelvin: u16) {
+        let gains = warmth_gains(f32::from(kelvin));
+        self.mutate(|state| state.warmth = gains);
+    }
+
+    fn set_white_balance(&self, balances: HashMap<DeviceId, WhiteBalance>) {
+        // An invalid entry is neutral: the API refuses one, so this only guards the trait.
+        let gains: HashMap<DeviceId, [f32; 3]> = balances
+            .into_iter()
+            .filter(|(_, wb)| wb.is_valid() && *wb != WhiteBalance::NEUTRAL)
+            .map(|(id, wb)| (id, wb.gains()))
+            .collect();
+        let gains = Arc::new(gains);
+        self.mutate(|state| state.white_balance = gains);
+    }
+
     fn add_sink(&self, device: DeviceId, sink: Arc<dyn FrameSink>) {
         let device_id = device.clone();
         self.mutate(|state| {
@@ -722,6 +745,8 @@ fn render_loop(engine: Arc<CoreEngine>) {
             effect_panicked,
             pending_props,
             brightness,
+            warmth,
+            white_balance,
             preview_on,
             input_source,
             effect_start,
@@ -765,6 +790,8 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 state.effect_panicked,
                 pending_props,
                 state.brightness,
+                state.warmth,
+                Arc::clone(&state.white_balance),
                 state.preview.is_some(),
                 state.input_source.clone(),
                 state.effect_started,
@@ -901,15 +928,14 @@ fn render_loop(engine: Arc<CoreEngine>) {
             // count comes from the device topology, so a zone that changed size
             // between the layout and the device list cannot shorten the frame.
             device_colors.resize(device.led_count as usize, Rgb8::BLACK);
-            // Apply the brightness to the sampled colors.
-            if brightness_factor < 1.0 {
+            // Apply the brightness, the warmth stage and this device's white balance
+            // (#50) to the sampled colors, as one gain per channel.
+            let balance = white_balance.get(&device.device_id).copied().unwrap_or([1.0; 3]);
+            let gain = [0, 1, 2].map(|i| brightness_factor * warmth[i] * balance[i]);
+            if gain.iter().any(|g| *g < 1.0) {
                 for c in device_colors.iter_mut() {
                     let f = c.to_f32();
-                    *c = Rgb8::from_f32([
-                        f[0] * brightness_factor,
-                        f[1] * brightness_factor,
-                        f[2] * brightness_factor,
-                    ]);
+                    *c = Rgb8::from_f32([f[0] * gain[0], f[1] * gain[1], f[2] * gain[2]]);
                 }
             }
             // Keep this device's last good colours (#145): a device that needs a frame
@@ -1126,7 +1152,7 @@ mod frame_window_tests {
 
 
     fn state() -> State {
-        State::new(&EngineSettings { fps: 60, power: Power::Running, brightness: 100 })
+        State::new(&EngineSettings { fps: 60, power: Power::Running, brightness: 100, warmth: canvas_proto::consts::WARMTH_OFF })
     }
 
     #[test]
@@ -1168,6 +1194,7 @@ mod power_tests {
             fps: 60,
             power: Power::Running,
             brightness: 100,
+            warmth: canvas_proto::consts::WARMTH_OFF,
         })
     }
 

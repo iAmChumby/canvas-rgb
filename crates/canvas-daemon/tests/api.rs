@@ -3891,3 +3891,116 @@ async fn the_persisted_audio_source_pick_is_applied_at_startup() {
         name_hint: "Microphone".to_string(),
     });
 }
+
+// ---------------------------------------------------------------- #50 warmth and white balance
+
+#[tokio::test]
+async fn the_warmth_is_validated_applied_and_saved() {
+    let (router, app, fake, home) = build_with_engine();
+    for bad in [r#"{"warmth":1000}"#, r#"{"warmth":7000}"#] {
+        let response = router
+            .clone()
+            .oneshot(request_with_body("PATCH", routes::OUTPUT, bad))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{bad}");
+    }
+    assert_eq!(app.store.read().await.config.settings.warmth, canvas_proto::consts::WARMTH_OFF);
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PATCH", routes::OUTPUT, r#"{"warmth":2700}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await.get("warmth").and_then(|v| v.as_u64()), Some(2700));
+    assert_eq!(fake.warmth.load(std::sync::atomic::Ordering::SeqCst), 2700);
+    let saved = std::fs::read_to_string(home.path.join("config.toml")).expect("the config is saved");
+    assert!(saved.contains("warmth = 2700"), "{saved}");
+
+    // A PATCH that only pauses leaves the warmth alone.
+    let response = router
+        .oneshot(request_with_body("PATCH", routes::OUTPUT, r#"{"power":"paused"}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(json(response).await.get("warmth").and_then(|v| v.as_u64()), Some(2700));
+}
+
+#[tokio::test]
+async fn a_settings_put_out_of_range_warmth_is_refused() {
+    let (router, app, _home) = build();
+    let mut settings = app.store.read().await.config.settings.clone();
+    settings.warmth = 100;
+    let body = serde_json::to_string(&settings).unwrap();
+    let response = router
+        .oneshot(request_with_body("PUT", routes::SETTINGS, &body))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn a_white_balance_is_validated_applied_saved_and_cleared() {
+    let (router, app, fake, home) = build_with_engine();
+    let path = routes::DEVICE_WHITE_BALANCE.replace("{id}", "openrgb:KB-1");
+    for bad in [
+        r#"{"red":1.5,"green":1,"blue":1}"#,
+        r#"{"red":-0.1,"green":1,"blue":1}"#,
+        r#"{"red":1,"green":1}"#,
+    ] {
+        let response = router
+            .clone()
+            .oneshot(request_with_body("PUT", &path, bad))
+            .await
+            .expect("the router answers");
+        assert!(response.status().is_client_error(), "{bad} answered {}", response.status());
+    }
+    assert!(app.store.read().await.config.white_balance.is_empty());
+
+    // The device need not be connected: the gains are kept by fingerprint.
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PUT", &path, r#"{"red":1,"green":0.8,"blue":0.6}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    assert_eq!(body["devices"]["openrgb:KB-1"]["green"].as_f64().map(|v| (v * 100.0).round()), Some(80.0), "{body}");
+    let want = canvas_proto::color::WhiteBalance { red: 1.0, green: 0.8, blue: 0.6 };
+    let id = canvas_proto::device::DeviceId("openrgb:KB-1".into());
+    assert_eq!(fake.white_balance.lock().unwrap().get(&id), Some(&want));
+    let saved = std::fs::read_to_string(home.path.join("config.toml")).expect("the config is saved");
+    assert!(saved.contains("openrgb:KB-1"), "{saved}");
+
+    let response = router
+        .clone()
+        .oneshot(request("GET", routes::WHITE_BALANCE))
+        .await
+        .expect("the router answers");
+    assert_eq!(json(response).await["devices"]["openrgb:KB-1"]["blue"].as_f64().map(|v| (v * 100.0).round()), Some(60.0));
+
+    // DELETE is neutral again, and a neutral balance is stored as no entry.
+    let response = router
+        .clone()
+        .oneshot(request("DELETE", &path))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert!(app.store.read().await.config.white_balance.is_empty());
+    assert!(fake.white_balance.lock().unwrap().is_empty());
+
+    // A whole-object settings write never touches the white balance.
+    router
+        .clone()
+        .oneshot(request_with_body("PUT", &path, r#"{"red":0.9,"green":1,"blue":1}"#))
+        .await
+        .expect("the router answers");
+    let settings = serde_json::to_string(&app.store.read().await.config.settings).unwrap();
+    assert!(!settings.contains("white_balance"), "{settings}");
+    let response = router
+        .oneshot(request_with_body("PUT", routes::SETTINGS, &settings))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.store.read().await.config.white_balance.len(), 1);
+}

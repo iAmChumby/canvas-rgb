@@ -369,6 +369,7 @@ async fn an_audio_effect_reads_the_source_and_lights_the_sink() {
         fps: 30,
         power: canvas_proto::api::Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let app = Arc::new(App::new(

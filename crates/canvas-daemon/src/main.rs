@@ -149,7 +149,9 @@ async fn daemon_main(fakes: bool) -> Exit {
         fps: settings.fps,
         power: settings.power,
         brightness: settings.brightness,
+        warmth: settings.warmth,
     });
+    engine.set_white_balance(canvas_daemon::api::devices::white_balance_map(&store.config));
 
     // The OpenRGB adapter, on the port the config names, with the native adapters beside it.
     // In fakes mode it talks to the fake OpenRGB server on the fake port, and

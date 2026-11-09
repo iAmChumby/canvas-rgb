@@ -39,8 +39,11 @@ pub async fn put_settings(
         )));
     }
 
+    crate::api::output::validate_warmth(settings.warmth)?;
+
     app.engine.set_fps(settings.fps);
     app.engine.set_brightness(settings.brightness);
+    app.engine.set_warmth(settings.warmth);
     // The HTML budget a stack's layers are held to follows the frame rate.
     app.stacks.set_fps(settings.fps);
     let current_power = app.store.read().await.config.settings.power;
@@ -312,7 +315,10 @@ pub async fn config_import(
         let settings = app.store.read().await.config.settings.clone();
         app.engine.set_fps(settings.fps);
         app.engine.set_brightness(settings.brightness);
+        app.engine.set_warmth(settings.warmth);
         app.engine.set_power(settings.power);
+        let balances = crate::api::devices::white_balance_map(&app.store.read().await.config);
+        app.engine.set_white_balance(balances);
         app.stacks.set_fps(settings.fps);
         if let Some(layout) = app.active_layout().await {
             let devices = app.devices.read().await.clone();
@@ -327,7 +333,7 @@ pub async fn config_import(
 
 /// The output state after an import, for the CLI.
 pub fn output_state(settings: &Settings) -> OutputState {
-    OutputState { power: settings.power, brightness: settings.brightness }
+    OutputState { power: settings.power, brightness: settings.brightness, warmth: settings.warmth }
 }
 
 /// A default config, for the tests.

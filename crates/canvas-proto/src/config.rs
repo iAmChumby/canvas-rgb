@@ -7,7 +7,8 @@
 //! request over the pipe.
 
 use crate::api::Power;
-use crate::color::Rgb8;
+use crate::color::{Rgb8, WhiteBalance};
+use crate::device::DeviceId;
 use crate::fans::{FanProfile, DEFAULT_FLOOR_PERCENT};
 use crate::layout::Layout;
 use crate::props::{Preset, Props};
@@ -54,6 +55,16 @@ pub struct Settings {
     pub boot_color: Option<Rgb8>,
     pub brightness: u8,
     pub power: Power,
+    /// #50: the global warmth stage, a colour temperature in kelvin
+    /// ([`crate::consts::WARMTH_MIN`]..=[`crate::consts::WARMTH_OFF`]). At
+    /// [`crate::consts::WARMTH_OFF`] it changes nothing; below, every effect is shifted
+    /// warmer ([`crate::color::warmth_gains`]). Configs saved before it load as off.
+    #[serde(default = "warmth_off")]
+    pub warmth: u16,
+}
+
+fn warmth_off() -> u16 {
+    crate::consts::WARMTH_OFF
 }
 
 impl Default for Settings {
@@ -65,6 +76,7 @@ impl Default for Settings {
             boot_color: None,
             brightness: 100,
             power: Power::Running,
+            warmth: crate::consts::WARMTH_OFF,
         }
     }
 }
@@ -89,6 +101,11 @@ pub struct ConfigFile {
     /// must never undo a pick. Configs saved before it load as `FollowDefault`.
     #[serde(default)]
     pub audio_source: crate::audio::AudioSource,
+    /// #50: each device's white balance, by device fingerprint. Outside `Settings` for the
+    /// same reason as `audio_source`; `PUT /api/v1/devices/{id}/white-balance` is its only
+    /// writer. A device with no entry is neutral. Configs saved before it load empty.
+    #[serde(default)]
+    pub white_balance: BTreeMap<DeviceId, WhiteBalance>,
 }
 
 impl Default for ConfigFile {
@@ -102,6 +119,7 @@ impl Default for ConfigFile {
             onboarding_complete: false,
             settings: Settings::default(),
             audio_source: crate::audio::AudioSource::FollowDefault,
+            white_balance: BTreeMap::new(),
         }
     }
 }

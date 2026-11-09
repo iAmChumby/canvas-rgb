@@ -1,6 +1,6 @@
 //! White: a white of one colour temperature, warm to cool, across the whole canvas.
 
-use crate::color::{KELVIN_MAX, KELVIN_MIN, kelvin_to_rgb};
+use crate::color::{KELVIN_MAX, KELVIN_MIN, kelvin_to_led};
 use crate::props_util as p;
 use crate::schema::{SchemaBuilder, num};
 use canvas_proto::{Canvas, Effect, PropertySchema, Props};
@@ -53,7 +53,9 @@ impl Effect for White {
     }
 
     fn init(&mut self, props: &Props) {
-        self.color = kelvin_to_rgb(p::number(&self.schema, props, "temperature") as f32);
+        // LED drive levels, not display values: sent unchanged, the display white reads
+        // yellow on an LED instead of amber (#50, `canvas_proto::color::kelvin_to_led`).
+        self.color = kelvin_to_led(p::number(&self.schema, props, "temperature") as f32);
     }
 
     fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::Inputs) {
@@ -84,7 +86,7 @@ mod tests {
     fn every_pixel_is_the_white_of_the_chosen_temperature() {
         for k in [1800.0, 2700.0, 4000.0, 6500.0] {
             let canvas = render(&at(k));
-            let want = kelvin_to_rgb(k as f32);
+            let want = kelvin_to_led(k as f32);
             assert!(canvas.pixels.iter().all(|p| *p == want), "{k} K is not one flat {want:?}");
         }
     }
@@ -92,7 +94,7 @@ mod tests {
     #[test]
     fn the_default_is_a_neutral_white() {
         let canvas = render(&Props::new());
-        assert_eq!(canvas.pixels[0], kelvin_to_rgb(DEFAULT_KELVIN as f32));
+        assert_eq!(canvas.pixels[0], kelvin_to_led(DEFAULT_KELVIN as f32));
     }
 
     #[test]
@@ -104,12 +106,20 @@ mod tests {
         };
         let (warm, cool) = (preset("Warm"), preset("Cool"));
         assert!(warm[2] < cool[2], "Warm is no warmer than Cool: {warm:?} vs {cool:?}");
-        assert_eq!(warm, kelvin_to_rgb(2700.0));
+        assert_eq!(warm, kelvin_to_led(2700.0));
+    }
+
+    /// #50 regression: v0.10.0 sent the display white, 1800 K = #ff7e1f, which the lights
+    /// showed far less warm than the Govee lamps.
+    #[test]
+    fn the_warm_end_drives_the_leds_amber() {
+        let c = canvas_proto::Rgb8::from_f32(render(&at(1800.0)).pixels[0]);
+        assert_eq!(c.to_hex(), "#ff3603");
     }
 
     #[test]
     fn a_temperature_outside_the_slider_is_clamped() {
-        assert_eq!(render(&at(500.0)).pixels[0], kelvin_to_rgb(KELVIN_MIN));
-        assert_eq!(render(&at(99_000.0)).pixels[0], kelvin_to_rgb(KELVIN_MAX));
+        assert_eq!(render(&at(500.0)).pixels[0], kelvin_to_led(KELVIN_MIN));
+        assert_eq!(render(&at(99_000.0)).pixels[0], kelvin_to_led(KELVIN_MAX));
     }
 }
