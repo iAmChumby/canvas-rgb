@@ -330,6 +330,7 @@ fn settings(fps: u32) -> EngineSettings {
         fps,
         power: Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     }
 }
 

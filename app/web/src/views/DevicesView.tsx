@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, type CSSProperties, type ReactElement } from "react";
+import { useEffect, useState, type CSSProperties, type ReactElement } from "react";
 import {
   ArrowClockwise,
   Cpu,
@@ -11,16 +11,22 @@ import {
   Microphone,
   Mouse,
   Plugs,
+  SlidersHorizontal,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
+import { Slider } from "@/components/Slider";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
+import { api } from "@/lib/endpoints";
+import { messageOf } from "@/lib/errors";
 import { refreshDevices, retryDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
+import type { WhiteBalance } from "@/proto/WhiteBalance";
+import type { WhiteBalances } from "@/proto/WhiteBalances";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { IdentifyWalker } from "@/views/editor/IdentifyWalker";
@@ -150,6 +156,96 @@ interface WalkTarget {
   zoneIndex: number;
 }
 
+const NEUTRAL: WhiteBalance = { red: 1, green: 1, blue: 1 };
+
+const CHANNELS = [
+  { key: "red", label: "Red" },
+  { key: "green", label: "Green" },
+  { key: "blue", label: "Blue" },
+] as const;
+
+type Channel = (typeof CHANNELS)[number]["key"];
+
+/** What pure white becomes on a device with these gains. */
+function swatchOf(wb: WhiteBalance): string {
+  return `rgb(${Math.round(255 * wb.red)}, ${Math.round(255 * wb.green)}, ${Math.round(255 * wb.blue)})`;
+}
+
+function isNeutral(wb: WhiteBalance): boolean {
+  return wb.red === 1 && wb.green === 1 && wb.blue === 1;
+}
+
+/**
+ * One device's white balance (#50), opened under its row from the row's Balance key, like the
+ * Size walker: one gain per LED channel, shown as 0..100 %. Reset is there only while the
+ * device is not neutral.
+ */
+function WhiteBalanceSection({
+  device,
+  name,
+  shown,
+  saved,
+  onDraft,
+  onPut,
+  onReset,
+  onClose,
+  error,
+}: {
+  device: DeviceInfo;
+  name: string;
+  shown: WhiteBalance;
+  saved: WhiteBalance;
+  onDraft: (deviceId: string, wb: WhiteBalance) => void;
+  onPut: (deviceId: string, wb: WhiteBalance) => Promise<void>;
+  onReset: (deviceId: string) => Promise<void>;
+  onClose: () => void;
+  error: string | null;
+}) {
+  const commit = (channel: Channel) => (pct: number) => {
+    void onPut(device.id, { ...shown, [channel]: pct / 100 });
+  };
+  const drag = (channel: Channel) => (pct: number) => {
+    onDraft(device.id, { ...shown, [channel]: pct / 100 });
+  };
+
+  return (
+    <div className="rd-wb" role="group" aria-label={`White balance channels for ${name}`}>
+      <div className="rd-wb-head">
+        <span className="wb-swatch" style={{ backgroundColor: swatchOf(shown) }} aria-hidden="true" />
+        <span className="rd-wb-title">White balance</span>
+        <span className="mute rd-wb-hint">
+          Show White on every light, then lower the channel this one has too much of until it matches.
+        </span>
+        {!isNeutral(saved) && (
+          <Button size="sm" variant="ghost" onClick={() => void onReset(device.id)}>
+            Reset
+          </Button>
+        )}
+        <Button size="sm" onClick={onClose}>
+          Done
+        </Button>
+      </div>
+      <div className="rd-wb-rows">
+        {CHANNELS.map(({ key, label }) => (
+          <div className="rd-wb-row" key={key} data-channel={key}>
+            <span className="rd-wb-label">{label}</span>
+            <Slider
+              label={`${label} gain for ${name}`}
+              min={0}
+              max={100}
+              value={Math.round(shown[key] * 100)}
+              onChange={drag(key)}
+              onCommit={commit(key)}
+            />
+            <span className="fig rd-wb-fig">{Math.round(shown[key] * 100)}%</span>
+          </div>
+        ))}
+      </div>
+      {error && <p className="error-line">{error}</p>}
+    </div>
+  );
+}
+
 export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
@@ -187,6 +283,68 @@ export function DevicesView() {
 
   const walkDevice = devices?.find((d) => d.id === walk?.deviceId) ?? null;
   const walkZone = walkDevice?.zones.find((z) => z.index === walk?.zoneIndex) ?? null;
+
+  // The white balances, read once when the view mounts (#50); a device not listed is neutral.
+  const [whiteBalances, setWhiteBalances] = useState<WhiteBalances | null>(null);
+  const [wbDrafts, setWbDrafts] = useState<Record<string, WhiteBalance>>({});
+  const [wbError, setWbError] = useState<string | null>(null);
+  // The one device whose white balance is open under its row, if any.
+  const [wbOpen, setWbOpen] = useState<string | null>(null);
+  useEffect(() => {
+    let live = true;
+    api
+      .getWhiteBalance()
+      .then((wb) => {
+        if (live) setWhiteBalances(wb);
+      })
+      .catch((e: unknown) => {
+        if (live) setWbError(messageOf(e));
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
+
+  const wbDraft = (deviceId: string, wb: WhiteBalance) =>
+    setWbDrafts((d) => ({ ...d, [deviceId]: wb }));
+
+  const wbPut = async (deviceId: string, wb: WhiteBalance) => {
+    try {
+      setWhiteBalances(await api.putWhiteBalance(deviceId, wb));
+      // A drag that started while this PUT was out keeps its draft: only the draft this PUT
+      // sent is cleared.
+      setWbDrafts((d) => {
+        const cur = d[deviceId];
+        if (cur && (cur.red !== wb.red || cur.green !== wb.green || cur.blue !== wb.blue)) return d;
+        const next = { ...d };
+        delete next[deviceId];
+        return next;
+      });
+      setWbError(null);
+    } catch (e) {
+      // The control goes back to the value the daemon has: nothing fails silently.
+      setWbDrafts((d) => {
+        const next = { ...d };
+        delete next[deviceId];
+        return next;
+      });
+      setWbError(messageOf(e));
+    }
+  };
+
+  const wbReset = async (deviceId: string) => {
+    try {
+      setWhiteBalances(await api.deleteWhiteBalance(deviceId));
+      setWbDrafts((d) => {
+        const next = { ...d };
+        delete next[deviceId];
+        return next;
+      });
+      setWbError(null);
+    } catch (e) {
+      setWbError(messageOf(e));
+    }
+  };
 
   // The list in the order it is read: what is not there first, then by kind.
   const sorted = [...(devices ?? [])].sort((a, b) => {
@@ -276,6 +434,8 @@ export function DevicesView() {
             const accent = ACCENTS[sorted.indexOf(d) % ACCENTS.length];
             const tag = deviceTag(d);
             const sameName = (devices ?? []).filter((x) => x.name === d.name).length > 1;
+            // The name the row shows, so two devices of one model get two different labels.
+            const shownName = `${d.name}${sameName && tag ? ` ${tag}` : ""}`;
             const sub = `${KIND_LABEL[d.kind]} · ${d.vendor} · ${d.adapter} #${d.adapter_index}${tag ? ` · ${tag}` : ""}`;
             // The zones of a device that has one are the device's own row; a device with
             // several gets a row of its own and a row for each of its zones.
@@ -305,6 +465,24 @@ export function DevicesView() {
                       <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
                     </span>
                   )}
+                  {(() => {
+                    const wb = wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL;
+                    const open = wbOpen === d.id;
+                    return (
+                      <Button
+                        size="sm"
+                        className="wb-key"
+                        variant={open ? "primary" : "default"}
+                        aria-expanded={open}
+                        aria-label={`White balance for ${shownName}${isNeutral(wb) ? "" : " (set)"}`}
+                        icon={<span className="wb-swatch" style={{ backgroundColor: swatchOf(wb) }} aria-hidden="true" />}
+                        onClick={() => setWbOpen(open ? null : d.id)}
+                      >
+                        <span className="wb-key-text">Balance</span>
+                        <SlidersHorizontal size={14} className="wb-key-glyph" aria-hidden="true" />
+                      </Button>
+                    );
+                  })()}
                   <span className={`state ${d.connected ? "" : "down-text"}`} style={{ "--tone": d.connected ? "var(--ok)" : "var(--down)" } as CSSProperties}>
                     <span className="state-dot" aria-hidden="true" />
                     {d.connected ? "connected" : "disconnected"}
@@ -377,6 +555,20 @@ export function DevicesView() {
                       onClose={() => setWalk(null)}
                     />
                   </div>
+                )}
+
+                {wbOpen === d.id && (
+                  <WhiteBalanceSection
+                    device={d}
+                    name={shownName}
+                    shown={wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL}
+                    saved={whiteBalances?.devices[d.id] ?? NEUTRAL}
+                    onDraft={wbDraft}
+                    onPut={wbPut}
+                    onReset={wbReset}
+                    onClose={() => setWbOpen(null)}
+                    error={wbError}
+                  />
                 )}
               </section>
             );

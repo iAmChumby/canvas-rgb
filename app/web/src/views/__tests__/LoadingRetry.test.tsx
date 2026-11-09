@@ -147,6 +147,7 @@ describe("a refresh that fails after the content is on screen", () => {
         boot_color: "#6000fc",
         brightness: 100,
         power: "running",
+        warmth: 6500,
       },
       settingsError: "could not read the settings: the request came back with an error",
     });

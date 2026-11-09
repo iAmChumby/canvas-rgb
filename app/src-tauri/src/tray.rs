@@ -467,7 +467,7 @@ fn on_menu_event<R: Runtime>(app: &AppHandle<R>, id: &str) {
         let power = if power == "paused" { Power::Paused } else { Power::Running };
         act(app, "set lighting power", move |client| {
             client
-                .patch::<_, serde_json::Value>(routes::OUTPUT, &PatchOutput { power: Some(power), brightness: None })
+                .patch::<_, serde_json::Value>(routes::OUTPUT, &PatchOutput { power: Some(power), ..PatchOutput::default() })
                 .map(drop)
         });
     } else if let Some(effect) = id.strip_prefix("effect:") {

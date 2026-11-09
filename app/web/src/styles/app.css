@@ -3517,6 +3517,102 @@ button.chip:hover {
   color: var(--down);
 }
 
+/* White balance (#50): the Balance key in a device's row opens one device's channels under the
+   row, like the Size walker. The swatch is square: it is a colour, not a switch. */
+.rd-devices .wb-swatch {
+  display: inline-block;
+  width: 12px;
+  height: 12px;
+  flex: none;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+}
+
+.rd-devices .wb-key {
+  flex: none;
+}
+
+/* The glyph stands in for the word on a phone only. */
+.rd-devices .wb-key-glyph {
+  display: none;
+}
+
+.rd-devices .rd-wb {
+  padding: var(--s3) var(--s4) var(--s4) calc(var(--s4) + var(--s8) + var(--s3));
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.rd-devices .rd-wb-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.rd-devices .rd-wb-title {
+  flex: none;
+  font-weight: 600;
+}
+
+.rd-devices .rd-wb-hint {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  font-size: var(--t14);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* Three channels side by side where there is room, one under another where there is not. */
+.rd-devices .rd-wb-rows {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--s2) var(--s4);
+}
+
+.rd-devices .rd-wb-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+.rd-devices .rd-wb-label {
+  flex: 0 0 44px;
+}
+
+.rd-devices .rd-wb-row .slider {
+  flex: 1 1 80px;
+  min-width: 64px;
+}
+
+.rd-devices .rd-wb-fig {
+  flex: none;
+  min-width: 40px;
+  text-align: right;
+}
+
+@media (max-width: 760px) {
+  .rd-devices .rd-wb {
+    padding-left: var(--s4);
+  }
+  .rd-devices .rd-wb-rows {
+    grid-template-columns: 1fr;
+  }
+  .rd-devices .rd-wb-head {
+    flex-wrap: wrap;
+  }
+  .rd-devices .rd-wb-hint {
+    flex-basis: 100%;
+    order: 9;
+    white-space: normal;
+  }
+}
+
 /* A device with several zones: a header row, then one indented row per zone. */
 .rd-devices .rd-zone {
   display: flex;
@@ -3685,8 +3781,11 @@ button.chip:hover {
     order: 2;
   }
 
+  /* A small basis that grows: the line wraps by basis, so 150px pushed the Balance key (#50)
+     onto a third line. */
   .rd-devices .rd-dev-row .rd-dev-sub {
-    flex: 0 1 150px;
+    flex: 1 1 80px;
+    min-width: 0;
     order: 3;
   }
 
@@ -3708,6 +3807,20 @@ button.chip:hover {
     order: 6;
     min-width: 0;
     margin-left: auto;
+  }
+
+  /* The Balance key (#50) ends the second line, after the count and any Size key: its swatch
+     alone, so it fits there (the key keeps its spoken name). */
+  .rd-devices .rd-dev-row .wb-key {
+    order: 7;
+  }
+
+  .rd-devices .rd-dev-row .wb-key-text {
+    display: none;
+  }
+
+  .rd-devices .rd-dev-row .wb-key-glyph {
+    display: inline-block;
   }
 
   .rd-devices .rd-zone {

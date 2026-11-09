@@ -75,43 +75,11 @@ pub fn saturate(c: Rgb, amount: f32) -> Rgb {
     out
 }
 
-/// The warmest colour temperature [`kelvin_to_rgb`] draws, in kelvin.
-pub const KELVIN_MIN: f32 = 1800.0;
-/// The coolest colour temperature [`kelvin_to_rgb`] draws, in kelvin.
-pub const KELVIN_MAX: f32 = 6500.0;
-/// The least blue a white ever gets, 0..1.
-///
-/// A blackbody below about 2100 K has almost no blue, and an RGB LED with its blue off
-/// reads as orange, not as a warm white, the more so when it is dimmed. Holding blue at
-/// this floor keeps the warm end a white.
-pub const KELVIN_BLUE_FLOOR: f32 = 0.12;
-
-/// A white of colour temperature `kelvin`, as RGB in 0..1.
-///
-/// The curve is Tanner Helland's fit to the blackbody colours, the one most LED tools use.
-/// `kelvin` is clamped to [`KELVIN_MIN`]..=[`KELVIN_MAX`]; a non-finite value draws the
-/// warmest white. Over that range red stays full and green and blue rise with the
-/// temperature, so 6500 K is close to a neutral white.
-pub fn kelvin_to_rgb(kelvin: f32) -> Rgb {
-    let k = if kelvin.is_finite() { kelvin.clamp(KELVIN_MIN, KELVIN_MAX) } else { KELVIN_MIN };
-    // The fit works in hundreds of kelvin and gives 0..255 per channel.
-    let t = (k / 100.0) as f64;
-    let red = if t <= 66.0 { 255.0 } else { 329.698_727_446 * (t - 60.0).powf(-0.133_204_759_2) };
-    let green = if t <= 66.0 {
-        99.470_802_586_1 * t.ln() - 161.119_568_166_1
-    } else {
-        288.122_169_528_3 * (t - 60.0).powf(-0.075_514_849_2)
-    };
-    let blue = if t >= 66.0 {
-        255.0
-    } else if t <= 19.0 {
-        0.0
-    } else {
-        138.517_731_223_1 * (t - 10.0).ln() - 305.044_792_730_7
-    };
-    let unit = |v: f64| (v / 255.0).clamp(0.0, 1.0) as f32;
-    [unit(red), unit(green), unit(blue).max(KELVIN_BLUE_FLOOR)]
-}
+// The colour-temperature curve lives in the spine, so the engine's warmth stage and the
+// White effect use the same numbers.
+pub use canvas_proto::color::{
+    kelvin_to_led, kelvin_to_rgb, srgb_to_linear, KELVIN_BLUE_FLOOR, KELVIN_MAX, KELVIN_MIN,
+};
 
 #[cfg(test)]
 mod tests {

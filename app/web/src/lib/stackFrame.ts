@@ -2,7 +2,7 @@
 // own blend maths (D95.3.3). Used by the builder's preview feed and the stack's library tile; a
 // real daemon draws both itself.
 
-import { kelvinToRgb } from "@/lib/kelvin";
+import { kelvinToLed } from "@/lib/kelvin";
 import { demoFrameFor, THUMB_FRAMES, THUMB_H, THUMB_W } from "@/lib/thumb-demo";
 import type { Layout } from "@/proto/Layout";
 import type { PropValue } from "@/proto/PropValue";
@@ -37,7 +37,7 @@ function demoLayerPicture(layer: StackLayer, width: number, height: number, seco
   if (layer.effect === "solid" || layer.effect === "white") {
     const [r, g, b] =
       layer.effect === "white"
-        ? kelvinToRgb(numberProp(layer, "temperature", 4000))
+        ? kelvinToLed(numberProp(layer, "temperature", 4000))
         : colorOf(layer.props.color, "#6000fc");
     const out = new Uint8Array(width * height * 3);
     for (let i = 0; i < width * height; i++) {

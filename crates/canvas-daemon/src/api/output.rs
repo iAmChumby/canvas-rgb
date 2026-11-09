@@ -1,4 +1,4 @@
-//! `GET/PATCH /api/v1/output`: the global power state and brightness.
+//! `GET/PATCH /api/v1/output`: the global power state, brightness and warmth (#50).
 
 use axum::extract::State;
 use axum::Json;
@@ -14,6 +14,7 @@ pub async fn get_output(State(app): State<Arc<App>>) -> Json<OutputState> {
     let state = OutputState {
         power: state.config.settings.power,
         brightness: state.config.settings.brightness,
+        warmth: state.config.settings.warmth,
     };
     Json(state)
 }
@@ -21,19 +22,29 @@ pub async fn get_output(State(app): State<Arc<App>>) -> Json<OutputState> {
 /// `PATCH /api/v1/output`.
 ///
 /// `power: "paused"` writes black once and then stops the render loop; `"running"`
-/// resumes it. `brightness` is 0..100.
+/// resumes it. `brightness` is 0..100. `warmth` is kelvin,
+/// [`canvas_proto::consts::WARMTH_MIN`]..=[`canvas_proto::consts::WARMTH_OFF`].
 #[axum::debug_handler]
 pub async fn patch_output(
     State(app): State<Arc<App>>,
     Json(patch): Json<PatchOutput>,
 ) -> ApiResult<Json<OutputState>> {
+    // Everything is validated before anything is applied: a refused PATCH changes nothing.
     if let Some(brightness) = patch.brightness {
         if brightness > 100 {
             return Err(crate::api::ApiFailure::validation(format!(
                 "brightness must be 0..100, got {brightness}"
             )));
         }
+    }
+    if let Some(warmth) = patch.warmth {
+        validate_warmth(warmth)?;
+    }
+    if let Some(brightness) = patch.brightness {
         app.engine.set_brightness(brightness);
+    }
+    if let Some(warmth) = patch.warmth {
+        app.engine.set_warmth(warmth);
     }
     if let Some(power) = patch.power {
         apply_power(&app, power)?;
@@ -48,6 +59,9 @@ pub async fn patch_output(
         if let Some(brightness) = patch.brightness {
             store.config.settings.brightness = brightness;
         }
+        if let Some(warmth) = patch.warmth {
+            store.config.settings.warmth = warmth;
+        }
         if let Some(power) = patch.power {
             store.config.settings.power = power;
         }
@@ -57,6 +71,17 @@ pub async fn patch_output(
     }
 
     Ok(Json(get_output(State(app)).await.0))
+}
+
+/// #50: the warmth stage takes [`canvas_proto::consts::WARMTH_MIN`]..=[`canvas_proto::consts::WARMTH_OFF`] kelvin.
+pub fn validate_warmth(warmth: u16) -> ApiResult<()> {
+    use canvas_proto::consts::{WARMTH_MIN, WARMTH_OFF};
+    if !(WARMTH_MIN..=WARMTH_OFF).contains(&warmth) {
+        return Err(crate::api::ApiFailure::validation(format!(
+            "warmth must be {WARMTH_MIN}..={WARMTH_OFF} K, got {warmth}"
+        )));
+    }
+    Ok(())
 }
 
 /// Applies a power state to the engine and logs why.

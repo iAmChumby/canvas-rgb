@@ -44,6 +44,74 @@ describe("the demo's header availability answer (#146)", () => {
   });
 });
 
+describe("the demo's white balance (#50)", () => {
+  const deviceId = "openrgb:strip-1";
+  const put = (gain: number) =>
+    demoRequest("PUT", `/api/v1/devices/${encodeURIComponent(deviceId)}/white-balance`, {
+      red: gain,
+      green: 1,
+      blue: 1,
+    });
+
+  it("answers an empty map, then PUT/GET/DELETE round-trip one device", async () => {
+    window.history.replaceState({}, "", "/devices/");
+    const empty = await demoRequest("GET", "/api/v1/white-balance", undefined) as { devices: unknown };
+    expect(empty.devices).toEqual({});
+    const putRes = await put(0.8) as { devices: Record<string, unknown> };
+    expect(putRes.devices[deviceId]).toEqual({ red: 0.8, green: 1, blue: 1 });
+    const got = await demoRequest("GET", "/api/v1/white-balance", undefined) as { devices: Record<string, unknown> };
+    expect(got.devices[deviceId]).toEqual({ red: 0.8, green: 1, blue: 1 });
+    const del = await demoRequest(
+      "DELETE",
+      `/api/v1/devices/${encodeURIComponent(deviceId)}/white-balance`,
+      undefined,
+    ) as { devices: Record<string, unknown> };
+    expect(del.devices[deviceId]).toBeUndefined();
+    expect(await demoRequest("GET", "/api/v1/white-balance", undefined)).toEqual({ devices: {} });
+  });
+
+  it("refuses a gain outside 0..1 with 422 validation, like the daemon", async () => {
+    window.history.replaceState({}, "", "/devices/");
+    const err = await put(1.5).then(
+      () => null,
+      (e: unknown) => e,
+    );
+    expect(err).toBeInstanceOf(ApiFailure);
+    expect((err as ApiFailure).status).toBe(422);
+    expect((err as ApiFailure).code).toBe("validation");
+  });
+
+  it("answers as the daemon: NaN refused, neutral stored as nothing, an unknown device kept", async () => {
+    window.history.replaceState({}, "", "/devices/");
+    const nan = await put(Number.NaN).then(() => null, (e: unknown) => e);
+    expect((nan as ApiFailure).status).toBe(422);
+    await put(0.5);
+    expect(await put(1)).toEqual({ devices: {} });
+    const other = await demoRequest("PUT", "/api/v1/devices/openrgb%3Anot-here/white-balance", {
+      red: 0.5,
+      green: 1,
+      blue: 1,
+    }) as { devices: Record<string, unknown> };
+    expect(other.devices["openrgb:not-here"]).toEqual({ red: 0.5, green: 1, blue: 1 });
+    await demoRequest("DELETE", "/api/v1/devices/openrgb%3Anot-here/white-balance", undefined);
+  });
+});
+
+describe("the demo's settings PUT (#50)", () => {
+  it("keeps the stored warmth when the body has none, and refuses one out of range", async () => {
+    window.history.replaceState({}, "", "/settings/");
+    const start = await demoRequest("GET", "/api/v1/settings", undefined) as Record<string, unknown>;
+    await demoRequest("PUT", "/api/v1/settings", { ...start, warmth: 2700 });
+    const old: Record<string, unknown> = { ...start };
+    delete old.warmth;
+    const kept = await demoRequest("PUT", "/api/v1/settings", old) as { warmth: number };
+    expect(kept.warmth).toBe(2700);
+    const err = await demoRequest("PUT", "/api/v1/settings", { ...start, warmth: 100 }).then(() => null, (e: unknown) => e);
+    expect((err as ApiFailure).status).toBe(422);
+    await demoRequest("PUT", "/api/v1/settings", start);
+  });
+});
+
 describe("the demo's value validator (#106)", () => {
   const device = {
     info: { id: "test:1", name: "Test", vendor: "", kind: "mouse", adapter: "test", serial: "", location: "" },

@@ -1,7 +1,7 @@
 // The demo's White colour matches the daemon's curve (#50).
 
 import { describe, expect, it } from "vitest";
-import { kelvinToRgb } from "@/lib/kelvin";
+import { kelvinToLed, kelvinToRgb } from "@/lib/kelvin";
 import { composeStack } from "@/lib/stackFrame";
 import type { Stack } from "@/proto/Stack";
 
@@ -19,8 +19,15 @@ describe("kelvinToRgb", () => {
   });
 });
 
+describe("kelvinToLed", () => {
+  it("decodes the display white to linear light, as the daemon sends it (#50)", () => {
+    expect(kelvinToLed(1800)).toEqual([255, 54, 3]);
+    expect(kelvinToLed(2700)).toEqual([255, 98, 25]);
+  });
+});
+
 describe("a White layer in a demo stack", () => {
-  it("draws one flat white of its temperature", () => {
+  it("draws one flat LED white of its temperature", () => {
     const stack: Stack = {
       id: "stack:test",
       layers: [
@@ -38,7 +45,7 @@ describe("a White layer in a demo stack", () => {
     };
     const frame = composeStack(stack, null, 0.5, 16, 10);
     for (let i = 0; i < 16 * 10; i++) {
-      expect([frame[i * 3], frame[i * 3 + 1], frame[i * 3 + 2]]).toEqual([255, 167, 87]);
+      expect([frame[i * 3], frame[i * 3 + 1], frame[i * 3 + 2]]).toEqual([255, 98, 25]);
     }
   });
 });

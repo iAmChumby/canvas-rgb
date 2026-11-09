@@ -178,6 +178,8 @@ interface DemoState {
   audioLeases: Record<string, { listen: boolean }>;
   /** The next audio lease counter. */
   audioLeaseCounter: number;
+  /** The per-device white balances (#50), by device id; a device not listed is neutral. */
+  whiteBalances: Record<string, { red: number; green: number; blue: number }>;
 }
 
 /**
@@ -326,6 +328,7 @@ function initialState(): DemoState {
     audioSource: { kind: "follow_default" },
     audioLeases: {},
     audioLeaseCounter: 0,
+    whiteBalances: {},
   };
 }
 
@@ -464,6 +467,29 @@ function endDraft(s: DemoState): DraftStatus {
     ...(note ? { note } : {}),
   };
 }
+
+/** What the demo answers for the white balances (#50): a copy, so a caller cannot mutate the state. */
+function whiteBalancesAnswer(s: DemoState) {
+  return {
+    devices: Object.fromEntries(
+      Object.entries(s.whiteBalances).map(([id, wb]) => [id, { ...wb }]),
+    ),
+  };
+}
+
+/** The daemon's own validation for one device's white balance (#50): every gain a finite 0..1. */
+function checkWhiteBalance(wb: { red: number; green: number; blue: number }): void {
+  for (const channel of ["red", "green", "blue"] as const) {
+    const gain = (wb as Record<string, unknown>)[channel];
+    if (typeof gain !== "number" || !Number.isFinite(gain) || gain < 0 || gain > 1) {
+      fail(422, "validation", `${channel} gain must be 0..1, got ${String(gain)}`);
+    }
+  }
+}
+
+/** The daemon's caps (`crates/canvas-daemon/src/api/devices.rs`). */
+const WHITE_BALANCE_MAX_DEVICES = 128;
+const WHITE_BALANCE_MAX_ID_LEN = 256;
 
 function activeLayout(): Layout {
   const found = st().layouts.find((l) => l.id === st().activeLayout);
@@ -1016,12 +1042,17 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "status") return method === "GET" ? statusNow() : bad();
 
   if (head === "output") {
-    if (method === "GET") return { power: s.settings.power, brightness: s.settings.brightness };
+    const out = () => ({ power: s.settings.power, brightness: s.settings.brightness, warmth: s.settings.warmth });
+    if (method === "GET") return out();
     if (method === "PATCH") {
-      const b = body as { power?: "running" | "paused" | null; brightness?: number | null };
+      const b = body as { power?: "running" | "paused" | null; brightness?: number | null; warmth?: number | null };
+      if (typeof b.warmth === "number" && (b.warmth < 1800 || b.warmth > 6500)) {
+        fail(422, "validation", `warmth must be 1800..=6500 K, got ${b.warmth}`);
+      }
       if (b.power) s.settings.power = b.power;
       if (typeof b.brightness === "number") s.settings.brightness = Math.max(0, Math.min(100, b.brightness));
-      return { power: s.settings.power, brightness: s.settings.brightness };
+      if (typeof b.warmth === "number") s.settings.warmth = b.warmth;
+      return out();
     }
     return bad();
   }
@@ -1080,6 +1111,37 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       (globalThis as { __identify?: unknown[] }).__identify?.push({ id, at: Date.now(), ...(body as object) });
       return { ok: true };
     }
+    if (seg.length === 3 && seg[2] === "white-balance") {
+      // As the daemon: the device need not be connected or known, the gains are kept by id.
+      const id = seg[1] ?? "";
+      if (id.length === 0 || new TextEncoder().encode(id).length > WHITE_BALANCE_MAX_ID_LEN) {
+        fail(422, "validation", `a device id is 1..=${WHITE_BALANCE_MAX_ID_LEN} bytes`);
+      }
+      if (method === "PUT") {
+        const wb = body as { red: number; green: number; blue: number };
+        checkWhiteBalance(wb);
+        if (wb.red === 1 && wb.green === 1 && wb.blue === 1) {
+          // Neutral is stored as no entry.
+          delete s.whiteBalances[id];
+          return whiteBalancesAnswer(s);
+        }
+        if (!(id in s.whiteBalances) && Object.keys(s.whiteBalances).length >= WHITE_BALANCE_MAX_DEVICES) {
+          fail(422, "validation", `at most ${WHITE_BALANCE_MAX_DEVICES} devices can carry a white balance`);
+        }
+        s.whiteBalances[id] = { red: wb.red, green: wb.green, blue: wb.blue };
+        return whiteBalancesAnswer(s);
+      }
+      if (method === "DELETE") {
+        delete s.whiteBalances[id];
+        return whiteBalancesAnswer(s);
+      }
+      return bad();
+    }
+    return bad();
+  }
+
+  if (head === "white-balance") {
+    if (seg.length === 1 && method === "GET") return whiteBalancesAnswer(s);
     return bad();
   }
 
@@ -1664,9 +1726,14 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "settings") {
     if (method === "GET") return { ...s.settings };
     if (method === "PUT") {
-      const next = body as Settings;
+      const next = { ...(body as Settings) };
       if (next.fps < 10 || next.fps > 60) fail(422, "validation", `fps must be 10 to 60, got ${next.fps}`);
-      s.settings = { ...next };
+      // As the daemon (#50): a body without warmth keeps the stored warmth.
+      if (typeof next.warmth !== "number") next.warmth = s.settings.warmth;
+      if (next.warmth < 1800 || next.warmth > 6500) {
+        fail(422, "validation", `warmth must be 1800..=6500 K, got ${next.warmth}`);
+      }
+      s.settings = next;
       return { ...s.settings };
     }
     return bad();

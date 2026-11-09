@@ -118,6 +118,8 @@ pub struct FakeEngine {
     pub fps: AtomicU32,
     pub power: Mutex<canvas_proto::api::Power>,
     pub brightness: AtomicU32,
+    pub warmth: AtomicU32,
+    pub white_balance: Mutex<std::collections::HashMap<DeviceId, canvas_proto::color::WhiteBalance>>,
     pub preview: Mutex<Option<Arc<dyn PreviewSink>>>,
     pub sinks: Mutex<BTreeMap<DeviceId, Arc<dyn FrameSink>>>,
     pub input_source: Mutex<Option<Arc<dyn InputSource>>>,
@@ -139,6 +141,8 @@ impl Default for FakeEngine {
             fps: AtomicU32::new(30),
             power: Mutex::new(canvas_proto::api::Power::Running),
             brightness: AtomicU32::new(100),
+            warmth: AtomicU32::new(u32::from(canvas_proto::consts::WARMTH_OFF)),
+            white_balance: Mutex::new(std::collections::HashMap::new()),
             preview: Mutex::new(None),
             sinks: Mutex::new(BTreeMap::new()),
             input_source: Mutex::new(None),
@@ -178,6 +182,17 @@ impl Engine for FakeEngine {
 
     fn set_brightness(&self, brightness: u8) {
         self.brightness.store(brightness as u32, Ordering::SeqCst);
+    }
+
+    fn set_warmth(&self, kelvin: u16) {
+        self.warmth.store(u32::from(kelvin), Ordering::SeqCst);
+    }
+
+    fn set_white_balance(
+        &self,
+        balances: std::collections::HashMap<DeviceId, canvas_proto::color::WhiteBalance>,
+    ) {
+        *self.white_balance.lock().unwrap() = balances;
     }
 
     fn add_sink(&self, device: DeviceId, sink: Arc<dyn FrameSink>) {
@@ -384,7 +399,12 @@ pub fn device(name: &str, kind: canvas_proto::device::DeviceKind, leds: u32) -> 
 
 /// The engine settings the daemon starts with.
 pub fn engine_settings() -> EngineSettings {
-    EngineSettings { fps: 30, power: canvas_proto::api::Power::Running, brightness: 100 }
+    EngineSettings {
+        fps: 30,
+        power: canvas_proto::api::Power::Running,
+        brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
+    }
 }
 
 /// What a [`FakeDisplay`] was asked to do, and what it did. Tests set the `found`, `fail_*` and

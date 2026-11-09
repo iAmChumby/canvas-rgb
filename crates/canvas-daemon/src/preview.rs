@@ -39,6 +39,7 @@ pub fn engine_settings() -> EngineSettings {
         fps: canvas_proto::consts::PREVIEW_MAX_FPS,
         power: canvas_proto::api::Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     }
 }
 

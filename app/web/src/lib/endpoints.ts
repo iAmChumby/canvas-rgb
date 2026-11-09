@@ -40,6 +40,8 @@ import type { FanMode } from "@/proto/FanMode";
 import type { PutFanHeaderAvailability } from "@/proto/PutFanHeaderAvailability";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanProfileName } from "@/proto/FanProfileName";
+import type { WhiteBalance } from "@/proto/WhiteBalance";
+import type { WhiteBalances } from "@/proto/WhiteBalances";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayConfig } from "@/proto/DisplayConfig";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -77,6 +79,15 @@ export const api = {
     request<unknown>("PATCH", routes.deviceZone(id, zone), body),
   identify: (id: string, body: IdentifyRequest) =>
     request<unknown>("POST", routes.deviceIdentify(id), body),
+
+  /** Every device's white balance (#50): gains 0..1 per channel; a device not listed is neutral. */
+  getWhiteBalance: () => request<WhiteBalances>("GET", routes.whiteBalance),
+  /** Sets one device's white balance; 422 when any gain is outside 0..1. Answers WhiteBalances. */
+  putWhiteBalance: (id: string, wb: WhiteBalance) =>
+    request<WhiteBalances>("PUT", routes.deviceWhiteBalance(id), wb),
+  /** Puts one device back to neutral. Answers WhiteBalances. */
+  deleteWhiteBalance: (id: string) =>
+    request<WhiteBalances>("DELETE", routes.deviceWhiteBalance(id)),
 
   effects: () => request<EffectsResponse>("GET", routes.effects),
   effect: (id: string) => request<EffectDetail>("GET", routes.effect(id)),

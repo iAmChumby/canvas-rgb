@@ -22,4 +22,11 @@ on_quit: OnQuit,
 /**
  * G5: the service holds this until the daemon connects. `None` = black.
  */
-boot_color: Rgb8 | null, brightness: number, power: Power, };
+boot_color: Rgb8 | null, brightness: number, power: Power, 
+/**
+ * #50: the global warmth stage, a colour temperature in kelvin
+ * ([`crate::consts::WARMTH_MIN`]..=[`crate::consts::WARMTH_OFF`]). At
+ * [`crate::consts::WARMTH_OFF`] it changes nothing; below, every effect is shifted
+ * warmer ([`crate::color::warmth_gains`]). Configs saved before it load as off.
+ */
+warmth: number, };

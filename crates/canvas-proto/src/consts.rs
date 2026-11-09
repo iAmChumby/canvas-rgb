@@ -21,6 +21,9 @@ pub const OPENRGB_CLIENT_NAME: &str = "canvas-rgb";
 pub const FPS_MIN: u32 = 10;
 pub const FPS_MAX: u32 = 60;
 pub const FPS_DEFAULT: u32 = 30;
+/// #50: the global warmth stage's range, in kelvin. [`WARMTH_OFF`] changes nothing.
+pub const WARMTH_MIN: u16 = 1800;
+pub const WARMTH_OFF: u16 = 6500;
 pub const PREVIEW_MAX_FPS: u32 = 15;
 /// The largest user HTML effect `POST /effects/import` accepts, in bytes.
 pub const EFFECT_IMPORT_MAX_BYTES: usize = 1024 * 1024;

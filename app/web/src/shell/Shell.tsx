@@ -111,7 +111,7 @@ function Frame({ children }: { children: ReactNode }) {
     if (!snap) return;
     const paused = snap.power === "paused";
     try {
-      await api.patchOutput({ power: paused ? "running" : "paused", brightness: null });
+      await api.patchOutput({ power: paused ? "running" : "paused", brightness: null, warmth: null });
       patchSnap({ status: { ...snap, power: paused ? "running" : "paused" } });
       await refreshStatus();
     } catch (e) {

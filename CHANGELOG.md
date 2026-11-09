@@ -6,6 +6,11 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The White effect's warm whites now look as warm on the lights as a lamp set to the same number: 1800 K is a deep amber instead of a yellow-white. (#50)
+- Each device now has a white balance in Devices, so one white looks the same on every light, and Settings has a Warmth control that shifts every effect warmer. (#50)
+
 ## [0.10.0] - 2026-11-08
 
 ### Added

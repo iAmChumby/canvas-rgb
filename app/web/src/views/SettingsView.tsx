@@ -42,6 +42,7 @@ export function SettingsView() {
   const render = useSnap((s) => s.render);
   const [fps, setFps] = useState<number | null>(null);
   const [brightness, setBrightness] = useState<number | null>(null);
+  const [warmth, setWarmth] = useState<number | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [renderErr, setRenderErr] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
@@ -74,6 +75,7 @@ export function SettingsView() {
 
   const shownFps = fps ?? render?.fps ?? settings.fps;
   const shownBrightness = brightness ?? settings.brightness;
+  const shownWarmth = warmth ?? settings.warmth;
 
   const save = async (patch: Partial<Settings>) => {
     setErr(null);
@@ -107,13 +109,27 @@ export function SettingsView() {
   const commitBrightness = async (v: number) => {
     setRenderErr(null);
     try {
-      const out = await api.patchOutput({ power: null, brightness: v });
+      const out = await api.patchOutput({ power: null, brightness: v, warmth: null });
       const cur = getSnap().settings;
       if (cur) patchSnap({ settings: { ...cur, brightness: out.brightness } });
       setBrightness(null);
       await refreshSettings();
     } catch (e) {
       setBrightness(null);
+      setRenderErr(messageOf(e));
+    }
+  };
+
+  const commitWarmth = async (v: number) => {
+    setRenderErr(null);
+    try {
+      const out = await api.patchOutput({ power: null, brightness: null, warmth: v });
+      const cur = getSnap().settings;
+      if (cur) patchSnap({ settings: { ...cur, warmth: out.warmth } });
+      setWarmth(null);
+      await refreshSettings();
+    } catch (e) {
+      setWarmth(null);
       setRenderErr(messageOf(e));
     }
   };
@@ -186,6 +202,21 @@ export function SettingsView() {
                   onCommit={commitBrightness}
                 />
                 <NumberField label="Brightness value" min={0} max={100} value={shownBrightness} unit="%" onCommit={commitBrightness} />
+              </span>
+            </Field>
+            <Field label="Warmth">
+              <span className="row-wrap field-slider">
+                <Slider
+                  label="Warmth"
+                  min={1800}
+                  max={6500}
+                  step={100}
+                  value={shownWarmth}
+                  onChange={setWarmth}
+                  onCommit={commitWarmth}
+                />
+                <NumberField label="Warmth value" min={1800} max={6500} step={100} value={shownWarmth} unit="K" onCommit={commitWarmth} />
+                {shownWarmth === 6500 && <span className="unit">Off</span>}
               </span>
             </Field>
             {renderErr && <p className="error-line" style={{ marginTop: 8 }}>{renderErr}</p>}

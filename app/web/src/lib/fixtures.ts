@@ -683,6 +683,7 @@ export const INITIAL_SETTINGS: Settings = {
   boot_color: "#6000fc",
   brightness: 100,
   power: "running",
+  warmth: 6500,
 };
 
 /**

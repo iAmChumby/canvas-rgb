@@ -40,6 +40,11 @@ pub fn router(app: Arc<App>) -> Router {
             patch(devices::patch_zone),
         )
         .route(routes::DEVICE_IDENTIFY, post(devices::identify))
+        .route(routes::WHITE_BALANCE, get(devices::get_white_balance))
+        .route(
+            routes::DEVICE_WHITE_BALANCE,
+            put(devices::put_white_balance).delete(devices::delete_white_balance),
+        )
         .route(routes::EFFECTS, get(effects::list_effects))
         .route(
             routes::EFFECT,

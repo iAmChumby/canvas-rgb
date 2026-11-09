@@ -306,10 +306,15 @@ impl Store {
         let _ = std::fs::create_dir_all(&home);
 
         let config_value: Option<ConfigFile> =
-            read_parsed(&config, CONFIG_SCHEMA, "config.toml").unwrap_or_else(|e| {
-                tracing::error!(error = %e, "config.toml could not be read");
-                None
-            });
+            read_parsed(&config, CONFIG_SCHEMA, "config.toml")
+                .unwrap_or_else(|e| {
+                    tracing::error!(error = %e, "config.toml could not be read");
+                    None
+                })
+                .map(|mut c: ConfigFile| {
+                    clamp_settings(&mut c.settings);
+                    c
+                });
         let layouts_value: Option<LayoutsFile> = read_parsed(&layouts, LAYOUTS_SCHEMA, "layouts.json")
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "layouts.json could not be read");
@@ -450,8 +455,46 @@ pub enum ImportError {
     HotLimits(#[from] HotLimitError),
     #[error("display config refused: {0}")]
     Displays(String),
+    #[error("settings refused: {0}")]
+    Settings(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+}
+
+/// Holds settings read from disk to the ranges [`validate_settings`] checks (#50): a
+/// hand-edited `config.toml` with `warmth = 100` would otherwise report one thing and apply
+/// another, and every whole-object settings PUT from the editor's snapshot would then be
+/// refused. Each value out of range is logged and moved to the nearest end.
+pub fn clamp_settings(settings: &mut canvas_proto::config::Settings) {
+    use canvas_proto::consts::{FPS_MAX, FPS_MIN, WARMTH_MIN, WARMTH_OFF};
+    let fps = settings.fps.clamp(FPS_MIN, FPS_MAX);
+    let brightness = settings.brightness.min(100);
+    let warmth = settings.warmth.clamp(WARMTH_MIN, WARMTH_OFF);
+    if (fps, brightness, warmth) != (settings.fps, settings.brightness, settings.warmth) {
+        tracing::warn!(
+            fps = settings.fps, brightness = settings.brightness, warmth = settings.warmth,
+            "config.toml held settings out of range; they were moved into range"
+        );
+    }
+    settings.fps = fps;
+    settings.brightness = brightness;
+    settings.warmth = warmth;
+}
+
+/// The ranges `PUT /api/v1/settings` and a config import hold `Settings` to, so what is
+/// stored is what the engine applies.
+pub fn validate_settings(settings: &canvas_proto::config::Settings) -> Result<(), String> {
+    use canvas_proto::consts::{FPS_MAX, FPS_MIN, WARMTH_MIN, WARMTH_OFF};
+    if !(FPS_MIN..=FPS_MAX).contains(&settings.fps) {
+        return Err(format!("fps must be {FPS_MIN}..={FPS_MAX}, got {}", settings.fps));
+    }
+    if settings.brightness > 100 {
+        return Err(format!("brightness must be 0..100, got {}", settings.brightness));
+    }
+    if !(WARMTH_MIN..=WARMTH_OFF).contains(&settings.warmth) {
+        return Err(format!("warmth must be {WARMTH_MIN}..={WARMTH_OFF} K, got {}", settings.warmth));
+    }
+    Ok(())
 }
 
 /// Validates an export bundle. Fan values below the floors are refused.
@@ -472,6 +515,7 @@ pub fn validate_bundle_rated(
     if bundle.schema_version != EXPORT_SCHEMA {
         return Err(ImportError::Schema { found: bundle.schema_version, expected: EXPORT_SCHEMA });
     }
+    validate_settings(&bundle.settings).map_err(ImportError::Settings)?;
     for profile in &bundle.fans.profiles {
         validate_profile(profile, bundle.fans.floor_percent).map_err(ImportError::Fans)?;
     }
@@ -505,15 +549,16 @@ pub fn import_bundle_rated(
 
     // Endpoint ids are machine-specific: an import keeps this machine's
     // current audio_source, whatever the bundle came from (#166).
-    let current_audio_source = read_parsed::<ConfigFile>(&home.join(CONFIG_FILE), CONFIG_SCHEMA, "config.toml")
+    // The same goes for the white balance (#50): it is how this machine's LEDs mix, by device.
+    let current = read_parsed::<ConfigFile>(&home.join(CONFIG_FILE), CONFIG_SCHEMA, "config.toml")
         .unwrap_or(None)
-        .map(|config| config.audio_source)
         .unwrap_or_default();
 
     let config = ConfigFile {
         schema_version: CONFIG_SCHEMA,
         settings: bundle.settings.clone(),
-        audio_source: current_audio_source,
+        audio_source: current.audio_source,
+        white_balance: current.white_balance,
         ..ConfigFile::default()
     };
 
@@ -697,6 +742,9 @@ power = "running"
 "#;
         let config: ConfigFile = toml::from_str(text).unwrap();
         assert_eq!(config.audio_source, AudioSource::FollowDefault);
+        // #50: nor the warmth or the white balance: off and empty.
+        assert_eq!(config.settings.warmth, canvas_proto::consts::WARMTH_OFF);
+        assert!(config.white_balance.is_empty());
     }
 
     /// #166: `PUT /settings` replaces only `Settings`, so it can never undo a
@@ -725,6 +773,61 @@ power = "running"
         assert!(!settings_json.contains("audio_source"), "{settings_json}");
     }
 
+    /// #50: settings read from a hand-edited config.toml are moved into range, and a restart
+    /// keeps the warmth and the white balance.
+    #[test]
+    fn a_config_is_loaded_into_range_and_keeps_warmth_and_balance() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-load-range-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let mut config = ConfigFile::default();
+        config.settings.warmth = 2700;
+        config.white_balance.insert(
+            canvas_proto::device::DeviceId("openrgb:kb".into()),
+            canvas_proto::color::WhiteBalance { red: 0.8, green: 1.0, blue: 1.0 },
+        );
+        write_toml(&dir.join(CONFIG_FILE), &config).unwrap();
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.config.settings.warmth, 2700, "a restart keeps the warmth");
+        assert_eq!(loaded.config.white_balance, config.white_balance, "a restart keeps the balance");
+
+        config.settings.warmth = 100;
+        config.settings.brightness = 250;
+        config.settings.fps = 500;
+        write_toml(&dir.join(CONFIG_FILE), &config).unwrap();
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.config.settings.warmth, canvas_proto::consts::WARMTH_MIN);
+        assert_eq!(loaded.config.settings.brightness, 100);
+        assert_eq!(loaded.config.settings.fps, canvas_proto::consts::FPS_MAX);
+        assert!(validate_settings(&loaded.config.settings).is_ok());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// #50: an import holds the bundle's settings to the same ranges as `PUT /settings`.
+    #[test]
+    fn an_import_with_out_of_range_settings_is_refused() {
+        let bundle = |settings: Settings| ExportBundle {
+            schema_version: EXPORT_SCHEMA,
+            exported_at: "2026-11-08T00:00:00Z".into(),
+            app_version: "0.0.0".into(),
+            settings,
+            layouts: default_layouts(),
+            zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
+            effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
+            fans: canvas_proto::config::FansFile::default(),
+            displays: Vec::new(),
+            stacks: Vec::new(),
+        };
+        assert!(validate_bundle(&bundle(Settings::default())).is_ok());
+        for bad in [
+            Settings { warmth: 100, ..Settings::default() },
+            Settings { brightness: 200, ..Settings::default() },
+            Settings { fps: 500, ..Settings::default() },
+        ] {
+            assert!(matches!(validate_bundle(&bundle(bad.clone())), Err(ImportError::Settings(_))), "{bad:?}");
+        }
+    }
+
     /// #166: a config import keeps this machine's current audio_source.
     #[test]
     fn a_config_import_keeps_this_machines_audio_source() {
@@ -739,6 +842,13 @@ power = "running"
                 flow: AudioFlow::Render,
                 name_hint: "This machine".into(),
             },
+            // #50: this machine's white balance, by its own devices.
+            white_balance: [(
+                canvas_proto::device::DeviceId("royuan:KB".into()),
+                canvas_proto::color::WhiteBalance { red: 0.7, green: 1.0, blue: 1.0 },
+            )]
+            .into_iter()
+            .collect(),
             ..ConfigFile::default()
         };
         write_toml(&dir.join(CONFIG_FILE), &current).unwrap();
@@ -763,6 +873,7 @@ power = "running"
             AudioSource::Endpoint { id: "this-machines-id".into(), flow: AudioFlow::Render, name_hint: "This machine".into() },
             "the import keeps this machine's pick"
         );
+        assert_eq!(loaded.config.white_balance, current.white_balance, "the import keeps this machine's white balance");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

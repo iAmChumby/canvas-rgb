@@ -21,6 +21,12 @@ pub mod routes {
     pub const DEVICE_ZONE: &str = "/api/v1/devices/{id}/zones/{zone}";
     /// `POST` with [`super::IdentifyRequest`].
     pub const DEVICE_IDENTIFY: &str = "/api/v1/devices/{id}/identify";
+    /// #50: `GET` every device's white balance ([`super::WhiteBalances`]).
+    pub const WHITE_BALANCE: &str = "/api/v1/white-balance";
+    /// #50: `PUT` with a [`crate::color::WhiteBalance`] sets one device's gains (each 0..=1,
+    /// 422 otherwise) and answers [`super::WhiteBalances`]; `DELETE` sets it back to neutral.
+    /// The device need not be connected: the gains are kept by fingerprint.
+    pub const DEVICE_WHITE_BALANCE: &str = "/api/v1/devices/{id}/white-balance";
     pub const EFFECTS: &str = "/api/v1/effects";
     pub const EFFECT: &str = "/api/v1/effects/{id}";
     pub const EFFECT_ACTIVATE: &str = "/api/v1/effects/{id}/activate";
@@ -269,6 +275,13 @@ pub struct OutputState {
     pub power: Power,
     /// 0..100
     pub brightness: u8,
+    /// #50: the global warmth stage in kelvin; [`crate::consts::WARMTH_OFF`] is off.
+    #[serde(default = "warmth_off")]
+    pub warmth: u16,
+}
+
+fn warmth_off() -> u16 {
+    crate::consts::WARMTH_OFF
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -276,6 +289,9 @@ pub struct OutputState {
 pub struct PatchOutput {
     pub power: Option<Power>,
     pub brightness: Option<u8>,
+    /// [`crate::consts::WARMTH_MIN`]..=[`crate::consts::WARMTH_OFF`], 422 otherwise.
+    #[serde(default)]
+    pub warmth: Option<u16>,
 }
 
 /// `GET /render`: fps is global; scale and sampling are the active layout's.
@@ -301,6 +317,13 @@ pub struct PatchRender {
 #[ts(export)]
 pub struct DevicesResponse {
     pub devices: Vec<DeviceInfo>,
+}
+
+/// #50: every device's white balance, by fingerprint. A device not listed is neutral.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct WhiteBalances {
+    pub devices: std::collections::BTreeMap<crate::device::DeviceId, crate::color::WhiteBalance>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]

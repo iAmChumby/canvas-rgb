@@ -133,6 +133,7 @@ async fn a_panicking_init_keeps_logging_open_and_logs_the_caught_warn() {
         fps: 30,
         power: canvas_proto::api::Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let app = Arc::new(App::new(

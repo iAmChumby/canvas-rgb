@@ -90,6 +90,7 @@ async fn the_engine_parks_with_no_devices_and_no_preview() {
         fps: 30,
         power: canvas_proto::api::Power::Running,
         brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
     });
     tokio::time::sleep(std::time::Duration::from_secs(2)).await;
     let stats = engine.stats();
