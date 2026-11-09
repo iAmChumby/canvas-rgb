@@ -2,7 +2,7 @@
 //!
 //! Exported entry points each area crate provides (signatures are fixed by the spine):
 //! - `canvas_core::spawn(settings: EngineSettings) -> std::sync::Arc<dyn Engine>`
-//! - `canvas_effects::registry() -> Vec<EffectFactory>` (exactly the 11 in `EFFECT_IDS`)
+//! - `canvas_effects::registry() -> Vec<EffectFactory>` (exactly the 12 in `EFFECT_IDS`)
 //! - `canvas_effects::create(id: &str) -> Option<Box<dyn Effect>>`
 //! - `canvas_html::HtmlEffect::from_source(id, html, default_overrides) -> Result<HtmlEffect, HtmlError>`
 //!   (implements [`Effect`]; runs SignalRGB-format `effect.html` with an embedded JS engine and

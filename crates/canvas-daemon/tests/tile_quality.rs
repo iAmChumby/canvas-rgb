@@ -108,10 +108,10 @@ fn every_stock_tile_passes_the_bar_or_says_why_not() {
 }
 
 #[test]
-fn the_test_covers_the_fourteen_shipped_effects_by_name() {
+fn the_test_covers_the_fifteen_shipped_effects_by_name() {
     let ids: Vec<String> = shipped().into_iter().map(|(id, _)| id).collect();
     let expected = [
-        "solid", "gradient", "rainbow_wave", "spiral", "breathing", "color_cycle", "aurora", "rain", "fire",
+        "solid", "white", "gradient", "rainbow_wave", "spiral", "breathing", "color_cycle", "aurora", "rain", "fire",
         "screen_ambience", "audio_spectrum", "html:ink-drop", "html:wet-smear", "html:palette-knife",
     ];
     // A new effect that is not in this list is not yet held to the bar: add it here.
@@ -142,7 +142,7 @@ fn the_tiles_of_moving_effects_move_and_do_not_cut() {
 /// Every tile may not cut hard inside its loop, the ones the motion test skips included.
 ///
 /// The motion test above only reads the tiles that follow motion. The bar's hard-cut term
-/// reads every tile, so the seven built-ins it skips are held to it here too.
+/// reads every tile, so the eight built-ins it skips are held to it here too.
 #[test]
 fn no_tile_cuts_hard_inside_its_loop() {
     let mut failures = Vec::new();
