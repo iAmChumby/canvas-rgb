@@ -1016,12 +1016,17 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "status") return method === "GET" ? statusNow() : bad();
 
   if (head === "output") {
-    if (method === "GET") return { power: s.settings.power, brightness: s.settings.brightness };
+    const out = () => ({ power: s.settings.power, brightness: s.settings.brightness, warmth: s.settings.warmth });
+    if (method === "GET") return out();
     if (method === "PATCH") {
-      const b = body as { power?: "running" | "paused" | null; brightness?: number | null };
+      const b = body as { power?: "running" | "paused" | null; brightness?: number | null; warmth?: number | null };
+      if (typeof b.warmth === "number" && (b.warmth < 1800 || b.warmth > 6500)) {
+        fail(422, "validation", `warmth must be 1800..=6500 K, got ${b.warmth}`);
+      }
       if (b.power) s.settings.power = b.power;
       if (typeof b.brightness === "number") s.settings.brightness = Math.max(0, Math.min(100, b.brightness));
-      return { power: s.settings.power, brightness: s.settings.brightness };
+      if (typeof b.warmth === "number") s.settings.warmth = b.warmth;
+      return out();
     }
     return bad();
   }

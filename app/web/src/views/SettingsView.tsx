@@ -107,7 +107,7 @@ export function SettingsView() {
   const commitBrightness = async (v: number) => {
     setRenderErr(null);
     try {
-      const out = await api.patchOutput({ power: null, brightness: v });
+      const out = await api.patchOutput({ power: null, brightness: v, warmth: null });
       const cur = getSnap().settings;
       if (cur) patchSnap({ settings: { ...cur, brightness: out.brightness } });
       setBrightness(null);

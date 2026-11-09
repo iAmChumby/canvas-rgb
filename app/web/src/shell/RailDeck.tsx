@@ -63,7 +63,7 @@ export function RailDeck() {
     if (!snap) return;
     const wasPaused = snap.power === "paused";
     try {
-      await api.patchOutput({ power: wasPaused ? "running" : "paused", brightness: null });
+      await api.patchOutput({ power: wasPaused ? "running" : "paused", brightness: null, warmth: null });
       patchSnap({ status: { ...snap, power: wasPaused ? "running" : "paused" } });
       await refreshStatus();
     } catch (e) {
@@ -136,7 +136,7 @@ function LightsPanel({
     async (v: number) => {
       const snap = getSnap().status;
       try {
-        await api.patchOutput({ power: null, brightness: v });
+        await api.patchOutput({ power: null, brightness: v, warmth: null });
         if (snap) patchSnap({ status: { ...snap, brightness: v } });
         setDraft(null);
         await refreshStatus();

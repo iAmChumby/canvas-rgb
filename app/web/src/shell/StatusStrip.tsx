@@ -101,7 +101,7 @@ export function StatusStrip({
     if (!status) return;
     setBusy(true);
     try {
-      await api.patchOutput({ power: paused ? "running" : "paused", brightness: null });
+      await api.patchOutput({ power: paused ? "running" : "paused", brightness: null, warmth: null });
       patchSnap({ status: { ...status, power: paused ? "running" : "paused" } });
       await refreshStatus();
     } catch (e) {
