@@ -141,8 +141,8 @@ fn the_tiles_of_moving_effects_move_and_do_not_cut() {
 
 /// Every tile may not cut hard inside its loop, the ones the motion test skips included.
 ///
-/// The motion test above only reads the tiles that follow motion. The bar's hard-cut term
-/// reads every tile, so the eight built-ins it skips are held to it here too.
+/// The motion test above asks only the tiles that follow motion to move. The bar's hard-cut
+/// term reads every tile, so the eight built-ins with no motion check are held to it here too.
 #[test]
 fn no_tile_cuts_hard_inside_its_loop() {
     let mut failures = Vec::new();
