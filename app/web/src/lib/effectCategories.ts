@@ -23,6 +23,7 @@ export const EFFECT_CATEGORIES: CategoryOption[] = [
 
 const BY_ID: Record<string, EffectCategory> = {
   solid: "ambient",
+  white: "ambient",
   gradient: "ambient",
   breathing: "ambient",
   rainbow_wave: "motion",

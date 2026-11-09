@@ -1,4 +1,4 @@
-//! canvas-rgb's effect library: 11 native effects drawn straight onto the canvas.
+//! canvas-rgb's effect library: 12 native effects drawn straight onto the canvas.
 //!
 //! Every effect declares its properties once in a [`PropertySchema`]; the editor
 //! renders its controls from that declaration, so there is no per-effect UI code
@@ -28,6 +28,7 @@ pub mod schema;
 pub mod screen_ambience;
 pub mod solid;
 pub mod spiral;
+pub mod white;
 
 use canvas_proto::{Effect, EffectFactory};
 
@@ -48,12 +49,13 @@ pub const TILE_SEED_PROP: &str = "__tile_seed";
 
 /// The built-in effects, in `canvas_proto::EFFECT_IDS` order.
 ///
-/// These are the 11 effects that are ours. A user HTML effect is not one of them: it
+/// These are the 12 effects that are ours. A user HTML effect is not one of them: it
 /// lives on the owner's machine as a file in `%APPDATA%\canvas-rgb\effects\`, with the
 /// id `html:` plus the file's stem.
 pub fn registry() -> Vec<EffectFactory> {
     vec![
         solid::create as EffectFactory,
+        white::create as EffectFactory,
         gradient::create as EffectFactory,
         rainbow_wave::create as EffectFactory,
         spiral::create as EffectFactory,
@@ -69,7 +71,7 @@ pub fn registry() -> Vec<EffectFactory> {
 
 /// Creates the effect with this id, or `None`. Only the requested effect is built.
 ///
-/// The spine's id list holds the 11 effects that are ours, so every id in it builds.
+/// The spine's id list holds the 12 effects that are ours, so every id in it builds.
 /// An id that is not in the list is not a built-in: `create("html:poison")` is `None`,
 /// because Poison is a user HTML effect now.
 pub fn create(id: &str) -> Option<Box<dyn Effect>> {
@@ -92,8 +94,9 @@ mod tests {
     use canvas_proto::{Canvas, EFFECT_IDS, Inputs, Props};
 
     /// The display names, in registry order.
-    const NAMES: [&str; 11] = [
+    const NAMES: [&str; 12] = [
         "Solid",
+        "White",
         "Gradient",
         "Rainbow Wave",
         "Spiral",
@@ -113,9 +116,9 @@ mod tests {
 
     /// The registry lists the built-in effects, in order.
     #[test]
-    fn the_registry_holds_the_eleven_native_effects_in_order() {
+    fn the_registry_holds_the_twelve_native_effects_in_order() {
         let reg = registry();
-        assert_eq!(reg.len(), 11);
+        assert_eq!(reg.len(), 12);
         let ids: Vec<String> = reg.iter().map(|f| f().schema().id).collect();
         assert_eq!(ids, native_ids());
     }

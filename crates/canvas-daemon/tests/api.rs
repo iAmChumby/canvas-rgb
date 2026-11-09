@@ -392,9 +392,9 @@ async fn the_effects_are_listed() {
     let effects = body.get("effects").and_then(|v| v.as_array()).expect("the effects list");
     let ids: Vec<&str> =
         effects.iter().filter_map(|e| e.get("id").and_then(|v| v.as_str())).collect();
-    // Exactly these: the 11 built-ins, then the 3 stock paint effects that ship in the daemon.
+    // Exactly these: the 12 built-ins, then the 3 stock paint effects that ship in the daemon.
     let built_ins: Vec<String> = canvas_effects::registry().into_iter().map(|make| make().schema().id).collect();
-    assert_eq!(built_ins.len(), 11, "there are 11 built-in effects");
+    assert_eq!(built_ins.len(), 12, "there are 12 built-in effects");
     let stock = ["html:ink-drop", "html:palette-knife", "html:wet-smear"];
     let mut expected: Vec<&str> = built_ins.iter().map(|s| s.as_str()).chain(stock).collect();
     let mut got = ids.clone();

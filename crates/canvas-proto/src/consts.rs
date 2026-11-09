@@ -190,9 +190,10 @@ pub const EXPERIMENTAL_FEED_URL: &str =
     "https://github.com/iAmChumby/canvas-rgb/releases/download/experimental/latest.json";
 
 
-/// The 11 native effects, by stable id (spec, effects line 1).
-pub const EFFECT_IDS: [&str; 11] = [
+/// The 12 native effects, by stable id (spec, effects line 1; White from #50).
+pub const EFFECT_IDS: [&str; 12] = [
     "solid",
+    "white",
     "gradient",
     "rainbow_wave",
     "spiral",

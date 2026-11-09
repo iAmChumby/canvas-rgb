@@ -103,6 +103,15 @@ export const EFFECTS: DemoEffect[] = [
       { name: "Amber", over: { color: c("#ff8c00") } },
       { name: "Teal", over: { color: c("#00d8c0") } },
     ], false),
+  build("white", "White", "A white of the colour temperature you pick, warm to cool.", NO_INPUT,
+    [{ key: "temperature", label: "Kelvin", kind: numberKind(1800, 6500, 100, 4000) }],
+    [
+      { name: "Candle", over: { temperature: n(1800) } },
+      { name: "Warm", over: { temperature: n(2700) } },
+      { name: "Neutral", over: { temperature: n(4000) } },
+      { name: "Daylight", over: { temperature: n(5000) } },
+      { name: "Cool", over: { temperature: n(6500) } },
+    ], false),
   build("gradient", "Gradient", "A linear gradient between two colors, optionally scrolling.", NO_INPUT,
     [
       { key: "color1", label: "Color 1", kind: colorKind("#6000fc") },

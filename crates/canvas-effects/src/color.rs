@@ -75,6 +75,44 @@ pub fn saturate(c: Rgb, amount: f32) -> Rgb {
     out
 }
 
+/// The warmest colour temperature [`kelvin_to_rgb`] draws, in kelvin.
+pub const KELVIN_MIN: f32 = 1800.0;
+/// The coolest colour temperature [`kelvin_to_rgb`] draws, in kelvin.
+pub const KELVIN_MAX: f32 = 6500.0;
+/// The least blue a white ever gets, 0..1.
+///
+/// A blackbody below about 2100 K has almost no blue, and an RGB LED with its blue off
+/// reads as orange, not as a warm white, the more so when it is dimmed. Holding blue at
+/// this floor keeps the warm end a white.
+pub const KELVIN_BLUE_FLOOR: f32 = 0.12;
+
+/// A white of colour temperature `kelvin`, as RGB in 0..1.
+///
+/// The curve is Tanner Helland's fit to the blackbody colours, the one most LED tools use.
+/// `kelvin` is clamped to [`KELVIN_MIN`]..=[`KELVIN_MAX`]; a non-finite value draws the
+/// warmest white. Over that range red stays full and green and blue rise with the
+/// temperature, so 6500 K is close to a neutral white.
+pub fn kelvin_to_rgb(kelvin: f32) -> Rgb {
+    let k = if kelvin.is_finite() { kelvin.clamp(KELVIN_MIN, KELVIN_MAX) } else { KELVIN_MIN };
+    // The fit works in hundreds of kelvin and gives 0..255 per channel.
+    let t = (k / 100.0) as f64;
+    let red = if t <= 66.0 { 255.0 } else { 329.698_727_446 * (t - 60.0).powf(-0.133_204_759_2) };
+    let green = if t <= 66.0 {
+        99.470_802_586_1 * t.ln() - 161.119_568_166_1
+    } else {
+        288.122_169_528_3 * (t - 60.0).powf(-0.075_514_849_2)
+    };
+    let blue = if t >= 66.0 {
+        255.0
+    } else if t <= 19.0 {
+        0.0
+    } else {
+        138.517_731_223_1 * (t - 10.0).ln() - 305.044_792_730_7
+    };
+    let unit = |v: f64| (v / 255.0).clamp(0.0, 1.0) as f32;
+    [unit(red), unit(green), unit(blue).max(KELVIN_BLUE_FLOOR)]
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -109,5 +147,70 @@ mod tests {
         let s = saturate(c, 2.0);
         assert!(s[0] > c[0] && s[2] < c[2], "{s:?}");
         assert_eq!(saturate(c, 1.0), saturate(c, 1.0));
+    }
+
+    /// Red's part of the white, which is what "warmer" means for a white.
+    fn red_share(c: Rgb) -> f32 {
+        c[0] / (c[0] + c[1] + c[2])
+    }
+
+    #[test]
+    fn a_higher_temperature_is_a_cooler_white_across_the_whole_range() {
+        let mut last = kelvin_to_rgb(KELVIN_MIN);
+        let mut k = KELVIN_MIN + 100.0;
+        while k <= KELVIN_MAX {
+            let c = kelvin_to_rgb(k);
+            assert!(red_share(c) < red_share(last), "red's share did not fall from {} K to {k} K: {last:?} -> {c:?}", k - 100.0);
+            assert!(c[0] <= last[0], "red rose at {k} K: {last:?} -> {c:?}");
+            assert!(c[1] > last[1], "green did not rise at {k} K: {last:?} -> {c:?}");
+            assert!(c[2] >= last[2], "blue fell at {k} K: {last:?} -> {c:?}");
+            last = c;
+            k += 100.0;
+        }
+        // Blue climbs well clear of its floor by the cool end.
+        assert!(kelvin_to_rgb(KELVIN_MAX)[2] > kelvin_to_rgb(2700.0)[2] + 0.5);
+    }
+
+    #[test]
+    fn six_thousand_five_hundred_kelvin_is_close_to_neutral() {
+        let c = kelvin_to_rgb(6500.0);
+        for v in c {
+            assert!(v >= 0.97, "6500 K is not near neutral: {c:?}");
+        }
+    }
+
+    #[test]
+    fn the_temperature_is_clamped_to_its_range() {
+        assert_eq!(kelvin_to_rgb(1000.0), kelvin_to_rgb(KELVIN_MIN));
+        assert_eq!(kelvin_to_rgb(0.0), kelvin_to_rgb(KELVIN_MIN));
+        assert_eq!(kelvin_to_rgb(-5.0), kelvin_to_rgb(KELVIN_MIN));
+        assert_eq!(kelvin_to_rgb(20_000.0), kelvin_to_rgb(KELVIN_MAX));
+        assert_eq!(kelvin_to_rgb(f32::NAN), kelvin_to_rgb(KELVIN_MIN));
+        assert_eq!(kelvin_to_rgb(f32::INFINITY), kelvin_to_rgb(KELVIN_MIN));
+        for k in [KELVIN_MIN, 2700.0, 4000.0, KELVIN_MAX] {
+            for v in kelvin_to_rgb(k) {
+                assert!(v.is_finite() && (0.0..=1.0).contains(&v), "{k} K gave {v}");
+            }
+        }
+    }
+
+    /// Pinned to the published fit, worked by hand: a wrong coefficient that still rises
+    /// with the temperature fails here.
+    #[test]
+    fn the_curve_matches_the_published_fit() {
+        for (k, want) in [(2700.0, [255.0, 166.7, 87.4]), (4000.0, [255.0, 205.8, 166.1])] {
+            let got = kelvin_to_rgb(k);
+            for i in 0..3 {
+                assert!((got[i] * 255.0 - want[i]).abs() < 0.6, "{k} K channel {i}: {} against {}", got[i] * 255.0, want[i]);
+            }
+        }
+    }
+
+    #[test]
+    fn the_warmest_white_keeps_its_blue_floor() {
+        let c = kelvin_to_rgb(KELVIN_MIN);
+        assert_eq!(c[2], KELVIN_BLUE_FLOOR, "the warm end lost its blue: {c:?}");
+        assert_eq!(c[0], 1.0);
+        assert!(c[1] > 0.4 && c[1] < 0.6, "1800 K green is off the curve: {c:?}");
     }
 }

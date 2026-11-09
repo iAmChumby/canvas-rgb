@@ -16,9 +16,9 @@ use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 use crate::user_effects::UserEffects;
 
-/// Every effect's schema: the eleven built-ins first, then the user HTML effects sorted by
+/// Every effect's schema: the twelve built-ins first, then the user HTML effects sorted by
 /// name, then the saved stacks (D95.4.2). The registry is read once per call: it is cheap
-/// (eleven effects) and always reflects the current build.
+/// (twelve effects) and always reflects the current build.
 ///
 /// A stack's schema is derived from the effects its layers name (D95.4.3), and never from
 /// another stack: a stack cannot contain a stack, so a nested layer contributes no property.

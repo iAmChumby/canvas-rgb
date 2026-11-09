@@ -2,6 +2,7 @@
 // own blend maths (D95.3.3). Used by the builder's preview feed and the stack's library tile; a
 // real daemon draws both itself.
 
+import { kelvinToRgb } from "@/lib/kelvin";
 import { demoFrameFor, THUMB_FRAMES, THUMB_H, THUMB_W } from "@/lib/thumb-demo";
 import type { Layout } from "@/proto/Layout";
 import type { PropValue } from "@/proto/PropValue";
@@ -33,8 +34,11 @@ function angleProp(layer: StackLayer, key: string, fallback: number): number {
 
 /** One layer's demo picture. A handful of effects have a look built from their props. */
 function demoLayerPicture(layer: StackLayer, width: number, height: number, seconds: number): Uint8Array {
-  if (layer.effect === "solid") {
-    const [r, g, b] = colorOf(layer.props.color, "#6000fc");
+  if (layer.effect === "solid" || layer.effect === "white") {
+    const [r, g, b] =
+      layer.effect === "white"
+        ? kelvinToRgb(numberProp(layer, "temperature", 4000))
+        : colorOf(layer.props.color, "#6000fc");
     const out = new Uint8Array(width * height * 3);
     for (let i = 0; i < width * height; i++) {
       out[i * 3] = r;
