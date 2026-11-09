@@ -89,8 +89,21 @@ describe("DevicesView white balance (#50)", () => {
     window.history.replaceState({}, "", "/devices/");
     patchSnap({ devices: DEVICES });
     render(<DevicesView />);
-    await screen.findByLabelText(`White balance for ${STRIP.name}`);
+    // Closed until the row's Balance key opens it, so the list stays one row per device.
+    expect(screen.queryByRole("group", { name: `White balance channels for ${STRIP.name}` })).toBeNull();
+    fireEvent.click(await screen.findByRole("button", { name: `White balance for ${STRIP.name}` }));
+    await screen.findByRole("group", { name: `White balance channels for ${STRIP.name}` });
   }
+
+  it("opens one device at a time", async () => {
+    await page();
+    // A device whose model name no other device shares, so its label is its plain name.
+    const other = DEVICES.find((d) => d.id !== STRIP.id && DEVICES.filter((x) => x.name === d.name).length === 1)!;
+    fireEvent.click(screen.getByRole("button", { name: `White balance for ${other.name}` }));
+    await screen.findByRole("group", { name: `White balance channels for ${other.name}` });
+    expect(screen.queryByRole("group", { name: `White balance channels for ${STRIP.name}` })).toBeNull();
+    expect(screen.getAllByRole("slider", { name: /gain for/ }).length).toBe(3);
+  });
 
   it("PUTs the dragged channel on release", async () => {
     const spy = vi.spyOn(api, "putWhiteBalance");
