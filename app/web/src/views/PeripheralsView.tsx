@@ -776,7 +776,7 @@ function PeripheralDetail({
                 />
               </span>
             </Tooltip>
-            <Tooltip label="asks the device for its settings again, for changes made on the mouse itself; this pauses the mouse for a few seconds">
+            <Tooltip label={`asks the device for its settings again, for changes made on the ${noun} itself; this pauses the ${noun} for a few seconds`}>
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"
@@ -822,8 +822,9 @@ function PeripheralDetail({
         </Panel>
       )}
 
-      {/* Reads off: the same frame as "Not read yet", with the switch that starts reading as its
-          action. No section is drawn, so the page never shows a default as if it were read. */}
+      {/* Reads off: the same frame as "Not read yet", with one key that starts reading (the head's
+          Read switch stays the one place to turn it off: a switch that could only turn on would be a
+          button in disguise). No section is drawn, so the page never shows a default as if read. */}
       {readsOff && (
         <Panel className="rd-peri-unread rd-peri-reads-off">
           <div className="rd-peri-unread-body" data-role="reads-off">
@@ -831,18 +832,13 @@ function PeripheralDetail({
               <EyeSlash size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`canvas-rgb reads this ${noun}'s settings only when you turn Read on; reading pauses the ${noun} for a few seconds.`}
+              {`canvas-rgb reads this ${noun}'s settings only when you turn reading on; reading pauses the ${noun} for a few seconds.`}
             </p>
             <span className="rd-peri-reads-off-action">
               <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
-                <span className="rd-peri-toggle">
-                  <span className="rd-peri-toggle-label">Read</span>
-                  <Toggle
-                    label="Read this device's settings"
-                    checked={reads}
-                    onChange={onReadToggle}
-                  />
-                </span>
+                <Button variant="primary" size="sm" onClick={() => onReadToggle(true)}>
+                  Turn on reading
+                </Button>
               </Tooltip>
             </span>
           </div>

@@ -51,9 +51,9 @@ afterEach(() => {
 });
 
 const MOUSE_OFF_TEXT =
-  "canvas-rgb reads this mouse's settings only when you turn Read on; reading pauses the mouse for a few seconds.";
+  "canvas-rgb reads this mouse's settings only when you turn reading on; reading pauses the mouse for a few seconds.";
 const PAD_OFF_TEXT =
-  "canvas-rgb reads this controller's settings only when you turn Read on; reading pauses the controller for a few seconds.";
+  "canvas-rgb reads this controller's settings only when you turn reading on; reading pauses the controller for a few seconds.";
 
 /**
  * A mouse with a DPI section, a lighting colour and a read-only profile. `reads` is its access;
@@ -223,7 +223,7 @@ describe("a device with reads off", () => {
     expect(document.querySelector('[data-role="problem"]')).toBeNull();
   });
 
-  it("puts the Read switch in the frame, off, and it starts reading", async () => {
+  it("puts one Turn on reading key in the frame, and it starts reading", async () => {
     const id = "x6:reads-off-switch";
     let reads = false;
     api.peripherals.mockResolvedValue({ peripherals: [mouse(id, false, null).info] });
@@ -235,8 +235,9 @@ describe("a device with reads off", () => {
     render(<PeripheralsView />);
     await screen.findByText(MOUSE_OFF_TEXT);
     const frame = document.querySelector('[data-role="reads-off"]') as HTMLElement;
-    const key = within(frame).getByRole("switch", { name: "Read this device's settings" });
-    expect(key.getAttribute("aria-checked")).toBe("false");
+    const key = within(frame).getByRole("button", { name: "Turn on reading" });
+    // One switch for reading on the page: the head's.
+    expect(screen.getAllByRole("switch", { name: /Read/ })).toHaveLength(1);
     await act(async () => {
       key.click();
     });
