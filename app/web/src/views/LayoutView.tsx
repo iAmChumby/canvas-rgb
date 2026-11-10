@@ -1044,7 +1044,7 @@ export function LayoutView() {
             busy={saving}
             disabled={!dirty}
             onClick={save}
-            aria-label={saving ? "Saving layout" : "Save layout"}
+            aria-label="Save layout"
           >
             <span className="rd-lay-text">Save layout</span>
           </Button>

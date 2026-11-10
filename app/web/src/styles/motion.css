@@ -442,6 +442,12 @@
   animation: canvas-fade var(--dur-slow) var(--ease) both;
 }
 
+/* Effect pictures sit in a well (--sunk): the placeholder there takes the well's own tone. */
+.thumb .skeleton,
+.effect-card-preview .skeleton {
+  background: var(--skeleton-on-sunk);
+}
+
 .skeleton-line {
   height: 12px;
   margin-bottom: var(--s2);
