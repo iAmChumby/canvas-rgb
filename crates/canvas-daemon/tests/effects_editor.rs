@@ -1614,8 +1614,16 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
         .store(1, std::sync::atomic::Ordering::SeqCst);
     canvas_daemon::draft::spawn_sweeper(app.clone());
 
-    // The first sweep takes the draft and dies in the restore.
-    wait_until(|| !app.draft.is_active()).await;
+    // The first sweep takes the draft and dies in the restore. The slot empties before the
+    // restore runs (`draft.rs` `expire_locked`), so the wait is on the panic itself (#282).
+    wait_until(|| {
+        engine
+            .set_effect_panics
+            .load(std::sync::atomic::Ordering::SeqCst)
+            > 0
+    })
+    .await;
+    assert!(!app.draft.is_active());
     assert_eq!(
         running(&engine).0,
         Some(format!(
@@ -1636,7 +1644,9 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
         StatusCode::OK
     );
     clock.advance(canvas_proto::consts::DRAFT_LEASE);
-    wait_until(|| !app.draft.is_active()).await;
+    // The restore lands after the slot empties: wait for the engine, not the slot (#282).
+    wait_until(|| running(&engine).0.as_deref() == Some("solid")).await;
+    assert!(!app.draft.is_active());
     let (id, props) = running(&engine);
     assert_eq!(id.as_deref(), Some("solid"), "the second draft ended too");
     assert_eq!(props, prior, "with the props the prior effect had");
