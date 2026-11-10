@@ -377,6 +377,7 @@ export function StackBuilder({
                   message={saver.startFailure.message}
                   onRetry={() => void saver.startAgain()}
                   retryLabel="Start again"
+                  busy={saver.starting}
                 />
               )}
               {saver.saveError && (

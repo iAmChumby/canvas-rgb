@@ -328,7 +328,8 @@ export function useSaveAndLeave({
   /** Start again: the stack is already saved, so only the activation is sent once more. */
   const startAgain = async () => {
     const failed = startFailure;
-    if (!failed || starting) return;
+    // An unsaved edit: the saved stack is no longer what is on screen, so there is nothing to start.
+    if (!failed || starting || dirty) return;
     setStarting(true);
     try {
       await api.activateEffect(failed.id, { props: {}, preset: null });
@@ -499,7 +500,10 @@ export function useSaveAndLeave({
     saveState,
     saveError,
     setSaveError,
-    startFailure,
+    // Hidden, not dropped, while the draft has unsaved edits: Start again would run the saved stack,
+    // not what is on screen. Undo back to the saved stack and it is offered again; Save starts the edit.
+    startFailure: dirty ? null : startFailure,
+    starting,
     startAgain,
     clash,
     setClash,

@@ -149,12 +149,36 @@ describe("the stack builder's states", () => {
       expect(layerNames()).toHaveLength(4);
       // Start again sends the activation only, to the id that was saved.
       const write = vi.spyOn(api, "putStack");
-      fireEvent.click(screen.getByRole("button", { name: "Start again" }));
+      try {
+        fireEvent.click(screen.getByRole("button", { name: "Start again" }));
+        await waitFor(() => expect(screen.queryByText("Saved, but it did not start")).toBeNull());
+        expect(start).toHaveBeenCalledTimes(2);
+        expect(start.mock.calls[1]?.[0]).toBe("stack:Sunset glow");
+        expect(write).not.toHaveBeenCalled();
+      } finally {
+        write.mockRestore();
+      }
+    } finally {
+      start.mockRestore();
+    }
+  });
+
+  it("drops the did-not-start banner once the draft is edited, so Start again never runs a stale stack", async () => {
+    await openBuilder();
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
+    await waitFor(() => expect(layerNames()).toHaveLength(4));
+    const start = vi.spyOn(api, "activateEffect").mockRejectedValueOnce(
+      new ApiFailure(503, "service_unavailable", "the effect could not start: the engine is busy"),
+    );
+    try {
+      fireEvent.click(screen.getByRole("button", { name: "Save" }));
+      expect(await screen.findByText("Saved, but it did not start")).toBeTruthy();
+      // An unsaved fifth layer: the saved stack is no longer what is on screen.
+      fireEvent.click(screen.getByRole("button", { name: "Add Solid" }));
+      await waitFor(() => expect(layerNames()).toHaveLength(5));
       await waitFor(() => expect(screen.queryByText("Saved, but it did not start")).toBeNull());
-      expect(start).toHaveBeenCalledTimes(2);
-      expect(start.mock.calls[1]?.[0]).toBe("stack:Sunset glow");
-      expect(write).not.toHaveBeenCalled();
-      write.mockRestore();
+      expect(screen.queryByRole("button", { name: "Start again" })).toBeNull();
+      expect(start).toHaveBeenCalledTimes(1);
     } finally {
       start.mockRestore();
     }

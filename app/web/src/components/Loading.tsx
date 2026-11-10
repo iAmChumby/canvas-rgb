@@ -89,6 +89,7 @@ export function ErrorPanel({
   summary = "The answer did not arrive. Nothing was changed.",
   onRetry,
   retryLabel = "Try again",
+  busy = false,
 }: {
   title: string;
   /** The raw words, shown only inside the disclosure. */
@@ -98,6 +99,8 @@ export function ErrorPanel({
   onRetry?: () => void;
   /** The action's words: "Try again" unless the retry is a different step, like "Start again". */
   retryLabel?: string;
+  /** The retry is running: the key shows the wait and takes no second press. */
+  busy?: boolean;
 }) {
   return (
     <Panel title={title}>
@@ -107,7 +110,7 @@ export function ErrorPanel({
       {message ? <Details>{message}</Details> : null}
       {onRetry && (
         <div className="load-note-action">
-          <Button size="sm" onClick={onRetry}>
+          <Button size="sm" onClick={onRetry} busy={busy}>
             {retryLabel}
           </Button>
         </div>
