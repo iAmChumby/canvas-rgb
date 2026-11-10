@@ -82,9 +82,9 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
   }, {
     mask: {
       effect: "fire",
-      // Mono: the fire is white, so its luma reaches 1 and the warm white shows in the flame
-      // rather than the Classic palette's dim orange (fix pass 1, #256).
-      props: { ...fire, intensity: number(70), palette: { type: "choice", value: "Mono" } },
+      // Mono so the fire's luma reaches 1, intensity 100 with cooling 16 so the flame body fills
+      // roughly the bottom half with tongues (measured on the real compositor, #256).
+      props: { ...fire, intensity: number(100), cooling: number(16), palette: { type: "choice", value: "Mono" } },
       source: "luma",
       invert: false,
       amount: 100,
