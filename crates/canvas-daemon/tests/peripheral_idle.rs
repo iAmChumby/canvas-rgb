@@ -164,12 +164,11 @@ async fn the_wait_doubles_a_streak_warns_once_and_a_good_read_ends_it() {
     hub.refresh_idle(std::slice::from_ref(&id)).await;
     assert_eq!(fake.log().reads, 1, "still waiting");
     tokio::time::sleep(base + Duration::from_millis(40)).await;
-    // Second failure: waits twice the base, so the base later it still waits.
+    // Second failure, after the first wait is over. The doubling itself is pinned without a clock
+    // by the `backoff_after` unit test; a "still waiting" check here would read a wall clock.
     hub.refresh_idle(std::slice::from_ref(&id)).await;
     assert_eq!(fake.log().reads, 2, "the first wait is over");
-    tokio::time::sleep(base + Duration::from_millis(40)).await;
-    hub.refresh_idle(std::slice::from_ref(&id)).await;
-    assert_eq!(fake.log().reads, 2, "the second wait is twice the first: one base later it is not over");
+    assert!(hub.backed_off(&id), "the second failure starts a new wait");
     assert_eq!(
         logs.text().matches("idle read failed;").count(),
         1,
