@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 import { ListChecks, X } from "@phosphor-icons/react";
-import { Button } from "@/components/Button";
+import { Button, WaitMark } from "@/components/Button";
 import { NumberField } from "@/components/NumberField";
 import { Popover } from "@/components/Popover";
 import { Select } from "@/components/Select";
@@ -45,6 +45,8 @@ export function FanBulkBar({
   write: Write;
 }) {
   const [busy, setBusy] = useState(false);
+  // Which action is out: its key is busy (spinner, same size); the other controls wait shut.
+  const [running, setRunning] = useState<BulkAction["kind"] | null>(null);
   const [percent, setPercent] = useState(50);
   const [pickedFrom, setPickedFrom] = useState<string | null>(null);
   const [result, setResult] = useState<{ words: string; outcomes: BulkOutcome[] } | null>(null);
@@ -83,6 +85,7 @@ export function FanBulkBar({
     const ctl = new AbortController();
     stop.current = ctl;
     setBusy(true);
+    setRunning(action.kind);
     setOpen(false);
     try {
       const outcomes = await applyBulk(checked, action, fans, write, ctl.signal);
@@ -97,7 +100,10 @@ export function FanBulkBar({
       }
     } finally {
       stop.current = null;
-      if (alive.current) setBusy(false);
+      if (alive.current) {
+        setBusy(false);
+        setRunning(null);
+      }
     }
   };
 
@@ -117,7 +123,7 @@ export function FanBulkBar({
             {checked.length} selected
           </span>
           <span className="fan-bulk-result" role="status" data-tone={failed ? "down" : "ok"}>
-            {busy ? "Applying" : result ? summaryOf(result.outcomes, result.words) : ""}
+            {busy ? <WaitMark busy label="Applying" /> : result ? summaryOf(result.outcomes, result.words) : ""}
           </span>
           {result && !busy && (
             <span ref={detailRef} className="row-wrap fan-bulk-details">
@@ -143,7 +149,12 @@ export function FanBulkBar({
         </div>
 
         <div className="fan-bulk-actions">
-          <Button size="sm" disabled={busy} onClick={() => void run({ kind: "bios" })}>
+          <Button
+            size="sm"
+            busy={running === "bios"}
+            disabled={busy && running !== "bios"}
+            onClick={() => void run({ kind: "bios" })}
+          >
             BIOS
           </Button>
 
@@ -157,7 +168,12 @@ export function FanBulkBar({
               disabled={busy}
               onCommit={setPercent}
             />
-            <Button size="sm" disabled={busy} onClick={() => void run({ kind: "fixed", percent })}>
+            <Button
+              size="sm"
+              busy={running === "fixed"}
+              disabled={busy && running !== "fixed"}
+              onClick={() => void run({ kind: "fixed", percent })}
+            >
               Set fixed
             </Button>
           </span>
@@ -174,7 +190,12 @@ export function FanBulkBar({
             ) : (
               <span className="mute">No header is on a curve</span>
             )}
-            <Button size="sm" disabled={busy || !from} onClick={() => from && void run({ kind: "curve", from: from.id })}>
+            <Button
+              size="sm"
+              busy={running === "curve"}
+              disabled={(busy && running !== "curve") || !from}
+              onClick={() => from && void run({ kind: "curve", from: from.id })}
+            >
               Copy curve
             </Button>
           </span>

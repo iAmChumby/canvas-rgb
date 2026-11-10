@@ -3,6 +3,8 @@
 import { useState, type KeyboardEvent } from "react";
 import { clamp } from "@/lib/format";
 import { useCounter } from "@/components/Motion";
+import { SpinnerGap } from "@phosphor-icons/react";
+import { useLoadDelay } from "@/lib/loadDelay";
 
 /**
  * A mono number entry. The value is clamped to [min, max] when it is committed (Enter or blur),
@@ -17,6 +19,7 @@ export function NumberField({
   label,
   unit,
   disabled,
+  busy,
   onCommit,
 }: {
   value: number;
@@ -27,6 +30,14 @@ export function NumberField({
   label: string;
   unit?: string;
   disabled?: boolean;
+  /**
+   * A request sent from this entry is in flight. The entry stays focusable and keeps its look
+   * (`aria-busy`, `aria-disabled`, read-only, so a press of an arrow key cannot send a second
+   * one), and the unit gets a small spinner over it after the load delay. An entry that passes
+   * `busy` at all (even false) wraps its unit in the room the spinner uses, so the row never
+   * changes width when the wait starts.
+   */
+  busy?: boolean;
   onCommit: (v: number) => void;
 }) {
   const [draft, setDraft] = useState<string | null>(null);
@@ -40,6 +51,10 @@ export function NumberField({
 
   const commit = () => {
     if (draft === null) return;
+    if (busy) {
+      setDraft(null);
+      return;
+    }
     const n = Number(draft);
     setDraft(null);
     if (Number.isNaN(n)) return;
@@ -53,6 +68,7 @@ export function NumberField({
     }
     if (e.key === "ArrowUp" || e.key === "ArrowDown") {
       e.preventDefault();
+      if (busy) return;
       const dir = e.key === "ArrowUp" ? 1 : -1;
       const next = clamp(Number((value + dir * step).toFixed(decimals)), min, max);
       setDraft(null);
@@ -70,7 +86,12 @@ export function NumberField({
         className={invalid ? "num num-invalid" : "num"}
         value={shown}
         disabled={disabled}
-        onChange={(e) => setDraft(e.target.value)}
+        readOnly={busy || undefined}
+        aria-busy={busy || undefined}
+        aria-disabled={busy || undefined}
+        onChange={(e) => {
+          if (!busy) setDraft(e.target.value);
+        }}
         onBlur={() => {
           setFocused(false);
           commit();
@@ -81,7 +102,19 @@ export function NumberField({
           e.currentTarget.select();
         }}
       />
-      {unit && <span className="unit">{unit}</span>}
+      {unit &&
+        (busy === undefined ? <span className="unit">{unit}</span> : <UnitSlot unit={unit} busy={busy} />)}
+    </span>
+  );
+}
+
+/** The unit of an entry that can be busy: the spinner lies over the unit's own box, so no width moves. */
+function UnitSlot({ unit, busy }: { unit: string; busy: boolean }) {
+  const spinning = useLoadDelay(busy);
+  return (
+    <span className="unit-slot" data-spinning={spinning ? "true" : "false"}>
+      <span className="unit">{unit}</span>
+      {spinning && <SpinnerGap className="spin unit-spinner" size={12} weight="bold" aria-hidden="true" />}
     </span>
   );
 }

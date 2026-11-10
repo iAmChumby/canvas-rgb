@@ -89,6 +89,57 @@
   justify-content: center;
 }
 
+/* ---------- status marks and entries (#266) ---------- */
+
+/* The wait mark of a status line: the spinner, after the load delay, and the words for a screen
+   reader. The line it stands in is as tall empty as full (its owner reserves the room), so the
+   mark is the height of one line and never taller. */
+.wait-mark {
+  display: flex;
+  align-items: center;
+  justify-content: var(--wait-justify, flex-start);
+  height: 1lh;
+  color: var(--mute);
+}
+
+/* Block level on purpose: an inline box would sit on the line's baseline and make the line taller. */
+.fan-status-busy {
+  --wait-justify: flex-end;
+  min-height: 1lh;
+}
+
+/* The bulk result line holds one line of room empty or full (two on a phone, its own rule). */
+.fan-bulk-result {
+  min-height: 1lh;
+}
+
+/* A busy entry keeps its look: only the cursor and the spinner over its unit say it is working. */
+.num[aria-busy="true"] {
+  cursor: progress;
+}
+
+.unit-slot {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.unit-slot[data-spinning="true"] > .unit {
+  opacity: 0;
+}
+
+.unit-slot > .unit-spinner {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  color: var(--mute);
+}
+
+.slider[aria-busy="true"] {
+  cursor: progress;
+}
+
 /* ---------- inline skeleton ---------- */
 
 .inline-skel {

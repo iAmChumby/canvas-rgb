@@ -2,7 +2,7 @@
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
 import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { Button, IconButton, WaitMark } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
 import { Popover } from "@/components/Popover";
@@ -831,22 +831,24 @@ function MoreKey({ open, onToggle, fallback }: { open: boolean; onToggle: () => 
  * control. A refusal is said next to the key, in the panel's own error colour.
  */
 function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
-  const [busy, setBusy] = useState(false);
+  // Which key sent the request: that key is busy (spinner, same size); the others wait shut.
+  const [sent, setSent] = useState<"show" | "hide" | "list" | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const unavailable = isUnavailable(header);
   // The owner's word, when there is one: `false` "not on my board", `true` "show anyway".
   const override = header.override_available ?? null;
 
-  const send = async (available: boolean | null) => {
+  const send = async (key: "show" | "hide" | "list", available: boolean | null) => {
+    if (sent !== null) return;
     setErr(null);
-    setBusy(true);
+    setSent(key);
     try {
       await api.putFanHeaderAvailability(header.id, { available });
       await refreshFans();
     } catch (e) {
       setErr(messageOf(e));
     } finally {
-      setBusy(false);
+      setSent(null);
     }
   };
 
@@ -857,8 +859,9 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
           size="sm"
           variant="ghost"
           icon={<Eye size={14} />}
-          disabled={busy}
-          onClick={() => void send(true)}
+          busy={sent === "show"}
+          disabled={sent !== null && sent !== "show"}
+          onClick={() => void send("show", true)}
         >
           Show anyway
         </Button>
@@ -867,8 +870,9 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
           size="sm"
           variant="ghost"
           icon={<EyeSlash size={14} />}
-          disabled={busy}
-          onClick={() => void send(false)}
+          busy={sent === "hide"}
+          disabled={sent !== null && sent !== "hide"}
+          onClick={() => void send("hide", false)}
         >
           Not on my board
         </Button>
@@ -878,8 +882,9 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
           size="sm"
           variant="ghost"
           icon={<ListChecks size={14} />}
-          disabled={busy}
-          onClick={() => void send(null)}
+          busy={sent === "list"}
+          disabled={sent !== null && sent !== "list"}
+          onClick={() => void send("list", null)}
         >
           Use the board list
         </Button>
@@ -966,7 +971,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   // Issue #130: the hot line for this curve's source kind. A Fixed header has no curve
   // source: its reference temperature is the CPU reading, as the service treats it.
   const [hotErr, setHotErr] = useState<string | null>(null);
-  const [hotBusy, setHotBusy] = useState(false);
+  // Which control sent the hot limit: the figure (`set`) or Reset (`reset`). That one is busy;
+  // the other waits shut.
+  const [hotSent, setHotSent] = useState<"set" | "reset" | null>(null);
   const hotKind: HotKind = mode.mode === "curve" ? source.type : "cpu";
   const hotRow = (fans.hot ?? []).find((h) => h.kind === hotKind) ?? null;
   // The short name the daemon's own reason uses for this source, so the floor sentence and the
@@ -977,7 +984,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   /** Sends the whole set of hot limits with one kind changed (`null` = automatic).
    * Resolves true when the service accepted it, false when the PUT failed (422). */
   const commitHot = async (value: number | null): Promise<boolean> => {
-    setHotBusy(true);
+    setHotSent(value === null ? "reset" : "set");
     setHotErr(null);
     const limits: HotLimits = { cpu_c: null, gpu_c: null, board_c: null };
     for (const row of fans.hot ?? []) {
@@ -997,7 +1004,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       setHotErr(messageOf(e));
       return false;
     } finally {
-      setHotBusy(false);
+      setHotSent(null);
     }
   };
 
@@ -1030,7 +1037,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
           {err ?? ""}
         </span>
-        <span className="fan-status-busy mute">{busy ? "Applying" : ""}</span>
+        <span className="fan-status-busy mute" role="status" aria-busy={busy || undefined}>
+          <WaitMark busy={busy} label="Applying" />
+        </span>
       </div>
     </div>
   );
@@ -1049,7 +1058,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         max={hotRow.max_settable_c}
         value={hotRow.limit_c}
         unit="°C"
-        disabled={hotBusy}
+        busy={hotSent === "set"}
+        disabled={hotSent === "reset"}
         onCommit={(v) => void commitHot(v)}
       />
       {hotRow.user_set ? (
@@ -1057,7 +1067,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           size="sm"
           variant="ghost"
           icon={<ArrowClockwise size={14} />}
-          disabled={hotBusy}
+          busy={hotSent === "reset"}
+          disabled={hotSent === "set"}
           onClick={() => void commitHot(null)}
         >
           Reset to automatic
@@ -1135,7 +1146,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
                 max={100}
                 value={percent}
                 floor={base}
-                disabled={busy}
+                busy={busy}
                 onChange={setPercent}
                 onCommit={commitPercent}
               />
