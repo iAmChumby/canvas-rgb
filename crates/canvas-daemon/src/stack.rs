@@ -513,6 +513,14 @@ pub fn schema_for(stack: &Stack, resolve: &dyn Fn(&str) -> Option<PropertySchema
         } else {
             resolve(&layer.effect)
         };
+        // A mask's effect reads its own inputs too (#256): a screen or audio effect used as a
+        // mask needs the capture the same way a layer does.
+        if let Some(mask) = &layer.mask {
+            if let Some(mask_schema) = resolve(&mask.effect) {
+                needs.screen |= mask_schema.needs.screen;
+                needs.audio |= mask_schema.needs.audio;
+            }
+        }
         match schema {
             Some(schema) => {
                 needs.screen |= schema.needs.screen;
@@ -1270,6 +1278,12 @@ impl Effect for StackEffect {
         let mut needs = InputNeeds::default();
         let mut names = Vec::new();
         for layer in &self.layers {
+            if let Some(mask) = &layer.mask {
+                // A mask's effect reads its own inputs too (#256).
+                let mask_schema = mask.built.schema();
+                needs.screen |= mask_schema.needs.screen;
+                needs.audio |= mask_schema.needs.audio;
+            }
             match layer.built.as_ref() {
                 Some(effect) => {
                     let schema = effect.schema();
