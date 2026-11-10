@@ -139,6 +139,37 @@ describe("a finger that scrolls is not a lift", () => {
   });
 });
 
+describe("Escape and the page scroll under a pointer drag (#257 review)", () => {
+  it("ends a lifted mouse drag on Escape, and the release that follows adds nothing", async () => {
+    await openBuilder();
+    const added = vi.spyOn(api, "effect");
+    liftOnStage();
+    act(() => void fireEvent.keyDown(window, { key: "Escape" }));
+    expect(ghost()).toBeNull();
+    act(() => void fireEvent.pointerUp(window, { ...mouse, buttons: 0, clientX: px(200), clientY: atY(100) }));
+    expect(rows()).toHaveLength(3);
+    expect(added).not.toHaveBeenCalled();
+  });
+
+  it("lets a finger scroll the page until the hold lifts, then keeps the move for the drag", async () => {
+    await openBuilder();
+    vi.useFakeTimers();
+    const solid = tile("Solid");
+    const touchMove = () => {
+      const e = new Event("touchmove", { bubbles: true, cancelable: true });
+      window.dispatchEvent(e);
+      return e.defaultPrevented;
+    };
+    act(() => void fireEvent.pointerDown(solid, { ...finger, clientX: 10, clientY: 700 }));
+    expect(touchMove()).toBe(false);
+    act(() => void vi.advanceTimersByTime(300));
+    expect(ghost()).not.toBeNull();
+    expect(touchMove()).toBe(true);
+    act(() => void fireEvent.pointerUp(window, { ...finger, buttons: 0, clientX: 10, clientY: 700 }));
+    expect(touchMove()).toBe(false);
+  });
+});
+
 describe("a session never outlives its pointer", () => {
   const ends: [string, () => void][] = [
     ["a lost pointer capture", () => document.querySelector<HTMLElement>('[data-effect="solid"]')!.dispatchEvent(new Event("lostpointercapture"))],

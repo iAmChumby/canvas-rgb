@@ -166,6 +166,10 @@ interface Press {
   up: (event: PointerEvent) => void;
   /** The capture went away under a lifted press (the element left the page, the browser took it). */
   lost: () => void;
+  /** Once lifted, a finger's move is the drag's, not a page scroll (dnd-kit's TouchSensor rule). */
+  touch: (event: TouchEvent) => void;
+  /** Escape ends a lifted pointer or touch drag, as it ends a keyboard one. */
+  key: (event: KeyboardEvent) => void;
 }
 
 function nameOf(id: string): string {
@@ -1685,6 +1689,8 @@ export function StackBuilder({
     window.removeEventListener("pointermove", current.move);
     window.removeEventListener("pointerup", current.up);
     window.removeEventListener("pointercancel", current.up);
+    window.removeEventListener("touchmove", current.touch);
+    window.removeEventListener("keydown", current.key, true);
     current.element?.removeEventListener("lostpointercapture", current.lost);
     press.current = null;
   };
@@ -1820,6 +1826,8 @@ export function StackBuilder({
       move: () => {},
       up: () => {},
       lost: () => {},
+      touch: () => {},
+      key: () => {},
     };
     /** The move or the hold went past the slop: the drag begins where the press did. */
     const lift = () => {
@@ -1874,7 +1882,21 @@ export function StackBuilder({
     current.lost = () => {
       if (press.current === current && current.lifted) cancelSession();
     };
+    // `touch-action` lets the page pan, so a still hold can still scroll. After the lift the pan
+    // must not start: the browser would take the gesture and send `pointercancel` (#257). A
+    // non-passive touchmove is the one place that can stop it.
+    current.touch = (e) => {
+      if (current.lifted && e.cancelable) e.preventDefault();
+    };
+    current.key = (e) => {
+      if (e.key !== "Escape" || !current.lifted) return;
+      e.preventDefault();
+      e.stopPropagation();
+      cancelSession();
+    };
     press.current = current;
+    window.addEventListener("touchmove", current.touch, { passive: false });
+    window.addEventListener("keydown", current.key, true);
     element.addEventListener("lostpointercapture", current.lost);
     window.addEventListener("pointermove", current.move, { passive: false });
     window.addEventListener("pointerup", current.up);
