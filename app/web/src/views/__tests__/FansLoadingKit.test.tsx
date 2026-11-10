@@ -110,9 +110,12 @@ describe("the header availability keys", () => {
     await page();
     const real = api.putFanHeaderAvailability.bind(api);
     const gate = hold(undefined);
+    let wrote = false;
     vi.spyOn(api, "putFanHeaderAvailability").mockImplementation(async (id, body) => {
       await gate.promise;
-      return real(id, body);
+      const answer = await real(id, body);
+      wrote = true;
+      return answer;
     });
     const key = screen.getByRole("button", { name: "Not on my board" });
     fireEvent.click(key);
@@ -125,8 +128,12 @@ describe("the header availability keys", () => {
     fireEvent.click(key);
     expect(api.putFanHeaderAvailability).toHaveBeenCalledTimes(1);
     await gate.release();
-    // The word took: the header is off the board, so this key's panel is replaced.
-    await waitFor(() => expect(key.isConnected && key.getAttribute("aria-busy") === "true").toBe(false));
+    // The word took: the write reached the daemon and finished, and the key is busy no more.
+    expect(api.putFanHeaderAvailability).toHaveBeenCalledWith("cpu_fan", { available: false });
+    await waitFor(() => expect(wrote).toBe(true));
+    // The header is off the board now: its panel offers Show anyway in place of this key.
+    expect(await screen.findByRole("button", { name: "Show anyway" })).toBeTruthy();
+    expect(key.isConnected).toBe(false);
   });
 
   it("Show anyway is busy and Use the board list waits shut beside it", async () => {
@@ -160,15 +167,22 @@ describe("the header availability keys", () => {
     const list = await screen.findByRole("button", { name: "Use the board list" });
     const real = api.putFanHeaderAvailability.bind(api);
     const gate = hold(undefined);
+    let wrote = false;
     vi.spyOn(api, "putFanHeaderAvailability").mockImplementation(async (id, body) => {
       await gate.promise;
-      return real(id, body);
+      const answer = await real(id, body);
+      wrote = true;
+      return answer;
     });
     fireEvent.click(list);
     await waitFor(() => expectBusy(list, "Use the board list"));
     expect((screen.getByRole("button", { name: "Show anyway" }) as HTMLButtonElement).disabled).toBe(true);
     await gate.release();
-    await waitFor(() => expect(list.isConnected && list.getAttribute("aria-busy") === "true").toBe(false));
+    expect(api.putFanHeaderAvailability).toHaveBeenCalledTimes(1);
+    await waitFor(() => expect(wrote).toBe(true));
+    // The header follows the board list again: Not on my board is offered once more.
+    expect(await screen.findByRole("button", { name: "Not on my board" })).toBeTruthy();
+    expect(list.isConnected).toBe(false);
   });
 });
 
@@ -350,12 +364,14 @@ describe("NumberField and Slider busy", () => {
 
   it("a busy Slider keeps its tab stop, ignores keys, and says aria-busy", () => {
     const onCommit = vi.fn();
-    render(<Slider label="Duty" min={0} max={100} value={40} busy onChange={() => {}} onCommit={onCommit} />);
+    const onChange = vi.fn();
+    render(<Slider label="Duty" min={0} max={100} value={40} busy onChange={onChange} onCommit={onCommit} />);
     const slider = screen.getByRole("slider", { name: "Duty" });
     expect(slider.getAttribute("aria-busy")).toBe("true");
     expect(slider.getAttribute("aria-disabled")).toBe("true");
     expect(slider.getAttribute("tabindex")).toBe("0");
     fireEvent.keyDown(slider, { key: "ArrowRight" });
+    expect(onChange).not.toHaveBeenCalled();
     expect(onCommit).not.toHaveBeenCalled();
   });
 });

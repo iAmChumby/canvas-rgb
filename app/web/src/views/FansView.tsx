@@ -1037,7 +1037,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         <span className="fan-status-error error-line" role="alert" title={err ?? undefined}>
           {err ?? ""}
         </span>
-        <span className="fan-status-busy mute" aria-busy={busy || undefined}>
+        <span className="fan-status-busy mute" role="status" aria-busy={busy || undefined}>
           <WaitMark busy={busy} label="Applying" />
         </span>
       </div>
