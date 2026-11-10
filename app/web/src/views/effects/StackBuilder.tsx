@@ -247,7 +247,12 @@ export function StackBuilder({
     );
   };
   /** A checkpoint with no steps behind it: a load, a save or a revert. */
-  const resetDraft = (next: Stack) => setEdit((history) => reset(history, next));
+  const resetDraft = (next: Stack) => {
+    historyMoves.current += 1;
+    setEdit((history) => reset(history, next));
+  };
+  /** Undo, redo and resets so far: a mask that lands after one of these is not applied. */
+  const historyMoves = useRef(0);
   const [nameDraft, setNameDraft] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, StackLayerStatus>>({});
@@ -1269,11 +1274,13 @@ export function StackBuilder({
   const undoNow = () => {
     if (areaDragging.current) return;
     stepped.current = true;
+    historyMoves.current += 1;
     setEdit((history) => undo(history));
   };
   const redoNow = () => {
     if (areaDragging.current) return;
     stepped.current = true;
+    historyMoves.current += 1;
     setEdit((history) => redo(history));
   };
 
@@ -1547,13 +1554,13 @@ export function StackBuilder({
       setAnnounce(refusal);
       return false;
     }
-    // The draft this drop started from. An Undo or another edit while the effect is read must not
-    // be overwritten, and the redo it cleared must survive: apply only to the same draft, and say
-    // nothing when the drop is abandoned (#257 review).
-    const before = draftRef.current;
+    // An Undo, a Redo or a reset while the effect is read must not be overwritten and its redo
+    // must survive, so the drop is abandoned then. Any other edit in that gap (a slider, a
+    // handle) is kept: the mask lands on top of it, by layer id (#257 review).
+    const moves = historyMoves.current;
     const { schema, props } = await maskOf(effect);
     if (!mounted.current) return false;
-    if (draftRef.current !== before) return false;
+    if (historyMoves.current !== moves) return false;
     const latest = draftRef.current.layers.find((entry) => entry.id === id);
     if (!latest) return false;
     const lateRefusal = maskRefusal(draftRef.current.layers, id, effect);

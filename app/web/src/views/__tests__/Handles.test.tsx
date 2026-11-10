@@ -135,6 +135,28 @@ describe("a gesture cut off by an unmount", () => {
   });
 });
 
+describe("a held arrow key cut off by an unmount (#257 adversarial review)", () => {
+  it("ends the key's undo run once", () => {
+    const onChangeEnd = vi.fn();
+    const view = render(
+      <FrameHandles
+        layer={layerOf("gradient", { angle: { type: "angle", value: 0 } })}
+        schema={schemaOf("gradient")}
+        centre={() => ({ x: 100, y: 100 })}
+        stage={() => STAGE}
+        onChange={() => {}}
+        onChangeEnd={onChangeEnd}
+      />,
+    );
+    const grip = view.container.querySelector<HTMLElement>(".rd-angle-grip")!;
+    fireEvent.keyDown(grip, { key: "ArrowRight" });
+    fireEvent.keyDown(grip, { key: "ArrowRight", repeat: true });
+    expect(onChangeEnd).not.toHaveBeenCalled();
+    view.unmount();
+    expect(onChangeEnd).toHaveBeenCalledTimes(1);
+  });
+});
+
 describe("the pill's value text", () => {
   it("says a period as a speed, so a short period reads as faster", () => {
     const fast = render(

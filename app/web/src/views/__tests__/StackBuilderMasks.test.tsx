@@ -300,6 +300,41 @@ describe("an Undo racing a mask drop (#257 review)", () => {
   });
 });
 
+describe("an unrelated edit during a mask drop (#257 adversarial review)", () => {
+  it("keeps the drop: the mask lands on top of an edit that is not an undo", async () => {
+    await openBuilder();
+    const realEffect = api.effect;
+    const pending: Array<(detail: Awaited<ReturnType<typeof realEffect>>) => void> = [];
+    const spy = vi.spyOn(api, "effect").mockImplementation((id) =>
+      id === "fire" ? new Promise((resolve) => pending.push(resolve)) : realEffect(id),
+    );
+    try {
+      masksTab();
+      const tile = screen.getByRole("button", { name: "Add Fire" });
+      act(() => void fireEvent.pointerDown(tile, { ...mouse, clientX: 10, clientY: 700 }));
+      act(() => void fireEvent.pointerMove(window, { ...mouse, clientX: 16, clientY: 700 }));
+      act(() => void fireEvent.pointerMove(window, { ...mouse, clientX: 850, clientY: rowTop(1) + 20 }));
+      act(() => void fireEvent.pointerUp(window, { ...mouse, buttons: 0, clientX: 850, clientY: rowTop(1) + 20 }));
+
+      // While the effect is read, another edit: Sunset is hidden. It is not an undo.
+      const hide = screen.getByRole("button", { name: "Hide Sunset" });
+      act(() => void fireEvent.click(hide));
+      await screen.findByRole("button", { name: "Show Sunset" });
+
+      await act(async () => {
+        const detail = await realEffect("fire");
+        pending[0]?.(detail);
+        await Promise.resolve();
+      });
+      await waitFor(() => expect(chips()).toHaveLength(1));
+      // The hide stayed: the mask did not overwrite it.
+      expect(screen.getByRole("button", { name: "Show Sunset" })).toBeTruthy();
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
 describe("a stage drop over a hidden top layer (#257 review)", () => {
   it("goes to the next visible layer under the pointer, not the hidden one", async () => {
     await openBuilder();

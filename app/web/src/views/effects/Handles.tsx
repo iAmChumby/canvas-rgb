@@ -87,10 +87,12 @@ export function FrameHandles({
   useEffect(() => {
     return () => {
       const current = grip.current;
-      if (!current) return;
+      const key = held.current;
+      // A drag or a held arrow key: either one has an undo run open.
+      if (!current && !key) return;
       grip.current = null;
       held.current = null;
-      if (current.el.hasPointerCapture?.(current.pointerId)) {
+      if (current?.el.hasPointerCapture?.(current.pointerId)) {
         try {
           current.el.releasePointerCapture(current.pointerId);
         } catch {

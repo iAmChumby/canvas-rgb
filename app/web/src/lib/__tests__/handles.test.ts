@@ -171,6 +171,23 @@ describe("the grip's clamp inside the stage (#257 review)", () => {
     expect(x).toBeGreaterThanOrEqual(stage.left);
   });
 
+  it("keeps a diagonal grip on its own line and inside the stage (#257 adversarial review)", () => {
+    const box = { left: 0, top: 0, right: 100, bottom: 100 };
+    const reach = clampArrow(45, 72, { x: 50, y: 90 }, box);
+    const x = 50 + reach * Math.cos(Math.PI / 4);
+    const y = 90 + reach * Math.sin(Math.PI / 4);
+    expect(x).toBeLessThanOrEqual(box.right + 1e-9);
+    expect(y).toBeLessThanOrEqual(box.bottom + 1e-9);
+    // It meets the bottom edge first: 10 px down at 45 degrees is 10 * sqrt(2) along the arrow.
+    expect(reach).toBeCloseTo(10 * Math.SQRT2, 5);
+  });
+
+  it("never gives a negative length", () => {
+    const box = { left: 0, top: 0, right: 100, bottom: 100 };
+    expect(clampArrow(0, 72, { x: 100, y: 50 }, box)).toBe(0);
+    expect(clampArrow(0, 72, { x: 120, y: 50 }, box)).toBe(0);
+  });
+
   it("leaves an arrow that is already inside alone", () => {
     expect(clampArrow(0, 40, { x: 100, y: 200 }, stage)).toBe(40);
     expect(clampArrow(0, 40, { x: 100, y: 200 }, null)).toBe(40);

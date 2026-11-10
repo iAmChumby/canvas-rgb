@@ -7556,6 +7556,7 @@ button.chip:hover {
 
 .rd-area-frame .handle {
   position: absolute;
+  z-index: 6;
   width: 24px;
   height: 24px;
   touch-action: none;
@@ -7579,6 +7580,7 @@ button.chip:hover {
 
 .rd-area-frame .edge {
   position: absolute;
+  z-index: 6;
   touch-action: none;
 }
 
@@ -9355,6 +9357,8 @@ button.chip:hover {
 
 /* The band's foot is the stage's edge (the pill sits 4px up), because the stage clips what
    passes it: 44px of hit height all inside the picture. */
+/* The band lies under the frame's resize handles (z-index 6 below): where they meet, a press
+   resizes, so a small frame keeps its south and corner handles (#257 review). */
 .rd-speed-pill::before {
   content: "";
   position: absolute;

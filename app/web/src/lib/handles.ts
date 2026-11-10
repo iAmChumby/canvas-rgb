@@ -164,13 +164,21 @@ export function clampArrow(
 ): number {
   if (!hub || !box) return length;
   const rad = (dir * Math.PI) / 180;
-  const x = hub.x + length * Math.cos(rad);
-  const y = hub.y + length * Math.sin(rad);
+  const dx = Math.cos(rad);
+  const dy = Math.sin(rad);
+  const x = hub.x + length * dx;
+  const y = hub.y + length * dy;
   // Already inside: keep the exact length, so no clamp introduces a float's worth of drift.
   if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return length;
-  const cx = Math.min(box.right, Math.max(box.left, x));
-  const cy = Math.min(box.bottom, Math.max(box.top, y));
-  return Math.hypot(cx - hub.x, cy - hub.y);
+  // Along the arrow's own direction, the distance to the first box edge it meets: the grip stays
+  // on the line the angle draws (clamping x and y apart would bend it off that line).
+  const EPS = 1e-9;
+  let reach = length;
+  if (dx > EPS) reach = Math.min(reach, (box.right - hub.x) / dx);
+  else if (dx < -EPS) reach = Math.min(reach, (box.left - hub.x) / dx);
+  if (dy > EPS) reach = Math.min(reach, (box.bottom - hub.y) / dy);
+  else if (dy < -EPS) reach = Math.min(reach, (box.top - hub.y) / dy);
+  return Math.max(0, reach);
 }
 
 /** A scrub of `dx` pixels across the pill: a full sweep is `SPEED_SWEEP_PX`. */
