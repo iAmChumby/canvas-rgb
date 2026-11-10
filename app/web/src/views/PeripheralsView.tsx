@@ -803,7 +803,7 @@ function PeripheralDetail({
                 shown={reads && ago ? ago.text : undefined}
               />
             </span>
-            <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
+            <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing" className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Read</span>
                 <Toggle
@@ -813,7 +813,7 @@ function PeripheralDetail({
                 />
               </span>
             </Tooltip>
-            <Tooltip label={`asks the device for its settings again, for changes made on the ${noun} itself; this pauses the ${noun} for a few seconds`}>
+            <Tooltip label={`asks the device for its settings again, for changes made on the ${noun} itself; this pauses the ${noun} for a few seconds`} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"
@@ -826,7 +826,7 @@ function PeripheralDetail({
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip label="lets canvas-rgb change settings on the device">
+            <Tooltip label="lets canvas-rgb change settings on the device" className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Change</span>
                 <Toggle

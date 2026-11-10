@@ -534,6 +534,9 @@
 }
 
 .setupWalk :global(.tip-bubble) {
+  --tip-side: right;
+  --tip-align: center;
+  --tip-gap: 8px;
   bottom: auto;
   top: 50%;
   left: calc(100% + 8px);

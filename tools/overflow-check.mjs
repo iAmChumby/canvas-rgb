@@ -44,6 +44,12 @@
 //   node tools/overflow-check.mjs --mutate-overflow      put a 40 px wider element in one box per
 //                                                        view: every row must then FAIL, and say
 //                                                        that the check caught it
+//   node tools/overflow-check.mjs --hover-tips           hover every control that draws a tooltip
+//                                                        and FAIL when a shown bubble passes the
+//                                                        window by more than 1 px, or is cut off
+//                                                        by an ancestor that clips it (#271). It
+//                                                        replaces the edge measure above for the
+//                                                        run; combine with --views and --sizes.
 
 import http from "node:http";
 import fs from "node:fs";
@@ -71,6 +77,7 @@ const { chromium } = require("playwright");
 const shotsDir = flag("--shots");
 const shotTag = shotsDir ? args[args.indexOf("--shots") + 2] : null;
 const mutate = args.includes("--mutate-overflow");
+const hoverTips = args.includes("--hover-tips");
 const SIZES = (flag("--sizes") ?? "1920x1040,1440x900,1280x860,1024x768,960x1032,390x844")
   .split(",")
   .map((s) => s.split("x").map(Number));
@@ -285,6 +292,14 @@ const describe = (x) => {
       return `${x.el} "${x.text}" passes ${x.box} by ${x.over}px`;
     case "window":
       return `${x.el} "${x.text}" passes the window's right edge by ${x.over}px`;
+    case "window-left":
+      return `${x.el} "${x.text}" passes the window's left edge by ${x.over}px`;
+    case "window-top":
+      return `${x.el} "${x.text}" passes the window's top edge by ${x.over}px`;
+    case "window-bottom":
+      return `${x.el} "${x.text}" passes the window's bottom edge by ${x.over}px`;
+    case "clipped":
+      return `${x.el} "${x.text}" is cut off by ${x.clipper} at its ${x.edge} by ${x.over}px`;
     case "wide":
       return `${x.el} is ${x.over}px wider than the window`;
     case "doc":
@@ -297,6 +312,104 @@ const describe = (x) => {
       return JSON.stringify(x);
   }
 };
+
+/** Runs in the page: every drawn control that has a tooltip, in DOM order. */
+const TIPS = () => {
+  const drawn = (el) => {
+    const cs = getComputedStyle(el);
+    if (cs.display === "none" || cs.visibility === "hidden") return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 1 && r.height > 1;
+  };
+  return [...document.querySelectorAll(".tip")]
+    .map((tip, index) => {
+      if (!drawn(tip)) return null;
+      const b = tip.querySelector(".tip-bubble");
+      // A bubble its own CSS never draws (display: none) has no placement to check.
+      if (!b || !drawn(b)) return null;
+      return { index, text: (b.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 40) };
+    })
+    .filter(Boolean);
+};
+
+/** Runs in the page after the hover: the shown bubble against the window and its clippers. */
+const MEASURE_TIP = ({ index, slack }) => {
+  const tip = document.querySelectorAll(".tip")[index];
+  const b = tip?.querySelector(".tip-bubble");
+  if (!b) return { missing: true };
+  const name = (el) => {
+    const cls = String(el.getAttribute("class") ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".");
+    return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
+  };
+  const round = (n) => Math.round(n * 10) / 10;
+  const r = b.getBoundingClientRect();
+  const vw = document.documentElement.clientWidth;
+  const vh = document.documentElement.clientHeight;
+  const text = (b.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 40);
+  const hits = [];
+  if (r.right > vw + slack) hits.push({ kind: "window", el: name(b), text, over: round(r.right - vw) });
+  if (r.left < -slack) hits.push({ kind: "window-left", el: name(b), text, over: round(-r.left) });
+  if (r.bottom > vh + slack) hits.push({ kind: "window-bottom", el: name(b), text, over: round(r.bottom - vh) });
+  if (r.top < -slack) hits.push({ kind: "window-top", el: name(b), text, over: round(-r.top) });
+  // An ancestor that clips the bubble cuts its words off even where the window has room.
+  for (let a = b.parentElement; a && a !== document.body; a = a.parentElement) {
+    const cs = getComputedStyle(a);
+    if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+    const ar = a.getBoundingClientRect();
+    const cuts = [];
+    if (cs.overflowX !== "visible") {
+      if (r.right > ar.right + slack) cuts.push(["right", r.right - ar.right]);
+      if (r.left < ar.left - slack) cuts.push(["left", ar.left - r.left]);
+    }
+    if (cs.overflowY !== "visible") {
+      if (r.bottom > ar.bottom + slack) cuts.push(["bottom", r.bottom - ar.bottom]);
+      if (r.top < ar.top - slack) cuts.push(["top", ar.top - r.top]);
+    }
+    if (cuts.length) {
+      const worst = cuts.sort((x, y) => y[1] - x[1])[0];
+      hits.push({ kind: "clipped", el: name(b), clipper: name(a), edge: worst[0], over: round(worst[1]), text });
+      break;
+    }
+  }
+  return { opacity: Number(getComputedStyle(b).opacity), hits, text };
+};
+
+/** Hovers every tooltip the page draws, and measures each bubble once it is shown. */
+async function hoverEveryTip(page) {
+  const tips = await page.evaluate(TIPS);
+  const hits = [];
+  let hovered = 0;
+  for (const tip of tips) {
+    try {
+      await page.locator(".tip").nth(tip.index).hover({ timeout: 10000 });
+    } catch (e) {
+      hits.push(`"${tip.text}": could not hover it (${String(e.message).split("\n")[0]})`);
+      continue;
+    }
+    try {
+      await page.waitForFunction(
+        (i) => {
+          const b = document.querySelectorAll(".tip")[i]?.querySelector(".tip-bubble");
+          return b ? Number(getComputedStyle(b).opacity) > 0.99 : false;
+        },
+        tip.index,
+        { timeout: 4000 },
+      );
+    } catch {
+      // Measured below anyway: a bubble that never showed is reported as its own failure.
+    }
+    const m = await page.evaluate(MEASURE_TIP, { index: tip.index, slack: SLACK_PX });
+    if (m.missing) {
+      hits.push(`"${tip.text}": its bubble left the page while it was hovered`);
+      continue;
+    }
+    if (m.opacity < 0.99) hits.push(`"${m.text}": hovered but the bubble did not show (opacity ${m.opacity})`);
+    else hovered++;
+    for (const h of m.hits) hits.push(describe(h));
+  }
+  const skipped = await page.evaluate(() => document.querySelectorAll(".tip").length);
+  return { tips: tips.length, skipped: skipped - tips.length, hovered, hits };
+}
 
 /** A busy machine can time a request out: up to three tries, from a blank page. */
 async function goto(page, url) {
@@ -349,11 +462,14 @@ async function main() {
     browser = await chromium.launch({ headless: true, channel: "chrome" });
   }
   console.log(`overflow-check: browser channel ${channel}, ${rows.length} views x ${SIZES.length} sizes x ${SCHEMES.length} schemes`);
+  if (hoverTips) console.log("overflow-check: HOVER mode: every drawn tooltip is hovered and its shown bubble measured");
   if (mutate) console.log("overflow-check: MUTATION on, one box per view gets a 40px wider element: every row must FAIL");
   const failures = [];
   let checks = 0;
   let caught = 0;
   let missed = 0;
+  let tipTotal = 0;
+  let hoverTotal = 0;
   try {
     for (const [w, h] of SIZES) {
       for (const scheme of SCHEMES) {
@@ -383,6 +499,7 @@ async function main() {
           const anchor = known ? extraBoxes : ".panel";
           const bad = [];
           let m = null;
+          let detail = "-";
           try {
             await goto(page, `${base}${v.url}`);
             await settle(page, anchor);
@@ -390,11 +507,21 @@ async function main() {
               await v.prep(page);
               await settle(page, anchor);
             }
-            m = await page.evaluate(MEASURE, { slack: SLACK_PX, extraBoxes, mutate });
-            if (mutate && !m.mutated) bad.push("mutation: no drawn box to put the 40px element in");
-            for (const x of m.hits) bad.push(describe(x));
-            if (m.boxes === 0) bad.push("nothing was measured: no box drawn");
-            else if (m.panels === 0 && !known) bad.push("nothing was measured: no .panel drawn, and the view is not on the NO_PANEL list");
+            if (hoverTips) {
+              const h = await hoverEveryTip(page);
+              tipTotal += h.tips;
+              hoverTotal += h.hovered;
+              detail = `${h.tips} tips, ${h.hovered} hovered, ${h.skipped} not drawn`;
+              for (const b of h.hits) bad.push(b);
+              if (h.tips === 0) bad.push("nothing was measured: the view draws no tooltip");
+            } else {
+              m = await page.evaluate(MEASURE, { slack: SLACK_PX, extraBoxes, mutate });
+              detail = m ? `${m.panels} panels, ${m.boxes - m.panels} other boxes` : "-";
+              if (mutate && !m.mutated) bad.push("mutation: no drawn box to put the 40px element in");
+              for (const x of m.hits) bad.push(describe(x));
+              if (m.boxes === 0) bad.push("nothing was measured: no box drawn");
+              else if (m.panels === 0 && !known) bad.push("nothing was measured: no .panel drawn, and the view is not on the NO_PANEL list");
+            }
             if (shotsDir) {
               fs.mkdirSync(shotsDir, { recursive: true });
               await page.screenshot({ path: path.join(shotsDir, `${shotTag}-${v.name}-${w}x${h}-${scheme}.png`) });
@@ -402,7 +529,7 @@ async function main() {
           } catch (e) {
             bad.push(`could not measure: ${String(e.message).split("\n")[0]}`);
           }
-          if (mutate) {
+          if (mutate && !hoverTips) {
             const ok = bad.some((b) => b.includes("ovf-mutant"));
             if (ok) caught++;
             else {
@@ -411,7 +538,7 @@ async function main() {
             }
           }
           checks++;
-          console.log(`${bad.length ? "FAIL" : "ok  "} ${label}  [${m ? `${m.panels} panels, ${m.boxes - m.panels} other boxes` : "-"}]`);
+          console.log(`${bad.length ? "FAIL" : "ok  "} ${label}  [${detail}]`);
           for (const b of bad) {
             console.log(`       - ${b}`);
             failures.push(`${label}: ${b}`);
@@ -425,6 +552,7 @@ async function main() {
     server.close();
   }
   console.log(`\n${checks} view checks, ${failures.length} hits`);
+  if (hoverTips) console.log(`${tipTotal} tooltips hovered (${hoverTotal} showed their bubble) over ${checks} rows`);
   if (mutate) console.log(`mutation caught in ${caught} of ${checks} rows, missed in ${missed}`);
   if (checks === 0 || failures.length) process.exitCode = 1;
 }
