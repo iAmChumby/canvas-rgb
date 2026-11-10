@@ -84,7 +84,7 @@ import {
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { canRedo, canUndo, endRun, historyOf, record, redo, reset, undo, type History } from "@/lib/draftHistory";
-import { dropArea, dropTargetAt, dropTargetWords, type DropTarget } from "@/lib/dropTargets";
+import { dropArea, dropTargetAt, dropTargetWords, type DropBoxes, type DropTarget } from "@/lib/dropTargets";
 import {
   CANCEL_ANNOUNCEMENT,
   TOUCH_HOLD_MS,
@@ -164,6 +164,8 @@ interface Press {
   element: HTMLElement | null;
   move: (event: PointerEvent) => void;
   up: (event: PointerEvent) => void;
+  /** The capture went away under a lifted press (the element left the page, the browser took it). */
+  lost: () => void;
 }
 
 function nameOf(id: string): string {
@@ -301,6 +303,12 @@ export function StackBuilder({
   const press = useRef<Press | null>(null);
   /** A drag just ended: the click that follows the release is not a tap-to-add. */
   const suppressClick = useRef(false);
+  /** The safety timer that drops `suppressClick` when the click it waited for never came. */
+  const suppressTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  /** The drop boxes of the drag in progress, read once at the lift and again when the page moves. */
+  const boxesRef = useRef<DropBoxes | null>(null);
+  /** The release that follows a cancelled drag, still to be swallowed as a click. */
+  const orphanUp = useRef<(() => void) | null>(null);
 
   const libraryRef = useRef<HTMLDivElement>(null);
   const tuneRef = useRef<HTMLSpanElement>(null);
@@ -1677,20 +1685,79 @@ export function StackBuilder({
     window.removeEventListener("pointermove", current.move);
     window.removeEventListener("pointerup", current.up);
     window.removeEventListener("pointercancel", current.up);
+    current.element?.removeEventListener("lostpointercapture", current.lost);
     press.current = null;
   };
 
   const clearDrag = () => {
     endPress();
+    boxesRef.current = null;
     showDrag(NO_DRAG);
+  };
+
+  /** The click that follows a release or a key is not a tap-to-add; the next input or a second ends it. */
+  const armSuppress = () => {
+    suppressClick.current = true;
+    if (suppressTimer.current !== null) clearTimeout(suppressTimer.current);
+    suppressTimer.current = setTimeout(() => {
+      suppressClick.current = false;
+      suppressTimer.current = null;
+    }, 1000);
+  };
+
+  /**
+   * A Space or Enter that steers a lift is a key whose click must not add: Space clicks on its
+   * keyup, so the keyup is swallowed with it, and the click it still sends finds the guard armed.
+   */
+  const guardKeyClick = () => {
+    armSuppress();
+    const release = (event: KeyboardEvent) => {
+      if (event.key === " ") event.preventDefault();
+    };
+    window.addEventListener("keyup", release, { capture: true, once: true });
+  };
+
+  /**
+   * The session ends with no drop: the capture is released, the ghost goes, the source is cleared
+   * and the live region says nothing changed. A press that never lifted just ends, silently. The
+   * release that may still come is swallowed as a click, so a cancelled drag is never also an add.
+   */
+  const cancelSession = () => {
+    const wasLifted = dragRef.current.source !== null;
+    const current = press.current;
+    if (current?.lifted) {
+      try {
+        current.element?.releasePointerCapture(current.pointerId);
+      } catch {
+        // The capture is already gone.
+      }
+      const swallow = () => {
+        window.removeEventListener("pointerup", swallow);
+        window.removeEventListener("pointercancel", swallow);
+        orphanUp.current = null;
+        armSuppress();
+      };
+      window.addEventListener("pointerup", swallow);
+      window.addEventListener("pointercancel", swallow);
+      orphanUp.current = () => {
+        window.removeEventListener("pointerup", swallow);
+        window.removeEventListener("pointercancel", swallow);
+        orphanUp.current = null;
+      };
+    }
+    clearDrag();
+    if (wasLifted) setAnnounce(CANCEL_ANNOUNCEMENT);
   };
 
   const moveDrag = (point: { x: number; y: number }, shift: boolean) => {
     const current = dragRef.current;
     if (!current.source) return;
+    // The boxes were read at the lift and are read again when the page scrolls or resizes, not
+    // on every move: a move only compares a point with them.
+    const boxes = (boxesRef.current ??= readDropBoxes());
     const target = dropTargetAt({
       point,
-      boxes: readDropBoxes(),
+      boxes,
       layout,
       payload: current.source.kind,
       shift,
@@ -1729,6 +1796,8 @@ export function StackBuilder({
       source.kind === "effect"
         ? (stageTargets(layout)[0] ?? null)
         : { kind: "stackSlot", at: Math.max(0, layers.findIndex((layer) => layer.id === source.id)) };
+    // The key that lifts is a key whose click must not also add the tile.
+    guardKeyClick();
     showDrag(lifted(source, "keyboard", first));
     setAnnounce(liftAnnouncement(source));
   };
@@ -1736,6 +1805,7 @@ export function StackBuilder({
   const beginPress = (source: DragSource, event: ReactPointerEvent<HTMLElement>) => {
     if (event.button > 0 || dragRef.current.source) return;
     endPress();
+    orphanUp.current?.();
     const pointerType = event.pointerType || "mouse";
     const start = { x: event.clientX, y: event.clientY };
     const element = event.currentTarget;
@@ -1749,6 +1819,7 @@ export function StackBuilder({
       element,
       move: () => {},
       up: () => {},
+      lost: () => {},
     };
     /** The move or the hold went past the slop: the drag begins where the press did. */
     const lift = () => {
@@ -1763,14 +1834,21 @@ export function StackBuilder({
       } catch {
         // A pointer that is already gone has nothing to capture.
       }
-      const target = dropTargetAt({ point: start, boxes: readDropBoxes(), layout, payload: source.kind });
+      const boxes = readDropBoxes();
+      boxesRef.current = boxes;
+      const target = dropTargetAt({ point: start, boxes, layout, payload: source.kind });
       showDrag({ source, mode: pointerType === "touch" ? "touch" : "pointer", target, point: start });
       setAnnounce(liftAnnouncement(source));
     };
     current.move = (e) => {
       if (e.pointerId !== current.pointerId || !press.current) return;
       if (!current.lifted) {
-        if (!liftsOnMove(pointerType) || !pressMoved(start, { x: e.clientX, y: e.clientY })) return;
+        if (!liftsOnMove(pointerType)) {
+          // A finger that travels before the hold is a scroll, not a lift: the hold is off.
+          if (pressMoved(start, { x: e.clientX, y: e.clientY })) endPress();
+          return;
+        }
+        if (!pressMoved(start, { x: e.clientX, y: e.clientY })) return;
         lift();
       }
       // The press is the drag's: a finger does not scroll the page under the ghost.
@@ -1783,10 +1861,7 @@ export function StackBuilder({
       endPress();
       if (!wasLifted) return;
       // The click that follows a release must not also add the tile.
-      suppressClick.current = true;
-      setTimeout(() => {
-        suppressClick.current = false;
-      }, 0);
+      armSuppress();
       if (e.type === "pointercancel") {
         setAnnounce(CANCEL_ANNOUNCEMENT);
         clearDrag();
@@ -1794,7 +1869,13 @@ export function StackBuilder({
       }
       commitDrop(source, dragRef.current.target);
     };
+    // The capture went while the drag was lifted: the session ends rather than waiting for a
+    // release that will not come to this element.
+    current.lost = () => {
+      if (press.current === current && current.lifted) cancelSession();
+    };
     press.current = current;
+    element.addEventListener("lostpointercapture", current.lost);
     window.addEventListener("pointermove", current.move, { passive: false });
     window.addEventListener("pointerup", current.up);
     window.addEventListener("pointercancel", current.up);
@@ -1813,8 +1894,9 @@ export function StackBuilder({
     return cycleTarget(slots, current, step);
   };
 
-  // The keyboard sensor: the arrows pick, Enter drops, Escape cancels. Capture, so a key that
-  // steers the drag is not also a key the tile or the row under it acts on.
+  // The keyboard sensor: the arrows pick, Enter drops, Escape cancels. Capture, and stopped there,
+  // so a key that steers the drag is not also a key the tile or the row under it acts on: the
+  // Enter that drops must not reach the focused tile and lift it again.
   useEffect(() => {
     if (!drag.source || drag.mode !== "keyboard") return;
     const source = drag.source;
@@ -1822,18 +1904,22 @@ export function StackBuilder({
       const current = dragRef.current;
       if (event.key === "Escape") {
         event.preventDefault();
+        event.stopPropagation();
         setAnnounce(CANCEL_ANNOUNCEMENT);
         clearDrag();
         return;
       }
       if (event.key === "Enter" || event.key === " ") {
         event.preventDefault();
+        event.stopPropagation();
+        guardKeyClick();
         commitDrop(source, current.target);
         return;
       }
       if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
         if (source.kind !== "effect") return;
         event.preventDefault();
+        event.stopPropagation();
         const next = cycleTarget(stageTargets(layout), current.target, event.key === "ArrowRight" ? 1 : -1);
         showDrag({ ...current, target: next });
         sayTarget(next);
@@ -1841,6 +1927,7 @@ export function StackBuilder({
       }
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         event.preventDefault();
+        event.stopPropagation();
         const next = slotStep(current.target, event.key === "ArrowUp" ? 1 : -1);
         showDrag({ ...current, target: next });
         sayTarget(next);
@@ -1852,6 +1939,78 @@ export function StackBuilder({
     // move re-renders the page, and only a new lift starts a new listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [drag.source, drag.mode, layout, devices]);
+
+  // The session's loose ends, for the life of the builder: a window that loses focus or a tab
+  // that goes to the background ends any press or drag (the pointer's release will not come
+  // here), the next press or key ends a click guard, and leaving the page ends everything with
+  // no setState and no add.
+  const sessionRef = useRef({ cancel: cancelSession, end: endPress });
+  useEffect(() => {
+    sessionRef.current = { cancel: cancelSession, end: endPress };
+  });
+  useEffect(() => {
+    const onBlur = () => sessionRef.current.cancel();
+    const onHidden = () => {
+      if (document.visibilityState === "hidden") sessionRef.current.cancel();
+    };
+    const onInput = () => {
+      suppressClick.current = false;
+    };
+    window.addEventListener("blur", onBlur);
+    document.addEventListener("visibilitychange", onHidden);
+    window.addEventListener("pointerdown", onInput, true);
+    window.addEventListener("keydown", onInput, true);
+    return () => {
+      window.removeEventListener("blur", onBlur);
+      document.removeEventListener("visibilitychange", onHidden);
+      window.removeEventListener("pointerdown", onInput, true);
+      window.removeEventListener("keydown", onInput, true);
+      // Leaving mid-press or mid-drag: the capture goes, the timer stops, the window listeners
+      // come off. Nothing is set and nothing is added: the release that follows finds no press.
+      const held = press.current;
+      if (held?.lifted) {
+        try {
+          held.element?.releasePointerCapture(held.pointerId);
+        } catch {
+          // Nothing left to release.
+        }
+      }
+      sessionRef.current.end();
+      orphanUp.current?.();
+      if (suppressTimer.current !== null) clearTimeout(suppressTimer.current);
+      dragRef.current = NO_DRAG;
+      boxesRef.current = null;
+    };
+  }, []);
+
+  // The drop boxes are read when a drag lifts, and again when the page scrolls or resizes under it
+  // or when the insertion line changes the list's height; a pointer move reads none.
+  const liftedMode = drag.source ? drag.mode : null;
+  useEffect(() => {
+    if (liftedMode !== "pointer" && liftedMode !== "touch") return;
+    const reread = () => {
+      boxesRef.current = readDropBoxes();
+    };
+    reread();
+    window.addEventListener("scroll", reread, true);
+    window.addEventListener("resize", reread);
+    return () => {
+      window.removeEventListener("scroll", reread, true);
+      window.removeEventListener("resize", reread);
+    };
+  }, [liftedMode]);
+  const insertAt =
+    drag.source && drag.target
+      ? drag.target.kind === "stackSlot"
+        ? drag.target.at
+        : drag.target.kind === "row"
+          ? drag.target.index + 1
+          : null
+      : null;
+  useEffect(() => {
+    if (liftedMode !== "pointer" && liftedMode !== "touch") return;
+    boxesRef.current = readDropBoxes();
+  }, [liftedMode, insertAt]);
 
   /** A tile's click: a tap or a click adds the effect on top, whole canvas (spec §4). */
   const onTileAdd = (effect: string) => {
@@ -1887,15 +2046,6 @@ export function StackBuilder({
     event.preventDefault();
     beginKeyboard({ kind: "layer", id: layer.id, name: layer.name });
   };
-
-  const insertAt =
-    drag.source && drag.target
-      ? drag.target.kind === "stackSlot"
-        ? drag.target.at
-        : drag.target.kind === "row"
-          ? drag.target.index + 1
-          : null
-      : null;
 
   // ---- presets ----------------------------------------------------------------------
 
