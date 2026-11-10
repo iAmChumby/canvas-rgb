@@ -5848,6 +5848,16 @@ button.chip:hover {
   color: var(--mute);
 }
 
+/* The reads-off frame: the same frame as "Not read yet", with the switch that starts reading at
+   its end. On a narrow page the switch wraps under the words instead of pushing them out. */
+.rd-peri-reads-off .rd-peri-unread-body {
+  flex-wrap: wrap;
+}
+
+.rd-peri-reads-off-action {
+  margin-left: auto;
+}
+
 .rd-peri-toggle-label {
   font-weight: 600;
 }

@@ -7,6 +7,7 @@ import {
   BatteryCharging,
   BatteryFull,
   ClockCountdown,
+  EyeSlash,
   GameController,
   Keyboard,
   Mouse,
@@ -29,6 +30,7 @@ import {
   kindWord,
   NOT_READ_YET_PROBLEM,
   nounOf,
+  READS_OFF_PROBLEM,
   readAgo,
   readStage,
   type PeripheralRow,
@@ -654,16 +656,22 @@ function PeripheralDetail({
   const isMouse = detail.schema.kind === "mouse";
   // Nothing was read yet: a frame that says so replaces the controls (no setting is made up).
   const unread = isUnread(detail);
+  // Reads off: the daemon has read nothing and will read nothing until Read is turned on, so the
+  // controls have no values to show and stand behind a frame that says what reading does (#264).
+  const readsOff = !reads;
+  const showsSettings = !unread && !readsOff;
   const noun = nounOf(info.kind);
   const nowMs = useNowMs(30_000);
   const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
   const ago = readAt === null ? null : readAgo(readAt, nowMs);
+  // The Read switch, in the head and in the reads-off frame: one action, so both stay in step.
+  const onReadToggle = (v: boolean) => onAccess({ reads: v, writes: v ? undefined : false });
 
   // The panels that stand in columns, and the one that spans them all.
   const columnPanels: ReactNode[] = [];
   const widePanels: ReactNode[] = [];
 
-  for (const section of unread ? [] : detail.schema.sections) {
+  for (const section of showsSettings ? detail.schema.sections : []) {
     if (isMouse && section.id === "dpi") {
       columnPanels.push(
         <DpiPanel
@@ -764,7 +772,7 @@ function PeripheralDetail({
                 <Toggle
                   label="Read settings from this device"
                   checked={reads}
-                  onChange={(v) => onAccess({ reads: v, writes: v ? undefined : false })}
+                  onChange={onReadToggle}
                 />
               </span>
             </Tooltip>
@@ -794,7 +802,7 @@ function PeripheralDetail({
             </Tooltip>
           </div>
         </div>
-        {detail.problem && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && (
+        {detail.problem && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && !(readsOff && detail.problem === READS_OFF_PROBLEM) && (
           <p className="rule rule-warn" data-role="problem">
             {detail.problem}
           </p>
@@ -814,12 +822,39 @@ function PeripheralDetail({
         </Panel>
       )}
 
+      {/* Reads off: the same frame as "Not read yet", with the switch that starts reading as its
+          action. No section is drawn, so the page never shows a default as if it were read. */}
+      {readsOff && (
+        <Panel className="rd-peri-unread rd-peri-reads-off">
+          <div className="rd-peri-unread-body" data-role="reads-off">
+            <span className="rd-peri-unread-icon" aria-hidden="true">
+              <EyeSlash size={22} />
+            </span>
+            <p className="rd-peri-unread-text">
+              {`canvas-rgb reads this ${noun}'s settings only when you turn Read on; reading pauses the ${noun} for a few seconds.`}
+            </p>
+            <span className="rd-peri-reads-off-action">
+              <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
+                <span className="rd-peri-toggle">
+                  <span className="rd-peri-toggle-label">Read</span>
+                  <Toggle
+                    label="Read this device's settings"
+                    checked={reads}
+                    onChange={onReadToggle}
+                  />
+                </span>
+              </Tooltip>
+            </span>
+          </div>
+        </Panel>
+      )}
+
       {/* The sections in columns: a panel never breaks across two of them. */}
-      {!unread && <div className="rd-peri-sections">{columnPanels}</div>}
+      {showsSettings && <div className="rd-peri-sections">{columnPanels}</div>}
 
       {widePanels}
 
-      {isController && !unread && (
+      {isController && showsSettings && (
         <Panel title="RGB rings">
           <p className="mute">The rings on the pad are not read yet: this build cannot name them.</p>
         </Panel>

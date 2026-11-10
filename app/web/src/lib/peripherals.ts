@@ -106,6 +106,9 @@ export function readStage(progress: ReadProgress | null, noun: string): LoadStag
 /** The daemon's words (`problem`) when reads are on and nothing has been read yet. */
 export const NOT_READ_YET_PROBLEM = "the device's settings have not been read yet";
 
+/** The daemon's words (`problem`) while reads are off for a device (crates/canvas-daemon/src/peripherals.rs). */
+export const READS_OFF_PROBLEM = "reads are off for this device";
+
 /** Values read longer ago than this are shown as stale (the daemon refreshes them when idle). */
 export const STALE_AFTER_MS = 30 * 60 * 1000;
 

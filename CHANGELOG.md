@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Peripherals: a device you have not let canvas-rgb read no longer shows made-up settings (#264)
+
 ## [0.11.0] - 2026-11-10
 
 ### Added
