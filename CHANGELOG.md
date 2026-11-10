@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.13.0] - 2026-11-10
+
 ### Changed
 
 - Effects: the builder has a library beside the picture (a rail on a wide window, a tray under the picture, a tab on a phone) with Effects and Masks, a search, and a New from code tile; click a tile to add it, drag it onto the picture to place it on the whole canvas, a device, a zone (hold Shift) or a new rectangle, drag it into the layer list to choose its place, and reorder a layer by dragging its grip — with Space and the arrow keys doing the same from the keyboard, and each step said aloud (#257)
@@ -292,7 +294,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...HEAD
+[0.13.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.3...v0.11.0
