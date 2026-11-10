@@ -565,20 +565,27 @@ scroll, so the content was clipped and unreachable.
   the window's right or left edge (`.content { overflow: hidden }` hides such an element, so a clip
   is no excuse); a `.panel` wider than the window or scrolling sideways; a document that scrolls
   sideways; a figure whose unit wraps under it; and a portal (a `Popover` or a `Select` list, both
-  drawn into `body`) past the window on any side or past the right edge of the box its opening
-  control sits in. A view that measured nothing fails too. What it skips: anything not drawn,
-  Layout's `canvas.stage-canvas` (the zoomed view, clipped by its stage on purpose), and content
-  inside a scroller whose CSS says `overflow-x: auto|scroll` and whose own edge is inside the edge
+  drawn into `body`) past the window on any side, or past the right edge of the box its opening
+  control sits in. The control is found through `aria-controls` (a `Select`'s list, and a
+  `Popover`'s panel: the `Popover` names itself on its anchor while open); a portal whose control
+  is not found gets an `unknown` line in the row output and is counted in the summary, never
+  passed, and only its window edges were measured. A view that measured nothing fails too. Fixed
+  elements are measured against the window like any other. What it skips: anything not drawn
+  (display none, visibility hidden, opacity 0), Layout's `canvas.stage-canvas` past the window's
+  right edge while its own `.stage` clips it and sits inside the window, and content inside a
+  scroller whose CSS says `overflow-x: auto|scroll` and whose own edge is inside the edge
   measured. An `overflow-y: auto` list or panel computes `overflow-x: auto` too, and is not such a
-  scroller: what it holds past the panel edge is reported. `--mutate-overflow` plants ten
+  scroller: what it holds past the panel edge is reported. `--mutate-overflow` plants thirteen
   overflows in every row, one per measuring path (a wider element in a box, an element outside any
   box past either window edge, a `.panel` past the window, a `.panel` wider than the window, a body
   wider than the window, an element past the panel inside a vertical scroller, a sideways-scrolling
-  panel, a wrapped figure, a portal past its panel), and fails when a row does not report the one
-  planted. Since #271 `--hover-tips` replaces the edge measure with a hover pass over the rows
+  panel, a wrapped figure, a portal past its panel, a stage canvas past the left window edge, a
+  stage canvas in a stage that does not clip, a sibling of a stage canvas past the window), fails
+  when a row does not report the one planted, and prints per row which kinds it caught and which it
+  did not. Since #271 `--hover-tips` replaces the edge measure with a hover pass over the rows
   that have no popup open: it hovers every control that draws a tooltip and fails on a shown bubble
-  that passes the window by more than 1 px or that an ancestor cuts off (78 hits on origin/main,
-  0 after #271). Run it after `npm --prefix app/web run build`. Not in CI yet (it needs
+  that passes the window by more than 1 px or that an ancestor cuts off. Run it after
+  `npm --prefix app/web run build`. Not in CI yet (it needs
   Playwright's browser). When it finds an overflow, let the row wrap as groups (the browser decides
   from the control's own width) and keep every state of a row the same width, so a state change
   never moves it.

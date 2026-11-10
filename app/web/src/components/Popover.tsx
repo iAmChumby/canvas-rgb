@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
+import { useEffect, useId, useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { motionOffNow, readCssMs } from "@/lib/motion";
 
@@ -62,6 +62,7 @@ export function Popover({
   label?: string;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
+  const id = useId();
   const [style, setStyle] = useState<CSSProperties | undefined>(undefined);
   // The exit (issue #187, rule 2): when `open` drops, the panel stays for
   // --dur-exit under its exit animation, then goes. It closes back into the
@@ -96,6 +97,19 @@ export function Popover({
     }, ms);
     return () => clearTimeout(t);
   }, [closing]);
+
+  // The control names the panel it opened (aria-controls) while the panel is open, so a tool or a
+  // screen reader can tell which control a panel belongs to.
+  useLayoutEffect(() => {
+    const el = anchor.current;
+    if (!open || !el) return;
+    const had = el.getAttribute("aria-controls");
+    el.setAttribute("aria-controls", id);
+    return () => {
+      if (had === null) el.removeAttribute("aria-controls");
+      else el.setAttribute("aria-controls", had);
+    };
+  }, [open, anchor, id]);
 
   useLayoutEffect(() => {
     if (!open) return;
@@ -178,6 +192,7 @@ export function Popover({
   return createPortal(
     <div
       ref={panelRef}
+      id={id}
       className={className ? `popover ${className}` : "popover"}
       role="dialog"
       aria-label={label}
