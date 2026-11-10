@@ -155,6 +155,8 @@ pub fn build_core(boot: &Boot, deps: Deps) -> Core {
     // Issue #130: the rated maxima the hot lines are measured from. The CPU one comes
     // from the CPUID brand string, the GPU one from NVML's slowdown threshold.
     fans.set_rated(crate::fans::cpu_brand_string().as_deref(), gpu_rated_max_c);
+    // Issue #225: a hand-edited hot limit outside the settable range falls back to automatic.
+    fans.drop_invalid_hot_limits();
     // Issue #128: read the board name once, and load the per-header overrides from chip.toml.
     fans.set_board_product(crate::board::RealBoardProbe.base_board_product());
     if boot.secured() {

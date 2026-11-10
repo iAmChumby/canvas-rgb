@@ -488,6 +488,38 @@ impl FanController {
         self.hot_logged = false;
     }
 
+    /// Issue #225: validates the hot limits loaded from `fans.toml`. A hand-edited value outside
+    /// `HOT_LIMIT_MIN_C..=max_settable_c` (or not a finite number) falls back to automatic with a
+    /// WARN naming it; the other limits and the rest of the file load as written. Call it after
+    /// the rated maxima are set (`set_rated`), because the settable range depends on them. The
+    /// corrected file is saved, so the file, the export and the enforced line all agree.
+    pub fn drop_invalid_hot_limits(&mut self) {
+        let mut dropped = false;
+        for kind in [HotKind::Cpu, HotKind::Gpu, HotKind::Board] {
+            let Some(celsius) = self.config.hot_limits.get(kind) else { continue };
+            let mut only = HotLimits::default();
+            match kind {
+                HotKind::Cpu => only.cpu_c = Some(celsius),
+                HotKind::Gpu => only.gpu_c = Some(celsius),
+                HotKind::Board => only.board_c = Some(celsius),
+            }
+            if let Err(e) = validate_hot_limits(&only, self.cpu_rated_max_c, self.gpu_rated_max_c) {
+                tracing::warn!(?kind, celsius, error = %e, "fans.toml has an out-of-range hot limit; using the automatic one");
+                match kind {
+                    HotKind::Cpu => self.config.hot_limits.cpu_c = None,
+                    HotKind::Gpu => self.config.hot_limits.gpu_c = None,
+                    HotKind::Board => self.config.hot_limits.board_c = None,
+                }
+                dropped = true;
+            }
+        }
+        if dropped {
+            if let Err(e) = self.persist() {
+                tracing::warn!(error = %e, "could not save fans.toml after dropping an out-of-range hot limit");
+            }
+        }
+    }
+
     /// The rated maximum for a hot kind, when known. Board sensors have no part maximum.
     fn rated_for(&self, kind: HotKind) -> Option<f32> {
         match kind {

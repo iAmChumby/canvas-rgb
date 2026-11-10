@@ -1394,6 +1394,203 @@ async fn deleting_a_fan_profile_with_the_service_down_is_a_503() {
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
 }
 
+// ---- Issue #225: the fans PATCH routes read the service's answer ----
+
+#[tokio::test]
+async fn issue225_patching_to_a_profile_the_service_does_not_have_is_a_404_and_saves_nothing() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Error("not_found"));
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let before = app.fans_last.read().await.clone().expect("fans_last is set").active_profile;
+    let response = router
+        .oneshot(request_with_body("PATCH", routes::FAN_PROFILE, r#"{"name":"Nope"}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    assert_eq!(json(response).await.get("error").and_then(|v| v.as_str()), Some("not_found"));
+    let saved = app.fans_last.read().await.clone().expect("fans_last stays");
+    assert_eq!(saved.active_profile, before, "a refused switch leaves active_profile unchanged");
+    assert_ne!(saved.active_profile, "Nope");
+}
+
+#[tokio::test]
+async fn issue225_patching_to_a_profile_the_service_takes_saves_the_name() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Ok);
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let response = router
+        .oneshot(request_with_body("PATCH", routes::FAN_PROFILE, r#"{"name":"Quiet"}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved = app.fans_last.read().await.clone().expect("fans_last stays");
+    assert_eq!(saved.active_profile, "Quiet");
+}
+
+#[tokio::test]
+async fn issue225_patching_the_profile_with_the_service_down_is_a_503_and_saves_nothing() {
+    let (router, app, _home) = build_with_pipe(FakeReply::Down);
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let response = router
+        .oneshot(request_with_body("PATCH", routes::FAN_PROFILE, r#"{"name":"Quiet"}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(app.fans_last.read().await.clone().expect("fans_last stays").active_profile, "Default");
+}
+
+#[tokio::test]
+async fn issue225_a_header_mode_the_service_refuses_is_an_error_status() {
+    for (code, status) in [
+        ("validation", StatusCode::UNPROCESSABLE_ENTITY),
+        ("not_found", StatusCode::NOT_FOUND),
+        ("conflict", StatusCode::CONFLICT),
+    ] {
+        let (router, _app, _home) = build_with_pipe(FakeReply::Error(code));
+        let response = router
+            .oneshot(request_with_body("PATCH", "/api/v1/fans/headers/cpu_fan", r#"{"mode":"fixed","percent":100}"#))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), status, "service code {code}");
+        assert_eq!(json(response).await.get("error").and_then(|v| v.as_str()), Some(code));
+    }
+}
+
+#[tokio::test]
+async fn issue225_a_header_mode_the_service_takes_is_200() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
+    let response = router
+        .oneshot(request_with_body("PATCH", "/api/v1/fans/headers/cpu_fan", r#"{"mode":"fixed","percent":100}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(json(response).await.get("ok").and_then(|v| v.as_bool()), Some(true));
+}
+
+#[tokio::test]
+async fn issue225_a_fail_sensor_the_service_refuses_is_an_error_status() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Error("validation"));
+    let response = router
+        .oneshot(request_with_body("POST", "/api/v1/diag/fail-sensor", r#"{"source":"cpu","failed":true}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+#[tokio::test]
+async fn issue225_a_fail_sensor_the_service_takes_is_200() {
+    let (router, _app, _home) = build_with_pipe(FakeReply::Ok);
+    let response = router
+        .oneshot(request_with_body("POST", "/api/v1/diag/fail-sensor", r#"{"source":"cpu","failed":true}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+// ---- Issue #225: put_profile holds the fans-config lock across both of its sends ----
+
+/// A service that logs each request as it ARRIVES and holds `PutProfile` until the test
+/// opens the gate. No clock: the test drives the interleaving.
+struct GatedPutProfilePipe {
+    sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+    gate: Arc<tokio::sync::Notify>,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for GatedPutProfilePipe {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        self.sent.lock().unwrap().push(request.clone());
+        if matches!(request, canvas_proto::pipe::PipeRequest::PutProfile { .. }) {
+            self.gate.notified().await;
+        }
+        Ok(canvas_proto::pipe::PipeResponse::Ok)
+    }
+}
+
+/// Lets every other ready task run: on the test's single-threaded runtime each yield polls
+/// the spawned tasks once, so a task that is not blocked reaches the pipe within a few.
+async fn let_other_tasks_run() {
+    for _ in 0..200 {
+        tokio::task::yield_now().await;
+    }
+}
+
+#[tokio::test]
+async fn issue225_put_profile_holds_the_fans_lock_across_both_sends() {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        Arc::new(FakeEngine::default()),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
+    let gate = Arc::new(tokio::sync::Notify::new());
+    app.pipe = Arc::new(GatedPutProfilePipe { sent: Arc::clone(&sent), gate: Arc::clone(&gate) });
+    let app = Arc::new(app);
+    *app.fans.write().await = Some(fans_with_hot());
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let router = api::router(app.clone());
+
+    let profile_body = serde_json::json!({
+        "name": "quiet",
+        "headers": {"cpu_fan": {"mode": "fixed", "percent": 40}}
+    })
+    .to_string();
+    let router_profile = router.clone();
+    let profile_task = tokio::spawn(async move {
+        router_profile
+            .oneshot(request_with_body("PUT", "/api/v1/fans/profiles/quiet", &profile_body))
+            .await
+            .expect("the profile router answers")
+    });
+    // The profile PUT is now in flight: PutProfile reached the service and waits at the gate.
+    let_other_tasks_run().await;
+    assert!(
+        sent.lock().unwrap().iter().any(|r| matches!(r, canvas_proto::pipe::PipeRequest::PutProfile { .. })),
+        "the PutProfile send is in flight"
+    );
+
+    let router_hot = router.clone();
+    let hot_task = tokio::spawn(async move {
+        router_hot
+            .oneshot(request_with_body("PUT", routes::FAN_HOT, r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#))
+            .await
+            .expect("the hot router answers")
+    });
+    // Give the hot PUT every chance to push its config while PutProfile is held.
+    let_other_tasks_run().await;
+    gate.notify_one();
+    let profile_resp = profile_task.await.expect("the profile task joins");
+    let hot_resp = hot_task.await.expect("the hot task joins");
+    assert_eq!(profile_resp.status(), StatusCode::OK);
+    assert_eq!(hot_resp.status(), StatusCode::OK);
+
+    // The service saw the profile PUT's two sends back to back: the first config push after
+    // PutProfile is the profile's own (it carries the profile), not the hot PUT's.
+    let recorded = sent.lock().unwrap().clone();
+    let after_put_profile = recorded
+        .iter()
+        .skip_while(|r| !matches!(r, canvas_proto::pipe::PipeRequest::PutProfile { .. }))
+        .find_map(|r| match r {
+            canvas_proto::pipe::PipeRequest::PutFanConfig { config } => Some(config),
+            _ => None,
+        })
+        .expect("a config push follows PutProfile");
+    assert!(
+        after_put_profile.profiles.iter().any(|p| p.name == "quiet"),
+        "a concurrent hot-limit push interleaved between the two sends of put_profile: {recorded:?}"
+    );
+
+    let saved = app.fans_last.read().await.clone().expect("fans_last is saved");
+    assert_eq!(saved.hot_limits.cpu_c, Some(70.0), "the hot change survived");
+    assert!(saved.profiles.iter().any(|p| p.name == "quiet"), "the profile change survived");
+}
+
 fn install_body(installer: &str, signature: &str) -> String {
     serde_json::json!({ "installer": installer, "signature": signature }).to_string()
 }

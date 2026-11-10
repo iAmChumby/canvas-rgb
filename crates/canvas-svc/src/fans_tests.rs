@@ -2103,3 +2103,54 @@ fn an_edited_curve_keeps_the_ceiling_latch_until_the_hold_ends() {
     }
     assert_ne!(last, 255, "after 60 s below the ceiling the latch released: {last}");
 }
+
+// ---- Issue #225: fans.toml hot limits are validated on load ----
+
+fn write_fans_toml(dir: &TempDir, hot_limits: HotLimits) {
+    let file = FansFile { hot_limits, ..Default::default() };
+    store::save_fans(&paths::fans_path(dir.path()), &file).unwrap();
+}
+
+#[test]
+fn issue225_a_hand_edited_hot_limit_past_the_ceiling_loads_as_automatic() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    // A hand-edited file: cpu_c is past the ceiling gap, board_c is fine.
+    write_fans_toml(&dir, HotLimits { cpu_c: Some(95.0), gpu_c: None, board_c: Some(60.0) });
+    let loaded = store::load_fans(&paths::fans_path(dir.path())).unwrap().unwrap();
+    assert_eq!(loaded.hot_limits.cpu_c, Some(95.0), "the schema check alone keeps the bad value");
+
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = controller(&dir, &chip, &cpu, loaded, t0);
+    let (_, log) = crate::test_logs::captured(|| fans.drop_invalid_hot_limits());
+
+    let status = fans.status();
+    let cpu_row = status.hot.iter().find(|s| s.kind == HotKind::Cpu).unwrap();
+    assert!(!cpu_row.user_set, "an out-of-range cpu limit falls back to automatic: {cpu_row:?}");
+    assert_eq!(cpu_row.limit_c, cpu_row.auto_c);
+    let board_row = status.hot.iter().find(|s| s.kind == HotKind::Board).unwrap();
+    assert!(board_row.user_set && board_row.limit_c == 60.0, "the rest of the file still loads: {board_row:?}");
+    assert!(log.contains("WARN") && log.contains("95"), "a WARN names the value: {log}");
+
+    // The file agrees with what is enforced: the dropped limit is gone from disk too.
+    let again = store::load_fans(&paths::fans_path(dir.path())).unwrap().unwrap();
+    assert_eq!(again.hot_limits, HotLimits { cpu_c: None, gpu_c: None, board_c: Some(60.0) });
+}
+
+#[test]
+fn issue225_valid_hot_limits_are_left_alone_and_nothing_is_logged() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let limits = HotLimits { cpu_c: Some(70.0), gpu_c: None, board_c: Some(60.0) };
+    write_fans_toml(&dir, limits);
+    let loaded = store::load_fans(&paths::fans_path(dir.path())).unwrap().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = controller(&dir, &chip, &cpu, loaded, t0);
+    let (_, log) = crate::test_logs::captured(|| fans.drop_invalid_hot_limits());
+    let status = fans.status();
+    let cpu_row = status.hot.iter().find(|s| s.kind == HotKind::Cpu).unwrap();
+    assert!(cpu_row.user_set && cpu_row.limit_c == 70.0, "{cpu_row:?}");
+    assert!(!log.contains("hot limit"), "no line for a valid file: {log}");
+}

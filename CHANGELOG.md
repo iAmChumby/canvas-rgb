@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Fans: switching to a profile the service does not have, or setting a header mode it refuses, now answers with the service's refusal instead of 200 and no longer saves the new profile name; a hand-edited hot limit in fans.toml outside its allowed range falls back to automatic with a logged warning; saving a fan profile no longer lets a hot-limit change slip in between its two writes to the service (#225)
+
 ## [0.13.0] - 2026-11-10
 
 ### Changed

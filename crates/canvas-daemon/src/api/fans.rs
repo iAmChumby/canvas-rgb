@@ -54,12 +54,15 @@ pub async fn patch_header(
     validate_mode(&header, &mode, floor)
         .map_err(|e| ApiFailure::validation(e.to_string()))?;
 
-    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::SetHeaderMode {
+    let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::SetHeaderMode {
         header: header.clone(),
         mode: mode.clone(),
     })
     .await
     .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+    // Issue #225: the service's refusal is the answer (a pipe `Error` maps through
+    // `service_failure`); only an `Ok` means the mode changed.
+    expect_ok(response)?;
 
     tracing::info!(header = %header, mode = ?mode, "the fan header mode changed");
     Ok(Json(serde_json::json!({ "ok": true, "header": header, "mode": mode })))
@@ -172,11 +175,14 @@ pub async fn patch_profile(
     State(app): State<Arc<App>>,
     Json(request): Json<FanProfileName>,
 ) -> ApiResult<Json<FanProfileName>> {
-    crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::SetProfile {
+    let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::SetProfile {
         name: request.name.clone(),
     })
     .await
     .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+    // Issue #225: a refusal (`not_found` for a profile the service does not have) is the
+    // answer, and the daemon's copy changes only after the service said `Ok`.
+    expect_ok(response)?;
 
     // Keep the daemon's copy of the fans file in step, so an export while the service is
     // down still shows the right profile.
@@ -234,7 +240,7 @@ pub async fn delete_profile(
 
 /// Maps a service error code to the API's status: `conflict` 409, `not_found` 404,
 /// `service_unavailable` 503, `validation` 422. Any other code is an internal error.
-fn service_failure(code: &str, message: String) -> ApiFailure {
+pub(crate) fn service_failure(code: &str, message: String) -> ApiFailure {
     use canvas_proto::api::error_codes;
     match code {
         error_codes::CONFLICT => ApiFailure::new(
@@ -246,6 +252,18 @@ fn service_failure(code: &str, message: String) -> ApiFailure {
         error_codes::VALIDATION => ApiFailure::validation(message),
         error_codes::SERVICE_UNAVAILABLE => ApiFailure::service_unavailable(message),
         _ => ApiFailure::internal(message),
+    }
+}
+
+/// Turns the service's answer to a write into `Ok(())` or the matching failure: a pipe
+/// `Error` goes through [`service_failure`], and anything other than `Ok` is an internal
+/// error. Every fan route that sends a request and needs no payload back reads its answer
+/// through this (issue #225).
+pub(crate) fn expect_ok(response: canvas_proto::pipe::PipeResponse) -> Result<(), ApiFailure> {
+    match response {
+        canvas_proto::pipe::PipeResponse::Ok => Ok(()),
+        canvas_proto::pipe::PipeResponse::Error { code, message } => Err(service_failure(&code, message)),
+        _ => Err(ApiFailure::internal("the fan service gave an unexpected answer")),
     }
 }
 
@@ -266,55 +284,37 @@ pub async fn put_profile(
     let floor = configured_floor(&app).await;
     validate_profile(&profile, floor).map_err(|e| ApiFailure::validation(e.to_string()))?;
 
+    // One fans-config lock (`fans_last`) is held across the whole read-modify-send-send-save:
+    // `PutProfile`, then the whole-config push that mirrors it, then the daemon's copy. A
+    // concurrent hot-limit PUT (or another profile PUT) waits, so its config push can never
+    // land between the two sends, and two PUTs cannot lose each other's change (issue #225).
+    let home = app.store.read().await.home.clone();
+    let mut guard = app.fans_last.write().await;
+
     let put_response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutProfile {
         profile: profile.clone(),
     })
     .await
     .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
-    match put_response {
-        canvas_proto::pipe::PipeResponse::Ok => {}
-        canvas_proto::pipe::PipeResponse::Error { code, message } => {
-            return Err(service_failure(&code, message));
-        }
-        _ => {
-            return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
-        }
-    }
+    expect_ok(put_response)?;
 
-    // Mirror the profiles into the daemon's copy of the fans file and push the whole
-    // config, so the service and the daemon agree. One fans-config lock is held across
-    // the whole read-modify-send-save, so two PUTs cannot lose each other's change.
-    let fans = {
-        let home = app.store.read().await.home.clone();
-        let mut guard = app.fans_last.write().await;
-        let mut next = guard
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| canvas_proto::config::FansFile { floor_percent: floor, ..Default::default() });
-        next.floor_percent = floor;
-        match next.profiles.iter_mut().find(|p| p.name == profile.name) {
-            Some(existing) => *existing = profile.clone(),
-            None => next.profiles.push(profile.clone()),
-        }
-        // Send first: the daemon's copy is updated below only after the service said Ok.
-        // The guard is held across the send, so a concurrent hot-limit PUT waits.
-        let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
-            .await
-            .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
-        match response {
-            canvas_proto::pipe::PipeResponse::Ok => {}
-            canvas_proto::pipe::PipeResponse::Error { code, message } => {
-                return Err(service_failure(&code, message));
-            }
-            _ => {
-                return Err(ApiFailure::internal("the fan service gave an unexpected answer"));
-            }
-        }
-        crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));
-        *guard = Some(next.clone());
-        next
-    };
-    let _ = fans;
+    let mut next = guard
+        .as_ref()
+        .cloned()
+        .unwrap_or_else(|| canvas_proto::config::FansFile { floor_percent: floor, ..Default::default() });
+    next.floor_percent = floor;
+    match next.profiles.iter_mut().find(|p| p.name == profile.name) {
+        Some(existing) => *existing = profile.clone(),
+        None => next.profiles.push(profile.clone()),
+    }
+    // Send first: the daemon's copy is updated below only after the service said Ok.
+    let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
+        .await
+        .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+    expect_ok(response)?;
+    crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));
+    *guard = Some(next);
+    drop(guard);
 
     tracing::info!(profile = %profile.name, "the fan profile was saved");
     Ok(Json(profile))
