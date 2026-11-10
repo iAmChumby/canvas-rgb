@@ -484,7 +484,11 @@ export function Stage({
                 }}
               >
                 {selected && (
-                  <span className="rd-area-label">
+                  <span
+                    className="rd-area-label"
+                    data-below={frame.bounds.y < 30 ? "true" : undefined}
+                    data-end={frame.bounds.x + frame.bounds.width > CANVAS_W * 0.6 ? "true" : undefined}
+                  >
                     {layer.name} · {areaName(layer.area, layout, devices)}
                   </span>
                 )}
