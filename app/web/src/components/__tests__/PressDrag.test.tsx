@@ -11,7 +11,7 @@ import type { CurvePoint } from "@/proto/CurvePoint";
 import type { StackLayer } from "@/proto/StackLayer";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { PreviewStage } from "@/views/PreviewStage";
-import { StackPreviewCanvas } from "@/views/effects/StackPreviewCanvas";
+import { Stage } from "@/views/effects/Stage";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 
 // The class test for `cause:ui-interaction` (#105): one rule over every control the pointer
@@ -277,7 +277,7 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     expect(el.getAttribute("draggable")).toBe("false");
   });
 
-  it("the stack preview's area frame is prevented, refuses a dragstart and still blurs a focused field", () => {
+  it("the stack stage's area frame is prevented, refuses a dragstart and still blurs a focused field", () => {
     const onBlur: Mock = vi.fn();
     const layer = {
       id: "l1",
@@ -292,12 +292,13 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     const { container } = render(
       <>
         <input aria-label="Field" onBlur={onBlur} />
-        <StackPreviewCanvas
+        <Stage
           stack={{ id: "stack:T", layers: [layer] }}
           layout={null}
           devices={null}
           picked={layer}
-          showAreas
+          parts
+          onSelect={() => undefined}
           onAreaChange={vi.fn()}
         />
       </>,

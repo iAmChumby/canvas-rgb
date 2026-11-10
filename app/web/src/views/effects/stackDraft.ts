@@ -637,6 +637,88 @@ export function areaReadout(
   return { title: areaName(area, layout, devices), detail: null };
 }
 
+// ---------------------------------------------------------------- the stage (#257)
+
+/** One layer's frame on the stage: where its area paints, and how big that is. */
+export interface StageFrame {
+  id: string;
+  bounds: Bounds;
+  kind: LayerArea["kind"];
+  /** Width × height in canvas units: the smallest area under a press wins. */
+  area: number;
+  /** The layer's place in the stack, bottom first: a tie goes to the one painted on top. */
+  index: number;
+}
+
+/**
+ * Every frame the stage draws, bottom first: a layer that is switched off paints nothing, so it
+ * has no frame, and one whose device is not on the desk has nowhere to draw.
+ */
+export function stageFrames(layers: StackLayer[], layout: Layout | null): StageFrame[] {
+  const frames: StageFrame[] = [];
+  layers.forEach((layer, index) => {
+    if (!layer.visible) return;
+    const bounds = areaBounds(layer.area, layout);
+    if (!bounds) return;
+    const width = Math.max(0, bounds.width);
+    const height = Math.max(0, bounds.height);
+    frames.push({ id: layer.id, bounds, kind: layer.area.kind, area: width * height, index });
+  });
+  return frames;
+}
+
+/**
+ * The frames in the order a press takes them: the smallest area under the point wins, a
+ * whole-canvas layer comes last however big it is, and an equal area goes to the layer painted
+ * on top. `layerAtPoint` then takes the first frame that holds the point.
+ */
+export function stageHitOrder(frames: StageFrame[]): StageFrame[] {
+  const rank = (frame: StageFrame) => (frame.kind === "canvas" ? 1 : 0);
+  return [...frames].sort(
+    (a, b) => rank(a) - rank(b) || a.area - b.area || b.index - a.index,
+  );
+}
+
+/** The layer a press at `point` picks, or null when nothing is under it. */
+export function layerAtPoint(
+  layers: StackLayer[],
+  layout: Layout | null,
+  point: { x: number; y: number },
+): string | null {
+  const hit = stageHitOrder(stageFrames(layers, layout)).find(
+    (frame) =>
+      point.x >= frame.bounds.x &&
+      point.x <= frame.bounds.x + frame.bounds.width &&
+      point.y >= frame.bounds.y &&
+      point.y <= frame.bounds.y + frame.bounds.height,
+  );
+  return hit?.id ?? null;
+}
+
+/**
+ * The layer Tab and Shift+Tab move to, top of the stack first: the list reads as the stage
+ * paints it. A picked layer that is gone (or nothing picked) starts at the top.
+ */
+export function cycleLayer(layers: StackLayer[], picked: string | null, step: 1 | -1): string | null {
+  if (layers.length === 0) return null;
+  const top = [...layers].reverse();
+  const at = picked === null ? -1 : top.findIndex((layer) => layer.id === picked);
+  if (at < 0) return (step > 0 ? top[0] : top[top.length - 1])?.id ?? null;
+  return top[(at + step + top.length) % top.length]?.id ?? null;
+}
+
+/**
+ * An area said as the rectangle it covers on the stage (#257): the picked frame's own bounds,
+ * rounded whole and inside the canvas. Null when the area is not on the desk, so the chip that
+ * offers this can say so by not being there.
+ */
+export function areaAsRect(area: LayerArea, layout: Layout | null): LayerArea | null {
+  if (area.kind === "rect") return area;
+  const bounds = areaBounds(area, layout);
+  if (!bounds) return null;
+  return { kind: "rect", ...roundRect(bounds) };
+}
+
 /** The tone a layer's status is drawn in: warn for a layer that is not running. */
 export function statusWords(
   state: StackLayerState | undefined,

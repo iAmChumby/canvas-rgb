@@ -7265,11 +7265,18 @@ button.chip:hover {
   white-space: nowrap;
 }
 
-.rd-show-areas {
+.rd-stage-parts {
   display: flex;
   align-items: center;
   gap: var(--s2);
   font-size: var(--t14);
+}
+
+/* Undo and redo sit beside Parts, as the stage's own keys (#257). */
+.rd-stage-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
 }
 
 .rd-canvas-wrap {
@@ -7328,7 +7335,49 @@ button.chip:hover {
   font-weight: 600;
 }
 
-/* The picked layer's area: an accent frame with four corner handles, drawn over the picture. */
+/* Every visible layer's frame sits on the picture as a faint outline (#257): the stage shows
+   where each layer paints before anything is picked. The picked one is `.rd-area-frame` below,
+   which draws over this outline. A faint frame takes no press: the stage under it picks the
+   smallest area at the point. */
+.rd-layer-frame {
+  position: absolute;
+  border: 1px solid color-mix(in srgb, var(--ink) 22%, transparent);
+  border-radius: 3px;
+  pointer-events: none;
+}
+
+.rd-layer-frame[data-selected="true"] {
+  pointer-events: none;
+}
+
+/* The desk's own outlines, under every layer's frame while Parts is on: a dashed edge and the
+   owner's name for a zone, in the muted ink so a frame stays the loudest thing on the stage. */
+.rd-parts {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.rd-part-outline {
+  position: absolute;
+  border: 1px dashed color-mix(in srgb, var(--ink) 30%, transparent);
+  border-radius: 3px;
+}
+
+.rd-part-outline em {
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  max-width: calc(100% - 6px);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--mute);
+  font: 500 var(--t14) / 1.2 var(--fm);
+  font-style: normal;
+}
+
+/* The picked frame's area: an accent frame with four corner handles, drawn over the picture. */
 .rd-area-frame {
   position: absolute;
   border: 1.5px solid var(--a1);
@@ -7424,6 +7473,25 @@ button.chip:hover {
   background: var(--a1);
   color: var(--on-accent);
   font: 500 var(--t14) / 1.3 var(--fm);
+}
+
+/* The "Make rectangle" key of a picked area that is not a rectangle (#257): it floats over the
+   stage's top-right corner, where it never sits under a frame's handles. */
+.rd-stage-float {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  z-index: 2;
+  display: flex;
+}
+
+.rd-stage-float .chip {
+  background: var(--panel);
+  border-color: var(--line-2);
+}
+
+.rd-stage-float .chip:hover {
+  background: var(--raised);
 }
 
 .rd-stage-foot {
@@ -8309,9 +8377,13 @@ button.chip:hover {
     gap: var(--s2);
   }
 
-  /* The mockup's phone head carries the size and the rate; the areas are drawn, and the switch
-     that hides them is a desktop control. */
-  .rd-stacks-phone .rd-show-areas {
+  /* The mockup's phone head carries the size and the rate; the desk's outlines are a desktop
+     control, and without the switch they would only crowd a 358 px stage. */
+  .rd-stacks-phone .rd-stage-parts {
+    display: none;
+  }
+
+  .rd-stacks-phone .rd-parts {
     display: none;
   }
 

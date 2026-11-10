@@ -44,11 +44,12 @@ import { useMediaQuery } from "@/components/MediaQuery";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { PropertyControls } from "@/views/PropertyControls";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
-import { StackPreviewCanvas } from "@/views/effects/StackPreviewCanvas";
+import { Stage, StageTools } from "@/views/effects/Stage";
 import {
   addLayer,
   addLayerRefusal,
   applyMergedProps,
+  areaAsRect,
   areaName,
   areaPosition,
   duplicateLayer,
@@ -79,6 +80,7 @@ import {
 } from "@/views/effects/stackDraft";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import { canRedo, canUndo, endRun, historyOf, record, redo, reset, undo, type History } from "@/lib/draftHistory";
 import { onStackPreviewFeed } from "@/lib/stackPreview";
 import {
   cancelNavigation,
@@ -179,13 +181,27 @@ export function StackBuilder({
   const [phase, setPhase] = useState<LoadState>(isNew ? "ready" : "loading");
   const [loadError, setLoadError] = useState<string | null>(null);
   const [base, setBase] = useState<Stack | null>(null);
-  const [draft, setDraft] = useState<Stack>({ id: "stack:", layers: [] });
+  /**
+   * The draft and the steps that led to it (#257). Every edit is one step, so undo takes back a
+   * whole drag or slider scrub and not one frame of it; the draft and its history live in one
+   * piece of state, so a change and its step can never come apart.
+   */
+  const [edit, setEdit] = useState<History<Stack>>(() => historyOf({ id: "stack:", layers: [] }));
+  const draft = edit.draft;
+  /** A change to the draft: a step of its own, or part of the undo run it names. */
+  const setDraft = (update: Stack | ((current: Stack) => Stack), run?: string) => {
+    setEdit((history) =>
+      record(history, typeof update === "function" ? update(history.draft) : update, run === undefined ? {} : { run }),
+    );
+  };
+  /** A checkpoint with no steps behind it: a load, a save or a revert. */
+  const resetDraft = (next: Stack) => setEdit((history) => reset(history, next));
   const [nameDraft, setNameDraft] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, StackLayerStatus>>({});
   const [schemas, setSchemas] = useState<Record<string, PropertySchema | null>>({});
   const [presets, setPresets] = useState<{ builtIn: Preset[]; user: Preset[] }>({ builtIn: [], user: [] });
-  const [showAreas, setShowAreas] = useState(true);
+  const [parts, setParts] = useState(true);
   const [addOpen, setAddOpen] = useState(false);
   const [addQuery, setAddQuery] = useState("");
   const [pickerFor, setPickerFor] = useState<string | null>(null);
@@ -243,6 +259,7 @@ export function StackBuilder({
   const areaOpener = useRef<HTMLElement | null>(null);
   const touchDrag = useRef<{ id: string; over: string | null } | null>(null);
   const draftRef = useRef(draft);
+  const historyRef = useRef(edit);
   const nameRef = useRef("");
   const baseRef = useRef<Stack | null>(null);
   const pickedRef = useRef<string | null>(null);
@@ -285,6 +302,9 @@ export function StackBuilder({
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
+  useEffect(() => {
+    historyRef.current = edit;
+  }, [edit]);
   useEffect(() => {
     nameRef.current = nameDraft;
   }, [nameDraft]);
@@ -577,7 +597,7 @@ export function StackBuilder({
     if (isNew) {
       setPhase("ready");
       setBase(null);
-      setDraft({ id: "stack:", layers: [] });
+      resetDraft({ id: "stack:", layers: [] });
       pick(null);
       return;
     }
@@ -589,7 +609,7 @@ export function StackBuilder({
         if (!mounted.current) return;
         const stack: Stack = { id: detail.stack.id, layers: detail.stack.layers };
         setBase(stack);
-        setDraft(stack);
+        resetDraft(stack);
         setStatuses(Object.fromEntries(detail.layers.map((layer) => [layer.id, layer])));
         pick(stack.layers[stack.layers.length - 1]?.id ?? null);
         loadDetails(stack);
@@ -1049,7 +1069,7 @@ export function StackBuilder({
     draftOn.current = false;
     setDraftState("off");
     setBase(saved);
-    setDraft({ id: saved.id, layers: saved.layers });
+    resetDraft({ id: saved.id, layers: saved.layers });
     if (isNew) {
       // A replace keeps the other stack's own name, so the strip and the URL take the name
       // that was stored, not the spelling the prompt collected.
@@ -1120,10 +1140,10 @@ export function StackBuilder({
 
   const revert = () => {
     if (base) {
-      setDraft({ id: base.id, layers: base.layers });
+      resetDraft({ id: base.id, layers: base.layers });
       pick(base.layers[base.layers.length - 1]?.id ?? null);
     } else {
-      setDraft({ id: "stack:", layers: [] });
+      resetDraft({ id: "stack:", layers: [] });
       setNameDraft("");
       pick(null);
     }
@@ -1136,6 +1156,59 @@ export function StackBuilder({
     if (dirty) setLeaving("close");
     else onClose();
   };
+
+  // ---- undo and redo (#257) ---------------------------------------------------------
+
+  /**
+   * A step taken: the draft it lands on is the new one, and a pick that draft no longer holds
+   * (an undo took the layer back) moves to the top layer. The layer sheet closes too: it was
+   * the removed layer's.
+   */
+  const settle = (next: History<Stack>) => {
+    setEdit(next);
+    const current = pickedRef.current;
+    if (current === null || next.draft.layers.some((layer) => layer.id === current)) return;
+    setMaskProblem(null);
+    setPicked(next.draft.layers[next.draft.layers.length - 1]?.id ?? null);
+    setSheetOpen(false);
+  };
+
+  const undoNow = () => settle(undo(historyRef.current));
+  const redoNow = () => settle(redo(historyRef.current));
+
+  // Ctrl+Z and ctrl+shift+Z (and ctrl+Y) take a step back and take it again, as the Layout page
+  // does (views/LayoutView.tsx:530-550). A text field keeps its own undo: the reader there is
+  // undoing what they typed. Ctrl+D copies the picked layer; the browser's bookmark key is not
+  // wanted in the builder. An open sheet or dialog owns its own keys.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!(event.ctrlKey || event.metaKey)) return;
+      // The stage and a row handle their own keys first; a key they took is not taken again.
+      if (event.defaultPrevented) return;
+      const target = event.target as HTMLElement | null;
+      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
+      if (sheetOpen || pickerFor || leaving || naming) return;
+      const key = event.key.toLowerCase();
+      if (key === "z" && !event.shiftKey) {
+        event.preventDefault();
+        undoNow();
+        return;
+      }
+      if ((key === "z" && event.shiftKey) || key === "y") {
+        event.preventDefault();
+        redoNow();
+        return;
+      }
+      if (key === "d" && pickedRef.current !== null) {
+        event.preventDefault();
+        duplicate(pickedRef.current);
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+    // `duplicate` reads the draft it was rendered with; the listener is re-registered with it.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [draft, sheetOpen, pickerFor, leaving, naming]);
 
   const leavePrompt = (
     <div className="rd-scrim" role="presentation">
@@ -1196,8 +1269,21 @@ export function StackBuilder({
 
   // ---- layer edits ------------------------------------------------------------------
 
-  const patch = (id: string, change: Partial<StackLayer>) => {
-    setDraft((current) => ({ ...current, layers: patchLayer(current.layers, id, change) }));
+  const patch = (id: string, change: Partial<StackLayer>, run?: string) => {
+    setDraft((current) => ({ ...current, layers: patchLayer(current.layers, id, change) }), run);
+  };
+
+  /** The picked layer's area made into the rectangle it covers now, by its own key's name (#257). */
+  const makeRect = (id: string) => {
+    const layer = draftRef.current.layers.find((entry) => entry.id === id);
+    if (!layer) return;
+    const rect = areaAsRect(layer.area, layout);
+    if (!rect) {
+      setLayerProblem("That area is not on the desk, so there is no rectangle to make.");
+      return;
+    }
+    setLayerProblem(null);
+    patch(id, { area: rect });
   };
 
   const chooseEffect = async (id: string, effect: string) => {
@@ -1250,20 +1336,23 @@ export function StackBuilder({
     setDraft((current) => ({ ...current, layers: setLayerMask(current.layers, id, null) }));
   };
 
-  const patchMaskDraft = (id: string, change: Partial<LayerMask>) => {
-    setDraft((current) => ({ ...current, layers: patchMask(current.layers, id, change) }));
+  const patchMaskDraft = (id: string, change: Partial<LayerMask>, run?: string) => {
+    setDraft((current) => ({ ...current, layers: patchMask(current.layers, id, change) }), run);
   };
 
   /** One mask property changed: a functional patch, so two quick changes cannot drop one (#256). */
   const patchMaskProps = (id: string, key: string, value: PropValue) => {
-    setDraft((current) => ({
-      ...current,
-      layers: current.layers.map((layer) =>
-        layer.id === id && layer.mask !== undefined
-          ? { ...layer, mask: { ...layer.mask, props: { ...layer.mask.props, [key]: value } } }
-          : layer,
-      ),
-    }));
+    setDraft(
+      (current) => ({
+        ...current,
+        layers: current.layers.map((layer) =>
+          layer.id === id && layer.mask !== undefined
+            ? { ...layer, mask: { ...layer.mask, props: { ...layer.mask.props, [key]: value } } }
+            : layer,
+        ),
+      }),
+      `mask:${id}:${key}`,
+    );
   };
 
   /** Gives a layer a mask of `effect`, or changes the mask it has (#256). */
@@ -1693,22 +1782,28 @@ export function StackBuilder({
                 className="rd-stack-stage"
                 title="Preview"
                 actions={
-                  <span className="rd-stage-meta">
-                    <span className="fig mute">320 × 200 · 15 fps</span>
-                    <span className="rd-show-areas">
-                      <span className="mute">Show areas</span>
-                      <Toggle label="Show the layers' areas" checked={showAreas} onChange={setShowAreas} />
-                    </span>
-                  </span>
+                  <StageTools
+                    canUndo={canUndo(edit)}
+                    canRedo={canRedo(edit)}
+                    onUndo={undoNow}
+                    onRedo={redoNow}
+                    parts={parts}
+                    onParts={setParts}
+                  />
                 }
               >
-                <StackPreviewCanvas
+                <Stage
                   stack={draft}
                   layout={layout}
                   devices={devices}
                   picked={pickedLayer}
-                  showAreas={showAreas}
-                  onAreaChange={(area) => pickedLayer && patch(pickedLayer.id, { area })}
+                  parts={parts}
+                  onSelect={pick}
+                  onAreaChange={(area, run) => pickedLayer && patch(pickedLayer.id, { area }, run)}
+                  onAreaChangeEnd={() => setEdit((history) => endRun(history))}
+                  onDelete={remove}
+                  onDuplicate={duplicate}
+                  onMakeRect={makeRect}
                 />
                 {draftState === "off" ? (
                   <div className="rd-stage-foot">
@@ -1854,11 +1949,17 @@ export function StackBuilder({
                           onClick={() => pick(layer.id)}
                           onKeyDown={(event) => {
                             // A row is in the tab order so the picked layer can be changed from
-                            // the keyboard; the grip's own keys reorder it.
+                            // the keyboard; the grip's own keys reorder it. Delete removes the
+                            // row's layer, as it does on the stage (#257).
                             if (event.target !== event.currentTarget) return;
                             if (event.key === "Enter" || event.key === " ") {
                               event.preventDefault();
                               pick(layer.id);
+                              return;
+                            }
+                            if (event.key === "Delete" || event.key === "Backspace") {
+                              event.preventDefault();
+                              remove(layer.id);
                             }
                           }}
                         >
@@ -2111,7 +2212,8 @@ export function StackBuilder({
                           min={0}
                           max={100}
                           value={pickedLayer.opacity}
-                          onChange={(next) => patch(pickedLayer.id, { opacity: next })}
+                          onChange={(next) => patch(pickedLayer.id, { opacity: next }, `opacity:${pickedLayer.id}`)}
+                          onCommit={() => setEdit((history) => endRun(history))}
                         />
                         <NumberField
                           label="Opacity value"
@@ -2183,12 +2285,15 @@ export function StackBuilder({
                       schema={schemas[pickedLayer.effect] as PropertySchema}
                       values={layerValues(schemas[pickedLayer.effect], pickedLayer.props)}
                       onChange={(key, value) =>
-                        setDraft((current) => ({
-                          ...current,
-                          layers: current.layers.map((layer) =>
-                            layer.id === pickedLayer.id ? { ...layer, props: { ...layer.props, [key]: value } } : layer,
-                          ),
-                        }))
+                        setDraft(
+                          (current) => ({
+                            ...current,
+                            layers: current.layers.map((layer) =>
+                              layer.id === pickedLayer.id ? { ...layer, props: { ...layer.props, [key]: value } } : layer,
+                            ),
+                          }),
+                          `props:${pickedLayer.id}:${key}`,
+                        )
                       }
                     />
                   )}
@@ -2296,7 +2401,10 @@ export function StackBuilder({
                                 min={0}
                                 max={100}
                                 value={pickedLayer.mask.amount}
-                                onChange={(amount) => patchMaskDraft(pickedLayer.id, { amount })}
+                                onChange={(amount) =>
+                                  patchMaskDraft(pickedLayer.id, { amount }, `mask-amount:${pickedLayer.id}`)
+                                }
+                                onCommit={() => setEdit((history) => endRun(history))}
                               />
                               <NumberField
                                 label="Mask amount value"

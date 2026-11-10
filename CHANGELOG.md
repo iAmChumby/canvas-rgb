@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Effects: the builder draws a frame for every layer on the picture, so a click picks a layer, Tab and Shift+Tab walk them, Delete removes one, Ctrl+D copies one, Make rectangle turns a whole-canvas or device area into a box you can move, and Ctrl+Z takes back a whole drag (#257)
+
 ## [0.11.0] - 2026-11-10
 
 ### Added

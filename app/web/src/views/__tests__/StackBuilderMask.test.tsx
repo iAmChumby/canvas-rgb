@@ -55,7 +55,13 @@ beforeAll(() => {
     ({ x: 0, y: 0, top: 0, left: 0, right: 0, bottom: 0, width: 0, height: 0, toJSON: () => ({}) }) as DOMRect) as typeof Range.prototype.getBoundingClientRect;
 });
 
-afterEach(cleanup);
+afterEach(async () => {
+  cleanup();
+  // A Revert drops the builder's guard entry with `history.back()`, which lands a turn later.
+  // Let it land here: a pending one would otherwise fire during the next test's read and
+  // rewrite that test's URL to the previous stack.
+  await new Promise((resolve) => setTimeout(resolve, 0));
+});
 
 type PreviewCall = { at: number; epoch: string; seq: number; applied: boolean; stack?: { layers: Array<{ id: string; mask?: LayerMask }> } };
 
