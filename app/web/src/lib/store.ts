@@ -241,7 +241,9 @@ export async function refreshFans(n?: number): Promise<void> {
     const rpm = { ...snap.rpm };
     for (const h of fans.headers) {
       const prev = rpm[h.id] ?? [];
-      rpm[h.id] = [...prev.slice(-(RPM_HISTORY - 1)), h.rpm ?? 0];
+      // Issue #279: a header with no reading adds no sample. A made-up 0 would draw a fan that
+      // stopped, and would pull the sparkline's peak down with it.
+      if (h.rpm !== null) rpm[h.id] = [...prev.slice(-(RPM_HISTORY - 1)), h.rpm];
     }
     patchSnap({ fans, fansError: null, rpm });
   } catch (e) {

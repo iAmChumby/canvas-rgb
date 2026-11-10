@@ -32,8 +32,8 @@ export function Sparkline({
   const line = pts.map((p, i) => `${i === 0 ? "M" : "L"} ${p.x} ${p.y}`).join(" ");
   const area = pts.length > 1 && !flat ? `${line} L ${w} ${h} L 0 ${h} Z` : "";
   const head = pts.length > 0 ? pts[pts.length - 1] : undefined;
-  const last = values.length > 0 ? (values[values.length - 1] ?? 0) : 0;
-  const peak = values.length > 0 ? Math.max(...values) : 0;
+  const last = values.length > 0 ? (values[values.length - 1] ?? 0) : null;
+  const peak = values.length > 0 ? Math.max(...values) : null;
 
   return (
     <svg
@@ -43,7 +43,9 @@ export function Sparkline({
       aria-label={label}
       style={{ color: `var(--${tone})` } as CSSProperties}
     >
-      <title>{`${label}: ${Math.round(last)} RPM, peak ${Math.round(peak)}`}</title>
+      <title>
+        {last === null ? `${label}: no reading` : `${label}: ${Math.round(last)} RPM, peak ${Math.round(peak ?? 0)}`}
+      </title>
       <line x1={0} x2={w} y1={h - 0.5} y2={h - 0.5} stroke="var(--line-2)" strokeWidth={1} />
       {area && <path className="spark-area" d={area} />}
       {pts.length > 1 && (

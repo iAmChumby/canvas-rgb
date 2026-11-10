@@ -14,6 +14,7 @@ import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Sparkline, Figure } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { UnreadValue } from "@/components/UnreadValue";
 import { usePageNarrow } from "@/components/MediaQuery";
 import { PageActions } from "@/shell/PageHeader";
 import { Details, LoadFrame } from "@/components/Loading";
@@ -21,7 +22,7 @@ import { FansShape } from "@/components/LoadShapes";
 import { notify } from "@/components/Notify";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { FanBulkBar } from "@/views/FanBulk";
-import { TACH_ONLY_WHY, UNAVAILABLE_WHY, canDrive, isHandedBack, isUnavailable, plainLabel } from "@/lib/fanBulk";
+import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack, isUnavailable, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
@@ -277,23 +278,31 @@ export function FansView() {
             {fans.temps.length === 0 && <p className="mute">No temperature sources reported.</p>}
             <div className="rd-temp-row">
               {fans.temps.map((t) => {
-                const c = t.celsius ?? 0;
+                const c = t.celsius;
                 return (
                   <div className="temp-cell" key={sourceKey(t.source)}>
                     <span className="one-line">{t.label}</span>
-                    <span className="meter" aria-hidden="true">
-                      <span
-                        className="meter-fill"
-                        style={
-                          {
-                            "--p": clamp((c - 20) / 80, 0, 1),
-                            "--tone": tempTone(c),
-                          } as CSSProperties
-                        }
-                      />
+                    <span className="meter" aria-hidden="true" data-unread={c === null ? "true" : undefined}>
+                      {c !== null && (
+                        <span
+                          className="meter-fill"
+                          style={
+                            {
+                              "--p": clamp((c - 20) / 80, 0, 1),
+                              "--tone": tempTone(c),
+                            } as CSSProperties
+                          }
+                        />
+                      )}
                     </span>
                     <span className="fig">
-                      <AnimatedNumber value={c} decimals={1} /> °C
+                      {c === null ? (
+                        <UnreadValue label={`${t.label} temperature`} />
+                      ) : (
+                        <>
+                          <AnimatedNumber value={c} decimals={1} /> °C
+                        </>
+                      )}
                     </span>
                   </div>
                 );
@@ -422,9 +431,13 @@ function FanRow({
   onSelect: () => void;
 }) {
   const peak = Math.max(2000, ...history);
-  const duty = header.pwm_percent ?? 0;
+  const duty = header.pwm_percent;
   const unavailable = isUnavailable(header);
-  const tach = !unavailable && !canDrive(header);
+  // A header whose label the daemon marks "(tach only)" cannot report a duty at all. Any other
+  // header with no duty was not read (#279): the page must not call that "tach only".
+  const tachOnly = plainLabel(header.label) !== header.label;
+  const unreadDuty = !unavailable && duty === null && !tachOnly;
+  const tach = !unavailable && duty === null && tachOnly;
   const blocked = !canDrive(header);
   return (
     <tr
@@ -447,10 +460,18 @@ function FanRow({
     >
       <td className="tick-col">
         <Checkbox
-          label={unavailable ? `${header.label}: not on this board, cannot be selected` : tach ? `${header.label}: tach only, cannot be selected` : `Select ${header.label}`}
+          label={
+            unavailable
+              ? `${header.label}: not on this board, cannot be selected`
+              : tach
+                ? `${header.label}: tach only, cannot be selected`
+                : unreadDuty
+                  ? `${header.label}: duty not read, cannot be selected`
+                  : `Select ${header.label}`
+          }
           checked={checked}
           blocked={blocked}
-          title={unavailable ? UNAVAILABLE_WHY : tach ? TACH_ONLY_WHY : undefined}
+          title={unavailable ? UNAVAILABLE_WHY : tach ? TACH_ONLY_WHY : unreadDuty ? UNREAD_DUTY_WHY : undefined}
           onToggle={onTick}
         />
       </td>
@@ -460,24 +481,30 @@ function FanRow({
         <div className="fan-name-cell">
           <span className="fig" style={{ fontWeight: 600 }}>{plainLabel(header.label)}</span>
           {unavailable && <Chip className="rd-hdr-chip">Not on this board</Chip>}
-          {header.pwm_percent === null && !unavailable && <Chip className="rd-hdr-chip">tach only</Chip>}
+          {!unavailable && duty === null && (
+            <Chip className="rd-hdr-chip">{tachOnly ? "tach only" : "duty not read"}</Chip>
+          )}
           <Handoff header={header} ticked={checked} />
         </div>
       </td>
       <td className="num-col">
         <span className="rpm-big">
-          <AnimatedNumber value={header.rpm ?? 0} />
+          {header.rpm === null ? <UnreadValue label="RPM" /> : <AnimatedNumber value={header.rpm} />}
         </span>
       </td>
       <td>
         <span className="duty-cell">
-          <span className="meter" aria-hidden="true">
-            <span
-              className="meter-fill"
-              style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
-            />
+          <span className="meter" aria-hidden="true" data-unread={duty === null ? "true" : undefined}>
+            {duty !== null && (
+              <span
+                className="meter-fill"
+                style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
+              />
+            )}
           </span>
-          <span className="fig">{header.pwm_percent === null ? "—" : <><AnimatedNumber value={header.pwm_percent} />%</>}</span>
+          <span className="fig">
+            {duty === null ? <UnreadValue label="Duty" /> : <><AnimatedNumber value={duty} />%</>}
+          </span>
         </span>
       </td>
       <td>
@@ -525,9 +552,11 @@ function FanCard({
   onSelect: () => void;
 }) {
   const peak = Math.max(2000, ...history);
-  const duty = header.pwm_percent ?? 0;
+  const duty = header.pwm_percent;
   const unavailable = isUnavailable(header);
-  const tach = !unavailable && !canDrive(header);
+  const tachOnly = plainLabel(header.label) !== header.label;
+  const unreadDuty = !unavailable && duty === null && !tachOnly;
+  const tach = !unavailable && duty === null && tachOnly;
   const blocked = !canDrive(header);
   // In select mode a card is a tick box: a tap ticks it, and a header that cannot be set says why it cannot be.
   const pick = selectMode
@@ -538,7 +567,15 @@ function FanCard({
       type="button"
       className={unavailable ? "fan-card fan-unavailable" : "fan-card"}
       data-selected={(selectMode ? checked : selected) ? "true" : "false"}
-      title={selectMode && unavailable ? UNAVAILABLE_WHY : selectMode && tach ? TACH_ONLY_WHY : undefined}
+      title={
+        selectMode && unavailable
+          ? UNAVAILABLE_WHY
+          : selectMode && tach
+            ? TACH_ONLY_WHY
+            : selectMode && unreadDuty
+              ? UNREAD_DUTY_WHY
+              : undefined
+      }
       {...pick}
       onClick={() => {
         if (!selectMode || !blocked) onSelect();
@@ -557,20 +594,25 @@ function FanCard({
           <span className="fan-card-editing">{selectMode ? "Not on this board, cannot be set" : "Not on this board"}</span>
         )}
         {selectMode && tach && <span className="fan-card-editing">Tach only, cannot be set</span>}
+        {selectMode && unreadDuty && <span className="fan-card-editing">Duty not read, cannot be set</span>}
         <Handoff header={header} ticked={selectMode && checked} />
       </span>
       <span className="fan-card-readouts">
         <span className="fan-card-rpm">
-          <AnimatedNumber value={header.rpm ?? 0} />
+          {header.rpm === null ? <UnreadValue label="RPM" /> : <AnimatedNumber value={header.rpm} />}
           <span className="unit">RPM</span>
         </span>
-        <span className="meter" aria-hidden="true">
-          <span
-            className="meter-fill"
-            style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
-          />
+        <span className="meter" aria-hidden="true" data-unread={duty === null ? "true" : undefined}>
+          {duty !== null && (
+            <span
+              className="meter-fill"
+              style={{ "--p": clamp(duty / 100, 0, 1), "--tone": "var(--a3)" } as CSSProperties}
+            />
+          )}
         </span>
-        <span className="fig">{header.pwm_percent === null ? "—" : <><AnimatedNumber value={header.pwm_percent} />%</>}</span>
+        <span className="fig">
+          {duty === null ? <UnreadValue label="Duty" /> : <><AnimatedNumber value={duty} />%</>}
+        </span>
       </span>
       <span className="fan-card-spark">
         <Sparkline values={history} max={peak} label={`${header.label} RPM over the last 60 seconds`} />
@@ -1112,7 +1154,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               route says its own thing in the panel's body instead, so it is not here twice. */}
           {!isUnavailable(header) && <HeaderAvailability header={header} />}
           <span className="rpm-readout">
-            <AnimatedNumber value={header.rpm ?? 0} />
+            {header.rpm === null ? <UnreadValue label="RPM" /> : <AnimatedNumber value={header.rpm} />}
             <span className="unit">RPM</span>
           </span>
         </span>
@@ -1268,7 +1310,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
         {mode.mode === "fixed" && (
           <p className="mute" style={{ fontSize: 14 }}>
-            Duty <Figure unit="%">{header.pwm_percent === null ? "—" : <AnimatedNumber value={header.pwm_percent} />}</Figure>
+            Duty{" "}
+            <Figure unit="%">
+              {header.pwm_percent === null ? <UnreadValue label="Duty" /> : <AnimatedNumber value={header.pwm_percent} />}
+            </Figure>
           </p>
         )}
       </div>

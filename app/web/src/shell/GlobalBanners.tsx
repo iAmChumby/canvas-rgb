@@ -217,8 +217,9 @@ export function GlobalBanners() {
             icon={<WarningOctagon size={20} weight="fill" />}
             title="Fan control is unavailable"
           >
-            canvas-rgb has not heard from the fan service for {fmtSeconds(status.service_down_ms ?? 0)}. The
-            lights are unaffected.
+            canvas-rgb has not heard from the fan service for{" "}
+            {status.service_down_ms === null ? "a while" : fmtSeconds(status.service_down_ms)}. The lights are
+            unaffected.
           </Banner>
         )}
       </div>

@@ -6264,6 +6264,20 @@ button.chip:hover {
   cursor: help;
 }
 
+/* In the Fans readouts the dash takes a figure's place, not a control's: it keeps the line's own
+   size, and a meter with no reading is a bare track rather than a bar at 0 (#279). */
+.rd-fans .unread-value {
+  min-height: 0;
+  padding: 0;
+  font-size: inherit;
+}
+
+.rd-fans .meter[data-unread="true"] {
+  background: transparent;
+  outline: 1px dashed var(--line-2);
+  outline-offset: -1px;
+}
+
 .read-only-dot {
   width: 14px;
   height: 14px;

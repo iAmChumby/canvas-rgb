@@ -244,11 +244,15 @@ or acts as if a step worked without checking that it did.
   DPI strip and the controller's profile and button map do the same. One test over every peripheral
   schema in the fakes (`app/web/src/views/__tests__/PeripheralPartialRead.test.tsx`) removes each key
   in turn and fails on a control labelled with that setting, a chip with a figure or a colour for it,
-  a stage strip with no count, an active stage or an active profile that was not read. Siblings left
-  open (device figures drawn as `0` when missing, not peripheral settings): `header.pwm_percent ?? 0`
-  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty ring and the RPM figure), and
-  `h.rpm ?? 0` in the RPM history (`app/web/src/lib/store.ts`). When adding a device value to the
-  page, read it with `known()` and draw `UnreadValue` for `undefined`.
+  a stage strip with no count, an active stage or an active profile that was not read. Siblings
+  closed by [#279](https://github.com/iAmChumby/canvas-rgb/issues/279): `header.pwm_percent ?? 0`
+  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty meter and the RPM figures,
+  plus a temperature with no `celsius`), `h.rpm ?? 0` in the RPM history
+  (`app/web/src/lib/store.ts`, which now adds no sample), and the made-up `0` in the service
+  banner's `fmtSeconds` and in the demo display's fan read. The Fans page draws each missing
+  reading as `UnreadValue`, the history's peak skips unread fans, and a header whose duty was not
+  read is not offered as settable. When adding a device value to the page, read it with `known()`
+  and draw `UnreadValue` for `undefined`.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 

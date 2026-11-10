@@ -15,6 +15,9 @@ import type { WriteResult } from "@/lib/fanWrites";
 /** Why a tach-only header cannot be ticked. */
 export const TACH_ONLY_WHY = "Tach only: canvas-rgb reads its speed and cannot set it.";
 
+/** Why a header with no duty reading cannot be ticked. */
+export const UNREAD_DUTY_WHY = "canvas-rgb has not read this header's duty, so it will not set it.";
+
 /** Why a header the board does not route cannot be ticked (issue #128). */
 export const UNAVAILABLE_WHY = "Not on this board: this header is not fitted on your board.";
 
