@@ -1051,31 +1051,41 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   // Reset shows only once the user has set a limit, as a settings reset usually does.
   const hotControls = hotRow && (
     <span className="hot-controls">
-      <span className="mute">Don&apos;t exceed</span>
-      <NumberField
-        label="Don't exceed temperature"
-        min={40}
-        max={hotRow.max_settable_c}
-        value={hotRow.limit_c}
-        unit="°C"
-        busy={hotSent === "set"}
-        disabled={hotSent === "reset"}
-        onCommit={(v) => void commitHot(v)}
-      />
-      {hotRow.user_set ? (
-        <Button
-          size="sm"
-          variant="ghost"
-          icon={<ArrowClockwise size={14} />}
-          busy={hotSent === "reset"}
-          disabled={hotSent === "set"}
-          onClick={() => void commitHot(null)}
-        >
+      <span className="hot-main">
+        <span className="mute">Don&apos;t exceed</span>
+        <NumberField
+          label="Don't exceed temperature"
+          min={40}
+          max={hotRow.max_settable_c}
+          value={hotRow.limit_c}
+          unit="°C"
+          busy={hotSent === "set"}
+          disabled={hotSent === "reset"}
+          onCommit={(v) => void commitHot(v)}
+        />
+      </span>
+      <span className="hot-tail">
+        {/* Not drawn: it holds the room of the Reset key, so "automatic" and the key are
+            the same width and the row wraps the same way in both states. */}
+        <span className="btn btn-sm btn-ghost hot-sizer" aria-hidden="true">
+          <ArrowClockwise size={14} />
           Reset to automatic
-        </Button>
-      ) : (
-        <span className="mute">automatic</span>
-      )}
+        </span>
+        {hotRow.user_set ? (
+          <Button
+            size="sm"
+            variant="ghost"
+            icon={<ArrowClockwise size={14} />}
+            busy={hotSent === "reset"}
+            disabled={hotSent === "set"}
+            onClick={() => void commitHot(null)}
+          >
+            Reset to automatic
+          </Button>
+        ) : (
+          <span className="mute">automatic</span>
+        )}
+      </span>
     </span>
   );
   const hotError = hotErr && (

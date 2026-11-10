@@ -11,6 +11,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Waiting looks the same everywhere: a button that sends something keeps its size and shows a small spinner, values and lists that are still loading show a placeholder line instead of "Loading…", "0 connected" or a made-up neutral value, effect pictures show a blank tile until the first frame arrives, and nothing flashes when the answer is quick. (#258)
 - Fans: buttons that are sending a change show a small spinner and keep their size, like the rest of the app (#266)
 
+### Fixed
+
+- Peripherals and Fans: controls that ran past their panel on narrower windows now fit (#263, #268)
+
 ## [0.10.3] - 2026-11-10
 
 ### Fixed

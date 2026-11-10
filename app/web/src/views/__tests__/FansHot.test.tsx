@@ -90,6 +90,30 @@ describe("the hot line on the fan curve chart", () => {
     expect(screen.getByText("automatic")).toBeTruthy();
   });
 
+  // Issue #268: the figure and its unit are one non-wrapping group, and the state after it is as
+  // wide in both states (a hidden copy of the Reset key holds its room), so a narrow note wraps the
+  // same way before and after a limit is set. The pixels are measured by tools/overflow-check.mjs.
+  it("keeps the figure and its unit in one group and the state's room the same in both states", async () => {
+    await page();
+    const main = () => document.querySelector(".hot-controls > .hot-main");
+    const sizer = () => document.querySelector(".hot-controls > .hot-tail > .hot-sizer");
+    const input = await screen.findByLabelText("Don't exceed temperature");
+    expect(main()?.contains(input)).toBe(true);
+    expect(main()?.querySelector(".unit")?.textContent).toBe("°C");
+    expect(sizer()?.getAttribute("aria-hidden")).toBe("true");
+    expect(sizer()?.textContent).toContain("Reset to automatic");
+
+    fireEvent.change(input, { target: { value: "70" } });
+    fireEvent.blur(input);
+    await screen.findByRole("button", { name: "Reset to automatic" });
+    expect(sizer()?.textContent).toContain("Reset to automatic");
+    expect(document.querySelectorAll(".hot-tail > *").length).toBe(2);
+
+    // The fake keeps the limit between tests: put it back.
+    fireEvent.click(screen.getByRole("button", { name: "Reset to automatic" }));
+    await waitFor(() => expect(screen.queryByRole("button", { name: "Reset to automatic" })).toBeNull());
+  });
+
   it("typing 70 sends cpu_c 70 and the line follows", async () => {
     await page();
     const spy = vi.spyOn(api, "putFanHot");
