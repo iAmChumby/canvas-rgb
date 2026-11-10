@@ -8,10 +8,13 @@ import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
 import type { Layout } from "@/proto/Layout";
 import type { StackLayer } from "@/proto/StackLayer";
-import { CANVAS_H, CANVAS_W, pointerToStage, type StageBox } from "@/views/effects/stackDraft";
+import { CANVAS_H, CANVAS_W, layerOnTopAtPoint, pointerToStage, type StageBox } from "@/views/effects/stackDraft";
 
-/** What is being dragged: a library effect, or a layer already in the stack. */
-export type DragPayloadKind = "effect" | "layer";
+/**
+ * What is being dragged: a library effect, a layer already in the stack, or a mask (a library
+ * tile dropped from the Masks tab, which needs a layer to land on — #257 phase 3).
+ */
+export type DragPayloadKind = "effect" | "layer" | "mask";
 
 export type DropTarget =
   | { kind: "canvas" }
@@ -21,7 +24,9 @@ export type DropTarget =
   /** An insertion point in the stack, bottom-first: 0 is under every layer, `at` is the top. */
   | { kind: "stackSlot"; at: number }
   /** A row of the layer list, top first, with that layer's bottom-first index. */
-  | { kind: "row"; id: string; index: number };
+  | { kind: "row"; id: string; index: number }
+  /** The layer a mask would go on: its row, or the top-most layer under the pointer. */
+  | { kind: "maskLayer"; id: string; index: number };
 
 /** One row of the layer list as it sits on the page. */
 export interface DropRow {
@@ -55,6 +60,11 @@ const inBox = (point: { x: number; y: number }, box: StageBox | null): boolean =
   point.x <= box.left + box.width &&
   point.y >= box.top &&
   point.y <= box.top + box.height;
+
+/** Whether a client point is inside a box on the page (the stage, for a mask's refusal hint). */
+export function pointInBox(point: { x: number; y: number }, box: StageBox | null): boolean {
+  return inBox(point, box);
+}
 
 /** A new rectangle centred on a canvas point, whole units, held inside the canvas. */
 export function rectAtPoint(point: { x: number; y: number }): { x: number; y: number; width: number; height: number } {
@@ -108,20 +118,40 @@ function rowAtPoint(rows: DropRow[], point: { x: number; y: number }): DropTarge
  * under it is the Device (or that Zone with Shift), and empty picture is a new Rectangle. Over
  * the layer list, a dragged layer names the Row it is over and a dragged effect names the
  * StackSlot the insertion line would sit at.
+ *
+ * A mask is different: it always needs a layer, so over the picture it is the top-most layer
+ * under the point, over the layer list it is that row, and anywhere else it is null (the drop
+ * refuses, and the builder says why beside the pointer).
  */
 export function dropTargetAt({
   point,
   boxes,
   layout,
+  layers,
   payload,
   shift = false,
 }: {
   point: { x: number; y: number };
   boxes: DropBoxes;
   layout: Layout | null;
+  /** The stack's layers, for a mask's hit-test on the picture. */
+  layers?: StackLayer[];
   payload: DragPayloadKind;
   shift?: boolean;
 }): DropTarget | null {
+  if (payload === "mask") {
+    if (inBox(point, boxes.stage)) {
+      const at = pointerToStage(point.x, point.y, boxes.stage as StageBox);
+      const id = layerOnTopAtPoint(layers ?? [], layout, at);
+      if (!id) return null;
+      const index = (layers ?? []).findIndex((layer) => layer.id === id);
+      return { kind: "maskLayer", id, index: index < 0 ? 0 : index };
+    }
+    // Over the layer list, the row the pointer is on is the layer the mask would go to.
+    const row = rowAtPoint(boxes.rows, point);
+    if (!row || row.kind !== "row") return null;
+    return { kind: "maskLayer", id: row.id, index: row.index };
+  }
   if (inBox(point, boxes.strip)) return { kind: "canvas" };
   if (inBox(point, boxes.stage)) {
     const box = boxes.stage as StageBox;
@@ -166,6 +196,10 @@ export function dropTargetWords(
       const layer = layers.find((entry) => entry.id === target.id);
       return layer ? `Row ${layer.name}` : "Row";
     }
+    case "maskLayer": {
+      const layer = layers.find((entry) => entry.id === target.id);
+      return layer ? layer.name : "Layer";
+    }
   }
 }
 
@@ -186,6 +220,7 @@ export function dropArea(target: DropTarget): LayerArea | null {
       return { kind: "rect", x: target.x, y: target.y, width: target.width, height: target.height };
     case "stackSlot":
     case "row":
+    case "maskLayer":
       return null;
   }
 }

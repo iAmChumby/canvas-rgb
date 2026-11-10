@@ -36,8 +36,8 @@ export function Library({
   problem: string | null;
   containerRef?: Ref<HTMLDivElement>;
   onAdd: (effect: string) => void;
-  onLiftStart: (effect: EffectSummary, event: ReactPointerEvent<HTMLButtonElement>) => void;
-  onLiftKey: (effect: EffectSummary, event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  onLiftStart: (effect: EffectSummary, event: ReactPointerEvent<HTMLButtonElement>, asMask: boolean) => void;
+  onLiftKey: (effect: EffectSummary, event: ReactKeyboardEvent<HTMLButtonElement>, asMask: boolean) => void;
   onWriteCode: () => void;
 }) {
   const [tab, setTab] = useState<LibraryTab>("effects");
@@ -95,10 +95,15 @@ export function Library({
                 data-lib-tile="true"
                 data-effect={effect.id}
                 aria-label={`Add ${effect.name}`}
-                title={refusal ?? `Add ${effect.name}; drag it onto the stage to place it`}
+                title={
+                  refusal ??
+                  (tab === "masks"
+                    ? `Add ${effect.name}; drag it onto a layer to use it as that layer's mask`
+                    : `Add ${effect.name}; drag it onto the stage to place it`)
+                }
                 disabled={refusal !== null}
-                onPointerDown={(event) => onLiftStart(effect, event)}
-                onKeyDown={(event) => onLiftKey(effect, event)}
+                onPointerDown={(event) => onLiftStart(effect, event, tab === "masks")}
+                onKeyDown={(event) => onLiftKey(effect, event, tab === "masks")}
                 onClick={() => onAdd(effect.id)}
               >
                 <Thumb id={effect.id} size="sm" label={effect.name} />

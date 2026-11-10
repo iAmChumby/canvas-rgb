@@ -121,6 +121,7 @@ describe("the press sensor", () => {
       mode: "keyboard",
       target: null,
       point: null,
+      hint: null,
     });
   });
 });

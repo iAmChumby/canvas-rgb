@@ -13,7 +13,6 @@ import {
   CircleHalf,
   CopySimple,
   DotsSixVertical,
-  Eraser,
   Eye,
   EyeSlash,
   FloppyDisk,
@@ -46,6 +45,7 @@ import { Highlighted, matchEffect } from "@/components/Search";
 import { PropertyControls } from "@/views/PropertyControls";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 import { Library, type LibraryMode } from "@/views/effects/Library";
+import { MaskChip } from "@/views/effects/MaskChip";
 import { Stage, StageTools } from "@/views/effects/Stage";
 import {
   addLayer,
@@ -84,9 +84,10 @@ import {
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { canRedo, canUndo, endRun, historyOf, record, redo, reset, undo, type History } from "@/lib/draftHistory";
-import { dropArea, dropTargetAt, dropTargetWords, type DropBoxes, type DropTarget } from "@/lib/dropTargets";
+import { dropArea, dropTargetAt, dropTargetWords, pointInBox, type DropBoxes, type DropTarget } from "@/lib/dropTargets";
 import {
   CANCEL_ANNOUNCEMENT,
+  MASK_EMPTY_HINT,
   TOUCH_HOLD_MS,
   cycleTarget,
   dropAnnouncement,
@@ -94,6 +95,7 @@ import {
   lifted,
   liftsOnHold,
   liftsOnMove,
+  maskTargets,
   NO_DRAG,
   pressMoved,
   readDropBoxes,
@@ -245,7 +247,12 @@ export function StackBuilder({
     );
   };
   /** A checkpoint with no steps behind it: a load, a save or a revert. */
-  const resetDraft = (next: Stack) => setEdit((history) => reset(history, next));
+  const resetDraft = (next: Stack) => {
+    historyMoves.current += 1;
+    setEdit((history) => reset(history, next));
+  };
+  /** Undo, redo and resets so far: a mask that lands after one of these is not applied. */
+  const historyMoves = useRef(0);
   const [nameDraft, setNameDraft] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
   const [statuses, setStatuses] = useState<Record<string, StackLayerStatus>>({});
@@ -1267,11 +1274,13 @@ export function StackBuilder({
   const undoNow = () => {
     if (areaDragging.current) return;
     stepped.current = true;
+    historyMoves.current += 1;
     setEdit((history) => undo(history));
   };
   const redoNow = () => {
     if (areaDragging.current) return;
     stepped.current = true;
+    historyMoves.current += 1;
     setEdit((history) => redo(history));
   };
 
@@ -1490,6 +1499,18 @@ export function StackBuilder({
     );
   };
 
+  /** A mask effect's schema and starting values, read from the daemon; nothing when it is gone. */
+  const maskOf = async (effect: string): Promise<{ schema: PropertySchema | null; props: Record<string, PropValue> }> => {
+    try {
+      const detail = await api.effect(effect);
+      if (mounted.current) setSchemas((current) => ({ ...current, [effect]: detail.schema }));
+      return { schema: detail.schema as PropertySchema | null, props: detail.props };
+    } catch {
+      if (mounted.current) setSchemas((current) => ({ ...current, [effect]: null }));
+      return { schema: null, props: {} };
+    }
+  };
+
   /** Gives a layer a mask of `effect`, or changes the mask it has (#256). */
   const chooseMaskEffect = async (id: string, effect: string) => {
     const layer = draftRef.current.layers.find((entry) => entry.id === id);
@@ -1504,18 +1525,8 @@ export function StackBuilder({
       return;
     }
     setMaskProblem(null);
-    let schema: PropertySchema | null = null;
-    let props: Record<string, PropValue> = {};
-    try {
-      const detail = await api.effect(effect);
-      if (!mounted.current) return;
-      schema = detail.schema;
-      props = detail.props;
-      setSchemas((current) => ({ ...current, [effect]: detail.schema }));
-    } catch {
-      if (!mounted.current) return;
-      setSchemas((current) => ({ ...current, [effect]: null }));
-    }
+    const { schema, props } = await maskOf(effect);
+    if (!mounted.current) return;
     // The draft may have moved while the effect was read: check the cap again.
     const latest = draftRef.current.layers.find((entry) => entry.id === id);
     if (!latest) return;
@@ -1529,6 +1540,39 @@ export function StackBuilder({
       layers: setLayerMask(current.layers, id, makeMask(effect, schema, props)),
     }));
     closeMaskPicker();
+  };
+
+  /**
+   * A mask dropped on a layer (#257 phase 3): the layer a row or the picture names gets it,
+   * replacing the mask it had in the same single step. Nothing changes when the drop is refused.
+   */
+  const applyMask = async (id: string, effect: string): Promise<boolean> => {
+    const layer = draftRef.current.layers.find((entry) => entry.id === id);
+    if (!layer || layer.mask?.effect === effect) return false;
+    const refusal = maskRefusal(draftRef.current.layers, id, effect);
+    if (refusal) {
+      setAnnounce(refusal);
+      return false;
+    }
+    // An Undo, a Redo or a reset while the effect is read must not be overwritten and its redo
+    // must survive, so the drop is abandoned then. Any other edit in that gap (a slider, a
+    // handle) is kept: the mask lands on top of it, by layer id (#257 review).
+    const moves = historyMoves.current;
+    const { schema, props } = await maskOf(effect);
+    if (!mounted.current) return false;
+    if (historyMoves.current !== moves) return false;
+    const latest = draftRef.current.layers.find((entry) => entry.id === id);
+    if (!latest) return false;
+    const lateRefusal = maskRefusal(draftRef.current.layers, id, effect);
+    if (lateRefusal) {
+      setAnnounce(lateRefusal);
+      return false;
+    }
+    setDraft((current) => ({
+      ...current,
+      layers: setLayerMask(current.layers, id, makeMask(effect, schema, props)),
+    }));
+    return true;
   };
 
   /** The mask picker's keys, as a listbox: arrows move, Home/End jump, Enter/Space choose. */
@@ -1765,18 +1809,39 @@ export function StackBuilder({
       point,
       boxes,
       layout,
+      layers: draftRef.current.layers,
       payload: current.source.kind,
       shift,
     });
-    if (targetKey(target) !== targetKey(current.target)) sayTarget(target);
-    showDrag({ ...current, target, point });
+    // A mask over bare picture has nothing to land on: the drop would refuse, and the reason
+    // follows the pointer (§4).
+    const hint =
+      current.source.kind === "mask" && target === null && pointInBox(point, boxes.stage)
+        ? MASK_EMPTY_HINT
+        : null;
+    if (hint !== current.hint && hint !== null) setAnnounce(hint);
+    else if (targetKey(target) !== targetKey(current.target)) sayTarget(target);
+    showDrag({ ...current, target, point, hint });
   };
 
   /** The drop, applied once: one drop is one undo step. */
   const commitDrop = (source: DragSource, target: DropTarget | null) => {
     const names = targetNames();
     if (!target) {
-      setAnnounce(CANCEL_ANNOUNCEMENT);
+      setAnnounce(source.kind === "mask" ? MASK_EMPTY_HINT : CANCEL_ANNOUNCEMENT);
+      clearDrag();
+      return;
+    }
+    if (source.kind === "mask") {
+      if (target.kind === "row" || target.kind === "maskLayer") {
+        clearDrag();
+        // The drop's words wait for the effect read: a drop abandoned to an Undo in that gap says
+        // nothing rather than announcing a mask that never landed (#257 review).
+        void applyMask(target.id, source.effect).then((applied) => {
+          if (applied) setAnnounce(dropAnnouncement(source, target, names));
+        });
+        return;
+      }
       clearDrag();
       return;
     }
@@ -1798,10 +1863,20 @@ export function StackBuilder({
 
   const beginKeyboard = (source: DragSource) => {
     const layers = draftRef.current.layers;
-    const first: DropTarget | null =
-      source.kind === "effect"
-        ? (stageTargets(layout)[0] ?? null)
-        : { kind: "stackSlot", at: Math.max(0, layers.findIndex((layer) => layer.id === source.id)) };
+    let first: DropTarget | null;
+    if (source.kind === "mask") {
+      // A mask starts on the picked layer's row when there is one, otherwise the top row (the
+      // last in the stack's own bottom-first order).
+      const targets = maskTargets(layers);
+      first =
+        targets.find((target) => target.kind === "maskLayer" && target.id === picked) ??
+        targets[targets.length - 1] ??
+        null;
+    } else if (source.kind === "effect") {
+      first = stageTargets(layout)[0] ?? null;
+    } else {
+      first = { kind: "stackSlot", at: Math.max(0, layers.findIndex((layer) => layer.id === source.id)) };
+    }
     // The key that lifts is a key whose click must not also add the tile.
     guardKeyClick();
     showDrag(lifted(source, "keyboard", first));
@@ -1844,8 +1919,8 @@ export function StackBuilder({
       }
       const boxes = readDropBoxes();
       boxesRef.current = boxes;
-      const target = dropTargetAt({ point: start, boxes, layout, payload: source.kind });
-      showDrag({ source, mode: pointerType === "touch" ? "touch" : "pointer", target, point: start });
+      const target = dropTargetAt({ point: start, boxes, layout, layers: draftRef.current.layers, payload: source.kind });
+      showDrag({ source, mode: pointerType === "touch" ? "touch" : "pointer", target, point: start, hint: null });
       setAnnounce(liftAnnouncement(source));
     };
     current.move = (e) => {
@@ -1950,7 +2025,11 @@ export function StackBuilder({
       if (event.key === "ArrowUp" || event.key === "ArrowDown") {
         event.preventDefault();
         event.stopPropagation();
-        const next = slotStep(current.target, event.key === "ArrowUp" ? 1 : -1);
+        const step = event.key === "ArrowUp" ? 1 : -1;
+        const next =
+          source.kind === "mask"
+            ? cycleTarget(maskTargets(draftRef.current.layers), current.target, step)
+            : slotStep(current.target, step);
         showDrag({ ...current, target: next });
         sayTarget(next);
       }
@@ -2043,16 +2122,25 @@ export function StackBuilder({
     void addEffect(effect);
   };
 
-  const onTileLiftStart = (effect: EffectSummary, event: ReactPointerEvent<HTMLButtonElement>) => {
-    beginPress({ kind: "effect", effect: effect.id, name: effect.name }, event);
+  const onTileLiftStart = (effect: EffectSummary, event: ReactPointerEvent<HTMLButtonElement>, asMask: boolean) => {
+    beginPress(
+      asMask
+        ? { kind: "mask", effect: effect.id, name: effect.name }
+        : { kind: "effect", effect: effect.id, name: effect.name },
+      event,
+    );
   };
 
-  const onTileLiftKey = (effect: EffectSummary, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+  const onTileLiftKey = (effect: EffectSummary, event: ReactKeyboardEvent<HTMLButtonElement>, asMask: boolean) => {
     if (dragRef.current.source) return;
     if (event.key !== "Enter" && event.key !== " ") return;
     if (event.ctrlKey || event.metaKey || event.altKey) return;
     event.preventDefault();
-    beginKeyboard({ kind: "effect", effect: effect.id, name: effect.name });
+    beginKeyboard(
+      asMask
+        ? { kind: "mask", effect: effect.id, name: effect.name }
+        : { kind: "effect", effect: effect.id, name: effect.name },
+    );
   };
 
   /** The grip's press: a mouse or pen lifts on the move, a finger on the hold. */
@@ -2308,7 +2396,26 @@ export function StackBuilder({
                   onDelete={remove}
                   onDuplicate={duplicate}
                   onMakeRect={makeRect}
-                  drop={drag.source?.kind === "effect" ? { target: drag.target, words: dragWords } : null}
+                  drop={
+                    drag.source?.kind === "effect" || (drag.source?.kind === "mask" && drag.target)
+                      ? { target: drag.target, words: dragWords }
+                      : null
+                  }
+                  dragging={drag.source !== null}
+                  schema={pickedLayer ? (schemas[pickedLayer.effect] ?? null) : null}
+                  onPropChange={(id, key, value, run, hold) =>
+                    setDraft(
+                      (current) => ({
+                        ...current,
+                        layers: current.layers.map((layer) =>
+                          layer.id === id ? { ...layer, props: { ...layer.props, [key]: value } } : layer,
+                        ),
+                      }),
+                      run,
+                      hold,
+                    )
+                  }
+                  onPropChangeEnd={() => setEdit((history) => endRun(history))}
                 />
                 {draftState === "off" ? (
                   <div className="rd-stage-foot">
@@ -2441,6 +2548,7 @@ export function StackBuilder({
                           data-selected={layer.id === picked ? "true" : "false"}
                           data-hidden={layer.visible ? "false" : "true"}
                           data-dragging={drag.source?.kind === "layer" && drag.source.id === layer.id ? "true" : "false"}
+                          data-mask-target={drag.target?.kind === "maskLayer" && drag.target.id === layer.id ? "true" : undefined}
                           tabIndex={0}
                           aria-current={layer.id === picked ? "true" : undefined}
                           onClick={() => pick(layer.id)}
@@ -2490,23 +2598,16 @@ export function StackBuilder({
                               label={layerLabel(schemas, effects, layer.effect) ?? "Effect"}
                             />
                             {layer.mask && (
-                              <button
-                                type="button"
-                                className="layer-mask-thumb"
-                                aria-label={`Change the mask of ${layer.name}`}
-                                title={`Mask: ${layerLabel(schemas, effects, layer.mask.effect) ?? "Effect"}`}
-                                onClick={(event) => {
-                                  event.stopPropagation();
+                              <MaskChip
+                                layerName={layer.name}
+                                effect={layer.mask.effect}
+                                label={layerLabel(schemas, effects, layer.mask.effect) ?? "Effect"}
+                                onChange={(anchor) => {
                                   pick(layer.id);
-                                  openMaskPicker(layer.id, event.currentTarget);
+                                  openMaskPicker(layer.id, anchor);
                                 }}
-                              >
-                                <Thumb
-                                  id={layer.mask.effect}
-                                  size="sm"
-                                  label={`Mask: ${layerLabel(schemas, effects, layer.mask.effect) ?? "Effect"}`}
-                                />
-                              </button>
+                                onRemove={() => removeMask(layer.id)}
+                              />
                             )}
                           </span>
                           <span className="layer-text">
@@ -2547,13 +2648,7 @@ export function StackBuilder({
                               {words ?? `${blendOf(layer.blend)} ${layer.opacity}% · ${areaName(layer.area, layout, devices)}`}
                             </span>
                           </span>
-                          {layer.mask ? (
-                            <IconButton
-                              label={`Remove the mask from ${layer.name}`}
-                              icon={<Eraser size={16} />}
-                              onClick={() => removeMask(layer.id)}
-                            />
-                          ) : (
+                          {!layer.mask && (
                             <Button
                               size="sm"
                               variant="ghost"
@@ -3167,15 +3262,24 @@ export function StackBuilder({
           style={{ left: `${drag.point.x + 12}px`, top: `${drag.point.y + 12}px` }}
           aria-hidden="true"
         >
-          {drag.source.kind === "effect" ? (
-            <Thumb id={drag.source.effect} size="sm" label={drag.source.name} live />
-          ) : (
+          {drag.source.kind === "layer" ? (
             <span className="rd-drag-ghost-grip">
               <DotsSixVertical size={16} />
             </span>
+          ) : (
+            <Thumb id={drag.source.effect} size="sm" label={drag.source.name} live />
           )}
           <span className="rd-drag-ghost-name">{drag.source.name}</span>
+          {drag.source.kind === "mask" && <span className="rd-drag-ghost-tag">mask</span>}
         </div>
+      )}
+
+      {/* Why a mask cannot land here: the words follow the pointer, and the live region says
+          them too. */}
+      {drag.source && drag.point && drag.hint && (
+        <p className="rd-drag-hint" style={{ left: `${drag.point.x + 12}px`, top: `${drag.point.y + 48}px` }} aria-hidden="true">
+          {drag.hint}
+        </p>
       )}
 
       <p className="sr-only rd-live" role="status" aria-live="polite" aria-atomic="true">

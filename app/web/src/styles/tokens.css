@@ -39,6 +39,19 @@
   --knob-ring: #ffffff;  /* a drag knob on the picture: light inner ring, dark outer ring, */
   --knob-edge: #101216;  /* so it reads on any effect colour */
 
+  /* the stage's direction and speed handles (#257 phase 3): the arrow and grip, the speed pill
+     and a refused drop's hint; light and dark each get their own mix */
+  --handle-arm: color-mix(in srgb, var(--a1) 62%, var(--ink));
+  --handle-halo: rgba(0, 0, 0, 0.55);
+  --handle-pill-bg: color-mix(in srgb, var(--panel) 86%, transparent);
+  --handle-pill-line: var(--line-2);
+  --handle-pill-ink: var(--ink);
+  --handle-pill-label: var(--mute);
+  --handle-pill-fill: color-mix(in srgb, var(--a1) 22%, transparent);
+  --hint-bg: color-mix(in srgb, var(--down) 18%, var(--panel));
+  --hint-line: color-mix(in srgb, var(--down) 60%, var(--line-2));
+  --hint-ink: var(--ink);
+
   /* the scrollbar (#92): one look for every scrolling pane. The thumb is the muted ink, a
      control grey that reads on a panel (5.4:1), on the page (5.7:1) and in a well; on hover it
      steps up to --dim. The track is the pane's own background, so the bar never draws a box
@@ -171,6 +184,17 @@
   --on-accent: #ffffff;
   --knob-ring: #ffffff;
   --knob-edge: #1a1d24;
+  /* the stage's handles (#257 phase 3), in the light theme's own mixes */
+  --handle-arm: color-mix(in srgb, var(--a1) 76%, var(--ink));
+  --handle-halo: rgba(255, 255, 255, 0.75);
+  --handle-pill-bg: color-mix(in srgb, var(--panel) 92%, transparent);
+  --handle-pill-line: var(--line-2);
+  --handle-pill-ink: var(--ink);
+  --handle-pill-label: var(--mute);
+  --handle-pill-fill: color-mix(in srgb, var(--a1) 16%, transparent);
+  --hint-bg: color-mix(in srgb, var(--down) 12%, var(--panel));
+  --hint-line: color-mix(in srgb, var(--down) 55%, var(--line-2));
+  --hint-ink: var(--ink);
   /* the scrollbar (#92): the same pair, in the light theme's ink */
   --scroll-thumb: var(--mute);
   --scroll-thumb-hover: var(--dim);
@@ -212,6 +236,17 @@
     --on-accent: #ffffff;
     --knob-ring: #ffffff;
     --knob-edge: #1a1d24;
+    /* the stage's handles (#257 phase 3), in the light theme's own mixes */
+    --handle-arm: color-mix(in srgb, var(--a1) 76%, var(--ink));
+    --handle-halo: rgba(255, 255, 255, 0.75);
+    --handle-pill-bg: color-mix(in srgb, var(--panel) 92%, transparent);
+    --handle-pill-line: var(--line-2);
+    --handle-pill-ink: var(--ink);
+    --handle-pill-label: var(--mute);
+    --handle-pill-fill: color-mix(in srgb, var(--a1) 16%, transparent);
+    --hint-bg: color-mix(in srgb, var(--down) 12%, var(--panel));
+    --hint-line: color-mix(in srgb, var(--down) 55%, var(--line-2));
+    --hint-ink: var(--ink);
     /* the scrollbar (#92): the same pair, in the light theme's ink */
     --scroll-thumb: var(--mute);
     --scroll-thumb-hover: var(--dim);
