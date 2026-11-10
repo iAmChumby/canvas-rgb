@@ -130,6 +130,8 @@ pub struct FakeEngine {
     /// When this is not zero, `set_effect` panics instead of recording the effect: a test
     /// that needs a panic in the middle of a route (#94).
     pub panic_on_set_effect: AtomicU32,
+    /// How many times `set_effect` has panicked: a test waits on this, not on the slot (#282).
+    pub set_effect_panics: AtomicU32,
 }
 
 impl Default for FakeEngine {
@@ -151,6 +153,7 @@ impl Default for FakeEngine {
             shutdown: AtomicU32::new(0),
             stats: Mutex::new(RenderStats::default()),
             panic_on_set_effect: AtomicU32::new(0),
+            set_effect_panics: AtomicU32::new(0),
         }
     }
 }
@@ -162,6 +165,7 @@ impl Engine for FakeEngine {
 
     fn set_effect(&self, effect: Box<dyn Effect>, props: &Props) {
         if self.panic_on_set_effect.load(Ordering::SeqCst) != 0 {
+            self.set_effect_panics.fetch_add(1, Ordering::SeqCst);
             panic!("the engine panicked on set_effect");
         }
         *self.effect_id.lock().unwrap() = Some(effect.schema().id);
