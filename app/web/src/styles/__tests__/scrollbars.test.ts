@@ -107,6 +107,7 @@ const SCROLL_PANES = [
   ".rd-library-scroll",
   '.rd-library[data-mode="tray"] .rd-library-scroll',
   ".rd-layer-edit",
+  '.rd-stacks-phone .rd-stack-main[data-empty="true"]',
   ".rd-picker",
   ".rd-add-list",
   ".rd-layer-sheet .rd-layer-edit",

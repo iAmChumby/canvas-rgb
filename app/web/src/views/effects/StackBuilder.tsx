@@ -380,7 +380,7 @@ export function StackBuilder({
         >
           <div className="rd-stack-body" data-library={libraryMode}>
             {libraryMode === "rail" && libraryPanel("rail")}
-            <div className="rd-stack-main">
+            <div className="rd-stack-main" data-empty={count === 0 ? "true" : undefined}>
               {saver.saveError && (
                 <ErrorPanel
                   title="The stack could not be saved"
@@ -444,13 +444,6 @@ export function StackBuilder({
                 leaving={saver.leaving}
               />
 
-              {/* An empty stack shows the library with the stage (spec §5). On a phone the library
-                  is a tab normally; the empty state puts one row of tiles under the stage instead,
-                  so "Drag an effect here" has something to drag without a second tap. */}
-              {narrow && count === 0 && phoneTab === "layers" && libraryPanel("tray")}
-
-              {libraryMode === "tray" && libraryPanel("tray")}
-
               {count === 0 && (
                 <StarterTiles
                   starters={STARTER_STACKS}
@@ -461,6 +454,12 @@ export function StackBuilder({
                 />
               )}
 
+              {/* An empty stack shows the library with the stage (spec §5). On a phone the library
+                  is a tab normally; the empty state puts one row of tiles under the starters
+                  instead, so "Drag an effect here" has something to drag without a second tap. */}
+              {narrow && count === 0 && phoneTab === "layers" && libraryPanel("tray")}
+
+              {libraryMode === "tray" && libraryPanel("tray")}
 
               {narrow && (
                 <div className="rd-phone-tabs">
