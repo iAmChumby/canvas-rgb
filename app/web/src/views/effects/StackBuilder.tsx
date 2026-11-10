@@ -24,6 +24,8 @@ import { BuilderSide } from "@/views/effects/BuilderSide";
 import { Library, type LibraryMode } from "@/views/effects/Library";
 import { LayerList } from "@/views/effects/LayerList";
 import { StackStage } from "@/views/effects/StackStage";
+import { StarterTiles } from "@/views/effects/StarterTiles";
+import { STARTER_STACKS } from "@/lib/demoStacks";
 import {
   ChooseEffectPopover,
   DragGhost,
@@ -162,6 +164,7 @@ export function StackBuilder({
     layout,
     draftRef,
     mounted: mountedRef,
+    historyMoves,
     setDraft,
     pick,
     setSheetOpen,
@@ -441,7 +444,23 @@ export function StackBuilder({
                 leaving={saver.leaving}
               />
 
+              {/* An empty stack shows the library with the stage (spec §5). On a phone the library
+                  is a tab normally; the empty state puts one row of tiles under the stage instead,
+                  so "Drag an effect here" has something to drag without a second tap. */}
+              {narrow && count === 0 && phoneTab === "layers" && libraryPanel("tray")}
+
               {libraryMode === "tray" && libraryPanel("tray")}
+
+              {count === 0 && (
+                <StarterTiles
+                  starters={STARTER_STACKS}
+                  onAdd={(starter) => {
+                    void edits.addStack(starter);
+                    if (narrow) setPhoneTab("layers");
+                  }}
+                />
+              )}
+
 
               {narrow && (
                 <div className="rd-phone-tabs">
@@ -540,7 +559,7 @@ export function StackBuilder({
                 setPickerFor(id);
               }}
               onChooseEffectOpen={setChooseFor}
-              onPropChange={(id, key, value) =>
+              onPropChange={(id, key, value) => {
                 setDraft(
                   (current) => ({
                     ...current,
@@ -550,7 +569,7 @@ export function StackBuilder({
                   }),
                   `props:${id}:${key}`,
                 )
-              }
+              }}
             />
           </div>
         </LoadFrame>
@@ -625,6 +644,11 @@ export function StackBuilder({
     </div>
   );
 }
+
+
+
+
+
 
 
 

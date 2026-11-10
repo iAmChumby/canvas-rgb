@@ -3,6 +3,8 @@
 // are the spine's (`Stack`, `StackDetail`, `StackSummary`), built from the demo effects.
 
 import type { DemoEffect, Props } from "@/lib/fixtures";
+import type { BlendMode } from "@/proto/BlendMode";
+import type { LayerArea } from "@/proto/LayerArea";
 import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { Stack } from "@/proto/Stack";
@@ -45,6 +47,93 @@ function layer(
     ...extra,
   };
 }
+
+/** One layer of a starter stack: its effect, its name, and the values it overrides. */
+export interface StarterLayer {
+  name: string;
+  effect: string;
+  /** The property values this layer starts with, over the effect's own defaults. */
+  props?: Props;
+  blend?: BlendMode;
+  opacity?: number;
+  area?: LayerArea;
+  /** A mask of another effect, its own values over that effect's defaults. */
+  mask?: { effect: string; props?: Props };
+}
+
+/** A whole stack the "New effect" stage offers in one click (#257 phase 4, spec §5). */
+export interface StarterStack {
+  id: string;
+  name: string;
+  /** One line under the name: what the stack is made of. */
+  blurb: string;
+  layers: StarterLayer[];
+}
+
+/**
+ * The three starters the empty builder offers (#257 phase 4): a whole stack in one click, added as
+ * one undo step. They are ordinary effects with ordinary values; nothing here needs the demo
+ * backend, and the daemon supplies every default they do not override.
+ */
+export const STARTER_STACKS: StarterStack[] = [
+  {
+    id: "starter:sunset-glow",
+    name: "Sunset glow",
+    blurb: "A gradient, fire on the keys, rain over both",
+    layers: [
+      {
+        name: "Sunset",
+        effect: "gradient",
+        props: { color1: color("#ff2d55"), color2: color("#ffb703"), angle: { type: "angle", value: 112 } },
+      },
+      {
+        name: "Heat",
+        effect: "fire",
+        props: { intensity: number(72), cooling: number(34) },
+        area: { kind: "rect", x: 16, y: 150, width: 110, height: 46 },
+        blend: "add",
+        opacity: 70,
+      },
+      {
+        name: "Sparkles",
+        effect: "rain",
+        props: { drop_color: color("#eaf2ff"), background: color("#050814") },
+        blend: "screen",
+        opacity: 80,
+      },
+    ],
+  },
+  {
+    id: "starter:warm-flame",
+    name: "Warm flame",
+    blurb: "Warm white shaped by a fire mask",
+    layers: [
+      {
+        name: "Warm white",
+        effect: "white",
+        props: { temperature: number(2700) },
+        mask: {
+          effect: "fire",
+          props: { intensity: number(100), cooling: number(16), palette: { type: "choice", value: "Mono" } },
+        },
+      },
+    ],
+  },
+  {
+    id: "starter:sparkle-sky",
+    name: "Sparkle sky",
+    blurb: "Deep blue, aurora, and falling rain",
+    layers: [
+      {
+        name: "Base",
+        effect: "gradient",
+        props: { color1: color("#0a0a4a"), color2: color("#1e6fd9") },
+      },
+      { name: "Waves", effect: "aurora", blend: "screen", opacity: 80 },
+      { name: "Rain", effect: "rain", blend: "screen", opacity: 70 },
+    ],
+  },
+];
 
 /** The stack the mockups show: a Sunset gradient, Heat's fire on the keyboard, sparkles over both. */
 export function seededStacks(scenario: Set<string>, effects: Record<string, DemoEffect>): Record<string, Stack> {

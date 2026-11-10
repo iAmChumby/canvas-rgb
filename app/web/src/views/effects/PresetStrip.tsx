@@ -6,6 +6,7 @@
 
 import { Button } from "@/components/Button";
 import { Chip } from "@/components/Chip";
+import { InspectorSection } from "@/components/InspectorSection";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
 import type { Preset } from "@/proto/Preset";
@@ -34,8 +35,9 @@ export function PresetStrip({
   onEscape: () => void;
 }) {
   return (
-    <Panel title="Presets" className="rd-presets">
-      <div className="preset-chips" role="group" aria-label="Presets">
+    <Panel className="rd-presets">
+      <InspectorSection title="Presets">
+        <div className="preset-chips" role="group" aria-label="Presets">
         {builtIn.map((preset) => (
           <Chip
             key={preset.name}
@@ -88,6 +90,7 @@ export function PresetStrip({
       <div className="preset-line" data-mode="idle">
         <span className="preset-status">{appliedPreset ?? "Custom values"}</span>
       </div>
+      </InspectorSection>
     </Panel>
   );
 }

@@ -1122,7 +1122,8 @@ export function EffectsView() {
             New from code
           </Button>
           <p className="eff-menu-note">
-            An HTML effect you write here: copy one of the library&apos;s, or start blank.
+            The HTML path: an effect you write in code, copied from the library or started blank. To stack
+            effects, use New effect.
           </p>
         </div>
       </Popover>

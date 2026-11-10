@@ -1,8 +1,9 @@
 "use client";
 
-// New from code (D2.3): a blank file second, a copy of an existing HTML effect first. A Rust
-// built-in has no HTML source to copy (the route answers 404), so only `html:` effects are
-// offered. Reading a copy's source has its own wait and its own error.
+// New from code (D2.3): the HTML path. A blank file second, a copy of an existing HTML effect
+// first. A Rust built-in has no HTML source to copy (the route answers 404), so only `html:`
+// effects are offered. Reading a copy's source has its own wait and its own error. A stacked
+// effect is built with New effect; this is for an effect written by hand.
 
 import { CaretLeft, CopySimple, FilePlus } from "@phosphor-icons/react";
 import { BusyIcon, Button, IconButton } from "@/components/Button";
@@ -45,6 +46,9 @@ export function NewEffectChooser({
           </span>
         )}
       </div>
+      <p className="dim eff-choose-sub">
+        The HTML path: an effect you write in code. To combine effects, go back and use New effect.
+      </p>
 
       <Panel title="Copy an effect" className="eff-choose-panel">
         <p className="dim eff-choose-sub">

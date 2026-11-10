@@ -4,11 +4,12 @@
 // controls, and its mask, moved out of StackBuilder.tsx unchanged. The phone's Tune sheet renders
 // the same inspector inside its dialog.
 
-import { CircleHalf, CopySimple, Monitor, Plus, Trash, X } from "@phosphor-icons/react";
+import { CopySimple, Monitor, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
+import { FigureField } from "@/components/FigureField";
+import { InspectorSection } from "@/components/InspectorSection";
 import { LoadFrame } from "@/components/Loading";
 import { InlineSkeleton, Skeleton } from "@/components/Skeleton";
-import { NumberField } from "@/components/NumberField";
 import { Panel } from "@/components/Panel";
 import { PropertyControls } from "@/views/PropertyControls";
 import { Segmented } from "@/components/Segmented";
@@ -118,134 +119,136 @@ export function Inspector({
         </span>
       </div>
 
-      <div className="layer-fields">
-        <div className="layer-field">
-          <span>Effect</span>
-          <Select
-            label="Effect"
-            loading={
-              effects === null ||
-              (schemas[layer.effect] === undefined && !effects.some((effect) => effect.id === layer.effect))
-            }
-            value={layer.effect}
-            options={[
-              // A layer whose effect is gone (or is a stack, which the list never offers)
-              // keeps its own entry, so the select says what the layer has.
-              ...((effects ?? []).some((effect) => effect.id === layer.effect)
-                ? []
-                : [
-                    {
-                      value: layer.effect,
-                      label: layerLabel(schemas, effects, layer.effect) ?? "Effect",
-                    },
-                  ]),
-              ...(effects ?? [])
-                .filter((effect) => !effect.id.startsWith("stack:"))
-                .map((effect) => ({
-                  value: effect.id,
-                  label:
-                    html && !isHtmlEffect(layer.effect) && isHtmlEffect(effect.id)
-                      ? `${effect.name} (HTML layers full)`
-                      : effect.name,
-                })),
-            ]}
-            onChange={onChooseEffect}
-          />
-        </div>
-        <div className="layer-field">
-          <span>Blend</span>
-          <Select
-            label="Blend"
-            value={layer.blend}
-            options={BLENDS.map((blend) => ({ value: blend.value, label: blend.label }))}
-            onChange={(next) => onBlend(next as BlendMode)}
-          />
-        </div>
-        <div className="layer-field wide">
-          <span>Opacity</span>
-          <div className="field-slider">
-            <Slider
-              label="Opacity"
-              min={0}
-              max={100}
-              value={layer.opacity}
-              onChange={(next) => onOpacity(next, `opacity:${layer.id}`)}
-              onCommit={onOpacityCommit}
-            />
-            <NumberField
-              label="Opacity value"
-              min={0}
-              max={100}
-              value={layer.opacity}
-              onCommit={(next) => onOpacity(next)}
+      <InspectorSection title="Effect and blend">
+        <div className="layer-fields">
+          <div className="layer-field">
+            <span>Effect</span>
+            <Select
+              label="Effect"
+              loading={
+                effects === null ||
+                (schemas[layer.effect] === undefined && !effects.some((effect) => effect.id === layer.effect))
+              }
+              value={layer.effect}
+              options={[
+                // A layer whose effect is gone (or is a stack, which the list never offers)
+                // keeps its own entry, so the select says what the layer has.
+                ...((effects ?? []).some((effect) => effect.id === layer.effect)
+                  ? []
+                  : [
+                      {
+                        value: layer.effect,
+                        label: layerLabel(schemas, effects, layer.effect) ?? "Effect",
+                      },
+                    ]),
+                ...(effects ?? [])
+                  .filter((effect) => !effect.id.startsWith("stack:"))
+                  .map((effect) => ({
+                    value: effect.id,
+                    label:
+                      html && !isHtmlEffect(layer.effect) && isHtmlEffect(effect.id)
+                        ? `${effect.name} (HTML layers full)`
+                        : effect.name,
+                  })),
+              ]}
+              onChange={onChooseEffect}
             />
           </div>
+          <div className="layer-field">
+            <span>Blend</span>
+            <Select
+              label="Blend"
+              value={layer.blend}
+              options={BLENDS.map((blend) => ({ value: blend.value, label: blend.label }))}
+              onChange={(next) => onBlend(next as BlendMode)}
+            />
+          </div>
+          <div className="layer-field wide">
+            <span>Opacity</span>
+            <div className="field-slider">
+              <Slider
+                label="Opacity"
+                min={0}
+                max={100}
+                value={layer.opacity}
+                onChange={(next) => onOpacity(next, `opacity:${layer.id}`)}
+                onCommit={onOpacityCommit}
+              />
+              <FigureField
+                label="Opacity"
+                min={0}
+                max={100}
+                value={layer.opacity}
+                unit="%"
+                onCommit={(next) => onOpacity(next)}
+              />
+            </div>
+          </div>
         </div>
-      </div>
-      <p className="blend-note">{BLENDS.find((blend) => blend.value === layer.blend)?.note}</p>
+        <p className="blend-note">{BLENDS.find((blend) => blend.value === layer.blend)?.note}</p>
+      </InspectorSection>
 
-      <div className="layer-area">
-        <div className="layer-area-text">
-          <Monitor size={16} aria-hidden="true" />
-          <span className="layer-area-words">
-            <span>{areaName(layer.area, layout, devices)}</span>
-            {areaPosition(layer.area) && <span className="mute fig">{areaPosition(layer.area)}</span>}
-          </span>
-        </div>
-        <Button
-          size="sm"
-          variant="ghost"
-          onClick={(event) => onOpenArea(event.currentTarget)}
-        >
-          Change area
-        </Button>
-      </div>
-
-      {schemas[layer.effect] === null || statuses[layer.id]?.status === "missing_effect" ? (
-        <div className="rd-gone">
-          <p className="error-line">This effect is gone. Choose another.</p>
-          <Button
-            size="sm"
-            icon={<Plus size={15} />}
-            aria-label={`Choose effect for ${layer.name}`}
-            onClick={onChooseEffectOpen}
-          >
-            Choose effect
+      <InspectorSection title="Area">
+        <div className="layer-area">
+          <div className="layer-area-text">
+            <Monitor size={16} aria-hidden="true" />
+            <span className="layer-area-words">
+              <span>{areaName(layer.area, layout, devices)}</span>
+              {areaPosition(layer.area) && <span className="mute fig">{areaPosition(layer.area)}</span>}
+            </span>
+          </div>
+          <Button size="sm" variant="ghost" onClick={(event) => onOpenArea(event.currentTarget)}>
+            Change area
           </Button>
         </div>
-      ) : schemas[layer.effect] === undefined ? (
-        <LoadFrame
-          state="loading"
-          label="Loading the effect's properties"
-          shape={
-            // The shape of the property rows that come: a label on the left, its control on
-            // the right, one row each (a colour, a slider, a choice).
-            <div className="rd-props-shape">
-              {[0.32, 0.26, 0.36].map((label, i) => (
-                <div className="rd-props-row" key={i}>
-                  <Skeleton width={`${label * 100}%`} height={14} />
-                  <Skeleton width={i === 0 ? "34%" : "52%"} height={i === 0 ? 24 : 18} radius={i === 0 ? 6 : 9} />
-                </div>
-              ))}
-            </div>
-          }
-        />
-      ) : (
-        <PropertyControls
-          schema={schemas[layer.effect] as PropertySchema}
-          values={layerValues(schemas[layer.effect], layer.props)}
-          onChange={onPropChange}
-        />
-      )}
+      </InspectorSection>
+
+      <InspectorSection title="Properties">
+        {schemas[layer.effect] === null || statuses[layer.id]?.status === "missing_effect" ? (
+          <div className="rd-gone">
+            <p className="error-line">This effect is gone. Choose another.</p>
+            <Button
+              size="sm"
+              icon={<Plus size={15} />}
+              aria-label={`Choose effect for ${layer.name}`}
+              onClick={onChooseEffectOpen}
+            >
+              Choose effect
+            </Button>
+          </div>
+        ) : schemas[layer.effect] === undefined ? (
+          <LoadFrame
+            state="loading"
+            label="Loading the effect's properties"
+            shape={
+              // The shape of the property rows that come: a label on the left, its control on
+              // the right, one row each (a colour, a slider, a choice).
+              <div className="rd-props-shape">
+                {[0.32, 0.26, 0.36].map((label, i) => (
+                  <div className="rd-props-row" key={i}>
+                    <Skeleton width={`${label * 100}%`} height={14} />
+                    <Skeleton width={i === 0 ? "34%" : "52%"} height={i === 0 ? 24 : 18} radius={i === 0 ? 6 : 9} />
+                  </div>
+                ))}
+              </div>
+            }
+          />
+        ) : (
+          <PropertyControls
+            schema={schemas[layer.effect] as PropertySchema}
+            values={layerValues(schemas[layer.effect], layer.props)}
+            onChange={onPropChange}
+            readouts
+          />
+        )}
+      </InspectorSection>
 
       {/* The mask (#256): another effect, run over this layer's area, whose picture
           decides where the layer shows. */}
-      <div className="rd-mask" aria-label="Mask">
-        <div className="rd-mask-head">
-          <span className="rd-mask-title">
-            <CircleHalf size={15} aria-hidden="true" /> Mask
-          </span>
-          {mask ? (
+      <InspectorSection
+        title="Mask"
+        actions={
+          mask ? (
             <Button size="sm" variant="ghost" icon={<X size={14} />} onClick={onRemoveMask}>
               Remove
             </Button>
@@ -253,14 +256,16 @@ export function Inspector({
             <Button size="sm" icon={<Plus size={15} />} onClick={(event) => onOpenMaskPicker(event.currentTarget)}>
               Add mask
             </Button>
-          )}
-        </div>
-        {mask ? (
-          <>
-            <p className="rd-mask-note">
-              The mask runs over this layer&apos;s area every frame; its picture decides how much of the layer
-              shows.
-            </p>
+          )
+        }
+      >
+        <div className="rd-mask" aria-label="Mask">
+          {mask ? (
+            <>
+              <p className="rd-mask-note">
+                The mask runs over this layer&apos;s area every frame; its picture decides how much of the layer
+                shows.
+              </p>
             <div className="layer-fields">
               <div className="layer-field wide">
                 <span>Mask effect</span>
@@ -331,11 +336,12 @@ export function Inspector({
                     onChange={(amount) => onMaskAmount(amount, `mask-amount:${layer.id}`)}
                     onCommit={onMaskAmountCommit}
                   />
-                  <NumberField
-                    label="Mask amount value"
+                  <FigureField
+                    label="Mask amount"
                     min={0}
                     max={100}
                     value={mask.amount}
+                    unit="%"
                     onCommit={(amount) => onMaskAmount(amount, `mask-amount:${layer.id}`)}
                   />
                 </div>
@@ -375,7 +381,8 @@ export function Inspector({
             decides the coverage. A flame over warm white is the classic.
           </p>
         )}
-      </div>
+        </div>
+      </InspectorSection>
       {(statuses[layer.id]?.status === "held" || statuses[layer.id]?.status === "faulted") && (
         <p className="layer-warn" role="status">
           This layer is slower than the frame; the rest of the stack keeps its rate.
@@ -403,3 +410,5 @@ export function InspectorEmpty() {
     </Panel>
   );
 }
+
+

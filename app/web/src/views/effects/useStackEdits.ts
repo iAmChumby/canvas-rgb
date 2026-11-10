@@ -7,6 +7,7 @@
 import { useRef, useState } from "react";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
+import type { StarterStack } from "@/lib/demoStacks";
 import { freeLayerName } from "@/views/effects/layerText";
 import {
   addLayer,
@@ -19,6 +20,7 @@ import {
   layerNameProblem,
   layerValues,
   makeLayer,
+  makeMask,
   moveLayer,
   nextLayerId,
   patchLayer,
@@ -39,6 +41,7 @@ export function useStackEdits({
   layout,
   draftRef,
   mounted,
+  historyMoves,
   setDraft,
   pick,
   setSheetOpen,
@@ -49,6 +52,7 @@ export function useStackEdits({
   layout: Layout | null;
   draftRef: { current: Stack };
   mounted: { current: boolean };
+  historyMoves: { current: number };
   setDraft: (update: Stack | ((current: Stack) => Stack), run?: string, hold?: boolean) => void;
   pick: (id: string | null) => void;
   setSheetOpen: (open: boolean) => void;
@@ -64,6 +68,8 @@ export function useStackEdits({
   const addChain = useRef<Promise<void>>(Promise.resolve());
   const addQueued = useRef(new Set<string>());
   const choosing = useRef(false);
+  /** A starter stack is being read and built: a second click waits its turn in the same chain. */
+  const stackQueued = useRef(false);
 
   const patch = (id: string, change: Partial<StackLayer>, run?: string, hold = false) => {
     setDraft((current) => ({ ...current, layers: patchLayer(current.layers, id, change) }), run, hold);
@@ -186,6 +192,94 @@ export function useStackEdits({
     return run;
   };
 
+  /**
+   * A starter stack (#257 phase 4, spec §5): every layer is read and built first, then the whole
+   * stack lands in one draft change, so one undo takes it all back. A second click while the
+   * effects are read waits its turn; an Undo or a reset in that gap abandons the add rather than
+   * overwriting the step back.
+   */
+  const addStack = (starter: StarterStack): Promise<void> => {
+    if (stackQueued.current) return Promise.resolve();
+    stackQueued.current = true;
+    const run = addChain.current.then(async () => {
+      try {
+        const room = MAX_LAYERS - draftRef.current.layers.length;
+        if (starter.layers.length > room) {
+          const refusal = `A stack holds ${MAX_LAYERS} layers`;
+          setAddProblem(refusal);
+          notify(refusal, "warn");
+          return;
+        }
+        const moves = historyMoves.current;
+        setAddProblem(null);
+        const ids = new Set<string>();
+        for (const def of starter.layers) {
+          ids.add(def.effect);
+          if (def.mask) ids.add(def.mask.effect);
+        }
+        const details = new Map<string, { schema: PropertySchema | null; props: Record<string, PropValue> }>();
+        await Promise.all(
+          [...ids].map(async (id) => {
+            try {
+              const detail = await api.effect(id);
+              if (mounted.current) setSchemas((current) => ({ ...current, [id]: detail.schema }));
+              details.set(id, { schema: detail.schema, props: detail.props });
+            } catch {
+              if (mounted.current) setSchemas((current) => ({ ...current, [id]: null }));
+              details.set(id, { schema: null, props: {} });
+            }
+          }),
+        );
+        if (!mounted.current) return;
+        if (historyMoves.current !== moves) return;
+        const layers = draftRef.current.layers;
+        if (starter.layers.length > MAX_LAYERS - layers.length) {
+          const refusal = `A stack holds ${MAX_LAYERS} layers`;
+          setAddProblem(refusal);
+          notify(refusal, "warn");
+          return;
+        }
+        let working = [...layers];
+        const added: StackLayer[] = [];
+        for (const def of starter.layers) {
+          const id = nextLayerId(working);
+          if (!id) break;
+          const detail = details.get(def.effect);
+          const maskDetail = def.mask ? details.get(def.mask.effect) : undefined;
+          const layer: StackLayer = {
+            ...makeLayer(def.effect, freeLayerName(def.name, working), detail?.schema, {
+              ...(detail?.props ?? {}),
+              ...(def.props ?? {}),
+            }),
+            id,
+            ...(def.blend ? { blend: def.blend } : {}),
+            ...(def.opacity !== undefined ? { opacity: def.opacity } : {}),
+            ...(def.area ? { area: def.area } : {}),
+            ...(def.mask
+              ? {
+                  mask: makeMask(def.mask.effect, maskDetail?.schema, {
+                    ...(maskDetail?.props ?? {}),
+                    ...(def.mask.props ?? {}),
+                  }),
+                }
+              : {}),
+          };
+          working = [...working, layer];
+          added.push(layer);
+        }
+        if (added.length === 0) return;
+        const next = { ...draftRef.current, layers: working };
+        draftRef.current = next;
+        setDraft(next);
+        pick(added[added.length - 1]!.id);
+      } finally {
+        stackQueued.current = false;
+      }
+    });
+    addChain.current = run.catch(() => undefined);
+    return run;
+  };
+
   const remove = (id: string) => {
     const index = draft.layers.findIndex((layer) => layer.id === id);
     const next = removeLayer(draft.layers, id);
@@ -241,6 +335,7 @@ export function useStackEdits({
     chooseEffect,
     addOne,
     addEffect,
+    addStack,
     remove,
     duplicate,
     reorder,
