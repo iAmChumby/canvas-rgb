@@ -3514,10 +3514,13 @@ button.chip:hover {
   flex: none;
 }
 
-/* The Size key of a device with one zone: the same column as the Size keys of the zone rows. */
+/* The Size key of a device with one zone: the same column as the Size keys of the zone rows.
+   The column hugs the key (a small key is about 50 px wide) with a gutter, so a row that is out
+   of room at the two-column 1920 and the narrow 960 does not pass its pane (#273: the strip's
+   key read "Si" there). No row holds anything else in this column. */
 .rd-devices .rd-dev-row .zone-strip-size {
   flex: none;
-  min-width: 104px;
+  min-width: 56px;
   text-align: right;
 }
 
@@ -3662,9 +3665,11 @@ button.chip:hover {
   margin-left: auto;
 }
 
+/* The same column as the device row's Size key, so a device's drawing ends where its zone rows'
+   drawings do (#273: the key hugs its width here too, instead of reserving 104 px). */
 .rd-devices .rd-zone .zone-strip-size {
   flex: none;
-  min-width: 104px;
+  min-width: 56px;
   text-align: right;
 }
 

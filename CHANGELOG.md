@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Peripherals and Fans: controls that ran past their panel on narrower windows now fit (#263, #268)
+- Devices: the light strip's Size key reads in full instead of "Si" (#273)
 
 ## [0.11.0] - 2026-11-10
 
