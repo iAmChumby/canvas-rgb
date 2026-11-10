@@ -1028,7 +1028,11 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         ? "effect"
         : head === "peripherals" && seg.length === 2
           ? "peripheral"
-          : head;
+          : // A thumbnail is held on its own (`hold:thumbnail:<ms>`), so a picture can be late
+            // while the effect list and the detail around it have arrived.
+            head === "effects" && seg.length === 3 && seg[2] === "thumbnail"
+            ? "thumbnail"
+            : head;
     const wait = holdMs(area);
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     // The daemon's own words: the route that failed and why, the way the service says it.

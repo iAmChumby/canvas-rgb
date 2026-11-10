@@ -148,7 +148,8 @@ export function onboardingDone(): boolean {
  * when no time is given, which is "still loading" for a screenshot), `fail:<area>` makes them
  * answer 500, `empty:<area>` makes them answer with nothing in them. The areas are the first
  * path segment (`fans`, `layouts`, `settings`, `displays`, `devices`) and `effects`, `effect`,
- * `peripherals`, `peripheral` for the list and the detail of the last two.
+ * `peripherals`, `peripheral` for the list and the detail of the last two, and `thumbnail` for the
+ * effect pictures alone.
  */
 export function holdMs(area: string): number {
   for (const t of tokens()) {
