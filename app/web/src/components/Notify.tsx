@@ -24,6 +24,16 @@ export interface NotifyAction {
   onClick: () => void;
 }
 
+/** Extra policy for one message: a second line, a life of its own, and what the close key means. */
+export interface NotifyOptions {
+  /** A second line under the message. */
+  detail?: string;
+  /** How long the message stays before it goes on its own. It replaces the tone's rule. */
+  lifeMs?: number;
+  /** Runs when the reader closes the message with its close key (a timeout or an answer does not). */
+  onClose?: () => void;
+}
+
 /** How long a plain note stays up before it goes. */
 const NOTE_MS = 3000;
 
@@ -111,13 +121,31 @@ function touch(id: string, patch: Partial<Hold>): void {
  *
  * A note (a success, a piece of information) goes after three seconds. An error, a warning and
  * anything that offers an answer stays until it is dismissed, because a message nobody can
- * finish reading is the problem this replaces.
+ * finish reading is the problem this replaces. `options.lifeMs` gives a message a life of its own:
+ * it still carries its close key, and it goes on its own when the life is spent. The return value
+ * is the message's identity, for `dismissNotification`.
  */
-export function notify(text: string, tone: NotifyTone = "ok", action?: NotifyAction): void {
+export function notify(
+  text: string,
+  tone: NotifyTone = "ok",
+  action?: NotifyAction,
+  options?: NotifyOptions,
+): string {
   const id = notificationId(tone, text);
   const keeps = tone === "down" || tone === "warn" || action !== undefined;
+  const life = options?.lifeMs ?? (keeps ? Infinity : NOTE_MS);
   sonnerToast.custom(
-    () => <NotifyBody id={id} text={text} tone={tone} action={action} keeps={keeps} />,
+    () => (
+      <NotifyBody
+        id={id}
+        text={text}
+        tone={tone}
+        action={action}
+        keeps={keeps}
+        detail={options?.detail}
+        onClose={options?.onClose}
+      />
+    ),
     // The library's own timer never runs: this file's clock owns the life of every message.
     { id, duration: Infinity, testId: id, onDismiss: () => forget(id) },
   );
@@ -126,11 +154,21 @@ export function notify(text: string, tone: NotifyTone = "ok", action?: NotifyAct
   holds.set(id, {
     hover: before?.hover ?? false,
     focus: before?.focus ?? false,
-    left: keeps ? Infinity : NOTE_MS,
+    left: life,
     due: null,
     timer: null,
   });
-  if (!keeps) sync(id);
+  // A message that waits for the reader has no clock to start; sync leaves it alone.
+  sync(id);
+  return id;
+}
+
+/**
+ * Takes one message away by the identity `notify` returned. A message that must not outlive its
+ * page (the "Updated to" notice, on the Updates page) uses it.
+ */
+export function dismissNotification(id: string): void {
+  go(id);
 }
 
 /**
@@ -141,19 +179,24 @@ export function dismissNotifications(): void {
   for (const id of Array.from(holds.keys())) go(id);
 }
 
-interface NotifyBodyProps {  id: string;
+interface NotifyBodyProps {
+  id: string;
   text: string;
   tone: NotifyTone;
   action?: NotifyAction;
   /** True when the notification waits for the reader instead of a clock. */
   keeps: boolean;
+  /** A second line under the message. */
+  detail?: string;
+  /** Runs when the reader closes the message with its close key. */
+  onClose?: () => void;
 }
 
 /**
  * The body of a notification: the mark for its tone, the words, and the answers it carries. It
  * is the only part of a notification the app draws.
  */
-function NotifyBody({ id, text, tone, action, keeps }: NotifyBodyProps) {
+function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBodyProps) {
   const Icon = TONE_ICON[tone];
   return (
     <div
@@ -174,7 +217,10 @@ function NotifyBody({ id, text, tone, action, keeps }: NotifyBodyProps) {
       <span className="notify-icon" aria-hidden="true">
         <Icon size={16} weight="fill" />
       </span>
-      <span className="notify-text">{text}</span>
+      <span className="notify-text">
+        {detail ? <span className="notify-title">{text}</span> : text}
+        {detail && <span className="notify-detail">{detail}</span>}
+      </span>
       {action && (
         <Button
           variant="ghost"
@@ -195,7 +241,10 @@ function NotifyBody({ id, text, tone, action, keeps }: NotifyBodyProps) {
           size="sm"
           className="notify-close"
           icon={<X size={14} weight="bold" />}
-          onClick={() => go(id)}
+          onClick={() => {
+            onClose?.();
+            go(id);
+          }}
         />
       )}
     </div>
