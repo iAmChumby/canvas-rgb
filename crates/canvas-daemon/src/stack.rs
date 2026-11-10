@@ -23,7 +23,7 @@ use canvas_proto::device::DeviceId;
 use canvas_proto::layout::{Layout, PlacedZone, SamplingMode, CANVAS_HEIGHT, CANVAS_WIDTH};
 use canvas_proto::props::{InputNeeds, Props, PropertyDef, PropertySchema};
 use canvas_proto::stack::{
-    BlendMode, LayerArea, Stack, STACK_ID_PREFIX, STACK_MAX_LAYERS,
+    BlendMode, LayerArea, LayerMask, MaskSource, Stack, STACK_ID_PREFIX, STACK_MAX_LAYERS,
 };
 use canvas_proto::traits::{Canvas, Effect, Inputs};
 use std::collections::BTreeMap;
@@ -55,7 +55,44 @@ pub fn write_recovering<T>(lock: &RwLock<T>) -> std::sync::RwLockWriteGuard<'_, 
     lock.write().unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// The message a panic payload carries, for a log line and for the status a faulted mask
+/// reports (#256).
+fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+    if let Some(text) = payload.downcast_ref::<&str>() {
+        (*text).to_string()
+    } else if let Some(text) = payload.downcast_ref::<String>() {
+        text.clone()
+    } else {
+        "panicked".to_string()
+    }
+}
+
 // ---------------------------------------------------------------- the live map
+
+/// A layer's mask as the compositor reads it every frame (#256): which channel is read, whether
+/// it is flipped, how strongly it applies, and the values the mask effect runs with.
+///
+/// The values are live, not structural: a slider drag on Amount, or a mask property, re-initialises
+/// the mask effect and rebuilds nothing.
+#[derive(Debug, Clone, PartialEq)]
+pub struct LiveMask {
+    pub source: MaskSource,
+    pub invert: bool,
+    pub amount: u8,
+    pub props: Props,
+}
+
+impl LiveMask {
+    /// The values a file's mask asks for.
+    pub fn from_mask(mask: &LayerMask) -> Self {
+        Self {
+            source: mask.source,
+            invert: mask.invert,
+            amount: mask.amount.min(100),
+            props: mask.props.clone(),
+        }
+    }
+}
 
 /// A layer's live settings, as the compositor reads them every frame.
 #[derive(Debug, Clone, PartialEq)]
@@ -64,6 +101,8 @@ pub struct LiveLayer {
     pub opacity: u8,
     pub visible: bool,
     pub area: LayerArea,
+    /// The layer's mask, or `None` when it draws whole.
+    pub mask: Option<LiveMask>,
 }
 
 impl LiveLayer {
@@ -74,6 +113,7 @@ impl LiveLayer {
             opacity: layer.opacity.min(100),
             visible: layer.visible,
             area: layer.area.clone(),
+            mask: layer.mask.as_ref().map(LiveMask::from_mask),
         }
     }
 }
@@ -556,30 +596,38 @@ fn tile_seed(props: &Props) -> Option<canvas_proto::PropValue> {
 // ---------------------------------------------------------------- structure identity
 
 /// A stack's structure: the layer ids, their order, their effect ids and each HTML layer's
-/// source, and nothing else (D95.4.6). Props, blend, opacity, visibility and area are values.
+/// source, and each mask's effect and HTML source (#256), and nothing else (D95.4.6). Props,
+/// blend, opacity, visibility, area and the mask's own values are values.
 pub fn structure(
     stack: &Stack,
     source_of: &dyn Fn(&str) -> Option<String>,
-) -> Vec<(String, String, String)> {
+) -> Vec<(String, String, String, String)> {
+    let hash_of = |effect: &str| {
+        if effect.starts_with(crate::user_effects::USER_EFFECT_PREFIX) {
+            source_of(effect)
+                .map(|source| crate::user_effects::source_hash(&source))
+                .unwrap_or_default()
+        } else {
+            String::new()
+        }
+    };
     stack
         .layers
         .iter()
         .map(|layer| {
-            let source_hash = if layer.effect.starts_with(crate::user_effects::USER_EFFECT_PREFIX) {
-                source_of(&layer.effect)
-                    .map(|source| crate::user_effects::source_hash(&source))
-                    .unwrap_or_default()
-            } else {
-                String::new()
-            };
-            (layer.id.clone(), layer.effect.clone(), source_hash)
+            let mask = layer
+                .mask
+                .as_ref()
+                .map(|mask| format!("{}|{}", mask.effect, hash_of(&mask.effect)))
+                .unwrap_or_default();
+            (layer.id.clone(), layer.effect.clone(), hash_of(&layer.effect), mask)
         })
         .collect()
 }
 
 /// The hash of a structure. FNV-1a over the canonical JSON, through the hash this repository
 /// already uses for an effect's source: it is internal, never written to a file and never shown.
-pub fn structure_hash(parts: &[(String, String, String)]) -> String {
+pub fn structure_hash(parts: &[(String, String, String, String)]) -> String {
     let text = serde_json::to_string(parts).unwrap_or_default();
     crate::user_effects::source_hash(&text)
 }
@@ -597,6 +645,26 @@ pub fn html_budget(fps: u32) -> Duration {
 
 /// How long each consecutive hold lasts: 250 ms, 500 ms, 1 s, then the layer is faulted.
 const HOLD_STEPS_MS: [u64; 3] = [250, 500, 1000];
+
+/// The hold an HTML effect's measured update leaves it in: a trial frame that fits resets the
+/// escalation; one that overruns takes the next step, and a fourth overrun faults it. The second
+/// value is the measured time to report with a hold, in milliseconds.
+fn overrun_hold(before: Hold, elapsed: Duration, budget: Duration, now: Instant) -> (Hold, Option<f32>) {
+    if elapsed <= budget {
+        return (Hold::Running, None);
+    }
+    let level = match before {
+        Hold::Held { level, .. } => level.saturating_add(1),
+        _ => 1,
+    };
+    let ms = Some(elapsed.as_secs_f32() * 1000.0);
+    if level as usize > HOLD_STEPS_MS.len() {
+        (Hold::Faulted, ms)
+    } else {
+        let hold = Duration::from_millis(HOLD_STEPS_MS[level as usize - 1]);
+        (Hold::Held { until: now + hold, level }, ms)
+    }
+}
 
 /// What a layer's slow updates have done to it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -626,6 +694,61 @@ struct Layer {
     last_ms: Option<f32>,
     /// True when a panic was already logged for this layer: a faulted layer logs once.
     panic_logged: bool,
+    /// The layer's mask, built and run beside it (#256), or `None` when it draws whole.
+    mask: Option<MaskLayer>,
+    /// Why the layer's mask is not applied: its effect did not build. The layer draws unmasked.
+    mask_error: Option<String>,
+}
+
+/// One built mask: another effect, run every frame over the layer's own area, whose picture
+/// decides how much of the layer shows (#256).
+struct MaskLayer {
+    /// The effect id, as the file names it.
+    effect: String,
+    built: Box<dyn Effect>,
+    /// The mask's picture, at the frame's render size (the layer canvas's size).
+    canvas: Canvas,
+    /// The values the file asks for, for a live map that does not know the layer.
+    values: LiveMask,
+    /// The values the effect was last initialised with, so a live change re-initialises it once.
+    applied: LiveMask,
+    hold: Hold,
+    last_ms: Option<f32>,
+    panic_logged: bool,
+    /// Why the mask is not applied any more: its effect panicked. The layer draws unmasked.
+    fault: Option<String>,
+}
+
+impl MaskLayer {
+    /// True while the mask shapes the layer: it built, it has not faulted, and its values apply.
+    fn applies(&self) -> bool {
+        self.fault.is_none()
+    }
+}
+
+/// The coverage one mask pixel gives, 0 (hidden) to 1 (whole), before invert and amount.
+///
+/// Luma is Rec. 709 on the picture's 8-bit-ish channels (`0.2126 R + 0.7152 G + 0.0722 B`); it is
+/// linear-enough for a light mask and needs no colour-space conversion. The compositor's canvases
+/// are RGB with no alpha channel, so Alpha reads the picture's strongest channel: a pixel the mask
+/// effect left black is transparent, and any colour it drew is opaque at its strongest channel's
+/// strength.
+pub fn mask_coverage(source: MaskSource, pixel: [f32; 3]) -> f32 {
+    let channel = |v: f32| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
+    let [r, g, b] = pixel.map(channel);
+    match source {
+        MaskSource::Luma => 0.2126 * r + 0.7152 * g + 0.0722 * b,
+        MaskSource::Alpha => r.max(g).max(b),
+    }
+}
+
+/// The coverage a mask's pixel applies to the layer, after its invert and amount: `amount` blends
+/// between 1 (the layer draws whole) and the pixel's own coverage.
+pub fn masked_coverage(source: MaskSource, pixel: [f32; 3], invert: bool, amount: u8) -> f32 {
+    let raw = mask_coverage(source, pixel);
+    let raw = if invert { 1.0 - raw } else { raw };
+    let amount = f32::from(amount.min(100)) / 100.0;
+    1.0 - (1.0 - raw) * amount
 }
 
 /// The compositor: one effect built from a stack's layers.
@@ -688,6 +811,52 @@ impl StackEffect {
                         }
                     }
                 };
+                let (mask, mask_error) = match &layer.mask {
+                    None => (None, None),
+                    Some(spec) => {
+                        let values = LiveMask::from_mask(spec);
+                        if spec.effect.starts_with(STACK_ID_PREFIX) {
+                            let reason = format!(
+                                "{} is a stack, and a stack cannot contain a stack",
+                                spec.effect
+                            );
+                            tracing::warn!(
+                                stack = %stack.id,
+                                layer = %layer.id,
+                                mask = %spec.effect,
+                                "a layer's mask names a stack; the layer draws unmasked"
+                            );
+                            (None, Some(reason))
+                        } else {
+                            match leaf(&spec.effect) {
+                                Ok(effect) => (
+                                    Some(MaskLayer {
+                                        effect: spec.effect.clone(),
+                                        built: effect,
+                                        canvas: Canvas::new(1, 1),
+                                        applied: values.clone(),
+                                        values,
+                                        hold: Hold::Running,
+                                        last_ms: None,
+                                        panic_logged: false,
+                                        fault: None,
+                                    }),
+                                    None,
+                                ),
+                                Err(error) => {
+                                    tracing::warn!(
+                                        stack = %stack.id,
+                                        layer = %layer.id,
+                                        mask = %spec.effect,
+                                        %error,
+                                        "a layer's mask did not build; the layer draws unmasked"
+                                    );
+                                    (None, Some(error))
+                                }
+                            }
+                        }
+                    }
+                };
                 Layer {
                     id: layer.id.clone(),
                     name: layer.name.clone(),
@@ -698,6 +867,8 @@ impl StackEffect {
                     hold: Hold::Running,
                     last_ms: None,
                     panic_logged: false,
+                    mask,
+                    mask_error,
                 }
             })
             .collect();
@@ -762,6 +933,12 @@ impl StackEffect {
             layer.hold = Hold::Running;
             layer.last_ms = None;
             layer.panic_logged = false;
+            if let Some(mask) = &mut layer.mask {
+                mask.hold = Hold::Running;
+                mask.last_ms = None;
+                mask.panic_logged = false;
+                mask.fault = None;
+            }
         }
     }
 
@@ -785,6 +962,11 @@ impl StackEffect {
             if layer.canvas.width != width || layer.canvas.height != height {
                 layer.canvas = Canvas::new(width, height);
             }
+            if let Some(mask) = &mut layer.mask {
+                if mask.canvas.width != width || mask.canvas.height != height {
+                    mask.canvas = Canvas::new(width, height);
+                }
+            }
         }
     }
 
@@ -792,6 +974,9 @@ impl StackEffect {
     fn blacken_canvases(&mut self) {
         for layer in &mut self.layers {
             layer.canvas.fill([0.0, 0.0, 0.0]);
+            if let Some(mask) = &mut layer.mask {
+                mask.canvas.fill([0.0, 0.0, 0.0]);
+            }
         }
     }
 
@@ -814,6 +999,7 @@ impl StackEffect {
         let live = read_recovering(&self.live);
         let areas = read_recovering(&self.areas);
         let mut resolved = Vec::with_capacity(self.layers.len());
+        let mut masks: Vec<Option<LiveMask>> = Vec::with_capacity(self.layers.len());
         for layer in &self.layers {
             let values = live
                 .layers
@@ -821,11 +1007,48 @@ impl StackEffect {
                 .cloned()
                 .unwrap_or_else(|| layer.values.clone());
             let area = areas.resolve(&values.area).map(OwnedArea::from_resolved);
+            masks.push(values.mask.clone());
             resolved.push(ResolvedLayer { values, area });
         }
         drop(live);
         drop(areas);
         self.resolved = resolved;
+        // A mask's own values are live too (#256): a slider drag or a mask property change
+        // re-initialises the mask effect and rebuilds nothing. The lock is dropped first.
+        for (index, mask) in masks.into_iter().enumerate() {
+            if let Some(mask) = mask {
+                self.apply_live_mask(index, mask);
+            }
+        }
+    }
+
+    /// Gives one layer's mask effect the live values it does not already hold. A panic in the
+    /// mask's `init` faults the mask, and the layer draws unmasked.
+    fn apply_live_mask(&mut self, index: usize, values: LiveMask) {
+        let Some(layer) = self.layers.get_mut(index) else { return };
+        let Some(mask) = layer.mask.as_mut() else { return };
+        if mask.applied == values {
+            return;
+        }
+        mask.values = values.clone();
+        if mask.applied.props != values.props && mask.fault.is_none() {
+            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                mask.built.init(&values.props);
+            }));
+            if let Err(payload) = outcome {
+                let reason = panic_text(&payload);
+                mask.fault = Some(reason.clone());
+                mask.canvas.fill([0.0, 0.0, 0.0]);
+                tracing::error!(
+                    stack = %self.stack_id,
+                    layer = %layer.id,
+                    mask = %mask.effect,
+                    reason = %reason,
+                    "a layer's mask panicked while it started; the layer draws unmasked"
+                );
+            }
+        }
+        mask.applied = values;
     }
 
     /// Runs one layer's `update` when its hold lets it. `None` when it did not run.
@@ -858,6 +1081,45 @@ impl StackEffect {
                         layer = %layer.id,
                         effect = %layer.effect,
                         "a layer's effect panicked; it is faulted, its picture is black and the rest of the stack runs"
+                    );
+                }
+                None
+            }
+        }
+    }
+
+    /// Runs one layer's mask `update` when its hold lets it. `None` when it did not run.
+    fn run_mask(&mut self, index: usize, dt: f32, inputs: &Inputs) -> Option<Duration> {
+        let started = (self.clock)();
+        let layer = &mut self.layers[index];
+        let mask = layer.mask.as_mut()?;
+        // A panic in a mask is a bug, not a dead render thread: the mask faults, the layer draws
+        // unmasked, and the rest of the stack runs (#256, the #99 handling).
+        let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            mask.built.update(dt, &mut mask.canvas, inputs);
+        }));
+        let elapsed = (self.clock)().saturating_duration_since(started);
+        match outcome {
+            Ok(()) => Some(elapsed),
+            Err(payload) => {
+                // A tile's HTML mask unwinds with a `TileFailure` by design, and the tile
+                // render catches it to refuse the tile; that one belongs to the caller.
+                if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                    std::panic::resume_unwind(payload);
+                }
+                let reason = panic_text(&payload);
+                let first = !mask.panic_logged;
+                mask.panic_logged = true;
+                mask.fault = Some(reason.clone());
+                // A half-written mask must not shape anything: the layer draws unmasked.
+                mask.canvas.fill([0.0, 0.0, 0.0]);
+                if first {
+                    tracing::error!(
+                        stack = %self.stack_id,
+                        layer = %layer.id,
+                        mask = %mask.effect,
+                        reason = %reason,
+                        "a layer's mask panicked; the layer draws unmasked and the rest of the stack runs"
                     );
                 }
                 None
@@ -905,10 +1167,15 @@ impl StackEffect {
         if src.width == 0 || src.height == 0 || x1 <= x0 || y1 <= y0 {
             return;
         }
+        // A mask that applies shapes this layer only (#256): its picture is mapped over the same
+        // box as the layer's, and its coverage multiplies the layer's alpha per pixel.
+        let mask = layer.mask.as_ref().filter(|mask| mask.applies()).filter(|mask| {
+            mask.canvas.width == src.width && mask.canvas.height == src.height
+        });
         for y in y0..y1 {
             for x in x0..x1 {
-                if let Some(mask) = &area.mask {
-                    if !mask.contains(x, y) {
+                if let Some(area_mask) = &area.mask {
+                    if !area_mask.contains(x, y) {
                         continue;
                     }
                 }
@@ -918,27 +1185,73 @@ impl StackEffect {
                 let sx = (sx.max(0.0) as u32).min(src.width - 1);
                 let sy = (sy.max(0.0) as u32).min(src.height - 1);
                 let source = src.get(sx, sy);
+                let alpha = match mask {
+                    Some(mask) => {
+                        let pixel = mask.canvas.get(sx, sy);
+                        a * masked_coverage(
+                            mask.values.source,
+                            pixel,
+                            mask.values.invert,
+                            mask.values.amount,
+                        )
+                    }
+                    None => a,
+                };
+                if alpha <= 0.0 {
+                    continue;
+                }
                 let i = (y as usize) * (target.width as usize) + x as usize;
-                target.pixels[i] = blend_pixel(values.blend, target.pixels[i], source, a);
+                target.pixels[i] = blend_pixel(values.blend, target.pixels[i], source, alpha);
             }
         }
     }
 
-    /// Writes the held and faulted layers to the status sink.
+    /// Writes the held and faulted layers to the status sink. A mask that is missing, held or
+    /// faulted is reported on its layer, because a mask has no id of its own (#256).
     fn report_statuses(&self) {
         let Some(sink) = &self.statuses else { return };
         let mut out = Vec::new();
         for layer in &self.layers {
-            let state = state_of(layer.hold);
-            if matches!(state, StackLayerState::Held | StackLayerState::Faulted) {
+            let (mut state, mut last_ms) = (state_of(layer.hold), layer.last_ms);
+            if state == StackLayerState::Ok {
+                if layer.mask_error.is_some() {
+                    state = StackLayerState::MissingEffect;
+                } else if let Some(mask) = &layer.mask {
+                    if mask.fault.is_some() {
+                        state = StackLayerState::Faulted;
+                    } else {
+                        let mask_state = state_of(mask.hold);
+                        if mask_state != StackLayerState::Ok {
+                            state = mask_state;
+                            last_ms = mask.last_ms;
+                        }
+                    }
+                }
+            }
+            if matches!(
+                state,
+                StackLayerState::Held | StackLayerState::Faulted | StackLayerState::MissingEffect
+            ) {
                 out.push(StackLayerStatus {
                     id: layer.id.clone(),
                     status: state,
-                    last_ms: layer.last_ms,
+                    last_ms,
                 });
             }
         }
         *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = out;
+    }
+
+    /// The status of a layer's mask, for a test: its state and why it is not applied.
+    pub fn mask_status(&self, id: &str) -> Option<(StackLayerState, Option<String>)> {
+        let layer = self.layers.iter().find(|layer| layer.id == id)?;
+        if let Some(error) = &layer.mask_error {
+            return Some((StackLayerState::MissingEffect, Some(error.clone())));
+        }
+        layer.mask.as_ref().map(|mask| {
+            let state = if mask.fault.is_some() { StackLayerState::Faulted } else { state_of(mask.hold) };
+            (state, mask.fault.clone())
+        })
     }
 }
 
@@ -1082,6 +1395,30 @@ impl StackEffect {
                     "a layer's effect panicked while it started; it is faulted, its picture is black and the rest of the stack runs"
                 );
             }
+            // The mask starts after its layer (#256). A panic in the mask's start faults the
+            // mask, not the layer: the layer draws unmasked and the rest of the stack runs.
+            if let Some(mask) = layer.mask.as_mut() {
+                let mask_props = mask.values.props.clone();
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    mask.built.init(&mask_props);
+                }));
+                if let Err(payload) = outcome {
+                    if payload.downcast_ref::<crate::thumbnail::TileFailure>().is_some() {
+                        std::panic::resume_unwind(payload);
+                    }
+                    let reason = panic_text(&payload);
+                    mask.panic_logged = true;
+                    mask.fault = Some(reason.clone());
+                    mask.canvas.fill([0.0, 0.0, 0.0]);
+                    tracing::error!(
+                        stack = %self.stack_id,
+                        layer = %layer.id,
+                        mask = %mask.effect,
+                        reason = %reason,
+                        "a layer's mask panicked while it started; the layer draws unmasked"
+                    );
+                }
+            }
         }
         self.resolve_areas();
         self.report_statuses();
@@ -1134,33 +1471,23 @@ impl StackEffect {
                 }
             }
             if ran && is_html {
-                if elapsed <= budget {
-                    // A trial frame that fits resets the escalation.
-                    self.layers[index].hold = Hold::Running;
-                    self.layers[index].last_ms = None;
-                } else {
-                    let level = match before {
-                        Hold::Held { level, .. } => level.saturating_add(1),
-                        _ => 1,
-                    };
-                    self.layers[index].last_ms = Some(elapsed.as_secs_f32() * 1000.0);
-                    if level as usize > HOLD_STEPS_MS.len() {
-                        self.layers[index].hold = Hold::Faulted;
+                let (hold, last_ms) = overrun_hold(before, elapsed, budget, now);
+                self.layers[index].hold = hold;
+                self.layers[index].last_ms = last_ms;
+                if let Some(ms) = last_ms {
+                    if matches!(hold, Hold::Faulted) {
                         tracing::warn!(
                             stack = %self.stack_id,
                             layer = %self.layers[index].id,
                             effect = %self.layers[index].effect,
-                            ms = self.layers[index].last_ms,
+                            ms,
                             "a layer is too slow: it is faulted and keeps its last picture"
                         );
                     } else {
-                        let hold = Duration::from_millis(HOLD_STEPS_MS[level as usize - 1]);
-                        self.layers[index].hold = Hold::Held { until: now + hold, level };
                         tracing::debug!(
                             stack = %self.stack_id,
                             layer = %self.layers[index].id,
-                            ms = self.layers[index].last_ms,
-                            hold_ms = hold.as_millis() as u64,
+                            ms,
                             "a layer overran its budget and is held"
                         );
                     }
@@ -1168,6 +1495,69 @@ impl StackEffect {
             }
             if state_of(self.layers[index].hold) != state_of(before) {
                 changed = true;
+            }
+            // The layer's mask runs with it (#256): one more effect update per frame. A held
+            // layer holds its mask too, and a faulted mask leaves the layer unmasked.
+            if ran {
+                let mask_state_before = self.layers[index].mask.as_ref().map(|mask| {
+                    if mask.fault.is_some() {
+                        StackLayerState::Faulted
+                    } else {
+                        state_of(mask.hold)
+                    }
+                });
+                if let Some(mask_before) = self.layers[index].mask.as_ref().map(|mask| mask.hold) {
+                    let mut mask_ran = false;
+                    let mut mask_elapsed = Duration::ZERO;
+                    match mask_before {
+                        Hold::Faulted => {}
+                        Hold::Held { until, .. } if now < until => {}
+                        _ => {
+                            if let Some(took) = self.run_mask(index, dt, inputs) {
+                                mask_ran = true;
+                                mask_elapsed = took;
+                            }
+                        }
+                    }
+                    let mask_is_html = self.layers[index]
+                        .mask
+                        .as_ref()
+                        .is_some_and(|mask| mask.effect.starts_with(crate::user_effects::USER_EFFECT_PREFIX));
+                    if mask_ran && mask_is_html {
+                        let (hold, last_ms) = overrun_hold(mask_before, mask_elapsed, budget, now);
+                        if let Some(mask) = self.layers[index].mask.as_mut() {
+                            mask.hold = hold;
+                            mask.last_ms = last_ms;
+                        }
+                        if let Some(ms) = last_ms {
+                            if matches!(hold, Hold::Faulted) {
+                                tracing::warn!(
+                                    stack = %self.stack_id,
+                                    layer = %self.layers[index].id,
+                                    ms,
+                                    "a layer's mask is too slow: it is faulted and the layer draws unmasked"
+                                );
+                            } else {
+                                tracing::debug!(
+                                    stack = %self.stack_id,
+                                    layer = %self.layers[index].id,
+                                    ms,
+                                    "a layer's mask overran its budget and is held"
+                                );
+                            }
+                        }
+                    }
+                    let mask_state_after = self.layers[index].mask.as_ref().map(|mask| {
+                        if mask.fault.is_some() {
+                            StackLayerState::Faulted
+                        } else {
+                            state_of(mask.hold)
+                        }
+                    });
+                    if mask_state_after != mask_state_before {
+                        changed = true;
+                    }
+                }
             }
             // A held layer keeps its last good canvas and is composited as usual; a layer that
             // panicked had its canvas blacked as it faulted, so it adds nothing to the frame.

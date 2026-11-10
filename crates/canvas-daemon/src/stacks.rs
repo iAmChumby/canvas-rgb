@@ -177,6 +177,14 @@ fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
             layer.id, layer.opacity
         ));
     }
+    if let Some(mask) = &layer.mask {
+        if mask.amount > 100 {
+            return Err(format!(
+                "layer {}: the mask's amount must be 0..=100, and it is {}",
+                layer.id, mask.amount
+            ));
+        }
+    }
     if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
         let finite = x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
         if !finite {
@@ -234,6 +242,34 @@ fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
     Ok(())
 }
 
+/// A layer's mask has to be an effect the daemon can run (#256): never a stack, and never an id
+/// that resolves to nothing. An HTML mask is allowed and counts toward the HTML cap.
+fn check_mask(layer: &StackLayer, known: &KnownEffects) -> Result<(), String> {
+    let Some(mask) = &layer.mask else { return Ok(()) };
+    if mask.effect.starts_with(STACK_ID_PREFIX) {
+        return Err(format!(
+            "layer {}: the mask effect {} is a stack, and a stack cannot contain a stack",
+            layer.id, mask.effect
+        ));
+    }
+    if layer_effect_id(known, &mask.effect).is_none() {
+        return Err(format!(
+            "layer {}: the mask effect {:?} is not an effect",
+            layer.id, mask.effect
+        ));
+    }
+    Ok(())
+}
+
+/// True for a layer or its mask when it is an HTML effect: the capped, slow kind.
+pub fn layer_counts_as_html(layer: &StackLayer) -> bool {
+    is_html_effect(&layer.effect)
+        || layer
+            .mask
+            .as_ref()
+            .is_some_and(|mask| is_html_effect(&mask.effect))
+}
+
 /// Checks one stack before it is saved (the D95.1.1 table).
 ///
 /// `known` is what `find_schema` can resolve and `others` the stacks that are not this one:
@@ -253,7 +289,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
             stack.layers.len()
         ));
     }
-    let html = stack.layers.iter().filter(|l| is_html_effect(&l.effect)).count();
+    let html = stack.layers.iter().filter(|l| layer_counts_as_html(l)).count();
     if html > STACK_HTML_MAX {
         return Err(format!(
             "a stack holds at most {STACK_HTML_MAX} HTML layers, and this one has {html}"
@@ -262,6 +298,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
     let mut seen = Vec::new();
     for (index, layer) in stack.layers.iter().enumerate() {
         check_layer_structure(layer, &mut seen)?;
+        check_mask(layer, known)?;
         check_layer_values(layer, index)?;
     }
     Ok(())
@@ -304,6 +341,11 @@ pub fn canonicalise_and_validate(
         if let Some(id) = layer_effect_id(known, &layer.effect) {
             layer.effect = id.to_string();
         }
+        if let Some(mask) = &mut layer.mask {
+            if let Some(id) = layer_effect_id(known, &mask.effect) {
+                mask.effect = id.to_string();
+            }
+        }
     }
     let name = stack.name().to_string();
     let others: Vec<Stack> = stacks
@@ -345,6 +387,39 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
         let mut layer = layer.clone();
         if let Some(id) = layer_effect_id(known, &layer.effect) {
             layer.effect = id.to_string();
+        }
+        // A mask's effect is canonicalised like a layer's, and one that does not resolve is
+        // dropped with its reason: the layer runs unmasked (#256).
+        if let Some(mask) = layer.mask.take() {
+            let resolved = layer_effect_id(known, &mask.effect);
+            if mask.effect.starts_with(STACK_ID_PREFIX) || resolved.is_none() {
+                tracing::warn!(
+                    stack = %stack.id,
+                    layer = %layer.id,
+                    mask = %mask.effect,
+                    "a layer's mask does not resolve to an effect; the layer draws unmasked"
+                );
+            } else {
+                let mut mask = mask;
+                if let Some(id) = resolved {
+                    mask.effect = id.to_string();
+                }
+                // An HTML mask counts toward the cap like an HTML layer.
+                if is_html_effect(&mask.effect) && html >= STACK_HTML_MAX {
+                    tracing::warn!(
+                        stack = %stack.id,
+                        layer = %layer.id,
+                        mask = %mask.effect,
+                        "the stack has more HTML layers than a stack may hold; a layer's mask is dropped and the layer draws unmasked"
+                    );
+                } else {
+                    if is_html_effect(&mask.effect) {
+                        html += 1;
+                    }
+                    mask.amount = mask.amount.min(100);
+                    layer.mask = Some(mask);
+                }
+            }
         }
         // A layer counts toward the HTML cap once it is a layer the stack can run.
         if is_html_effect(&layer.effect) {

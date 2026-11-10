@@ -1980,6 +1980,41 @@ fn frame_cost_by_layer_count_and_scale() {
         }
     }
 
+    // Eight layers, every one of them masked (#256): the cost of the masks is the cost of eight
+    // more effect updates, so it is measured beside the unmasked eight.
+    for (label, masked) in [("unmasked", false), ("masked", true)] {
+        let lay = desk_layout(RenderScale::P100, SamplingMode::AreaAverage);
+        let built: Vec<StackLayer> = (1..=8)
+            .map(|i| {
+                let mut layer = layer(&format!("l{i}"), "aurora");
+                if masked {
+                    let mut mask = a_mask("fire");
+                    mask.amount = 80;
+                    layer.mask = Some(mask);
+                }
+                layer
+            })
+            .collect();
+        let stack = stack("stack:CostMask", built);
+        let leaves: LeafBuilder = Arc::new(|id: &str| {
+            canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))
+        });
+        let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+            .with_clock(ManualClock::new().clock());
+        effect.init(&Props::new());
+        let mut canvas = Canvas::with_scale(1.0);
+        let inputs = Inputs::default();
+        for _ in 0..30 {
+            effect.update(1.0 / 30.0, &mut canvas, &inputs);
+        }
+        let started = Instant::now();
+        for _ in 0..60 {
+            effect.update(1.0 / 30.0, &mut canvas, &inputs);
+        }
+        let each = started.elapsed().as_secs_f64() * 1000.0 / 60.0;
+        println!("8 layers, all {label} at 100 %: {each:.3} ms/frame");
+    }
+
     // The HTML layers, which are the slow kind: one layer each, at 100 % and at 50 %.
     let user = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
         canvas_daemon::user_effects::html_builder(),
@@ -3250,7 +3285,436 @@ async fn a_preview_and_a_draft_require_a_sixteen_hex_epoch() {
     );
 }
 
-// ================================================================ round 3 (job 75)
+// ================================================================ masks (#256)
+
+/// A flat-colour fake effect for a layer or a mask: it fills its canvas, counts its updates, and
+/// panics on every update when `panics` is set.
+struct ColourEffect {
+    colour: [f32; 3],
+    updates: Arc<AtomicU64>,
+    panics: bool,
+}
+
+impl Effect for ColourEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "colour".into(),
+            name: "Colour".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        self.updates.fetch_add(1, Ordering::SeqCst);
+        if self.panics {
+            panic!("a mask's effect panicked");
+        }
+        canvas.fill(self.colour);
+    }
+}
+
+/// A fake mask that paints its left half white and its right half black: a picture whose coverage
+/// differs across the layer's area.
+struct SplitMask;
+
+impl Effect for SplitMask {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "split".into(),
+            name: "Split".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                canvas.set(x, y, if x < canvas.width / 2 { [1.0; 3] } else { [0.0; 3] });
+            }
+        }
+    }
+}
+
+/// A leaf builder that gives each id its own fake: a flat colour, a split mask, or a panicking
+/// mask. Every build is counted in `updates`.
+fn mask_leaves(updates: Arc<AtomicU64>, panic_mask: bool) -> LeafBuilder {
+    Arc::new(move |id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "mask-black" => Box::new(ColourEffect { colour: [0.0; 3], updates: Arc::clone(&updates), panics: false }),
+            "mask-white" => Box::new(ColourEffect { colour: [1.0; 3], updates: Arc::clone(&updates), panics: false }),
+            "mask-red" => Box::new(ColourEffect { colour: [1.0, 0.0, 0.0], updates: Arc::clone(&updates), panics: false }),
+            "mask-panics" => Box::new(ColourEffect { colour: [0.0; 3], updates: Arc::clone(&updates), panics: panic_mask }),
+            "mask-split" => Box::new(SplitMask),
+            _ => Box::new(ColourEffect { colour: [1.0, 0.0, 0.0], updates: Arc::clone(&updates), panics: false }),
+        };
+        Ok(effect)
+    })
+}
+
+/// A mask with the default source and amount, over the given effect.
+fn a_mask(effect: &str) -> canvas_proto::stack::LayerMask {
+    canvas_proto::stack::LayerMask {
+        effect: effect.into(),
+        props: Props::new(),
+        source: canvas_proto::stack::MaskSource::Luma,
+        invert: false,
+        amount: 100,
+    }
+}
+
+fn masked_layer(id: &str, effect: &str, mask: canvas_proto::stack::LayerMask) -> StackLayer {
+    let mut layer = layer(id, effect);
+    layer.mask = Some(mask);
+    layer
+}
+
+/// One frame of a stack with one red layer and the given mask, over a 320 × 200 whole-canvas area.
+fn masked_frame(mask: canvas_proto::stack::LayerMask, panic_mask: bool) -> (Canvas, StackEffect) {
+    let stack = stack("stack:Masked", vec![masked_layer("l1", "layer", mask)]);
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(
+        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
+        RenderScale::P100,
+        SamplingMode::Nearest,
+    );
+    let updates = Arc::new(AtomicU64::new(0));
+    let mut effect = StackEffect::new(
+        &stack,
+        mask_leaves(updates, panic_mask),
+        live_for(&stack),
+        areas_for(&lay, &devices),
+    )
+    .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    (canvas, effect)
+}
+
+#[test]
+fn a_black_mask_paints_nothing_and_a_white_mask_paints_the_layer_unchanged() {
+    let (white, _) = masked_frame(a_mask("mask-white"), false);
+    assert_eq!(white.get(5, 5), [1.0, 0.0, 0.0], "a white mask shows the layer whole");
+    assert_eq!(white.get(319, 199), [1.0, 0.0, 0.0], "over the whole picture");
+
+    let (black, _) = masked_frame(a_mask("mask-black"), false);
+    assert_eq!(black.get(5, 5), [0.0, 0.0, 0.0], "a black mask hides the layer");
+    assert_eq!(black.get(319, 199), [0.0, 0.0, 0.0]);
+}
+
+#[test]
+fn inverting_a_mask_swaps_what_it_shows() {
+    let mut inverted_black = a_mask("mask-black");
+    inverted_black.invert = true;
+    let (canvas, _) = masked_frame(inverted_black, false);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "an inverted black mask shows the layer");
+
+    let mut inverted_white = a_mask("mask-white");
+    inverted_white.invert = true;
+    let (canvas, _) = masked_frame(inverted_white, false);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "an inverted white mask hides it");
+}
+
+#[test]
+fn the_amount_blends_between_no_mask_and_the_masks_coverage() {
+    let mut none = a_mask("mask-black");
+    none.amount = 0;
+    let (canvas, _) = masked_frame(none, false);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "amount 0 leaves the layer whole");
+
+    let mut half = a_mask("mask-black");
+    half.amount = 50;
+    let (canvas, _) = masked_frame(half, false);
+    let pixel = canvas.get(5, 5);
+    assert!(
+        (pixel[0] - 0.5).abs() < 1e-6 && pixel[1] == 0.0,
+        "amount 50 is halfway between hidden and whole: {pixel:?}"
+    );
+}
+
+#[test]
+fn the_brightness_and_alpha_sources_read_different_channels() {
+    // A saturated red mask: its luma is 0.2126, while its strongest channel (the picture's
+    // alpha stand-in, since the compositor's canvases carry no alpha) is 1.
+    let (luma, _) = masked_frame(a_mask("mask-red"), false);
+    let pixel = luma.get(5, 5);
+    assert!(
+        (pixel[0] - 0.2126).abs() < 1e-5,
+        "a red luma mask shows 21 % of the layer: {pixel:?}"
+    );
+
+    let mut alpha = a_mask("mask-red");
+    alpha.source = canvas_proto::stack::MaskSource::Alpha;
+    let (canvas, _) = masked_frame(alpha, false);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "alpha reads the strongest channel");
+}
+
+#[test]
+fn a_mask_is_mapped_over_the_layers_own_area() {
+    // The layer is a 40 × 20 rectangle at the origin; the mask is white on its left half.
+    let stack = stack(
+        "stack:MaskedArea",
+        vec![with_area(
+            masked_layer("l1", "layer", a_mask("mask-split")),
+            LayerArea::Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 },
+        )],
+    );
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(
+        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
+        RenderScale::P100,
+        SamplingMode::Nearest,
+    );
+    let mut effect = StackEffect::new(
+        &stack,
+        mask_leaves(Arc::new(AtomicU64::new(0)), false),
+        live_for(&stack),
+        areas_for(&lay, &devices),
+    )
+    .with_clock(ManualClock::new().clock());
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the left half of the rectangle shows");
+    assert_eq!(canvas.get(35, 5), [0.0, 0.0, 0.0], "the right half is masked out");
+    assert_eq!(canvas.get(45, 5), [0.0, 0.0, 0.0], "and nothing outside the area paints");
+}
+
+#[test]
+fn a_panicking_mask_leaves_the_layer_unmasked_and_says_why() {
+    let stack = stack(
+        "stack:PanicMask",
+        vec![masked_layer("l1", "layer", a_mask("mask-panics"))],
+    );
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(
+        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
+        RenderScale::P100,
+        SamplingMode::Nearest,
+    );
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let mut effect = StackEffect::new(
+        &stack,
+        mask_leaves(Arc::new(AtomicU64::new(0)), true),
+        live_for(&stack),
+        areas_for(&lay, &devices),
+    )
+    .with_clock(ManualClock::new().clock())
+    .with_status_sink(Arc::clone(&statuses));
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+
+    assert_eq!(
+        canvas.get(5, 5),
+        [1.0, 0.0, 0.0],
+        "the mask panicked, so the layer draws unmasked rather than going black"
+    );
+    let (state, reason) = effect.mask_status("l1").expect("the layer has a mask");
+    assert_eq!(state, StackLayerState::Faulted);
+    assert!(
+        reason.as_deref().is_some_and(|reason| reason.contains("panicked")),
+        "the mask's reason is kept: {reason:?}"
+    );
+    assert_eq!(
+        effect.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Ok),
+        "the layer itself is fine"
+    );
+    let reported = statuses.lock().unwrap().clone();
+    assert_eq!(
+        reported.iter().find(|status| status.id == "l1").map(|status| status.status),
+        Some(StackLayerState::Faulted),
+        "the layer's status says its mask failed: {reported:?}"
+    );
+}
+
+#[test]
+fn a_mask_that_does_not_build_leaves_the_layer_unmasked() {
+    let mut effect = {
+        let stack = stack(
+            "stack:GoneMask",
+            vec![masked_layer("l1", "layer", a_mask("no-such-effect"))],
+        );
+        let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+        let lay = layout(
+            vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
+            RenderScale::P100,
+            SamplingMode::Nearest,
+        );
+        let leaves: LeafBuilder = Arc::new(|id: &str| {
+            if id == "no-such-effect" {
+                Err("no effect with that id".to_string())
+            } else {
+                Ok(Box::new(ColourEffect {
+                    colour: [1.0, 0.0, 0.0],
+                    updates: Arc::new(AtomicU64::new(0)),
+                    panics: false,
+                }) as Box<dyn Effect>)
+            }
+        });
+        StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+            .with_clock(ManualClock::new().clock())
+    };
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the layer draws unmasked");
+    let (state, reason) = effect.mask_status("l1").expect("the layer has a mask");
+    assert_eq!(state, StackLayerState::MissingEffect);
+    assert!(reason.is_some(), "the build error is kept");
+}
+
+#[tokio::test]
+async fn a_mask_is_validated_like_a_layer_and_an_html_mask_counts_toward_the_cap() {
+    let harness = build("t-mask-validation");
+    add_html(&harness, "a.html", VALID_HTML);
+    add_html(&harness, "b.html", VALID_HTML);
+
+    // A mask that names an effect nothing builds is refused, naming the mask.
+    let bad = stack(
+        "stack:BadMask",
+        vec![masked_layer("l1", "solid", a_mask("no-such-effect"))],
+    );
+    let (status, message) = put_stack_body(
+        &harness,
+        "stack:BadMask",
+        &serde_json::to_string(&bad).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(message.contains("mask effect"), "the rule is named: {message}");
+
+    // A mask that names a stack is refused.
+    let nested = stack(
+        "stack:NestedMask",
+        vec![masked_layer("l1", "solid", a_mask("stack:Other"))],
+    );
+    let (status, message) = put_stack_body(
+        &harness,
+        "stack:NestedMask",
+        &serde_json::to_string(&nested).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(message.contains("cannot contain a stack"), "{message}");
+
+    // Two HTML layers and an HTML mask is over the cap of two.
+    let over = stack(
+        "stack:HtmlMask",
+        vec![
+            layer("l1", "html:a"),
+            layer("l2", "html:b"),
+            masked_layer("l3", "solid", a_mask("html:a")),
+        ],
+    );
+    let (status, message) = put_stack_body(
+        &harness,
+        "stack:HtmlMask",
+        &serde_json::to_string(&over).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(message.contains("at most 2 HTML layers"), "{message}");
+
+    // One HTML layer and an HTML mask is two, and saves.
+    let fits = stack(
+        "stack:HtmlMaskFits",
+        vec![layer("l1", "html:a"), masked_layer("l2", "solid", a_mask("html:b"))],
+    );
+    assert_eq!(
+        put_stack(&harness, &fits).await,
+        StatusCode::OK,
+        "an HTML layer plus an HTML mask is the cap, not over it"
+    );
+
+    // A mask's amount over 100 is refused.
+    let mut wide = a_mask("fire");
+    wide.amount = 101;
+    let (status, message) = put_stack_body(
+        &harness,
+        "stack:WideMask",
+        &serde_json::to_string(&stack("stack:WideMask", vec![masked_layer("l1", "solid", wide)]))
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(message.contains("0..=100"), "{message}");
+}
+
+#[tokio::test]
+async fn a_mask_saved_by_display_name_runs_that_effect() {
+    let harness = build("t-mask-display-name");
+    let saved = stack(
+        "stack:WarmFlame",
+        vec![masked_layer("l1", "White", a_mask("Fire"))],
+    );
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let stored = harness.app.stacks.get("stack:WarmFlame").expect("the stack saved");
+    assert_eq!(stored.layers[0].effect, "white");
+    assert_eq!(
+        stored.layers[0].mask.as_ref().map(|mask| mask.effect.as_str()),
+        Some("fire"),
+        "the mask's display name is stored as the id"
+    );
+}
+
+#[test]
+fn a_masks_effect_is_part_of_the_stacks_structure() {
+    let plain = stack("stack:S", vec![layer("l1", "white")]);
+    let fire = stack(
+        "stack:S",
+        vec![masked_layer("l1", "white", a_mask("fire"))],
+    );
+    let mut rain = fire.clone();
+    rain.layers[0].mask.as_mut().unwrap().effect = "rain".into();
+    let hash = |stack: &Stack| {
+        stack::structure_hash(&stack::structure(stack, &|_id| None))
+    };
+    assert_ne!(hash(&plain), hash(&fire), "adding a mask is a structure change");
+    assert_ne!(hash(&fire), hash(&rain), "changing the mask effect is one too");
+
+    // A mask's values are not structure: amount and invert rebuild nothing.
+    let mut half = fire.clone();
+    let mask = half.layers[0].mask.as_mut().unwrap();
+    mask.amount = 40;
+    mask.invert = true;
+    assert_eq!(hash(&fire), hash(&half));
+}
+
+/// A hand-written file whose mask names an effect nothing builds loads with the layer unmasked.
+#[tokio::test]
+async fn a_file_with_a_mask_that_does_not_resolve_loads_the_layer_unmasked() {
+    let home = TempHome::new("t-mask-load");
+    std::fs::write(
+        home.path.join(STACKS_FILE),
+        r#"{"schema_version":1,"stacks":[
+            {"id":"stack:HandMask","layers":[
+              {"id":"l1","name":"Base","effect":"white","mask":{"effect":"no-such-effect"}},
+              {"id":"l2","name":"Kept","effect":"white","mask":{"effect":"fire","amount":50}}]}]}"#,
+    )
+    .unwrap();
+    let harness = harness_at(home);
+    let loaded = harness.app.stacks.get("stack:HandMask").expect("the stack loads");
+    assert_eq!(loaded.layers.len(), 2, "a bad mask does not drop its layer");
+    assert!(loaded.layers[0].mask.is_none(), "the unresolvable mask is dropped");
+    let mask = loaded.layers[1].mask.as_ref().expect("the good mask stays");
+    assert_eq!(mask.effect, "fire");
+    assert_eq!(mask.amount, 50);
+}
+
 
 /// HTML whose script does not parse: the builder refuses it, so a PUT of it answers 422.
 const BROKEN_HTML: &str = "<head><title>Broken</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar = ;\n</script>";

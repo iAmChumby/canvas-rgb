@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Effects: give any layer of a stacked effect an animated mask, like a flame over warm white, to shape where it shows (#256)
+
 ## [0.10.2] - 2026-11-09
 
 ### Fixed
