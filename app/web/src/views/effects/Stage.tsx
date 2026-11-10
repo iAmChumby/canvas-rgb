@@ -19,10 +19,13 @@ import type { DropTarget } from "@/lib/dropTargets";
 import { Chip } from "@/components/Chip";
 import { IconButton } from "@/components/Button";
 import { Toggle } from "@/components/Toggle";
+import { FrameHandles } from "@/views/effects/Handles";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
 import type { Layout } from "@/proto/Layout";
+import type { PropertySchema } from "@/proto/PropertySchema";
+import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
 import {
@@ -141,11 +144,15 @@ export function Stage({
   onSelect,
   onAreaChange,
   onAreaChangeEnd,
+  schema,
+  onPropChange,
+  onPropChangeEnd,
   onDragActive,
   onDelete,
   onDuplicate,
   onMakeRect,
   drop,
+  dragging: libraryDrag,
 }: {
   stack: Stack;
   layout: Layout | null;
@@ -161,6 +168,12 @@ export function Stage({
   onAreaChange?: (area: LayerArea, run: string, hold: boolean) => void;
   /** The gesture is over: the next change is a new undo step. */
   onAreaChangeEnd?: () => void;
+  /** The picked effect's schema: its direction and speed handles are read from it. */
+  schema?: PropertySchema | null;
+  /** A prop changed by a handle: one gesture is one undo step (`run`). */
+  onPropChange?: (layerId: string, key: string, value: PropValue, run: string, hold: boolean) => void;
+  /** The handle's gesture is over: the next change is a new undo step. */
+  onPropChangeEnd?: () => void;
   /** A pointer drag or resize began (true) or ended (false): undo and redo wait for it. */
   onDragActive?: (active: boolean) => void;
   onDelete?: (id: string) => void;
@@ -168,6 +181,9 @@ export function Stage({
   onMakeRect?: (id: string) => void;
   /** A library drag in progress (#257 phase 2): its target on the stage, and the words for it. */
   drop?: { target: DropTarget | null; words: string | null } | null;
+  /** Some drag runs, whether or not it is over the picture (a mask over a row): the stage's own
+   *  floating keys stand aside. */
+  dragging?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -498,7 +514,7 @@ export function Stage({
         onDragStart={refuseDragStart}
         draggable={false}
       >
-        {drop && (
+        {drop && drop.target?.kind !== "maskLayer" && (
           <div className="rd-drop-strip" data-over={drop.target?.kind === "canvas" ? "true" : "false"}>
             Whole canvas
           </div>
@@ -510,7 +526,7 @@ export function Stage({
             <span>Add a layer and its picture appears here.</span>
           </div>
         )}
-        {!empty && (parts || dragging || drop) && layout && (
+        {!empty && (parts || dragging || (drop && drop.target?.kind !== "maskLayer")) && layout && (
           <div className="rd-parts" aria-hidden="true">
             {visibleZones.map((zone) => {
               const key = zoneKey(zone);
@@ -547,6 +563,7 @@ export function Stage({
                 data-layer-id={frame.id}
                 data-kind={frame.kind}
                 data-selected={selected ? "true" : "false"}
+                data-mask-target={drop?.target?.kind === "maskLayer" && drop.target.id === layer.id ? "true" : undefined}
                 {...(selected ? { "data-editable": draggable ? "true" : "false" } : {})}
                 {...(draggable
                   ? {
@@ -599,6 +616,25 @@ export function Stage({
                     <span className="edge w" data-mark={markN(frame.bounds.height)} aria-hidden="true" />
                   </>
                 )}
+                {/* The picked effect's own direction and speed (#257 phase 3), read from its
+                    schema: nothing while a library drag runs, so the drag's targets stay clear. */}
+                {selected && !drop && schema && (
+                  <FrameHandles
+                    layer={layer}
+                    schema={schema}
+                    centre={() => {
+                      const box = stageRef.current?.getBoundingClientRect();
+                      if (!box) return null;
+                      const k = box.width / CANVAS_W;
+                      return {
+                        x: box.left + (frame.bounds.x + frame.bounds.width / 2) * k,
+                        y: box.top + (frame.bounds.y + frame.bounds.height / 2) * k,
+                      };
+                    }}
+                    onChange={(key, value, run, hold) => onPropChange?.(layer.id, key, value, run, hold)}
+                    onChangeEnd={onPropChangeEnd}
+                  />
+                )}
               </div>
             );
           })}
@@ -635,7 +671,7 @@ export function Stage({
           </span>
         )}
       </div>
-      {!empty && !drop && picked && asRect && picked.area.kind !== "rect" && (
+      {!empty && !drop && !libraryDrag && picked && asRect && picked.area.kind !== "rect" && (
         <span className="rd-stage-float">
           <Chip
             label={`Make ${picked.name} a rectangle`}

@@ -116,9 +116,10 @@ describe("the stack builder's masks", () => {
     fireEvent.click(within(list).getByRole("option", { name: /^Fire/ }));
     const remove = await screen.findByRole("button", { name: "Remove the mask from Sparkles" });
     expect(remove).toBeTruthy();
-    // The row shows the mask's own small thumbnail beside the layer's.
+    // The row shows the mask's own small thumbnail beside the layer's, with its remove key.
     const row = document.querySelector('.layer-row[data-layer-id="l3"]');
-    expect(row?.querySelector(".layer-mask-thumb")).not.toBeNull();
+    expect(row?.querySelector(".rd-mask-chip")).not.toBeNull();
+    expect(within(row as HTMLElement).getByRole("button", { name: "Change the mask of Sparkles" })).toBeTruthy();
     const mask = await waitForMask("l3", (mask) => mask?.effect === "fire");
     expect(mask).toMatchObject({ effect: "fire", source: "luma", invert: false, amount: 100 });
   });

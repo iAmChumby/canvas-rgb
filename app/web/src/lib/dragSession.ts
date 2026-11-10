@@ -19,9 +19,10 @@ export const DRAG_SLOP_PX = 4;
 /** A finger lifts a tile after this long; before it, the gesture can still scroll the grid. */
 export const TOUCH_HOLD_MS = 300;
 
-/** What was lifted: a library effect, or a layer already in the stack. */
+/** What was lifted: a library effect, a mask from the Masks tab, or a layer already in the stack. */
 export type DragSource =
   | { kind: "effect"; effect: string; name: string }
+  | { kind: "mask"; effect: string; name: string }
   | { kind: "layer"; id: string; name: string };
 
 export type DragMode = "pointer" | "keyboard" | "touch";
@@ -34,12 +35,14 @@ export interface DragState {
   target: DropTarget | null;
   /** The pointer, in client pixels: the ghost follows it 1:1 (no easing, spec §4). */
   point: { x: number; y: number } | null;
+  /** Why the drop would refuse here (a mask on empty picture), said beside the pointer. */
+  hint: string | null;
 }
 
-export const NO_DRAG: DragState = { source: null, mode: null, target: null, point: null };
+export const NO_DRAG: DragState = { source: null, mode: null, target: null, point: null, hint: null };
 
 export function lifted(source: DragSource, mode: DragMode, target: DropTarget | null = null): DragState {
-  return { source, mode, target, point: null };
+  return { source, mode, target, point: null, hint: null };
 }
 
 /** The names a target is said by. */
@@ -54,14 +57,27 @@ export function liftAnnouncement(source: DragSource): string {
   if (source.kind === "effect") {
     return `Lifted ${source.name}. Left and Right pick where it goes, Up and Down pick a place in the list; Enter drops it, Escape cancels.`;
   }
+  if (source.kind === "mask") {
+    return `Lifted ${source.name} as a mask. Up and Down pick a layer; Enter drops it, Escape cancels.`;
+  }
   return `Lifted ${source.name}. Up and Down pick a place in the list; Enter drops it, Escape cancels.`;
 }
+
+/** Why a mask refused to land on the picture: nothing is there to wear it. */
+export const MASK_EMPTY_HINT = "No layer there. A mask needs a layer.";
 
 export function targetAnnouncement(target: DropTarget, names: TargetNames): string {
   return `${dropTargetWords(target, names)}.`;
 }
 
 export function dropAnnouncement(source: DragSource, target: DropTarget, names: TargetNames): string {
+  if (source.kind === "mask") {
+    const layer =
+      target.kind === "maskLayer" || target.kind === "row"
+        ? names.layers.find((entry) => entry.id === target.id)
+        : undefined;
+    return layer ? `${source.name} is now the mask on ${layer.name}.` : `${source.name} added.`;
+  }
   const verb = source.kind === "effect" ? "added" : "moved";
   if (target.kind === "stackSlot") {
     const words = dropTargetWords(target, names);
@@ -157,6 +173,11 @@ export function stackSlots(count: number): DropTarget[] {
   return Array.from({ length: count + 1 }, (_, at): DropTarget => ({ kind: "stackSlot", at }));
 }
 
+/** Every layer a mask may land on, bottom first, so Up (a step of +1) walks up the drawn list. */
+export function maskTargets(layers: Pick<StackLayer, "id">[]): DropTarget[] {
+  return layers.map((layer, index): DropTarget => ({ kind: "maskLayer", id: layer.id, index }));
+}
+
 /** The target `step` places from `current` in `targets`, wrapping at both ends. */
 export function cycleTarget(
   targets: DropTarget[],
@@ -186,6 +207,8 @@ export function targetKey(target: DropTarget | null): string | null {
       return `slot:${target.at}`;
     case "row":
       return `row:${target.id}`;
+    case "maskLayer":
+      return `maskLayer:${target.id}`;
   }
 }
 

@@ -723,6 +723,32 @@ export function layerAtPoint(
 }
 
 /**
+ * The top-most visible layer whose frame holds `point`, or null when none does (#257 phase 3).
+ * A mask dropped on the picture takes this layer: the one painted last over the point, rather
+ * than the smallest winner a press picks.
+ */
+export function layerOnTopAtPoint(
+  layers: StackLayer[],
+  layout: Layout | null,
+  point: { x: number; y: number },
+): string | null {
+  const frames = stageFrames(layers, layout);
+  for (let i = frames.length - 1; i >= 0; i--) {
+    const frame = frames[i];
+    if (!frame) continue;
+    if (
+      point.x >= frame.bounds.x &&
+      point.x <= frame.bounds.x + frame.bounds.width &&
+      point.y >= frame.bounds.y &&
+      point.y <= frame.bounds.y + frame.bounds.height
+    ) {
+      return frame.id;
+    }
+  }
+  return null;
+}
+
+/**
  * The layer Tab and Shift+Tab move to, top of the stack first: the list reads as the stage
  * paints it. A picked layer that is gone (or nothing picked) starts at the top.
  */
