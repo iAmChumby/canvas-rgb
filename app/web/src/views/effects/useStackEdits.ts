@@ -202,6 +202,9 @@ export function useStackEdits({
   const addStack = (starter: StarterStack): Promise<void> => {
     if (starterQueued.current.has(starter.id)) return Promise.resolve();
     starterQueued.current.add(starter.id);
+    // The history as it stood at the click: an Undo while this add waits behind another one
+    // abandons it too (#257 adversarial review).
+    const moves = historyMoves.current;
     const run = addChain.current.then(async () => {
       try {
         const room = MAX_LAYERS - draftRef.current.layers.length;
@@ -211,7 +214,7 @@ export function useStackEdits({
           notify(refusal, "warn");
           return;
         }
-        const moves = historyMoves.current;
+        if (historyMoves.current !== moves) return;
         setAddProblem(null);
         const ids = new Set<string>();
         for (const def of starter.layers) {

@@ -47,6 +47,21 @@ describe("useMoreBelow", () => {
     expect(pane.dataset.more).toBe("false");
   });
 
+  it("notices a notice added below after mount, with no scroll and no resize (#257 adversarial review)", async () => {
+    const view = render(<Pane />);
+    const pane = view.getByTestId("pane");
+    sized(pane, { scrollHeight: 400, clientHeight: 400, scrollTop: 0 });
+    act(() => void pane.dispatchEvent(new Event("scroll")));
+    expect(pane.dataset.more).toBe("false");
+    // A held-layer notice appears at the foot: the pane is now taller than its window.
+    sized(pane, { scrollHeight: 520, clientHeight: 400, scrollTop: 0 });
+    await act(async () => {
+      pane.appendChild(document.createElement("p"));
+      await Promise.resolve();
+    });
+    expect(pane.dataset.more).toBe("true");
+  });
+
   it("says nothing is below when the pane's content fits", () => {
     const view = render(<Pane />);
     const pane = view.getByTestId("pane");

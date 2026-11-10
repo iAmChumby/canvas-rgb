@@ -102,6 +102,16 @@ describe("the empty builder", () => {
     await waitFor(() => expect(layerNames()).toEqual(["Warm white", "Sparkles", "Heat", "Sunset"]));
   });
 
+  it("abandons a queued starter too when an Undo lands while it waits (#257 adversarial review)", async () => {
+    await openNew();
+    fireEvent.click(screen.getByRole("button", { name: "Add the Sunset glow starter stack" }));
+    fireEvent.click(screen.getByRole("button", { name: "Add the Warm flame starter stack" }));
+    // Undo before either has read its effects: neither lands over the step back.
+    act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    expect(layerNames()).not.toContain("Warm white");
+  });
+
   it("takes a second click on the same starter as the same add", async () => {
     await openNew();
     const starter = screen.getByRole("button", { name: "Add the Sunset glow starter stack" });

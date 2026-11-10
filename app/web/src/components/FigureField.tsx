@@ -74,8 +74,13 @@ export function FigureField({
       close(byKey);
       return;
     }
-    // The field stays open and marked: the number was not taken, and the person is told.
-    if (invalid) return;
+    // Enter on a bad number: the field stays open and marked, and the person is told. A click away
+    // from it reverts, as Escape does: a field left open and unfocused would hold the bad value
+    // with no key to clear it (#257 adversarial review).
+    if (invalid) {
+      if (!byKey) close(false);
+      return;
+    }
     const next = Number(parsed.toFixed(decimals));
     close(byKey);
     if (next !== value) onCommit(next);

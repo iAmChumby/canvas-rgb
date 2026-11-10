@@ -87,6 +87,16 @@ describe("FigureField", () => {
     expect(onCommit).toHaveBeenCalledWith(99);
   });
 
+  it("reverts a bad number on a click away instead of staying open and unfocused (#257 adversarial review)", () => {
+    const onCommit = setup();
+    const field = open();
+    fireEvent.change(field, { target: { value: "150" } });
+    fireEvent.blur(field);
+    expect(onCommit).not.toHaveBeenCalled();
+    expect(screen.queryByRole("textbox", { name: "Intensity value" })).toBeNull();
+    expect(readout().textContent).toContain("72");
+  });
+
   it("refuses text that is not a number the same way", () => {
     const onCommit = setup();
     const field = open();

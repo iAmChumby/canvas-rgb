@@ -22,9 +22,23 @@ export function useMoreBelow(ref: RefObject<HTMLElement | null>, key: string) {
     const watcher = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(update);
     watcher?.observe(pane);
     for (const child of Array.from(pane.children)) watcher?.observe(child);
+    // A section or a notice added after the pane mounted grows it with no scroll and no resize of
+    // a watched child: watch the tree too, and size-watch each new direct child (#257 review).
+    const added = typeof MutationObserver === "undefined"
+      ? null
+      : new MutationObserver((records) => {
+          for (const record of records) {
+            for (const node of Array.from(record.addedNodes)) {
+              if (node instanceof Element && node.parentElement === pane) watcher?.observe(node);
+            }
+          }
+          update();
+        });
+    added?.observe(pane, { childList: true, subtree: true });
     return () => {
       pane.removeEventListener("scroll", update);
       watcher?.disconnect();
+      added?.disconnect();
     };
   }, [ref, key]);
 }
