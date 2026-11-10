@@ -128,7 +128,7 @@ export function Library({
             <span className="rd-library-code-icon" aria-hidden="true">
               <Code size={22} />
             </span>
-            <span className="rd-library-name">Write code</span>
+            <span className="rd-library-name">New from code</span>
           </button>
         </div>
       </div>

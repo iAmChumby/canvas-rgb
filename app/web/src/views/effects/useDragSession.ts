@@ -543,6 +543,8 @@ export function useDragSession({
 
   return {
     drag,
+    /** A lift is live right now: read from the ref, which a keydown in the same turn sees at once. */
+    isLifted: () => dragRef.current.source !== null,
     insertAt,
     dragWords,
     onTileAdd,

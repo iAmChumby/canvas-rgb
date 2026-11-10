@@ -485,6 +485,7 @@ export function StackBuilder({
                     layout={layout}
                     devices={devices}
                     drag={dragSession.drag}
+                    isLifted={dragSession.isLifted}
                     insertAt={dragSession.insertAt}
                     renaming={edits.renaming}
                     renameText={edits.renameText}

@@ -28,6 +28,7 @@ export function LayerList({
   layout,
   devices,
   drag,
+  isLifted,
   insertAt,
   renaming,
   renameText,
@@ -53,6 +54,7 @@ export function LayerList({
   layout: Layout | null;
   devices: DeviceInfo[] | null;
   drag: DragState;
+  isLifted: () => boolean;
   insertAt: number | null;
   renaming: string | null;
   renameText: string;
@@ -74,13 +76,7 @@ export function LayerList({
   if (count === 0) {
     return (
       <div className="rd-layers-empty">
-        <p>No layers yet. A stack is a list of effects drawn one over the other, bottom to top.</p>
-        <ul className="rd-how-list">
-          <li>The bottom layer is painted first, then each layer over it.</li>
-          <li>A layer paints on its canvas, a device, a zone or a rectangle.</li>
-          <li>Blend and opacity mix it over what is under it.</li>
-        </ul>
-        <p className="rd-layers-empty-hint">Pick an effect from the library to start.</p>
+        <p>No layers yet. Pick an effect from the library, or start with a stack.</p>
       </div>
     );
   }
@@ -127,7 +123,7 @@ export function LayerList({
                 title="Drag to reorder, or press Space; Alt+↑/↓ on the keyboard"
                 onPointerDown={(event) => onGripDown(layer, event)}
                 onKeyDown={(event) => {
-                  if (drag.source) return;
+                  if (isLifted()) return;
                   if (event.altKey) {
                     if (event.key === "ArrowUp" && index < count - 1) {
                       event.preventDefault();

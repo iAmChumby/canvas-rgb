@@ -170,7 +170,7 @@ export function useSaveAndLeave({
     else onClose();
   };
 
-  /** The library's "Write code" tile: the code flow, once a dirty builder has left. */
+  /** The library's "New from code" tile: the code flow, once a dirty builder has left. */
   const writeCode = () => {
     if (dirty) {
       pendingCode.current = true;

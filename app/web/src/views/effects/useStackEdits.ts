@@ -68,8 +68,8 @@ export function useStackEdits({
   const addChain = useRef<Promise<void>>(Promise.resolve());
   const addQueued = useRef(new Set<string>());
   const choosing = useRef(false);
-  /** A starter stack is being read and built: a second click waits its turn in the same chain. */
-  const stackQueued = useRef(false);
+  /** The starters waiting in `addChain` or being built: a second click on the same one is the same add. */
+  const starterQueued = useRef(new Set<string>());
 
   const patch = (id: string, change: Partial<StackLayer>, run?: string, hold = false) => {
     setDraft((current) => ({ ...current, layers: patchLayer(current.layers, id, change) }), run, hold);
@@ -194,13 +194,14 @@ export function useStackEdits({
 
   /**
    * A starter stack (#257 phase 4, spec §5): every layer is read and built first, then the whole
-   * stack lands in one draft change, so one undo takes it all back. A second click while the
-   * effects are read waits its turn; an Undo or a reset in that gap abandons the add rather than
-   * overwriting the step back.
+   * stack lands in one draft change, so one undo takes it all back. A click on another starter
+   * while the effects are read waits its turn in `addChain`, as `addEffect` does, and lands after
+   * it; a second click on the same starter is the same add. An Undo or a reset in that gap
+   * abandons the add rather than overwriting the step back.
    */
   const addStack = (starter: StarterStack): Promise<void> => {
-    if (stackQueued.current) return Promise.resolve();
-    stackQueued.current = true;
+    if (starterQueued.current.has(starter.id)) return Promise.resolve();
+    starterQueued.current.add(starter.id);
     const run = addChain.current.then(async () => {
       try {
         const room = MAX_LAYERS - draftRef.current.layers.length;
@@ -273,7 +274,7 @@ export function useStackEdits({
         setDraft(next);
         pick(added[added.length - 1]!.id);
       } finally {
-        stackQueued.current = false;
+        starterQueued.current.delete(starter.id);
       }
     });
     addChain.current = run.catch(() => undefined);

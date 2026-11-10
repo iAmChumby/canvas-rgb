@@ -124,7 +124,7 @@ describe("the inspector's sections", () => {
     await waitFor(() => expect(valueNow()).toBe("72"));
     // Nothing but the figure is drawn until it is clicked.
     expect(screen.queryByRole("textbox", { name: "Intensity value" })).toBeNull();
-    fireEvent.click(screen.getByRole("button", { name: "Edit Intensity" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Edit Intensity, \d+$/ }));
     const field = screen.getByRole("textbox", { name: "Intensity value" });
     fireEvent.change(field, { target: { value: "40" } });
     fireEvent.keyDown(field, { key: "Enter" });
@@ -137,7 +137,7 @@ describe("the inspector's sections", () => {
     await waitFor(() => expect(valueNow()).toBe("40"));
 
     // Escape leaves the value and adds no step: one undo takes the typed change back.
-    fireEvent.click(screen.getByRole("button", { name: "Edit Intensity" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Edit Intensity, \d+$/ }));
     const again = screen.getByRole("textbox", { name: "Intensity value" });
     fireEvent.change(again, { target: { value: "11" } });
     fireEvent.keyDown(again, { key: "Escape" });
@@ -145,6 +145,42 @@ describe("the inspector's sections", () => {
     expect(screen.queryByRole("textbox", { name: "Intensity value" })).toBeNull();
     act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
     await waitFor(() => expect(valueNow()).toBe("72"));
+  });
+  it("names the readout with its value, and a held arrow in the open field is one undo step", async () => {
+    await openBuilder();
+    pick("Heat");
+    const valueNow = () => screen.getByRole("slider", { name: "Intensity" }).getAttribute("aria-valuenow");
+    await waitFor(() => expect(valueNow()).toBe("72"));
+    const readout = screen.getByRole("button", { name: "Edit Intensity, 72" });
+    fireEvent.click(readout);
+    // Three presses of the arrow, as a held key repeats: the field stays open and each press steps.
+    for (let press = 0; press < 3; press += 1) {
+      fireEvent.keyDown(screen.getByRole("textbox", { name: "Intensity value" }), { key: "ArrowUp" });
+    }
+    await waitFor(() => expect(valueNow()).toBe("75"));
+    expect(screen.getByRole("textbox", { name: "Intensity value" })).toBeTruthy();
+    // The presses ran into one run, as the number field's did: one undo puts all three back.
+    act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
+    await waitFor(() => expect(valueNow()).toBe("72"));
+  });
+
+  it("hands focus back to the readout after Enter and after Escape", async () => {
+    await openBuilder();
+    pick("Heat");
+    await waitFor(() =>
+      expect(screen.getByRole("slider", { name: "Intensity" }).getAttribute("aria-valuenow")).toBe("72"),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Intensity, 72" }));
+    fireEvent.change(screen.getByRole("textbox", { name: "Intensity value" }), { target: { value: "50" } });
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Intensity value" }), { key: "Enter" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Intensity, 50" })),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Edit Intensity, 50" }));
+    fireEvent.keyDown(screen.getByRole("textbox", { name: "Intensity value" }), { key: "Escape" });
+    await waitFor(() =>
+      expect(document.activeElement).toBe(screen.getByRole("button", { name: "Edit Intensity, 50" })),
+    );
   });
 });
 

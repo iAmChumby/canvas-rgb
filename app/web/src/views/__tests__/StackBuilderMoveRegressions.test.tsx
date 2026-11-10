@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { CaretLeft } from "@phosphor-icons/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NotifyHost } from "@/components/Notify";
@@ -171,6 +171,21 @@ describe("the phone sheet's back key (A5)", () => {
     const caret = render(<CaretLeft size={18} />).container.querySelector("svg");
     expect(icon?.innerHTML).toBe(caret?.innerHTML);
     expect(icon?.getAttribute("width")).toBe("18");
+  });
+});
+
+describe("the grip's key reads the live lift (sweep of the move)", () => {
+  it("ignores Alt+Arrow in the turn a Space lifted the row, as the ref-reading handler did", async () => {
+    await open("?stack=Sunset%20glow&state=complete,stack");
+    await waitFor(() => expect(layerNames()).toHaveLength(3));
+    const before = layerNames();
+    const grip = screen.getByRole("button", { name: "Reorder Heat" });
+    // One turn, no render between the two keys: only the ref knows the row is lifted.
+    act(() => {
+      fireEvent.keyDown(grip, { key: " " });
+      fireEvent.keyDown(grip, { key: "ArrowUp", altKey: true });
+    });
+    expect(layerNames()).toEqual(before);
   });
 });
 

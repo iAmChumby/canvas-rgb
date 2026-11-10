@@ -28,18 +28,23 @@ export function InspectorSection({
   return (
     <section className={className ? `rd-section ${className}` : "rd-section"} aria-labelledby={headingId}>
       <div className="rd-section-head">
-        <button
-          type="button"
-          className="rd-section-toggle"
-          aria-expanded={open}
-          aria-controls={bodyId}
-          onClick={() => setOpen((current) => !current)}
-        >
-          {open ? <CaretDown size={13} aria-hidden="true" /> : <CaretRight size={13} aria-hidden="true" />}
+        {/* The heading is a heading and the key is a key: a heading inside a button is invalid
+            HTML. The key lies over the whole lead (the look of one key) and is named by the heading. */}
+        <div className="rd-section-lead">
           <h3 className="rd-section-title" id={headingId}>
             {title}
           </h3>
-        </button>
+          <button
+            type="button"
+            className="rd-section-toggle"
+            aria-labelledby={headingId}
+            aria-expanded={open}
+            aria-controls={bodyId}
+            onClick={() => setOpen((current) => !current)}
+          >
+            {open ? <CaretDown size={13} aria-hidden="true" /> : <CaretRight size={13} aria-hidden="true" />}
+          </button>
+        </div>
         {actions && <span className="rd-section-actions">{actions}</span>}
       </div>
       <div className="rd-section-body" id={bodyId} hidden={!open}>

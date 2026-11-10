@@ -74,6 +74,18 @@ const newEffect = async () => {
 };
 
 describe("a new effect", () => {
+  it("names the HTML path one way, with no second explanation of it", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "More effect actions" }));
+    const key = await screen.findByRole("button", { name: "New from code" });
+    expect(document.body.textContent).not.toContain("The HTML path");
+    fireEvent.click(key);
+    const chooser = await screen.findByTestId("new-effect");
+    expect(within(chooser).getByRole("heading", { name: "New from code" })).toBeTruthy();
+    expect(chooser.textContent).not.toContain("The HTML path");
+    expect(chooser.textContent).not.toContain("go back and use New effect");
+  });
+
   it("starts from a copy, keeps its licence line, and saves under a new name", async () => {
     await mount();
     const chooser = await newEffect();

@@ -119,7 +119,7 @@ describe("the library", () => {
   it("keeps the last tile for the code flow", async () => {
     await openBuilder();
     const tiles = [...document.querySelectorAll<HTMLElement>(".rd-library [data-lib-tile]")];
-    expect(tiles.at(-1)?.textContent).toContain("Write code");
+    expect(tiles.at(-1)?.textContent).toContain("New from code");
   });
 });
 

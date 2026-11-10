@@ -43,8 +43,9 @@ beforeAll(() => {
 afterEach(cleanup);
 
 function layerNames(): string[] {
+  // The empty layer panel has no list now, so an empty stack has no listitem to find.
   return screen
-    .getAllByRole("listitem")
+    .queryAllByRole("listitem")
     .map((row) => row.querySelector(".layer-name")?.textContent ?? "")
     .filter(Boolean);
 }
@@ -92,5 +93,22 @@ describe("the empty builder", () => {
     act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
     await waitFor(() => expect(layerNames()).toHaveLength(0));
     expect(screen.getByText("Drag an effect here")).toBeTruthy();
+  });
+  it("queues a click on another starter while one is loading, and lands both", async () => {
+    await openNew();
+    fireEvent.click(screen.getByRole("button", { name: "Add the Sunset glow starter stack" }));
+    // The first starter is still reading its effects: this click waits its turn.
+    fireEvent.click(screen.getByRole("button", { name: "Add the Warm flame starter stack" }));
+    await waitFor(() => expect(layerNames()).toEqual(["Warm white", "Sparkles", "Heat", "Sunset"]));
+  });
+
+  it("takes a second click on the same starter as the same add", async () => {
+    await openNew();
+    const starter = screen.getByRole("button", { name: "Add the Sunset glow starter stack" });
+    fireEvent.click(starter);
+    fireEvent.click(starter);
+    await waitFor(() => expect(layerNames()).toEqual(["Sparkles", "Heat", "Sunset"]));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(layerNames()).toEqual(["Sparkles", "Heat", "Sunset"]);
   });
 });

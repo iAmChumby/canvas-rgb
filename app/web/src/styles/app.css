@@ -8182,33 +8182,6 @@ button.chip:hover {
   font-weight: 600;
 }
 
-.rd-how-list {
-  margin: 0 0 var(--s2);
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  color: var(--mute);
-  font-size: var(--t14);
-  line-height: 1.5;
-}
-
-.rd-how-list li {
-  padding-left: var(--s4);
-  position: relative;
-}
-
-.rd-how-list li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.62em;
-  width: 8px;
-  height: 2px;
-  background: var(--line-2);
-}
-
 /* ---------- the picked layer ---------- */
 
 .rd-layer-edit {
@@ -8413,24 +8386,39 @@ button.chip:hover {
   min-height: 28px;
 }
 
-.rd-section-toggle {
+/* The heading and its key share one lead: the heading gives the lead its size, and the key lies
+   over all of it, so the title reads as part of the key without being inside it. */
+.rd-section-lead {
+  position: relative;
   display: inline-flex;
   align-items: center;
-  gap: var(--s1);
   margin-left: -4px;
-  padding: 3px 6px 3px 4px;
+  padding: 3px 6px 3px 22px;
+  color: var(--dim);
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.rd-section-lead:hover {
+  color: var(--ink);
+}
+
+.rd-section-toggle {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 0 0 4px;
   border: 0;
   border-radius: var(--r-sm);
   background: none;
-  color: var(--dim);
+  color: inherit;
   font: inherit;
   cursor: pointer;
-  transition: background var(--dur-fast) var(--ease), color var(--dur-fast) var(--ease);
+  transition: background var(--dur-fast) var(--ease);
 }
 
 .rd-section-toggle:hover {
   background: var(--hover);
-  color: var(--ink);
 }
 
 .rd-section-toggle:focus-visible {
@@ -8514,6 +8502,20 @@ button.chip:hover {
 
 .fig-field-input {
   width: 64px;
+}
+
+/* A finger needs 44px: the readout and its field grow to it on a phone, and the desktop keeps its
+   own size. The two share one height, so opening the field moves nothing. */
+@media (max-width: 720px) {
+  .fig-field,
+  .fig-field-input {
+    min-height: 44px;
+    align-items: center;
+  }
+
+  .fig-field {
+    min-width: 56px;
+  }
 }
 
 .rd-presets {
@@ -9365,11 +9367,6 @@ button.chip:hover {
   .rd-library[data-mode="tab"] .rd-library-tile .thumb-sm {
     aspect-ratio: 2 / 1;
   }
-}
-
-.rd-layers-empty-hint {
-  color: var(--mute);
-  font-size: var(--t14);
 }
 
 /* The insertion line while a drag is over the stack: one step of motion, then still. */
