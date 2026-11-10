@@ -40,6 +40,7 @@ import { closePopover } from "@/views/effects/popoverFocus";
 import { nameOf } from "@/views/effects/layerText";
 import {
   htmlLayers,
+  layersForServer,
   MAX_LAYERS,
   toggleLayer,
   StackSession,
@@ -104,7 +105,7 @@ export function StackBuilder({
 
   const libraryRef = useRef<HTMLDivElement>(null);
   const tuneRef = useRef<HTMLSpanElement>(null);
-  const chooseRef = useRef<HTMLElement | null>(null);
+  const chooseRef = useRef<HTMLSpanElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
   const backRef = useRef<HTMLSpanElement>(null);
   const promptRef = useRef<HTMLDivElement>(null);
@@ -210,7 +211,7 @@ export function StackBuilder({
     const id = isNew
       ? `stack:${nameRef.current.trim() || "New stack"}`
       : baseRef.current?.id ?? (initialName.startsWith("stack:") ? initialName : `stack:${initialName}`);
-    return { id, layers: draftRef.current.layers };
+    return { id, layers: layersForServer(draftRef.current.layers) };
   }
 
   const area = useAreaPicker(edits.patch);
@@ -542,6 +543,7 @@ export function StackBuilder({
               setEdit={setEdit}
               setSheetOpen={setSheetOpen}
               onOpenArea={area.open}
+              chooseRef={chooseRef}
               onChooseEffectOpen={setChooseFor}
               onPropChange={(id, key, value) => {
                 setDraft(
@@ -607,7 +609,7 @@ export function StackBuilder({
             saver.setNamingError(null);
           }}
           onEnter={saver.nameTheStack}
-          onEscape={saver.cancelNaming}
+          onEscape={saver.escapeNaming}
           onCancel={saver.cancelNaming}
         />
       )}

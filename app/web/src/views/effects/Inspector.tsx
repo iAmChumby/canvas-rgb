@@ -4,6 +4,7 @@
 // controls, and its mask, moved out of StackBuilder.tsx unchanged. The phone's Tune sheet renders
 // the same inspector inside its dialog.
 
+import type { RefObject } from "react";
 import { CopySimple, Monitor, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { FigureField } from "@/components/FigureField";
@@ -57,6 +58,7 @@ export function Inspector({
   onOpacity,
   onOpacityCommit,
   onOpenArea,
+  chooseRef,
   onChooseEffectOpen,
   onPropChange,
   onRemoveMask,
@@ -87,6 +89,7 @@ export function Inspector({
   onOpacity: (value: number, run?: string) => void;
   onOpacityCommit: () => void;
   onOpenArea: (opener: HTMLElement) => void;
+  chooseRef: RefObject<HTMLSpanElement | null>;
   onChooseEffectOpen: () => void;
   onPropChange: (key: string, value: PropValue) => void;
   onRemoveMask: () => void;
@@ -94,7 +97,7 @@ export function Inspector({
   onMaskEffect: (effect: string) => void;
   onMaskSource: (source: MaskSource) => void;
   onMaskInvert: (invert: boolean) => void;
-  onMaskAmount: (amount: number, run: string) => void;
+  onMaskAmount: (amount: number, run?: string) => void;
   onMaskAmountCommit: () => void;
   onMaskProp: (key: string, value: PropValue) => void;
 }) {
@@ -207,14 +210,16 @@ export function Inspector({
         {schemas[layer.effect] === null || statuses[layer.id]?.status === "missing_effect" ? (
           <div className="rd-gone">
             <p className="error-line">This effect is gone. Choose another.</p>
-            <Button
-              size="sm"
-              icon={<Plus size={15} />}
-              aria-label={`Choose effect for ${layer.name}`}
-              onClick={onChooseEffectOpen}
-            >
-              Choose effect
-            </Button>
+            <span ref={chooseRef}>
+              <Button
+                size="sm"
+                icon={<Plus size={15} />}
+                aria-label={`Choose effect for ${layer.name}`}
+                onClick={onChooseEffectOpen}
+              >
+                Choose effect
+              </Button>
+            </span>
           </div>
         ) : schemas[layer.effect] === undefined ? (
           <LoadFrame
@@ -342,7 +347,9 @@ export function Inspector({
                     max={100}
                     value={mask.amount}
                     unit="%"
-                    onCommit={(amount) => onMaskAmount(amount, `mask-amount:${layer.id}`)}
+                    // A typed or stepped value is a step of its own, as the number field's was
+                    // before #257: only the slider's drag joins the run.
+                    onCommit={(amount) => onMaskAmount(amount)}
                   />
                 </div>
               </div>

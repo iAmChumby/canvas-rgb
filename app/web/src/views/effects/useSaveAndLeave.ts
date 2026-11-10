@@ -356,11 +356,14 @@ export function useSaveAndLeave({
     void save(after ?? undefined);
   };
 
-  /** The name prompt closed without a name: a leave that waited for one is dropped. */
+  /** The Close and Cancel keys: the prompt closes without a name, and a leave that waited for one is dropped. */
   const cancelNaming = () => {
     leaveAfterName.current = null;
     setNaming(false);
   };
+
+  /** Escape in the prompt only closes it, as it did before #257's move: an owed leave stays owed. */
+  const escapeNaming = () => setNaming(false);
 
   const revert = () => {
     if (base) {
@@ -463,6 +466,7 @@ export function useSaveAndLeave({
     replaceOther,
     nameTheStack,
     cancelNaming,
+    escapeNaming,
     revert,
     askLeave,
     writeCode,

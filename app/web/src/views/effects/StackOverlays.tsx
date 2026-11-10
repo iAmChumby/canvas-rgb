@@ -4,7 +4,7 @@
 // prompt, the name prompt, the two effect popovers, the drag ghost with its hint, and the live
 // region. Their markup and classes are unchanged.
 
-import type { KeyboardEvent as ReactKeyboardEvent, RefObject } from "react";
+import { useMemo, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { DotsSixVertical, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -133,10 +133,14 @@ export function ChooseEffectPopover({
   onChoose: (effect: string) => void;
   onClose: () => void;
 }) {
-  const chooseList = (effects ?? [])
-    .filter((effect) => !effect.id.startsWith("stack:"))
-    .map((effect) => ({ effect, match: matchEffect("", effect.name, effect.description) }))
-    .filter((row): row is { effect: EffectSummary; match: NonNullable<typeof row.match> } => row.match !== null);
+  const chooseList = useMemo(
+    () =>
+      (effects ?? [])
+        .filter((effect) => !effect.id.startsWith("stack:"))
+        .map((effect) => ({ effect, match: matchEffect("", effect.name, effect.description) }))
+        .filter((row): row is { effect: EffectSummary; match: NonNullable<typeof row.match> } => row.match !== null),
+    [effects],
+  );
   return (
     <Popover
       anchor={anchor}

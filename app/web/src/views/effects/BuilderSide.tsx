@@ -4,7 +4,7 @@
 // or the phone's Tune sheet around them. Moved out of StackBuilder.tsx unchanged.
 
 import type { Dispatch, RefObject, SetStateAction } from "react";
-import { ArrowLeft } from "@phosphor-icons/react";
+import { CaretLeft } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { endRun, type History } from "@/lib/draftHistory";
 import { Inspector, InspectorEmpty } from "@/views/effects/Inspector";
@@ -38,6 +38,7 @@ export function BuilderSide({
   load,
   setEdit,
   setSheetOpen,
+  chooseRef,
   onOpenArea,
   onChooseEffectOpen,
   onPropChange,
@@ -60,6 +61,8 @@ export function BuilderSide({
   load: ReturnType<typeof useStackLoad>;
   setEdit: Dispatch<SetStateAction<History<Stack>>>;
   setSheetOpen: (open: boolean) => void;
+  /** Wraps the Choose effect key: the popover hangs under it and Escape hands focus back to it. */
+  chooseRef: RefObject<HTMLSpanElement | null>;
   onOpenArea: (id: string, opener: HTMLElement) => void;
   onChooseEffectOpen: (id: string) => void;
   onPropChange: (id: string, key: string, value: import("@/proto/PropValue").PropValue) => void;
@@ -77,7 +80,7 @@ export function BuilderSide({
     >
       {narrow && (
         <div className="effect-sheet-head">
-          <IconButton label="Back to the stack" icon={<ArrowLeft size={18} />} onClick={() => setSheetOpen(false)} />
+          <IconButton label="Back to the stack" icon={<CaretLeft size={18} />} onClick={() => setSheetOpen(false)} />
           <span>{pickedLayer ? `Tune ${pickedLayer.name}` : "Tune"}</span>
         </div>
       )}
@@ -101,6 +104,7 @@ export function BuilderSide({
           onOpacity={(next, run) => edits.patch(pickedLayer.id, { opacity: next }, run)}
           onOpacityCommit={() => setEdit((current) => endRun(current))}
           onOpenArea={(opener) => onOpenArea(pickedLayer.id, opener)}
+          chooseRef={chooseRef}
           onChooseEffectOpen={() => onChooseEffectOpen(pickedLayer.id)}
           onPropChange={(key, value) => onPropChange(pickedLayer.id, key, value)}
           onRemoveMask={() => mask.removeMask(pickedLayer.id)}
