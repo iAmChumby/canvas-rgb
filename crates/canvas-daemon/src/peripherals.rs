@@ -1,4 +1,4 @@
-﻿//! The peripherals: the mouse and the game controller canvas-rgb can read and configure.
+//! The peripherals: the mouse and the game controller canvas-rgb can read and configure.
 //!
 //! A peripheral is a device with settings and no lights of its own. The daemon never opens one
 //! it was not told to: the vendor app may own it, and both would write the same device. What
@@ -29,6 +29,10 @@
 //! - through `?fresh=true`, the person's own **Read again** (the one stall they ask for);
 //! - in the background, and only after Windows reports no keyboard or mouse input for
 //!   [`PERIPHERAL_IDLE_READ_S`], when the kept values are missing or older than [`KEPT_STALE`].
+//!
+//! A background read that fails waits (1 minute, doubling to 30) before the next try, so a
+//! mouse that is off or held by its vendor app is not polled every second. The wait ends when a
+//! read works or the person presses **Read again**.
 //!
 //! The idle question goes through [`InputIdle`], so a test drives it.
 
@@ -61,15 +65,19 @@ pub const DISCOVERY_CACHE: Duration = Duration::from_secs(5);
 /// The file the kept values live in, next to `peripherals.json`. They survive a restart, so the
 /// first open after one reads nothing (#127).
 pub const KEPT_VALUES_FILE: &str = "peripheral-values.json";
-/// The schema version of `peripheral-values.json`.
-pub const KEPT_VALUES_SCHEMA: u32 = 1;
+/// The format of `peripheral-values.json`, stored in the file as `format`. It is a number of
+/// its own, not the app version: an update keeps the values, and the number moves only when
+/// the file's shape or the meaning of a stored value changes.
+pub const KEPT_FORMAT: u32 = 1;
 /// Kept values older than this are refreshed in the background, once the person is idle.
 pub const KEPT_STALE: Duration = Duration::from_secs(30 * 60);
 /// How long Windows must report no keyboard or mouse input before a background read (#127).
 pub const PERIPHERAL_IDLE_READ_S: u64 = 10;
-/// The version of the adapters whose read produced the kept values. Values saved by another
-/// build are ignored: its decode may not mean the same thing.
-pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
+/// How long a device waits after its first failed background read. Each further failure doubles
+/// it, up to [`BACKOFF_CAP_FACTOR`] times this (30 minutes).
+pub const BACKOFF_BASE: Duration = Duration::from_secs(60);
+/// The longest wait between background reads of a failing device, as a multiple of the base.
+pub const BACKOFF_CAP_FACTOR: u32 = 30;
 
 /// The message the detail carries when the values are missing because reads are off.
 pub const READS_OFF: &str = "reads are off for this device";
@@ -132,21 +140,21 @@ impl InputIdle for WindowsInputIdle {
 /// the first open without touching the device (#127).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KeptValuesFile {
-    pub schema_version: u32,
+    /// [`KEPT_FORMAT`] when the file was written. Another number means another shape.
+    pub format: u32,
     /// The kept values per device id.
     #[serde(default)]
     pub devices: BTreeMap<String, KeptValues>,
 }
 
-/// One device's kept values, and the adapter version that read them.
+/// One device's kept values.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct KeptValues {
     /// The adapter that owns the device, e.g. `attack-shark-x6`.
     pub adapter: String,
-    /// The adapter's version: values from another build are ignored.
-    pub adapter_version: String,
-    /// Seconds since the Unix epoch when the device was last read.
-    pub read_at: u64,
+    /// Milliseconds since the Unix epoch when the device was last read. A write merged into
+    /// the values leaves it alone: it says when the device was last read, not last touched.
+    pub read_at_ms: u64,
     /// The values, keyed by property key.
     pub values: Props,
 }
@@ -156,9 +164,27 @@ fn kept_values_path(home: &Path) -> PathBuf {
     home.join(KEPT_VALUES_FILE)
 }
 
-/// Seconds since the Unix epoch, or 0 when the wall clock is before it.
-fn now_unix_s() -> u64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+/// Milliseconds since the Unix epoch, or 0 when the wall clock is before it.
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
+        .unwrap_or(0)
+}
+
+/// How long to wait after a failed background read, given the wait before it (`None` for the
+/// first failure of a streak): the base, then double each time, up to 30 times the base.
+pub fn backoff_after(base: Duration, previous: Option<Duration>) -> Duration {
+    match previous {
+        None => base,
+        Some(previous) => previous.saturating_mul(2).min(base.saturating_mul(BACKOFF_CAP_FACTOR)),
+    }
+}
+
+/// A device whose background read failed: when it may be tried again, and the wait it was given.
+struct Backoff {
+    until: Instant,
+    delay: Duration,
 }
 
 /// `peripherals.json`: what the daemon may do with each device.
@@ -268,9 +294,15 @@ pub struct PeripheralHub {
     /// answers from them while the `adapters` lock is held, so concurrent reads of one device
     /// queue behind the first and find its answer here (single-flight).
     reads: std::sync::Mutex<BTreeMap<DeviceId, Kept>>,
-    /// How many fresh reads of each device have finished. A fresh read that waited for the
-    /// adapters' lock while another one finished answers with that one's result.
-    fresh_done: std::sync::Mutex<BTreeMap<DeviceId, u64>>,
+    /// How many device reads have started. A read takes the next number when it starts; a fresh
+    /// read that waited for the adapters' lock answers with another read's result only when
+    /// that read started after the ask arrived, so **Read again** never returns a read that
+    /// began before the click.
+    read_seq: std::sync::atomic::AtomicU64,
+    /// The devices whose background read failed, and when each may be tried again.
+    backoff: std::sync::Mutex<BTreeMap<DeviceId, Backoff>>,
+    /// The first wait after a failed background read ([`BACKOFF_BASE`]; a test shortens it).
+    backoff_base: Duration,
     /// The `reads` of the access each device was last given: only a change of it makes the kept
     /// values stale (the device is opened or closed); a repeat, or a change of `writes`, keeps them.
     reads_applied: std::sync::Mutex<BTreeMap<DeviceId, bool>>,
@@ -289,8 +321,10 @@ struct Kept {
     /// these alone.
     adapter: String,
     props: Props,
-    /// Seconds since the Unix epoch when the read finished.
-    read_at: u64,
+    /// Milliseconds since the Unix epoch when the device was last read. Writes keep it.
+    read_at_ms: u64,
+    /// The number the producing read took when it started (0 for values loaded from the file).
+    started_seq: u64,
 }
 
 /// Clears the stage of a read when the read ends or its request is dropped, and stops a sink that
@@ -490,8 +524,8 @@ impl PeripheralHub {
         kept_path: Option<PathBuf>,
         idle: Arc<dyn InputIdle>,
     ) -> Self {
-        // Values saved by another adapter version are dropped here, with a log line each; a
-        // file that does not parse is ignored the same way. Never fatal (#127).
+        // A file that does not parse, or has another format number, is copied aside to
+        // `peripheral-values.json.corrupt`, logged and ignored. Never fatal (#127).
         let reads = kept_path
             .as_deref()
             .map(load_kept_values)
@@ -501,11 +535,20 @@ impl PeripheralHub {
             discovery: tokio::sync::Mutex::new(None),
             progress: Arc::new(StdMutex::new(BTreeMap::new())),
             reads: std::sync::Mutex::new(reads),
-            fresh_done: std::sync::Mutex::new(BTreeMap::new()),
+            read_seq: std::sync::atomic::AtomicU64::new(0),
+            backoff: std::sync::Mutex::new(BTreeMap::new()),
+            backoff_base: BACKOFF_BASE,
             reads_applied: std::sync::Mutex::new(BTreeMap::new()),
             kept_path,
             idle,
         }
+    }
+
+    /// The same hub with another first wait after a failed background read. The tests use it
+    /// so the doubling can be watched in milliseconds.
+    pub fn with_backoff_base(mut self, base: Duration) -> Self {
+        self.backoff_base = base;
+        self
     }
 
     /// The device's settings as the daemon keeps them, with every write since merged in.
@@ -513,7 +556,16 @@ impl PeripheralHub {
     /// This never touches the device: opening the view is answered from here, or with
     /// [`NOT_READ_YET`](crate::peripherals::NOT_READ_YET) when nothing has been read (#127).
     pub fn kept(&self, device: &DeviceId) -> Option<Props> {
-        self.kept_read(device)
+        self.kept_stamped(device).map(|(props, _)| props)
+    }
+
+    /// Like [`PeripheralHub::kept`], with the Unix milliseconds of the read the values come from.
+    pub fn kept_stamped(&self, device: &DeviceId) -> Option<(Props, u64)> {
+        self.reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(device)
+            .map(|k| (k.props.clone(), k.read_at_ms))
     }
 
     /// The stage of the read of this device that is running now, [`ReadProgress::IDLE`] when none
@@ -602,9 +654,24 @@ impl PeripheralHub {
     ///
     /// The device is opened first if it is not open. A failed read keeps nothing. A read that
     /// fails because the device is gone closes it, so the next read opens it again.
+    ///
+    /// This is the person's ask, so it also ends the device's background backoff: they tried
+    /// again by hand, and the next background pass may try as well.
     pub async fn read_fresh(&self, device: &DeviceId) -> Result<Props, AdapterError> {
-        // How many fresh reads of this device had finished when this ask arrived.
-        let done_on_arrival = self.fresh_finished(device);
+        self.read_fresh_stamped(device).await.map(|(props, _)| props)
+    }
+
+    /// [`PeripheralHub::read_fresh`], with the Unix milliseconds the read finished.
+    pub async fn read_fresh_stamped(&self, device: &DeviceId) -> Result<(Props, u64), AdapterError> {
+        self.clear_backoff(device);
+        self.read_device(device).await
+    }
+
+    /// One device read: the body of both the person's ask and the background pass.
+    async fn read_device(&self, device: &DeviceId) -> Result<(Props, u64), AdapterError> {
+        // How many reads had started when this ask arrived: only a read that starts after it
+        // may answer it.
+        let seq_on_arrival = self.read_seq.load(std::sync::atomic::Ordering::SeqCst);
         // One lock for all adapters. A blocking open inside an adapter holds it, so a slow open
         // of one device queues the reads of the others behind it (the adapters' own HID caches
         // are per adapter and do not share this).
@@ -619,13 +686,16 @@ impl PeripheralHub {
             live: live.clone(),
             progress: self.progress.clone(),
         };
-        // A read that waited while another read of this device ran takes that one's result (a
-        // double click, or a Read again that lands during the background refresh, is one read).
-        if adapter.is_connected() && self.fresh_finished(device) > done_on_arrival {
-            if let Some(props) = self.kept_read(device) {
-                return Ok(props);
+        // A read that waited behind other reads takes the result of one that STARTED after this
+        // ask arrived (two clicks queued behind one read are one read). A read that was already
+        // running when the ask arrived began before the click and answers nothing: the person
+        // asked for the device as it is now.
+        if adapter.is_connected() {
+            if let Some(answer) = self.kept_started_after(device, seq_on_arrival) {
+                return Ok(answer);
             }
         }
+        let seq = self.read_seq.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
         if !adapter.is_connected() {
             self.set_progress(device, ReadProgress::at(ReadStage::Opening));
             adapter.connect().await?;
@@ -653,44 +723,78 @@ impl PeripheralHub {
         adapter.set_read_sink(Some(sink));
         let result = adapter.read_settings(device).await;
         adapter.set_read_sink(None);
-        match &result {
+        match result {
             Ok(props) => {
+                let read_at_ms = now_unix_ms();
                 self.reads.lock().unwrap_or_else(|e| e.into_inner()).insert(
                     device.clone(),
                     Kept {
                         adapter: adapter.name().to_string(),
                         props: props.clone(),
-                        read_at: now_unix_s(),
+                        read_at_ms,
+                        started_seq: seq,
                     },
                 );
-                *self
-                    .fresh_done
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .entry(device.clone())
-                    .or_insert(0) += 1;
+                self.clear_backoff(device);
                 // The values survive a restart now (#127).
                 self.save_kept();
+                Ok((props, read_at_ms))
             }
             Err(error) => {
                 // A failed read leaves nothing kept: the old values may no longer be true.
                 self.forget_read(device);
-                if device_failure(error) {
+                if device_failure(&error) {
                     let _ = adapter.disconnect().await;
                 }
+                Err(error)
             }
         }
-        result
     }
 
-    /// The values kept for this device, if any.
-    fn kept_read(&self, device: &DeviceId) -> Option<Props> {
-        self.reads.lock().unwrap_or_else(|e| e.into_inner()).get(device).map(|k| k.props.clone())
+    /// The kept values, when the read they come from started after read number `seq`.
+    fn kept_started_after(&self, device: &DeviceId, seq: u64) -> Option<(Props, u64)> {
+        self.reads
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(device)
+            .filter(|kept| kept.started_seq > seq)
+            .map(|kept| (kept.props.clone(), kept.read_at_ms))
     }
 
-    /// How many fresh reads of this device have finished.
-    fn fresh_finished(&self, device: &DeviceId) -> u64 {
-        self.fresh_done.lock().unwrap_or_else(|e| e.into_inner()).get(device).copied().unwrap_or(0)
+    /// True while this device's last background read failed and its wait is not over.
+    pub fn backed_off(&self, device: &DeviceId) -> bool {
+        self.backoff
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(device)
+            .is_some_and(|b| b.until > Instant::now())
+    }
+
+    /// Ends the backoff of this device: a read worked, or the person asked again by hand.
+    fn clear_backoff(&self, device: &DeviceId) {
+        self.backoff.lock().unwrap_or_else(|e| e.into_inner()).remove(device);
+    }
+
+    /// A background read of this device failed: it waits, longer each time in a row. The first
+    /// failure of a streak logs a warning; the ones after it stay quiet until a read works.
+    fn note_background_failure(&self, device: &DeviceId, error: &AdapterError) {
+        let (first, delay) = {
+            let mut backoff = self.backoff.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = backoff.get(device).map(|b| b.delay);
+            let delay = backoff_after(self.backoff_base, previous);
+            backoff.insert(device.clone(), Backoff { until: Instant::now() + delay, delay });
+            (previous.is_none(), delay)
+        };
+        if first {
+            tracing::warn!(
+                device = %device,
+                error = %error,
+                retry_in_s = delay.as_secs_f32(),
+                "the peripheral's idle read failed; it is tried again later, with a longer wait each time"
+            );
+        } else {
+            tracing::debug!(device = %device, error = %error, retry_in_s = delay.as_secs_f32(), "the peripheral's idle read failed again");
+        }
     }
 
     /// Forgets the kept values of this device: they are stale.
@@ -706,8 +810,16 @@ impl PeripheralHub {
         let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
         match reads.get(device) {
             None => true,
-            Some(kept) => now_unix_s().saturating_sub(kept.read_at) > KEPT_STALE.as_secs(),
+            Some(kept) => {
+                now_unix_ms().saturating_sub(kept.read_at_ms) > KEPT_STALE.as_millis() as u64
+            }
         }
+    }
+
+    /// True when a background pass may read this device now: its values are missing or stale,
+    /// and its last background read did not fail a moment ago.
+    pub fn due_for_background_read(&self, device: &DeviceId) -> bool {
+        self.needs_refresh(device) && !self.backed_off(device)
     }
 
     /// One background pass (#127): reads each device whose values are missing or stale, and only
@@ -716,8 +828,11 @@ impl PeripheralHub {
     /// It returns how many devices were read. A read is abandoned before it starts when input
     /// arrived while an earlier device was being read. Nothing on the view-open path calls this.
     pub async fn refresh_idle(&self, devices: &[DeviceId]) -> usize {
-        let needed: Vec<DeviceId> =
-            devices.iter().filter(|device| self.needs_refresh(device)).cloned().collect();
+        let needed: Vec<DeviceId> = devices
+            .iter()
+            .filter(|device| self.due_for_background_read(device))
+            .cloned()
+            .collect();
         if needed.is_empty() {
             return 0;
         }
@@ -731,16 +846,15 @@ impl PeripheralHub {
             if self.idle.idle_for() < enough {
                 break;
             }
-            if !self.needs_refresh(&device) {
+            if !self.due_for_background_read(&device) {
                 continue;
             }
-            match self.read_fresh(&device).await {
+            // Not `read_fresh`: that is the person's ask and ends the backoff.
+            match self.read_device(&device).await {
                 Ok(_) => read += 1,
                 // A device that is not here is not a failure: it is read when it comes back.
                 Err(AdapterError::UnknownDevice(_) | AdapterError::NotConnected) => {}
-                Err(error) => {
-                    tracing::warn!(device = %device, error = %error, "the peripheral's idle read failed")
-                }
+                Err(error) => self.note_background_failure(&device, &error),
             }
         }
         read
@@ -761,15 +875,14 @@ impl PeripheralHub {
                         id.0.clone(),
                         KeptValues {
                             adapter: kept.adapter.clone(),
-                            adapter_version: ADAPTER_VERSION.to_string(),
-                            read_at: kept.read_at,
+                            read_at_ms: kept.read_at_ms,
                             values: kept.props.clone(),
                         },
                     )
                 })
                 .collect()
         };
-        let file = KeptValuesFile { schema_version: KEPT_VALUES_SCHEMA, devices };
+        let file = KeptValuesFile { format: KEPT_FORMAT, devices };
         if let Err(error) = crate::storage::write_json(path, &file) {
             tracing::warn!(
                 path = %path.display(),
@@ -846,6 +959,7 @@ impl PeripheralHub {
             .insert(device.clone(), access.reads);
         if previous.is_some_and(|reads| reads != access.reads) {
             self.forget_read(device);
+            self.clear_backoff(device);
         }
         // The gate follows the access, whatever the access is. Writes need reads, so an
         // access that says otherwise keeps the writes off.
@@ -885,8 +999,25 @@ fn device_failure(error: &AdapterError) -> bool {
     matches!(error, AdapterError::Io(_) | AdapterError::NotConnected)
 }
 
-/// Reads the kept values file. A missing file has nothing kept; one that does not parse, or an
-/// entry from another adapter version, is ignored with a log line and never fatal (#127).
+/// Keeps a copy of a kept values file the daemon cannot use, as `peripheral-values.json.corrupt`
+/// next to it, before the next save overwrites it (as `storage::read_parsed` keeps an
+/// unparseable file). A failed copy is logged and nothing more.
+fn keep_unusable_copy(path: &Path) {
+    let name = path.file_name().and_then(|n| n.to_str()).unwrap_or(KEPT_VALUES_FILE);
+    let copy = path.with_file_name(format!("{name}.corrupt"));
+    if let Err(error) = std::fs::copy(path, &copy) {
+        tracing::warn!(
+            path = %path.display(),
+            copy = %copy.display(),
+            error = %error,
+            "could not keep a copy of the unusable kept peripheral values"
+        );
+    }
+}
+
+/// Reads the kept values file. A missing file has nothing kept. One that does not parse, or has
+/// another [`KEPT_FORMAT`], is copied aside, logged and ignored, never fatal (#127). The adapter
+/// version is not part of the check: an app update keeps the values.
 fn load_kept_values(path: &Path) -> BTreeMap<DeviceId, Kept> {
     let Some(bytes) = crate::paths::read_optional(path) else {
         return BTreeMap::new();
@@ -899,35 +1030,34 @@ fn load_kept_values(path: &Path) -> BTreeMap<DeviceId, Kept> {
                 error = %error,
                 "peripheral-values.json did not parse; the kept peripheral values are ignored"
             );
+            keep_unusable_copy(path);
             return BTreeMap::new();
         }
     };
-    if file.schema_version != KEPT_VALUES_SCHEMA {
+    if file.format != KEPT_FORMAT {
         tracing::warn!(
             path = %path.display(),
-            found = file.schema_version,
-            expected = KEPT_VALUES_SCHEMA,
-            "peripheral-values.json has another schema version; its values are ignored"
+            found = file.format,
+            expected = KEPT_FORMAT,
+            "peripheral-values.json has another format; its values are ignored"
         );
+        keep_unusable_copy(path);
         return BTreeMap::new();
     }
-    let mut kept = BTreeMap::new();
-    for (id, values) in file.devices {
-        if values.adapter_version != ADAPTER_VERSION {
-            tracing::warn!(
-                device = %id,
-                found = %values.adapter_version,
-                expected = ADAPTER_VERSION,
-                "kept peripheral values from another adapter version are ignored"
-            );
-            continue;
-        }
-        kept.insert(
-            DeviceId(id),
-            Kept { adapter: values.adapter, props: values.values, read_at: values.read_at },
-        );
-    }
-    kept
+    file.devices
+        .into_iter()
+        .map(|(id, values)| {
+            (
+                DeviceId(id),
+                Kept {
+                    adapter: values.adapter,
+                    props: values.values,
+                    read_at_ms: values.read_at_ms,
+                    started_seq: 0,
+                },
+            )
+        })
+        .collect()
 }
 
 /// Starts the background refresh (#127): every second, it reads a device whose kept values are
@@ -953,7 +1083,7 @@ pub fn start_idle_refresh(app: Arc<App>) {
                     .collect()
             };
             let wanted: Vec<DeviceId> =
-                saved.into_iter().filter(|id| app.peripherals.needs_refresh(id)).collect();
+                saved.into_iter().filter(|id| app.peripherals.due_for_background_read(id)).collect();
             if wanted.is_empty() {
                 continue;
             }
@@ -1284,6 +1414,18 @@ mod tests {
         let empty: PeripheralsFile = serde_json::from_str(r#"{"schema_version":1}"#)
             .expect("a missing list is empty");
         assert!(empty.peripherals.is_empty());
+    }
+
+    #[test]
+    fn the_wait_after_a_failed_background_read_doubles_up_to_thirty_minutes() {
+        let mut wait = None;
+        let mut seen = Vec::new();
+        for _ in 0..8 {
+            let next = backoff_after(BACKOFF_BASE, wait);
+            seen.push(next.as_secs() / 60);
+            wait = Some(next);
+        }
+        assert_eq!(seen, vec![1, 2, 4, 8, 16, 30, 30, 30], "minutes");
     }
 
     #[test]

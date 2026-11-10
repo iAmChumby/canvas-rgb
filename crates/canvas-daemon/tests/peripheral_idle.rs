@@ -121,3 +121,80 @@ async fn input_that_arrives_before_the_read_abandons_it() {
         "a read is abandoned before it starts when input arrived meanwhile"
     );
 }
+
+/// An idle person and a device that fails every read: the failing fake.
+fn failing_hub(fake: &FakePeripheral, base: Duration) -> (PeripheralHub, Arc<AtomicU64>) {
+    let (millis, idle) = fake_idle();
+    millis.store(60_000, Ordering::SeqCst);
+    fake.0.lock().unwrap().fail_read = 1_000;
+    (hub_with(fake, idle).with_backoff_base(base), millis)
+}
+
+/// #127: a failed background read does not retry every second. Three idle passes in a row make
+/// one read; the other two find the device backing off.
+#[tokio::test]
+async fn a_failed_idle_read_is_not_retried_on_the_next_two_idle_ticks() {
+    let fake = FakePeripheral::default();
+    let (hub, _millis) = failing_hub(&fake, canvas_daemon::peripherals::BACKOFF_BASE);
+    let id = fake.id();
+    reads_on(&hub, &fake).await;
+
+    for tick in 1..=3 {
+        assert_eq!(hub.refresh_idle(std::slice::from_ref(&id)).await, 0, "tick {tick} reads nothing good");
+    }
+    assert_eq!(fake.log().reads, 1, "three idle ticks, one read: the device backs off after the failure");
+    assert!(hub.backed_off(&id));
+    assert!(hub.kept(&id).is_none(), "the failed read kept nothing");
+}
+
+/// #127: the wait doubles, a streak warns once, and a read that works ends the backoff.
+#[tokio::test]
+async fn the_wait_doubles_a_streak_warns_once_and_a_good_read_ends_it() {
+    let fake = FakePeripheral::default();
+    let base = Duration::from_millis(200);
+    let (hub, _millis) = failing_hub(&fake, base);
+    let id = fake.id();
+    reads_on(&hub, &fake).await;
+    let logs = common::LogBuf::default();
+    let _capture = logs.install();
+
+    // First failure: waits `base`.
+    hub.refresh_idle(std::slice::from_ref(&id)).await;
+    assert_eq!(fake.log().reads, 1);
+    hub.refresh_idle(std::slice::from_ref(&id)).await;
+    assert_eq!(fake.log().reads, 1, "still waiting");
+    tokio::time::sleep(base + Duration::from_millis(40)).await;
+    // Second failure: waits twice the base, so the base later it still waits.
+    hub.refresh_idle(std::slice::from_ref(&id)).await;
+    assert_eq!(fake.log().reads, 2, "the first wait is over");
+    tokio::time::sleep(base + Duration::from_millis(40)).await;
+    hub.refresh_idle(std::slice::from_ref(&id)).await;
+    assert_eq!(fake.log().reads, 2, "the second wait is twice the first: one base later it is not over");
+    assert_eq!(
+        logs.text().matches("idle read failed;").count(),
+        1,
+        "one warning for the streak: {}",
+        logs.text()
+    );
+
+    // The mouse answers again; the wait ends the moment Read again works.
+    fake.0.lock().unwrap().fail_read = 0;
+    hub.read_fresh(&id).await.expect("the device answers");
+    assert!(!hub.backed_off(&id), "a read that works ends the backoff");
+    // And a new failure starts a new streak with a new warning.
+    assert_eq!(fake.log().reads, 3);
+}
+
+/// #127: the person's own Read again ends the backoff even when it fails too, so the next idle
+/// pass may try the device (no waiting out up to 30 minutes after they tried by hand).
+#[tokio::test]
+async fn read_again_by_hand_ends_the_backoff() {
+    let fake = FakePeripheral::default();
+    let (hub, _millis) = failing_hub(&fake, canvas_daemon::peripherals::BACKOFF_BASE);
+    let id = fake.id();
+    reads_on(&hub, &fake).await;
+    hub.refresh_idle(std::slice::from_ref(&id)).await;
+    assert!(hub.backed_off(&id));
+    assert!(hub.read_fresh(&id).await.is_err(), "the device still fails");
+    assert!(!hub.backed_off(&id), "the person asked again: the backoff is over");
+}

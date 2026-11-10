@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Peripherals: opening the page no longer pauses the mouse; its settings are read while you are not using it (#127)
+- Peripherals: opening the page no longer pauses the mouse. Its settings are read while you are away from it; until then the page says so, and Read again reads them now (#127)
 
 ## [0.10.2] - 2026-11-09
 

@@ -74,25 +74,25 @@ pub async fn get_peripheral(
         .await
         .ok_or_else(|| ApiFailure::not_found(format!("no peripheral with the id {id}")))?;
     let schema = app.peripherals.describe(&device).await.map_err(adapter_failure)?;
-    let (values, problem) = if access.reads {
+    let (values, problem, read_at_ms) = if access.reads {
         if fresh {
-            match app.peripherals.read_fresh(&device).await {
-                Ok(values) => (values, None),
+            match app.peripherals.read_fresh_stamped(&device).await {
+                Ok((values, read_at_ms)) => (values, None, Some(read_at_ms)),
                 Err(error) => {
                     tracing::warn!(device = %id, error = %error, "the peripheral did not answer the read");
-                    (Props::new(), Some(error.to_string()))
+                    (Props::new(), Some(error.to_string()), None)
                 }
             }
         } else {
-            match app.peripherals.kept(&device) {
-                Some(values) => (values, None),
-                None => (Props::new(), Some(NOT_READ_YET.to_string())),
+            match app.peripherals.kept_stamped(&device) {
+                Some((values, read_at_ms)) => (values, None, Some(read_at_ms)),
+                None => (Props::new(), Some(NOT_READ_YET.to_string()), None),
             }
         }
     } else {
-        (Props::new(), Some(READS_OFF.to_string()))
+        (Props::new(), Some(READS_OFF.to_string()), None)
     };
-    Ok(Json(PeripheralDetail { info, schema, values, access, problem, read_at_ms: None }))
+    Ok(Json(PeripheralDetail { info, schema, values, access, problem, read_at_ms }))
 }
 
 /// `PATCH /api/v1/peripherals/{id}`: writes the given keys to the device.
