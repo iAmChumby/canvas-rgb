@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
-import { applyBulk, canDrive, isUnavailable } from "@/lib/fanBulk";
+import { TACH_ONLY_WHY, UNREAD_DUTY_WHY, applyBulk, canDrive, isUnavailable } from "@/lib/fanBulk";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
 import type { FansStatus } from "@/proto/FansStatus";
 
@@ -43,5 +43,25 @@ describe("applyBulk", () => {
     expect(unavailable?.state).toBe("skipped");
     expect(unavailable?.detail).toMatch(/Not on this board/);
     expect(out.find((o) => o.id === "sys_fan1")?.state).toBe("applied");
+  });
+
+  it("names a header with an unread duty as unread, and a daemon-labelled tach-only header as tach only (#279)", async () => {
+    const unread = { ...header("cpu_fan"), pwm_percent: null } as FanHeaderStatus;
+    const tach = { ...header("pump_fan2"), label: "Pump fan 2 (tach only)", pwm_percent: null } as FanHeaderStatus;
+    const fans = { headers: [unread, tach], floor_percent: 20 } as unknown as FansStatus;
+    const write = vi.fn(async () => "sent" as const);
+    const out = await applyBulk(fans.headers, { kind: "fixed", percent: 50 }, fans, write);
+    expect(write).not.toHaveBeenCalled();
+    expect(out.find((o) => o.id === "cpu_fan")?.detail).toBe(UNREAD_DUTY_WHY);
+    expect(out.find((o) => o.id === "pump_fan2")?.detail).toBe(TACH_ONLY_WHY);
+  });
+
+  it("still sends BIOS to a header with no duty reading: it is the way back from Fixed or Curve (#279)", async () => {
+    const stuck = { ...header("cpu_fan"), pwm_percent: null, mode: { mode: "fixed", percent: 60 }, on_bios: false } as FanHeaderStatus;
+    const fans = { headers: [stuck], floor_percent: 20 } as unknown as FansStatus;
+    const write = vi.fn(async () => "sent" as const);
+    const out = await applyBulk(fans.headers, { kind: "bios" }, fans, write);
+    expect(write).toHaveBeenCalledWith("cpu_fan", { mode: "bios" }, expect.any(Function));
+    expect(out.find((o) => o.id === "cpu_fan")?.state).toBe("applied");
   });
 });

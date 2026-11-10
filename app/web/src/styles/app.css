@@ -1181,6 +1181,17 @@ html[data-motion="reduced"] *::after {
   color: var(--ink);
 }
 
+/* An option that cannot be picked reads as off, and hovering it does not light it (#279). */
+.seg-item:disabled,
+.seg-item:disabled:hover {
+  color: var(--mute);
+  cursor: not-allowed;
+}
+
+.seg-item[aria-checked="true"]:disabled {
+  color: var(--dim);
+}
+
 /* An icon-only group: the icon is the label, so the segments are tighter. */
 .seg[data-icons="true"] .seg-item {
   padding: 0 8px;
@@ -6278,6 +6289,20 @@ button.chip:hover {
   color: var(--mute);
   font-size: var(--t14);
   cursor: help;
+}
+
+/* In the Fans readouts the dash takes a figure's place, not a control's: it keeps the line's own
+   size, and a meter with no reading is a bare track rather than a bar at 0 (#279). */
+.rd-fans .unread-value {
+  min-height: 0;
+  padding: 0;
+  font-size: inherit;
+}
+
+.rd-fans .meter[data-unread="true"] {
+  background: transparent;
+  outline: 1px dashed var(--line-2);
+  outline-offset: -1px;
 }
 
 .read-only-dot {

@@ -12,6 +12,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Fans: a header whose speed or duty was not read shows as not read, instead of 0 RPM or 0% (#279)
 - Peripherals: a setting the device did not report shows as not read, instead of a made-up value (#276)
 - Tooltips stay inside the window instead of running off its edge (#271)
 

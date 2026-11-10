@@ -244,11 +244,23 @@ or acts as if a step worked without checking that it did.
   DPI strip and the controller's profile and button map do the same. One test over every peripheral
   schema in the fakes (`app/web/src/views/__tests__/PeripheralPartialRead.test.tsx`) removes each key
   in turn and fails on a control labelled with that setting, a chip with a figure or a colour for it,
-  a stage strip with no count, an active stage or an active profile that was not read. Siblings left
-  open (device figures drawn as `0` when missing, not peripheral settings): `header.pwm_percent ?? 0`
-  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty ring and the RPM figure), and
-  `h.rpm ?? 0` in the RPM history (`app/web/src/lib/store.ts`). When adding a device value to the
-  page, read it with `known()` and draw `UnreadValue` for `undefined`.
+  a stage strip with no count, an active stage or an active profile that was not read. Siblings
+  closed by [#279](https://github.com/iAmChumby/canvas-rgb/issues/279): `header.pwm_percent ?? 0`
+  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty meter and the RPM figures,
+  plus a temperature with no `celsius`), `h.rpm ?? 0` in the RPM history
+  (`app/web/src/lib/store.ts`, which now keeps a `null` slot for a poll with no reading), and the
+  made-up `0` in the service banner's `fmtSeconds` and in the demo display's fan read. The Fans
+  page draws each missing reading as `UnreadValue`; the history keeps one slot per poll, so the
+  sparkline breaks its line at a `null` slot instead of bridging it, and every reader of the
+  history (`peakOf`) skips `null`. Only a header whose label the daemon marks "(tach only)" is
+  called tach only; any other header with no duty is "duty not read". A header with no duty
+  reading is offered no Fixed or Curve, in the bulk bar and in the header editor alike: the daemon
+  accepts the request (it checks only the register map, `crates/canvas-svc/src/fans.rs:1202`), but
+  every write is read back (`fans.rs:1155-1168`), and with no reading the write fails and the
+  header goes back to BIOS. BIOS itself stays offered: it is the way back for a header left in
+  Fixed or Curve. The page's "no duty" can come from one failed poll (`fans.rs:1370` turns a read
+  error into `None`), so a lockout must never take the way back with it. When adding a device value to the page, read it with `known()` and draw
+  `UnreadValue` for `undefined`.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 

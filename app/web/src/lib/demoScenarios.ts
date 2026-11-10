@@ -217,6 +217,14 @@ export function unavailableHeaders(): string[] {
     .filter(Boolean);
 }
 
+/** `?state=fan-unread`: the CPU fan's speed and duty come back with no reading (#279). */
+export const FAN_UNREAD = "fan-unread";
+/** `?state=fan-stopped`: the CPU fan is read at 0 RPM and 0% duty (#279). */
+export const FAN_STOPPED = "fan-stopped";
+
+/** The header the two fan-reading scenarios change. */
+const SCENARIO_HEADER = "cpu_fan";
+
 /** Applies the fan scenarios to a status. */
 export function applyFanScenarios(status: FansStatus): FansStatus {
   const ids = handbackHeaders();
@@ -237,6 +245,18 @@ export function applyFanScenarios(status: FansStatus): FansStatus {
         }
         return h;
       }),
+    };
+  }
+  // Issue #279: a header the chip did not report comes back with no reading, and one that was
+  // read at 0 comes back as 0. The two must stay apart all the way to the page.
+  if (has(FAN_UNREAD) || has(FAN_STOPPED)) {
+    next = {
+      ...next,
+      headers: next.headers.map((h) =>
+        h.id === SCENARIO_HEADER
+          ? { ...h, rpm: has(FAN_UNREAD) ? null : 0, pwm_percent: has(FAN_UNREAD) ? null : 0 }
+          : h,
+      ),
     };
   }
   return next;

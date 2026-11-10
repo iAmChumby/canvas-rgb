@@ -817,7 +817,8 @@ function displayReads(s: DemoState, config: DisplayConfig): { value: number | nu
     return { value: reading?.celsius ?? null, rpm: false };
   }
   const header = fansStatus().headers.find((h) => h.id === source.header);
-  return { value: header?.rpm ?? 0, rpm: true };
+  // Issue #279: a header with no reading sends no value, as the daemon's own display does.
+  return { value: header?.rpm ?? null, rpm: true };
 }
 
 /** What the display shows now: the value in its unit, rounded the way the adapter rounds it. */
