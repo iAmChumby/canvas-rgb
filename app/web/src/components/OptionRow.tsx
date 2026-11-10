@@ -8,7 +8,9 @@ import type { ReactNode } from "react";
  * picker draws its effects with it, so no caller hand-rolls a `<button role="option">`.
  */
 export function OptionRow({
+  id,
   selected,
+  active,
   disabled,
   title,
   onSelect,
@@ -17,7 +19,11 @@ export function OptionRow({
   description,
   trailing,
 }: {
+  /** The row's id, for the listbox's `aria-activedescendant`. */
+  id?: string;
   selected?: boolean;
+  /** The keyboard cursor is on this row (the listbox owns the focus). */
+  active?: boolean;
   disabled?: boolean;
   title?: string;
   onSelect: () => void;
@@ -31,9 +37,13 @@ export function OptionRow({
   return (
     <button
       type="button"
+      id={id}
       className="rd-add-row"
       role="option"
       aria-selected={selected}
+      data-active={active ? "true" : undefined}
+      // The listbox owns the focus (the APG pattern): the options are reached with the arrow keys.
+      tabIndex={-1}
       disabled={disabled}
       title={title}
       onClick={onSelect}

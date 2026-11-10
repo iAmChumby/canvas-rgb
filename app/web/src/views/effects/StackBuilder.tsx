@@ -5,7 +5,7 @@
 // second engine (`?stack=1`); Try on the lights is a stack draft; Save writes the stack and
 // activates it. Nothing here writes an effect file or the layout except those two routes.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
@@ -222,6 +222,8 @@ export function StackBuilder({
   const [chooseFor, setChooseFor] = useState<string | null>(null);
   /** The layer whose mask picker is open, and the control it hangs under (#256). */
   const [maskFor, setMaskFor] = useState<string | null>(null);
+  /** The row the mask picker's keyboard cursor is on: an index into leads + rest (#256). */
+  const [maskActive, setMaskActive] = useState(0);
   /** A layer row picked up by a finger on its grip, and the row it is over. */
   const [touchId, setTouchId] = useState<string | null>(null);
 
@@ -229,6 +231,7 @@ export function StackBuilder({
   const tuneRef = useRef<HTMLSpanElement>(null);
   const chooseRef = useRef<HTMLSpanElement>(null);
   const maskAnchor = useRef<HTMLElement | null>(null);
+  const maskListRef = useRef<HTMLUListElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
   const backRef = useRef<HTMLSpanElement>(null);
   const promptRef = useRef<HTMLDivElement>(null);
@@ -294,6 +297,39 @@ export function StackBuilder({
     schemasRef.current = schemas;
   }, [schemas]);
 
+  /** The mask picker's list (#256): the six effects that read well as masks, then every other. */
+  const maskList = useMemo(() => {
+    const all = (effects ?? []).filter((effect) => !effect.id.startsWith("stack:"));
+    const leads: EffectSummary[] = [];
+    for (const id of MASK_LEAD_EFFECTS) {
+      const effect = all.find((entry) => entry.id === id);
+      if (effect) leads.push(effect);
+    }
+    const leadIds = new Set(leads.map((effect) => effect.id));
+    return { leads, rest: all.filter((effect) => !leadIds.has(effect.id)) };
+  }, [effects]);
+
+  /** The picker's rows in the order they are drawn: the six leads, then the rest. */
+  const maskChoices = useMemo(() => [...maskList.leads, ...maskList.rest], [maskList]);
+
+  // A mask refusal belongs to the layer it was said on: `pick` clears it (#256).
+
+  // The mask picker's listbox takes the focus when it opens, and its keyboard cursor starts on
+  // the layer's current mask (the APG listbox pattern, #256).
+  useEffect(() => {
+    if (maskFor === null) return;
+    maskListRef.current?.focus();
+  }, [maskFor]);
+
+  // The active row scrolls into view as the arrow keys move it.
+  useEffect(() => {
+    if (maskFor === null) return;
+    const effect = maskChoices[maskActive];
+    if (effect) {
+      document.getElementById(`mask-option-${effect.id}`)?.scrollIntoView({ block: "nearest" });
+    }
+  }, [maskActive, maskChoices, maskFor]);
+
   // ---- focus and keys (D95.5.7, D95.7 item 4) ---------------------------------------
 
   /** A popover closed by Escape puts focus back on the key that opened it. A click outside
@@ -318,6 +354,12 @@ export function StackBuilder({
   };
 
   const openSheet = () => setSheetOpen(true);
+
+  /** Picking a layer: a mask refusal belongs to the layer it was said on, so it clears here (#256). */
+  const pick = (id: string | null) => {
+    setMaskProblem(null);
+    setPicked(id);
+  };
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
 
@@ -535,7 +577,7 @@ export function StackBuilder({
       setPhase("ready");
       setBase(null);
       setDraft({ id: "stack:", layers: [] });
-      setPicked(null);
+      pick(null);
       return;
     }
     setPhase("loading");
@@ -548,7 +590,7 @@ export function StackBuilder({
         setBase(stack);
         setDraft(stack);
         setStatuses(Object.fromEntries(detail.layers.map((layer) => [layer.id, layer])));
-        setPicked(stack.layers[stack.layers.length - 1]?.id ?? null);
+        pick(stack.layers[stack.layers.length - 1]?.id ?? null);
         loadDetails(stack);
         loadPresets(stack.id);
         setPhase("ready");
@@ -1078,11 +1120,11 @@ export function StackBuilder({
   const revert = () => {
     if (base) {
       setDraft({ id: base.id, layers: base.layers });
-      setPicked(base.layers[base.layers.length - 1]?.id ?? null);
+      pick(base.layers[base.layers.length - 1]?.id ?? null);
     } else {
       setDraft({ id: "stack:", layers: [] });
       setNameDraft("");
-      setPicked(null);
+      pick(null);
     }
     setSheetOpen(false);
     setSaveError(null);
@@ -1194,6 +1236,9 @@ export function StackBuilder({
   const openMaskPicker = (id: string, anchor: HTMLElement) => {
     maskAnchor.current = anchor;
     setMaskProblem(null);
+    const layer = draftRef.current.layers.find((entry) => entry.id === id);
+    const at = maskChoices.findIndex((effect) => effect.id === layer?.mask?.effect);
+    setMaskActive(at >= 0 ? at : 0);
     setMaskFor(id);
   };
 
@@ -1261,6 +1306,26 @@ export function StackBuilder({
     closeMaskPicker();
   };
 
+  /** The mask picker's keys, as a listbox: arrows move, Home/End jump, Enter/Space choose. */
+  const onMaskKey = (event: ReactKeyboardEvent<HTMLUListElement>) => {
+    const last = maskChoices.length - 1;
+    if (last < 0) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const effect = maskChoices[maskActive];
+      if (effect && maskFor) void chooseMaskEffect(maskFor, effect.id);
+      return;
+    }
+    let next: number | null = null;
+    if (event.key === "ArrowDown") next = Math.min(last, maskActive + 1);
+    else if (event.key === "ArrowUp") next = Math.max(0, maskActive - 1);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+    if (next === null) return;
+    event.preventDefault();
+    setMaskActive(next);
+  };
+
   const addOne = async (effect: string) => {
     const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
@@ -1297,7 +1362,7 @@ export function StackBuilder({
     const next = { ...draftRef.current, layers: addLayer(layers, layer) };
     draftRef.current = next;
     setDraft(next);
-    setPicked(id);
+    pick(id);
     setAddOpen(false);
     setAddQuery("");
   };
@@ -1323,7 +1388,7 @@ export function StackBuilder({
     const next = removeLayer(draft.layers, id);
     setDraft((current) => ({ ...current, layers: next }));
     if (picked === id) {
-      setPicked(next[Math.min(index, next.length - 1)]?.id ?? null);
+      pick(next[Math.min(index, next.length - 1)]?.id ?? null);
       // The sheet is the removed layer's: it closes rather than showing the next one unsought.
       setSheetOpen(false);
     }
@@ -1341,7 +1406,7 @@ export function StackBuilder({
     }
     setLayerProblem(null);
     setDraft((current) => ({ ...current, layers: answer.layers }));
-    setPicked(answer.id);
+    pick(answer.id);
   };
 
   const reorder = (id: string, to: number) => {
@@ -1453,25 +1518,15 @@ export function StackBuilder({
       .filter((row): row is { effect: EffectSummary; match: NonNullable<typeof row.match> } => row.match !== null);
   }, [effects]);
 
-  /** The mask picker's list (#256): the six effects that read well as masks, then every other. */
-  const maskList = useMemo(() => {
-    const all = (effects ?? []).filter((effect) => !effect.id.startsWith("stack:"));
-    const leads: EffectSummary[] = [];
-    for (const id of MASK_LEAD_EFFECTS) {
-      const effect = all.find((entry) => entry.id === id);
-      if (effect) leads.push(effect);
-    }
-    const leadIds = new Set(leads.map((effect) => effect.id));
-    return { leads, rest: all.filter((effect) => !leadIds.has(effect.id)) };
-  }, [effects]);
-
   /** One row of the mask picker: choosing it gives the open layer this mask. */
-  const maskRow = (effect: EffectSummary) => {
+  const maskRow = (effect: EffectSummary, index: number) => {
     const refusal = maskFor ? maskRefusal(draft.layers, maskFor, effect.id) : null;
     const current = maskFor ? draft.layers.find((layer) => layer.id === maskFor)?.mask?.effect === effect.id : false;
     return (
       <li key={effect.id}>
         <OptionRow
+          id={`mask-option-${effect.id}`}
+          active={index === maskActive}
           selected={current}
           disabled={refusal !== null}
           title={refusal ?? undefined}
@@ -1793,14 +1848,14 @@ export function StackBuilder({
                             const id = event.dataTransfer.getData("text/plain");
                             if (id) reorder(id, index);
                           }}
-                          onClick={() => setPicked(layer.id)}
+                          onClick={() => pick(layer.id)}
                           onKeyDown={(event) => {
                             // A row is in the tab order so the picked layer can be changed from
                             // the keyboard; the grip's own keys reorder it.
                             if (event.target !== event.currentTarget) return;
                             if (event.key === "Enter" || event.key === " ") {
                               event.preventDefault();
-                              setPicked(layer.id);
+                              pick(layer.id);
                             }
                           }}
                         >
@@ -1834,16 +1889,23 @@ export function StackBuilder({
                           <span className="layer-thumbs">
                             <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, effects, layer.effect)} />
                             {layer.mask && (
-                              <span
+                              <button
+                                type="button"
                                 className="layer-mask-thumb"
+                                aria-label={`Change the mask of ${layer.name}`}
                                 title={`Mask: ${layerLabel(schemas, effects, layer.mask.effect)}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  pick(layer.id);
+                                  openMaskPicker(layer.id, event.currentTarget);
+                                }}
                               >
                                 <Thumb
                                   id={layer.mask.effect}
                                   size="sm"
                                   label={`Mask: ${layerLabel(schemas, effects, layer.mask.effect)}`}
                                 />
-                              </span>
+                              </button>
                             )}
                           </span>
                           <span className="layer-text">
@@ -1886,7 +1948,7 @@ export function StackBuilder({
                           </span>
                           {layer.mask ? (
                             <IconButton
-                              label="Remove mask"
+                              label={`Remove the mask from ${layer.name}`}
                               icon={<Eraser size={16} />}
                               onClick={() => removeMask(layer.id)}
                             />
@@ -1899,7 +1961,7 @@ export function StackBuilder({
                               title={`Add a mask to ${layer.name}`}
                               onClick={(event) => {
                                 event.stopPropagation();
-                                setPicked(layer.id);
+                                pick(layer.id);
                                 openMaskPicker(layer.id, event.currentTarget);
                               }}
                             >
@@ -2190,8 +2252,8 @@ export function StackBuilder({
                               onChange={(source) => patchMaskDraft(pickedLayer.id, { source })}
                             />
                             <span className="rd-mask-hint">
-                              Brightness follows the picture&apos;s brightness; Strongest colour counts any colour it
-                              draws as fully opaque (the canvases carry no alpha).
+                              Strongest colour: each pixel shows as much of the layer as its strongest colour
+                              channel is bright.
                             </span>
                           </div>
                           <div className="layer-field wide layer-field-row">
@@ -2223,7 +2285,9 @@ export function StackBuilder({
                           </div>
                         </div>
                         {schemas[pickedLayer.mask.effect] === null ? (
-                          <p className="error-line">This mask effect is gone. Choose another.</p>
+                          <p className="error-line">
+                            This mask effect is gone. Choose another, or remove the mask.
+                          </p>
                         ) : schemas[pickedLayer.mask.effect] === undefined ? (
                           <p className="dim">Loading the mask&apos;s properties…</p>
                         ) : (
@@ -2388,15 +2452,25 @@ export function StackBuilder({
           <p className="rd-mask-picker-note">
             A mask&apos;s picture decides where the layer shows. These six read best as masks.
           </p>
-          <ul className="rd-add-list" role="listbox" aria-label="Effects to use as a mask">
+          <ul
+            ref={maskListRef}
+            className="rd-add-list"
+            role="listbox"
+            aria-label="Effects to use as a mask"
+            tabIndex={-1}
+            aria-activedescendant={
+              maskChoices[maskActive] ? `mask-option-${maskChoices[maskActive].id}` : undefined
+            }
+            onKeyDown={onMaskKey}
+          >
             <li className="rd-add-group" aria-hidden="true">
               Good as a mask
             </li>
-            {maskList.leads.map(maskRow)}
+            {maskList.leads.map((effect, index) => maskRow(effect, index))}
             <li className="rd-add-group" aria-hidden="true">
               More
             </li>
-            {maskList.rest.map(maskRow)}
+            {maskList.rest.map((effect, index) => maskRow(effect, maskList.leads.length + index))}
           </ul>
         </div>
       </Popover>

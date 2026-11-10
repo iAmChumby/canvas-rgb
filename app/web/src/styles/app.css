@@ -7970,6 +7970,12 @@ button.chip:hover {
   background: var(--hover);
 }
 
+/* The row the mask picker's keyboard cursor is on (#256): the listbox owns the focus, so this is
+   the only mark of where Enter would choose. */
+.rd-add-row[data-active="true"] {
+  background: var(--hover);
+}
+
 .rd-add-row:disabled {
   cursor: default;
   opacity: 0.55;

@@ -122,6 +122,19 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
     };
     stacks[nested.id] = nested;
   }
+  // `?state=stack-gone-mask`: a layer whose mask names an effect the library does not have, so the
+  // builder can show its refusal next to the mask Select (#256).
+  if (scenario.has("stack-gone-mask")) {
+    const gone: Stack = {
+      id: "stack:Gone mask",
+      layers: [
+        layer("l1", "Warm white", "white", { ...(effects.white?.defaults ?? {}), temperature: number(2700) }, {
+          mask: { effect: "html:gone", props: {}, source: "luma", invert: false, amount: 100 },
+        }),
+      ],
+    };
+    stacks[gone.id] = gone;
+  }
   return stacks;
 }
 
