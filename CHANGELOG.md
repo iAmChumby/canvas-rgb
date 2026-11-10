@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Fans: "Don't exceed" now speeds the fan up until the temperature is back under your limit, instead of only setting a minimum speed (#255)
+
 ### Changed
 
 - The "Updated to" message that greets you after an update now appears in the corner with the rest of the app's messages: it shows the new version, offers What's new, goes away by itself after a few seconds, and stays put while you point at it. (#168)
