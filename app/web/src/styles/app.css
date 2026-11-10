@@ -4502,6 +4502,15 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* Issue #255 review: on a phone the floor note's sentence must stay two lines, so the slots
+   below it keep the height the old sentence had. The tighter inset is the room it needs. */
+@media (max-width: 720px) {
+  .fan-floor-note {
+    padding-left: calc(var(--s2) - 2px);
+    padding-right: calc(var(--s2) - 2px);
+  }
+}
+
 /* The compact "don't exceed" control (#130): the words, the figure and its state
    wrap as one group, never apart. In the Fixed header's floor note it takes its
    own line under the note, inside the same box, so it adds no new row. */

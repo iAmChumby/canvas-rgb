@@ -80,8 +80,10 @@ describe("the hot line on the fan curve chart", () => {
     // Issue #255: the floor sentence says what "Don't exceed" now does, with the line and the
     // fixed safety ceiling filled in and the source in the daemon's short name.
     expect(document.querySelector(".rule")?.textContent).toContain(
-      "Above 74 °C the fan speeds up until CPU is back under 74 °C; at 84 °C it runs at full speed.",
+      "Above 74 °C the fan speeds up to bring CPU back under it; at 84 °C it runs at full speed.",
     );
+    // Issue #255 review: the speed-up band from the line to the ceiling is drawn and named.
+    expect(screen.getByText("speeds up")).toBeTruthy();
     expect(screen.getByLabelText("Don't exceed temperature")).toBeTruthy();
     // Nothing to reset while the limit is automatic: the state word stands in for the button.
     expect(screen.queryByRole("button", { name: "Reset to automatic" })).toBeNull();

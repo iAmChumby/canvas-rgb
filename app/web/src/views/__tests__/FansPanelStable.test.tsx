@@ -5,7 +5,7 @@ import { FansView } from "@/views/FansView";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 
 // Issue #109: editing a fan curve made the editor panel grow and shrink. The daemon's reason
-// ("canvas-rgb overrode this: hot floor 50%...") appeared above the floor note and pushed the
+// ("canvas-rgb overrode this: ...") appeared above the floor note and pushed the
 // panel down, and "Applying" appeared under the points on every commit, so the panel's scrollbar
 // came and went and the points were laid out again at a new width.
 //
@@ -176,15 +176,15 @@ describe("the fan editor panel while the daemon has a reason", () => {
         });
       });
     };
-    withReason("hot floor 50% while CPU is 78 °C", false);
+    withReason("at the safety ceiling: CPU is 78 °C", false);
     const first = live().textContent;
     expect(first).toBe("canvas-rgb is overriding CPU fan");
     // Only the temperature changes: the announced words stay as they were.
-    withReason("hot floor 50% while CPU is 79 °C", false);
+    withReason("at the safety ceiling: CPU is 79 °C", false);
     expect(live().textContent).toBe(first);
     // The words the eye reads do carry the live value, and sit outside the live region.
-    expect(screen.getByText(/while CPU is 79/)).toBeTruthy();
-    expect(live().contains(screen.getByText(/while CPU is 79/))).toBe(false);
+    expect(screen.getByText(/CPU is 79 °C/)).toBeTruthy();
+    expect(live().contains(screen.getByText(/CPU is 79 °C/))).toBe(false);
     // A different kind of reason is announced.
     withReason("write failed: busy", true);
     expect(live().textContent).toBe("CPU fan: canvas-rgb handed this header back to BIOS");
@@ -272,7 +272,7 @@ describe("the fan editor panel while the daemon has a reason", () => {
       more.focus();
       expect(document.activeElement).toBe(more);
       cut = false;
-      setReason("hot floor 50% while CPU is 78 °C");
+      setReason("at the safety ceiling: CPU is 78 °C");
       await waitFor(() => expect(screen.queryByRole("button", { name: "More" })).toBeNull());
       expect(document.activeElement).toBe(region);
       // The reason clears while More has focus.

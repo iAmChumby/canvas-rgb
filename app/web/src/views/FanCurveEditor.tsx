@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { HotLimitStatus } from "@/proto/HotLimitStatus";
-import { HOT_FLOOR, HOT_CPU_FAN_FLOOR, HOT_TEMP_C, CPU_FAN } from "@/lib/fan-rules";
+import { HOT_TEMP_C } from "@/lib/fan-rules";
 import { clamp } from "@/lib/format";
 import { dragThresholdPx } from "@/lib/hitTest";
 import { cancelPress } from "@/lib/pressDrag";
@@ -249,8 +249,6 @@ export function FanCurveEditor({
     commitHot(next);
   };
 
-  const hotFloor = header === CPU_FAN ? HOT_CPU_FAN_FLOOR : HOT_FLOOR;
-  const hotTop = yOf(hotFloor);
   const hotLeft = xOf(hotValue);
   const hotLabel = `Don't exceed ${hotValue} °C${hot ? (hot.user_set ? " · set by you" : " · automatic") : ""}`;
   // The chart shows the figure only; the full words are on the handle (aria-valuetext) and in
@@ -280,6 +278,9 @@ export function FanCurveEditor({
         <defs>
           <pattern id="ceiling-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
             <line x1="0" y1="0" x2="0" y2="8" stroke="var(--down)" strokeWidth="1.5" opacity="0.45" />
+          </pattern>
+          <pattern id="speedup-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="8" stroke="var(--warn)" strokeWidth="1.5" opacity="0.5" />
           </pattern>
         </defs>
         {pctGrid.map((p) => (
@@ -345,16 +346,29 @@ export function FanCurveEditor({
             </text>
           </>
         )}
-        {/* Issue #255: from the hot line to the right is the speed-up zone. The flat floor (G4)
-            still applies inside it, and the closed loop raises the header further until the
-            source is back under the line. */}
-        <rect
-          x={hotLeft}
-          y={hotTop}
-          width={MARGIN.left + plotW - hotLeft}
-          height={MARGIN.top + plotH - hotTop}
-          fill="color-mix(in srgb, var(--warn) 16%, transparent)"
-        />
+        {/* Issue #255 review: from the hot line to the ceiling is the speed-up zone. The flat
+            floor (G4) still applies inside it, and the closed loop raises the header further
+            until the source is back under the line. */}
+        {hot && ceilX > hotLeft && (
+          <g>
+            <title>{`${header} speeds up above the don't exceed line`}</title>
+            <rect x={hotLeft} y={MARGIN.top} width={ceilX - hotLeft} height={plotH} fill="url(#speedup-hatch)" />
+            <text
+              x={hotLeft + 14}
+              y={MARGIN.top + plotH - 8}
+              transform={`rotate(-90 ${hotLeft + 14} ${MARGIN.top + plotH - 8})`}
+              textAnchor="start"
+              fill="var(--warn)"
+              stroke="var(--panel)"
+              strokeWidth={4}
+              paintOrder="stroke"
+              fontSize={14}
+              fontFamily="var(--fm)"
+            >
+              speeds up
+            </text>
+          </g>
+        )}
         <line x1={hotLeft} x2={hotLeft} y1={MARGIN.top} y2={MARGIN.top + plotH} stroke="var(--warn)" strokeDasharray="4 4" />
         {/* The hot line's handle: drag it, or use the arrow keys. */}
         <rect

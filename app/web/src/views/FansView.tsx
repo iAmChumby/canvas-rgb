@@ -1116,7 +1116,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {mode.mode === "bios" && status}
 
         {manual && (
-          <div className="rule">
+          <div className="rule fan-floor-note">
             <span>
               Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c, hotSourceName, hotRow?.ceiling_c)}
             </span>

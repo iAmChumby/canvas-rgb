@@ -27,7 +27,9 @@ export function hotFloor(header: string, configured: number): number {
  * daemon's own reason sentence uses, so the page and the status agree.
  */
 export function hotRuleText(limitC: number | undefined, source: string, ceilingC: number | undefined): string {
-  const line = limitC === undefined ? "its hot limit" : `${limitC} °C`;
-  const ceiling = ceilingC === undefined ? "its safety ceiling" : `${ceilingC} °C`;
-  return `Above ${line} the fan speeds up until ${source} is back under ${line}; at ${ceiling} it runs at full speed.`;
+  // The service rounds the limit the same way before putting it in the status reason, so the
+  // sentence and the reason always name the same number.
+  const line = limitC === undefined ? "its hot limit" : `${Math.round(limitC)} °C`;
+  const ceiling = ceilingC === undefined ? "its safety ceiling" : `${Math.round(ceilingC)} °C`;
+  return `Above ${line} the fan speeds up to bring ${source} back under it; at ${ceiling} it runs at full speed.`;
 }
