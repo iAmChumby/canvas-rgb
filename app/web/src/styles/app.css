@@ -7662,6 +7662,13 @@ button.chip:hover {
   top: calc(100% + 6px);
 }
 
+.rd-area-label[data-inside="true"] {
+  bottom: auto;
+  top: 6px;
+  left: 6px;
+  right: auto;
+}
+
 /* The "Make rectangle" key of a picked area that is not a rectangle (#257): it floats over the
    stage's top-right corner, where it never sits under a frame's handles. */
 .rd-stage-float {

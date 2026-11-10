@@ -599,6 +599,8 @@ export function StackBuilder({
   }, []);
 
   const load = useCallback(() => {
+    // A drag cut off by a reload never sent its end: undo and redo are free again (#257).
+    areaDragging.current = false;
     if (isNew) {
       setPhase("ready");
       setBase(null);

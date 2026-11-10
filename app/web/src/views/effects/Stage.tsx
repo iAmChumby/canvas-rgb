@@ -46,6 +46,21 @@ const AREA_REF: PartRef = { kind: "zone", index: 0 };
 /** An arrow key nudges the area this many canvas units; with Shift, the big step. */
 const NUDGE = 1;
 const NUDGE_BIG = 10;
+/** The picked layer's label sits above its frame, or below it when the frame is this close (canvas
+ *  units) to the top; a frame that also reaches the bottom keeps it inside, at its top-left. */
+const LABEL_ROOM_Y = 30;
+type LabelBox = { x: number; y: number; width: number; height: number };
+const labelInside = (b: LabelBox) => b.y < LABEL_ROOM_Y && b.y + b.height > CANVAS_H - LABEL_ROOM_Y;
+/** Anchored to the frame's right edge when the frame ends past 60 % of the picture. */
+const labelEnd = (b: LabelBox) => b.x + b.width > CANVAS_W * 0.6;
+/** The label's widest, in px: the room left on the picture from its anchor, so it never clips. */
+function labelRoom(b: LabelBox, stageW: number): number {
+  if (stageW <= 0) return 260; // not measured yet: the cap alone
+  const unit = stageW / CANVAS_W;
+  const room = labelEnd(b) ? (b.x + b.width) * unit : (CANVAS_W - b.x) * unit;
+  return Math.max(48, Math.min(260, Math.floor(room - 4)));
+}
+
 /** A finger's reach from a handle's centre: half the 44px hit box (the knob stays 12px). */
 const TOUCH_REACH_PX = 22;
 
@@ -252,6 +267,15 @@ export function Stage({
   };
 
   const emit = (area: Bounds, run: string, hold: boolean) => onAreaChange?.({ kind: "rect", ...area }, run, hold);
+
+  // A stage that goes away mid-drag (a reload, a remount) still frees undo and redo.
+  useEffect(
+    () => () => {
+      if (drag.current) onDragActive?.(false);
+    },
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [],
+  );
 
   /** The drag is over, however it ended: the run closes and undo and redo are free again. */
   const finishDrag = () => {
@@ -486,8 +510,10 @@ export function Stage({
                 {selected && (
                   <span
                     className="rd-area-label"
-                    data-below={frame.bounds.y < 30 ? "true" : undefined}
-                    data-end={frame.bounds.x + frame.bounds.width > CANVAS_W * 0.6 ? "true" : undefined}
+                    data-below={frame.bounds.y < LABEL_ROOM_Y ? "true" : undefined}
+                    data-end={labelEnd(frame.bounds) ? "true" : undefined}
+                    data-inside={labelInside(frame.bounds) ? "true" : undefined}
+                    style={{ maxWidth: `${labelRoom(frame.bounds, stageW)}px` }}
                   >
                     {layer.name} · {areaName(layer.area, layout, devices)}
                   </span>
