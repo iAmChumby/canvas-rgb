@@ -11,6 +11,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Peripherals: a device you have not let canvas-rgb read no longer shows made-up settings (#264)
 - Peripherals and Fans: controls that ran past their panel on narrower windows now fit (#263, #268)
 - Devices: the light strip's Size key reads in full instead of "Si" (#273)
+- Tooltips stay inside the window instead of running off its edge (#271)
 
 ## [0.11.0] - 2026-11-10
 
