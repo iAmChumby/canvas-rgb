@@ -189,9 +189,13 @@ export function StackBuilder({
   const [edit, setEdit] = useState<History<Stack>>(() => historyOf({ id: "stack:", layers: [] }));
   const draft = edit.draft;
   /** A change to the draft: a step of its own, or part of the undo run it names. */
-  const setDraft = (update: Stack | ((current: Stack) => Stack), run?: string) => {
+  const setDraft = (update: Stack | ((current: Stack) => Stack), run?: string, hold = false) => {
     setEdit((history) =>
-      record(history, typeof update === "function" ? update(history.draft) : update, run === undefined ? {} : { run }),
+      record(
+        history,
+        typeof update === "function" ? update(history.draft) : update,
+        run === undefined ? {} : { run, hold },
+      ),
     );
   };
   /** A checkpoint with no steps behind it: a load, a save or a revert. */
@@ -201,7 +205,8 @@ export function StackBuilder({
   const [statuses, setStatuses] = useState<Record<string, StackLayerStatus>>({});
   const [schemas, setSchemas] = useState<Record<string, PropertySchema | null>>({});
   const [presets, setPresets] = useState<{ builtIn: Preset[]; user: Preset[] }>({ builtIn: [], user: [] });
-  const [parts, setParts] = useState(true);
+  // Parts (the desk's outlines) starts off; a drag shows them anyway (spec §3).
+  const [parts, setParts] = useState(false);
   const [addOpen, setAddOpen] = useState(false);
   const [addQuery, setAddQuery] = useState("");
   const [pickerFor, setPickerFor] = useState<string | null>(null);
@@ -259,7 +264,10 @@ export function StackBuilder({
   const areaOpener = useRef<HTMLElement | null>(null);
   const touchDrag = useRef<{ id: string; over: string | null } | null>(null);
   const draftRef = useRef(draft);
-  const historyRef = useRef(edit);
+  /** A pointer drag or resize on the stage is in progress: undo and redo wait for it. */
+  const areaDragging = useRef(false);
+  /** Undo or redo was asked for: the next draft change may have taken the picked layer away. */
+  const stepped = useRef(false);
   const nameRef = useRef("");
   const baseRef = useRef<Stack | null>(null);
   const pickedRef = useRef<string | null>(null);
@@ -302,9 +310,6 @@ export function StackBuilder({
   useEffect(() => {
     draftRef.current = draft;
   }, [draft]);
-  useEffect(() => {
-    historyRef.current = edit;
-  }, [edit]);
   useEffect(() => {
     nameRef.current = nameDraft;
   }, [nameDraft]);
@@ -1159,22 +1164,32 @@ export function StackBuilder({
 
   // ---- undo and redo (#257) ---------------------------------------------------------
 
-  /**
-   * A step taken: the draft it lands on is the new one, and a pick that draft no longer holds
-   * (an undo took the layer back) moves to the top layer. The layer sheet closes too: it was
-   * the removed layer's.
-   */
-  const settle = (next: History<Stack>) => {
-    setEdit(next);
-    const current = pickedRef.current;
-    if (current === null || next.draft.layers.some((layer) => layer.id === current)) return;
-    setMaskProblem(null);
-    setPicked(next.draft.layers[next.draft.layers.length - 1]?.id ?? null);
-    setSheetOpen(false);
+  // Undo and redo go through the functional updater, so a change and a step asked for in the same
+  // tick compose in order (a ref set in an effect would still hold the draft before the change).
+  // A drag in progress finishes first: its gesture is one step, and a step taken in the middle
+  // would tear it in two.
+  const undoNow = () => {
+    if (areaDragging.current) return;
+    stepped.current = true;
+    setEdit((history) => undo(history));
+  };
+  const redoNow = () => {
+    if (areaDragging.current) return;
+    stepped.current = true;
+    setEdit((history) => redo(history));
   };
 
-  const undoNow = () => settle(undo(historyRef.current));
-  const redoNow = () => settle(redo(historyRef.current));
+  // After a step: a pick that the draft no longer holds (an undo took the layer back) moves to
+  // the top layer. The layer sheet closes too: it was the removed layer's.
+  useEffect(() => {
+    if (!stepped.current) return;
+    stepped.current = false;
+    const current = pickedRef.current;
+    if (current === null || edit.draft.layers.some((layer) => layer.id === current)) return;
+    setMaskProblem(null);
+    setPicked(edit.draft.layers[edit.draft.layers.length - 1]?.id ?? null);
+    setSheetOpen(false);
+  }, [edit]);
 
   // Ctrl+Z and ctrl+shift+Z (and ctrl+Y) take a step back and take it again, as the Layout page
   // does (views/LayoutView.tsx:530-550). A text field keeps its own undo: the reader there is
@@ -1186,8 +1201,23 @@ export function StackBuilder({
       // The stage and a row handle their own keys first; a key they took is not taken again.
       if (event.defaultPrevented) return;
       const target = event.target as HTMLElement | null;
-      if (target && (target.tagName === "INPUT" || target.tagName === "TEXTAREA" || target.isContentEditable)) return;
-      if (sheetOpen || pickerFor || leaving || naming) return;
+      // A field, a select and a combobox trigger keep their own keys (a select's list answers
+      // Ctrl+letters as type-ahead), and so does anything inside an open popover or dialog.
+      if (
+        target &&
+        (target.tagName === "INPUT" ||
+          target.tagName === "TEXTAREA" ||
+          target.tagName === "SELECT" ||
+          target.isContentEditable ||
+          target.closest('[role="combobox"], [role="listbox"], [role="dialog"], [role="alertdialog"], [role="menu"]'))
+      ) {
+        return;
+      }
+      // Any open surface owns the keyboard: the Add layer popover, the mask picker, the layer
+      // sheet, the area picker, the leave and name prompts. The DOM check catches a popover or
+      // dialog the flags above do not know about.
+      if (sheetOpen || pickerFor || leaving || naming || addOpen || maskFor) return;
+      if (document.querySelector('.popover[role="dialog"]:not([inert]), [role="alertdialog"], [aria-modal="true"]')) return;
       const key = event.key.toLowerCase();
       if (key === "z" && !event.shiftKey) {
         event.preventDefault();
@@ -1208,7 +1238,7 @@ export function StackBuilder({
     return () => window.removeEventListener("keydown", onKey);
     // `duplicate` reads the draft it was rendered with; the listener is re-registered with it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, sheetOpen, pickerFor, leaving, naming]);
+  }, [draft, sheetOpen, pickerFor, leaving, naming, addOpen, maskFor]);
 
   const leavePrompt = (
     <div className="rd-scrim" role="presentation">
@@ -1269,17 +1299,26 @@ export function StackBuilder({
 
   // ---- layer edits ------------------------------------------------------------------
 
-  const patch = (id: string, change: Partial<StackLayer>, run?: string) => {
-    setDraft((current) => ({ ...current, layers: patchLayer(current.layers, id, change) }), run);
+  const patch = (id: string, change: Partial<StackLayer>, run?: string, hold = false) => {
+    setDraft((current) => ({ ...current, layers: patchLayer(current.layers, id, change) }), run, hold);
   };
 
   /** The picked layer's area made into the rectangle it covers now, by its own key's name (#257). */
+  /**
+   * A refusal from a key on the stage: the inspector shows it where it always has, but the
+   * inspector may be off screen (a short window, a phone), so it is also a note.
+   */
+  const refuse = (words: string) => {
+    setLayerProblem(words);
+    notify(words, "warn");
+  };
+
   const makeRect = (id: string) => {
     const layer = draftRef.current.layers.find((entry) => entry.id === id);
     if (!layer) return;
     const rect = areaAsRect(layer.area, layout);
     if (!rect) {
-      setLayerProblem("That area is not on the desk, so there is no rectangle to make.");
+      refuse("That area is not on the desk, so there is no rectangle to make.");
       return;
     }
     setLayerProblem(null);
@@ -1420,6 +1459,7 @@ export function StackBuilder({
     const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
       setAddProblem(refusal);
+      notify(refusal, "warn");
       return;
     }
     setAddProblem(null);
@@ -1440,6 +1480,7 @@ export function StackBuilder({
     const lateRefusal = addLayerRefusal(layers, effect);
     if (lateRefusal) {
       setAddProblem(lateRefusal);
+      notify(lateRefusal, "warn");
       return;
     }
     const id = nextLayerId(layers);
@@ -1486,12 +1527,12 @@ export function StackBuilder({
 
   const duplicate = (id: string) => {
     if (draft.layers.length >= MAX_LAYERS) {
-      setLayerProblem(`A stack holds ${MAX_LAYERS} layers`);
+      refuse(`A stack holds ${MAX_LAYERS} layers`);
       return;
     }
     const answer = duplicateLayer(draft.layers, id);
     if (!answer.id) {
-      setLayerProblem(`A stack holds ${MAX_HTML_LAYERS} HTML layers`);
+      refuse(`A stack holds ${MAX_HTML_LAYERS} HTML layers`);
       return;
     }
     setLayerProblem(null);
@@ -1799,8 +1840,11 @@ export function StackBuilder({
                   picked={pickedLayer}
                   parts={parts}
                   onSelect={pick}
-                  onAreaChange={(area, run) => pickedLayer && patch(pickedLayer.id, { area }, run)}
+                  onAreaChange={(area, run, hold) => pickedLayer && patch(pickedLayer.id, { area }, run, hold)}
                   onAreaChangeEnd={() => setEdit((history) => endRun(history))}
+                  onDragActive={(active) => {
+                    areaDragging.current = active;
+                  }}
                   onDelete={remove}
                   onDuplicate={duplicate}
                   onMakeRect={makeRect}

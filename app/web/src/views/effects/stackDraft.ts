@@ -532,6 +532,21 @@ export function pointerToCanvas(
   };
 }
 
+/**
+ * Pointer → canvas for the builder's stage (#257), one scale per axis: the picture's box is
+ * 320:200 by its CSS, but a box whose height is clamped (a short window) is not, and a scale taken
+ * from the width alone would drift in y by the difference. A point outside the box clamps at its
+ * edge.
+ */
+export function pointerToStage(clientX: number, clientY: number, box: StageBox): { x: number; y: number } {
+  const kx = box.width > 0 ? box.width / CANVAS_W : 1;
+  const ky = box.height > 0 ? box.height / CANVAS_H : kx;
+  return {
+    x: Math.min(CANVAS_W, Math.max(0, (clientX - box.left) / kx)),
+    y: Math.min(CANVAS_H, Math.max(0, (clientY - box.top) / ky)),
+  };
+}
+
 /** The rectangle two canvas points draw, whole pixels and at least one. */
 export function rectFromDrag(a: { x: number; y: number }, b: { x: number; y: number }): Bounds {
   const x0 = Math.min(a.x, b.x);
@@ -653,6 +668,10 @@ export interface StageFrame {
 /**
  * Every frame the stage draws, bottom first: a layer that is switched off paints nothing, so it
  * has no frame, and one whose device is not on the desk has nowhere to draw.
+ *
+ * A layer at opacity 0 keeps its frame on purpose: it paints nothing either, but it is still a
+ * layer, and the frame is the only place on the picture where it can be found, picked and
+ * brought back. Do not skip it here.
  */
 export function stageFrames(layers: StackLayer[], layout: Layout | null): StageFrame[] {
   const frames: StageFrame[] = [];
@@ -709,14 +728,62 @@ export function cycleLayer(layers: StackLayer[], picked: string | null, step: 1 
 
 /**
  * An area said as the rectangle it covers on the stage (#257): the picked frame's own bounds,
- * rounded whole and inside the canvas. Null when the area is not on the desk, so the chip that
- * offers this can say so by not being there.
+ * rounded outward to whole units (so the rectangle covers every zone it came from and never
+ * less) and then held inside the 320 × 200 canvas. Null when the area is not on the desk, or lies
+ * wholly off the canvas, so the chip that offers this can say so by not being there.
  */
 export function areaAsRect(area: LayerArea, layout: Layout | null): LayerArea | null {
   if (area.kind === "rect") return area;
   const bounds = areaBounds(area, layout);
   if (!bounds) return null;
-  return { kind: "rect", ...roundRect(bounds) };
+  const x0 = Math.max(0, Math.floor(bounds.x));
+  const y0 = Math.max(0, Math.floor(bounds.y));
+  const x1 = Math.min(CANVAS_W, Math.ceil(bounds.x + bounds.width));
+  const y1 = Math.min(CANVAS_H, Math.ceil(bounds.y + bounds.height));
+  if (x1 <= x0 || y1 <= y0) return null;
+  return { kind: "rect", x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+}
+
+/**
+ * Which of the Parts outlines carry their name (#257). A name sits at its outline's top-left
+ * corner; it is left off when the outline is too small to hold three characters or one line,
+ * and when it would land on a name already placed. The larger outline is placed first, so a
+ * device keeps its name over the zone inside it. `k` is css pixels per canvas unit; the sizes
+ * are estimates of the mono label at 14px (a character is 0.6 em, plus the chip's padding),
+ * which is what a collision test needs.
+ */
+export const PART_LABEL_CHAR_PX = 8.4;
+export const PART_LABEL_PAD_PX = 8;
+export const PART_LABEL_LINE_PX = 18;
+export interface PartLabelBox {
+  key: string;
+  label: string;
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+export function partLabelPlan(parts: PartLabelBox[], k: number): Set<string> {
+  const shown = new Set<string>();
+  if (!(k > 0)) return shown;
+  const placed: { x0: number; y0: number; x1: number; y1: number }[] = [];
+  const bySize = [...parts].sort((a, b) => b.width * b.height - a.width * a.height);
+  for (const part of bySize) {
+    if (!part.label) continue;
+    const boxW = part.width * k;
+    const boxH = part.height * k;
+    if (boxW < 3 * PART_LABEL_CHAR_PX + PART_LABEL_PAD_PX || boxH < PART_LABEL_LINE_PX) continue;
+    // The chip is clipped to its own outline's width, as the CSS does.
+    const w = Math.min(part.label.length * PART_LABEL_CHAR_PX + PART_LABEL_PAD_PX, boxW - 6);
+    const x0 = part.x * k + 3;
+    const y0 = part.y * k + 1;
+    const rect = { x0, y0, x1: x0 + w, y1: y0 + PART_LABEL_LINE_PX };
+    const hit = placed.some((p) => rect.x0 < p.x1 && rect.x1 > p.x0 && rect.y0 < p.y1 && rect.y1 > p.y0);
+    if (hit) continue;
+    placed.push(rect);
+    shown.add(part.key);
+  }
+  return shown;
 }
 
 /** The tone a layer's status is drawn in: warn for a layer that is not running. */

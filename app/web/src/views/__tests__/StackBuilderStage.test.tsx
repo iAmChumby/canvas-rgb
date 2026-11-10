@@ -5,7 +5,7 @@
 
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { NotifyHost } from "@/components/Notify";
+import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -52,6 +52,7 @@ beforeAll(() => {
 afterEach(async () => {
   cleanup();
   vi.restoreAllMocks();
+  act(() => dismissNotifications());
   // A change undone back to the saved stack drops the builder's guard entry with
   // `history.back()`, which lands a turn later: let it land before the next test sets its URL.
   await new Promise((resolve) => setTimeout(resolve, 0));
@@ -224,11 +225,13 @@ describe("the stage", () => {
     expect(screen.getByRole("button", { name: "Make Sparkles a rectangle" })).toBeTruthy();
   });
 
-  it("shows and hides the desk's outlines with Parts", async () => {
+  it("starts with Parts off, and shows and hides the desk's outlines with it", async () => {
     await openBuilder();
     const toggle = screen.getByRole("switch", { name: "Show the desk's device and zone outlines" });
-    expect(toggle.getAttribute("aria-checked")).toBe("true");
-    expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0);
+    expect(toggle.getAttribute("aria-checked")).toBe("false");
+    expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
+    fireEvent.click(toggle);
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0));
     fireEvent.click(toggle);
     await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0));
   });
@@ -237,5 +240,234 @@ describe("the stage", () => {
     await openBuilder();
     fireEvent.keyDown(row("Heat"), { key: "Delete" });
     await waitFor(() => expect(document.querySelectorAll(".layer-row")).toHaveLength(2));
+  });
+});
+
+// ---- fix pass 1 (#257): drags, guards, nudges, refusals, frames ----------------------------
+
+const rows = () => document.querySelectorAll(".layer-row").length;
+// In act, so the keys' updates land before the next line reads the page.
+const undoKey = () => act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
+const HEAT_AT = "x 16, y 150";
+
+/** Heat picked, its frame ready to drag. */
+async function pickHeat() {
+  const stage = await openBuilder();
+  press(stage, px(71), px(173));
+  await waitFor(() => expect(readout()).toContain(HEAT_AT));
+  return { stage, frame: document.querySelector<HTMLElement>(".rd-area-frame")! };
+}
+
+describe("a drag is one undo step", () => {
+  it("however long it pauses in the middle", async () => {
+    const { frame } = await pickHeat();
+    // Only the clock is faked, so the waits below keep their own timers.
+    vi.useFakeTimers({ toFake: ["Date"] });
+    try {
+      vi.setSystemTime(new Date(1_000_000));
+      act(() => {
+        fireEvent.pointerDown(frame, { ...mouse, clientX: px(71), clientY: px(173) });
+        fireEvent.pointerMove(frame, { ...mouse, clientX: px(71) + 10, clientY: px(173) - 4 });
+      });
+      // 1.5 s is longer than the history's merge gap: a drag that is not held would split here.
+      vi.setSystemTime(new Date(1_001_500));
+      act(() => {
+        fireEvent.pointerMove(frame, { ...mouse, clientX: px(71) + 40, clientY: px(173) - 20 });
+        fireEvent.pointerUp(frame, { ...mouse, buttons: 0, clientX: px(71) + 40, clientY: px(173) - 20 });
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+    await waitFor(() => expect(readout()).toContain("x 36, y 140"));
+    undoKey();
+    await waitFor(() => expect(readout()).toContain(HEAT_AT));
+  });
+
+  it("and a Ctrl+Z in the middle of it waits for the release", async () => {
+    const { frame } = await pickHeat();
+    act(() => {
+      fireEvent.pointerDown(frame, { ...mouse, clientX: px(71), clientY: px(173) });
+      fireEvent.pointerMove(frame, { ...mouse, clientX: px(71) + 40, clientY: px(173) - 20 });
+    });
+    await waitFor(() => expect(readout()).toContain("x 36, y 140"));
+    undoKey();
+    expect(readout()).toContain("x 36, y 140");
+    act(() => {
+      fireEvent.pointerUp(frame, { ...mouse, buttons: 0, clientX: px(71) + 40, clientY: px(173) - 20 });
+    });
+    undoKey();
+    await waitFor(() => expect(readout()).toContain(HEAT_AT));
+  });
+
+  it("shows the desk's outlines while it lasts, even with Parts off", async () => {
+    const { frame } = await pickHeat();
+    expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
+    act(() => {
+      fireEvent.pointerDown(frame, { ...mouse, clientX: px(71), clientY: px(173) });
+    });
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0));
+    act(() => {
+      fireEvent.pointerUp(frame, { ...mouse, buttons: 0, clientX: px(71), clientY: px(173) });
+    });
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0));
+  });
+});
+
+describe("the window shortcuts", () => {
+  it("wait while the Add layer popover is open", async () => {
+    const stage = await openBuilder();
+    press(stage, px(71), px(173));
+    await waitFor(() => expect(pickedName()).toBe("Heat"));
+    fireEvent.keyDown(stage, { key: "Delete" });
+    await waitFor(() => expect(rows()).toBe(2));
+    fireEvent.click(screen.getByRole("button", { name: /^Add layer/ }));
+    await screen.findByRole("dialog", { name: "Add a layer" });
+    // Ctrl+Z would bring Heat back and Ctrl+D would copy the picked layer; neither happens
+    // while the popover has the keyboard.
+    undoKey();
+    act(() => void fireEvent.keyDown(document.body, { key: "d", ctrlKey: true }));
+    expect(rows()).toBe(2);
+  });
+
+  it("leave a select and a combobox trigger their own keys", async () => {
+    const stage = await openBuilder();
+    press(stage, px(71), px(173));
+    await waitFor(() => expect(pickedName()).toBe("Heat"));
+    const trigger = screen.getAllByRole("combobox")[0]!;
+    fireEvent.keyDown(trigger, { key: "d", ctrlKey: true });
+    expect(rows()).toBe(3);
+    const select = document.createElement("select");
+    document.body.append(select);
+    try {
+      fireEvent.keyDown(select, { key: "d", ctrlKey: true });
+    } finally {
+      select.remove();
+    }
+    expect(rows()).toBe(3);
+  });
+
+  it("take two steps back when two Ctrl+Z come in the same tick", async () => {
+    const stage = await openBuilder();
+    press(stage, px(71), px(173));
+    await waitFor(() => expect(pickedName()).toBe("Heat"));
+    fireEvent.keyDown(stage, { key: "d", ctrlKey: true });
+    await waitFor(() => expect(rows()).toBe(4));
+    fireEvent.keyDown(stage, { key: "d", ctrlKey: true });
+    await waitFor(() => expect(rows()).toBe(5));
+    // Both keys reach the window before React has rendered between them: the second must
+    // build on the first, not on the draft the first one started from.
+    act(() => {
+      fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+      fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    });
+    await waitFor(() => expect(rows()).toBe(3));
+  });
+
+  it("see a change and the Ctrl+Z that follows it", async () => {
+    const stage = await openBuilder();
+    press(stage, px(71), px(173));
+    await waitFor(() => expect(pickedName()).toBe("Heat"));
+    act(() => {
+      fireEvent.keyDown(stage, { key: "Delete" });
+      fireEvent.keyDown(document.body, { key: "z", ctrlKey: true });
+    });
+    await waitFor(() => expect(rows()).toBe(3));
+    expect(screen.getByText("Heat")).toBeTruthy();
+  });
+});
+
+describe("arrow nudges", () => {
+  const arrow = (frame: HTMLElement, repeat: boolean) =>
+    fireEvent.keyDown(frame, { key: "ArrowRight", repeat });
+
+  it("fold the repeats of one held key into one step", async () => {
+    const { frame } = await pickHeat();
+    arrow(frame, false);
+    arrow(frame, true);
+    arrow(frame, true);
+    arrow(frame, true);
+    fireEvent.keyUp(frame, { key: "ArrowRight" });
+    await waitFor(() => expect(readout()).toContain("x 20, y 150"));
+    undoKey();
+    await waitFor(() => expect(readout()).toContain(HEAT_AT));
+  });
+
+  it("keep separate presses as separate steps", async () => {
+    const { frame } = await pickHeat();
+    arrow(frame, false);
+    fireEvent.keyUp(frame, { key: "ArrowRight" });
+    arrow(frame, false);
+    fireEvent.keyUp(frame, { key: "ArrowRight" });
+    await waitFor(() => expect(readout()).toContain("x 18, y 150"));
+    undoKey();
+    await waitFor(() => expect(readout()).toContain("x 17, y 150"));
+    undoKey();
+    await waitFor(() => expect(readout()).toContain(HEAT_AT));
+  });
+});
+
+describe("a press where the stage's height is clamped", () => {
+  it("maps each corner of a known rectangle to its layer", async () => {
+    const stage = await openBuilder();
+    // 640 wide but only 300 tall: two px per unit across and 1.5 down, as a short window gives.
+    vi.spyOn(stage, "getBoundingClientRect").mockReturnValue({
+      x: 0, y: 0, left: 0, top: 0, right: 640, bottom: 300, width: 640, height: 300, toJSON: () => ({}),
+    } as DOMRect);
+    // Heat is x 16..126, y 150..196. Each press lands one unit inside a corner, after a press
+    // outside the box has picked another layer, so a miss shows.
+    const inside: [string, number, number][] = [
+      ["top left", 17, 151],
+      ["top right", 125, 151],
+      ["bottom left", 17, 195],
+      ["bottom right", 125, 195],
+    ];
+    for (const [corner, ux, uy] of inside) {
+      press(stage, 2 * 200, 1.5 * 40);
+      await waitFor(() => expect(pickedName()).toBe("Sparkles"));
+      press(stage, 2 * ux, 1.5 * uy);
+      await waitFor(() => expect(`${corner}: ${pickedName()}`).toBe(`${corner}: Heat`));
+    }
+  });
+});
+
+describe("a refusal from a key on the stage", () => {
+  it("is also a note when the stack holds eight layers", async () => {
+    const stage = await openBuilder();
+    press(stage, px(71), px(173));
+    await waitFor(() => expect(pickedName()).toBe("Heat"));
+    for (let n = 4; n <= 8; n++) {
+      fireEvent.keyDown(stage, { key: "d", ctrlKey: true });
+      await waitFor(() => expect(rows()).toBe(n));
+    }
+    fireEvent.keyDown(stage, { key: "d", ctrlKey: true });
+    await waitFor(() =>
+      expect(document.querySelector("[data-sonner-toast]")?.textContent ?? "").toContain("A stack holds 8 layers"),
+    );
+    expect(rows()).toBe(8);
+  });
+});
+
+describe("the frames and their handles", () => {
+  it("name their kind, so a whole-canvas layer gets its inset frame", async () => {
+    await openBuilder();
+    expect(frameOf("l1")?.getAttribute("data-kind")).toBe("canvas");
+    expect(frameOf("l2")?.getAttribute("data-kind")).toBe("rect");
+  });
+
+  it("draw a bar on each of the four sides as well as the four corners", async () => {
+    await pickHeat();
+    const frame = document.querySelector<HTMLElement>(".rd-area-frame")!;
+    expect(frame.querySelectorAll(".handle")).toHaveLength(4);
+    const edges = [...frame.querySelectorAll<HTMLElement>(".edge")];
+    expect(edges).toHaveLength(4);
+    expect(edges.every((edge) => edge.getAttribute("data-mark") === "on")).toBe(true);
+  });
+
+  it("carry the shortcut in the undo and redo tooltips", async () => {
+    await openBuilder();
+    const tip = (name: string) =>
+      screen.getByRole("button", { name }).closest(".tip")?.querySelector(".tip-bubble")?.textContent;
+    expect(tip("Undo the last change")).toBe("Undo the last change (Ctrl+Z)");
+    expect(tip("Redo the change that was undone")).toBe("Redo the change that was undone (Ctrl+Shift+Z)");
   });
 });

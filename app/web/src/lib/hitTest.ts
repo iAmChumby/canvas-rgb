@@ -100,6 +100,8 @@ export interface HitInput {
   /** Css pixels per canvas unit. */
   k: number;
   pointer?: PointerKind;
+  /** A caller with bigger targets than the Layout page's (the builder's 44px touch handles). */
+  reachPx?: number;
   /** Alt-click: take the next part down from the picked one instead of the first. */
   under?: boolean;
 }
@@ -153,7 +155,7 @@ function handleAt(input: HitInput): HitTarget | null {
   const part = input.parts.find((p) => same(p.ref, ref));
   if (!part || part.locked) return null;
   const q = toLocal(part, input.point);
-  const reach = handleReachPx(input.pointer ?? "mouse") / input.k;
+  const reach = (input.reachPx ?? handleReachPx(input.pointer ?? "mouse")) / input.k;
   const narrowX = part.width * input.k < EDGE_HANDLE_MIN_PX;
   const narrowY = part.height * input.k < EDGE_HANDLE_MIN_PX;
   let best: { target: HitTarget; d: number } | null = null;

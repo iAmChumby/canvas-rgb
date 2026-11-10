@@ -9,6 +9,8 @@ import {
   areaAsRect,
   cycleLayer,
   layerAtPoint,
+  partLabelPlan,
+  pointerToStage,
   stageFrames,
   stageHitOrder,
 } from "@/views/effects/stackDraft";
@@ -170,5 +172,122 @@ describe("Make rectangle", () => {
 
   it("offers nothing for an area that is not on the desk", () => {
     expect(areaAsRect({ kind: "device", device: "gone:1" }, desk)).toBeNull();
+  });
+
+  const deskWith = (...zones: Partial<Layout["zones"][number]>[]): Layout => ({
+    ...desk,
+    zones: zones.map((zone, i) => ({ ...desk.zones[0]!, device_id: `z:${i}`, ...zone })),
+  });
+
+  it("holds a zone that runs past the canvas inside it", () => {
+    const wide = deskWith({ x: 300, y: 180, width: 60, height: 50 });
+    expect(areaAsRect({ kind: "device", device: "z:0" }, wide)).toEqual({
+      kind: "rect",
+      x: 300,
+      y: 180,
+      width: 20,
+      height: 20,
+    });
+    const before = deskWith({ x: -10, y: -4.5, width: 30, height: 20 });
+    expect(areaAsRect({ kind: "device", device: "z:0" }, before)).toEqual({
+      kind: "rect",
+      x: 0,
+      y: 0,
+      width: 20,
+      height: 16,
+    });
+  });
+
+  it("rounds outward, so the box covers every zone it came from", () => {
+    // 10.4 .. 30.6 and 20.5 .. 41.1: rounded to the nearest, the box would lose the edges.
+    const zone = deskWith({ x: 10.4, y: 20.5, width: 20.2, height: 20.6 });
+    const made = areaAsRect({ kind: "device", device: "z:0" }, zone);
+    expect(made).toEqual({ kind: "rect", x: 10, y: 20, width: 21, height: 22 });
+    if (!made || made.kind !== "rect") throw new Error("expected a rectangle");
+    expect(made.x).toBeLessThanOrEqual(10.4);
+    expect(made.y).toBeLessThanOrEqual(20.5);
+    expect(made.x + made.width).toBeGreaterThanOrEqual(30.6);
+    expect(made.y + made.height).toBeGreaterThanOrEqual(41.1);
+  });
+
+  it("covers the union of two zones of one device exactly, to the unit", () => {
+    const both = deskWith({ x: 10.2, y: 10.2, width: 10, height: 10 }, { x: 40.7, y: 30.1, width: 9.6, height: 9.6 });
+    both.zones[1] = { ...both.zones[1]!, device_id: "z:0", zone_index: 1 };
+    expect(areaAsRect({ kind: "device", device: "z:0" }, both)).toEqual({ kind: "rect", x: 10, y: 10, width: 41, height: 30 });
+  });
+
+  it("offers nothing for a zone wholly off the canvas", () => {
+    const off = deskWith({ x: 400, y: 10, width: 20, height: 20 });
+    expect(areaAsRect({ kind: "device", device: "z:0" }, off)).toBeNull();
+  });
+});
+
+describe("a frame at opacity 0", () => {
+  it("keeps its frame, so the layer can still be found and picked", () => {
+    const layers = [layer("ghost", rect(10, 10, 40, 40), { opacity: 0 })];
+    expect(stageFrames(layers, desk).map((frame) => frame.id)).toEqual(["ghost"]);
+    expect(layerAtPoint(layers, desk, { x: 20, y: 20 })).toBe("ghost");
+  });
+});
+
+describe("pointer to canvas on the stage", () => {
+  const corners = (box: { left: number; top: number; width: number; height: number }) => ({
+    nw: pointerToStage(box.left, box.top, box),
+    se: pointerToStage(box.left + box.width, box.top + box.height, box),
+  });
+
+  it("maps a box with the canvas ratio one to one", () => {
+    const box = { left: 10, top: 20, width: 640, height: 400 };
+    expect(pointerToStage(10 + 320, 20 + 200, box)).toEqual({ x: 160, y: 100 });
+    expect(corners(box).se).toEqual({ x: 320, y: 200 });
+  });
+
+  it("takes each axis from its own side when the height is clamped", () => {
+    // A 640 x 300 box: 2 px per unit across, 1.5 px per unit down. A scale from the width alone
+    // would put the bottom edge at y = 150 and a press in the lower half on the wrong layer.
+    const box = { left: 0, top: 0, width: 640, height: 300 };
+    expect(pointerToStage(640, 300, box)).toEqual({ x: 320, y: 200 });
+    expect(pointerToStage(320, 150, box)).toEqual({ x: 160, y: 100 });
+  });
+
+  it("clamps a point outside the box to its edge", () => {
+    const box = { left: 0, top: 0, width: 640, height: 400 };
+    expect(pointerToStage(-50, 900, box)).toEqual({ x: 0, y: 200 });
+  });
+});
+
+describe("the Parts names", () => {
+  const part = (key: string, label: string, x: number, y: number, width: number, height: number) => ({
+    key,
+    label,
+    x,
+    y,
+    width,
+    height,
+  });
+
+  it("leaves a name off an outline narrower than three characters", () => {
+    // At 2 px per unit a 10-unit outline is 20 px wide: no room for three characters and padding.
+    const shown = partLabelPlan([part("tiny", "Fan", 10, 10, 10, 20), part("ok", "Fan", 100, 10, 40, 20)], 2);
+    expect(shown.has("tiny")).toBe(false);
+    expect(shown.has("ok")).toBe(true);
+  });
+
+  it("leaves a name off an outline too short for a line", () => {
+    expect(partLabelPlan([part("flat", "Strip", 10, 10, 100, 4)], 2).size).toBe(0);
+  });
+
+  it("never lets two names land on each other, and the larger outline keeps its name", () => {
+    const shown = partLabelPlan([part("fan", "Fan 1", 12, 12, 40, 30), part("case", "Case", 10, 10, 200, 100)], 2);
+    expect([...shown]).toEqual(["case"]);
+  });
+
+  it("keeps two names that sit apart", () => {
+    const shown = partLabelPlan([part("a", "Keyboard", 10, 10, 100, 40), part("b", "Mouse", 150, 10, 40, 40)], 2);
+    expect(shown.has("a") && shown.has("b")).toBe(true);
+  });
+
+  it("shows nothing before the picture is measured", () => {
+    expect(partLabelPlan([part("a", "Keyboard", 10, 10, 100, 40)], 0).size).toBe(0);
   });
 });

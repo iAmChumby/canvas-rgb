@@ -11,10 +11,10 @@
 // Frames are drawn as DOM over a canvas that the 15 fps feed paints straight into, so a frame
 // never re-renders the picture.
 
-import { useEffect, useMemo, useRef, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import { ArrowClockwise, ArrowCounterClockwise } from "@phosphor-icons/react";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
-import { hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
+import { EDGE_HANDLE_MIN_PX, hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
 import { Chip } from "@/components/Chip";
 import { IconButton } from "@/components/Button";
 import { Toggle } from "@/components/Toggle";
@@ -32,18 +32,22 @@ import {
   cycleLayer,
   layerAtPoint,
   moveBounds,
-  pointerToCanvas,
+  partLabelPlan,
+  pointerToStage,
   resizeBounds,
   stageFrames,
   type Bounds,
 } from "@/views/effects/stackDraft";
 
+const zoneKey = (zone: Layout["zones"][number]) => `${zone.device_id}:${zone.zone_index}:${zone.part?.kind ?? ""}`;
+
 /** The one part the hit-test sees: the picked layer's rectangle. */
 const AREA_REF: PartRef = { kind: "zone", index: 0 };
-const VIEW = { zoom: 1, panX: 0, panY: 0 };
 /** An arrow key nudges the area this many canvas units; with Shift, the big step. */
 const NUDGE = 1;
 const NUDGE_BIG = 10;
+/** A finger's reach from a handle's centre: half the 44px hit box (the knob stays 12px). */
+const TOUCH_REACH_PX = 22;
 
 const HANDLE_CURSOR: Record<HandleDef["id"], string> = {
   nw: "nwse-resize",
@@ -84,6 +88,7 @@ export function StageTools({
       <span className="rd-stage-tools">
         <IconButton
           label="Undo the last change"
+          shortcut="Ctrl+Z"
           size="sm"
           icon={<ArrowCounterClockwise size={16} />}
           disabled={!canUndo}
@@ -91,6 +96,7 @@ export function StageTools({
         />
         <IconButton
           label="Redo the change that was undone"
+          shortcut="Ctrl+Shift+Z"
           size="sm"
           icon={<ArrowClockwise size={16} />}
           disabled={!canRedo}
@@ -115,6 +121,7 @@ export function Stage({
   onSelect,
   onAreaChange,
   onAreaChangeEnd,
+  onDragActive,
   onDelete,
   onDuplicate,
   onMakeRect,
@@ -126,10 +133,15 @@ export function Stage({
   /** Show the desk's device and zone outlines under the frames (the Parts switch). */
   parts: boolean;
   onSelect: (id: string | null) => void;
-  /** The picked layer's rectangle, dragged or nudged; `run` names the gesture for undo. */
-  onAreaChange?: (area: LayerArea, run: string) => void;
-  /** The drag is over: the next change is a new undo step. */
+  /**
+   * The picked layer's rectangle, dragged or nudged; `run` names the gesture for undo, and
+   * `hold` says it lasts until `onAreaChangeEnd` however long it pauses.
+   */
+  onAreaChange?: (area: LayerArea, run: string, hold: boolean) => void;
+  /** The gesture is over: the next change is a new undo step. */
   onAreaChangeEnd?: () => void;
+  /** A pointer drag or resize began (true) or ended (false): undo and redo wait for it. */
+  onDragActive?: (active: boolean) => void;
   onDelete?: (id: string) => void;
   onDuplicate?: (id: string) => void;
   onMakeRect?: (id: string) => void;
@@ -139,7 +151,24 @@ export function Stage({
   const drag = useRef<Drag | null>(null);
   /** One number per gesture, so a drag's changes all name the same undo run. */
   const runs = useRef(0);
+  /** The arrow key being held down on the frame: its auto-repeats are one undo step. */
+  const nudge = useRef<{ key: string; layer: string; run: string } | null>(null);
+  /** A drag or resize is in progress: the desk's outlines show even with Parts off. */
+  const [dragging, setDragging] = useState(false);
+  /** The picture's width in css pixels (0 until measured): the labels and edge marks fit to it. */
+  const [stageW, setStageW] = useState(0);
   const empty = stack.layers.length === 0;
+
+  useEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const read = () => setStageW(el.getBoundingClientRect().width);
+    read();
+    if (typeof ResizeObserver === "undefined") return;
+    const observer = new ResizeObserver(read);
+    observer.observe(el);
+    return () => observer.disconnect();
+  }, []);
 
   useEffect(() => {
     startStackPreview();
@@ -174,6 +203,29 @@ export function Stage({
   );
 
   const frames = useMemo(() => stageFrames(stack.layers, layout), [stack.layers, layout]);
+  const visibleZones = useMemo(() => (layout?.zones ?? []).filter((zone) => zone.visible), [layout]);
+  // Which outlines carry their name: none that would not fit or would land on another name.
+  // Until the picture is measured every name shows.
+  const labelPlan = useMemo(
+    () =>
+      stageW > 0
+        ? partLabelPlan(
+            visibleZones.map((zone) => ({
+              key: zoneKey(zone),
+              label: zone.label ?? "",
+              x: zone.x,
+              y: zone.y,
+              width: zone.width,
+              height: zone.height,
+            })),
+            stageW / CANVAS_W,
+          )
+        : null,
+    [visibleZones, stageW],
+  );
+  const pxPerUnit = stageW > 0 ? stageW / CANVAS_W : 0;
+  /** Whether a side of `units` long has room for its bar (unmeasured: yes). */
+  const markN = (units: number) => (pxPerUnit === 0 || units * pxPerUnit >= EDGE_HANDLE_MIN_PX ? "on" : "off");
   // Only a rectangle is dragged here. A whole-canvas, device or zone area follows the layout;
   // turning it into a rectangle is a choice the "Make rectangle" key asks for by name, so a
   // stray drag never does it.
@@ -185,7 +237,7 @@ export function Stage({
   const hitAt = (e: PointerEvent<HTMLDivElement>, area: Bounds) => {
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return null;
-    const point = pointerToCanvas(e.clientX, e.clientY, box, VIEW);
+    const point = pointerToStage(e.clientX, e.clientY, box);
     const part: HitPart = { ref: AREA_REF, ...area, rotation_deg: 0, isCase: false, locked: false };
     const pointer = (e.pointerType || "mouse") as PointerKind;
     const target = hitTest({
@@ -194,11 +246,20 @@ export function Stage({
       selection: [AREA_REF],
       k: box.width / CANVAS_W,
       pointer,
+      ...(pointer === "touch" ? { reachPx: TOUCH_REACH_PX } : {}),
     });
     return { box, point, target };
   };
 
-  const emit = (area: Bounds, run: string) => onAreaChange?.({ kind: "rect", ...area }, run);
+  const emit = (area: Bounds, run: string, hold: boolean) => onAreaChange?.({ kind: "rect", ...area }, run, hold);
+
+  /** The drag is over, however it ended: the run closes and undo and redo are free again. */
+  const finishDrag = () => {
+    drag.current = null;
+    setDragging(false);
+    onDragActive?.(false);
+    onAreaChangeEnd?.();
+  };
 
   const onDown = (e: PointerEvent<HTMLDivElement>) => {
     if (!editable || !picked || picked.area.kind !== "rect" || e.button > 0) return;
@@ -224,6 +285,8 @@ export function Stage({
       // A pointer that is already gone has nothing to capture.
     }
     drag.current = next;
+    setDragging(true);
+    onDragActive?.(true);
   };
 
   const onMove = (e: PointerEvent<HTMLDivElement>) => {
@@ -243,13 +306,12 @@ export function Stage({
     if (d.id !== e.pointerId) return;
     // A mouse that moves with no button down means the release was missed: the drag is over.
     if (e.pointerType === "mouse" && e.buttons === 0) {
-      drag.current = null;
-      onAreaChangeEnd?.();
+      finishDrag();
       return;
     }
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return;
-    const p = pointerToCanvas(e.clientX, e.clientY, box, VIEW);
+    const p = pointerToStage(e.clientX, e.clientY, box);
     const dx = p.x - d.from.x;
     const dy = p.y - d.from.y;
     emit(
@@ -257,25 +319,22 @@ export function Stage({
         ? moveBounds(d.start, dx, dy)
         : resizeBounds(d.start, d.handle.sx, d.handle.sy, dx, dy, e.shiftKey),
       d.run,
+      true,
     );
   };
 
   const onUp = (e: PointerEvent<HTMLDivElement>) => {
     const d = drag.current;
     if (!d || d.id !== e.pointerId) return;
-    drag.current = null;
     // A cancelled press (a call, a system gesture) puts the area back where it started.
-    if (e.type === "pointercancel") emit(d.start, d.run);
-    onAreaChangeEnd?.();
+    if (e.type === "pointercancel") emit(d.start, d.run, true);
+    finishDrag();
   };
 
   // Capture lost without a pointerup (the window lost focus, the element went away): the drag
   // ends where it is.
   const onLost = (e: PointerEvent<HTMLDivElement>) => {
-    if (drag.current?.id === e.pointerId) {
-      drag.current = null;
-      onAreaChangeEnd?.();
-    }
+    if (drag.current?.id === e.pointerId) finishDrag();
   };
 
   /** A press on the picture itself: pick the smallest frame under it, or clear the pick. */
@@ -283,7 +342,7 @@ export function Stage({
     if (e.button > 0) return;
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return;
-    const point = pointerToCanvas(e.clientX, e.clientY, box, VIEW);
+    const point = pointerToStage(e.clientX, e.clientY, box);
     const hit = layerAtPoint(stack.layers, layout, point);
     cancelPress(e, { focus: true });
     if (hit !== (picked?.id ?? null)) onSelect(hit);
@@ -323,9 +382,24 @@ export function Stage({
     const dy = e.key === "ArrowUp" ? -step : e.key === "ArrowDown" ? step : 0;
     if (dx === 0 && dy === 0) return;
     e.preventDefault();
-    // A nudge is a step of its own: each arrow press is one undo.
-    const run = `nudge:${picked.id}:${++runs.current}`;
-    emit(moveBounds(picked.area, dx, dy), run);
+    // Each press is a step of its own; the auto-repeats of one held key fold into that step. The
+    // step stays open (held) until the key comes up, so a slow repeat rate cannot split it.
+    const held = nudge.current;
+    const again = e.repeat && held && held.key === e.key && held.layer === picked.id;
+    const run = again ? held.run : `nudge:${picked.id}:${++runs.current}`;
+    nudge.current = { key: e.key, layer: picked.id, run };
+    emit(moveBounds(picked.area, dx, dy), run, true);
+  };
+
+  const onFrameKeyUp = (e: KeyboardEvent<HTMLDivElement>) => {
+    if (nudge.current?.key !== e.key) return;
+    nudge.current = null;
+    onAreaChangeEnd?.();
+  };
+
+  const onFrameBlur = () => {
+    if (!nudge.current) return;
+    nudge.current = null;
     onAreaChangeEnd?.();
   };
 
@@ -350,13 +424,13 @@ export function Stage({
             <span>Add a layer and its picture appears here.</span>
           </div>
         )}
-        {!empty && parts && layout && (
+        {!empty && (parts || dragging) && layout && (
           <div className="rd-parts" aria-hidden="true">
-            {layout.zones
-              .filter((zone) => zone.visible)
-              .map((zone) => (
+            {visibleZones.map((zone) => {
+              const key = zoneKey(zone);
+              return (
                 <span
-                  key={`${zone.device_id}:${zone.zone_index}:${zone.part?.kind ?? ""}`}
+                  key={key}
                   className="rd-part-outline"
                   style={{
                     left: `${(zone.x / CANVAS_W) * 100}%`,
@@ -365,9 +439,10 @@ export function Stage({
                     height: `${(zone.height / CANVAS_H) * 100}%`,
                   }}
                 >
-                  {zone.label && <em>{zone.label}</em>}
+                  {zone.label && (!labelPlan || labelPlan.has(key)) && <em>{zone.label}</em>}
                 </span>
-              ))}
+              );
+            })}
           </div>
         )}
         {!empty &&
@@ -381,6 +456,7 @@ export function Stage({
                 key={frame.id}
                 className={selected ? "rd-layer-frame rd-area-frame" : "rd-layer-frame"}
                 data-layer-id={frame.id}
+                data-kind={frame.kind}
                 data-selected={selected ? "true" : "false"}
                 {...(selected ? { "data-editable": draggable ? "true" : "false" } : {})}
                 {...(draggable
@@ -396,6 +472,8 @@ export function Stage({
                       onDragStart: refuseDragStart,
                       draggable: false,
                       onKeyDown: onFrameKey,
+                      onKeyUp: onFrameKeyUp,
+                      onBlur: onFrameBlur,
                     }
                   : {})}
                 style={{
@@ -416,12 +494,14 @@ export function Stage({
                     <span className="handle ne" aria-hidden="true" />
                     <span className="handle sw" aria-hidden="true" />
                     <span className="handle se" aria-hidden="true" />
-                    {/* The edges: nothing drawn (the knobs are the mark), a 24px hit span each with
-                        the resize cursor, so the outer half of the hit-test's reach lands too. */}
-                    <span className="edge n" aria-hidden="true" />
-                    <span className="edge e" aria-hidden="true" />
-                    <span className="edge s" aria-hidden="true" />
-                    <span className="edge w" aria-hidden="true" />
+                    {/* The four sides: a small bar each, so a side resize can be found (spec §4:
+                        eight handles). Each is also a hit span with the resize cursor, so the
+                        outer half of the hit-test's reach lands too. The hit-test drops an edge
+                        shorter than EDGE_HANDLE_MIN_PX, and the bar goes with it. */}
+                    <span className="edge n" data-mark={markN(frame.bounds.width)} aria-hidden="true" />
+                    <span className="edge e" data-mark={markN(frame.bounds.height)} aria-hidden="true" />
+                    <span className="edge s" data-mark={markN(frame.bounds.width)} aria-hidden="true" />
+                    <span className="edge w" data-mark={markN(frame.bounds.height)} aria-hidden="true" />
                   </>
                 )}
               </div>
