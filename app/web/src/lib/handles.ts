@@ -54,6 +54,8 @@ const NONE: EffectHandle = { kind: "none" };
 function speedSpecOf(def: PropertyDef): SpeedSpec | null {
   if (def.kind.type !== "number") return null;
   const { min, max, step } = def.kind;
+  // A range that is not two finite ends cannot be drawn or scrubbed: no handle (#257 review).
+  if (!Number.isFinite(min) || !Number.isFinite(max)) return null;
   return { key: def.key, label: def.label, min, max, step: step > 0 ? step : 1, inverse: def.key === "period" };
 }
 
@@ -61,14 +63,23 @@ function speedSpecOf(def: PropertyDef): SpeedSpec | null {
  * The handle an effect's schema asks for: one vector when it has a direction and a speed, a pill
  * when it has only a speed, a direction alone when it has an angle and no speed, and none
  * otherwise. Schemas that have not arrived get none.
+ *
+ * The speed is the first of `SPEED_KEYS` that is a number with a finite range, so a `speed` of
+ * another kind (a choice, say) does not hide a `scroll_speed` beside it (#257 review).
  */
 export function handleOf(schema: PropertySchema | null | undefined): EffectHandle {
   const props = schema?.properties ?? [];
   const directionDef = props.find((def) => def.kind.type === "angle");
-  const speedDef = SPEED_KEYS.map((key) =>
-    props.find((def) => def.key === key),
-  ).find((def): def is PropertyDef => def !== undefined);
-  const speed = speedDef ? speedSpecOf(speedDef) : null;
+  let speed: SpeedSpec | null = null;
+  for (const key of SPEED_KEYS) {
+    const def = props.find((entry) => entry.key === key);
+    if (!def) continue;
+    const spec = speedSpecOf(def);
+    if (spec) {
+      speed = spec;
+      break;
+    }
+  }
   const direction = directionDef ? { key: directionDef.key, label: directionDef.label } : null;
   if (direction && speed) return { kind: "vector", direction, speed };
   if (speed) return { kind: "pill", speed };
@@ -115,19 +126,51 @@ export function arrowLength(fraction: number): number {
 /** An angle in 0..360, the canvas' own: 0 points right, 90 down. */
 export function normaliseAngle(deg: number): number {
   const wrapped = deg % 360;
-  return wrapped < 0 ? wrapped + 360 : wrapped;
+  // `+ 0` folds `-0` to `0`, so a rounded angle never reads as `-0` (`Object.is(-0, 0)` is false).
+  return wrapped < 0 ? wrapped + 360 : wrapped + 0;
 }
 
 /** The direction from a centre to a point, in the canvas' degrees (0 right, 90 down). */
 export function angleFromPoint(centre: { x: number; y: number }, point: { x: number; y: number }): number {
   const raw = (Math.atan2(point.y - centre.y, point.x - centre.x) * 180) / Math.PI;
-  return Math.round(normaliseAngle(raw));
+  // Round first, then wrap: `Math.round(359.6)` is 360, which is 0, not an angle of 360 (#257 review).
+  return normaliseAngle(Math.round(raw));
 }
 
 /** The direction snapped to 15° steps, as a Shift drag does. */
 export function snapAngle(deg: number, step = ANGLE_SNAP_DEG): number {
-  if (step <= 0) return Math.round(normaliseAngle(deg));
+  if (step <= 0) return normaliseAngle(Math.round(deg));
   return normaliseAngle(Math.round(deg / step) * step);
+}
+
+/** A box in client pixels, as `getBoundingClientRect` returns it. */
+export interface ClientBox {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/**
+ * The arrow's length clamped so its grip's centre stays inside `box` (#257 review): a small frame
+ * at the picture's edge can put the grip outside the stage, where `overflow: hidden` clips it and
+ * it cannot be grabbed. The angle is unchanged; only the length is shortened.
+ */
+export function clampArrow(
+  dir: number,
+  length: number,
+  hub: { x: number; y: number } | null,
+  box: ClientBox | null,
+): number {
+  if (!hub || !box) return length;
+  const rad = (dir * Math.PI) / 180;
+  const x = hub.x + length * Math.cos(rad);
+  const y = hub.y + length * Math.sin(rad);
+  // Already inside: keep the exact length, so no clamp introduces a float's worth of drift.
+  if (x >= box.left && x <= box.right && y >= box.top && y <= box.bottom) return length;
+  const cx = Math.min(box.right, Math.max(box.left, x));
+  const cy = Math.min(box.bottom, Math.max(box.top, y));
+  return Math.hypot(cx - hub.x, cy - hub.y);
 }
 
 /** A scrub of `dx` pixels across the pill: a full sweep is `SPEED_SWEEP_PX`. */

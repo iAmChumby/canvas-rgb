@@ -1539,27 +1539,33 @@ export function StackBuilder({
    * A mask dropped on a layer (#257 phase 3): the layer a row or the picture names gets it,
    * replacing the mask it had in the same single step. Nothing changes when the drop is refused.
    */
-  const applyMask = async (id: string, effect: string) => {
+  const applyMask = async (id: string, effect: string): Promise<boolean> => {
     const layer = draftRef.current.layers.find((entry) => entry.id === id);
-    if (!layer || layer.mask?.effect === effect) return;
+    if (!layer || layer.mask?.effect === effect) return false;
     const refusal = maskRefusal(draftRef.current.layers, id, effect);
     if (refusal) {
       setAnnounce(refusal);
-      return;
+      return false;
     }
+    // The draft this drop started from. An Undo or another edit while the effect is read must not
+    // be overwritten, and the redo it cleared must survive: apply only to the same draft, and say
+    // nothing when the drop is abandoned (#257 review).
+    const before = draftRef.current;
     const { schema, props } = await maskOf(effect);
-    if (!mounted.current) return;
+    if (!mounted.current) return false;
+    if (draftRef.current !== before) return false;
     const latest = draftRef.current.layers.find((entry) => entry.id === id);
-    if (!latest) return;
+    if (!latest) return false;
     const lateRefusal = maskRefusal(draftRef.current.layers, id, effect);
     if (lateRefusal) {
       setAnnounce(lateRefusal);
-      return;
+      return false;
     }
     setDraft((current) => ({
       ...current,
       layers: setLayerMask(current.layers, id, makeMask(effect, schema, props)),
     }));
+    return true;
   };
 
   /** The mask picker's keys, as a listbox: arrows move, Home/End jump, Enter/Space choose. */
@@ -1821,8 +1827,13 @@ export function StackBuilder({
     }
     if (source.kind === "mask") {
       if (target.kind === "row" || target.kind === "maskLayer") {
-        void applyMask(target.id, source.effect);
-        setAnnounce(dropAnnouncement(source, target, names));
+        clearDrag();
+        // The drop's words wait for the effect read: a drop abandoned to an Undo in that gap says
+        // nothing rather than announcing a mask that never landed (#257 review).
+        void applyMask(target.id, source.effect).then((applied) => {
+          if (applied) setAnnounce(dropAnnouncement(source, target, names));
+        });
+        return;
       }
       clearDrag();
       return;

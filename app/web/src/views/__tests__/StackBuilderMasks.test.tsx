@@ -6,6 +6,7 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
+import { api } from "@/lib/endpoints";
 import { MASK_EMPTY_HINT } from "@/lib/dragSession";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
@@ -250,5 +251,66 @@ describe("a keyboard lift of a mask tile", () => {
     // The Enter that dropped did not also reach the focused tile and add a layer.
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(rows()).toHaveLength(3);
+  });
+});
+
+describe("an Undo racing a mask drop (#257 review)", () => {
+  it("drops the mask and keeps redo when the Undo lands while the effect is read", async () => {
+    await openBuilder();
+    // A step to undo: a new layer, which the Undo below takes back.
+    const addSolid = await screen.findByRole("button", { name: "Add Solid" });
+    act(() => void fireEvent.click(addSolid));
+    await waitFor(() => expect(rows()).toHaveLength(4));
+
+    // Hold the mask effect's read, so the drop is in flight across the Undo.
+    const realEffect = api.effect;
+    const pending: Array<(detail: Awaited<ReturnType<typeof realEffect>>) => void> = [];
+    const spy = vi.spyOn(api, "effect").mockImplementation((id) =>
+      id === "fire" ? new Promise((resolve) => pending.push(resolve)) : realEffect(id),
+    );
+    try {
+      masksTab();
+      const tile = screen.getByRole("button", { name: "Add Fire" });
+      act(() => void fireEvent.pointerDown(tile, { ...mouse, clientX: 10, clientY: 700 }));
+      act(() => void fireEvent.pointerMove(window, { ...mouse, clientX: 16, clientY: 700 }));
+      // Heat's row, as it sat before the added layer (the added row's own box is unmocked).
+      act(() => void fireEvent.pointerMove(window, { ...mouse, clientX: 850, clientY: rowTop(1) + 20 }));
+      act(() => void fireEvent.pointerUp(window, { ...mouse, buttons: 0, clientX: 850, clientY: rowTop(1) + 20 }));
+
+      // The Undo takes the added layer back while the mask's effect is still being read.
+      act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
+      await waitFor(() => expect(rows()).toHaveLength(3));
+
+      // The read resolves: the mask must not land on the undone draft.
+      await act(async () => {
+        const detail = await realEffect("fire");
+        pending[0]?.(detail);
+        await Promise.resolve();
+      });
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(rows()).toHaveLength(3);
+      expect(chips()).toHaveLength(0);
+
+      // Redo still works: the added layer comes back.
+      act(() => void fireEvent.keyDown(document.body, { key: "y", ctrlKey: true }));
+      await waitFor(() => expect(rows()).toHaveLength(4));
+    } finally {
+      spy.mockRestore();
+    }
+  });
+});
+
+describe("a stage drop over a hidden top layer (#257 review)", () => {
+  it("goes to the next visible layer under the pointer, not the hidden one", async () => {
+    await openBuilder();
+    // Sparkles is painted last; hiding it leaves Heat's rectangle under the pointer.
+    act(() => void fireEvent.click(screen.getByRole("button", { name: "Hide Sparkles" })));
+    masksTab();
+    // Heat's own centre: 71, 173 canvas units.
+    dragMaskTo({ x: px(71), y: atY(173) });
+    await waitFor(() => expect(chipIn("l2")).not.toBeNull());
+    expect(chipIn("l3")).toBeNull();
+    expect(chipIn("l1")).toBeNull();
+    expect(live()).toBe("Fire is now the mask on Heat.");
   });
 });

@@ -195,3 +195,31 @@ describe("the speed pill", () => {
     expect(document.querySelector(".rd-speed-pill")).toBeNull();
   });
 });
+
+describe("a gesture cut off by an unmount (#257 review)", () => {
+  it("closes the undo run, so the next edit after the handle comes back is its own step", async () => {
+    await openBuilder();
+    pickRow("l1");
+    const grip = await screen.findByRole("slider", { name: "Direction of Sunset" });
+    // A drag left down: the angle goes to 0.
+    act(() => void fireEvent.pointerDown(grip, { ...mouse, clientX: CENTRE.x + 16, clientY: CENTRE.y }));
+    act(() => void fireEvent.pointerMove(grip, { ...mouse, clientX: CENTRE.x + 60, clientY: CENTRE.y }));
+    expect(dial().getAttribute("aria-valuenow")).toBe("0");
+
+    // Tab away (the handle unmounts) and back (a fresh handle, its run counter at 0).
+    act(() => void fireEvent.keyDown(grip, { key: "Tab" }));
+    await waitFor(() => expect(document.querySelector('.layer-row[data-layer-id="l3"]')?.getAttribute("data-selected")).toBe("true"));
+    const stage = document.querySelector<HTMLElement>(".rd-canvas")!;
+    act(() => void fireEvent.keyDown(stage, { key: "Tab", shiftKey: true }));
+    await waitFor(() => expect(document.querySelector('.layer-row[data-layer-id="l1"]')?.getAttribute("data-selected")).toBe("true"));
+
+    const fresh = await screen.findByRole("slider", { name: "Direction of Sunset" });
+    act(() => void fireEvent.keyDown(fresh, { key: "ArrowRight" }));
+    act(() => void fireEvent.keyUp(fresh, { key: "ArrowRight" }));
+    expect(dial().getAttribute("aria-valuenow")).toBe("1");
+
+    // One undo takes back only the nudge, to the dragged angle (0), not to the pre-drag 112.
+    act(() => void fireEvent.keyDown(document.body, { key: "z", ctrlKey: true }));
+    await waitFor(() => expect(dial().getAttribute("aria-valuenow")).toBe("0"));
+  });
+});

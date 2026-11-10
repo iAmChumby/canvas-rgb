@@ -13,7 +13,7 @@
 // The inspector's AngleDial and slider stay and mirror these: both write the same prop, and one
 // drag or scrub is one undo step (the builder holds the run open until the gesture ends).
 
-import { useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
+import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import {
   ANGLE_SNAP_DEG,
@@ -21,6 +21,7 @@ import {
   ARROW_MIN_PX,
   angleFromPoint,
   arrowLength,
+  clampArrow,
   formatSpeed,
   handleOf,
   normaliseAngle,
@@ -29,6 +30,7 @@ import {
   snapAngle,
   speedFraction,
   stepSpeed,
+  type ClientBox,
   type SpeedSpec,
 } from "@/lib/handles";
 import { layerValues } from "@/views/effects/stackDraft";
@@ -39,6 +41,8 @@ import type { StackLayer } from "@/proto/StackLayer";
 /** A press that owns a handle: one pointer only, so a second finger cannot move it. */
 interface Grip {
   pointerId: number;
+  /** The element holding the pointer capture, so an unmount can let it go. */
+  el: HTMLElement;
   run: string;
   key: string;
   startX: number;
@@ -51,6 +55,7 @@ export function FrameHandles({
   layer,
   schema,
   centre,
+  stage,
   onChange,
   onChangeEnd,
 }: {
@@ -59,6 +64,8 @@ export function FrameHandles({
   schema: PropertySchema | null | undefined;
   /** The frame's centre in client pixels, read when a drag needs it. */
   centre: () => { x: number; y: number } | null;
+  /** The stage's box in client pixels: the grip is clamped inside it, so it stays grabbable. */
+  stage?: () => ClientBox | null;
   /** A prop changed inside `run`; `hold` keeps the step open until `onChangeEnd`. */
   onChange: (key: string, value: PropValue, run: string, hold: boolean) => void;
   onChangeEnd?: () => void;
@@ -70,6 +77,29 @@ export function FrameHandles({
   const held = useRef<{ key: string; run: string } | null>(null);
   const [dragging, setDragging] = useState(false);
   const runs = useRef(0);
+  // The latest `onChangeEnd`, for the unmount cleanup (which must not depend on it).
+  const endRef = useRef(onChangeEnd);
+  useEffect(() => {
+    endRef.current = onChangeEnd;
+  });
+  // A gesture cut off by an unmount (the picked layer removed, or the pick moved) still ends its
+  // undo run: the next edit is its own step, and the capture is let go (#257 review).
+  useEffect(() => {
+    return () => {
+      const current = grip.current;
+      if (!current) return;
+      grip.current = null;
+      held.current = null;
+      if (current.el.hasPointerCapture?.(current.pointerId)) {
+        try {
+          current.el.releasePointerCapture(current.pointerId);
+        } catch {
+          // The pointer was already gone; the capture went with it.
+        }
+      }
+      endRef.current?.();
+    };
+  }, []);
 
   if (handle.kind === "none") return null;
 
@@ -87,7 +117,7 @@ export function FrameHandles({
     const speed = handle.kind === "vector" ? handle.speed : null;
     const dir = normaliseAngle(numberOf(values[direction.key]));
     const raw = speed ? numberOf(values[speed.key], speed.min) : null;
-    const length = speed === null || raw === null ? ARROW_MIN_PX : arrowLength(speedFraction(speed, raw));
+    const reach = clampArrow(dir, speed === null || raw === null ? ARROW_MIN_PX : arrowLength(speedFraction(speed, raw)), centre(), stage?.() ?? null);
     const readout = Math.round(dir) % 360;
     const word = directionWord(readout);
 
@@ -103,6 +133,7 @@ export function FrameHandles({
       }
       grip.current = {
         pointerId: e.pointerId,
+        el: e.currentTarget,
         run: beginRun(direction.key),
         key: direction.key,
         startX: e.clientX,
@@ -168,13 +199,13 @@ export function FrameHandles({
         style={{ transform: `rotate(${dir}deg)` }}
         onDragStart={refuseDragStart}
       >
-        <span className="rd-angle-arm" style={{ width: `${length}px` }} />
+        <span className="rd-angle-arm" style={{ width: `${reach}px` }} />
         <div
           className="rd-angle-grip"
           data-handle="direction"
           role="slider"
           tabIndex={0}
-          style={{ left: `${length}px` }}
+          style={{ left: `${reach}px` }}
           aria-label={`Direction of ${layer.name}`}
           aria-valuemin={0}
           aria-valuemax={359}
@@ -209,7 +240,7 @@ export function FrameHandles({
     } catch {
       // A pointer already gone has nothing to capture.
     }
-    grip.current = { pointerId: e.pointerId, run: beginRun(speed.key), key: speed.key, startX: e.clientX, startRaw: raw, down: true };
+    grip.current = { pointerId: e.pointerId, el: e.currentTarget, run: beginRun(speed.key), key: speed.key, startX: e.clientX, startRaw: raw, down: true };
     setDragging(true);
   };
 
@@ -247,6 +278,11 @@ export function FrameHandles({
   };
 
   const fraction = speedFraction(speed, raw);
+  // A period is said as a speed, so the reader hears which way is faster: a shorter period is a
+  // faster effect, and ArrowRight steps it down (#257 review).
+  const valueText = speed.inverse
+    ? `Speed: ${fraction > 0.5 ? "faster" : fraction < 0.5 ? "slower" : "middling"} (${speed.label} ${formatSpeed(raw)})`
+    : `${speed.label} ${formatSpeed(raw)}`;
   return (
     <div
       className="rd-speed-pill"
@@ -258,7 +294,7 @@ export function FrameHandles({
       aria-valuemin={speed.min}
       aria-valuemax={speed.max}
       aria-valuenow={raw}
-      aria-valuetext={`${speed.label} ${formatSpeed(raw)}`}
+      aria-valuetext={valueText}
       title={`Scrub left and right to change the ${speed.label.toLowerCase()}; Left and Right step it.`}
       draggable={false}
       style={{ "--rd-speed-fill": `${Math.round(fraction * 100)}%` } as CSSProperties}
@@ -272,9 +308,11 @@ export function FrameHandles({
       onKeyUp={onKeyUp}
       onBlur={() => held.current && end()}
     >
-      <span className="rd-speed-pill-fill" aria-hidden="true" />
-      <span className="rd-speed-pill-label">{speed.label}</span>
-      <span className="rd-speed-pill-value fig">{formatSpeed(raw)}</span>
+      <span className="rd-speed-pill-inner">
+        <span className="rd-speed-pill-fill" aria-hidden="true" />
+        <span className="rd-speed-pill-label">{speed.label}</span>
+        <span className="rd-speed-pill-value fig">{formatSpeed(raw)}</span>
+      </span>
     </div>
   );
 }

@@ -631,6 +631,10 @@ export function Stage({
                         y: box.top + (frame.bounds.y + frame.bounds.height / 2) * k,
                       };
                     }}
+                    stage={() => {
+                      const box = stageRef.current?.getBoundingClientRect();
+                      return box ? { left: box.left, top: box.top, right: box.right, bottom: box.bottom } : null;
+                    }}
                     onChange={(key, value, run, hold) => onPropChange?.(layer.id, key, value, run, hold)}
                     onChangeEnd={onPropChangeEnd}
                   />

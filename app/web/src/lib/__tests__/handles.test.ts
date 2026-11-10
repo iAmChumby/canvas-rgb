@@ -12,6 +12,7 @@ import {
   ARROW_MIN_PX,
   angleFromPoint,
   arrowLength,
+  clampArrow,
   formatSpeed,
   handleOf,
   normaliseAngle,
@@ -24,6 +25,7 @@ import {
   stepSpeed,
   type SpeedSpec,
 } from "@/lib/handles";
+import type { PropertyDef } from "@/proto/PropertyDef";
 import type { PropertySchema } from "@/proto/PropertySchema";
 
 const schemas = Object.fromEntries(EFFECTS.map((effect) => [effect.schema.id, effect.schema] as const));
@@ -115,6 +117,67 @@ describe("handleOf over every built-in schema", () => {
   });
 });
 
+describe("a speed that cannot be drawn (#257 review)", () => {
+  const schemaWith = (properties: PropertyDef[]): PropertySchema => ({
+    id: "html:review",
+    name: "Review",
+    description: "A user effect.",
+    needs: { screen: false, audio: false },
+    properties,
+    presets: [],
+  });
+
+  it("returns no speed handle when the range's ends are not both finite", () => {
+    const infinite = schemaWith([
+      { key: "speed", label: "Speed", kind: { type: "number", min: 0, max: Infinity, default: 0, step: 1 } },
+    ]);
+    expect(handleOf(infinite)).toEqual({ kind: "none" });
+    const notANumber = schemaWith([
+      { key: "scroll_speed", label: "Scroll Speed", kind: { type: "number", min: Number.NaN, max: 100, default: 0, step: 1 } },
+    ]);
+    expect(handleOf(notANumber)).toEqual({ kind: "none" });
+  });
+
+  it("skips a non-number speed and reads a scroll_speed beside it", () => {
+    const mixed = schemaWith([
+      { key: "speed", label: "Speed", kind: { type: "choice", options: ["Fast", "Slow"], default: "Fast" } },
+      { key: "scroll_speed", label: "Scroll Speed", kind: { type: "number", min: 0, max: 100, default: 0, step: 1 } },
+    ]);
+    expect(handleOf(mixed)).toEqual({
+      kind: "pill",
+      speed: { key: "scroll_speed", label: "Scroll Speed", min: 0, max: 100, step: 1, inverse: false },
+    });
+  });
+});
+
+describe("the grip's clamp inside the stage (#257 review)", () => {
+  const stage = { left: 0, top: 100, right: 640, bottom: 500 };
+
+  it("shortens an arrow that would put the grip outside, and keeps the angle", () => {
+    // A small frame at x=0: its centre is 4 px in, and a 72 px arrow at 180° would end at -68.
+    const reach = clampArrow(180, 72, { x: 4, y: 446 }, stage);
+    expect(reach).toBeCloseTo(4, 5);
+    // The end point is the stage's left edge, not past it.
+    const x = 4 + reach * Math.cos(Math.PI);
+    expect(x).toBeGreaterThanOrEqual(stage.left);
+    expect(x).toBeLessThanOrEqual(stage.right);
+  });
+
+  it("clamps at the right edge too", () => {
+    const reach = clampArrow(0, 72, { x: 636, y: 446 }, stage);
+    expect(reach).toBeCloseTo(4, 5);
+    const x = 636 + reach;
+    expect(x).toBeLessThanOrEqual(stage.right);
+    expect(x).toBeGreaterThanOrEqual(stage.left);
+  });
+
+  it("leaves an arrow that is already inside alone", () => {
+    expect(clampArrow(0, 40, { x: 100, y: 200 }, stage)).toBe(40);
+    expect(clampArrow(0, 40, { x: 100, y: 200 }, null)).toBe(40);
+    expect(clampArrow(0, 40, null, stage)).toBe(40);
+  });
+});
+
 describe("the vector's arrow and the speed's range", () => {
   const speed: SpeedSpec = { key: "speed", label: "Speed", min: 0, max: 100, step: 1, inverse: false };
   const period: SpeedSpec = { key: "period", label: "Period", min: 0.5, max: 20, step: 0.1, inverse: true };
@@ -151,6 +214,18 @@ describe("the direction", () => {
     expect(angleFromPoint({ x: 100, y: 100 }, { x: 100, y: 0 })).toBe(270);
     expect(normaliseAngle(360)).toBe(0);
     expect(normaliseAngle(-90)).toBe(270);
+  });
+
+  it("never stores 360: a point just above the x-axis reads 0, not 360", () => {
+    // atan2 of a point 0.4° above the +x axis is -0.4°; rounding first gives 0, not 360.
+    const x = 100 + 60 * Math.cos((-0.4 * Math.PI) / 180);
+    const y = 100 + 60 * Math.sin((-0.4 * Math.PI) / 180);
+    expect(angleFromPoint({ x: 100, y: 100 }, { x, y })).toBe(0);
+    expect(angleFromPoint({ x: 100, y: 100 }, { x, y })).not.toBe(360);
+  });
+
+  it("snaps without a step without storing 360", () => {
+    expect(snapAngle(359.6, 0)).toBe(0);
   });
 
   it("snaps a Shift drag to 15° steps", () => {

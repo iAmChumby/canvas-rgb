@@ -7944,11 +7944,57 @@ button.chip:hover {
 }
 
 .rd-mask-chip .rd-mask-chip-x {
+  position: relative;
   width: 18px;
   height: 18px;
   min-width: 18px;
   padding: 0;
   color: var(--mute);
+}
+
+/* On a phone the chip is its thumb and the x and nothing more, so the row's subtitle keeps its
+   room: "Add 70% · Rectangle" read "Rectangl…" at 390 (#257 review). */
+@media (max-width: 480px) {
+  .layer-row .layer-thumbs {
+    gap: 2px;
+  }
+
+  .layer-row .rd-mask-chip {
+    padding: 0;
+    gap: 0;
+  }
+
+  .layer-row .rd-mask-chip .thumb-sm,
+  .layer-row .rd-mask-chip .thumb {
+    width: 20px;
+    height: 14px;
+  }
+}
+
+/* The chip's hit areas (#257 review): each control is 44px tall (the row is 50px or more, so
+   nothing clips the band), and neither takes width from the other. The thumb is 20px wide on a
+   phone and the x sits against it, so the x reaches 13px right, over the row's gap, and keeps
+   its own width to the left: a finger that means the thumb never lands on the x. */
+.rd-mask-chip-thumb {
+  position: relative;
+}
+
+.rd-mask-chip-thumb::before,
+.rd-mask-chip .rd-mask-chip-x::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  height: 44px;
+  transform: translateY(-50%);
+}
+
+.rd-mask-chip-thumb::before {
+  right: 0;
+}
+
+.rd-mask-chip .rd-mask-chip-x::before {
+  right: -13px;
 }
 
 .rd-mask-chip .rd-mask-chip-x:hover {
@@ -9284,24 +9330,19 @@ button.chip:hover {
   background: var(--handle-arm);
 }
 
-/* The speed pill: on the frame's bottom edge, scrubbed left and right (#257 phase 3). */
+/* The speed pill: on the frame's bottom edge, scrubbed left and right (#257 phase 3). The pill
+   itself stays 22px tall; a transparent `::before` band gives a finger a 44px hit area (#257
+   review), and the visual box moved inside so the fill still clips to the rounded corners. */
 .rd-speed-pill {
   position: absolute;
   left: 50%;
   bottom: 4px;
   z-index: 5;
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s1);
-  height: 22px;
   box-sizing: border-box;
-  overflow: hidden;
+  height: 22px;
   padding: 0 var(--s2);
   transform: translateX(-50%);
-  border: 1px solid var(--handle-pill-line);
-  border-radius: var(--r-sm);
   outline: none;
-  background: var(--handle-pill-bg);
   color: var(--handle-pill-ink);
   font-size: var(--t14);
   line-height: 1;
@@ -9312,7 +9353,31 @@ button.chip:hover {
   pointer-events: auto;
 }
 
-.rd-speed-pill:focus-visible {
+/* The band's foot is the stage's edge (the pill sits 4px up), because the stage clips what
+   passes it: 44px of hit height all inside the picture. */
+.rd-speed-pill::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: -4px;
+  height: 44px;
+}
+
+.rd-speed-pill-inner {
+  position: relative;
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  height: 100%;
+  overflow: hidden;
+  border: 1px solid var(--handle-pill-line);
+  border-radius: var(--r-sm);
+  background: var(--handle-pill-bg);
+  pointer-events: none;
+}
+
+.rd-speed-pill:focus-visible .rd-speed-pill-inner {
   border-color: var(--focus);
   box-shadow: 0 0 0 2px var(--focus);
 }
