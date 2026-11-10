@@ -327,7 +327,7 @@ describe("AudioSourcePanel (#166)", () => {
 describe("audioStatusWords (#166)", () => {
   const cases: Array<[AudioTestState["status"], Partial<AudioTestState>, string]> = [
     ["off", {}, "Live while this panel is open"],
-    ["waiting", {}, "Waiting for the device…"],
+    ["waiting", {}, "Waiting for the device"],
     ["not_listening", {}, "Press Listen to test this input"],
     ["no_device", {}, "No output device"],
     ["missing", {}, "Saved device not connected: using Speakers (Realtek Audio)"],

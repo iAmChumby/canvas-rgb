@@ -10,6 +10,16 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Effects: give any layer of a stacked effect an animated mask, like a flame over warm white, to shape where it shows (#256)
 
+### Changed
+
+- Waiting looks the same everywhere: a button that sends something keeps its size and shows a small spinner, values and lists that are still loading show a placeholder line instead of "Loading…", "0 connected" or a made-up neutral value, effect pictures show a blank tile until the first frame arrives, and nothing flashes when the answer is quick. (#258)
+
+## [0.10.3] - 2026-11-10
+
+### Fixed
+
+- Peripherals: opening the page no longer pauses the mouse. Its settings are read while you are away from it; until then the page says so, and Read again reads them now (#127)
+
 ## [0.10.2] - 2026-11-09
 
 ### Fixed
@@ -253,7 +263,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.3...HEAD
+[0.10.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.9.0...v0.10.0

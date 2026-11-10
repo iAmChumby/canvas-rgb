@@ -1,9 +1,11 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { ImageBroken } from "@phosphor-icons/react";
 import { loadThumb, type Thumb as ThumbData } from "@/lib/thumbs";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
+import { CanvasSkeleton } from "@/components/Skeleton";
 
 export type ThumbSize = "sm" | "md" | "lg";
 
@@ -40,7 +42,12 @@ export function Thumb({
   const wrapRef = useRef<HTMLSpanElement>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [inView, setInView] = useState(false);
-  const [thumb, setThumb] = useState<ThumbData | null>(null);
+  // The fetch's answer, with the effect it belongs to: a tile reused for another effect reads as
+  // still waiting until that effect's own answer arrives (derived, so no reset in an effect).
+  const [answer, setAnswer] = useState<{ id: string; thumb: ThumbData | null } | null>(null);
+  const thumb = answer?.id === id ? answer.thumb : null;
+  // The fetch has answered (with a picture, or with null when it failed): the wait is over.
+  const settled = answer?.id === id;
   // The pointer is on the tile, or it has the keyboard focus.
   const [awake, setAwake] = useState(false);
   const docVisible = useDocumentVisible();
@@ -66,7 +73,8 @@ export function Thumb({
   useEffect(() => {
     let live = true;
     void loadThumb(id).then((t) => {
-      if (live) setThumb(t);
+      if (!live) return;
+      setAnswer({ id, thumb: t });
     });
     return () => {
       live = false;
@@ -111,6 +119,8 @@ export function Thumb({
       ref={wrapRef}
       className={`thumb thumb-${size}`}
       data-loaded={thumb ? "true" : "false"}
+      data-failed={settled && !thumb ? "true" : undefined}
+      aria-busy={thumb || settled ? undefined : true}
       data-running={animate ? "true" : "false"}
       role="img"
       aria-label={`${label} preview`}
@@ -122,9 +132,14 @@ export function Thumb({
       {thumb ? (
         <canvas ref={canvasRef} aria-hidden="true" />
       ) : (
-        <span className="thumb-pending-label" aria-hidden="true">
-          &middot;&middot;&middot;
-        </span>
+        // A fetch that failed ends the wait: a still "no picture" tile, not a skeleton for ever.
+        settled ? (
+          <span className="thumb-none" aria-hidden="true">
+            <ImageBroken size={16} />
+          </span>
+        ) : (
+          <CanvasSkeleton />
+        )
       )}
     </span>
   );

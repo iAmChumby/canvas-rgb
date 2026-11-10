@@ -6,22 +6,33 @@ import {
   ArrowsClockwise,
   BatteryCharging,
   BatteryFull,
+  ClockCountdown,
   GameController,
   Keyboard,
   Mouse,
 } from "@phosphor-icons/react";
-import { Button } from "@/components/Button";
+import { Button, Swap } from "@/components/Button";
 import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { PeripheralDetailShape, PeripheralListShape } from "@/components/LoadShapes";
 import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { choiceWord, kindWord, nounOf, readStage, type PeripheralRow } from "@/lib/peripherals";
+import {
+  choiceWord,
+  isUnread,
+  kindWord,
+  NOT_READ_YET_PROBLEM,
+  nounOf,
+  readAgo,
+  readStage,
+  type PeripheralRow,
+} from "@/lib/peripherals";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { ReadProgress } from "@/proto/ReadProgress";
 import type { PropertyDef } from "@/proto/PropertyDef";
@@ -80,6 +91,29 @@ const STAGE_POLL_MS = 300;
  * at once, marked as refreshing, while the new read runs.
  */
 const lastRead = new Map<string, PeripheralDetail>();
+
+/**
+ * Keeps a device's detail for the next time it is picked. A device nothing was read from is not
+ * kept: its "Not read yet" frame is not a read, and showing it as the last read would hide the
+ * placeholder the page needs while the daemon answers (#127).
+ */
+function remember(id: string, detail: PeripheralDetail): void {
+  if (isUnread(detail)) lastRead.delete(id);
+  else lastRead.set(id, detail);
+}
+
+/** How often the page asks again, in the "Not read yet" state. A plain GET never touches the device. */
+export const UNREAD_POLL_MS = 5000;
+
+/** The clock, ticking every `everyMs`, so "Read 3 min ago" moves on by itself. */
+function useNowMs(everyMs: number): number {
+  const [now, setNow] = useState(() => Date.now());
+  useEffect(() => {
+    const timer = setInterval(() => setNow(Date.now()), everyMs);
+    return () => clearInterval(timer);
+  }, [everyMs]);
+  return now;
+}
 
 /** The entries of `prev` whose device key is in `live`; `prev` itself when nothing goes. */
 function keepLive<T>(prev: Record<string, T>, live: Set<string>): Record<string, T> {
@@ -217,7 +251,7 @@ export function PeripheralsView() {
     try {
       const d = forceRead ? await api.peripheral(id, { fresh: true }) : await api.peripheral(id);
       if (n !== detailRequest.current) return;
-      lastRead.set(id, d);
+      remember(id, d);
       setLoaded({ id, detail: d });
       if (!keepsStaged(id)) setStagedFor(id, {});
       // Read again is the user's own new action on this device: it clears the device's failed
@@ -297,7 +331,7 @@ export function PeripheralsView() {
         // This read is newer than any reload that was out: that reload is dropped when it
         // lands, so its marker is cleared here, or the device would stay "refreshing" for good.
         setReloadingId(null);
-        lastRead.set(id, d);
+        remember(id, d);
         setLoaded({ id, detail: d });
         if (!keepsStaged(id)) setStagedFor(id, {});
         setDetailError(null);
@@ -316,6 +350,37 @@ export function PeripheralsView() {
     // editsOf / keepsStaged read refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedId]);
+
+  // "Not read yet": the daemon has read nothing from the device and reads it while the person is
+  // away. The page asks again every few seconds with a plain GET (it never touches the device)
+  // and stops when values arrive, the device changes or the page goes away (#127).
+  // Only while the daemon itself says it has not read the device yet: after a failed Read again
+  // the page shows the error and does not poll.
+  const awaitingIdleRead = detail !== null && isUnread(detail) && detail.problem === NOT_READ_YET_PROBLEM;
+  useEffect(() => {
+    if (!selectedId || !awaitingIdleRead) return;
+    const id = selectedId;
+    let stop = false;
+    const timer = setInterval(() => {
+      // A Read again that is out brings its own answer.
+      if (rereading.current) return;
+      api
+        .peripheral(id)
+        .then((d) => {
+          if (stop || (isUnread(d) && d.problem === NOT_READ_YET_PROBLEM)) return;
+          remember(id, d);
+          setLoaded({ id, detail: d });
+          setDetailError(null);
+        })
+        .catch(() => {
+          // The next tick asks again; a failed poll says nothing new.
+        });
+    }, UNREAD_POLL_MS);
+    return () => {
+      stop = true;
+      clearInterval(timer);
+    };
+  }, [selectedId, awaitingIdleRead]);
 
   // The values the controls show: what the device holds, with the staged edits on top.
   const values: Values = useMemo(
@@ -454,7 +519,7 @@ export function PeripheralsView() {
 
   return (
     <div className="rd-page rd-peripherals">
-      <PageTitle title="Peripherals" context={<>{rows.length} found</>} />
+      <PageTitle title="Peripherals" contextBusy={list === null && !listError} context={list === null && !listError ? <InlineSkeleton width="8ch" /> : <>{rows.length} found</>} />
       {/* The pending changes and the way to send them sit in the strip, beside the save (R4). */}
       <PageActions>
         {changedCount > 0 && (
@@ -472,15 +537,16 @@ export function PeripheralsView() {
             >
               <span className="rd-peri-revert-label">Revert</span>
             </Button>
-            <Button variant="primary" size="sm" disabled={saving} onClick={() => void apply()}>
-              {saving ? "Sending" : "Apply"}
+            <Button variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
+              Apply
             </Button>
           </>
         )}
       </PageActions>
 
       {/* The device column becomes a row of keys: one click, as now. */}
-      <div className="rd-peri-keys">        <LoadFrame
+      <div className="rd-peri-keys">
+        <LoadFrame
           className="load-col"
           state={listState}
           shape={<PeripheralListShape />}
@@ -586,12 +652,18 @@ function PeripheralDetail({
   const reads = detail.access.reads;
   const isController = detail.schema.kind === "game_controller";
   const isMouse = detail.schema.kind === "mouse";
+  // Nothing was read yet: a frame that says so replaces the controls (no setting is made up).
+  const unread = isUnread(detail);
+  const noun = nounOf(info.kind);
+  const nowMs = useNowMs(30_000);
+  const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
+  const ago = readAt === null ? null : readAgo(readAt, nowMs);
 
   // The panels that stand in columns, and the one that spans them all.
   const columnPanels: ReactNode[] = [];
   const widePanels: ReactNode[] = [];
 
-  for (const section of detail.schema.sections) {
+  for (const section of unread ? [] : detail.schema.sections) {
     if (isMouse && section.id === "dpi") {
       columnPanels.push(
         <DpiPanel
@@ -663,7 +735,7 @@ function PeripheralDetail({
           </span>
           <div className="peripheral-head-text">
             <h2 className="peripheral-head-name">{info.name}</h2>
-            <p className="peripheral-head-sub">
+            <p className="peripheral-head-sub" title={`${kindWord(info.kind)} · ${info.vendor} · ${info.location}`}>
               {kindWord(info.kind)} · {info.vendor} · <span className="fig">{info.location}</span>
             </p>
           </div>
@@ -671,6 +743,21 @@ function PeripheralDetail({
             {info.connected ? "Connected" : "Not connected"}
           </StateDot>
           <div className="rd-peri-access">
+            {/* One cell for every wording, so the head keeps its width between states; it is
+                there, empty, while reads are off or an older daemon sends no read time. */}
+            <span
+              className="rd-peri-readat"
+              data-role="read-at"
+              data-stale={reads && ago?.stale ? "true" : "false"}
+              data-empty={reads && (ago || unread) ? "false" : "true"}
+            >
+              {/* The third wording is never shown: it holds the width of the longest one. */}
+              <Swap
+                labels={["Not read yet", "Read 3 min ago", "Read 59 min ago"]}
+                at={reads && ago ? 1 : 0}
+                shown={reads && ago ? ago.text : undefined}
+              />
+            </span>
             <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Read</span>
@@ -681,10 +768,11 @@ function PeripheralDetail({
                 />
               </span>
             </Tooltip>
-            <Tooltip label="asks the device for its settings again, for changes made on the mouse itself">
+            <Tooltip label="asks the device for its settings again, for changes made on the mouse itself; this pauses the mouse for a few seconds">
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"
+                  variant={unread ? "primary" : "default"}
                   icon={<ArrowsClockwise size={16} />}
                   disabled={!reads || reading}
                   onClick={onReadAgain}
@@ -706,19 +794,32 @@ function PeripheralDetail({
             </Tooltip>
           </div>
         </div>
-        {detail.problem && (
+        {detail.problem && !(unread && detail.problem === NOT_READ_YET_PROBLEM) && (
           <p className="rule rule-warn" data-role="problem">
             {detail.problem}
           </p>
         )}
       </Panel>
 
+      {unread && (
+        <Panel className="rd-peri-unread">
+          <div className="rd-peri-unread-body" data-role="not-read">
+            <span className="rd-peri-unread-icon" aria-hidden="true">
+              <ClockCountdown size={22} />
+            </span>
+            <p className="rd-peri-unread-text">
+              {`Not read yet. canvas-rgb reads it while you're not using the ${noun}, or press Read again (this pauses the ${noun} for a few seconds).`}
+            </p>
+          </div>
+        </Panel>
+      )}
+
       {/* The sections in columns: a panel never breaks across two of them. */}
-      <div className="rd-peri-sections">{columnPanels}</div>
+      {!unread && <div className="rd-peri-sections">{columnPanels}</div>}
 
       {widePanels}
 
-      {isController && (
+      {isController && !unread && (
         <Panel title="RGB rings">
           <p className="mute">The rings on the pad are not read yet: this build cannot name them.</p>
         </Panel>

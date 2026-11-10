@@ -5,6 +5,7 @@ import "@/styles/tokens.css";
 import "@/styles/app.css";
 import "@/styles/motion.css";
 import "@/styles/hardware.css";
+import "@/styles/loading.css";
 import "@/styles/presets.css";
 import "@/styles/update.css";
 import "@/styles/scrollbars.css";

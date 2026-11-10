@@ -231,10 +231,12 @@ export function EffectsView() {
   const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
   const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
 
+  const [activating, setActivating] = useState(false);
   const activate = async (preset: string | null) => {
     if (!selectedId) return;
     const id = selectedId;
     clearWrite(id);
+    setActivating(true);
     try {
       await api.activateEffect(id, { props: {}, preset });
       await refreshAll();
@@ -245,6 +247,8 @@ export function EffectsView() {
       pulseApplySheet();
     } catch (e) {
       failWrite(id, e);
+    } finally {
+      setActivating(false);
     }
   };
 
@@ -828,6 +832,7 @@ export function EffectsView() {
                 <Button
                   ref={applyPulseEl}
                   variant={running ? "default" : "primary"}
+                  busy={activating}
                   disabled={running || stale}
                   onClick={() => void activate(null)}
                   icon={<Play size={14} weight="fill" />}
@@ -956,6 +961,7 @@ export function EffectsView() {
                     ref={applyPulseSheetEl}
                     variant="default"
                     size="sm"
+                    busy={activating}
                     disabled={running || stale}
                     onClick={() => void activate(null)}
                     icon={<Play size={14} weight="fill" />}

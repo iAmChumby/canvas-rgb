@@ -4,6 +4,7 @@ import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSS
 import { createPortal } from "react-dom";
 import { CaretDown, Check } from "@phosphor-icons/react";
 import { panelOriginSide } from "@/components/Popover";
+import { useLoadDelay } from "@/lib/loadDelay";
 import { motionOffNow, readCssMs } from "@/lib/motion";
 
 export interface SelectOption {
@@ -33,6 +34,7 @@ export function Select({
   groups,
   onChange,
   disabled,
+  loading = false,
 }: {
   value: string;
   label: string;
@@ -42,6 +44,12 @@ export function Select({
   groups?: SelectGroup[];
   onChange: (v: string) => void;
   disabled?: boolean;
+  /**
+   * The options are still being read: the select is disabled, `aria-busy`, and shows an
+   * `InlineSkeleton` (after the load delay) where its value goes. The trigger keeps the width of
+   * the options it already knows.
+   */
+  loading?: boolean;
 }) {
   const flat: SelectOption[] = groups ? groups.flatMap((g) => g.options) : options;
   const id = useId();
@@ -88,11 +96,14 @@ export function Select({
     return () => clearTimeout(t);
   }, [closing]);
   const typed = useRef({ text: "", at: 0 });
+  // The skeleton replaces the value only once the load has lasted LOAD_DELAY_MS: a fast load never
+  // blanks the value, and nothing flashes.
+  const skeleton = useLoadDelay(loading);
 
   const chosen = Math.max(0, flat.findIndex((o) => o.value === value));
 
   const show = (at = chosen) => {
-    if (disabled) return;
+    if (disabled || loading) return;
     setActive(at);
     setOpen(true);
   };
@@ -205,16 +216,22 @@ export function Select({
         aria-expanded={open}
         aria-controls={`${id}-list`}
         aria-activedescendant={open ? `${id}-${active}` : undefined}
-        disabled={disabled}
+        disabled={disabled || loading}
+        aria-busy={loading || undefined}
         onClick={() => (open ? setOpen(false) : show())}
         onKeyDown={onKey}
       >
         <span className="select-value">
           {flat.map((o, i) => (
-            <span key={o.value} className="one-line" data-on={i === chosen ? "true" : "false"} aria-hidden={i === chosen ? undefined : true}>
+            <span key={o.value} className="one-line" data-on={i === chosen && !skeleton ? "true" : "false"} aria-hidden={i === chosen && !skeleton ? undefined : true}>
               {o.label}
             </span>
           ))}
+          {skeleton && (
+            <span className="select-loading" data-on="true">
+              <span className="inline-skel" data-shown="true" style={{ width: "10ch" }} aria-hidden="true" />
+            </span>
+          )}
         </span>
         <CaretDown className="select-caret" size={14} weight="bold" aria-hidden="true" />
       </button>

@@ -1,5 +1,6 @@
 // The peripheral shapes the editor works with, and the words it uses for them.
 
+import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { PeripheralInfo } from "@/proto/PeripheralInfo";
 import type { ReadProgress } from "@/proto/ReadProgress";
 import type { LoadStage } from "@/components/Loading";
@@ -100,4 +101,34 @@ export function readStage(progress: ReadProgress | null, noun: string): LoadStag
     return { label: "Reading settings", done: progress.done, total: progress.total };
   }
   return { label: "Reading settings" };
+}
+
+/** The daemon's words (`problem`) when reads are on and nothing has been read yet. */
+export const NOT_READ_YET_PROBLEM = "the device's settings have not been read yet";
+
+/** Values read longer ago than this are shown as stale (the daemon refreshes them when idle). */
+export const STALE_AFTER_MS = 30 * 60 * 1000;
+
+/**
+ * True when nothing has been read from the device yet (#127): reads are on, the daemon has no
+ * read time for it and keeps no values. The page then shows a frame that says so instead of
+ * controls with settings it made up.
+ */
+export function isUnread(detail: PeripheralDetail): boolean {
+  return detail.access.reads && detail.read_at_ms == null && Object.keys(detail.values).length === 0;
+}
+
+/**
+ * "Read 3 min ago": when the values on the page were read, from the daemon's `read_at_ms` (Unix
+ * ms) and the clock. `stale` is true past `STALE_AFTER_MS`.
+ */
+export function readAgo(readAtMs: number, nowMs: number): { text: string; stale: boolean } {
+  const age = Math.max(0, nowMs - readAtMs);
+  const minutes = Math.floor(age / 60_000);
+  let text: string;
+  if (age < 45_000) text = "Read just now";
+  else if (minutes < 60) text = `Read ${Math.max(1, minutes)} min ago`;
+  else if (minutes < 24 * 60) text = `Read ${Math.floor(minutes / 60)} h ago`;
+  else text = `Read ${Math.floor(minutes / (24 * 60))} d ago`;
+  return { text, stale: age > STALE_AFTER_MS };
 }

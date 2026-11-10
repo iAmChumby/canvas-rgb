@@ -172,7 +172,7 @@ export function StatusStrip({
             <Button
               size="sm"
               variant={paused ? "primary" : "default"}
-              disabled={busy}
+              busy={busy}
               onClick={togglePower}
               aria-label={paused ? "Resume lights" : "Pause lights"}
               // The Play/Pause swap cross-fades with scale and blur (issue #187, rule 8). No

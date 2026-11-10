@@ -1,0 +1,242 @@
+/* ==========================================================================
+   The element-level loading kit (#258)
+   The busy Button and IconButton, InlineSkeleton, the Select's loading value and the placeholder of
+   a canvas that has no picture yet. Loaded after hardware.css, so these rules win at equal weight.
+   Every colour is a token, in both themes. Nothing here loops except the spinner, which stands
+   still under reduced motion (the global block in app.css zeroes animation durations).
+   ========================================================================== */
+
+/* ---------- the busy button ---------- */
+
+/* A button that waits on a request is not disabled (it keeps keyboard focus; a click guard drops
+   the press) and it is not drawn disabled: it keeps its look and its colour, hover and press
+   change nothing, and its cursor says it is working. */
+.btn[aria-busy="true"],
+.btn[aria-busy="true"]:hover,
+.btn[aria-busy="true"]:active {
+  opacity: 1;
+  cursor: progress;
+  border-color: var(--line-2);
+  color: var(--ink);
+  background-color: var(--raised);
+  background-image: none;
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+}
+
+.btn[aria-busy="true"] > * {
+  transform: none;
+}
+
+.btn.btn-primary[aria-busy="true"],
+.btn.btn-primary[aria-busy="true"]:hover,
+.btn.btn-primary[aria-busy="true"]:active {
+  border-color: transparent;
+  color: var(--on-accent);
+  background-color: var(--live);
+  box-shadow: 0 var(--skirt-h) 0 color-mix(in oklab, var(--live) 55%, black);
+}
+
+.btn.btn-ghost[aria-busy="true"],
+.btn.btn-ghost[aria-busy="true"]:hover,
+.btn.btn-ghost[aria-busy="true"]:active {
+  border-color: transparent;
+  color: var(--dim);
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.btn.btn-danger[aria-busy="true"],
+.btn.btn-danger[aria-busy="true"]:hover,
+.btn.btn-danger[aria-busy="true"]:active {
+  color: var(--down);
+}
+
+.ibtn[aria-busy="true"],
+.ibtn[aria-busy="true"]:hover {
+  cursor: progress;
+}
+
+/* The icon's slot: the icon and the spinner share one cell, so the slot is as wide as the icon
+   and the button keeps its width whichever one shows. */
+.btn-slot {
+  display: inline-grid;
+  place-items: center;
+}
+
+.btn-slot > * {
+  grid-area: 1 / 1;
+}
+
+.btn-slot[data-spinning="true"] > .btn-slot-icon {
+  opacity: 0;
+}
+
+.btn-slot-icon {
+  display: inline-grid;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.btn-spinner {
+  flex: none;
+}
+
+/* A button with no icon: the spinner sits beside the label, which stays visible. The button's
+   width is locked while it is busy (see useLockedWidth), so the spinner takes room from the
+   button's own padding, not new room: it is a little smaller than an icon, and the content, a
+   spinner and a label, is centred and may spill a few pixels into the padding. */
+.btn[data-spin="lead"] {
+  gap: 4px;
+  justify-content: center;
+}
+
+/* ---------- inline skeleton ---------- */
+
+.inline-skel {
+  display: inline-block;
+  max-width: 100%;
+  height: 0.85em;
+  vertical-align: -0.1em;
+  border-radius: var(--r-sm);
+  background: var(--skeleton);
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.inline-skel[data-shown="true"] {
+  opacity: 1;
+}
+
+/* The select's value slot, while its options are read. */
+.select-loading {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---------- a canvas with no picture yet ---------- */
+
+/* The skeleton of a thumbnail fills the tile (the tile is positioned) and fades in after the delay. */
+.canvas-skel {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  animation: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.canvas-skel[data-shown="true"] {
+  opacity: 1;
+}
+
+/* A thumbnail that will not come: a still tile in the sunk tone with a "no picture" glyph. Nothing
+   moves, and nothing says it is still loading. */
+.thumb-none {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--mute);
+  background: var(--sunk);
+}
+
+/* A preview canvas is its own box and cannot hold a child, so it wears the skeleton tone itself
+   while its first frame is on the way, after the delay. `held` is the delay, kept unseen. */
+.preview-canvas[data-wait="shown"] {
+  background: var(--skeleton);
+  animation: canvas-fade var(--dur-fast) var(--ease) both;
+}
+
+/* ---------- the stack builder's property pane, while its schema is read ---------- */
+
+.rd-props-shape {
+  display: grid;
+  gap: var(--s3);
+  padding: var(--s1) 0;
+}
+
+.rd-props-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  min-height: 32px;
+}
+
+/* A white-balance swatch whose gains have not been read: the skeleton tone, not a neutral white. */
+.rd-devices .wb-swatch[data-unknown="true"] {
+  background-color: var(--skeleton);
+}
+
+.rd-devices .rd-wb-row > .inline-skel {
+  flex: 1 1 80px;
+  min-width: 64px;
+}
+
+/* A preview that will not come: the sunk tone and a dashed edge, still. */
+.preview-canvas[data-wait="failed"] {
+  background: var(--sunk);
+  outline: 1px dashed var(--line-2);
+  outline-offset: -1px;
+}
+
+/* A white-balance read that failed: an empty dashed swatch, and the error with a way to ask again. */
+.rd-devices .wb-swatch[data-unknown="failed"] {
+  background-color: transparent;
+  border-style: dashed;
+}
+
+.rd-devices .rd-wb-failed {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+}
+
+/* ---------- the peripheral keys, while the list is read ---------- */
+
+/* The keys are a row of chips (an icon and a name), not a column of cards: the placeholder is the
+   same row, so nothing changes shape when the devices arrive. */
+.rd-peri-keys .peripheral-list {
+  flex-direction: row;
+}
+
+.rd-peri-keys .peripheral-row {
+  width: auto;
+  flex: 0 0 auto;
+  gap: var(--s2);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-md);
+  cursor: default;
+}
+
+.rd-peri-keys .peripheral-skel-icon {
+  flex: none;
+  width: 28px;
+  height: 28px;
+  border-radius: var(--r-md);
+}
+
+.rd-peri-keys .peripheral-text {
+  display: block;
+}
+
+/* The widths are the keys' own: the two devices of the demo desk, name and the room beside it. */
+.rd-peri-keys .peripheral-skel-name {
+  width: 118px;
+  height: 15px;
+}
+
+.rd-peri-keys .peripheral-row:nth-child(even) .peripheral-skel-name {
+  width: 239px;
+}
+
+/* On a phone the read's stage chip sits inside the top of the detail frame, over the placeholder's
+   head, and not above it, where it would cover a device key. */
+@media (max-width: 720px) {
+  .rd-peripherals .load-stage {
+    bottom: auto;
+    top: var(--s2);
+    right: var(--s2);
+  }
+}

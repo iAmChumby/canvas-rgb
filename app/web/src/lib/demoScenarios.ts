@@ -148,7 +148,8 @@ export function onboardingDone(): boolean {
  * when no time is given, which is "still loading" for a screenshot), `fail:<area>` makes them
  * answer 500, `empty:<area>` makes them answer with nothing in them. The areas are the first
  * path segment (`fans`, `layouts`, `settings`, `displays`, `devices`) and `effects`, `effect`,
- * `peripherals`, `peripheral` for the list and the detail of the last two.
+ * `peripherals`, `peripheral` for the list and the detail of the last two, and `thumbnail` for the
+ * effect pictures alone.
  */
 export function holdMs(area: string): number {
   for (const t of tokens()) {
@@ -176,9 +177,22 @@ export function slowRead(): boolean {
   return has(SLOW_READ);
 }
 
+/**
+ * `?slow=1500`: every answer of the demo takes this many milliseconds (capped at 10 s), so a
+ * screenshot or a walk catches each wait in the loading kit. Demo only: the real daemon host never
+ * reads the query string. `?slow` with no number is 1500.
+ */
+export function slowQueryMs(): number | null {
+  if (typeof window === "undefined") return null;
+  const raw = new URLSearchParams(window.location.search).get("slow");
+  if (raw === null) return null;
+  const ms = raw === "" ? 1500 : Number(raw);
+  return Number.isFinite(ms) && ms >= 0 ? Math.min(ms, 10_000) : null;
+}
+
 /** How long the demo waits before it answers. */
 export function answerDelayMs(): number {
-  return slow() ? 700 : 2;
+  return slowQueryMs() ?? (slow() ? 700 : 2);
 }
 
 /** The header ids the demo should report as handed back to BIOS: "handback:<header id>". */

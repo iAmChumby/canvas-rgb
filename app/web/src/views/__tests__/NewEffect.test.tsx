@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -157,12 +157,13 @@ describe("a new effect", () => {
     setState("html,stock");
   });
 
-  it("says it is reading a copy while the file is on its way", async () => {
+  it("marks the row busy while the copy's file is on its way", async () => {
     await mount();
     setState("html,stock,slow");
     const chooser = await newEffect();
-    fireEvent.click(within(chooser).getByRole("button", { name: "Copy Wet Smear" }));
-    expect(await screen.findByText("Reading…")).toBeTruthy();
+    const row = within(chooser).getByRole("button", { name: "Copy Wet Smear" });
+    fireEvent.click(row);
+    await waitFor(() => expect(row.getAttribute("aria-busy")).toBe("true"));
     await screen.findByTestId("effect-code", {}, { timeout: 5000 });
     setState("html,stock");
   });

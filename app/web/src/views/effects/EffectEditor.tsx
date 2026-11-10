@@ -328,7 +328,7 @@ export function EffectEditor({
   const thumb = stale ? lastGood?.thumb ?? null : responseThumb ?? lastGood?.thumb ?? null;
   const liveNote =
     previewState === "rendering"
-      ? "Rendering…"
+      ? "Rendering"
       : previewState === "busy"
         ? "Busy: the daemon is rendering other previews"
         : stale
@@ -731,7 +731,7 @@ export function EffectEditor({
     <div className="eff-leave" role="alertdialog" aria-label="Unsaved changes">
       <span>Save your changes before leaving?</span>
       <div className="row-wrap">
-        <Button size="sm" variant="primary" disabled={saving} onClick={() => void save()}>
+        <Button size="sm" variant="primary" busy={saving} onClick={() => void save()}>
           Save
         </Button>
         <Button
@@ -774,13 +774,13 @@ export function EffectEditor({
           <span className="eff-draft-mark" data-state={draftState} aria-hidden="true" />
           <span className="eff-draft-text">
             {draftState === "starting"
-              ? "Starting the draft…"
+              ? "Starting the draft"
               : draftState === "running"
                 ? "Draft on the lights."
                 : draftState === "expiring"
                   ? `Draft on the lights, expiring in ${expiresIn}s.`
                   : draftState === "restoring"
-                    ? "Restoring the previous effect…"
+                    ? "Restoring the previous effect"
                     : "The previous effect could not be restored."}
           </span>
           <span className="row-wrap eff-draft-actions">
@@ -790,11 +790,11 @@ export function EffectEditor({
               </Button>
             ) : (
               <>
-                <Button size="sm" variant="ghost" disabled={draftState === "restoring"} onClick={() => void stopDraft()}>
+                <Button size="sm" variant="ghost" busy={draftState === "restoring"} onClick={() => void stopDraft()}>
                   Stop
                 </Button>
                 {/* One primary action at a time: the prompt's Save is the primary while it asks. */}
-                <Button size="sm" variant={leaving ? "default" : "primary"} disabled={saving} onClick={() => void save()}>
+                <Button size="sm" variant={leaving ? "default" : "primary"} busy={saving} onClick={() => void save()}>
                   Save
                 </Button>
               </>
@@ -816,7 +816,7 @@ export function EffectEditor({
       <div className="eff-edit-main" data-code={showCode && !narrow ? "true" : "false"}>
         <div className="eff-edit-side">
           <div className="eff-live" data-preview={previewState}>
-            <LoopPreview thumb={thumb} label={`Preview of ${name}`} />
+            <LoopPreview thumb={thumb} label={`Preview of ${name}`} failed={previewState === "error" && thumb === null} />
             <span
               className="eff-live-note"
               data-tone={previewState === "error" ? "warn" : undefined}
@@ -873,10 +873,10 @@ export function EffectEditor({
                 <Button
                   size="sm"
                   icon={<Lightbulb size={15} />}
-                  disabled={draftState === "starting"}
+                  busy={draftState === "starting"}
                   onClick={() => void startDraft()}
                 >
-                  {draftState === "starting" ? "Starting…" : "Try on the lights"}
+                  Try on the lights
                 </Button>
               )}
               <Button
@@ -894,10 +894,11 @@ export function EffectEditor({
                 size="sm"
                 variant={leaving || running ? "default" : "primary"}
                 icon={<FloppyDisk size={15} />}
-                disabled={!canSave}
+                busy={saving}
+                disabled={!canSave && !saving}
                 onClick={() => void save()}
               >
-                {saving ? "Saving…" : "Save"}
+                Save
               </Button>
               {!narrow && (
                 <Button size="sm" variant="ghost" icon={<X size={15} />} onClick={askLeave}>
@@ -921,7 +922,7 @@ export function EffectEditor({
                   <span className="eff-clash-tag">file exists</span> Replace <span className="fig">{clash}</span>?
                 </span>
                 <div className="row-wrap">
-                  <Button size="sm" variant="primary" disabled={saving} onClick={() => void save(true)}>
+                  <Button size="sm" variant="primary" busy={saving} onClick={() => void save(true)}>
                     Replace
                   </Button>
                   <Button size="sm" variant="ghost" onClick={() => setClash(null)}>

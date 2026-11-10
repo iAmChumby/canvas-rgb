@@ -21,4 +21,10 @@ access: PeripheralAccess,
  * Why the values are missing, when they are: reads are off, the device did not answer, the
  * vendor app holds it. `None` after a good read.
  */
-problem: string | null, };
+problem: string | null, 
+/**
+ * Issue #127: when `values` were last read from the device, in Unix milliseconds. The daemon
+ * answers from kept values (they survive restarts), so the editor shows how old they are.
+ * `None` when nothing has been read yet, and from daemons before this field existed.
+ */
+read_at_ms?: bigint, };
