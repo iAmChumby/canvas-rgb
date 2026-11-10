@@ -169,6 +169,9 @@ describe("dragging a rectangle area on the preview", () => {
   it("ignores a press outside the rectangle", async () => {
     await openBuilderWith("Heat");
     drag(frame(), [px(2), px(2)], [px(40), px(40)]);
+    // The press is outside Heat's box, so it picks the layer under the pointer instead of
+    // dragging Heat (#257). Heat's own rectangle is untouched.
+    fireEvent.click(document.querySelector<HTMLElement>('.layer-row[data-layer-id="l2"]')!);
     expect(readout()).toContain("x 16, y 150");
   });
 

@@ -7350,11 +7350,18 @@ button.chip:hover {
   white-space: nowrap;
 }
 
-.rd-show-areas {
+.rd-stage-parts {
   display: flex;
   align-items: center;
   gap: var(--s2);
   font-size: var(--t14);
+}
+
+/* Undo and redo sit beside Parts, as the stage's own keys (#257). */
+.rd-stage-tools {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
 }
 
 .rd-canvas-wrap {
@@ -7413,11 +7420,75 @@ button.chip:hover {
   font-weight: 600;
 }
 
-/* The picked layer's area: an accent frame with four corner handles, drawn over the picture. */
+/* Every visible layer's frame sits on the picture as a faint outline (#257): the stage shows
+   where each layer paints before anything is picked. The picked one is `.rd-area-frame` below,
+   which draws over this outline. A faint frame takes no press: the stage under it picks the
+   smallest area at the point. */
+.rd-layer-frame {
+  position: absolute;
+  box-sizing: border-box;
+  /* Two rings, as the knob below: an inner 1px of ink and an outer 1px of the panel colour, so
+     one of the two reads against any colour the effect paints behind it. */
+  border: 1px solid color-mix(in srgb, var(--ink) 60%, transparent);
+  border-radius: 6px;
+  box-shadow: 0 0 0 1px var(--panel);
+  pointer-events: none;
+}
+
+/* A whole-canvas layer's frame would sit on the picture's own edge, half cut by it: the same
+   two rings are drawn inside instead, so it is seen and its layer can be picked by it. */
+.rd-layer-frame[data-kind="canvas"]:not(.rd-area-frame) {
+  border: 0;
+  box-shadow:
+    inset 0 0 0 1px var(--panel),
+    inset 0 0 0 2px color-mix(in srgb, var(--ink) 60%, transparent);
+}
+
+.rd-layer-frame[data-selected="true"] {
+  pointer-events: none;
+}
+
+/* The desk's own outlines, under every layer's frame while Parts is on: a dashed edge and the
+   owner's name for a zone, in the muted ink so a frame stays the loudest thing on the stage. */
+.rd-parts {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.rd-part-outline {
+  position: absolute;
+  box-sizing: border-box;
+  border: 1px dashed color-mix(in srgb, var(--ink) 45%, transparent);
+  border-radius: 6px;
+}
+
+/* The name sits on a chip of the panel colour so it reads on any picture; the stage leaves it
+   off an outline too small for three characters and off one that would land on another name. */
+.rd-part-outline em {
+  position: absolute;
+  left: 3px;
+  top: 1px;
+  max-width: calc(100% - 6px);
+  box-sizing: border-box;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--panel) 85%, transparent);
+  color: var(--ink);
+  font: 500 var(--t14) / 1.2 var(--fm);
+  font-style: normal;
+}
+
+/* The picked frame's area: an accent frame with four corner handles, drawn over the picture. */
 .rd-area-frame {
   position: absolute;
+  /* Over the other frames: a picked whole-canvas layer shares its edge with the rest. */
+  z-index: 1;
   border: 1.5px solid var(--a1);
-  border-radius: 3px;
+  border-radius: 6px;
   background: color-mix(in srgb, var(--a1) 12%, transparent);
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--sunk) 55%, transparent);
   pointer-events: none;
@@ -7488,6 +7559,82 @@ button.chip:hover {
 .rd-area-frame .edge.e { right: -13px; }
 .rd-area-frame .edge.w { left: -13px; }
 
+/* The side bars: the corners' knob in a long, thin shape, centred on each side, so a side
+   resize can be found without hunting (spec §4). Off when the side is too short to hold one. */
+.rd-area-frame .edge::before {
+  content: "";
+  position: absolute;
+  box-sizing: border-box;
+  border-radius: 3px;
+  background: var(--a1);
+  border: 2px solid var(--knob-ring);
+  box-shadow: 0 0 0 2px var(--knob-edge);
+}
+
+.rd-area-frame .edge.n::before,
+.rd-area-frame .edge.s::before {
+  left: calc(50% - 8px);
+  top: 8px;
+  width: 16px;
+  height: 8px;
+}
+
+.rd-area-frame .edge.e::before,
+.rd-area-frame .edge.w::before {
+  top: calc(50% - 8px);
+  left: 8px;
+  width: 8px;
+  height: 16px;
+}
+
+.rd-area-frame .edge[data-mark="off"]::before {
+  display: none;
+}
+
+/* A finger: the hit box of every handle grows to 44 x 44 and the knob stays 12px, centred on the
+   same point. The hit-test's touch reach is 22px to match (Stage.tsx TOUCH_REACH_PX). */
+@media (pointer: coarse) {
+  .rd-area-frame .handle {
+    width: 44px;
+    height: 44px;
+  }
+
+  .rd-area-frame .handle::before {
+    left: 16px;
+    top: 16px;
+  }
+
+  .rd-area-frame .handle.nw { left: -23px; top: -23px; }
+  .rd-area-frame .handle.ne { right: -23px; top: -23px; }
+  .rd-area-frame .handle.sw { left: -23px; bottom: -23px; }
+  .rd-area-frame .handle.se { right: -23px; bottom: -23px; }
+
+  .rd-area-frame .edge.n,
+  .rd-area-frame .edge.s {
+    left: 22px;
+    right: 22px;
+    height: 44px;
+  }
+
+  .rd-area-frame .edge.e,
+  .rd-area-frame .edge.w {
+    top: 22px;
+    bottom: 22px;
+    width: 44px;
+  }
+
+  .rd-area-frame .edge.n { top: -23px; }
+  .rd-area-frame .edge.s { bottom: -23px; }
+  .rd-area-frame .edge.e { right: -23px; }
+  .rd-area-frame .edge.w { left: -23px; }
+
+  .rd-area-frame .edge.n::before,
+  .rd-area-frame .edge.s::before { top: 18px; }
+
+  .rd-area-frame .edge.e::before,
+  .rd-area-frame .edge.w::before { left: 18px; }
+}
+
 .rd-area-frame .handle.nw,
 .rd-area-frame .handle.se { cursor: nwse-resize; }
 .rd-area-frame .handle.ne,
@@ -7499,9 +7646,14 @@ button.chip:hover {
 .rd-area-frame .handle.se { right: -13px; bottom: -13px; }
 
 .rd-area-label {
+  /* Outside the frame, so it never covers the handles of a small box (a phone, a short strip):
+     above it, or below it when the frame touches the top of the picture (#257). */
   position: absolute;
-  left: 12px;
-  top: 8px;
+  left: 0;
+  bottom: calc(100% + 6px);
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
   pointer-events: none;
   white-space: nowrap;
   padding: 1px 5px;
@@ -7509,6 +7661,42 @@ button.chip:hover {
   background: var(--a1);
   color: var(--on-accent);
   font: 500 var(--t14) / 1.3 var(--fm);
+}
+
+.rd-area-label[data-end="true"] {
+  left: auto;
+  right: 0;
+}
+
+.rd-area-label[data-below="true"] {
+  bottom: auto;
+  top: calc(100% + 6px);
+}
+
+.rd-area-label[data-inside="true"] {
+  bottom: auto;
+  top: 6px;
+  left: 6px;
+  right: auto;
+}
+
+/* The "Make rectangle" key of a picked area that is not a rectangle (#257): it floats over the
+   stage's top-right corner, where it never sits under a frame's handles. */
+.rd-stage-float {
+  position: absolute;
+  top: var(--s2);
+  right: var(--s2);
+  z-index: 2;
+  display: flex;
+}
+
+.rd-stage-float .chip {
+  background: var(--panel);
+  border-color: var(--line-2);
+}
+
+.rd-stage-float .chip:hover {
+  background: var(--raised);
 }
 
 .rd-stage-foot {
@@ -8394,9 +8582,13 @@ button.chip:hover {
     gap: var(--s2);
   }
 
-  /* The mockup's phone head carries the size and the rate; the areas are drawn, and the switch
-     that hides them is a desktop control. */
-  .rd-stacks-phone .rd-show-areas {
+  /* The mockup's phone head carries the size and the rate; the desk's outlines are a desktop
+     control, and without the switch they would only crowd a 358 px stage. */
+  .rd-stacks-phone .rd-stage-parts {
+    display: none;
+  }
+
+  .rd-stacks-phone .rd-parts {
     display: none;
   }
 

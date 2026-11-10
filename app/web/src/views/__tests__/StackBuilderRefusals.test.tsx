@@ -1,6 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { NotifyHost } from "@/components/Notify";
+import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
@@ -43,6 +43,9 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // A key on the stage that is refused also says so as a note (#257); the note outlives the
+  // page it came from, and the next test would find its words twice.
+  act(() => dismissNotifications());
 });
 
 async function openBuilder(stack: string) {
@@ -125,7 +128,8 @@ describe("the stack builder says a refusal where the control refused", () => {
     await pickLayer("Base");
 
     fireEvent.click(screen.getByRole("button", { name: "Duplicate Base" }));
-    const problem = await screen.findByText("A stack holds 8 layers");
+    // The refusal is also a note, so the words are on the page twice; the panel's is asked about.
+    const problem = await within(layerPanel()).findByText("A stack holds 8 layers");
     expect(problem.getAttribute("role")).toBe("alert");
     // The message is in the picked layer's own panel.
     expect(layerPanel().contains(problem)).toBe(true);
@@ -141,7 +145,7 @@ describe("the stack builder says a refusal where the control refused", () => {
 
     await pickLayer("Sample HTML");
     fireEvent.click(screen.getByRole("button", { name: "Duplicate Sample HTML" }));
-    const problem = await screen.findByText("A stack holds 2 HTML layers");
+    const problem = await within(layerPanel()).findByText("A stack holds 2 HTML layers");
     expect(problem.getAttribute("role")).toBe("alert");
     expect(layerPanel().contains(problem)).toBe(true);
   });
