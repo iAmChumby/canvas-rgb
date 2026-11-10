@@ -520,6 +520,20 @@ function startsUnread(): boolean {
   return new URLSearchParams(window.location.search).get("peripherals") === "unread";
 }
 
+/**
+ * `?state=partial-read`: a read that comes back without some keys (the X6's third DPI stage and its
+ * LED colour), as a device that answered only part of its report does (#276). The page must show
+ * those two as not read, never as a default.
+ */
+const PARTIAL_READ_MISSING = ["dpi-stage-3", "led-colour"];
+
+/** The values a read reports: all of them, or all but the keys `?state=partial-read` leaves out. */
+function reportedValues(values: Props): Props {
+  const out = { ...values };
+  if (scenario().has("partial-read")) for (const key of PARTIAL_READ_MISSING) delete out[key];
+  return out;
+}
+
 /** Seeds the kept values the first time a peripheral is asked about. */
 function seedKeptReads(devices: DemoPeripheral[]): void {
   if (keptSeeded) return;
@@ -1462,12 +1476,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
           if (scenario().has("asleep") && device.info.kind === "mouse") {
             detail.problem = "the mouse is asleep: move it and try again";
           } else {
-            detail.values = { ...device.values };
+            detail.values = reportedValues(device.values);
             keptReads.set(id, Date.now());
             detail.problem = null;
           }
         } else if (keptReads.has(id)) {
-          detail.values = { ...device.values };
+          detail.values = reportedValues(device.values);
           detail.problem = null;
         } else {
           detail.problem = NOT_READ_YET;

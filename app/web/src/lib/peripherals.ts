@@ -121,6 +121,20 @@ export function isUnread(detail: PeripheralDetail): boolean {
   return detail.access.reads && detail.read_at_ms == null && Object.keys(detail.values).length === 0;
 }
 
+/** The words for a setting the device did not report: a tooltip and the screen reader's text (#276). */
+export const NOT_READ_WORDS = "not read from the device";
+
+/**
+ * The value the device reported for a key, or `undefined` when the read did not carry it. This is
+ * the one way a peripheral page asks "what does the device hold?" (#276): the answer is never a
+ * schema default, a `?? 0` or a `?? "1"`. A caller that gets `undefined` draws the setting as not
+ * read (`UnreadValue`) and offers no control for it, so nothing is written back that the device
+ * never had. Own keys only, so `constructor` or `toString` is never "read".
+ */
+export function known<V>(values: Readonly<Record<string, V | undefined>>, key: string): V | undefined {
+  return Object.prototype.hasOwnProperty.call(values, key) ? values[key] : undefined;
+}
+
 /**
  * "Read 3 min ago": when the values on the page were read, from the daemon's `read_at_ms` (Unix
  * ms) and the clock. `stale` is true past `STALE_AFTER_MS`.

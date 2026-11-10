@@ -22,12 +22,15 @@ import { InlineSkeleton } from "@/components/Skeleton";
 import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
+import { UnreadValue } from "@/components/UnreadValue";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import {
   choiceWord,
   isUnread,
+  known,
   kindWord,
+  NOT_READ_WORDS,
   NOT_READ_YET_PROBLEM,
   nounOf,
   READS_OFF_PROBLEM,
@@ -706,8 +709,10 @@ function PeripheralDetail({
     }
     // One profile shows at a time: the active one.
     if (isController && section.id.startsWith("profile-")) {
-      const active = String(plain(values["active-profile"]) ?? "1");
-      if (section.id !== `profile-${active}`) continue;
+      // Which profile is active is read from the device. When the read did not carry it, no
+      // profile is drawn as the active one (#276); the profiles key above shows it as not read.
+      const active = plain(known(values, "active-profile"));
+      if (active === null || section.id !== `profile-${String(active)}`) continue;
     }
     // The paddles are in the mapping list of the plan; the profile panels hold the rest.
     const properties =
@@ -721,6 +726,7 @@ function PeripheralDetail({
         className={section.id === "buttons" ? "rd-peri-buttons" : undefined}
       >
         <PropertyControls
+          fromDevice
           schema={schemaOf(`peripheral-${section.id}`, section.title, properties)}
           values={values}
           readOnly={readOnly}
@@ -877,14 +883,20 @@ function DpiPanel({
   onPick: (n: number | null) => void;
   onChange: (key: string, value: PropValue) => void;
 }) {
-  const count = Number(plain(values["dpi-stage-count"]) ?? 6);
-  const active = String(plain(values["dpi-active-stage"]) ?? "1");
-  const stages: { n: number; dpi: number; colour: string }[] = [];
-  for (let i = 1; i <= count; i++) {
+  // Every figure here is what the device reported or nothing (#276): a stage count, a DPI, a
+  // colour or an active stage the read did not carry is null and draws as not read.
+  const countRead = plain(known(values, "dpi-stage-count"));
+  const count = typeof countRead === "number" ? countRead : null;
+  const activeRead = plain(known(values, "dpi-active-stage"));
+  const active = activeRead === null ? null : String(activeRead);
+  const stages: { n: number; dpi: number | null; colour: string | null }[] = [];
+  for (let i = 1; i <= (count ?? 0); i++) {
+    const dpiRead = plain(known(values, `dpi-stage-${i}`));
+    const colourRead = plain(known(values, `dpi-stage-${i}-colour`));
     stages.push({
       n: i,
-      dpi: Number(plain(values[`dpi-stage-${i}`]) ?? 0),
-      colour: String(plain(values[`dpi-stage-${i}-colour`]) ?? "#ffffff"),
+      dpi: typeof dpiRead === "number" ? dpiRead : null,
+      colour: typeof colourRead === "string" ? colourRead : null,
     });
   }
   const others = section.properties.filter((p) => !p.key.startsWith("dpi-stage-"));
@@ -897,6 +909,7 @@ function DpiPanel({
   return (
     <Panel title={section.title}>
       <PropertyControls
+        fromDevice
         schema={schemaOf("dpi-count", "DPI", others)}
         values={values}
         readOnly={readOnly}
@@ -905,6 +918,7 @@ function DpiPanel({
         onChange={onChange}
       />
       <div className="dpi-stages" role="group" aria-label="DPI stages">
+        {count === null && <UnreadValue label="DPI stages" />}
         {stages.map((s) => (
           <button
             key={s.n}
@@ -913,17 +927,24 @@ function DpiPanel({
             data-on={picked === s.n ? "true" : "false"}
             data-active={active === String(s.n) ? "true" : "false"}
             aria-pressed={picked === s.n}
-            aria-label={`DPI stage ${s.n}, ${s.dpi}${active === String(s.n) ? ", the active stage" : ""}`}
+            aria-label={`DPI stage ${s.n}, ${s.dpi === null ? NOT_READ_WORDS : s.dpi}${active === String(s.n) ? ", the active stage" : ""}`}
+            title={s.dpi === null ? NOT_READ_WORDS : undefined}
             onClick={() => onPick(picked === s.n ? null : s.n)}
           >
-            <span className="dpi-chip-dot" style={{ "--c": s.colour } as CSSProperties} aria-hidden="true" />
-            <span className="fig">{s.dpi}</span>
+            <span
+              className="dpi-chip-dot"
+              data-unread={s.colour === null ? "true" : "false"}
+              style={s.colour === null ? undefined : ({ "--c": s.colour } as CSSProperties)}
+              aria-hidden="true"
+            />
+            <span className="fig">{s.dpi ?? "—"}</span>
           </button>
         ))}
       </div>
       {picked !== null && pickedDefs.length > 0 && (
         <div className="dpi-stage-edit">
           <PropertyControls
+            fromDevice
             schema={schemaOf(`dpi-stage-${picked}`, `DPI stage ${picked}`, pickedDefs)}
             values={values}
             readOnly={readOnly}
@@ -955,8 +976,10 @@ function ControllerPanel({
   onChange: (key: string, value: PropValue) => void;
 }) {
   const buttons = detail.schema.sections.find((s) => s.id === "buttons");
-  const profile = String(plain(values["active-profile"]) ?? "1");
-  const profileSection = detail.schema.sections.find((s) => s.id === `profile-${profile}`);
+  // The paddles belong to the active profile; with no active profile read, none are listed (#276).
+  const profile = plain(known(values, "active-profile"));
+  const profileSection =
+    profile === null ? undefined : detail.schema.sections.find((s) => s.id === `profile-${String(profile)}`);
   const paddles = (profileSection?.properties ?? []).filter((p) => p.key.includes("-paddle-"));
   const rows: PropertyDef[] = [...(buttons?.properties ?? []), ...paddles];
   const rowRefs = useRef(new Map<string, HTMLDivElement | null>());
@@ -987,12 +1010,15 @@ function ControllerPanel({
               p.kind.type === "choice"
                 ? p.kind.options.map((o) => ({ value: o, label: choiceWord(o) }))
                 : [];
-            const current = String(plain(values[p.key]) ?? "");
+            const held = plain(known(values, p.key));
+            const current = held === null ? null : String(held);
             const fixed = readOnly.includes(p.key);
             return (
               <div
                 key={p.key}
                 className="pad-map-row"
+                data-key={p.key}
+                data-read={current === null ? "false" : "true"}
                 data-on={picked === p.key ? "true" : "false"}
                 ref={(el) => {
                   if (el) rowRefs.current.set(p.key, el);
@@ -1000,7 +1026,9 @@ function ControllerPanel({
                 }}
               >
                 <span className="pad-map-label">{plainLabel(p.label)}</span>
-                {fixed ? (
+                {current === null ? (
+                  <UnreadValue label={`${plainLabel(p.label)} mapping`} />
+                ) : fixed ? (
                   <span className="read-only">{choiceWord(current)}</span>
                 ) : (
                   <Select
