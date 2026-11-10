@@ -350,14 +350,14 @@ async fn a_corrupt_kept_values_file_is_ignored_logged_and_not_fatal() {
     );
     assert_eq!(fake.log().reads, 0, "a corrupt file never leads to a read on open");
     assert_eq!(
-        std::fs::read(_home.path.join("peripheral-values.json.corrupt")).ok().as_deref(),
+        corrupt_copy(&_home.path).and_then(|p| std::fs::read(p).ok()).as_deref(),
         Some(&b"{ this is not json"[..]),
         "a copy of the corrupt file is kept before the next save overwrites it"
     );
 }
 
 /// #127: a file with another format number is ignored too, and a copy of it is kept as
-/// `peripheral-values.json.corrupt` before the first save overwrites it.
+/// `peripheral-values.json.<stamp>.corrupt` before the first save overwrites it.
 #[tokio::test]
 async fn a_kept_values_file_of_another_format_is_copied_aside_and_ignored() {
     let fake = FakePeripheral::default();
@@ -377,7 +377,7 @@ async fn a_kept_values_file_of_another_format_is_copied_aside_and_ignored() {
     assert_eq!(body.get("read_at_ms"), None, "no read time without a read: {body}");
     assert_eq!(fake.log().reads, 0);
     assert_eq!(
-        std::fs::read_to_string(home.path.join("peripheral-values.json.corrupt")).ok().as_deref(),
+        corrupt_copy(&home.path).and_then(|p| std::fs::read_to_string(p).ok()).as_deref(),
         Some(other.as_str()),
         "the other-format file is kept as a copy"
     );
@@ -385,7 +385,14 @@ async fn a_kept_values_file_of_another_format_is_copied_aside_and_ignored() {
     call(&router, "GET", &format!("{path}?fresh=true")).await;
     let saved = std::fs::read_to_string(home.path.join("peripheral-values.json")).unwrap();
     assert!(saved.contains("\"format\": 1"), "the new file has the current format: {saved}");
-    assert!(home.path.join("peripheral-values.json.corrupt").exists());
+    assert!(corrupt_copy(&home.path).is_some(), "the copy stays");
+}
+
+/// The stamped copy of an unusable kept values file (`peripheral-values.json.<stamp>.corrupt`).
+fn corrupt_copy(home: &std::path::Path) -> Option<std::path::PathBuf> {
+    std::fs::read_dir(home).ok()?.filter_map(|e| e.ok()).map(|e| e.path()).find(|p| {
+        p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("peripheral-values.json.") && n.ends_with(".corrupt"))
+    })
 }
 
 /// Builds a second daemon on the same home, the way a restart does: new hub, new adapter.

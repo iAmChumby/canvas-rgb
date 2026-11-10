@@ -353,9 +353,11 @@ export function PeripheralsView() {
   // "Not read yet": the daemon has read nothing from the device and reads it while the person is
   // away. The page asks again every few seconds with a plain GET (it never touches the device)
   // and stops when values arrive, the device changes or the page goes away (#127).
-  const unread = detail !== null && isUnread(detail);
+  // Only while the daemon itself says it has not read the device yet: after a failed Read again
+  // the page shows the error and does not poll.
+  const awaitingIdleRead = detail !== null && isUnread(detail) && detail.problem === NOT_READ_YET_PROBLEM;
   useEffect(() => {
-    if (!selectedId || !unread) return;
+    if (!selectedId || !awaitingIdleRead) return;
     const id = selectedId;
     let stop = false;
     const timer = setInterval(() => {
@@ -364,7 +366,7 @@ export function PeripheralsView() {
       api
         .peripheral(id)
         .then((d) => {
-          if (stop || isUnread(d)) return;
+          if (stop || (isUnread(d) && d.problem === NOT_READ_YET_PROBLEM)) return;
           remember(id, d);
           setLoaded({ id, detail: d });
           setDetailError(null);
@@ -377,7 +379,7 @@ export function PeripheralsView() {
       stop = true;
       clearInterval(timer);
     };
-  }, [selectedId, unread]);
+  }, [selectedId, awaitingIdleRead]);
 
   // The values the controls show: what the device holds, with the staged edits on top.
   const values: Values = useMemo(

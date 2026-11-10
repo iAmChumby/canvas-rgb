@@ -189,6 +189,20 @@ describe("a device nothing was read from", () => {
     expect(asked()).toBe(done);
   });
 
+  it("does not poll after a failed read: the error stands and nothing asks again", async () => {
+    vi.useFakeTimers();
+    const id = "x6:unread-failed";
+    // What the daemon answers after a Read again that failed: no values, no read time, and its
+    // own problem words instead of "not read yet".
+    serve(id, async () => ({ ...mouse(id, null), problem: "the mouse did not answer" }));
+    render(<PeripheralsView />);
+    await tick(50);
+    const before = api.peripheral.mock.calls.length;
+    await tick(UNREAD_POLL_MS * 4);
+    expect(api.peripheral.mock.calls.length).toBe(before);
+    expect(screen.queryByText(/the mouse did not answer/)).not.toBeNull();
+  });
+
   it("stops asking when the page goes away", async () => {
     vi.useFakeTimers();
     const id = "x6:unread-unmount";

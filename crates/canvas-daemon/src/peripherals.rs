@@ -999,12 +999,13 @@ fn device_failure(error: &AdapterError) -> bool {
     matches!(error, AdapterError::Io(_) | AdapterError::NotConnected)
 }
 
-/// Keeps a copy of a kept values file the daemon cannot use, as `peripheral-values.json.corrupt`
+/// Keeps a copy of a kept values file the daemon cannot use, as `peripheral-values.json.<stamp>.corrupt`
 /// next to it, before the next save overwrites it (as `storage::read_parsed` keeps an
 /// unparseable file). A failed copy is logged and nothing more.
 fn keep_unusable_copy(path: &Path) {
     let name = path.file_name().and_then(|n| n.to_str()).unwrap_or(KEPT_VALUES_FILE);
-    let copy = path.with_file_name(format!("{name}.corrupt"));
+    // Stamped like `storage::quarantine`, so a second unusable file never replaces the first copy.
+    let copy = path.with_file_name(format!("{name}.{}.corrupt", crate::storage::timestamp()));
     if let Err(error) = std::fs::copy(path, &copy) {
         tracing::warn!(
             path = %path.display(),
