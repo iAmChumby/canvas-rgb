@@ -487,28 +487,30 @@ scroll, so the content was clipped and unreachable.
   in the main checkout). Left: Displays, Devices and Fans may clip long real content with no pane of
   their own (UNKNOWN, not measured).
 
-### `cause:css-layout`: a control sized by its content runs past its panel
-
-A control whose width comes from its content (a select that lays out every option, a row that holds
-`nowrap` words beside a key) meets a column whose width comes from the window. At the sizes where the
-column is narrower than the control, the control draws past the panel's right edge, or a row that is
-allowed to wrap does it in the wrong place. jsdom has no layout, so no unit test sees either.
-
-- [#263](https://github.com/iAmChumby/canvas-rgb/issues/263): the Attack Shark X6's LED mode select
-  (`.select-trigger`, as wide as its longest option) ran 23 px past the Lighting panel at 1440 and
-  16 px at 1024 (`.rd-peri-sections .prop-item` gave a control only the width the label left).
-- [#268](https://github.com/iAmChumby/canvas-rgb/issues/268): in the Fans floor note, `.hot-controls`
-  was `nowrap` but its figure's own `.row-wrap` was not, so at 1024 and below "°C" dropped under the
-  figure, and at 960 and 390 "Reset to automatic" ran 18 and 24 px past the note.
-- **Class fix:** done (#263, #268). `tools/overflow-check.mjs` serves the static export, opens every
-  view of the demo (plus the two states that draw more: Peripherals once read, Fans with a limit set)
-  at the six redesign sizes in both themes, and fails when an element passes the right edge of its
-  `.panel` or `.rule` by more than 1 px, or a figure's unit wraps under the figure. It skips
-  scroll-x containers and anything not drawn (tooltips before hover, fixed overlays). It reports
-  views that draw no `.panel` (Devices, and Effects on a phone) as not measured, never as a pass.
-  Run it after `npm --prefix app/web run build`. Not yet in CI (it needs Playwright's browser).
-  When it finds an overflow, give the control its own line or let its row wrap as groups, and keep
-  both states of a row the same width so a state change never moves it.
+- A second mechanism, same cause: a control whose width comes from its content (a select that lays
+  out every option, a row of `nowrap` words beside a key) meets a column whose width comes from the
+  window, and at the sizes where the column is narrower the control draws past its panel's edge or
+  wraps in the wrong place. jsdom has no layout, so no unit test sees it.
+  [#263](https://github.com/iAmChumby/canvas-rgb/issues/263): the Attack Shark X6's LED mode select
+  (`.select-trigger`, as wide as its longest option) passed the Lighting panel by 23 px at 1440 and
+  15.7 px at 1024, because `.rd-peri-sections .prop-item` gave a control only the width its label
+  left. [#268](https://github.com/iAmChumby/canvas-rgb/issues/268): in the Fans floor note,
+  `.hot-controls` was `nowrap` but its figure's own `.row-wrap` was not, so at 1024, 960 and 390
+  "°C" dropped 16.1 px under the figure, and at 960 and 390 "Reset to automatic" passed the note by
+  17.7 and 23.9 px (measured on origin/main with the check below).
+- **Class fix, second mechanism:** done (#263, #268). `tools/overflow-check.mjs` serves the static
+  export and opens every view of the demo (plus Peripherals once read and Fans with a limit set) at
+  the six redesign sizes in both themes. It fails on an element past the right edge of its `.panel`,
+  its `.rule` note or its view's row container (Devices and the Effects gallery, which draw no
+  panel), on a note past its panel, on anything past the window, on a `.panel` wider than the window
+  or scrolling sideways, on a document that scrolls sideways, and on a figure whose unit wraps under
+  it. A view that measured nothing fails too. It skips scroll-x containers (never a `.panel`: an
+  `overflow-y: auto` panel computes `overflow-x: auto`, as the Fans right panel does), anything not
+  drawn, and content a clipping ancestor cuts off inside the window. `--mutate-overflow` puts a
+  40 px wider element into one box per view and every row must then fail. Run it after
+  `npm --prefix app/web run build`. Not in CI yet (it needs Playwright's browser). When it finds an
+  overflow, let the row wrap as groups (the browser decides from the control's own width) and keep
+  every state of a row the same width, so a state change never moves it.
 
 ### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
 

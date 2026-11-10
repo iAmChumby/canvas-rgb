@@ -5934,15 +5934,30 @@ button.chip:hover {
 }
 
 /* A select is as wide as its longest option (it lays every option out, so picking one never
-   resizes it), and the column leaves a control only the width the label does not take: the LED
-   mode select ran past the Lighting panel at 1440 and 1024 (#263). A select takes its own line
-   under its label, as wide as the row, at every width, so no state or option list moves it. */
+   resizes it), and the label column leaves a control only the width the label does not take: the
+   LED mode select ran past the Lighting panel at 1440 and 1024 (#263). A row with a select keeps
+   its label on the left, like its neighbours, while the select has 150 px or more beside it (it
+   shrinks to what is left, as it did before, down to that), and wraps under the label, as wide as
+   the row, when it would have less. The wrap is the browser's, from the widths, so it holds for
+   any panel width. */
 .rd-peri-sections .prop-item:has(.select-trigger) {
-  grid-template-columns: minmax(0, 1fr);
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+}
+
+.rd-peri-sections .prop-item:has(.select-trigger) .field-label {
+  flex: 0 0 116px;
+  max-width: 100%;
+}
+
+.rd-peri-sections .prop-item:has(.select-trigger) .prop-control {
+  flex: 1 1 150px;
+  min-width: 0;
 }
 
 .rd-peri-sections .prop-item:has(.select-trigger) .select-trigger {
-  width: 100%;
+  flex: 1 1 auto;
   min-width: 0;
 }
 

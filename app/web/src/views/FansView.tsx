@@ -1065,12 +1065,20 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         />
       </span>
       <span className="hot-tail">
-        {/* Not drawn: it holds the room of the Reset key, so "automatic" and the key are
-            the same width and the row wraps the same way in both states. */}
-        <span className="btn btn-sm btn-ghost hot-sizer" aria-hidden="true">
-          <ArrowClockwise size={14} />
+        {/* Not drawn: the same key, so it holds exactly the room of Reset. "automatic" and the key
+            are then the same width and the row wraps the same way in both states. */}
+        <Button
+          size="sm"
+          variant="ghost"
+          icon={<ArrowClockwise size={14} />}
+          busy={false}
+          disabled
+          tabIndex={-1}
+          aria-hidden="true"
+          className="hot-sizer"
+        >
           Reset to automatic
-        </span>
+        </Button>
         {hotRow.user_set ? (
           <Button
             size="sm"

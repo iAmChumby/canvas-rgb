@@ -90,10 +90,11 @@ describe("the hot line on the fan curve chart", () => {
     expect(screen.getByText("automatic")).toBeTruthy();
   });
 
-  // Issue #268: the figure and its unit are one non-wrapping group, and the state after it is as
-  // wide in both states (a hidden copy of the Reset key holds its room), so a narrow note wraps the
-  // same way before and after a limit is set. The pixels are measured by tools/overflow-check.mjs.
-  it("keeps the figure and its unit in one group and the state's room the same in both states", async () => {
+  // Issue #268: asserts the DOM, not pixels. The figure and its unit sit in one `.hot-main` group,
+  // and the state after it (`.hot-tail`) holds a hidden copy of the Reset key beside "automatic" or
+  // the real key, so both states take the same room. That the row then fits and does not move is
+  // measured in a browser by tools/overflow-check.mjs and its Fans rows.
+  it("groups the figure with its unit and keeps a hidden Reset key beside the state in both states", async () => {
     await page();
     const main = () => document.querySelector(".hot-controls > .hot-main");
     const sizer = () => document.querySelector(".hot-controls > .hot-tail > .hot-sizer");

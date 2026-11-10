@@ -1,23 +1,38 @@
-// Controls that run past their panel, measured in a real browser (issues #263, #268).
+// Controls that run past their panel or the window, measured in a real browser (issues #263, #268).
 //
 // jsdom has no layout, so a unit test cannot see a select that is wider than the Lighting panel
 // or a "Reset to automatic" key that sticks out of its note. This serves the static export
 // (app/web/out) on loopback, opens every view of the demo at the six redesign sizes in both colour
-// schemes, and reports every element inside a `.panel` (or inside a `.rule`, the boxed note
-// some panels hold) whose right edge passes that box's right edge by more than 1 px. An element inside a scroll container that scrolls on x (the container
-// is meant to be wider than what it shows) is left out, and so is an element that is not drawn
-// (display none, hidden, opacity 0: a tooltip before hover), is only there for a screen reader
-// (1-2 px) or is fixed to the window (a toast, a dialog).
-//
-// A figure's unit that has wrapped under the figure ("70" over "°C", #268) is reported too: it
-// stays inside the box but is no longer a row.
+// schemes, and reports, with the element named:
+//   - an element inside a box (a `.panel`, a `.rule` note, or the row containers a view lists in
+//     VIEWS) whose right edge passes that box's right edge by more than 1 px;
+//   - a box (a `.rule`, or a panel inside a panel) whose right edge passes the right edge of the
+//     panel that holds it;
+//   - any element, inside a panel or not, whose right edge passes the window's width, and any
+//     `.panel` wider than the window;
+//   - a view whose document scrolls sideways (scrollWidth > clientWidth);
+//   - a panel that scrolls sideways itself (its content is wider than it shows);
+//   - a figure's unit that has wrapped under the figure ("70" over "°C", #268).
+// The slack is 1 px. Left out: an element inside a scroll container that scrolls on x (the
+// container is meant to be wider than what it shows), and an element that is not drawn (display
+// none, hidden, opacity 0: a tooltip before hover), is only there for a screen reader (1-2 px) or,
+// for the box checks, is fixed to the window (a toast, a dialog). A `.panel` that scrolls on x is
+// NOT exempt: what is inside it is measured against the panel's own right edge. (An `overflow-y:
+// auto` panel computes `overflow-x: auto` too, as the Fans right panel does, which is how a
+// scroll-x exemption would have hidden everything in it.)
 //
 // Only the topmost offender in a chain is reported: when a row overflows, its children do too,
 // and listing each would bury the row.
 //
+// A view with nothing measured FAILS. The one exception is the list NO_PANEL below, the views
+// that are known to draw no `.panel`; they list their own row containers in `boxes`, and a view in
+// the list that draws none of those fails as well.
+//
 // Some states only exist after a click: the Fans "Don't exceed" row shows "Reset to automatic"
 // once a limit is set, and the Peripherals page shows the Attack Shark X6's Lighting panel once
 // the device has been read. Those are extra rows in VIEWS below, with a `prep` that gets there.
+// Nothing waits a fixed time: a row is measured once the fonts are ready, its anchor is drawn,
+// no load frame is still loading and every animation that ends has ended.
 //
 // Usage (after `npm --prefix app/web run build`; needs Playwright in tools/poison-compare/js, and
 // a Chromium that Playwright can start, or Chrome/Edge installed):
@@ -26,6 +41,9 @@
 //   node tools/overflow-check.mjs --views fans,peripherals
 //   node tools/overflow-check.mjs --shots <dir> <tag>    save <dir>/<tag>-<view>-<WxH>-<scheme>.png of every row
 //   node tools/overflow-check.mjs --out <dir>            serve another export than app/web/out
+//   node tools/overflow-check.mjs --mutate-overflow      put a 40 px wider element in one box per
+//                                                        view: every row must then FAIL, and say
+//                                                        that the check caught it
 
 import http from "node:http";
 import fs from "node:fs";
@@ -52,12 +70,14 @@ const { chromium } = require("playwright");
 
 const shotsDir = flag("--shots");
 const shotTag = shotsDir ? args[args.indexOf("--shots") + 2] : null;
+const mutate = args.includes("--mutate-overflow");
 const SIZES = (flag("--sizes") ?? "1920x1040,1440x900,1280x860,1024x768,960x1032,390x844")
   .split(",")
   .map((s) => s.split("x").map(Number));
 const SCHEMES = ["dark", "light"];
 const SLACK_PX = 1;
 const T = 20000;
+const PHONE_MAX = 720;
 
 const hasCards = (page) => page.locator(".fan-cards").count().then((n) => n > 0);
 
@@ -66,28 +86,41 @@ async function fansWithLimit(page) {
   await page.waitForSelector('[aria-label="Select CPU fan"], .fan-cards button', { timeout: T });
   if (await hasCards(page)) {
     await page.locator(".fan-cards button", { hasText: "CPU fan" }).first().click();
-    await page.waitForTimeout(300);
   }
   const f = page.getByLabel("Don't exceed temperature", { exact: true });
   await f.fill("70");
   await f.press("Enter");
-  await page.waitForSelector('button:has-text("Reset to automatic")', { timeout: T });
-  await page.waitForTimeout(600);
+  // The key is drawn (the hidden copy that holds its room is aria-hidden), and it is no longer
+  // sending the limit.
+  await page.waitForSelector('button:not([aria-hidden="true"]):has-text("Reset to automatic"):not([aria-busy="true"])', { timeout: T });
 }
 
-/** Every view of the demo, and the states of it that draw more than the first paint does. */
+/**
+ * Every view of the demo, and the states of it that draw more than the first paint does.
+ * `boxes` adds row containers to measure besides `.panel` and `.rule`.
+ */
 const VIEWS = [
   { name: "layout", url: "/" },
-  { name: "effects", url: "/effects/" },
-  { name: "devices", url: "/devices/" },
+  { name: "effects", url: "/effects/", boxes: ".effect-toolbar, .effect-card" },
+  { name: "devices", url: "/devices/", boxes: ".rd-dev" },
   { name: "displays", url: "/displays/" },
   { name: "peripherals", url: "/peripherals/" },
   { name: "peripherals-read", url: "/peripherals/?state=reads-on" },
   { name: "fans", url: "/fans/" },
   { name: "fans-limit", url: "/fans/", prep: fansWithLimit },
   { name: "settings", url: "/settings/" },
+  // No tray in a plain browser: the page waits, then says so (one panel). `?update=available` is
+  // the fixture with a release waiting: its update card and the notes' panels.
   { name: "updates", url: "/updates/" },
+  { name: "updates-available", url: "/updates/?update=available" },
 ];
+/**
+ * The views known to draw no `.panel` (Devices is a list of rows; Effects on a phone is the
+ * gallery). They are measured through their `boxes` instead, and the check fails if those are
+ * missing too. Any other view without a panel is a failure, not a pass.
+ */
+const NO_PANEL = (view, width) => view === "devices" || (view === "effects" && width <= PHONE_MAX);
+
 const only = flag("--views")?.split(",");
 const rows = VIEWS.filter((v) => !only || only.some((o) => v.name === o || v.name.startsWith(`${o}-`)));
 
@@ -125,79 +158,144 @@ const server = http.createServer((req, res) => {
   fs.createReadStream(file).pipe(res);
 });
 
-/** Runs in the page: every element that passes the right edge of the `.panel` or `.rule` it sits in. */
-const MEASURE = (slack) => {
+/** Runs in the page: everything wrong with the right edges. */
+const MEASURE = ({ slack, extraBoxes, mutate }) => {
+  const BOX = [".panel", ".rule", extraBoxes].filter(Boolean).join(", ");
+  const vw = document.documentElement.clientWidth;
+  // A box that is in the page but not drawn (a skeleton kept for its height, `visibility: hidden`)
+  // is not a box to measure, nor to put the mutation in.
+  const drawnBox = (b) => b.getBoundingClientRect().width > 0 && b.checkVisibility({ visibilityProperty: true, opacityProperty: true });
+  // `--mutate-overflow`: a 40 px wider element in the first drawn box, put in and measured in the
+  // same call so the view cannot redraw in between. The check has to catch it, or it is not looking.
+  let mutated = false;
+  if (mutate) {
+    const box = [...document.querySelectorAll(BOX)].find(drawnBox);
+    if (box) {
+      if (getComputedStyle(box).position === "static") box.style.position = "relative";
+      const m = document.createElement("div");
+      m.className = "ovf-mutant";
+      m.style.cssText = "position:absolute;top:0;left:0;height:4px;width:calc(100% + 40px);pointer-events:none";
+      box.appendChild(m);
+      mutated = true;
+    }
+  }
   const name = (el) => {
     const cls = String(el.getAttribute("class") ?? "").trim().split(/\s+/).filter(Boolean).slice(0, 2).join(".");
     return `${el.tagName.toLowerCase()}${cls ? `.${cls}` : ""}`;
   };
-  // A scroll container that scrolls on x is meant to be wider than what it shows.
+  const text = (el) => (el.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 40);
+  const round = (n) => Math.round(n * 10) / 10;
+  // A scroll container that scrolls on x is meant to be wider than what it shows. A `.panel` is
+  // never one of them: it is the thing being measured.
   const scrollsX = (el) => {
+    if (el.matches(".panel")) return false;
     const o = getComputedStyle(el).overflowX;
     return o === "auto" || o === "scroll";
   };
-  const skipped = (el, panel) => {
-    for (let a = el; a; a = a.parentElement) {
-      const cs = getComputedStyle(a);
-      if (cs.position === "fixed" || cs.display === "none" || cs.visibility === "hidden") return true;
-      // A tooltip waits at opacity 0 until the pointer is over its mark: it is not drawn yet.
-      if (cs.opacity === "0") return true;
+  // Not drawn, or drawn for a screen reader only: not an overflow. A tooltip waits at opacity 0
+  // until the pointer is over its mark.
+  const notDrawn = (el) => {
+    const cs = getComputedStyle(el);
+    return cs.display === "none" || cs.visibility === "hidden" || cs.opacity === "0";
+  };
+  /**
+   * Is `el` exempt: not drawn, fixed (when asked), inside a scroll-x container below `stop`, or
+   * (`clipAt`, for the window check) cut off by an ancestor that clips on x at or inside that edge,
+   * so the part that passes it is never drawn.
+   */
+  const skipped = (el, stop, { fixed, clipAt }) => {
+    for (let a = el; a && a !== stop; a = a.parentElement) {
+      if (notDrawn(a)) return true;
+      if (fixed && getComputedStyle(a).position === "fixed") return true;
       if (a !== el && scrollsX(a)) return true;
-      if (a === panel) return false;
+      if (clipAt !== undefined && a !== el && !a.matches(".panel")) {
+        const ox = getComputedStyle(a).overflowX;
+        if (ox !== "visible" && a.getBoundingClientRect().right <= clipAt) return true;
+      }
     }
     return false;
   };
-  const hits = new Set();
-  const BOX = ".panel, .rule";
-  const panels = [...document.querySelectorAll(BOX)].filter((p) => p.getBoundingClientRect().width > 0);
-  for (const panel of panels) {
-    const pr = panel.getBoundingClientRect();
-    for (const el of panel.querySelectorAll("*")) {
-      if (el.closest(BOX) !== panel) continue;
+  const tooSmall = (r) => r.width <= 2 || r.height <= 2;
+  const hits = [];
+
+  // 1. Elements past the right edge of their box, and boxes past the box that holds them.
+  const boxes = [...document.querySelectorAll(BOX)].filter(drawnBox);
+  const inBox = new Set();
+  for (const box of boxes) {
+    const br = box.getBoundingClientRect();
+    for (const el of box.querySelectorAll("*")) {
+      if (el.closest(BOX) !== box) continue;
       const r = el.getBoundingClientRect();
-      if (r.width <= 2 || r.height <= 2) continue;
-      if (r.right <= pr.right + slack) continue;
-      if (skipped(el, panel)) continue;
-      el.__panel = panel;
-      hits.add(el);
+      if (tooSmall(r) || r.right <= br.right + slack) continue;
+      if (skipped(el, box, { fixed: true })) continue;
+      inBox.add(el);
+      el.__box = box;
+    }
+    // The box itself against the box above it (a `.rule` against its panel).
+    const parent = box.parentElement?.closest(BOX);
+    if (parent && box.getBoundingClientRect().right > parent.getBoundingClientRect().right + slack && !skipped(box, parent, { fixed: true })) {
+      inBox.add(box);
+      box.__box = parent;
+    }
+    // A box that scrolls sideways is a box whose content is wider than it.
+    const ox = getComputedStyle(box).overflowX;
+    if ((ox === "auto" || ox === "scroll") && box.scrollWidth > box.clientWidth + slack) {
+      hits.push({ kind: "scrolls", el: name(box), text: "", over: box.scrollWidth - box.clientWidth });
     }
   }
-  const top = [...hits].filter((el) => !(el.parentElement && hits.has(el.parentElement)));
-  // A unit that has wrapped under its figure: its middle is below the figure's bottom.
-  const wrapped = [];
+  for (const el of [...inBox].filter((e) => !(e.parentElement && inBox.has(e.parentElement)))) {
+    const over = el.getBoundingClientRect().right - el.__box.getBoundingClientRect().right;
+    hits.push({ kind: "box", el: name(el), box: name(el.__box), text: text(el), over: round(over) });
+  }
+
+  // 2. Anything past the window, in a panel or not, and panels wider than the window.
+  const past = new Set();
+  for (const el of document.querySelectorAll("body *")) {
+    const r = el.getBoundingClientRect();
+    if (tooSmall(r) || r.right <= vw + slack) continue;
+    if (skipped(el, document.body, { fixed: false, clipAt: vw + slack })) continue;
+    past.add(el);
+  }
+  for (const el of [...past].filter((e) => !(e.parentElement && past.has(e.parentElement)))) {
+    hits.push({ kind: "window", el: name(el), text: text(el), over: round(el.getBoundingClientRect().right - vw) });
+  }
+  for (const p of document.querySelectorAll(".panel")) {
+    const w = p.getBoundingClientRect().width;
+    if (w > vw + slack) hits.push({ kind: "wide", el: name(p), text: "", over: round(w - vw) });
+  }
+  const sw = document.documentElement.scrollWidth;
+  if (sw > vw + slack) hits.push({ kind: "doc", el: "html", text: "", over: sw - vw });
+
+  // 3. A unit that has wrapped under its figure: its middle is below the figure's bottom.
   for (const input of document.querySelectorAll("input.num")) {
     const unit = input.parentElement?.querySelector(".unit");
-    if (!unit || unit.getBoundingClientRect().width === 0 || skipped(input, input.closest(BOX) ?? document.body)) continue;
+    if (!unit || unit.getBoundingClientRect().width === 0 || skipped(input, document.body, { fixed: true })) continue;
     const ir = input.getBoundingClientRect();
     const ur = unit.getBoundingClientRect();
     if (ur.top + ur.height / 2 > ir.bottom) {
-      wrapped.push({
-        el: name(unit),
-        panel: name(input.closest(BOX) ?? document.body),
-        text: (unit.textContent ?? "").trim(),
-        over: Math.round((ur.top + ur.height / 2 - ir.bottom) * 10) / 10,
-        right: Math.round(ur.right),
-        panelRight: Math.round(ir.right),
-        wrapped: true,
-      });
+      hits.push({ kind: "wrapped", el: name(unit), text: text(unit), over: round(ur.top + ur.height / 2 - ir.bottom) });
     }
   }
-  return {
-    vw: document.documentElement.clientWidth,
-    panels: panels.length,
-    hits: wrapped.concat(top.map((el) => {
-      const r = el.getBoundingClientRect();
-      const pr = el.__panel.getBoundingClientRect();
-      return {
-        el: name(el),
-        panel: name(el.__panel),
-        text: (el.textContent ?? "").trim().replace(/\s+/g, " ").slice(0, 40),
-        over: Math.round((r.right - pr.right) * 10) / 10,
-        right: Math.round(r.right),
-        panelRight: Math.round(pr.right),
-      };
-    })),
-  };
+  return { vw, mutated, boxes: boxes.length, panels: boxes.filter((b) => b.matches(".panel")).length, hits };
+};
+
+const describe = (x) => {
+  switch (x.kind) {
+    case "box":
+      return `${x.el} "${x.text}" passes ${x.box} by ${x.over}px`;
+    case "window":
+      return `${x.el} "${x.text}" passes the window's right edge by ${x.over}px`;
+    case "wide":
+      return `${x.el} is ${x.over}px wider than the window`;
+    case "doc":
+      return `the document scrolls sideways by ${x.over}px`;
+    case "scrolls":
+      return `${x.el} scrolls sideways: its content is ${x.over}px wider than it`;
+    case "wrapped":
+      return `${x.el} "${x.text}" has wrapped under its figure, ${x.over}px below the figure's bottom`;
+    default:
+      return JSON.stringify(x);
+  }
 };
 
 /** A busy machine can time a request out: up to three tries, from a blank page. */
@@ -214,6 +312,30 @@ async function goto(page, url) {
   }
 }
 
+/**
+ * Wait until the view is drawn and still: fonts ready, the anchor on screen, no load frame
+ * waiting, every animation that ends has ended (the ones that loop, a spinner, may run), and two
+ * frames since.
+ */
+async function settle(page, anchor) {
+  await page.evaluate(() => document.fonts.ready);
+  await page.waitForFunction(
+    (sel) => {
+      // Any one of them drawn: the first match can be a sheet that is shut on a phone.
+      const drawn = [...document.querySelectorAll(sel)].some((el) => {
+        const r = el.getBoundingClientRect();
+        return r.width > 0 && r.height > 0;
+      });
+      if (!drawn) return false;
+      if (document.querySelector('[data-state="loading"], [aria-busy="true"]')) return false;
+      return document.getAnimations().every((a) => a.playState === "finished" || a.effect?.getTiming().iterations === Infinity);
+    },
+    anchor,
+    { timeout: T },
+  );
+  await page.evaluate(() => new Promise((r) => requestAnimationFrame(() => requestAnimationFrame(r))));
+}
+
 async function main() {
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
@@ -227,17 +349,19 @@ async function main() {
     browser = await chromium.launch({ headless: true, channel: "chrome" });
   }
   console.log(`overflow-check: browser channel ${channel}, ${rows.length} views x ${SIZES.length} sizes x ${SCHEMES.length} schemes`);
+  if (mutate) console.log("overflow-check: MUTATION on, one box per view gets a 40px wider element: every row must FAIL");
   const failures = [];
   let checks = 0;
-  let none = 0; // views drawn with no .panel in them: nothing measured, which is not a pass
+  let caught = 0;
+  let missed = 0;
   try {
     for (const [w, h] of SIZES) {
       for (const scheme of SCHEMES) {
         const ctx = await browser.newContext({
           viewport: { width: w, height: h },
           colorScheme: scheme,
-          isMobile: w <= 720,
-          hasTouch: w <= 720,
+          isMobile: w <= PHONE_MAX,
+          hasTouch: w <= PHONE_MAX,
         });
         await ctx.addInitScript((s) => {
           try {
@@ -253,22 +377,24 @@ async function main() {
         const page = await ctx.newPage();
         for (const v of rows) {
           const label = `${w}x${h} ${scheme} ${v.name}`;
-          let bad = [];
+          const known = NO_PANEL(v.name.split("-")[0], w);
+          const extraBoxes = v.boxes ?? "";
+          // A known no-panel view is anchored on its own rows; any other on a panel.
+          const anchor = known ? extraBoxes : ".panel";
+          const bad = [];
           let m = null;
           try {
             await goto(page, `${base}${v.url}`);
-            await page.evaluate(() => document.fonts.ready);
-            await page.waitForTimeout(900);
-            if (v.prep) await v.prep(page);
-            m = await page.evaluate(MEASURE, SLACK_PX);
-            if (m.panels === 0) none++;
-            for (const x of m.hits) {
-              bad.push(
-                x.wrapped
-                  ? `${x.el} "${x.text}" has wrapped under its figure, ${x.over}px below the figure's bottom`
-                  : `${x.el} "${x.text}" passes ${x.panel} by ${x.over}px (right ${x.right}, panel right ${x.panelRight})`,
-              );
+            await settle(page, anchor);
+            if (v.prep) {
+              await v.prep(page);
+              await settle(page, anchor);
             }
+            m = await page.evaluate(MEASURE, { slack: SLACK_PX, extraBoxes, mutate });
+            if (mutate && !m.mutated) bad.push("mutation: no drawn box to put the 40px element in");
+            for (const x of m.hits) bad.push(describe(x));
+            if (m.boxes === 0) bad.push("nothing was measured: no box drawn");
+            else if (m.panels === 0 && !known) bad.push("nothing was measured: no .panel drawn, and the view is not on the NO_PANEL list");
             if (shotsDir) {
               fs.mkdirSync(shotsDir, { recursive: true });
               await page.screenshot({ path: path.join(shotsDir, `${shotTag}-${v.name}-${w}x${h}-${scheme}.png`) });
@@ -276,9 +402,16 @@ async function main() {
           } catch (e) {
             bad.push(`could not measure: ${String(e.message).split("\n")[0]}`);
           }
+          if (mutate) {
+            const ok = bad.some((b) => b.includes("ovf-mutant"));
+            if (ok) caught++;
+            else {
+              missed++;
+              bad.push("MUTATION MISSED: the 40px element was not reported");
+            }
+          }
           checks++;
-          const status = bad.length ? "FAIL" : m && m.panels === 0 ? "none" : "ok  ";
-          console.log(`${status} ${label}  [${m ? `${m.panels} panels` : "-"}]`);
+          console.log(`${bad.length ? "FAIL" : "ok  "} ${label}  [${m ? `${m.panels} panels, ${m.boxes - m.panels} other boxes` : "-"}]`);
           for (const b of bad) {
             console.log(`       - ${b}`);
             failures.push(`${label}: ${b}`);
@@ -291,7 +424,8 @@ async function main() {
     await browser.close();
     server.close();
   }
-  console.log(`\n${checks} view checks, ${failures.length} hits, ${none} drew no .panel (nothing measured: UNKNOWN, not a pass)`);
+  console.log(`\n${checks} view checks, ${failures.length} hits`);
+  if (mutate) console.log(`mutation caught in ${caught} of ${checks} rows, missed in ${missed}`);
   if (checks === 0 || failures.length) process.exitCode = 1;
 }
 
