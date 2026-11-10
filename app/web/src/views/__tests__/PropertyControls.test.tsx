@@ -72,3 +72,42 @@ describe("PropertyControls (#106)", () => {
     expect(setup({ angle: { type: "number", value: 405 } }).dial.getAttribute("aria-valuenow")).toBe("0");
   });
 });
+
+describe("PropertyControls fromDevice: a value of the wrong type is unread (#276)", () => {
+  afterEach(cleanup);
+
+  const deviceSchema: PropertySchema = {
+    ...schema,
+    properties: [
+      { key: "motion-sync", label: "Motion sync", kind: { type: "bool", default: true } },
+      { key: "led", label: "LED colour", kind: { type: "color", default: "#ff0000" } },
+      { key: "led-2", label: "Second colour", kind: { type: "color", default: "#00ff00" } },
+      { key: "angle", label: "Angle", kind: { type: "angle", default: 90 } },
+    ],
+  };
+
+  it("draws a dash, not the schema default, for a number in a switch slot, and still reads a hue as an angle", () => {
+    const { container } = render(
+      <PropertyControls
+        schema={deviceSchema}
+        values={{
+          "motion-sync": { type: "number", value: 1 },
+          led: { type: "color", value: "#0000ff" },
+          "led-2": { type: "number", value: 7 },
+          angle: { type: "hue", value: 45 },
+        }}
+        onChange={vi.fn()}
+        fromDevice
+      />,
+    );
+    const row = (key: string) => container.querySelector(`.prop-item[data-key="${key}"]`) as HTMLElement;
+    expect(row("motion-sync").dataset.read).toBe("false");
+    expect(row("motion-sync").querySelector(".unread-value")).toBeTruthy();
+    expect(row("led-2").dataset.read).toBe("false");
+    expect(row("led").dataset.read).toBe("true");
+    // The wrong-type colour offers no made-up quick swatch (#00ff00) inside the read colour's picker.
+    expect(row("led").innerHTML).not.toMatch(/00ff00/i);
+    expect(row("angle").dataset.read).toBe("true");
+    expect(row("angle").querySelector(".angle-dial")?.getAttribute("aria-valuenow")).toBe("45");
+  });
+});

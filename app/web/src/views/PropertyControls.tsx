@@ -59,7 +59,7 @@ export function PropertyControls({
   return (
     <div className="prop-list">
       {schema.properties.map((def) => {
-        const held = fromDevice ? known(values, def.key) : (values[def.key] ?? defaultFor(def.kind));
+        const held = fromDevice ? fits(def.kind, known(values, def.key)) : (values[def.key] ?? defaultFor(def.kind));
         const value = held ?? defaultFor(def.kind);
         const fixed = readOnly?.includes(def.key) ?? false;
         return (
@@ -111,6 +111,18 @@ function ReadOnlyValue({ value, optionLabel }: { value: PropValue; optionLabel?:
   return <span className="read-only fig">{value.value}</span>;
 }
 
+/**
+ * #276: a device value of the wrong type (a number where a switch goes) is as unread as a missing
+ * one; drawing the kind's default in its place would show a made-up setting as read. A hue and an
+ * angle are both degrees and stand in for each other.
+ */
+function fits(kind: PropKind, value: PropValue | undefined): PropValue | undefined {
+  if (!value) return undefined;
+  if (value.type === kind.type) return value;
+  const degrees = (t: string) => t === "hue" || t === "angle";
+  return degrees(value.type) && degrees(kind.type) ? value : undefined;
+}
+
 function defaultFor(kind: PropKind): PropValue {
   switch (kind.type) {
     case "color":
@@ -148,7 +160,7 @@ function control(
       const quick: ColorSwatch[] = [];
       for (const other of schema.properties) {
         if (other.key === key || other.kind.type !== "color") continue;
-        const held = fromDevice ? known(values, other.key) : values[other.key];
+        const held = fromDevice ? fits(other.kind, known(values, other.key)) : values[other.key];
         // A colour the device did not report is no quick swatch: it would offer a made-up one.
         if (fromDevice && !held) continue;
         const otherHex = held && held.type === "color" ? held.value : other.kind.default;
