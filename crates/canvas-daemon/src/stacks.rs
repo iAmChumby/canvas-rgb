@@ -262,15 +262,18 @@ fn check_mask(layer: &StackLayer, known: &KnownEffects) -> Result<(), String> {
 }
 
 /// The HTML slots one layer takes: one for its own effect and one for its mask (#256). A stack
-/// may hold `STACK_HTML_MAX` slots in all, and save and load both count them with this.
-pub fn html_slots(layer: &StackLayer) -> usize {
-    usize::from(is_html_effect(&layer.effect))
-        + usize::from(layer.mask.as_ref().is_some_and(|mask| is_html_effect(&mask.effect)))
+/// may hold `STACK_HTML_MAX` slots in all, and save and load both count them with this. A mask
+/// whose effect does not resolve takes no slot: it cannot build, so the layer draws unmasked.
+pub fn html_slots(layer: &StackLayer, known: &KnownEffects) -> usize {
+    let mask = layer.mask.as_ref().is_some_and(|mask| {
+        is_html_effect(&mask.effect) && layer_effect_id(known, &mask.effect).is_some()
+    });
+    usize::from(is_html_effect(&layer.effect)) + usize::from(mask)
 }
 
 /// True for a layer that takes at least one HTML slot: the capped, slow kind.
-pub fn layer_counts_as_html(layer: &StackLayer) -> bool {
-    html_slots(layer) > 0
+pub fn layer_counts_as_html(layer: &StackLayer, known: &KnownEffects) -> bool {
+    html_slots(layer, known) > 0
 }
 
 /// Checks one stack before it is saved (the D95.1.1 table).
@@ -292,7 +295,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
             stack.layers.len()
         ));
     }
-    let html: usize = stack.layers.iter().map(html_slots).sum();
+    let html: usize = stack.layers.iter().map(|layer| html_slots(layer, known)).sum();
     if html > STACK_HTML_MAX {
         return Err(format!(
             "a stack holds at most {STACK_HTML_MAX} HTML layers, and this one has {html}"
@@ -340,16 +343,7 @@ pub fn canonicalise_and_validate(
     stacks: &Stacks,
     known: &KnownEffects,
 ) -> Result<(), StackRefusal> {
-    for layer in &mut stack.layers {
-        if let Some(id) = layer_effect_id(known, &layer.effect) {
-            layer.effect = id.to_string();
-        }
-        if let Some(mask) = &mut layer.mask {
-            if let Some(id) = layer_effect_id(known, &mask.effect) {
-                mask.effect = id.to_string();
-            }
-        }
-    }
+    canonicalise(stack, known);
     let name = stack.name().to_string();
     let others: Vec<Stack> = stacks
         .all()
@@ -365,6 +359,34 @@ pub fn canonicalise_and_validate(
         )));
     }
     validate_stack(stack, known, &others).map_err(StackRefusal::Invalid)
+}
+
+/// Every layer's and mask's effect id, as the builder takes it: a display name ("Fire") becomes
+/// its id, and a name that resolves to nothing is left as it was.
+fn canonicalise(stack: &mut Stack, known: &KnownEffects) {
+    for layer in &mut stack.layers {
+        if let Some(id) = layer_effect_id(known, &layer.effect) {
+            layer.effect = id.to_string();
+        }
+        if let Some(mask) = &mut layer.mask {
+            if let Some(id) = layer_effect_id(known, &mask.effect) {
+                mask.effect = id.to_string();
+            }
+        }
+    }
+}
+
+/// A config bundle's stack: canonicalised the way a save does, then checked the way a load does
+/// (#256). A mask whose effect does not resolve is kept — the layer draws unmasked — so a bundle
+/// that a file could hold imports instead of refusing the whole config for a part it can report.
+pub fn canonicalise_and_validate_for_import(
+    stack: &mut Stack,
+    known: &KnownEffects,
+    others: &[Stack],
+) -> Result<(), String> {
+    canonicalise(stack, known);
+    let checked = checked_for_load(stack, stack.layers.clone(), known);
+    validate_stack(&checked, known, others)
 }
 
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
@@ -414,7 +436,7 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
         }
         // One rule, shared with the save: a layer's own effect and its mask take one HTML slot
         // each. A layer that does not fit the cap is dropped whole, never a mask alone.
-        let slots = html_slots(&layer);
+        let slots = html_slots(&layer, known);
         if html + slots > STACK_HTML_MAX {
             tracing::warn!(
                 stack = %stack.id,

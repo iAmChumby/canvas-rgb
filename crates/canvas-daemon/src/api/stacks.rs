@@ -46,7 +46,7 @@ fn summary(known: &KnownEffects, stack: &Stack) -> StackSummary {
         html_layers: stack
             .layers
             .iter()
-            .filter(|layer| crate::stacks::layer_counts_as_html(layer))
+            .filter(|layer| crate::stacks::layer_counts_as_html(layer, known))
             .count() as u32,
         missing,
     }

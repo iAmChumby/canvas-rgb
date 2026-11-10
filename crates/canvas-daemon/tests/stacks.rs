@@ -3823,7 +3823,157 @@ async fn the_html_cap_counts_a_layer_and_its_mask_the_same_at_save_and_load() {
         loaded.layers[0].mask.as_ref().map(|mask| mask.effect.as_str()),
         Some("html:b"),
         "a layer's mask is not dropped on its own"
-    );}
+    );
+}
+
+/// A second HTML effect for the cap tests: the same source with another title (display name).
+fn glow_html() -> String {
+    VALID_HTML.replace("<title>Spark</title>", "<title>Glow</title>")
+}
+
+#[tokio::test]
+async fn a_config_import_keeps_a_stack_whose_mask_effect_is_gone() {
+    let harness = build("fp2-import-mask");
+    let bundle = json(harness.router.clone().oneshot(request("GET", routes::CONFIG_EXPORT)).await.unwrap()).await;
+    let mut with_mask = bundle.clone();
+    with_mask["stacks"] = serde_json::json!([{
+        "id": "stack:GoneMask",
+        "layers": [{ "id": "l1", "name": "One", "effect": "white", "mask": { "effect": "no-such-effect" } }]
+    }]);
+    let imported = harness
+        .router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &with_mask.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), StatusCode::OK, "a missing mask does not refuse the import");
+
+    let detail = json(
+        harness
+            .router
+            .clone()
+            .oneshot(request("GET", &stack_path("stack:GoneMask")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(
+        detail["stack"]["layers"][0]["mask"]["effect"], "no-such-effect",
+        "the mask is still in the imported stack: {detail}"
+    );
+    assert_eq!(detail["layers"][0]["status"], "missing_effect", "{detail}");
+}
+
+#[tokio::test]
+async fn a_config_import_canonicalises_display_names_before_the_html_cap() {
+    let harness = build("fp2-import-html");
+    add_html(&harness, "spark.html", VALID_HTML);
+    add_html(&harness, "glow.html", &glow_html());
+    let bundle = json(harness.router.clone().oneshot(request("GET", routes::CONFIG_EXPORT)).await.unwrap()).await;
+
+    // Three layers spelled by HTML display names: after canonicalising they are three slots.
+    let mut over = bundle.clone();
+    over["stacks"] = serde_json::json!([{
+        "id": "stack:Names",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "Spark" },
+            { "id": "l2", "name": "Two", "effect": "Glow" },
+            { "id": "l3", "name": "Three", "effect": "Spark" }
+        ]
+    }]);
+    let refused = harness
+        .router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &over.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let message = json(refused).await["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("at most 2 HTML layers") && message.contains("3"), "{message}");
+
+    // Two fit, and the stored layers are the ids the names resolve to.
+    let mut fits = bundle.clone();
+    fits["stacks"] = serde_json::json!([{
+        "id": "stack:Names",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "Spark" },
+            { "id": "l2", "name": "Two", "effect": "Glow" }
+        ]
+    }]);
+    let imported = harness
+        .router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &fits.to_string()))
+        .await
+        .unwrap();
+    assert_eq!(imported.status(), StatusCode::OK);
+    let stored = harness.app.stacks.get("stack:Names").expect("the stack imported");
+    let effects: Vec<&str> = stored.layers.iter().map(|layer| layer.effect.as_str()).collect();
+    assert_eq!(effects, vec!["html:spark", "html:glow"]);
+}
+
+/// A hand-written file whose mask names an HTML effect nothing builds: the mask takes no HTML
+/// slot, so every layer still loads beside two real HTML layers (#256).
+#[tokio::test]
+async fn a_missing_html_mask_takes_no_slot_so_every_layer_loads() {
+    let home = TempHome::new("fp2-slots");
+    std::fs::write(
+        home.path.join(STACKS_FILE),
+        r#"{"schema_version":1,"stacks":[
+            {"id":"stack:Slots","layers":[
+              {"id":"l1","name":"One","effect":"white","mask":{"effect":"html:gone"}},
+              {"id":"l2","name":"Two","effect":"html:spark"},
+              {"id":"l3","name":"Three","effect":"html:glow"}]}]}"#,
+    )
+    .unwrap();
+    let harness = harness_at(home);
+    add_html(&harness, "spark.html", VALID_HTML);
+    add_html(&harness, "glow.html", &glow_html());
+    harness.app.stacks.reload(&harness.app.user_effects);
+    let loaded = harness.app.stacks.get("stack:Slots").expect("the stack loads");
+    assert_eq!(loaded.layers.len(), 3, "all three layers fit: {loaded:?}");
+    assert_eq!(
+        loaded.layers[0].mask.as_ref().map(|mask| mask.effect.as_str()),
+        Some("html:gone"),
+        "the missing mask is kept, as saved"
+    );
+}
+
+/// A loaded stack whose mask is gone is refused when it is saved or previewed, naming the mask.
+#[tokio::test]
+async fn a_put_or_a_preview_of_a_stack_whose_mask_is_gone_is_refused_naming_the_mask() {
+    let home = TempHome::new("fp2-put-gone");
+    std::fs::write(
+        home.path.join(STACKS_FILE),
+        r#"{"schema_version":1,"stacks":[
+            {"id":"stack:GoneMask","layers":[
+              {"id":"l1","name":"One","effect":"white","mask":{"effect":"no-such-effect"}}]}]}"#,
+    )
+    .unwrap();
+    let harness = harness_at(home);
+    let loaded = harness.app.stacks.get("stack:GoneMask").expect("the stack loads");
+
+    let (status, message) = put_stack_body(
+        &harness,
+        "stack:GoneMask",
+        &serde_json::to_string(&loaded).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(
+        message.contains("mask effect") && message.contains("no-such-effect"),
+        "the refusal names the mask: {message}"
+    );
+
+    let preview = put_preview(&harness, &loaded, &page(9), 1).await;
+    assert_eq!(preview.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(preview).await;
+    let message = body["message"].as_str().unwrap_or_default().to_string();
+    assert!(
+        message.contains("mask effect") && message.contains("no-such-effect"),
+        "the preview refusal names the mask: {message}"
+    );
+}
 
 
 /// A mask that overruns its budget is held, then faulted; a faulted mask leaves the layer
