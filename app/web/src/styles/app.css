@@ -8197,17 +8197,35 @@ button.chip:hover {
   overscroll-behavior: contain;
 }
 
-/* A fade at the pane's bottom edge says the inspector goes on below the fold (#257 phase 4):
-   without it a control cut by the edge reads as broken rather than scrollable. */
+/* The cue that the inspector goes on below the fold (#257 phase 4): a fade that takes the last
+   28px of whatever is cut there (a control sliced mid-label reads as scrollable, not broken) with a
+   tinted band at its foot, which shows even where the fold falls in a gap between controls. Where
+   the browser can tie it to the scroll it fades out as the end comes into view. */
 .rd-layer-edit::after {
   content: "";
   position: sticky;
   bottom: calc(var(--s3) * -1);
   flex: none;
-  height: 18px;
-  margin-top: -18px;
-  background: linear-gradient(to bottom, transparent, var(--panel));
+  height: 28px;
+  margin-top: -28px;
+  background:
+    linear-gradient(transparent, color-mix(in srgb, var(--ink) 14%, transparent)) 0 100% / 100% 12px no-repeat,
+    linear-gradient(to bottom, transparent, var(--panel) 80%);
   pointer-events: none;
+}
+
+@supports (animation-timeline: scroll()) {
+  .rd-layer-edit::after {
+    animation: fold-cue-out linear both;
+    animation-timeline: scroll(self block);
+    animation-range: calc(100% - 48px) 100%;
+  }
+}
+
+@keyframes fold-cue-out {
+  to {
+    opacity: 0;
+  }
 }
 
 .layer-edit-head {
@@ -9277,6 +9295,14 @@ button.chip:hover {
   border-style: dashed;
   background: transparent;
   color: var(--dim);
+}
+
+/* "New from code" is longer than "Gradient": it wraps inside the tile rather than running out of it. */
+.rd-library-code .rd-library-name {
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+  text-wrap: balance;
 }
 
 .rd-library-code-icon {
