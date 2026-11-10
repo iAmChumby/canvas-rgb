@@ -24,6 +24,7 @@ export const TIP_MARGIN = 8;
 const EPSILON = 0.5;
 
 export type TipSide = "top" | "bottom" | "left" | "right";
+/** Physical, not logical: `start` is the left (or top) edge, `end` the right (or bottom). The editor is left to right only. */
 export type TipAlign = "start" | "center" | "end";
 
 /** A box in viewport coordinates, as `getBoundingClientRect` reports it. */

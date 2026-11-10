@@ -5912,8 +5912,10 @@ button.chip:hover {
   font-weight: 600;
 }
 
-/* The bubble hangs from the right edge of its switch, so it never reaches past the page. */
-.rd-peri-toggle .tip-bubble {
+/* The bubble hangs from the right edge of its switch, so it never reaches past the page. The
+   class is on the Tooltip: the bubble is the switch's sibling inside it, never its child. */
+.rd-peri-tip > .tip-bubble {
+  --tip-align: end;
   white-space: normal;
   width: 240px;
   text-align: left;

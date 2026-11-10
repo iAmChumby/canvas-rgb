@@ -407,7 +407,8 @@ async function hoverEveryTip(page) {
     else hovered++;
     for (const h of m.hits) hits.push(describe(h));
   }
-  return { tips: tips.length, hovered, hits };
+  const skipped = await page.evaluate(() => document.querySelectorAll(".tip").length);
+  return { tips: tips.length, skipped: skipped - tips.length, hovered, hits };
 }
 
 /** A busy machine can time a request out: up to three tries, from a blank page. */
@@ -510,7 +511,7 @@ async function main() {
               const h = await hoverEveryTip(page);
               tipTotal += h.tips;
               hoverTotal += h.hovered;
-              detail = `${h.tips} tips, ${h.hovered} hovered`;
+              detail = `${h.tips} tips, ${h.hovered} hovered, ${h.skipped} not drawn`;
               for (const b of h.hits) bad.push(b);
               if (h.tips === 0) bad.push("nothing was measured: the view draws no tooltip");
             } else {

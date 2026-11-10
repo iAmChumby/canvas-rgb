@@ -9,7 +9,8 @@ const ALIGNS: readonly TipAlign[] = ["start", "center", "end"];
 /**
  * A clip narrower than a readable line cannot hold a tooltip: the window is used instead, and
  * the bubble is left as it was. (A rail can clip its own links while their bubbles are meant to
- * reach over the page.)
+ * reach over the page.) A bubble that such a clip still cuts is what `overflow-check.mjs
+ * --hover-tips` reports.
  */
 const MIN_TEXT_WIDTH = 120;
 
@@ -22,11 +23,12 @@ function boundsAround(bubble: HTMLElement): TipRect {
     if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
     const r = el.getBoundingClientRect();
     if (r.width === 0 || r.height === 0) continue;
-    // A scroll container clips at its padding edge, which is its border box less its borders.
+    // A scroll container clips at its padding edge: inside its borders and short of its
+    // scrollbar, which `clientWidth`/`clientHeight` already leave out.
     const left = r.left + (parseFloat(cs.borderLeftWidth) || 0);
     const top = r.top + (parseFloat(cs.borderTopWidth) || 0);
-    const right = Math.min(box.left + box.width, r.right - (parseFloat(cs.borderRightWidth) || 0));
-    const bottom = Math.min(box.top + box.height, r.bottom - (parseFloat(cs.borderBottomWidth) || 0));
+    const right = Math.min(box.left + box.width, left + el.clientWidth);
+    const bottom = Math.min(box.top + box.height, top + el.clientHeight);
     box = { left: Math.max(box.left, left), top: Math.max(box.top, top), width: 0, height: 0 };
     box.width = Math.max(0, right - box.left);
     box.height = Math.max(0, bottom - box.top);
@@ -95,19 +97,37 @@ export function Tooltip({ label, children, className }: { label: string; childre
       bub.style.transform = "none";
     };
 
+    // A scroll, a resize or the trigger changing size moves it again, once per frame however many
+    // events arrive. The first placement on show runs at once, so no frame shows the old spot.
+    let frame = 0;
+    const schedule = () => {
+      if (frame) return;
+      frame = requestAnimationFrame(() => {
+        frame = 0;
+        place();
+      });
+    };
+    const resized = typeof ResizeObserver === "undefined" ? null : new ResizeObserver(schedule);
+    const unbind = () => {
+      if (!bound) return;
+      window.removeEventListener("resize", schedule);
+      window.removeEventListener("scroll", schedule, true);
+      resized?.disconnect();
+      if (frame) cancelAnimationFrame(frame);
+      frame = 0;
+      bound = false;
+    };
+
     // The bubble shows on hover or on focus within, the same two states its CSS uses.
     const update = () => {
       if (!over && !focused) {
-        if (bound) {
-          window.removeEventListener("resize", place);
-          window.removeEventListener("scroll", place, true);
-          bound = false;
-        }
+        unbind();
         return;
       }
       if (!bound) {
-        window.addEventListener("resize", place);
-        window.addEventListener("scroll", place, true);
+        window.addEventListener("resize", schedule);
+        window.addEventListener("scroll", schedule, true);
+        resized?.observe(host);
         bound = true;
       }
       place();
@@ -139,8 +159,7 @@ export function Tooltip({ label, children, className }: { label: string; childre
       host.removeEventListener("pointerleave", leave);
       host.removeEventListener("focusin", focusIn);
       host.removeEventListener("focusout", focusOut);
-      window.removeEventListener("resize", place);
-      window.removeEventListener("scroll", place, true);
+      unbind();
     };
   }, []);
 
