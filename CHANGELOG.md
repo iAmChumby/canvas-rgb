@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Command palette: a screen reader is told which row Enter runs, Tab stays inside the palette and focus goes back to the key that opened it, and the short list is the phone's list instead of every window's (#232)
+
 ## [0.13.0] - 2026-11-10
 
 ### Changed

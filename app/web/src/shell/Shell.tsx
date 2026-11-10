@@ -208,7 +208,8 @@ function Frame({ children }: { children: ReactNode }) {
   }, [router, status, statusError, effects, togglePower, runEffect]);
 
   // A phone opens the palette with what is going on, the pages, the lights and the effects
-  // you would switch to. Typing still searches the whole list.
+  // you would switch to. The palette shows this list below the phone breakpoint; a desktop
+  // window shows every command. Typing still searches the whole list.
   const shortCommands = useMemo<Command[]>(() => {
     const list = commands.filter((c) => c.group === "Pages" || c.group === "Lights");
     const running = (effects ?? []).find((e) => e.id === status?.active_effect);
