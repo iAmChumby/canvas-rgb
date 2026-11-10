@@ -12,6 +12,7 @@ import {
   CaretLeft,
   CircleHalf,
   CopySimple,
+  Eraser,
   Eye,
   EyeSlash,
   FloppyDisk,
@@ -28,6 +29,7 @@ import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { LoadFrame, ErrorPanel, type LoadState } from "@/components/Loading";
 import { NameField } from "@/components/NameField";
+import { OptionRow } from "@/components/OptionRow";
 import { Panel } from "@/components/Panel";
 import { Popover } from "@/components/Popover";
 import { Segmented } from "@/components/Segmented";
@@ -208,6 +210,8 @@ export function StackBuilder({
   const [presetName, setPresetName] = useState<string | null>(null);
   /** The message a control refuses with, shown next to the control itself. */
   const [layerProblem, setLayerProblem] = useState<string | null>(null);
+  /** A mask control's own refusal (the HTML cap), shown beside the mask effect Select (#256). */
+  const [maskProblem, setMaskProblem] = useState<string | null>(null);
   const [addProblem, setAddProblem] = useState<string | null>(null);
   const [renameProblem, setRenameProblem] = useState<string | null>(null);
   const [presetProblem, setPresetProblem] = useState<string | null>(null);
@@ -1189,19 +1193,31 @@ export function StackBuilder({
   /** The mask picker hangs under the control that opened it, and returns focus there on Escape. */
   const openMaskPicker = (id: string, anchor: HTMLElement) => {
     maskAnchor.current = anchor;
-    setLayerProblem(null);
+    setMaskProblem(null);
     setMaskFor(id);
   };
 
   const closeMaskPicker = () => closePopover(".rd-mask-picker", maskAnchor, () => setMaskFor(null));
 
   const removeMask = (id: string) => {
-    setLayerProblem(null);
+    setMaskProblem(null);
     setDraft((current) => ({ ...current, layers: setLayerMask(current.layers, id, null) }));
   };
 
   const patchMaskDraft = (id: string, change: Partial<LayerMask>) => {
     setDraft((current) => ({ ...current, layers: patchMask(current.layers, id, change) }));
+  };
+
+  /** One mask property changed: a functional patch, so two quick changes cannot drop one (#256). */
+  const patchMaskProps = (id: string, key: string, value: PropValue) => {
+    setDraft((current) => ({
+      ...current,
+      layers: current.layers.map((layer) =>
+        layer.id === id && layer.mask !== undefined
+          ? { ...layer, mask: { ...layer.mask, props: { ...layer.mask.props, [key]: value } } }
+          : layer,
+      ),
+    }));
   };
 
   /** Gives a layer a mask of `effect`, or changes the mask it has (#256). */
@@ -1214,10 +1230,10 @@ export function StackBuilder({
     }
     const refusal = maskRefusal(draftRef.current.layers, id, effect);
     if (refusal) {
-      setLayerProblem(refusal);
+      setMaskProblem(refusal);
       return;
     }
-    setLayerProblem(null);
+    setMaskProblem(null);
     let schema: PropertySchema | null = null;
     let props: Record<string, PropValue> = {};
     try {
@@ -1235,7 +1251,7 @@ export function StackBuilder({
     if (!latest) return;
     const lateRefusal = maskRefusal(draftRef.current.layers, id, effect);
     if (lateRefusal) {
-      setLayerProblem(lateRefusal);
+      setMaskProblem(lateRefusal);
       return;
     }
     setDraft((current) => ({
@@ -1455,24 +1471,18 @@ export function StackBuilder({
     const current = maskFor ? draft.layers.find((layer) => layer.id === maskFor)?.mask?.effect === effect.id : false;
     return (
       <li key={effect.id}>
-        <button
-          type="button"
-          className="rd-add-row"
-          role="option"
-          aria-selected={current}
+        <OptionRow
+          selected={current}
           disabled={refusal !== null}
           title={refusal ?? undefined}
-          onClick={() => {
+          onSelect={() => {
             if (maskFor) void chooseMaskEffect(maskFor, effect.id);
           }}
-        >
-          <Thumb id={effect.id} size="sm" label={effect.name} />
-          <span className="rd-add-text">
-            <span className="rd-add-name">{effect.name}</span>
-            <span className="rd-add-desc">{refusal ?? effect.description}</span>
-          </span>
-          {isHtmlEffect(effect.id) && <Chip html>HTML</Chip>}
-        </button>
+          leading={<Thumb id={effect.id} size="sm" label={effect.name} />}
+          name={effect.name}
+          description={refusal ?? effect.description}
+          trailing={isHtmlEffect(effect.id) ? <Chip html>HTML</Chip> : undefined}
+        />
       </li>
     );
   };
@@ -1876,8 +1886,8 @@ export function StackBuilder({
                           </span>
                           {layer.mask ? (
                             <IconButton
-                              label={`Remove the mask from ${layer.name}`}
-                              icon={<X size={14} />}
+                              label="Remove mask"
+                              icon={<Eraser size={16} />}
                               onClick={() => removeMask(layer.id)}
                             />
                           ) : (
@@ -2162,6 +2172,11 @@ export function StackBuilder({
                               ]}
                               onChange={(next) => void chooseMaskEffect(pickedLayer.id, next)}
                             />
+                            {maskProblem && (
+                              <p className="error-line" role="alert">
+                                {maskProblem}
+                              </p>
+                            )}
                           </div>
                           <div className="layer-field wide">
                             <span>Reads</span>
@@ -2170,10 +2185,14 @@ export function StackBuilder({
                               value={pickedLayer.mask.source}
                               options={[
                                 { value: "luma", label: "Brightness" },
-                                { value: "alpha", label: "Alpha" },
+                                { value: "alpha", label: "Strongest colour" },
                               ]}
                               onChange={(source) => patchMaskDraft(pickedLayer.id, { source })}
                             />
+                            <span className="rd-mask-hint">
+                              Brightness follows the picture&apos;s brightness; Strongest colour counts any colour it
+                              draws as fully opaque (the canvases carry no alpha).
+                            </span>
                           </div>
                           <div className="layer-field wide layer-field-row">
                             <span>Invert</span>
@@ -2208,15 +2227,16 @@ export function StackBuilder({
                         ) : schemas[pickedLayer.mask.effect] === undefined ? (
                           <p className="dim">Loading the mask&apos;s properties…</p>
                         ) : (
-                          <PropertyControls
-                            schema={schemas[pickedLayer.mask.effect] as PropertySchema}
-                            values={maskValues(schemas[pickedLayer.mask.effect], pickedLayer.mask)}
-                            onChange={(key, value) =>
-                              patchMaskDraft(pickedLayer.id, {
-                                props: { ...pickedLayer.mask!.props, [key]: value },
-                              })
-                            }
-                          />
+                          <>
+                            <h3 className="rd-mask-sub">
+                              {layerLabel(schemas, effects, pickedLayer.mask.effect)} settings
+                            </h3>
+                            <PropertyControls
+                              schema={schemas[pickedLayer.mask.effect] as PropertySchema}
+                              values={maskValues(schemas[pickedLayer.mask.effect], pickedLayer.mask)}
+                              onChange={(key, value) => patchMaskProps(pickedLayer.id, key, value)}
+                            />
+                          </>
                         )}
                       </>
                     ) : (
@@ -2378,11 +2398,6 @@ export function StackBuilder({
             </li>
             {maskList.rest.map(maskRow)}
           </ul>
-          {layerProblem && (
-            <p className="error-line" role="alert">
-              {layerProblem}
-            </p>
-          )}
         </div>
       </Popover>
 

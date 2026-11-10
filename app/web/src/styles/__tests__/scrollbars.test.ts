@@ -175,6 +175,16 @@ describe("one scrollbar for every scrolling pane (#92)", () => {
     expect(hiding.map((r) => r.selectors.join(", ")).sort()).toEqual([...HIDDEN_ON_PURPOSE].sort());
   });
 
+  it("the layer panel is the one pane that scrolls, so its mask section cannot be clipped (#256)", () => {
+    // The panel carries the layer's fields, its properties and its mask section; a property list
+    // that scrolled inside it would cut the mask off. One pane, one bar.
+    expect(hasDecl(forSelector(".rd-layer-edit"), "overflow-y", "auto")).toBe(true);
+    const listScrolls = forSelector(".rd-layer-edit .prop-list").some(
+      (r) => decl(r, "overflow") === "auto" || decl(r, "overflow-y") === "auto" || decl(r, "overflow") === "scroll",
+    );
+    expect(listScrolls, "the property list scrolls inside the scrolling panel").toBe(false);
+  });
+
   it("the side nav keeps its thin bar", () => {
     // The rail showed a thin bar before #92 (the rule that says so is later in the file than the
     // one that hid it, so the thin one is the one that applies). It keeps it, in the shared

@@ -7519,7 +7519,7 @@ button.chip:hover {
   display: inline-flex;
   padding: 1px;
   border: 1px solid var(--line-2);
-  border-radius: 6px;
+  border-radius: var(--r-sm);
   background: var(--sunk);
 }
 
@@ -7527,7 +7527,7 @@ button.chip:hover {
 .layer-row .layer-mask-thumb .thumb {
   width: 28px;
   height: 18px;
-  border-radius: 4px;
+  border-radius: 6px;
 }
 
 /* The row's mask control: "Add mask" on a layer that draws whole, and a remove key on one that
@@ -8066,6 +8066,21 @@ button.chip:hover {
   color: var(--mute);
   font-size: var(--t14);
   line-height: 1.45;
+}
+
+/* The line under Reads (#256): what Brightness and Strongest colour read. */
+.rd-mask-hint {
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+/* The mask effect's own controls, under their own heading so they do not read as the layer's. */
+.rd-mask-sub {
+  margin: var(--s2) 0 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  font-weight: 600;
 }
 
 .chip-stack {
