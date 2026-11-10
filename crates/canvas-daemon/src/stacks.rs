@@ -827,6 +827,7 @@ mod tests {
             blend: BlendMode::Normal,
             opacity: 100,
             visible: true,
+            mask: None,
         }
     }
 

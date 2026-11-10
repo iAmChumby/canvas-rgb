@@ -370,6 +370,7 @@ fn layer(id: &str, effect: &str) -> StackLayer {
         blend: BlendMode::Normal,
         opacity: 100,
         visible: true,
+        mask: None,
     }
 }
 
