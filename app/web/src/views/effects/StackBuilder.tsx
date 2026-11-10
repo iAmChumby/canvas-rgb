@@ -1770,7 +1770,7 @@ export function StackBuilder({
                       <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect) ?? "Effect"} />
                       <div>
                         <h2>{pickedLayer.name}</h2>
-                        <span className="mute">
+                        <span className="mute" aria-busy={layerLabel(schemas, effects, pickedLayer.effect) === null || undefined}>
                           {layerLabel(schemas, effects, pickedLayer.effect) ?? <InlineSkeleton width="10ch" />} · {areaName(pickedLayer.area, layout, devices)}
                         </span>
                       </div>
@@ -1813,7 +1813,7 @@ export function StackBuilder({
                       <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect) ?? "Effect"} />
                       <div>
                         <h2>{pickedLayer.name}</h2>
-                        <span className="mute">
+                        <span className="mute" aria-busy={layerLabel(schemas, effects, pickedLayer.effect) === null || undefined}>
                           {layerLabel(schemas, effects, pickedLayer.effect) ?? <InlineSkeleton width="10ch" />} · layer {draft.layers.indexOf(pickedLayer) + 1} of{" "}
                           {count}
                         </span>
@@ -1939,13 +1939,15 @@ export function StackBuilder({
                       state="loading"
                       label="Loading the effect's properties"
                       shape={
+                        // The shape of the property rows that come: a label on the left, its control on
+                        // the right, one row each (a colour, a slider, a choice).
                         <div className="rd-props-shape">
-                          <Skeleton width="38%" height={12} />
-                          <Skeleton width="100%" height={32} />
-                          <Skeleton width="30%" height={12} />
-                          <Skeleton width="100%" height={32} />
-                          <Skeleton width="34%" height={12} />
-                          <Skeleton width="100%" height={32} />
+                          {[0.32, 0.26, 0.36].map((label, i) => (
+                            <div className="rd-props-row" key={i}>
+                              <Skeleton width={`${label * 100}%`} height={14} />
+                              <Skeleton width={i === 0 ? "34%" : "52%"} height={i === 0 ? 24 : 18} radius={i === 0 ? 6 : 9} />
+                            </div>
+                          ))}
                         </div>
                       }
                     />

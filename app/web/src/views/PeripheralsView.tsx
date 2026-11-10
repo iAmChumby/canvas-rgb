@@ -455,7 +455,7 @@ export function PeripheralsView() {
 
   return (
     <div className="rd-page rd-peripherals">
-      <PageTitle title="Peripherals" context={list === null && !listError ? <InlineSkeleton width="8ch" /> : <>{rows.length} found</>} />
+      <PageTitle title="Peripherals" contextBusy={list === null && !listError} context={list === null && !listError ? <InlineSkeleton width="8ch" /> : <>{rows.length} found</>} />
       {/* The pending changes and the way to send them sit in the strip, beside the save (R4). */}
       <PageActions>
         {changedCount > 0 && (
@@ -481,7 +481,8 @@ export function PeripheralsView() {
       </PageActions>
 
       {/* The device column becomes a row of keys: one click, as now. */}
-      <div className="rd-peri-keys">        <LoadFrame
+      <div className="rd-peri-keys">
+        <LoadFrame
           className="load-col"
           state={listState}
           shape={<PeripheralListShape />}

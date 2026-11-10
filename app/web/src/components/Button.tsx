@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, type ButtonHTMLAttributes, type ChangeEvent, type ReactNode, type Ref } from "react";
+import { useCallback, useLayoutEffect, useRef, type ButtonHTMLAttributes, type ChangeEvent, type MouseEvent, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { SpinnerGap } from "@phosphor-icons/react";
@@ -61,14 +61,17 @@ export function BusyIcon({ icon, busy, size = 14 }: { icon: ReactNode; busy: boo
 
 /**
  * The one button. `busy` is the standard wait of a control that sends a request (Save, Apply,
- * Check, Rescan), the busy-button pattern of Primer's and Radix Themes' `loading`:
+ * Check, Rescan), the busy-button pattern of Primer's `loading` and Radix Themes':
  *
- * - The button is disabled and `aria-busy` the moment `busy` is true, so a second press cannot
- *   happen, and it keeps its look (a busy primary button stays primary).
+ * - The button is `aria-busy` and `aria-disabled` the moment `busy` is true, and a click guard
+ *   drops presses, so a second press cannot happen. It is not `disabled`: a disabled button drops
+ *   keyboard focus, and a person who pressed Enter on Save must still be on Save when it finishes.
+ *   It keeps its look (a busy primary button stays primary).
+ * - Its width is locked while it is busy: measured when `busy` starts, set as `width`, released
+ *   when it ends. Whatever the spinner and the label do inside, the button does not resize.
  * - After `LOAD_DELAY_MS` a small spinner appears: in the icon's slot when the button has an icon,
- *   otherwise over the label (which keeps its room). A request that ends inside the delay shows
+ *   otherwise beside the label, which stays visible. A request that ends inside the delay shows
  *   nothing, so a fast answer never flashes.
- * - The width never changes: the spinner takes the icon's room or the label's, never new room.
  */
 export function Button({
   variant = "default",
@@ -78,6 +81,7 @@ export function Button({
   children,
   className,
   disabled,
+  onClick,
   ref,
   ...rest
 }: ButtonHTMLAttributes<HTMLButtonElement> & {
@@ -90,25 +94,58 @@ export function Button({
 }) {
   const spinning = useLoadDelay(busy);
   const px = size === "sm" ? 14 : 16;
+  const own = useRef<HTMLButtonElement | null>(null);
+  const setRef = useCallback(
+    (node: HTMLButtonElement | null) => {
+      own.current = node;
+      if (typeof ref === "function") ref(node);
+      else if (ref) (ref as { current: HTMLButtonElement | null }).current = node;
+    },
+    [ref],
+  );
+  useLockedWidth(own, busy);
+  const guard = (event: MouseEvent<HTMLButtonElement>) => {
+    if (busy) {
+      event.preventDefault();
+      return;
+    }
+    onClick?.(event);
+  };
   return (
     <button
       type="button"
-      ref={ref}
+      ref={setRef}
       className={buttonClass(variant, size, className)}
-      disabled={disabled || busy}
+      disabled={disabled}
       aria-busy={busy || undefined}
-      data-spin={spinning ? (icon ? "icon" : "over") : undefined}
+      aria-disabled={busy || undefined}
+      data-spin={spinning ? (icon ? "icon" : "lead") : undefined}
+      onClick={guard}
       {...rest}
     >
       {icon ? <BusySlot icon={icon} spinning={spinning} size={px} /> : null}
+      {spinning && !icon && <BusySpinner size={size === "sm" ? 12 : 14} />}
       {children}
-      {spinning && !icon && (
-        <span className="btn-over">
-          <BusySpinner size={px} />
-        </span>
-      )}
     </button>
   );
+}
+
+/**
+ * Holds an element's width while `locked`: measured when the lock starts and set as an inline
+ * `width`, removed when it ends. A busy button shows a spinner next to its label, and this is what
+ * keeps that from making the button wider. (Layout effect: the measure is of the idle button, the
+ * frame before anything busy is drawn.)
+ */
+function useLockedWidth(ref: { current: HTMLElement | null }, locked: boolean) {
+  useLayoutEffect(() => {
+    const el = ref.current;
+    if (!el || !locked) return;
+    const width = el.getBoundingClientRect().width;
+    if (width > 0) el.style.width = `${width}px`;
+    return () => {
+      el.style.width = "";
+    };
+  }, [ref, locked]);
 }
 
 /**
@@ -207,8 +244,9 @@ export function IconButton({
       aria-label={label}
       aria-pressed={pressed}
       aria-busy={busy || undefined}
-      disabled={disabled || busy}
-      onClick={onClick}
+      aria-disabled={busy || undefined}
+      disabled={disabled}
+      onClick={busy ? undefined : onClick}
     >
       <BusySlot icon={icon} spinning={spinning} size={size === "sm" ? 14 : 16} />
     </button>

@@ -18,6 +18,7 @@
   --sunk: #070809;        /* wells: the preview frame, input tracks */
   --panel: #121417;       /* panels */
   --raised: #191c20;      /* controls at rest */
+  --skeleton: #353a41;    /* a placeholder for content that has not arrived (#258): 1.6:1 on a panel, 1.8:1 on a well */
   --line: rgba(255, 255, 255, 0.07);
   --line-2: rgba(255, 255, 255, 0.14);
   --hover: rgba(255, 255, 255, 0.05);
@@ -154,6 +155,7 @@
   --sunk: #d9dde4;
   --panel: #ffffff;
   --raised: #f0f2f5;
+  --skeleton: #c3c8d1;    /* a placeholder: 1.7:1 on a panel, 1.5:1 on a raised control */
   --line: rgba(15, 18, 24, 0.16);
   --line-2: rgba(15, 18, 24, 0.26);
   --hover: rgba(15, 18, 24, 0.06);
@@ -193,6 +195,7 @@
     --sunk: #d9dde4;
     --panel: #ffffff;
     --raised: #f0f2f5;
+    --skeleton: #c3c8d1;
     --line: rgba(15, 18, 24, 0.16);
     --line-2: rgba(15, 18, 24, 0.26);
     --hover: rgba(15, 18, 24, 0.06);

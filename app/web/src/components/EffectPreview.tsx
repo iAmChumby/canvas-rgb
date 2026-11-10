@@ -34,13 +34,18 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
   const [framed, setFramed] = useState<string | null>(null);
   const motionOff = useMotionOff();
   const visible = useDocumentVisible();
-  const wait = useCanvasWait((thumb !== null && thumb.id === id) || framed === id);
+  // The thumbnail fetch answered with nothing (`loadThumb` resolves null when it fails).
+  const [missed, setMissed] = useState<string | null>(null);
+  const loaded = (thumb !== null && thumb.id === id) || framed === id;
+  const wait = useCanvasWait(loaded, !loaded && missed === id && !live);
 
   // The thumbnail: fetched once per effect (loadThumb keeps the cache).
   useEffect(() => {
     let current = true;
     void loadThumb(id).then((t) => {
-      if (current && t) setThumb({ id, data: t });
+      if (!current) return;
+      if (t) setThumb({ id, data: t });
+      else setMissed(id);
     });
     return () => {
       current = false;

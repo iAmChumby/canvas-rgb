@@ -267,10 +267,10 @@ function DisplayCard({
             {blockedBy ? `waiting for ${blockedBy}` : row.info.connected ? "connected" : "not connected"}
           </StateDot>
           <span className="rd-display-actions">
-            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} busy={doing === "save"} disabled={!dirty || busy} onClick={() => void save()}>
+            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} busy={doing === "save"} disabled={!dirty || (busy && doing !== "save")} onClick={() => void save()}>
               Save
             </Button>
-            <Button variant="ghost" busy={doing === "stop"} disabled={busy} onClick={() => void stop()}>
+            <Button variant="ghost" busy={doing === "stop"} disabled={busy && doing !== "stop"} onClick={() => void stop()}>
               Stop
             </Button>
             {dirty && <span className="mute">Unsaved</span>}
@@ -304,7 +304,7 @@ function DisplayCard({
             unit={draft.unit}
             pending={sensorsPending && preview === null}
           />
-          <p className="readout-now">
+          <p className="readout-now" aria-busy={(sensorsPending && shown?.value === null) || undefined}>
             <span className="readout-now-label">Now</span>
             {shown ? (
               <>

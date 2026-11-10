@@ -365,6 +365,7 @@ export function AudioSourcePanel() {
               className="audio-state audio-state-compact"
               role="status"
               title={compactTitle}
+              aria-busy={(waiting && !compactNote) || undefined}
               data-note={compactNote ? "true" : undefined}
             >
               <StateWords words={compactWords} waiting={waiting && !compactNote} />
@@ -398,7 +399,7 @@ export function AudioSourcePanel() {
         </>
       ) : (
         <>
-          <p className="audio-state" role="status">
+          <p className="audio-state" role="status" aria-busy={waiting || undefined}>
             <StateWords words={words} waiting={waiting} />
           </p>
           {err && <p className="error-line">{err}</p>}

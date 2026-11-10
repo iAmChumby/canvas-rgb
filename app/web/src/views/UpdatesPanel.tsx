@@ -83,7 +83,7 @@ export function UpdatesPanel() {
         />
       </Field>
       <Field label="Last checked">
-        <span className="fig">{acts && !u ? <InlineSkeleton width="14ch" /> : acts && u ? fmtChecked(u.last_check) : "—"}</span>
+        <span className="fig" aria-busy={(acts && !u) || undefined}>{acts && !u ? <InlineSkeleton width="14ch" /> : acts && u ? fmtChecked(u.last_check) : "—"}</span>
       </Field>
       <Field label="Check now">
         <Button
@@ -131,7 +131,7 @@ export function UpdatesPanel() {
             </span>
           </>
         ) : (
-          <span className="mute upd-note">{acts && !u ? <InlineSkeleton width="18ch" /> : "—"}</span>
+          <span className="mute upd-note" aria-busy={(acts && !u) || undefined}>{acts && !u ? <InlineSkeleton width="18ch" /> : "—"}</span>
         )}
       </div>
       {!acts && <p className="mute upd-note">Tray app only</p>}

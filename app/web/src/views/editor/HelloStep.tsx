@@ -80,7 +80,7 @@ export function HelloStep({
 /** "11 lights found", in mono. A dash while the count is not known. */
 function Count({ value }: { value: number | null }) {
   return (
-    <p className={s.count} aria-live="polite">
+    <p className={s.count} aria-live="polite" aria-busy={value === null || undefined}>
       <span className={s.countNumber} data-known={value !== null}>
         {value === null ? <InlineSkeleton width="2ch" /> : <AnimatedNumber value={value} />}
       </span>
@@ -130,7 +130,7 @@ function Waking({ onLater }: { onLater: () => void }) {
   return (
     <StepFrame
       center
-      title="Waking up your lights…"
+      title="Waking up your lights"
       lead="This takes a moment."
       primary={{ label: "Map my PC", icon: <ArrowRight size={16} weight="bold" />, disabled: true }}
       tertiary={{ label: "Set up later", onClick: onLater }}

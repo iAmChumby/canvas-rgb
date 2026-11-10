@@ -111,16 +111,18 @@ function SkelBands({ count, lines }: { count: number; lines: number }) {
   );
 }
 
-/** The list of peripherals: a row per device. */
+/**
+ * The keys of the peripherals row, while the list is read: a chip (an icon and a name) per device,
+ * in the keys' own classes. The sizes are in `loading.css`, so each chip is as big as a real key.
+ */
 export function PeripheralListShape({ rows = 2 }: { rows?: number }) {
   return (
     <div className="peripheral-list">
       {Array.from({ length: rows }, (_, i) => (
         <div className="peripheral-row" key={i}>
-          <Skeleton width={34} height={34} radius={8} style={{ flex: "none" }} />
+          <Skeleton className="peripheral-skel-icon" />
           <span className="peripheral-text">
-            <Skeleton width="58%" height={16} />
-            <Skeleton width="80%" height={14} style={{ marginTop: 4 }} />
+            <Skeleton className="peripheral-skel-name" />
           </span>
         </div>
       ))}
@@ -128,37 +130,30 @@ export function PeripheralListShape({ rows = 2 }: { rows?: number }) {
   );
 }
 
-/** The head and the access panel every peripheral page opens with. */
-function PeripheralTop({ headSize }: { headSize: Size }) {
+/**
+ * The head of a peripheral's page: its icon and name, its state, the two access switches that sit in
+ * the head, and the note under them. One panel with no title, as the loaded head is.
+ */
+function PeripheralHead({ size }: { size: Size }) {
   return (
-    <>
-      <SkelPanel title={false} size={headSize}>
-        <div className="peripheral-head">
-          <Skeleton width={44} height={44} radius={10} style={{ flex: "none" }} />
-          <div className="peripheral-head-text">
-            <Skeleton width="42%" height={24} />
-            <Skeleton width="68%" height={14} style={{ marginTop: 6 }} />
-          </div>
-          <Skeleton className="skel-head-status" width={92} height={14} />
+    <SkelPanel title={false} size={size}>
+      <div className="peripheral-head">
+        <Skeleton width={44} height={44} radius={10} style={{ flex: "none" }} />
+        <div className="peripheral-head-text">
+          <Skeleton width="42%" height={24} />
+          <Skeleton width="68%" height={14} style={{ marginTop: 6 }} />
         </div>
-      </SkelPanel>
-      <SkelPanel size={[166.8, 187.1]}>
-        <div className="access-list">
-          <div className="access-row">
-            <Skeleton width={190} height={16} />
-            <Skeleton width={40} height={24} radius={12} />
-            <Skeleton className="access-note" width="64%" height={14} />
-          </div>
-          <div className="access-row">
-            <Skeleton width={170} height={16} />
-            <Skeleton width={40} height={24} radius={12} />
-            <Skeleton className="access-note" width="40%" height={14} />
-          </div>
+        <Skeleton width={92} height={14} />
+        <div className="rd-peri-access">
+          <Skeleton width={96} height={28} radius={14} />
+          <Skeleton width={96} height={28} radius={14} />
         </div>
-      </SkelPanel>
-    </>
+      </div>
+      <Skeleton width="100%" height={38} radius={8} />
+    </SkelPanel>
   );
 }
+
 
 /** The save bar under a peripheral's panels. It is out of the flow on a phone. */
 function SkelSave({ height = 47.8 }: { height?: number }) {
@@ -172,36 +167,42 @@ function SkelSave({ height = 47.8 }: { height?: number }) {
   );
 }
 
-/** One peripheral's page, by kind of device (measured on the Attack Shark X6 and the 8BitDo Ultimate 2). */
+/**
+ * One peripheral's page, by kind of device, drawn in the page's own structure and measured on the
+ * Attack Shark X6 and the 8BitDo Ultimate 2: the head panel, then the sections in the same columns
+ * (`rd-peri-sections`), each panel as tall as the real one at 1440 and 390 px.
+ */
 export function PeripheralDetailShape({ kind = "mouse" }: { kind?: "mouse" | "game_controller" | "keyboard" }) {
   if (kind === "game_controller") {
     return (
       <div className="stack">
-        <PeripheralTop headSize={[79.3, 192.6]} />
-        <SkelRows rows={4} size={[270.3, 329.4]} />
-        <SkelPanel size={[921.6, 1341.7]}>
+        <PeripheralHead size={[117.6, 194.9]} />
+        <div className="rd-peri-sections">
+          <SkelRows rows={4} size={[270.3, 230.3]} row={[52, 44]} />
+          <SkelRows rows={11} size={[666.3, 857.3]} row={[54.9, 73]} />
+        </div>
+        <SkelPanel size={[531.3, 1339.5]}>
           <div className="skel-pad">
-            <Skeleton width="100%" height="100%" radius={8} />
+            <Skeleton width="100%" radius={8} />
           </div>
         </SkelPanel>
-        <SkelRows rows={10} size={[582.3, 865.3]} />
-        <SkelPanel size={[84, 105.8]}>
+        <SkelPanel size={[84, 97.8]}>
           <Skeleton width="70%" height={14} />
         </SkelPanel>
-        <SkelSave />
       </div>
     );
   }
   return (
     <div className="stack">
-      <PeripheralTop headSize={[79.3, 167.6]} />
-      <SkelRows rows={1} size={[171.3, 225.3]} chips />
-      <SkelRows rows={2} size={[166.3, 222.8]} />
-      <SkelRows rows={4} size={[270.3, 384.3]} />
-      <SkelRows rows={2} size={[166.3, 226.8]} />
-      <SkelRows rows={6} size={[374.3, 463.5]} />
-      <SkelRows rows={1} size={[114.3, 128.3]} />
-      <SkelSave />
+      <PeripheralHead size={[117.6, 169.9]} />
+      <div className="rd-peri-sections">
+        <SkelRows rows={1} size={[211.3, 195.3]} row={[52, 44]} chips />
+        <SkelRows rows={3} size={[200.5, 214.8]} row={[46, 53.5]} />
+        <SkelRows rows={4} size={[270.3, 316.8]} row={[52, 65.6]} />
+        <SkelRows rows={2} size={[173.8, 218.8]} row={[55.7, 82.2]} />
+        <SkelRows rows={3} size={[260.4, 252.4]} row={[66, 63]} />
+        <SkelRows rows={1} size={[114.3, 98.3]} row={[52, 44]} />
+      </div>
     </div>
   );
 }

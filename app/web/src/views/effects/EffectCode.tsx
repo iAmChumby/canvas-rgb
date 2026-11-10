@@ -15,6 +15,9 @@ function CodePending() {
   return (
     <div className="cm-loading" data-shown={shown ? "true" : "false"} role="status" aria-busy="true">
       <Skeleton className="cm-loading-box" width="100%" height="100%" />
+      {/* The words a screen reader hears, as LoadFrame's `label` does: with the placeholder, so a
+          chunk that is already cached is never announced. */}
+      <span className="sr-only">{shown ? "Loading the editor" : ""}</span>
     </div>
   );
 }

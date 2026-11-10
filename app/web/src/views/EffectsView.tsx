@@ -962,7 +962,7 @@ export function EffectsView() {
                     variant="default"
                     size="sm"
                     busy={activating}
-                  disabled={running || stale}
+                    disabled={running || stale}
                     onClick={() => void activate(null)}
                     icon={<Play size={14} weight="fill" />}
                   >

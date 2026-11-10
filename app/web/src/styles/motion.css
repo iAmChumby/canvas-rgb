@@ -396,7 +396,7 @@
 .effect-card-skeleton .skeleton-preview {
   aspect-ratio: 16 / 10;
   border-radius: 0;
-  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
+  background: var(--skeleton);
 }
 
 .effect-card-skeleton .skeleton-line {
@@ -438,7 +438,7 @@
 .skeleton {
   border-radius: var(--r-sm);
   /* A step darker than the controls at rest, so a placeholder reads on a panel in both themes. */
-  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
+  background: var(--skeleton);
   animation: canvas-fade var(--dur-slow) var(--ease) both;
 }
 
@@ -698,8 +698,13 @@
 }
 
 .skel-pad {
-  height: 100%;
-  min-height: 780px;
+  display: flex;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.skel-pad > .skeleton {
+  flex: 1 1 auto;
 }
 
 .skel-chips {
@@ -781,7 +786,7 @@
   position: absolute;
   border: 1px dashed var(--line-2);
   border-radius: 3px;
-  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
+  background: var(--skeleton);
 }
 
 .skel-zone-a {
@@ -873,11 +878,6 @@
   .skel-save {
     height: 0;
     overflow: hidden;
-  }
-
-  /* The head wraps on a phone: the state takes its own row under the name. */
-  .skel-head-status {
-    flex: 1 1 100%;
   }
 }
 

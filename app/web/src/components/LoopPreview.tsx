@@ -18,16 +18,19 @@ export function LoopPreview({
   thumb,
   className,
   label,
+  failed = false,
 }: {
   thumb: Thumb | null;
   className?: string;
   /** What the picture is, for a reader: "Preview of Comet". */
   label: string;
+  /** The preview errored and no picture is coming: the wait is over, the box stands still. */
+  failed?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const motionOff = useMotionOff();
   const visible = useDocumentVisible();
-  const wait = useCanvasWait(thumb !== null);
+  const wait = useCanvasWait(thumb !== null, failed);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -51,7 +54,7 @@ export function LoopPreview({
       ref={canvasRef}
       className={className ? `preview-canvas ${className}` : "preview-canvas"}
       data-wait={wait}
-      aria-busy={thumb ? undefined : true}
+      aria-busy={thumb || failed ? undefined : true}
       role="img"
       aria-label={label}
     />

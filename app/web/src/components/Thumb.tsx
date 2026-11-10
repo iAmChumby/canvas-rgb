@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { ImageBroken } from "@phosphor-icons/react";
 import { loadThumb, type Thumb as ThumbData } from "@/lib/thumbs";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
@@ -42,6 +43,8 @@ export function Thumb({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const [inView, setInView] = useState(false);
   const [thumb, setThumb] = useState<ThumbData | null>(null);
+  // The fetch has answered (with a picture, or with null when it failed): the wait is over.
+  const [settled, setSettled] = useState(false);
   // The pointer is on the tile, or it has the keyboard focus.
   const [awake, setAwake] = useState(false);
   const docVisible = useDocumentVisible();
@@ -67,7 +70,9 @@ export function Thumb({
   useEffect(() => {
     let live = true;
     void loadThumb(id).then((t) => {
-      if (live) setThumb(t);
+      if (!live) return;
+      setThumb(t);
+      setSettled(true);
     });
     return () => {
       live = false;
@@ -112,7 +117,8 @@ export function Thumb({
       ref={wrapRef}
       className={`thumb thumb-${size}`}
       data-loaded={thumb ? "true" : "false"}
-      aria-busy={thumb ? undefined : true}
+      data-failed={settled && !thumb ? "true" : undefined}
+      aria-busy={thumb || settled ? undefined : true}
       data-running={animate ? "true" : "false"}
       role="img"
       aria-label={`${label} preview`}
@@ -124,7 +130,14 @@ export function Thumb({
       {thumb ? (
         <canvas ref={canvasRef} aria-hidden="true" />
       ) : (
-        <CanvasSkeleton />
+        // A fetch that failed ends the wait: a still "no picture" tile, not a skeleton for ever.
+        settled ? (
+          <span className="thumb-none" aria-hidden="true">
+            <ImageBroken size={16} />
+          </span>
+        ) : (
+          <CanvasSkeleton />
+        )
       )}
     </span>
   );

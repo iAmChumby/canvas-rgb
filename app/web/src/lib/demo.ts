@@ -1033,10 +1033,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
             head === "effects" && seg.length === 3 && seg[2] === "thumbnail"
             ? "thumbnail"
             : head;
-    const wait = holdMs(area);
+    // A thumbnail is also an effects read: `hold:effects` and `fail:effects` still reach it, as
+    // they did before it had its own flag.
+    const wait = area === "thumbnail" ? Math.max(holdMs("thumbnail"), holdMs("effects")) : holdMs(area);
     if (wait > 0) await new Promise((resolve) => setTimeout(resolve, wait));
     // The daemon's own words: the route that failed and why, the way the service says it.
-    if (failsArea(area)) fail(500, "internal", `could not read the ${area}: the request came back with an error`);
+    if (failsArea(area) || (area === "thumbnail" && failsArea("effects"))) fail(500, "internal", `could not read the ${area}: the request came back with an error`);
     if (emptyArea(area)) {
       if (area === "peripherals") return { peripherals: [] };
       if (area === "displays") return [];

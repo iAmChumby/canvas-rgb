@@ -46,7 +46,10 @@ export function SkeletonLines({ rows = 3 }: { rows?: number }) {
  *
  * - It appears only after `LOAD_DELAY_MS`. Before that it holds its width and stays invisible, so
  *   a fast answer neither flashes a block nor moves the line.
- * - It sets `aria-busy` and announces nothing, so a screen reader hears the value when it comes.
+ * - It is `aria-hidden` and announces nothing, so a screen reader hears the value when it comes.
+ *   It is a drawing, not a status: the element that owns the value (the row, the readout, the
+ *   control) sets `aria-busy` while it is unknown. A skeleton cannot do that for its owner, and
+ *   must never be a `role="status"` inside a button.
  * - It wears the `Skeleton` tone and its one fade-in; nothing loops.
  *
  * Draw it only while the value is unknown. Put the real value in once it is known; an unknown
@@ -70,8 +73,7 @@ export function InlineSkeleton({
       className={className ? `inline-skel ${className}` : "inline-skel"}
       data-shown={shown ? "true" : "false"}
       style={{ width }}
-      role="status"
-      aria-busy="true"
+      aria-hidden="true"
     />
   );
 }
@@ -81,10 +83,15 @@ export function InlineSkeleton({
  * `loaded` is whether the first frame is in. The canvas keeps its box and, once the delay has
  * passed with no frame, wears the `Skeleton` tone (CSS: `.preview-canvas[data-wait="shown"]`).
  * Used by `EffectPreview` and `LoopPreview`, whose root is the canvas itself and cannot hold a child.
+ *
+ * `failed` is a picture that will not come (the fetch failed, the preview errored): the wait is
+ * over, so the canvas stops being a skeleton and stands as a still "no picture" box (`"failed"`),
+ * and the caller drops its `aria-busy`.
  */
-export function useCanvasWait(loaded: boolean): "shown" | "held" | undefined {
-  const shown = useLoadDelay(!loaded);
+export function useCanvasWait(loaded: boolean, failed = false): "shown" | "held" | "failed" | undefined {
+  const shown = useLoadDelay(!loaded && !failed);
   if (loaded) return undefined;
+  if (failed) return "failed";
   return shown ? "shown" : "held";
 }
 

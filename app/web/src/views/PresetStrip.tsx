@@ -299,7 +299,7 @@ export function PresetStrip({
               variant="primary"
               size="sm"
               busy={working === "update"}
-              disabled={busy || disabled}
+              disabled={(busy && working !== "update") || disabled}
               aria-label={`Update ${running.name}`}
               onClick={() => void doUpdate()}
             >
@@ -316,7 +316,7 @@ export function PresetStrip({
             label={`Reset to ${running.name}`}
             icon={<ArrowCounterClockwise size={16} />}
             busy={working === "apply"}
-            disabled={busy}
+            disabled={busy && working !== "apply"}
             onClick={() => void doReset()}
           />
         </span>
@@ -332,7 +332,7 @@ export function PresetStrip({
           size="sm"
           icon={<ArrowCounterClockwise size={14} />}
           busy={working === "undo"}
-          disabled={busy}
+          disabled={busy && working !== "undo"}
           onClick={() => void attempt("undo", onUndo)}
         >
           Undo
@@ -409,7 +409,7 @@ export function PresetStrip({
                     variant="danger"
                     size="sm"
                     busy={working === "delete"}
-                    disabled={busy}
+                    disabled={busy && working !== "delete"}
                     onClick={() => {
                       const name = menu.name;
                       setMenu(null);

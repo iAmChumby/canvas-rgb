@@ -129,7 +129,7 @@ export function stateLine(u: UpdateState): string {
   const p = u.phase;
   switch (p.kind) {
     case "checking":
-      return "Checking for updates…";
+      return "Checking for updates";
     case "downloading":
       return p.total && p.total > 0
         ? `Downloading ${v}: ${mb(p.downloaded)} of ${mb(p.total)} MB.`
@@ -195,7 +195,7 @@ export function settingsStatus(u: UpdateState): { tone: DotTone; text: string } 
   const p = u.phase;
   switch (p.kind) {
     case "checking":
-      return { tone: "work", text: "Checking for updates…" };
+      return { tone: "work", text: "Checking for updates" };
     case "downloading":
       return { tone: "work", text: `Downloading ${u.available?.version ?? ""}` };
     case "verifying":

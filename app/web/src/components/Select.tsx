@@ -4,7 +4,7 @@ import { Fragment, useEffect, useId, useLayoutEffect, useRef, useState, type CSS
 import { createPortal } from "react-dom";
 import { CaretDown, Check } from "@phosphor-icons/react";
 import { panelOriginSide } from "@/components/Popover";
-import { InlineSkeleton } from "@/components/Skeleton";
+import { useLoadDelay } from "@/lib/loadDelay";
 import { motionOffNow, readCssMs } from "@/lib/motion";
 
 export interface SelectOption {
@@ -96,6 +96,9 @@ export function Select({
     return () => clearTimeout(t);
   }, [closing]);
   const typed = useRef({ text: "", at: 0 });
+  // The skeleton replaces the value only once the load has lasted LOAD_DELAY_MS: a fast load never
+  // blanks the value, and nothing flashes.
+  const skeleton = useLoadDelay(loading);
 
   const chosen = Math.max(0, flat.findIndex((o) => o.value === value));
 
@@ -220,13 +223,13 @@ export function Select({
       >
         <span className="select-value">
           {flat.map((o, i) => (
-            <span key={o.value} className="one-line" data-on={i === chosen && !loading ? "true" : "false"} aria-hidden={i === chosen && !loading ? undefined : true}>
+            <span key={o.value} className="one-line" data-on={i === chosen && !skeleton ? "true" : "false"} aria-hidden={i === chosen && !skeleton ? undefined : true}>
               {o.label}
             </span>
           ))}
-          {loading && (
+          {skeleton && (
             <span className="select-loading" data-on="true">
-              <InlineSkeleton width="10ch" />
+              <span className="inline-skel" data-shown="true" style={{ width: "10ch" }} aria-hidden="true" />
             </span>
           )}
         </span>

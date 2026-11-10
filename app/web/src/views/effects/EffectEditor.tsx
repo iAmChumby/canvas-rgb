@@ -816,7 +816,7 @@ export function EffectEditor({
       <div className="eff-edit-main" data-code={showCode && !narrow ? "true" : "false"}>
         <div className="eff-edit-side">
           <div className="eff-live" data-preview={previewState}>
-            <LoopPreview thumb={thumb} label={`Preview of ${name}`} />
+            <LoopPreview thumb={thumb} label={`Preview of ${name}`} failed={previewState === "error" && thumb === null} />
             <span
               className="eff-live-note"
               data-tone={previewState === "error" ? "warn" : undefined}

@@ -180,7 +180,8 @@ describe("PresetStrip", () => {
     // The Save key stays in its place and says it is busy; Cancel waits. Nothing is replaced by a word.
     const save = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
     expect(save.getAttribute("aria-busy")).toBe("true");
-    expect(save.disabled).toBe(true);
+    expect(save.disabled).toBe(false);
+    expect(save.getAttribute("aria-disabled")).toBe("true");
     expect((screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement).disabled).toBe(true);
     await act(async () => finish());
     await waitFor(() => expect(screen.queryByRole("button", { name: "Saving Gale" })).toBeNull());

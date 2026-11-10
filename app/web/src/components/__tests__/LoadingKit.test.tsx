@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -14,6 +14,14 @@ import { CanvasSkeleton, InlineSkeleton } from "@/components/Skeleton";
 
 beforeEach(() => {
   vi.useFakeTimers();
+  window.IntersectionObserver ??= class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+    takeRecords(): IntersectionObserverEntry[] {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
   // jsdom has no matchMedia, which the motion gate behind the previews reads.
   window.matchMedia ??= ((query: string) =>
     ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
@@ -27,14 +35,28 @@ const advance = (ms: number) => act(() => void vi.advanceTimersByTime(ms));
 const spinner = (c: ParentNode) => c.querySelector(".spin");
 
 describe("the busy Button", () => {
-  it("is disabled and aria-busy at once, and shows no spinner before the delay", () => {
+  it("is aria-disabled and aria-busy at once, and shows no spinner before the delay", () => {
     const { container } = render(<Button busy>Save</Button>);
     const button = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
     expect(button.getAttribute("aria-busy")).toBe("true");
     expect(spinner(container)).toBeNull();
     advance(LOAD_DELAY_MS - 1);
     expect(spinner(container)).toBeNull();
+  });
+
+  it("stays focusable: it is not disabled, and keeps keyboard focus when it turns busy", () => {
+    const { rerender } = render(<Button>Save</Button>);
+    const button = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
+    button.focus();
+    expect(document.activeElement).toBe(button);
+    rerender(<Button busy>Save</Button>);
+    expect(button.disabled).toBe(false);
+    expect(document.activeElement).toBe(button);
+    advance(LOAD_DELAY_MS);
+    expect(document.activeElement).toBe(button);
+    rerender(<Button>Save</Button>);
+    expect(document.activeElement).toBe(button);
   });
 
   it("shows the spinner at the delay and drops it when the request ends", () => {
@@ -44,7 +66,7 @@ describe("the busy Button", () => {
     rerender(<Button busy={false}>Save</Button>);
     expect(spinner(container)).toBeNull();
     const button = screen.getByRole("button", { name: "Save" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBeNull();
     expect(button.getAttribute("aria-busy")).toBeNull();
   });
 
@@ -56,7 +78,7 @@ describe("the busy Button", () => {
     expect(spinner(container)).toBeNull();
   });
 
-  it("keeps its width: with an icon the spinner shares the icon's cell and the label stays", () => {
+  it("with an icon the spinner shares the icon cell and the label stays", () => {
     const { container } = render(
       <Button busy icon={<Check data-testid="icon" />}>
         Apply
@@ -68,27 +90,50 @@ describe("the busy Button", () => {
     // The icon stays in the slot (hidden by CSS, still taking its room) beside the spinner.
     expect(slot.querySelector('[data-testid="icon"]')).not.toBeNull();
     expect(slot.querySelector(".spin")).not.toBeNull();
-    expect(container.querySelector(".btn-over")).toBeNull();
     expect(screen.getByRole("button").textContent).toBe("Apply");
   });
 
-  it("keeps its width: with no icon the label stays in place and the spinner overlays it", () => {
+  it("with no icon the spinner sits beside the label and the label text stays", () => {
     const { container } = render(<Button busy>Apply</Button>);
     advance(LOAD_DELAY_MS);
-    expect(screen.getByRole("button").textContent).toBe("Apply");
-    expect(container.querySelector(".btn-over .spin")).not.toBeNull();
-    expect(screen.getByRole("button").getAttribute("data-spin")).toBe("over");
+    const button = screen.getByRole("button") as HTMLButtonElement;
+    expect(button.textContent).toBe("Apply");
+    expect(button.dataset.spin).toBe("lead");
+    const kids = [...button.childNodes];
+    // The spinner is in the flow before the label: nothing is laid over the words.
+    expect((kids[0] as Element).classList.contains("spin")).toBe(true);
+    expect(kids[1]?.textContent).toBe("Apply");
+    expect(container.querySelector(".btn-over")).toBeNull();
   });
 
-  it("does not fire onClick while busy", () => {
+  it("locks its width while busy: the idle width is set when busy starts and released when it ends", () => {
+    const measure = vi.spyOn(HTMLElement.prototype, "getBoundingClientRect").mockReturnValue({ width: 123.5, height: 30 } as DOMRect);
+    const { rerender } = render(<Button>Apply</Button>);
+    const button = screen.getByRole("button") as HTMLButtonElement;
+    expect(button.style.width).toBe("");
+    rerender(<Button busy>Apply</Button>);
+    expect(button.style.width).toBe("123.5px");
+    advance(LOAD_DELAY_MS);
+    // The spinner appears; the width the button was measured at is still the width it is held to.
+    expect(button.style.width).toBe("123.5px");
+    expect(button.textContent).toBe("Apply");
+    rerender(<Button>Apply</Button>);
+    expect(button.style.width).toBe("");
+    measure.mockRestore();
+  });
+
+  it("does not fire onClick while busy, and fires it again after", () => {
     const onClick = vi.fn();
-    render(
+    const { rerender } = render(
       <Button busy onClick={onClick}>
         Save
       </Button>,
     );
     fireEvent.click(screen.getByRole("button"));
     expect(onClick).not.toHaveBeenCalled();
+    rerender(<Button onClick={onClick}>Save</Button>);
+    fireEvent.click(screen.getByRole("button"));
+    expect(onClick).toHaveBeenCalledTimes(1);
   });
 
   it("leaves a plain disabled button without aria-busy or a spinner", () => {
@@ -100,10 +145,11 @@ describe("the busy Button", () => {
 });
 
 describe("the busy IconButton and BusyIcon", () => {
-  it("keeps its name, is aria-busy and disabled, and spins after the delay", () => {
+  it("keeps its name, is aria-busy and aria-disabled (still focusable), and spins after the delay", () => {
     const { container } = render(<IconButton label="Rescan" icon={<FloppyDisk />} tip={false} busy onClick={() => undefined} />);
     const button = screen.getByRole("button", { name: "Rescan" }) as HTMLButtonElement;
-    expect(button.disabled).toBe(true);
+    expect(button.disabled).toBe(false);
+    expect(button.getAttribute("aria-disabled")).toBe("true");
     expect(button.getAttribute("aria-busy")).toBe("true");
     expect(spinner(container)).toBeNull();
     advance(LOAD_DELAY_MS);
@@ -119,12 +165,14 @@ describe("the busy IconButton and BusyIcon", () => {
 });
 
 describe("InlineSkeleton", () => {
-  it("holds its width unseen until the delay, then shows; aria-busy throughout", () => {
+  it("holds its width unseen until the delay, then shows; it is a drawing, aria-hidden, not a status", () => {
     const { container } = render(<InlineSkeleton width="12ch" />);
     const line = container.querySelector(".inline-skel") as HTMLElement;
     expect(line.style.width).toBe("12ch");
     expect(line.dataset.shown).toBe("false");
-    expect(line.getAttribute("aria-busy")).toBe("true");
+    expect(line.getAttribute("aria-hidden")).toBe("true");
+    expect(line.getAttribute("role")).toBeNull();
+    expect(line.getAttribute("aria-busy")).toBeNull();
     advance(LOAD_DELAY_MS);
     expect(line.dataset.shown).toBe("true");
     expect(line.style.width).toBe("12ch");
@@ -142,18 +190,21 @@ describe("Select loading", () => {
     { value: "b", label: "Beta" },
   ];
 
-  it("is disabled and aria-busy, and shows a skeleton after the delay in place of the value", () => {
+  it("is disabled and aria-busy, and keeps its value until the delay: a fast load blanks nothing", () => {
     const { container } = render(<Select label="Source" value="a" options={options} onChange={() => undefined} loading />);
     const trigger = screen.getByRole("combobox", { name: "Source" }) as HTMLButtonElement;
     expect(trigger.disabled).toBe(true);
     expect(trigger.getAttribute("aria-busy")).toBe("true");
-    const line = container.querySelector(".inline-skel") as HTMLElement;
-    expect(line.dataset.shown).toBe("false");
-    advance(LOAD_DELAY_MS);
-    expect(line.dataset.shown).toBe("true");
-    // No real option is the visible value while loading.
-    const visible = [...container.querySelectorAll(".select-value > .one-line")].filter((n) => n.getAttribute("data-on") === "true");
-    expect(visible).toHaveLength(0);
+    const visible = () => [...container.querySelectorAll(".select-value > .one-line")].filter((n) => n.getAttribute("data-on") === "true");
+    // Before the delay the value is still drawn and there is no skeleton.
+    expect(visible().map((n) => n.textContent)).toEqual(["Alpha"]);
+    expect(container.querySelector(".inline-skel")).toBeNull();
+    advance(LOAD_DELAY_MS - 1);
+    expect(visible()).toHaveLength(1);
+    advance(1);
+    // After it the skeleton stands in for the value.
+    expect(container.querySelector(".inline-skel")).not.toBeNull();
+    expect(visible()).toHaveLength(0);
   });
 
   it("keeps the options' room so the trigger does not resize when they arrive", () => {
@@ -173,6 +224,34 @@ describe("Select loading", () => {
   });
 });
 
+describe("a thumbnail whose fetch fails", () => {
+  it("ends the wait: a still no-picture tile, no skeleton, aria-busy off", async () => {
+    vi.useRealTimers();
+    vi.resetModules();
+    vi.doMock("@/lib/thumbs", () => ({ loadThumb: () => Promise.resolve(null), blit: () => undefined }));
+    const { Thumb } = await import("@/components/Thumb");
+    const { container } = render(<Thumb id="x" label="Comet" />);
+    await waitFor(() => expect(container.querySelector(".thumb-none")).not.toBeNull());
+    const tile = container.querySelector(".thumb") as HTMLElement;
+    expect(tile.getAttribute("aria-busy")).toBeNull();
+    expect(tile.dataset.failed).toBe("true");
+    expect(container.querySelector(".canvas-skel")).toBeNull();
+    vi.doUnmock("@/lib/thumbs");
+    vi.useFakeTimers();
+  });
+
+  it("EffectPreview of an effect whose thumbnail fetch fails is a still box", async () => {
+    vi.useRealTimers();
+    vi.resetModules();
+    vi.doMock("@/lib/thumbs", () => ({ loadThumb: () => Promise.resolve(null), blit: () => undefined }));
+    const { EffectPreview } = await import("@/components/EffectPreview");
+    const { container } = render(<EffectPreview id="x" />);
+    await waitFor(() => expect((container.querySelector("canvas") as HTMLCanvasElement).dataset.wait).toBe("failed"));
+    vi.doUnmock("@/lib/thumbs");
+    vi.useFakeTimers();
+  });
+});
+
 describe("canvas placeholders", () => {
   it("CanvasSkeleton fills its tile and shows after the delay", () => {
     const { container } = render(<CanvasSkeleton />);
@@ -180,6 +259,14 @@ describe("canvas placeholders", () => {
     expect(skel.dataset.shown).toBe("false");
     advance(LOAD_DELAY_MS);
     expect(skel.dataset.shown).toBe("true");
+  });
+
+  it("LoopPreview with a failed preview is a still box: no skeleton, no aria-busy", () => {
+    const { container } = render(<LoopPreview thumb={null} label="Preview of Comet" failed />);
+    advance(LOAD_DELAY_MS * 3);
+    const canvas = container.querySelector("canvas") as HTMLCanvasElement;
+    expect(canvas.dataset.wait).toBe("failed");
+    expect(canvas.getAttribute("aria-busy")).toBeNull();
   });
 
   it("LoopPreview waits as a held box, then a skeleton, then nothing once it has a loop", () => {
@@ -209,7 +296,7 @@ describe("the kit's styles", () => {
   it("the busy button keeps its cell: icon and spinner share one grid cell", () => {
     const loading = css("loading.css");
     expect(loading).toMatch(/\.btn-slot > \* \{\s*grid-area: 1 \/ 1;/);
-    expect(loading).toMatch(/\.btn-over \{\s*position: absolute;\s*inset: 0;/);
+    expect(loading).toMatch(/\.btn\[data-spin="lead"\] \{[^}]*justify-content: center;/);
   });
 
   it("every colour in the kit is a token", () => {
