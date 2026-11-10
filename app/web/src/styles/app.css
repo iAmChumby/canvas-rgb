@@ -5790,6 +5790,55 @@ button.chip:hover {
   gap: var(--s2);
 }
 
+/* When the values were read, beside Read again. One cell holds every wording (Swap), so the head
+   does not move between "Not read yet" and "Read 3 min ago". Past 30 minutes it turns to the warn
+   tone: the daemon refreshes it when the person is away. */
+.rd-peri-readat {
+  display: inline-grid;
+  color: var(--mute);
+  font-size: var(--t14);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.rd-peri-readat[data-stale="true"] {
+  color: var(--warn);
+}
+
+.rd-peri-readat[data-empty="true"] {
+  visibility: hidden;
+}
+
+/* The frame that stands where the settings will be. It is as tall as one panel of controls. */
+.rd-peri-unread {
+  min-height: 168px;
+  display: grid;
+  align-items: center;
+}
+
+.rd-peri-unread-body {
+  display: flex;
+  align-items: center;
+  gap: var(--s4);
+}
+
+.rd-peri-unread-icon {
+  display: grid;
+  place-items: center;
+  flex: none;
+  width: 44px;
+  height: 44px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  color: var(--mute);
+}
+
+.rd-peri-unread-text {
+  margin: 0;
+  max-width: 60ch;
+  color: var(--mute);
+}
+
 .rd-peri-toggle-label {
   font-weight: 600;
 }
@@ -5919,7 +5968,15 @@ button.chip:hover {
     padding-left: 0;
     border-left: 0;
     flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: var(--s3);
     justify-content: flex-end;
+  }
+
+  /* When the values were read takes a line above the keys: the three keys fill the row. */
+  .rd-peri-readat {
+    flex: 1 1 100%;
+    justify-items: end;
   }
 }
 
@@ -6067,6 +6124,17 @@ button.chip:hover {
 .peripheral-head-sub {
   color: var(--mute);
   font-size: var(--t14);
+}
+
+/* Beside the room that "Read 3 min ago" takes, the name's second line (vendor and location) gives
+   way on one line with an ellipsis, so the head is one height in every state at a desk width. The
+   full line is its title. */
+@media (min-width: 721px) {
+  .rd-peripherals .peripheral-head-sub {
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
 }
 
 /* Access: what the daemon may do with the device, and what each switch does. */

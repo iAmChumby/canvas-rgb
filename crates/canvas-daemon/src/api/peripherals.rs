@@ -17,7 +17,7 @@ use canvas_proto::traits::AdapterError;
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
-use crate::peripherals::READS_OFF;
+use crate::peripherals::{NOT_READ_YET, READS_OFF};
 use crate::state::App;
 
 /// `GET /api/v1/peripherals`. Every peripheral the adapters see.
@@ -53,13 +53,15 @@ fn parse_fresh(query: Option<&str>) -> Result<bool, ApiFailure> {
 
 /// `GET /api/v1/peripherals/{id}`: what the device is, what it has and what it holds now.
 ///
-/// The values are the ones the daemon kept from the last read, with the writes since merged in.
-/// The device is read only when nothing is kept, or with `?fresh=true` (issue #7: a read stalls
-/// the pointer).
+/// A plain GET never reads the device (#127): the values are the ones the daemon kept from the
+/// last read, with the writes since merged in, loaded from `peripheral-values.json` at start so
+/// also the first open after a restart reads nothing. With nothing kept the values are empty
+/// and `problem` says they have not been read yet; the idle background refresh reads them when
+/// the person is away. `?fresh=true` is the person's **Read again** and does read now.
 ///
-/// The schema is always there. The values are read from the device only while reads are on for
-/// this id; otherwise they are empty and `problem` says why. A read that fails leaves the
-/// values empty too, and `problem` carries the adapter's own message.
+/// The schema is always there. The values are served only while reads are on for this id;
+/// otherwise they are empty and `problem` says why. A fresh read that fails leaves the values
+/// empty too, and `problem` carries the adapter's own message.
 pub async fn get_peripheral(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -72,23 +74,25 @@ pub async fn get_peripheral(
         .await
         .ok_or_else(|| ApiFailure::not_found(format!("no peripheral with the id {id}")))?;
     let schema = app.peripherals.describe(&device).await.map_err(adapter_failure)?;
-    let (values, problem) = if access.reads {
-        let read = if fresh {
-            app.peripherals.read_fresh(&device).await
+    let (values, problem, read_at_ms) = if access.reads {
+        if fresh {
+            match app.peripherals.read_fresh_stamped(&device).await {
+                Ok((values, read_at_ms)) => (values, None, Some(read_at_ms)),
+                Err(error) => {
+                    tracing::warn!(device = %id, error = %error, "the peripheral did not answer the read");
+                    (Props::new(), Some(error.to_string()), None)
+                }
+            }
         } else {
-            app.peripherals.read(&device).await
-        };
-        match read {
-            Ok(values) => (values, None),
-            Err(error) => {
-                tracing::warn!(device = %id, error = %error, "the peripheral did not answer the read");
-                (Props::new(), Some(error.to_string()))
+            match app.peripherals.kept_stamped(&device) {
+                Some((values, read_at_ms)) => (values, None, Some(read_at_ms)),
+                None => (Props::new(), Some(NOT_READ_YET.to_string()), None),
             }
         }
     } else {
-        (Props::new(), Some(READS_OFF.to_string()))
+        (Props::new(), Some(READS_OFF.to_string()), None)
     };
-    Ok(Json(PeripheralDetail { info, schema, values, access, problem }))
+    Ok(Json(PeripheralDetail { info, schema, values, access, problem, read_at_ms }))
 }
 
 /// `PATCH /api/v1/peripherals/{id}`: writes the given keys to the device.

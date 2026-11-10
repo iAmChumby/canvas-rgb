@@ -246,6 +246,10 @@ async fn daemon_main(fakes: bool) -> Exit {
     // Fakes mode has no peripherals, so nothing is opened.
     if canvas_daemon::fakes::real_peripherals_enabled(fakes) {
         canvas_daemon::peripherals::apply_saved(&app).await;
+        // The values a device has are read only while the person is away (#127): a view open
+        // never triggers a read, so the refresh runs here in the background, gated on Windows'
+        // last-input time.
+        canvas_daemon::peripherals::start_idle_refresh(app.clone());
     }
 
     // The zone sizes from disk.
