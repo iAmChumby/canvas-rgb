@@ -141,6 +141,16 @@ pub fn layer_effect_id<'a>(known: &'a KnownEffects, effect: &str) -> Option<&'a 
     known.takes(effect)
 }
 
+/// How a refusal names a layer: by the name the person gave it, which the editor shows, and by
+/// its id only when it has no name (the id is internal: `l1` means nothing on screen).
+fn who(layer: &StackLayer) -> String {
+    if layer.name.trim().is_empty() {
+        format!("layer {}", layer.id)
+    } else {
+        format!("layer \"{}\"", layer.name.trim())
+    }
+}
+
 /// The part of a layer that decides whether it can exist at all: its id, its name and its
 /// effect. A layer that fails this is a different stack, so it is dropped at load and refused at
 /// PUT.
@@ -159,8 +169,8 @@ fn check_layer_structure(layer: &StackLayer, seen: &mut Vec<String>) -> Result<(
         .map_err(|e| format!("layer {}: {e}", layer.id))?;
     if layer.effect.starts_with(STACK_ID_PREFIX) {
         return Err(format!(
-            "layer {}: {} is a stack, and a stack cannot contain a stack",
-            layer.id, layer.effect
+            "{}: {} is a stack, and a stack cannot contain a stack",
+            who(layer), layer.effect
         ));
     }
     Ok(())
@@ -173,15 +183,15 @@ fn check_layer_structure(layer: &StackLayer, seen: &mut Vec<String>) -> Result<(
 fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
     if layer.opacity > 100 {
         return Err(format!(
-            "layer {}: opacity must be 0..=100, and it is {}",
-            layer.id, layer.opacity
+            "{}: opacity must be 0..=100, and it is {}",
+            who(layer), layer.opacity
         ));
     }
     if let Some(mask) = &layer.mask {
         if mask.amount > 100 {
             return Err(format!(
-                "layer {}: the mask's amount must be 0..=100, and it is {}",
-                layer.id, mask.amount
+                "{}: the mask's amount must be 0..=100, and it is {}",
+                who(layer), mask.amount
             ));
         }
     }
@@ -189,20 +199,20 @@ fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
         let finite = x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
         if !finite {
             return Err(format!(
-                "layer {}: a rectangle's numbers must be finite, and x is {x}, y is {y}, width is {width}, height is {height}",
-                layer.id
+                "{}: a rectangle's numbers must be finite, and x is {x}, y is {y}, width is {width}, height is {height}",
+                who(layer)
             ));
         }
         if !(0.0..=320.0).contains(&width) || !(0.0..=200.0).contains(&height) {
             return Err(format!(
-                "layer {}: a rectangle is at most 320 wide and 200 tall, and it is {width} by {height}",
-                layer.id
+                "{}: a rectangle is at most 320 wide and 200 tall, and it is {width} by {height}",
+                who(layer)
             ));
         }
         if width < 0.0 || height < 0.0 {
             return Err(format!(
-                "layer {}: a rectangle's width and height are 0 or more",
-                layer.id
+                "{}: a rectangle's width and height are 0 or more",
+                who(layer)
             ));
         }
         let canvas_w = canvas_proto::CANVAS_WIDTH as f32;
@@ -212,28 +222,28 @@ fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
         // it as an edge failure instead of panicking.
         if x < 0.0 {
             return Err(format!(
-                "layer {} ({}) at index {index}: the left edge x = {x} is past the canvas; x must be 0 or more in the {canvas_w}-wide canvas",
-                layer.id, layer.effect
+                "{} ({}) at index {index}: the left edge x = {x} is past the canvas; x must be 0 or more in the {canvas_w}-wide canvas",
+                who(layer), layer.effect
             ));
         }
         if y < 0.0 {
             return Err(format!(
-                "layer {} ({}) at index {index}: the top edge y = {y} is past the canvas; y must be 0 or more in the {canvas_h}-tall canvas",
-                layer.id, layer.effect
+                "{} ({}) at index {index}: the top edge y = {y} is past the canvas; y must be 0 or more in the {canvas_h}-tall canvas",
+                who(layer), layer.effect
             ));
         }
         if x + width > canvas_w {
             return Err(format!(
-                "layer {} ({}) at index {index}: the right edge x + width = {} is past the {canvas_w}-wide canvas",
-                layer.id,
+                "{} ({}) at index {index}: the right edge x + width = {} is past the {canvas_w}-wide canvas",
+                who(layer),
                 layer.effect,
                 x + width
             ));
         }
         if y + height > canvas_h {
             return Err(format!(
-                "layer {} ({}) at index {index}: the bottom edge y + height = {} is past the {canvas_h}-tall canvas",
-                layer.id,
+                "{} ({}) at index {index}: the bottom edge y + height = {} is past the {canvas_h}-tall canvas",
+                who(layer),
                 layer.effect,
                 y + height
             ));
@@ -248,14 +258,14 @@ fn check_mask(layer: &StackLayer, known: &KnownEffects) -> Result<(), String> {
     let Some(mask) = &layer.mask else { return Ok(()) };
     if mask.effect.starts_with(STACK_ID_PREFIX) {
         return Err(format!(
-            "layer {}: the mask effect {} is a stack, and a stack cannot contain a stack",
-            layer.id, mask.effect
+            "{}: the mask effect {} is a stack, and a stack cannot contain a stack",
+            who(layer), mask.effect
         ));
     }
     if layer_effect_id(known, &mask.effect).is_none() {
         return Err(format!(
-            "layer {}: the mask effect {:?} is not an effect",
-            layer.id, mask.effect
+            "{}: the mask effect {:?} is not an effect",
+            who(layer), mask.effect
         ));
     }
     Ok(())
@@ -916,6 +926,22 @@ pub fn now() -> Instant {
 mod tests {
     use super::*;
     use canvas_proto::stack::{BlendMode, LayerArea};
+
+    #[test]
+    fn a_refusal_names_the_layer_the_person_sees_not_its_id() {
+        let mut named = layer("l1", "solid");
+        named.name = "Warm white".into();
+        named.opacity = 150;
+        let named_err = check_layer_values(&named, 0).unwrap_err();
+        assert!(named_err.starts_with("layer \"Warm white\":"), "{named_err}");
+        assert!(!named_err.contains("l1"), "the internal id stays out of it: {named_err}");
+
+        let mut unnamed = layer("l2", "solid");
+        unnamed.name = String::new();
+        unnamed.opacity = 150;
+        let unnamed_err = check_layer_values(&unnamed, 0).unwrap_err();
+        assert!(unnamed_err.starts_with("layer l2:"), "with no name, the id is all there is: {unnamed_err}");
+    }
 
     fn stack(id: &str, layers: Vec<StackLayer>) -> Stack {
         Stack { id: id.to_string(), layers }
