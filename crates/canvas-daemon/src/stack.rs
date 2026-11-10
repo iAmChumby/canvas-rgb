@@ -1249,18 +1249,6 @@ impl StackEffect {
         }
         *sink.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = out;
     }
-
-    /// The status of a layer's mask, for a test: its state and why it is not applied.
-    pub fn mask_status(&self, id: &str) -> Option<(StackLayerState, Option<String>)> {
-        let layer = self.layers.iter().find(|layer| layer.id == id)?;
-        if let Some(error) = &layer.mask_error {
-            return Some((StackLayerState::MissingEffect, Some(error.clone())));
-        }
-        layer.mask.as_ref().map(|mask| {
-            let state = if mask.fault.is_some() { StackLayerState::Faulted } else { state_of(mask.hold) };
-            (state, mask.fault.clone())
-        })
-    }
 }
 
 /// The API state a hold is reported as.

@@ -3505,6 +3505,7 @@ fn a_panicking_mask_leaves_the_layer_unmasked_and_says_why() {
         SamplingMode::Nearest,
     );
     let statuses = Arc::new(Mutex::new(Vec::new()));
+    let log = common::LogBuf::default();
     let mut effect = StackEffect::new(
         &stack,
         mask_leaves(Arc::new(AtomicU64::new(0)), true),
@@ -3513,20 +3514,22 @@ fn a_panicking_mask_leaves_the_layer_unmasked_and_says_why() {
     )
     .with_clock(ManualClock::new().clock())
     .with_status_sink(Arc::clone(&statuses));
-    effect.init(&Props::new());
     let mut canvas = Canvas::with_scale(1.0);
-    step(&mut effect, &mut canvas);
+    {
+        let _guard = log.install();
+        effect.init(&Props::new());
+        step(&mut effect, &mut canvas);
+    }
 
     assert_eq!(
         canvas.get(5, 5),
         [1.0, 0.0, 0.0],
         "the mask panicked, so the layer draws unmasked rather than going black"
     );
-    let (state, reason) = effect.mask_status("l1").expect("the layer has a mask");
-    assert_eq!(state, StackLayerState::Faulted);
+    let text = log.text();
     assert!(
-        reason.as_deref().is_some_and(|reason| reason.contains("panicked")),
-        "the mask's reason is kept: {reason:?}"
+        text.contains("a layer's mask panicked") && text.contains("a mask's effect panicked"),
+        "the log says the mask failed and why: {text}"
     );
     assert_eq!(
         effect.layer_status("l1").map(|(state, _)| state),
@@ -3543,7 +3546,10 @@ fn a_panicking_mask_leaves_the_layer_unmasked_and_says_why() {
 
 #[test]
 fn a_mask_that_does_not_build_leaves_the_layer_unmasked() {
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let log = common::LogBuf::default();
     let mut effect = {
+        let _guard = log.install();
         let stack = stack(
             "stack:GoneMask",
             vec![masked_layer("l1", "layer", a_mask("no-such-effect"))],
@@ -3567,14 +3573,26 @@ fn a_mask_that_does_not_build_leaves_the_layer_unmasked() {
         });
         StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
             .with_clock(ManualClock::new().clock())
+            .with_status_sink(Arc::clone(&statuses))
     };
-    effect.init(&Props::new());
     let mut canvas = Canvas::with_scale(1.0);
-    step(&mut effect, &mut canvas);
+    {
+        let _guard = log.install();
+        effect.init(&Props::new());
+        step(&mut effect, &mut canvas);
+    }
     assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the layer draws unmasked");
-    let (state, reason) = effect.mask_status("l1").expect("the layer has a mask");
-    assert_eq!(state, StackLayerState::MissingEffect);
-    assert!(reason.is_some(), "the build error is kept");
+    let text = log.text();
+    assert!(
+        text.contains("a layer's mask did not build") && text.contains("no effect with that id"),
+        "the log says the mask did not build and why: {text}"
+    );
+    let reported = statuses.lock().unwrap().clone();
+    assert_eq!(
+        reported.iter().find(|status| status.id == "l1").map(|status| status.status),
+        Some(StackLayerState::MissingEffect),
+        "the layer's status says its mask is missing: {reported:?}"
+    );
 }
 
 #[tokio::test]
