@@ -7411,7 +7411,7 @@ button.chip:hover {
 .layer-row {
   list-style: none;
   display: grid;
-  grid-template-columns: 20px 44px minmax(0, 1fr) auto;
+  grid-template-columns: 20px auto minmax(0, 1fr) auto auto;
   align-items: center;
   gap: var(--s2);
   min-height: 54px;
@@ -7500,6 +7500,48 @@ button.chip:hover {
   color: var(--ink);
 }
 
+/* The layer's own thumbnail, and beside it its mask's (#256): the mask is a small tile, so a row
+   says at a glance that the layer is shaped rather than drawn whole. */
+.layer-thumbs {
+  display: flex;
+  align-items: center;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.layer-row .layer-thumbs .thumb-sm,
+.layer-row .layer-thumbs .thumb {
+  width: 44px;
+  height: 28px;
+}
+
+.layer-mask-thumb {
+  display: inline-flex;
+  padding: 1px;
+  border: 1px solid var(--line-2);
+  border-radius: 6px;
+  background: var(--sunk);
+}
+
+.layer-row .layer-mask-thumb .thumb-sm,
+.layer-row .layer-mask-thumb .thumb {
+  width: 28px;
+  height: 18px;
+  border-radius: 4px;
+}
+
+/* The row's mask control: "Add mask" on a layer that draws whole, and a remove key on one that
+   is masked. The text key gives way to its icon on a narrow row. */
+.layer-row > .btn {
+  white-space: nowrap;
+}
+
+@media (max-width: 1100px) {
+  .rd-layers .layer-row > .btn .rd-btn-text {
+    display: none;
+  }
+}
+
 .rd-layers-empty {
   display: flex;
   flex-direction: column;
@@ -7549,7 +7591,11 @@ button.chip:hover {
   display: flex;
   flex-direction: column;
   padding: var(--s3);
-  overflow: hidden;
+  /* The layer's own controls and its mask section can be taller than the column: the panel
+     scrolls rather than clipping the mask (#256, the #124 rule). */
+  overflow-x: hidden;
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 .layer-edit-head {
@@ -7628,6 +7674,13 @@ button.chip:hover {
   grid-column: 1 / -1;
 }
 
+/* A label and its switch on one line: Invert needs no column of its own (#256). */
+.layer-field-row {
+  flex-direction: row;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .layer-field .field-slider {
   flex: 0 0 auto;
   display: flex;
@@ -7677,10 +7730,12 @@ button.chip:hover {
 }
 
 /* The app lays a property list out in two columns; this column has room for one, and a
-   choice's keys take the whole row so four keys never wrap. */
+   choice's keys take the whole row so four keys never wrap. The panel scrolls as one, so the
+   list does not scroll inside it (#256). */
 .rd-layer-edit .prop-list {
   grid-template-columns: minmax(0, 1fr);
-  overflow: auto;
+  flex: 0 0 auto;
+  overflow: visible;
   min-height: 0;
 }
 
@@ -7954,6 +8009,65 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* The mask picker (#256): a short note and the two groups, the six that read best first. */
+.rd-mask-picker-note {
+  margin: 0;
+  padding: 0 var(--s1) var(--s2);
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+.rd-add-group {
+  list-style: none;
+  padding: var(--s2) var(--s1) var(--s1);
+  color: var(--mute);
+  font-size: var(--t14);
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.rd-add-group:first-of-type {
+  padding-top: var(--s1);
+}
+
+/* The picked layer's mask (#256): a section under its properties, compact enough for the panel. */
+.rd-mask {
+  margin-top: var(--s3);
+  padding-top: var(--s3);
+  border-top: 1px solid var(--line);
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.rd-mask-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+}
+
+.rd-mask-title {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  color: var(--ink);
+  font-size: var(--t15);
+  font-weight: 600;
+}
+
+.rd-mask-title svg {
+  color: var(--a2);
+}
+
+.rd-mask-note {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
 .chip-stack {
   color: var(--a3);
   border-color: var(--a3);
@@ -8150,16 +8264,17 @@ button.chip:hover {
   .rd-layer-sheet .rd-layer-edit {
     flex: 1 1 auto;
     min-height: 0;
-    overflow: hidden;
+    overflow-x: hidden;
+    overflow-y: auto;
     padding: 0;
     border: 0;
     background: transparent;
   }
 
   .rd-layer-sheet .rd-layer-edit .prop-list {
-    flex: 1 1 auto;
+    flex: 0 0 auto;
     min-height: 0;
-    overflow-y: auto;
+    overflow: visible;
   }
 
   /* The area picker is a sheet on a phone, over the layer sheet (D95.5.6). */

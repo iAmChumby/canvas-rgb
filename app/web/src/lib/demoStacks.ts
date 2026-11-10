@@ -74,6 +74,21 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
     { blend: "screen", opacity: 80 },
   );
   const sunsetGlow: Stack = { id: "stack:Sunset glow", layers: [sunset, heat, sparkles] };
+  // The mask's example (#256): a warm white shaped by a Fire luma mask, so the flame decides
+  // where the white shows. It is in the demo so the builder's mask section can be seen.
+  const warmWhite = layer("l1", "Warm white", "white", {
+    ...(effects.white?.defaults ?? {}),
+    temperature: number(2700),
+  }, {
+    mask: {
+      effect: "fire",
+      props: { ...fire, intensity: number(70) },
+      source: "luma",
+      invert: false,
+      amount: 100,
+    },
+  });
+  const warmFlame: Stack = { id: "stack:Warm flame", layers: [warmWhite] };
   const eight: Stack = {
     id: "stack:Eight layers",
     layers: [
@@ -87,7 +102,11 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
       layer("l8", "Flat", "solid", effects.solid?.defaults ?? {}, { opacity: 20 }),
     ],
   };
-  const stacks: Record<string, Stack> = { [sunsetGlow.id]: sunsetGlow, [eight.id]: eight };
+  const stacks: Record<string, Stack> = {
+    [sunsetGlow.id]: sunsetGlow,
+    [eight.id]: eight,
+    [warmFlame.id]: warmFlame,
+  };
   // `?state=stack-nested`: a hand-edited stack whose middle layer is another stack, so the row's
   // `Nested stack` and the picked layer's explanation can be seen (D95.4.8).
   if (scenario.has("stack-nested")) {
@@ -112,7 +131,11 @@ export function stackSummary(stack: Stack, effects: Record<string, DemoEffect>):
     layers: stack.layers.length,
     html_layers: stack.layers.filter((layer) => layer.effect.startsWith("html:")).length,
     missing: stack.layers
-      .filter((layer) => !effects[layer.effect] && !layer.effect.startsWith("stack:"))
+      .filter(
+        (layer) =>
+          (!effects[layer.effect] && !layer.effect.startsWith("stack:")) ||
+          (layer.mask !== undefined && !effects[layer.mask.effect]),
+      )
       .map((layer) => layer.id),
   };
 }
@@ -137,6 +160,12 @@ export function stackSchema(stack: Stack, effects: Record<string, DemoEffect>): 
   const names: string[] = [];
   for (const layer of stack.layers) {
     const schema = effects[layer.effect]?.schema;
+    // A mask's effect reads its own inputs too (#256).
+    const maskSchema = layer.mask ? effects[layer.mask.effect]?.schema : undefined;
+    if (maskSchema) {
+      needs.screen ||= maskSchema.needs.screen;
+      needs.audio ||= maskSchema.needs.audio;
+    }
     if (schema) {
       needs.screen ||= schema.needs.screen;
       needs.audio ||= schema.needs.audio;

@@ -4,7 +4,9 @@
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
+import type { LayerMask } from "@/proto/LayerMask";
 import type { Layout } from "@/proto/Layout";
+import type { MaskSource } from "@/proto/MaskSource";
 import type { PropKind } from "@/proto/PropKind";
 import type { Props } from "@/proto/props";
 import type { PropValue } from "@/proto/PropValue";
@@ -22,12 +24,22 @@ export const MAX_LAYER_NAME = 40;
 export const CANVAS_W = 320;
 export const CANVAS_H = 200;
 
+/**
+ * The effects the mask picker leads with (#256): the ones whose pictures read as a shape rather
+ * than a wash of colour. Every other effect follows under "More".
+ */
+export const MASK_LEAD_EFFECTS = ["fire", "rain", "spiral", "aurora", "breathing", "gradient"] as const;
+
 export function isHtmlEffect(effect: string): boolean {
   return effect.startsWith("html:");
 }
 
+/** The HTML layers a stack runs: its own HTML layers plus its HTML masks (#256), which share the
+ *  same cap. */
 export function htmlLayers(layers: StackLayer[]): number {
-  return layers.filter((layer) => isHtmlEffect(layer.effect)).length;
+  return layers.filter(
+    (layer) => isHtmlEffect(layer.effect) || (layer.mask !== undefined && isHtmlEffect(layer.mask.effect)),
+  ).length;
 }
 
 /** The next free layer id (`l1` … `l8`), or null when the stack is full. */
@@ -92,6 +104,67 @@ export function makeLayer(
   };
 }
 
+// ---------------------------------------------------------------- masks (#256)
+
+/** A new mask: the effect's own values, Brightness, not inverted, applied fully. */
+export function makeMask(
+  effect: string,
+  schema: PropertySchema | null | undefined,
+  props: Props = {},
+): LayerMask {
+  return {
+    effect,
+    props: { ...layerValues(schema, props) },
+    source: "luma",
+    invert: false,
+    amount: 100,
+  };
+}
+
+/** A layer's mask values over its schema's defaults: what the mask section's controls show. */
+export function maskValues(schema: PropertySchema | null | undefined, mask: LayerMask): Props {
+  return layerValues(schema, mask.props);
+}
+
+/** The layers with one layer's mask replaced (or removed). */
+export function setLayerMask(layers: StackLayer[], id: string, mask: LayerMask | null): StackLayer[] {
+  return layers.map((layer) => {
+    if (layer.id !== id) return layer;
+    const next: StackLayer = { ...layer };
+    if (mask === null) delete next.mask;
+    else next.mask = mask;
+    return next;
+  });
+}
+
+/** The layers with one layer's mask changed by `patch`. */
+export function patchMask(layers: StackLayer[], id: string, patch: Partial<LayerMask>): StackLayer[] {
+  return layers.map((layer) =>
+    layer.id === id && layer.mask !== undefined ? { ...layer, mask: { ...layer.mask, ...patch } } : layer,
+  );
+}
+
+/** True when `effect` may be a mask: never a stack (#256). */
+export function maskEffectAllowed(effect: string): boolean {
+  return !effect.startsWith("stack:");
+}
+
+/** Why `effect` cannot be a mask on `layers`, or null when it can: the HTML cap counts masks. */
+export function maskRefusal(layers: StackLayer[], id: string, effect: string): string | null {
+  if (!maskEffectAllowed(effect)) return "A stack cannot be a mask";
+  const layer = layers.find((entry) => entry.id === id);
+  const current = layer?.mask?.effect;
+  if (isHtmlEffect(effect) && !(current !== undefined && isHtmlEffect(current)) && htmlLayers(layers) >= MAX_HTML_LAYERS) {
+    return `A stack holds ${MAX_HTML_LAYERS} HTML layers`;
+  }
+  return null;
+}
+
+/** The source a mask reads, said as a control's label. */
+export function maskSourceWords(source: MaskSource): string {
+  return source === "alpha" ? "Alpha" : "Brightness";
+}
+
 /** The layer list with a new layer on top (the last one painted). */
 export function addLayer(layers: StackLayer[], layer: StackLayer): StackLayer[] {
   return [...layers, layer];
@@ -133,6 +206,9 @@ export function duplicateLayer(
     name: `${source.name} copy`.slice(0, MAX_LAYER_NAME),
     props: { ...source.props },
     area: { ...source.area },
+    ...(source.mask
+      ? { mask: { ...source.mask, props: { ...source.mask.props } } }
+      : {}),
   };
   const next = [...layers];
   next.splice(from + 1, 0, copy);
@@ -204,6 +280,14 @@ export function stackSchema(
   const names: string[] = [];
   for (const layer of layers) {
     const schema = schemas[layer.effect];
+    // A mask's effect reads its own inputs too (#256).
+    if (layer.mask) {
+      const maskSchema = schemas[layer.mask.effect];
+      if (maskSchema) {
+        needs.screen ||= maskSchema.needs.screen;
+        needs.audio ||= maskSchema.needs.audio;
+      }
+    }
     if (schema) {
       needs.screen ||= schema.needs.screen;
       needs.audio ||= schema.needs.audio;

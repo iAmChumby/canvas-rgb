@@ -140,6 +140,11 @@ export function composeStack(
     const bounds = areaBounds(layer.area, layout);
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
     const picture = demoLayerPicture(layer, width, height, seconds);
+    // A layer's mask (#256) is another effect's picture over the same box, whose coverage shapes
+    // the layer per pixel.
+    const maskPicture = layer.mask
+      ? demoLayerPicture({ ...layer, effect: layer.mask.effect, props: layer.mask.props }, width, height, seconds)
+      : null;
     const x0 = Math.max(0, Math.floor((bounds.x / CANVAS_W) * width));
     const y0 = Math.max(0, Math.floor((bounds.y / CANVAS_H) * height));
     const x1 = Math.min(width, Math.ceil(((bounds.x + bounds.width) / CANVAS_W) * width));
@@ -147,15 +152,29 @@ export function composeStack(
     const spanX = Math.max(1, x1 - x0);
     const spanY = Math.max(1, y1 - y0);
     const a = Math.max(0, Math.min(100, layer.opacity)) / 100;
+    const mask = layer.mask;
+    const amount = Math.max(0, Math.min(100, mask?.amount ?? 100)) / 100;
     for (let y = y0; y < y1; y++) {
       const sy = Math.min(height - 1, Math.floor(((y + 0.5 - y0) / spanY) * height));
       for (let x = x0; x < x1; x++) {
         const sx = Math.min(width - 1, Math.floor(((x + 0.5 - x0) / spanX) * width));
         const d = (y * width + x) * 3;
         const s = (sy * width + sx) * 3;
+        let alpha = a;
+        if (mask && maskPicture) {
+          const r = (maskPicture[s] ?? 0) / 255;
+          const g = (maskPicture[s + 1] ?? 0) / 255;
+          const b = (maskPicture[s + 2] ?? 0) / 255;
+          // The same rule as the daemon's compositor: luma is Rec. 709, and alpha (the canvases
+          // carry none) is the picture's strongest channel.
+          const raw = mask.source === "alpha" ? Math.max(r, g, b) : 0.2126 * r + 0.7152 * g + 0.0722 * b;
+          const coverage = mask.invert ? 1 - raw : raw;
+          alpha = a * (1 - (1 - coverage) * amount);
+        }
+        if (alpha <= 0) continue;
         for (let c = 0; c < 3; c++) {
           const under = acc[d + c] ?? 0;
-          acc[d + c] = blendChannel(layer.blend, under, (picture[s + c] ?? 0) / 255, a);
+          acc[d + c] = blendChannel(layer.blend, under, (picture[s + c] ?? 0) / 255, alpha);
         }
       }
     }
