@@ -314,19 +314,23 @@ describe("a drag is one undo step", () => {
 });
 
 describe("the window shortcuts", () => {
-  it("wait while the Add layer popover is open", async () => {
+  it("wait while a library tile is lifted", async () => {
     const stage = await openBuilder();
     press(stage, px(71), px(173));
     await waitFor(() => expect(pickedName()).toBe("Heat"));
     fireEvent.keyDown(stage, { key: "Delete" });
     await waitFor(() => expect(rows()).toBe(2));
-    fireEvent.click(screen.getByRole("button", { name: /^Add layer/ }));
-    await screen.findByRole("dialog", { name: "Add a layer" });
-    // Ctrl+Z would bring Heat back and Ctrl+D would copy the picked layer; neither happens
-    // while the popover has the keyboard.
+    // A drag owns the keyboard: Ctrl+Z would bring Heat back and Ctrl+D would copy the picked
+    // layer; neither happens while the tile is lifted.
+    const solid = screen.getByRole("button", { name: "Add Solid" });
+    fireEvent.keyDown(solid, { key: " " });
     undoKey();
     act(() => void fireEvent.keyDown(document.body, { key: "d", ctrlKey: true }));
     expect(rows()).toBe(2);
+    // Escape is the drag's own cancel, and the keys are the page's again.
+    fireEvent.keyDown(window, { key: "Escape" });
+    undoKey();
+    await waitFor(() => expect(rows()).toBe(3));
   });
 
   it("leave a select and a combobox trigger their own keys", async () => {

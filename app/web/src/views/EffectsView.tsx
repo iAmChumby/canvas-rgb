@@ -1033,6 +1033,10 @@ export function EffectsView() {
         initialName={stackParam}
         onClose={() => goStack(null, { replace: true })}
         onName={(name) => goStack(name, { replace: true })}
+        onWriteCode={() => {
+          goStack(null, { replace: true });
+          setNewOpen(true);
+        }}
       />
     );
   }

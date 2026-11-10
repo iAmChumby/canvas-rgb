@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { ArrowClockwise, ArrowCounterClockwise } from "@phosphor-icons/react";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import { EDGE_HANDLE_MIN_PX, hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
+import type { DropTarget } from "@/lib/dropTargets";
 import { Chip } from "@/components/Chip";
 import { IconButton } from "@/components/Button";
 import { Toggle } from "@/components/Toggle";
@@ -63,6 +64,10 @@ function labelRoom(b: LabelBox, stageW: number): number {
 
 /** A finger's reach from a handle's centre: half the 44px hit box (the knob stays 12px). */
 const TOUCH_REACH_PX = 22;
+/** The pill that names a drop target is about this tall, with its gap: it needs this much room. */
+const PILL_ROOM_PX = 30;
+/** The "Whole canvas" strip's height (app.css .rd-drop-strip): a label under it would be covered. */
+const STRIP_PX = 24;
 
 const HANDLE_CURSOR: Record<HandleDef["id"], string> = {
   nw: "nwse-resize",
@@ -140,6 +145,7 @@ export function Stage({
   onDelete,
   onDuplicate,
   onMakeRect,
+  drop,
 }: {
   stack: Stack;
   layout: Layout | null;
@@ -160,6 +166,8 @@ export function Stage({
   onDelete?: (id: string) => void;
   onDuplicate?: (id: string) => void;
   onMakeRect?: (id: string) => void;
+  /** A library drag in progress (#257 phase 2): its target on the stage, and the words for it. */
+  drop?: { target: DropTarget | null; words: string | null } | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -239,6 +247,53 @@ export function Stage({
     [visibleZones, stageW],
   );
   const pxPerUnit = stageW > 0 ? stageW / CANVAS_W : 0;
+  /** The outlines that would take a drop: every placement of a device, or one zone. */
+  const dropZones = useMemo(() => {
+    const target = drop?.target ?? null;
+    if (!target || !layout) return null;
+    if (target.kind !== "device" && target.kind !== "zone") return null;
+    return new Set(
+      layout.zones
+        .filter(
+          (zone) =>
+            zone.device_id === target.device &&
+            (target.kind === "device" || zone.zone_index === target.zone),
+        )
+        .map(zoneKey),
+    );
+  }, [drop, layout]);
+
+  /**
+   * The box a device or a zone drop would take: every visible placement of it, as one rectangle in
+   * canvas units, drawn with the same dashed accent as the rectangle a drop on empty picture makes.
+   */
+  const dropBox = useMemo(() => {
+    if (!dropZones) return null;
+    const zones = visibleZones.filter((zone) => dropZones.has(zoneKey(zone)) && zone.width > 0 && zone.height > 0);
+    if (zones.length === 0) return null;
+    const x0 = Math.min(...zones.map((zone) => zone.x));
+    const y0 = Math.min(...zones.map((zone) => zone.y));
+    const x1 = Math.max(...zones.map((zone) => zone.x + zone.width));
+    const y1 = Math.max(...zones.map((zone) => zone.y + zone.height));
+    return { x0, y0, x1, y1 };
+  }, [dropZones, visibleZones]);
+  /**
+   * Where the target's name sits: beside the box, inside the picture, over no control. Below it
+   * when there is room, above it otherwise, inside its top edge when there is neither; across, it
+   * is centred on the box and slid along its own width so it never leaves the picture.
+   */
+  const pillStyle = (() => {
+    if (!dropBox) return undefined;
+    const cx = ((dropBox.x0 + dropBox.x1) / 2 / CANVAS_W) * 100;
+    const stageH = stageW > 0 ? (stageW * CANVAS_H) / CANVAS_W : 0;
+    const roomBelow = stageH === 0 || stageH - dropBox.y1 * pxPerUnit >= PILL_ROOM_PX;
+    const roomAbove = stageH > 0 && dropBox.y0 * pxPerUnit >= PILL_ROOM_PX + STRIP_PX;
+    const base = { left: `${cx}%`, transform: `translateX(-${cx}%)` };
+    if (roomBelow) return { ...base, top: `calc(${(dropBox.y1 / CANVAS_H) * 100}% + 6px)` };
+    if (roomAbove) return { ...base, bottom: `calc(${100 - (dropBox.y0 / CANVAS_H) * 100}% + 6px)` };
+    return { ...base, top: `calc(${(dropBox.y0 / CANVAS_H) * 100}% + 6px)` };
+  })();
+
   /** Whether a side of `units` long has room for its bar (unmeasured: yes). */
   const markN = (units: number) => (pxPerUnit === 0 || units * pxPerUnit >= EDGE_HANDLE_MIN_PX ? "on" : "off");
   // Only a rectangle is dragged here. A whole-canvas, device or zone area follows the layout;
@@ -433,6 +488,8 @@ export function Stage({
         className="rd-canvas"
         ref={stageRef}
         data-empty={empty ? "true" : "false"}
+        data-drop={drop?.target?.kind === "canvas" ? "true" : undefined}
+        data-dropping={drop ? "true" : undefined}
         tabIndex={0}
         role="group"
         aria-label="The stage. Tab and Shift+Tab pick a layer, Escape clears the pick."
@@ -441,6 +498,11 @@ export function Stage({
         onDragStart={refuseDragStart}
         draggable={false}
       >
+        {drop && (
+          <div className="rd-drop-strip" data-over={drop.target?.kind === "canvas" ? "true" : "false"}>
+            Whole canvas
+          </div>
+        )}
         {!empty && <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} aria-label="The stack's preview" />}
         {empty && (
           <div className="rd-canvas-empty">
@@ -448,7 +510,7 @@ export function Stage({
             <span>Add a layer and its picture appears here.</span>
           </div>
         )}
-        {!empty && (parts || dragging) && layout && (
+        {!empty && (parts || dragging || drop) && layout && (
           <div className="rd-parts" aria-hidden="true">
             {visibleZones.map((zone) => {
               const key = zoneKey(zone);
@@ -456,6 +518,7 @@ export function Stage({
                 <span
                   key={key}
                   className="rd-part-outline"
+                  data-drop={dropZones?.has(key) ? "true" : undefined}
                   style={{
                     left: `${(zone.x / CANVAS_W) * 100}%`,
                     top: `${(zone.y / CANVAS_H) * 100}%`,
@@ -463,7 +526,9 @@ export function Stage({
                     height: `${(zone.height / CANVAS_H) * 100}%`,
                   }}
                 >
-                  {zone.label && (!labelPlan || labelPlan.has(key)) && <em>{zone.label}</em>}
+                  {zone.label &&
+                    (!labelPlan || labelPlan.has(key)) &&
+                    !(drop && stageW > 0 && zone.y * pxPerUnit < STRIP_PX) && <em>{zone.label}</em>}
                 </span>
               );
             })}
@@ -537,8 +602,40 @@ export function Stage({
               </div>
             );
           })}
+        {drop?.target?.kind === "rect" && (
+          <span
+            className="rd-drop-rect"
+            aria-hidden="true"
+            style={{
+              left: `${(drop.target.x / CANVAS_W) * 100}%`,
+              top: `${(drop.target.y / CANVAS_H) * 100}%`,
+              width: `${(drop.target.width / CANVAS_W) * 100}%`,
+              height: `${(drop.target.height / CANVAS_H) * 100}%`,
+            }}
+          >
+            <em>New rectangle</em>
+          </span>
+        )}
+        {dropBox && (
+          <span
+            className="rd-drop-rect"
+            data-target={drop?.target?.kind}
+            aria-hidden="true"
+            style={{
+              left: `${(dropBox.x0 / CANVAS_W) * 100}%`,
+              top: `${(dropBox.y0 / CANVAS_H) * 100}%`,
+              width: `${((dropBox.x1 - dropBox.x0) / CANVAS_W) * 100}%`,
+              height: `${((dropBox.y1 - dropBox.y0) / CANVAS_H) * 100}%`,
+            }}
+          />
+        )}
+        {dropBox && drop?.words && (
+          <span className="rd-drop-pill" aria-hidden="true" style={pillStyle}>
+            {drop.words}
+          </span>
+        )}
       </div>
-      {!empty && picked && asRect && picked.area.kind !== "rect" && (
+      {!empty && !drop && picked && asRect && picked.area.kind !== "rect" && (
         <span className="rd-stage-float">
           <Chip
             label={`Make ${picked.name} a rectangle`}

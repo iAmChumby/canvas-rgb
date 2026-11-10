@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Effects: the builder has a library beside the picture (a rail on a wide window, a tray under the picture, a tab on a phone) with Effects and Masks, a search, and a Write code tile; click a tile to add it, drag it onto the picture to place it on the whole canvas, a device, a zone (hold Shift) or a new rectangle, drag it into the layer list to choose its place, and reorder a layer by dragging its grip — with Space and the arrow keys doing the same from the keyboard, and each step said aloud (#257)
+
 ## [0.12.0] - 2026-11-10
 
 ### Changed

@@ -83,8 +83,7 @@ describe("adding a layer while its effect is still loading", () => {
       id.startsWith("html:") ? new Promise((resolve) => pending.push(resolve)) : realEffect(id),
     );
     try {
-      fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-      const row = await screen.findByRole("option", { name: /Ink Drop/ });
+      const row = await screen.findByRole("button", { name: "Add Ink Drop" });
       await act(async () => {
         fireEvent.click(row);
         fireEvent.click(row);
@@ -125,9 +124,8 @@ describe("adding a layer while its effect is still loading", () => {
       return realEffect(id);
     });
     try {
-      fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-      const inkRow = await screen.findByRole("option", { name: /Ink Drop/ });
-      const solidRow = await screen.findByRole("option", { name: /Solid/ });
+      const inkRow = await screen.findByRole("button", { name: "Add Ink Drop" });
+      const solidRow = await screen.findByRole("button", { name: "Add Solid" });
       await act(async () => {
         fireEvent.click(inkRow);
         fireEvent.click(solidRow);

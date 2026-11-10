@@ -103,6 +103,15 @@ function pick(name: string) {
   if (row) fireEvent.click(row);
 }
 
+/** Adds from the library: on a phone it is the Library tab under the stage (spec §3). */
+async function addFromLibrary(name: string) {
+  const before = layerNames().length;
+  fireEvent.click(screen.getByRole("radio", { name: "Library" }));
+  fireEvent.click(await screen.findByRole("button", { name: `Add ${name}` }));
+  fireEvent.click(screen.getByRole("radio", { name: "Layers" }));
+  await waitFor(() => expect(layerNames()).toHaveLength(before + 1));
+}
+
 /** Focuses a control the way a person does before clicking it. */
 function focusAndClick(control: HTMLElement) {
   control.focus();
@@ -196,12 +205,13 @@ describe("the stack builder on a phone", () => {
     expect(within(sheet).getByText(/the rest of the stack keeps its rate/)).toBeTruthy();
   });
 
-  it("shows eight layers as 8 / 8 with Add layer disabled at 390", async () => {
+  it("shows eight layers as 8 / 8 with every tile disabled at 390", async () => {
     await openBuilder("?stack=Eight%20layers&state=complete,stack");
     expect(screen.getByText("8 / 8")).toBeTruthy();
-    const add = screen.getByRole("button", { name: /Add layer/ });
+    fireEvent.click(screen.getByRole("radio", { name: "Library" }));
+    const add = screen.getByRole("button", { name: "Add Solid" });
     expect(add).toHaveProperty("disabled", true);
-    expect(add.getAttribute("aria-label")).toContain("a stack holds 8");
+    expect(add.getAttribute("title")).toContain("A stack holds 8 layers");
   });
 
   it("runs a draft from the stage foot and stops it", async () => {
@@ -214,9 +224,7 @@ describe("the stack builder on a phone", () => {
 
   it("asks before leaving with unsaved changes at 390", async () => {
     await openBuilder();
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
-    await waitFor(() => expect(layerNames()).toHaveLength(4));
+    await addFromLibrary("Solid");
     // The in-app leave goes through the guard the dirty effect registers.
     await waitForStackGuard();
     fireEvent.click(screen.getByRole("button", { name: "Back to the effects" }));
@@ -226,7 +234,7 @@ describe("the stack builder on a phone", () => {
     await waitFor(() => expect(screen.queryByRole("alertdialog", { name: "Unsaved changes" })).toBeNull());
   });
 
-  it("reorders a layer with a finger on its grip", async () => {
+  it("reorders a layer with a finger held on its grip", async () => {
     await openBuilder();
     const rows = screen.getAllByRole("listitem");
     // jsdom has no layout: give each row the band it would have, top first.
@@ -237,11 +245,17 @@ describe("the stack builder on a phone", () => {
     const sunset = screen.getByText("Sunset").closest("li")!;
     const grip = sunset.querySelector<HTMLButtonElement>(".layer-grip")!;
     act(() => {
-      fireEvent.pointerDown(grip, { pointerType: "touch", pointerId: 1, clientY: 120 });
-      fireEvent.pointerMove(grip, { pointerType: "touch", pointerId: 1, clientY: 10 });
-      fireEvent.pointerUp(grip, { pointerType: "touch", pointerId: 1, clientY: 10 });
+      fireEvent.pointerDown(grip, { pointerType: "touch", pointerId: 1, clientX: 10, clientY: 120 });
     });
-    // Sunset moved past Sparkles and Heat to the top.
+    // A finger lifts on the hold, not on the first move: before the hold the list still scrolls.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 320));
+    });
+    act(() => {
+      fireEvent.pointerMove(window, { pointerType: "touch", pointerId: 1, clientX: 10, clientY: 10 });
+      fireEvent.pointerUp(window, { pointerType: "touch", pointerId: 1, clientX: 10, clientY: 10 });
+    });
+    // Sunset moved past Sparkles and Heat to the top, in one drop.
     await waitFor(() => expect(layerNames()).toEqual(["Sunset", "Sparkles", "Heat"]));
     await waitFor(() =>
       expect(previewCalls().at(-1)?.stack?.layers.map((layer) => layer.id)).toEqual(["l2", "l3", "l1"]),
@@ -292,20 +306,17 @@ describe("the stack builder on a phone", () => {
     expect(sheet.contains(document.activeElement)).toBe(true);
   });
 
-  it("closes the sheet onto Add layer when the last layer is deleted", async () => {
+  it("opens the library tab when the last layer is deleted with its sheet open", async () => {
     await renderEffects("?stack=new&state=complete,stack");
     await screen.findByTestId("stack-builder");
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
-    await waitFor(() => expect(layerNames()).toHaveLength(1));
+    await addFromLibrary("Solid");
     focusAndClick(await screen.findByRole("button", { name: "Tune Solid" }));
     const sheet = await screen.findByRole("dialog", { name: "Tune Solid" });
     fireEvent.click(within(sheet).getByRole("button", { name: "Delete Solid" }));
     await waitFor(() => expect(screen.queryByRole("dialog", { name: "Tune Solid" })).toBeNull());
-    // Tune is unmounted with the layer: the keyboard goes to Add layer, not to the body.
-    await waitFor(() =>
-      expect(document.activeElement).toBe(screen.getByRole("button", { name: /Add layer/ })),
-    );
+    // Tune is unmounted with the layer: the library opens and its first tile takes the keyboard,
+    // so the focus is never stranded on the body.
+    await waitFor(() => expect(document.activeElement?.hasAttribute("data-lib-tile")).toBe(true));
   });
 
   it("traps Tab inside the area picker, at its last control and its first", async () => {
@@ -328,9 +339,7 @@ describe("the stack builder on a phone", () => {
 
   it("focuses Keep editing, traps Tab in the prompt, and Escape goes back where focus was", async () => {
     await openBuilder();
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
-    await waitFor(() => expect(layerNames()).toHaveLength(4));
+    await addFromLibrary("Solid");
     const back = screen.getByRole("button", { name: "Back to the effects" });
     back.focus();
     fireEvent.click(back);
@@ -352,9 +361,7 @@ describe("the stack builder on a phone", () => {
 
   it("opens the leave prompt over the open sheet, and the sheet's trap yields", async () => {
     await openBuilder();
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
-    await waitFor(() => expect(layerNames()).toHaveLength(4));
+    await addFromLibrary("Solid");
     pick("Heat");
     focusAndClick(screen.getByRole("button", { name: "Tune Heat" }));
     const sheet = await screen.findByRole("dialog", { name: "Tune Heat" });
