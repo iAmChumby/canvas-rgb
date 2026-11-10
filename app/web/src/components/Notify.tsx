@@ -21,7 +21,12 @@ export type NotifyTone = "ok" | "warn" | "down" | "info";
 /** An answer a notification offers: the key beside the message. */
 export interface NotifyAction {
   label: string;
-  onClick: () => void;
+  /**
+   * Runs when the reader presses the key. The message goes with the answer, unless the answer
+   * returns `false`: it did not happen yet (a navigation the unsaved-changes prompt is holding),
+   * so the message stays until the owner takes it away.
+   */
+  onClick: () => void | boolean;
 }
 
 /** Extra policy for one message: a second line, a life of its own, and what the close key means. */
@@ -30,7 +35,10 @@ export interface NotifyOptions {
   detail?: string;
   /** How long the message stays before it goes on its own. It replaces the tone's rule. */
   lifeMs?: number;
-  /** Runs when the reader closes the message with its close key (a timeout or an answer does not). */
+  /**
+   * Runs when the reader takes the message away by hand: the close key, or a swipe. A timeout, an
+   * answer and `dismissNotification` do not run it.
+   */
   onClose?: () => void;
 }
 
@@ -75,9 +83,16 @@ function forget(id: string): void {
   holds.delete(id);
 }
 
+/**
+ * The messages the app took away (a timeout, an answer, `dismissNotification`). The library says
+ * "dismissed" for those too; only a message it dismissed that is not in this set was swiped away.
+ */
+const takenAway = new Set<string>();
+
 /** The notification goes: the library plays the leave motion. */
 function go(id: string): void {
   forget(id);
+  takenAway.add(id);
   sonnerToast.dismiss(id);
 }
 
@@ -147,8 +162,18 @@ export function notify(
       />
     ),
     // The library's own timer never runs: this file's clock owns the life of every message.
-    { id, duration: Infinity, testId: id, onDismiss: () => forget(id) },
+    {
+      id,
+      duration: Infinity,
+      testId: id,
+      onDismiss: () => {
+        forget(id);
+        // A swipe is as deliberate as the close key: it means what the close key means.
+        if (!takenAway.delete(id)) options?.onClose?.();
+      },
+    },
   );
+  takenAway.delete(id);
   const before = holds.get(id);
   if (before?.timer !== null && before?.timer !== undefined) clearTimeout(before.timer);
   holds.set(id, {
@@ -227,8 +252,7 @@ function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBo
           size="sm"
           className="notify-action"
           onClick={() => {
-            action.onClick();
-            go(id);
+            if (action.onClick() !== false) go(id);
           }}
         >
           {action.label}

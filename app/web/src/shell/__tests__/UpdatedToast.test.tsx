@@ -1,6 +1,7 @@
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotifyHost, dismissNotifications } from "@/components/Notify";
+import { continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 import { getSnap, patchSnap } from "@/lib/store";
 import { fixtureState } from "@/lib/demoUpdate";
 import { GlobalBanners } from "@/shell/GlobalBanners";
@@ -91,6 +92,23 @@ function drain() {
   for (let i = 0; i < 12; i++) settle(500);
 }
 
+/** A swipe to the right across a notice: the library's own gesture (pointer down, move, up). */
+function swipe(target: HTMLElement) {
+  const at = (type: string, clientX: number) =>
+    fireEvent(
+      target,
+      new MouseEvent(type, { bubbles: true, cancelable: true, clientX, clientY: 10, button: 0 }),
+    );
+  // jsdom has no pointer capture; the library asks for it on the first touch.
+  (target as unknown as { setPointerCapture: () => void }).setPointerCapture = () => undefined;
+  at("pointerdown", 10);
+  // The library locks the direction on the first move and follows the finger on the next.
+  at("pointermove", 30);
+  at("pointermove", 130);
+  vi.advanceTimersByTime(20);
+  at("pointerup", 130);
+}
+
 /** The notice inside the lane: null when the lane does not carry it. */
 const laneNotice = () =>
   Array.from(document.querySelectorAll("[data-sonner-toaster] [data-sonner-toast]")).find((n) =>
@@ -147,33 +165,126 @@ describe("the updated-to toast", () => {
     expect(laneNotice()).toBeNull();
   });
 
-  it("goes on its own after the action-toast timeout, and leaves updated_to set", () => {
+  it("goes on its own at the action-toast timeout, and leaves updated_to set", () => {
     mountUpdated();
     settle();
     act(() => {
       vi.advanceTimersByTime(TOAST_ACTION_MS - 100);
     });
     expect(laneNotice()).not.toBeNull();
+    expect(laneNotice()?.getAttribute("data-removed")).not.toBe("true");
+    // The clock has run out 50 ms past the timeout: the library has the notice on its way out.
+    act(() => {
+      vi.advanceTimersByTime(150);
+    });
+    const leaving = laneNotice();
+    expect(leaving === null || leaving.getAttribute("data-removed") === "true").toBe(true);
     drain();
     expect(laneNotice()).toBeNull();
     // A timeout is this session only: the release is still marked until the person sees it.
     expect(getSnap().update?.updated_to).not.toBeNull();
   });
 
-  it("stays through navigation and a re-render without firing a second time", () => {
+  it("waits while the pointer is on it, and goes a life after the pointer leaves", () => {
+    mountUpdated();
+    settle();
+    const notice = laneNotice() as HTMLElement;
+    fireEvent.mouseEnter(notice.querySelector(".notify-body") as HTMLElement);
+    // Held well past its life.
+    act(() => {
+      vi.advanceTimersByTime(TOAST_ACTION_MS + 3000);
+    });
+    expect(laneNotice()).not.toBeNull();
+    expect(laneNotice()?.getAttribute("data-removed")).not.toBe("true");
+    fireEvent.mouseLeave(laneNotice()?.querySelector(".notify-body") as HTMLElement);
+    // The life that was left when the pointer arrived starts again.
+    act(() => {
+      vi.advanceTimersByTime(TOAST_ACTION_MS - 100);
+    });
+    expect(laneNotice()?.getAttribute("data-removed")).not.toBe("true");
+    drain();
+    expect(laneNotice()).toBeNull();
+    expect(getSnap().update?.updated_to).not.toBeNull();
+  });
+
+  it("leaves when the person goes to any other page, and leaves updated_to set", () => {
     const view = mountUpdated();
     settle();
+    expect(laneNotice()).not.toBeNull();
     nav.pathname = "/devices/";
     view.rerender(<Shelf />);
+    drain();
+    expect(laneNotice()).toBeNull();
+    // Going is this session only: the release stays marked until What's new or the close key.
+    expect(getSnap().update?.updated_to).not.toBeNull();
+    // A re-render does not bring it back.
+    patchSnap({ update: { ...getSnap().update!, last_check: "2026-11-09T00:00:00Z" } });
+    view.rerender(<Shelf />);
+    settle();
+    expect(laneNotice()).toBeNull();
+  });
+
+  it("a re-render on the same page does not fire a second notice", () => {
+    const view = mountUpdated();
+    settle();
     patchSnap({ update: { ...getSnap().update!, last_check: "2026-11-09T00:00:00Z" } });
     view.rerender(<Shelf />);
     settle();
     expect(document.querySelectorAll("[data-sonner-toast]").length).toBe(1);
-    // Gone, and not brought back by the next re-render.
-    for (let i = 0; i < 20; i++) settle(500);
+  });
+
+  it("a swipe away counts as the close key: updated_to is dismissed", async () => {
+    mountUpdated();
+    settle();
+    const notice = laneNotice() as HTMLElement;
+    swipe(notice);
+    // The dismiss is a command to the tray: its answer lands a tick later.
+    await act(async () => {});
+    drain();
     expect(laneNotice()).toBeNull();
+    expect(getSnap().update?.updated_to).toBeNull();
+  });
+
+  it("on the Updates page every notice a second release added goes, not only the last", () => {
+    const view = mountUpdated();
+    settle();
+    const first = getSnap().update!;
+    // The first notice is held by the pointer, so it is still up when the second release lands.
+    fireEvent.mouseEnter(laneNotice()?.querySelector(".notify-body") as HTMLElement);
+    patchSnap({ update: { ...first, updated_to: { ...first.updated_to!, version: "9.99.0" } } });
     view.rerender(<Shelf />);
     settle();
+    const titles = () =>
+      Array.from(document.querySelectorAll("[data-sonner-toast]")).map((n) => n.textContent ?? "");
+    expect(titles().filter((t) => t.includes("Updated to")).length).toBe(2);
+
+    nav.pathname = "/updates/";
+    view.rerender(<Shelf />);
+    drain();
+    expect(titles().filter((t) => t.includes("Updated to")).length).toBe(0);
+  });
+
+  it("What's new while the unsaved-changes prompt holds the page keeps the notice until the page goes", () => {
+    const view = mountUpdated();
+    settle();
+    setNavigationGuard(() => false);
+    try {
+      fireEvent.click(within(laneNotice() as HTMLElement).getByRole("button", { name: /What.s new/ }));
+      // The page did not change: the guard holds it, and so the notice stays.
+      expect(nav.push).not.toHaveBeenCalled();
+      drain();
+      expect(laneNotice()).not.toBeNull();
+    } finally {
+      setNavigationGuard(null);
+    }
+    // The person lets the page go: the held navigation runs, and the arrival takes the notice.
+    act(() => {
+      continueNavigation();
+    });
+    expect(nav.push).toHaveBeenCalledWith("/updates/");
+    nav.pathname = "/updates/";
+    view.rerender(<Shelf />);
+    drain();
     expect(laneNotice()).toBeNull();
   });
 

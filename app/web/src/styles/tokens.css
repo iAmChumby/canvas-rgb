@@ -176,7 +176,7 @@
   --a3: #13877a;
   --a4: #c2415a;
   --a5: #a8612e;
-  --ok: #17894d;
+  --ok: #137f47;
   --work: #2563eb;
   --warn: #9a6b00;
   --warn-wash: color-mix(in srgb, var(--warn) 18%, var(--panel));
@@ -215,7 +215,7 @@
     --a3: #13877a;
     --a4: #c2415a;
     --a5: #a8612e;
-    --ok: #17894d;
+    --ok: #137f47;
     --work: #2563eb;
     --warn: #9a6b00;
     --warn-wash: color-mix(in srgb, var(--warn) 18%, var(--panel));

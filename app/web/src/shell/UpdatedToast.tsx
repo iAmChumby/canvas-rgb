@@ -13,15 +13,24 @@ export const UPDATED_TOAST_MS = 7000;
 
 /** The releases already announced in this session. Keyed by version so nothing fires twice. */
 const announced = new Set<string>();
+/** The toasts this module put up and has not taken away: a second release adds one. */
+const shown = new Set<string>();
+
+/** Takes every "Updated to" toast this module showed away. It never touches `updated_to`. */
+function clearShown(): void {
+  for (const id of shown) dismissNotification(id);
+  shown.clear();
+}
 
 /**
  * The "Updated to X.Y.Z" notice that greets the person when the window opens after an update (#168).
  * It is a toast: it goes through the notification lane, leaves on its own after the action-toast
  * timeout, and is not shown on the Updates page (which has the release notes itself).
  *
- * Going is this session only. `updated_to` is cleared by the close key (here) or by opening
- * What's new (UpdatesView dismisses it); a timeout leaves it set, so the next window greets the
- * person again. The notice is keyed by release: a re-render or a navigation cannot fire it twice.
+ * Going is this session only. The first navigation to another page sends it, and so does the
+ * timeout; neither clears `updated_to`, so the next window greets the person again. `updated_to`
+ * is cleared by the close key or a swipe (here), or by opening What's new (UpdatesView dismisses
+ * it). The notice is keyed by release: a re-render or a navigation cannot fire it twice.
  */
 export function UpdatedToast() {
   const pathname = usePathname();
@@ -30,28 +39,35 @@ export function UpdatedToast() {
   const onUpdates = pathname.endsWith("/updates/");
   const version = update?.updated_to?.version ?? null;
   const current = update?.current_version ?? "";
-  const shown = useRef<string | null>(null);
+  const mountedPath = useRef(pathname);
 
-  // On the Updates page the notice is not drawn, and one already up goes when the person arrives.
+  // The first navigation to another page sends the notice. On the Updates page it goes in any
+  // case, with every other "Updated to" notice a second release may have added.
   useEffect(() => {
-    if (onUpdates && shown.current !== null) {
-      dismissNotification(shown.current);
-      shown.current = null;
-    }
-  }, [onUpdates]);
+    if (pathname === mountedPath.current && !onUpdates) return;
+    mountedPath.current = pathname;
+    clearShown();
+  }, [pathname, onUpdates]);
 
   useEffect(() => {
     if (version === null || onUpdates || announced.has(version)) return;
     announced.add(version);
-    shown.current = notify(
-      `Updated to ${version}`,
-      "ok",
-      { label: "What’s new", onClick: () => requestNavigation(() => router.push("/updates/")) },
-      {
-        detail: `You have ${current}.`,
-        lifeMs: UPDATED_TOAST_MS,
-        onClose: () => void sendUpdate(updateDismissUpdated),
-      },
+    shown.add(
+      notify(
+        `Updated to ${version}`,
+        "ok",
+        {
+          label: "What’s new",
+          // False while the unsaved-changes prompt holds the page: the notice stays, and the
+          // arrival on the Updates page takes it away once the person lets the page go.
+          onClick: () => requestNavigation(() => router.push("/updates/")),
+        },
+        {
+          detail: `You have ${current}.`,
+          lifeMs: UPDATED_TOAST_MS,
+          onClose: () => void sendUpdate(updateDismissUpdated),
+        },
+      ),
     );
   }, [version, onUpdates, current, router]);
 
