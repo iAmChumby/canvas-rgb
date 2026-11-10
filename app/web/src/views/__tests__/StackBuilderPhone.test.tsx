@@ -86,7 +86,7 @@ async function renderEffects(query: string) {
 
 function layerNames(): string[] {
   return screen
-    .getAllByRole("listitem")
+    .queryAllByRole("listitem")
     .map((row) => row.querySelector(".layer-name")?.textContent ?? "")
     .filter(Boolean);
 }

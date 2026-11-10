@@ -4,7 +4,7 @@
 // controls, and its mask, moved out of StackBuilder.tsx unchanged. The phone's Tune sheet renders
 // the same inspector inside its dialog.
 
-import type { RefObject } from "react";
+import { useRef, type RefObject } from "react";
 import { CopySimple, Monitor, Plus, Trash, X } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { FigureField } from "@/components/FigureField";
@@ -18,6 +18,7 @@ import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Thumb } from "@/components/Thumb";
 import { Toggle } from "@/components/Toggle";
+import { useMoreBelow } from "@/views/effects/useMoreBelow";
 import { BLENDS, layerLabel } from "@/views/effects/layerText";
 import {
   areaName,
@@ -103,8 +104,10 @@ export function Inspector({
 }) {
   const html = htmlLayers(draft.layers);
   const mask = layer.mask;
+  const pane = useRef<HTMLElement>(null);
+  useMoreBelow(pane, layer.id);
   return (
-    <Panel className="rd-layer-edit">
+    <Panel className="rd-layer-edit" ref={pane}>
       <div className="layer-edit-head">
         <div className="layer-edit-title">
           <Thumb id={layer.effect} size="md" label={layerLabel(schemas, effects, layer.effect) ?? "Effect"} />

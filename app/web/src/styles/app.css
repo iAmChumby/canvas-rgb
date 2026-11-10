@@ -8199,8 +8199,8 @@ button.chip:hover {
 
 /* The cue that the inspector goes on below the fold (#257 phase 4): a fade that takes the last
    28px of whatever is cut there (a control sliced mid-label reads as scrollable, not broken) with a
-   tinted band at its foot, which shows even where the fold falls in a gap between controls. Where
-   the browser can tie it to the scroll it fades out as the end comes into view. */
+   tinted band at its foot, which shows even where the fold falls in a gap between controls. It goes
+   once the pane's end is in view. */
 .rd-layer-edit::after {
   content: "";
   position: sticky;
@@ -8212,20 +8212,13 @@ button.chip:hover {
     linear-gradient(transparent, color-mix(in srgb, var(--ink) 14%, transparent)) 0 100% / 100% 12px no-repeat,
     linear-gradient(to bottom, transparent, var(--panel) 80%);
   pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
 }
 
-@supports (animation-timeline: scroll()) {
-  .rd-layer-edit::after {
-    animation: fold-cue-out linear both;
-    animation-timeline: scroll(self block);
-    animation-range: calc(100% - 48px) 100%;
-  }
-}
-
-@keyframes fold-cue-out {
-  to {
-    opacity: 0;
-  }
+/* Only while the pane has more below its fold (useMoreBelow); an empty pane never has. */
+.rd-layer-edit[data-more="true"]::after {
+  opacity: 1;
 }
 
 .layer-edit-head {

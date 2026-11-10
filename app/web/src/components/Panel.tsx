@@ -1,20 +1,23 @@
 "use client";
 
-import type { CSSProperties, ReactNode } from "react";
+import type { CSSProperties, ReactNode, Ref } from "react";
 
 export function Panel({
   title,
   actions,
   children,
   className,
+  ref,
 }: {
   title?: string;
   actions?: ReactNode;
   children: ReactNode;
   className?: string;
+  /** The panel's own element, for a panel that scrolls and has to be measured. */
+  ref?: Ref<HTMLElement>;
 }) {
   return (
-    <section className={className ? `panel ${className}` : "panel"}>
+    <section ref={ref} className={className ? `panel ${className}` : "panel"}>
       {(title || actions) && (
         <div className="panel-head">
           {title && <h2 className="panel-title">{title}</h2>}
