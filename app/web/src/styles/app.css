@@ -3514,10 +3514,13 @@ button.chip:hover {
   flex: none;
 }
 
-/* The Size key of a device with one zone: the same column as the Size keys of the zone rows. */
+/* The Size key of a device with one zone: the same column as the Size keys of the zone rows.
+   The column hugs the key (a small key is about 50 px wide) with a gutter, so a row that is out
+   of room at the two-column 1920 and the narrow 960 does not pass its pane (#273: the strip's
+   key read "Si" there). No row holds anything else in this column. */
 .rd-devices .rd-dev-row .zone-strip-size {
   flex: none;
-  min-width: 104px;
+  min-width: 56px;
   text-align: right;
 }
 
@@ -3662,9 +3665,11 @@ button.chip:hover {
   margin-left: auto;
 }
 
+/* The same column as the device row's Size key, so a device's drawing ends where its zone rows'
+   drawings do (#273: the key hugs its width here too, instead of reserving 104 px). */
 .rd-devices .rd-zone .zone-strip-size {
   flex: none;
-  min-width: 104px;
+  min-width: 56px;
   text-align: right;
 }
 
@@ -4520,15 +4525,46 @@ button.chip:hover {
   }
 }
 
-/* The compact "don't exceed" control (#130): the words, the figure and its state
-   wrap as one group, never apart. In the Fixed header's floor note it takes its
+/* The compact "don't exceed" control (#130): in the Fixed header's floor note it takes its
    own line under the note, inside the same box, so it adds no new row. */
 .hot-controls {
+  display: inline-flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s1) var(--s2);
+}
+
+/* The words, the figure and its unit are one group and never wrap inside it (#268: the figure's
+   own row-wrap let "°C" drop under it when the note was narrow). The state after it (the word
+   "automatic" or the Reset key) is the only part that moves to its own line, and it is as wide
+   in both states (the hidden sizer is the key), so setting a limit never changes the note's
+   height. */
+.hot-main {
   display: inline-flex;
   flex-wrap: nowrap;
   align-items: center;
   gap: var(--s2);
   white-space: nowrap;
+}
+
+.hot-main .row-wrap {
+  flex-wrap: nowrap;
+}
+
+.hot-tail {
+  display: inline-grid;
+  align-items: center;
+  justify-items: start;
+  white-space: nowrap;
+}
+
+.hot-tail > * {
+  grid-area: 1 / 1;
+}
+
+.hot-sizer {
+  visibility: hidden;
+  pointer-events: none;
 }
 
 .rule > .hot-controls {
@@ -5848,6 +5884,16 @@ button.chip:hover {
   color: var(--mute);
 }
 
+/* The reads-off frame: the same frame as "Not read yet", with the switch that starts reading at
+   its end. On a narrow page the switch wraps under the words instead of pushing them out. */
+.rd-peri-reads-off .rd-peri-unread-body {
+  flex-wrap: wrap;
+}
+
+.rd-peri-reads-off-action {
+  margin-left: auto;
+}
+
 .rd-peri-toggle-label {
   font-weight: 600;
 }
@@ -5900,6 +5946,34 @@ button.chip:hover {
 
 .rd-peri-sections .prop-item:has(.seg) .prop-control {
   grid-column: 1 / -1;
+}
+
+/* A select is as wide as its longest option (it lays every option out, so picking one never
+   resizes it), and the label column leaves a control only the width the label does not take: the
+   LED mode select ran past the Lighting panel at 1440 and 1024 (#263). A row with a select keeps
+   its label on the left, like its neighbours, while the select has 150 px or more beside it (it
+   shrinks to what is left, as it did before, down to that), and wraps under the label, as wide as
+   the row, when it would have less. The wrap is the browser's, from the widths, so it holds for
+   any panel width. */
+.rd-peri-sections .prop-item:has(.select-trigger) {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s4);
+}
+
+.rd-peri-sections .prop-item:has(.select-trigger) .field-label {
+  flex: 0 0 116px;
+  max-width: 100%;
+}
+
+.rd-peri-sections .prop-item:has(.select-trigger) .prop-control {
+  flex: 1 1 150px;
+  min-width: 0;
+}
+
+.rd-peri-sections .prop-item:has(.select-trigger) .select-trigger {
+  flex: 1 1 auto;
+  min-width: 0;
 }
 
 /* The button mappings are a list of key/value pairs: two columns of pairs, three rows tall
