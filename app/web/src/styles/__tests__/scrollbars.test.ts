@@ -104,10 +104,10 @@ const SCROLL_PANES = [
   ".rd-peri-keys",
   ".table-scroll",
   ".rd-layers > .layer-list",
-  ".rd-layer-edit .prop-list",
+  ".rd-layer-edit",
   ".rd-picker",
   ".rd-add-list",
-  ".rd-layer-sheet .rd-layer-edit .prop-list",
+  ".rd-layer-sheet .rd-layer-edit",
   ".cmdk-list",
   ".effect-sheet",
   ".preset-chips",
@@ -173,6 +173,16 @@ describe("one scrollbar for every scrolling pane (#92)", () => {
   it("only the bars on the hidden list hide themselves", () => {
     const hiding = all.filter((r) => decl(r, "scrollbar-width") === "none");
     expect(hiding.map((r) => r.selectors.join(", ")).sort()).toEqual([...HIDDEN_ON_PURPOSE].sort());
+  });
+
+  it("the layer panel is the one pane that scrolls, so its mask section cannot be clipped (#256)", () => {
+    // The panel carries the layer's fields, its properties and its mask section; a property list
+    // that scrolled inside it would cut the mask off. One pane, one bar.
+    expect(hasDecl(forSelector(".rd-layer-edit"), "overflow-y", "auto")).toBe(true);
+    const listScrolls = forSelector(".rd-layer-edit .prop-list").some(
+      (r) => decl(r, "overflow") === "auto" || decl(r, "overflow-y") === "auto" || decl(r, "overflow") === "scroll",
+    );
+    expect(listScrolls, "the property list scrolls inside the scrolling panel").toBe(false);
   });
 
   it("the side nav keeps its thin bar", () => {

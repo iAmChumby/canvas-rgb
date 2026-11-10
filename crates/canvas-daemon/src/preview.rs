@@ -642,6 +642,14 @@ fn reports(
         .layers
         .iter()
         .map(|layer| {
+            let mask_error = layer.mask.as_ref().and_then(|mask| {
+                errors.get(&mask.effect).map(|error| {
+                    format!(
+                        "the layer's mask effect {} is missing: {error}; the layer draws unmasked",
+                        mask.effect
+                    )
+                })
+            });
             let (status, error) = if layer.effect.starts_with(STACK_ID_PREFIX) {
                 (
                     StackLayerState::NestedStack,
@@ -652,6 +660,9 @@ fn reports(
                 )
             } else if let Some(error) = errors.get(&layer.effect) {
                 (StackLayerState::MissingEffect, Some(error.clone()))
+            } else if mask_error.is_some() {
+                // The layer runs; its mask does not, so it draws unmasked (#256).
+                (StackLayerState::MissingEffect, mask_error)
             } else if areas.is_empty_area(&layer.area) {
                 (StackLayerState::NoArea, None)
             } else if let Some(reported) = runtime.iter().find(|status| status.id == layer.id) {

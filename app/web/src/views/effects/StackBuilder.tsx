@@ -5,12 +5,14 @@
 // second engine (`?stack=1`); Try on the lights is a stack draft; Save writes the stack and
 // activates it. Nothing here writes an effect file or the layout except those two routes.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
   CaretLeft,
+  CircleHalf,
   CopySimple,
+  Eraser,
   Eye,
   EyeSlash,
   FloppyDisk,
@@ -27,8 +29,10 @@ import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { LoadFrame, ErrorPanel, type LoadState } from "@/components/Loading";
 import { NameField } from "@/components/NameField";
+import { OptionRow } from "@/components/OptionRow";
 import { Panel } from "@/components/Panel";
 import { Popover } from "@/components/Popover";
+import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
 import { InlineSkeleton, Skeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
@@ -53,15 +57,21 @@ import {
   layerNameProblem,
   layerValues,
   makeLayer,
+  makeMask,
+  maskRefusal,
+  maskValues,
   mergedProps,
   moveLayer,
   newEpoch,
   nextLayerId,
   patchLayer,
+  patchMask,
   removeLayer,
+  setLayerMask,
   stackNameProblem,
   statusWords,
   toggleLayer,
+  MASK_LEAD_EFFECTS,
   MAX_HTML_LAYERS,
   MAX_LAYERS,
   StackSession,
@@ -82,6 +92,8 @@ import type { BlendMode } from "@/proto/BlendMode";
 import type { DraftStatus } from "@/proto/DraftStatus";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { LayerArea } from "@/proto/LayerArea";
+import type { LayerMask } from "@/proto/LayerMask";
+import type { MaskSource } from "@/proto/MaskSource";
 import type { Preset } from "@/proto/Preset";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
@@ -199,6 +211,8 @@ export function StackBuilder({
   const [presetName, setPresetName] = useState<string | null>(null);
   /** The message a control refuses with, shown next to the control itself. */
   const [layerProblem, setLayerProblem] = useState<string | null>(null);
+  /** A mask control's own refusal (the HTML cap), shown beside the mask effect Select (#256). */
+  const [maskProblem, setMaskProblem] = useState<string | null>(null);
   const [addProblem, setAddProblem] = useState<string | null>(null);
   const [renameProblem, setRenameProblem] = useState<string | null>(null);
   const [presetProblem, setPresetProblem] = useState<string | null>(null);
@@ -207,12 +221,18 @@ export function StackBuilder({
   // The phone's layer sheet: Tune pushes it over the builder (D95.5.7).
   const [sheetOpen, setSheetOpen] = useState(false);
   const [chooseFor, setChooseFor] = useState<string | null>(null);
+  /** The layer whose mask picker is open, and the control it hangs under (#256). */
+  const [maskFor, setMaskFor] = useState<string | null>(null);
+  /** The row the mask picker's keyboard cursor is on: an index into leads + rest (#256). */
+  const [maskActive, setMaskActive] = useState(0);
   /** A layer row picked up by a finger on its grip, and the row it is over. */
   const [touchId, setTouchId] = useState<string | null>(null);
 
   const addRef = useRef<HTMLSpanElement>(null);
   const tuneRef = useRef<HTMLSpanElement>(null);
   const chooseRef = useRef<HTMLSpanElement>(null);
+  const maskAnchor = useRef<HTMLElement | null>(null);
+  const maskListRef = useRef<HTMLUListElement>(null);
   const sheetRef = useRef<HTMLDivElement>(null);
   const backRef = useRef<HTMLSpanElement>(null);
   const promptRef = useRef<HTMLDivElement>(null);
@@ -278,6 +298,39 @@ export function StackBuilder({
     schemasRef.current = schemas;
   }, [schemas]);
 
+  /** The mask picker's list (#256): the six effects that read well as masks, then every other. */
+  const maskList = useMemo(() => {
+    const all = (effects ?? []).filter((effect) => !effect.id.startsWith("stack:"));
+    const leads: EffectSummary[] = [];
+    for (const id of MASK_LEAD_EFFECTS) {
+      const effect = all.find((entry) => entry.id === id);
+      if (effect) leads.push(effect);
+    }
+    const leadIds = new Set(leads.map((effect) => effect.id));
+    return { leads, rest: all.filter((effect) => !leadIds.has(effect.id)) };
+  }, [effects]);
+
+  /** The picker's rows in the order they are drawn: the six leads, then the rest. */
+  const maskChoices = useMemo(() => [...maskList.leads, ...maskList.rest], [maskList]);
+
+  // A mask refusal belongs to the layer it was said on: `pick` clears it (#256).
+
+  // The mask picker's listbox takes the focus when it opens, and its keyboard cursor starts on
+  // the layer's current mask (the APG listbox pattern, #256).
+  useEffect(() => {
+    if (maskFor === null) return;
+    maskListRef.current?.focus();
+  }, [maskFor]);
+
+  // The active row scrolls into view as the arrow keys move it.
+  useEffect(() => {
+    if (maskFor === null) return;
+    const effect = maskChoices[maskActive];
+    if (effect) {
+      document.getElementById(`mask-option-${effect.id}`)?.scrollIntoView({ block: "nearest" });
+    }
+  }, [maskActive, maskChoices, maskFor]);
+
   // ---- focus and keys (D95.5.7, D95.7 item 4) ---------------------------------------
 
   /** A popover closed by Escape puts focus back on the key that opened it. A click outside
@@ -302,6 +355,12 @@ export function StackBuilder({
   };
 
   const openSheet = () => setSheetOpen(true);
+
+  /** Picking a layer: a mask refusal belongs to the layer it was said on, so it clears here (#256). */
+  const pick = (id: string | null) => {
+    setMaskProblem(null);
+    setPicked(id);
+  };
 
   const closeSheet = useCallback(() => setSheetOpen(false), []);
 
@@ -481,20 +540,23 @@ export function StackBuilder({
 
   const loadDetails = useCallback((stack: Stack) => {
     for (const layer of stack.layers) {
-      const id = layer.effect;
-      if (schemasRef.current[id] !== undefined || fetching.current.has(id)) continue;
-      fetching.current.add(id);
-      api
-        .effect(id)
-        .then((detail) => {
-          if (!mounted.current) return;
-          setSchemas((current) => ({ ...current, [id]: detail.schema }));
-        })
-        .catch(() => {
-          if (!mounted.current) return;
-          setSchemas((current) => ({ ...current, [id]: null }));
-        })
-        .finally(() => fetching.current.delete(id));
+      // A mask's effect has its own schema and values (#256), read the same way.
+      const ids = [layer.effect, ...(layer.mask ? [layer.mask.effect] : [])];
+      for (const id of ids) {
+        if (schemasRef.current[id] !== undefined || fetching.current.has(id)) continue;
+        fetching.current.add(id);
+        api
+          .effect(id)
+          .then((detail) => {
+            if (!mounted.current) return;
+            setSchemas((current) => ({ ...current, [id]: detail.schema }));
+          })
+          .catch(() => {
+            if (!mounted.current) return;
+            setSchemas((current) => ({ ...current, [id]: null }));
+          })
+          .finally(() => fetching.current.delete(id));
+      }
     }
   }, []);
 
@@ -516,7 +578,7 @@ export function StackBuilder({
       setPhase("ready");
       setBase(null);
       setDraft({ id: "stack:", layers: [] });
-      setPicked(null);
+      pick(null);
       return;
     }
     setPhase("loading");
@@ -529,7 +591,7 @@ export function StackBuilder({
         setBase(stack);
         setDraft(stack);
         setStatuses(Object.fromEntries(detail.layers.map((layer) => [layer.id, layer])));
-        setPicked(stack.layers[stack.layers.length - 1]?.id ?? null);
+        pick(stack.layers[stack.layers.length - 1]?.id ?? null);
         loadDetails(stack);
         loadPresets(stack.id);
         setPhase("ready");
@@ -1059,11 +1121,11 @@ export function StackBuilder({
   const revert = () => {
     if (base) {
       setDraft({ id: base.id, layers: base.layers });
-      setPicked(base.layers[base.layers.length - 1]?.id ?? null);
+      pick(base.layers[base.layers.length - 1]?.id ?? null);
     } else {
       setDraft({ id: "stack:", layers: [] });
       setNameDraft("");
-      setPicked(null);
+      pick(null);
     }
     setSheetOpen(false);
     setSaveError(null);
@@ -1171,6 +1233,100 @@ export function StackBuilder({
     }
   };
 
+  /** The mask picker hangs under the control that opened it, and returns focus there on Escape. */
+  const openMaskPicker = (id: string, anchor: HTMLElement) => {
+    maskAnchor.current = anchor;
+    setMaskProblem(null);
+    const layer = draftRef.current.layers.find((entry) => entry.id === id);
+    const at = maskChoices.findIndex((effect) => effect.id === layer?.mask?.effect);
+    setMaskActive(at >= 0 ? at : 0);
+    setMaskFor(id);
+  };
+
+  const closeMaskPicker = () => closePopover(".rd-mask-picker", maskAnchor, () => setMaskFor(null));
+
+  const removeMask = (id: string) => {
+    setMaskProblem(null);
+    setDraft((current) => ({ ...current, layers: setLayerMask(current.layers, id, null) }));
+  };
+
+  const patchMaskDraft = (id: string, change: Partial<LayerMask>) => {
+    setDraft((current) => ({ ...current, layers: patchMask(current.layers, id, change) }));
+  };
+
+  /** One mask property changed: a functional patch, so two quick changes cannot drop one (#256). */
+  const patchMaskProps = (id: string, key: string, value: PropValue) => {
+    setDraft((current) => ({
+      ...current,
+      layers: current.layers.map((layer) =>
+        layer.id === id && layer.mask !== undefined
+          ? { ...layer, mask: { ...layer.mask, props: { ...layer.mask.props, [key]: value } } }
+          : layer,
+      ),
+    }));
+  };
+
+  /** Gives a layer a mask of `effect`, or changes the mask it has (#256). */
+  const chooseMaskEffect = async (id: string, effect: string) => {
+    const layer = draftRef.current.layers.find((entry) => entry.id === id);
+    if (!layer) return;
+    if (layer.mask?.effect === effect) {
+      closeMaskPicker();
+      return;
+    }
+    const refusal = maskRefusal(draftRef.current.layers, id, effect);
+    if (refusal) {
+      setMaskProblem(refusal);
+      return;
+    }
+    setMaskProblem(null);
+    let schema: PropertySchema | null = null;
+    let props: Record<string, PropValue> = {};
+    try {
+      const detail = await api.effect(effect);
+      if (!mounted.current) return;
+      schema = detail.schema;
+      props = detail.props;
+      setSchemas((current) => ({ ...current, [effect]: detail.schema }));
+    } catch {
+      if (!mounted.current) return;
+      setSchemas((current) => ({ ...current, [effect]: null }));
+    }
+    // The draft may have moved while the effect was read: check the cap again.
+    const latest = draftRef.current.layers.find((entry) => entry.id === id);
+    if (!latest) return;
+    const lateRefusal = maskRefusal(draftRef.current.layers, id, effect);
+    if (lateRefusal) {
+      setMaskProblem(lateRefusal);
+      return;
+    }
+    setDraft((current) => ({
+      ...current,
+      layers: setLayerMask(current.layers, id, makeMask(effect, schema, props)),
+    }));
+    closeMaskPicker();
+  };
+
+  /** The mask picker's keys, as a listbox: arrows move, Home/End jump, Enter/Space choose. */
+  const onMaskKey = (event: ReactKeyboardEvent<HTMLUListElement>) => {
+    const last = maskChoices.length - 1;
+    if (last < 0) return;
+    if (event.key === "Enter" || event.key === " ") {
+      event.preventDefault();
+      const effect = maskChoices[maskActive];
+      if (effect && maskFor) void chooseMaskEffect(maskFor, effect.id);
+      return;
+    }
+    let next: number | null = null;
+    if (event.key === "ArrowDown") next = Math.min(last, maskActive + 1);
+    else if (event.key === "ArrowUp") next = Math.max(0, maskActive - 1);
+    else if (event.key === "Home") next = 0;
+    else if (event.key === "End") next = last;
+    if (next === null) return;
+    event.preventDefault();
+    setMaskActive(next);
+  };
+
   const addOne = async (effect: string) => {
     const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
@@ -1207,7 +1363,7 @@ export function StackBuilder({
     const next = { ...draftRef.current, layers: addLayer(layers, layer) };
     draftRef.current = next;
     setDraft(next);
-    setPicked(id);
+    pick(id);
     setAddOpen(false);
     setAddQuery("");
   };
@@ -1233,7 +1389,7 @@ export function StackBuilder({
     const next = removeLayer(draft.layers, id);
     setDraft((current) => ({ ...current, layers: next }));
     if (picked === id) {
-      setPicked(next[Math.min(index, next.length - 1)]?.id ?? null);
+      pick(next[Math.min(index, next.length - 1)]?.id ?? null);
       // The sheet is the removed layer's: it closes rather than showing the next one unsought.
       setSheetOpen(false);
     }
@@ -1251,7 +1407,7 @@ export function StackBuilder({
     }
     setLayerProblem(null);
     setDraft((current) => ({ ...current, layers: answer.layers }));
-    setPicked(answer.id);
+    pick(answer.id);
   };
 
   const reorder = (id: string, to: number) => {
@@ -1362,6 +1518,30 @@ export function StackBuilder({
       .map((effect) => ({ effect, match: matchEffect("", effect.name, effect.description) }))
       .filter((row): row is { effect: EffectSummary; match: NonNullable<typeof row.match> } => row.match !== null);
   }, [effects]);
+
+  /** One row of the mask picker: choosing it gives the open layer this mask. */
+  const maskRow = (effect: EffectSummary, index: number) => {
+    const refusal = maskFor ? maskRefusal(draft.layers, maskFor, effect.id) : null;
+    const current = maskFor ? draft.layers.find((layer) => layer.id === maskFor)?.mask?.effect === effect.id : false;
+    return (
+      <li key={effect.id}>
+        <OptionRow
+          id={`mask-option-${effect.id}`}
+          active={index === maskActive}
+          selected={current}
+          disabled={refusal !== null}
+          title={refusal ?? undefined}
+          onSelect={() => {
+            if (maskFor) void chooseMaskEffect(maskFor, effect.id);
+          }}
+          leading={<Thumb id={effect.id} size="sm" label={effect.name} />}
+          name={effect.name}
+          description={refusal ?? effect.description}
+          trailing={isHtmlEffect(effect.id) ? <Chip html>HTML</Chip> : undefined}
+        />
+      </li>
+    );
+  };
 
   /** One row of an effect list: Add layer offers it with its cap's reason, Choose effect picks
    *  it for the picked layer. */
@@ -1671,14 +1851,14 @@ export function StackBuilder({
                             const id = event.dataTransfer.getData("text/plain");
                             if (id) reorder(id, index);
                           }}
-                          onClick={() => setPicked(layer.id)}
+                          onClick={() => pick(layer.id)}
                           onKeyDown={(event) => {
                             // A row is in the tab order so the picked layer can be changed from
                             // the keyboard; the grip's own keys reorder it.
                             if (event.target !== event.currentTarget) return;
                             if (event.key === "Enter" || event.key === " ") {
                               event.preventDefault();
-                              setPicked(layer.id);
+                              pick(layer.id);
                             }
                           }}
                         >
@@ -1709,7 +1889,32 @@ export function StackBuilder({
                           >
                             <DotsIcon />
                           </button>
-                          <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, effects, layer.effect) ?? "Effect"} />
+                          <span className="layer-thumbs">
+                            <Thumb
+                              id={layer.effect}
+                              size="sm"
+                              label={layerLabel(schemas, effects, layer.effect) ?? "Effect"}
+                            />
+                            {layer.mask && (
+                              <button
+                                type="button"
+                                className="layer-mask-thumb"
+                                aria-label={`Change the mask of ${layer.name}`}
+                                title={`Mask: ${layerLabel(schemas, effects, layer.mask.effect) ?? "Effect"}`}
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  pick(layer.id);
+                                  openMaskPicker(layer.id, event.currentTarget);
+                                }}
+                              >
+                                <Thumb
+                                  id={layer.mask.effect}
+                                  size="sm"
+                                  label={`Mask: ${layerLabel(schemas, effects, layer.mask.effect) ?? "Effect"}`}
+                                />
+                              </button>
+                            )}
+                          </span>
                           <span className="layer-text">
                             {renaming === layer.id ? (
                               <div onClick={(event) => event.stopPropagation()}>
@@ -1748,6 +1953,28 @@ export function StackBuilder({
                               {words ?? `${blendOf(layer.blend)} ${layer.opacity}% · ${areaName(layer.area, layout, devices)}`}
                             </span>
                           </span>
+                          {layer.mask ? (
+                            <IconButton
+                              label={`Remove the mask from ${layer.name}`}
+                              icon={<Eraser size={16} />}
+                              onClick={() => removeMask(layer.id)}
+                            />
+                          ) : (
+                            <Button
+                              size="sm"
+                              variant="ghost"
+                              icon={<CircleHalf size={15} />}
+                              aria-label={`Add a mask to ${layer.name}`}
+                              title={`Add a mask to ${layer.name}`}
+                              onClick={(event) => {
+                                event.stopPropagation();
+                                pick(layer.id);
+                                openMaskPicker(layer.id, event.currentTarget);
+                              }}
+                            >
+                              <span className="rd-btn-text">Add mask</span>
+                            </Button>
+                          )}
                           <IconButton
                             label={layer.visible ? `Hide ${layer.name}` : `Show ${layer.name}`}
                             icon={layer.visible ? <Eye size={16} /> : <EyeSlash size={16} />}
@@ -1965,6 +2192,165 @@ export function StackBuilder({
                       }
                     />
                   )}
+
+                  {/* The mask (#256): another effect, run over this layer's area, whose picture
+                      decides where the layer shows. */}
+                  <div className="rd-mask" aria-label="Mask">
+                    <div className="rd-mask-head">
+                      <span className="rd-mask-title">
+                        <CircleHalf size={15} aria-hidden="true" /> Mask
+                      </span>
+                      {pickedLayer.mask ? (
+                        <Button
+                          size="sm"
+                          variant="ghost"
+                          icon={<X size={14} />}
+                          onClick={() => removeMask(pickedLayer.id)}
+                        >
+                          Remove
+                        </Button>
+                      ) : (
+                        <Button
+                          size="sm"
+                          icon={<Plus size={15} />}
+                          onClick={(event) => openMaskPicker(pickedLayer.id, event.currentTarget)}
+                        >
+                          Add mask
+                        </Button>
+                      )}
+                    </div>
+                    {pickedLayer.mask ? (
+                      <>
+                        <p className="rd-mask-note">
+                          The mask runs over this layer&apos;s area every frame; its picture decides how much of the
+                          layer shows.
+                        </p>
+                        <div className="layer-fields">
+                          <div className="layer-field wide">
+                            <span>Mask effect</span>
+                            <Select
+                              label="Mask effect"
+                              value={pickedLayer.mask.effect}
+                              options={[
+                                ...((effects ?? []).some((effect) => effect.id === pickedLayer.mask?.effect)
+                                  ? []
+                                  : [
+                                      {
+                                        value: pickedLayer.mask.effect,
+                                        label:
+                                          schemas[pickedLayer.mask.effect] === null
+                                            ? "Missing effect"
+                                            : layerLabel(schemas, effects, pickedLayer.mask.effect) ?? "Effect",
+                                      },
+                                    ]),
+                                ...(effects ?? [])
+                                  .filter((effect) => !effect.id.startsWith("stack:"))
+                                  .map((effect) => ({
+                                    value: effect.id,
+                                    label:
+                                      html > 0 &&
+                                      !isHtmlEffect(pickedLayer.mask?.effect ?? "") &&
+                                      isHtmlEffect(effect.id) &&
+                                      htmlLayers(draft.layers) >= MAX_HTML_LAYERS
+                                        ? `${effect.name} (HTML layers full)`
+                                        : effect.name,
+                                  })),
+                              ]}
+                              onChange={(next) => void chooseMaskEffect(pickedLayer.id, next)}
+                            />
+                            {maskProblem && (
+                              <p className="error-line" role="alert">
+                                {maskProblem}
+                              </p>
+                            )}
+                          </div>
+                          <div className="layer-field wide">
+                            <span>Reads</span>
+                            <Segmented<MaskSource>
+                              label="What the mask reads"
+                              value={pickedLayer.mask.source}
+                              options={[
+                                { value: "luma", label: "Brightness" },
+                                { value: "alpha", label: "Strongest colour" },
+                              ]}
+                              onChange={(source) => patchMaskDraft(pickedLayer.id, { source })}
+                            />
+                            <span className="rd-mask-hint">
+                              Strongest colour: each pixel shows as much of the layer as its strongest colour
+                              channel is bright.
+                            </span>
+                          </div>
+                          <div className="layer-field wide layer-field-row">
+                            <span>Invert</span>
+                            <Toggle
+                              label="Invert the mask"
+                              checked={pickedLayer.mask.invert}
+                              onChange={(invert) => patchMaskDraft(pickedLayer.id, { invert })}
+                            />
+                          </div>
+                          <div className="layer-field wide">
+                            <span>Amount</span>
+                            <div className="field-slider">
+                              <Slider
+                                label="Mask amount"
+                                min={0}
+                                max={100}
+                                value={pickedLayer.mask.amount}
+                                onChange={(amount) => patchMaskDraft(pickedLayer.id, { amount })}
+                              />
+                              <NumberField
+                                label="Mask amount value"
+                                min={0}
+                                max={100}
+                                value={pickedLayer.mask.amount}
+                                onCommit={(amount) => patchMaskDraft(pickedLayer.id, { amount })}
+                              />
+                            </div>
+                          </div>
+                        </div>
+                        {schemas[pickedLayer.mask.effect] === null ? (
+                          <p className="error-line">
+                            This mask effect is gone. Choose another, or remove the mask.
+                          </p>
+                        ) : schemas[pickedLayer.mask.effect] === undefined ? (
+                          <LoadFrame
+                            state="loading"
+                            label="Loading the mask's properties"
+                            shape={
+                              <div className="rd-props-shape">
+                                {[0.32, 0.26, 0.36].map((label, i) => (
+                                  <div className="rd-props-row" key={i}>
+                                    <Skeleton width={`${label * 100}%`} height={14} />
+                                    <Skeleton
+                                      width={i === 0 ? "34%" : "52%"}
+                                      height={i === 0 ? 24 : 18}
+                                      radius={i === 0 ? 6 : 9}
+                                    />
+                                  </div>
+                                ))}
+                              </div>
+                            }
+                          />
+                        ) : (
+                          <>
+                            <h3 className="rd-mask-sub">
+                              {layerLabel(schemas, effects, pickedLayer.mask.effect)} settings
+                            </h3>
+                            <PropertyControls
+                              schema={schemas[pickedLayer.mask.effect] as PropertySchema}
+                              values={maskValues(schemas[pickedLayer.mask.effect], pickedLayer.mask)}
+                              onChange={(key, value) => patchMaskProps(pickedLayer.id, key, value)}
+                            />
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      <p className="rd-mask-note">
+                        A mask shapes where this layer shows: another effect runs over the layer&apos;s area and its
+                        picture decides the coverage. A flame over warm white is the classic.
+                      </p>
+                    )}
+                  </div>
                   {(statuses[pickedLayer.id]?.status === "held" || statuses[pickedLayer.id]?.status === "faulted") && (
                     <p className="layer-warn" role="status">
                       This layer is slower than the frame; the rest of the stack keeps its rate.
@@ -2092,6 +2478,40 @@ export function StackBuilder({
         <div className="stack rd-add-layer-body">
           <ul className="rd-add-list" role="listbox" aria-label="Effects to choose">
             {chooseList.map((row) => effectRow(row, false))}
+          </ul>
+        </div>
+      </Popover>
+
+      <Popover
+        anchor={maskAnchor}
+        open={maskFor !== null}
+        onClose={closeMaskPicker}
+        label="Choose a mask"
+        className="rd-add-layer rd-mask-picker"
+      >
+        <div className="stack rd-add-layer-body">
+          <p className="rd-mask-picker-note">
+            A mask&apos;s picture decides where the layer shows. These six read best as masks.
+          </p>
+          <ul
+            ref={maskListRef}
+            className="rd-add-list"
+            role="listbox"
+            aria-label="Effects to use as a mask"
+            tabIndex={-1}
+            aria-activedescendant={
+              maskChoices[maskActive] ? `mask-option-${maskChoices[maskActive].id}` : undefined
+            }
+            onKeyDown={onMaskKey}
+          >
+            <li className="rd-add-group" aria-hidden="true">
+              Good as a mask
+            </li>
+            {maskList.leads.map((effect, index) => maskRow(effect, index))}
+            <li className="rd-add-group" aria-hidden="true">
+              More
+            </li>
+            {maskList.rest.map((effect, index) => maskRow(effect, maskList.leads.length + index))}
           </ul>
         </div>
       </Popover>
