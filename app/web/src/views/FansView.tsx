@@ -1006,8 +1006,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   // The chip is doing something else than what was asked for: the daemon handed it back.
   const handedBack = header.on_bios && mode.mode !== "bios";
   // What the daemon says about this header, in words that name it. The words are on the page for
-  // the eye; the reader of a screen hears one stable sentence per KIND of reason, so a live
-  // temperature inside the reason ("while CPU is 78 °C") is not read again at every change.
+  // the eye; the reader of a screen hears one stable sentence per KIND of reason. Every reason
+  // the service sends is stable (it names the limit or the fixed ceiling, never a live reading),
+  // so no change in temperature can be read out again.
   const reasonText = header.override_reason
     ? handedBack
       ? `canvas-rgb handed ${header.label} back to BIOS: ${header.override_reason}`

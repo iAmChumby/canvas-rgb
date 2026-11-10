@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { HotLimitStatus } from "@/proto/HotLimitStatus";
-import { HOT_TEMP_C } from "@/lib/fan-rules";
+import { HOT_TEMP_C, hotFloor } from "@/lib/fan-rules";
 import { clamp } from "@/lib/format";
 import { dragThresholdPx } from "@/lib/hitTest";
 import { cancelPress } from "@/lib/pressDrag";
@@ -250,6 +250,9 @@ export function FanCurveEditor({
   };
 
   const hotLeft = xOf(hotValue);
+  // Issue #255 review: the flat hot floor (50 % CPU_FAN, 35 % others) still applies inside the
+  // speed-up zone, so it is drawn as a dashed level from the line to the ceiling.
+  const hotFloorY = yOf(hotFloor(header, floor));
   const hotLabel = `Don't exceed ${hotValue} °C${hot ? (hot.user_set ? " · set by you" : " · automatic") : ""}`;
   // The chart shows the figure only; the full words are on the handle (aria-valuetext) and in
   // the controls above the chart. The label sits at the top, left of its line when it fits (a
@@ -353,6 +356,7 @@ export function FanCurveEditor({
           <g>
             <title>{`${header} speeds up above the don't exceed line`}</title>
             <rect x={hotLeft} y={MARGIN.top} width={ceilX - hotLeft} height={plotH} fill="url(#speedup-hatch)" />
+            <line x1={hotLeft} x2={ceilX} y1={hotFloorY} y2={hotFloorY} stroke="var(--warn)" strokeDasharray="2 4" />
             <text
               x={hotLeft + 14}
               y={MARGIN.top + plotH - 8}

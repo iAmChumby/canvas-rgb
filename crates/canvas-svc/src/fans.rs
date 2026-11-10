@@ -234,8 +234,9 @@ impl CurveState {
     /// `limit_c` the hot line. At or above the line the boost rises (fast), inside the deadband
     /// it holds, and below the deadband it decays (slowly). While the safety ceiling is latched
     /// the boost is frozen: the ceiling already runs the header at 100 %. A missing reading
-    /// keeps the boost: the header is not written until the reading returns, and only the
-    /// sensor-loss handback clears it.
+    /// keeps the boost through the short gap: the Curve arm holds its write and the Fixed arm
+    /// keeps its duty until `SENSOR_LOSS_TIMEOUT_MS`. The Curve handback clears it; the Fixed
+    /// arm drops it at the timeout and writes its plain duty again.
     fn note_boost(&mut self, temp_c: Option<f32>, limit_c: f32, now: Instant, ceiling_latched: bool) {
         if ceiling_latched {
             self.boost_last_at = Some(now);
@@ -1065,9 +1066,19 @@ impl FanController {
         self.slots[ch].curve.note_ceiling(reference, ceiling_c, now);
         let latched = self.slots[ch].curve.hot_latched;
         let ceiling_latched = self.slots[ch].curve.ceiling_latched;
+        // Issue #255 review: a Fixed header needs no sensor, so a lost reading is not a
+        // handback by itself. Its kept boost lives through the short gap, and after the
+        // sensor-loss timeout it is dropped so the plain Fixed duty returns.
+        if matches!(mode, FanMode::Fixed { .. }) && reference.is_none() {
+            let since = self.slots[ch].manual_since.unwrap_or(now);
+            let last = self.last_good.get(&TempSource::Cpu).copied().unwrap_or(since);
+            if now.saturating_duration_since(last) >= Duration::from_millis(SENSOR_LOSS_TIMEOUT_MS) {
+                self.slots[ch].curve.hot_boost = 0.0;
+            }
+        }
         // Issue #255: the closed-loop boost. It runs after the latches so the ceiling freeze
-        // sees the latch this tick engaged. A missing reading keeps it; the sensor-loss
-        // handback clears it.
+        // sees the latch this tick engaged. A missing reading keeps it for the short gap (see
+        // the Fixed case above and the Curve hold and handback below).
         self.slots[ch].curve.note_boost(reference, limit_c, now, ceiling_latched);
         // A Fixed header with no reference reading while a safety latch is set must not
         // write its lower Fixed duty over the latched 100 %. Hold the last written duty
@@ -1098,18 +1109,18 @@ impl FanController {
         // The limit as the editor rounds it: no decimals, ties away from zero. `{:.0}` on an
         // f32 rounds ties to even, which would disagree with `Math.round` on a .5 limit.
         let limit_text = limit_c.round() as i32;
+        let ceiling_text = ceiling_c.round() as i32;
         let mut reason = None;
         if ceiling_latched && reference.is_some() {
             // The fixed safety ceiling (issue #130): whatever the curve or the setting asks
-            // for, the header runs at full speed.
+            // for, the header runs at full speed. Name the fixed ceiling, not the live reading,
+            // so the announced sentence stays stable.
             percent = 100;
-            if let Some(t) = reference {
-                let name = match &mode {
-                    FanMode::Curve { source, .. } => source_label(source),
-                    _ => "CPU".to_string(),
-                };
-                reason = Some(format!("at the safety ceiling: {} is {:.0} °C", ceiling_name(&name), t));
-            }
+            let name = match &mode {
+                FanMode::Curve { source, .. } => source_label(source),
+                _ => "CPU".to_string(),
+            };
+            reason = Some(format!("at the safety ceiling: {} reached {ceiling_text} °C", ceiling_name(&name)));
         } else if boost >= 1.0 {
             // Issue #255: the closed loop is holding the line. The reason names the limit,
             // never the live temperature, so the editor's stable sentence rule holds.
@@ -1120,12 +1131,15 @@ impl FanController {
             reason = Some(format!("holding {} under {limit_text} °C", hot_name(&name)));
         } else if floor > base && base_duty == floor {
             // Issue #255 review: the latch can still hold after the boost has decayed under a
-            // point. Name the limit, not the live reading, so the sentence stays stable.
+            // point. Say what the latch is waiting for, not a temperature claim that is false.
             let name = match &mode {
                 FanMode::Curve { source, .. } => source_label(source),
                 _ => "CPU".to_string(),
             };
-            reason = Some(format!("hot floor {floor}% while {} is over {limit_text} °C", hot_name(&name)));
+            reason = Some(format!(
+                "hot floor {floor}% until {} has stayed under {limit_text} °C",
+                hot_name(&name)
+            ));
         }
         match self.write_and_verify(ch, percent) {
             Ok(()) => {

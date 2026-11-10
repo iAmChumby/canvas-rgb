@@ -1565,13 +1565,33 @@ fn issue255_the_boost_decays_below_the_deadband_and_holds_inside_it() {
 
 #[test]
 fn issue255_an_oscillating_temperature_around_the_line_never_steps_the_duty_down() {
+    // The original from-zero case: the first tick at the line starts the boost and the rest of
+    // the oscillation must never step the duty down.
     let t0 = Instant::now();
     let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
     let mut r = rig(config, t0);
     r.cpu.set(Some(40.0));
     r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
-    // Build a boost well below the cap first (three ticks at the line plus five): most of the
-    // 120 ticks then exercise holding inside the deadband, not only climbing towards it.
+    let mut duties = Vec::new();
+    for s in 1..=120 {
+        let temp = if s % 2 == 0 { 50.5 } else { 49.5 };
+        duties.push(tick_cpu_at_temp(&mut r, t0, s, temp));
+    }
+    let falls = duties.windows(2).filter(|w| w[1] < w[0]).count();
+    assert_eq!(falls, 0, "the duty stepped down {falls} times over 120 ticks: {duties:?}");
+    // And the closed loop engaged: the duty ended above where it started.
+    assert!(duties.last() > duties.first(), "the boost never engaged: {duties:?}");
+}
+
+#[test]
+fn issue255_a_pre_built_boost_holds_through_an_oscillation() {
+    // A boost well below the cap, then 120 ticks of the line plus or minus half a degree: most
+    // of that window is the deadband holding, not only climbing towards the cap.
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 55.0);
     }
@@ -1582,8 +1602,6 @@ fn issue255_an_oscillating_temperature_around_the_line_never_steps_the_duty_down
     }
     let falls = duties.windows(2).filter(|w| w[1] < w[0]).count();
     assert_eq!(falls, 0, "the duty stepped down {falls} times over 120 ticks: {duties:?}");
-    // And the closed loop did engage: the duty ended above where it started (a flat floor
-    // alone leaves it where it was, which is what the old code did).
     assert!(duties.last() > duties.first(), "the boost never engaged: {duties:?}");
 }
 
@@ -1811,6 +1829,33 @@ fn issue255_a_sensor_loss_handback_resets_the_boost() {
 }
 
 #[test]
+fn issue255_a_fixed_header_drops_the_boost_after_a_lost_reading() {
+    // Fixed needs no sensor, so a lost reading is not a handback. The boost is kept through the
+    // short gap and dropped at the sensor-loss timeout, when the plain Fixed duty returns.
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    for s in 1..=3 {
+        tick_at_temp(&mut r, t0, s, 60.0);
+    }
+    // Sixty seconds in the deadband release the hot latch but hold the boost.
+    for s in 4..=64 {
+        tick_at_temp(&mut r, t0, s, 49.0);
+    }
+    let before = duty_percent(&r, SYS_FAN1);
+    assert_eq!(before, 50, "the latch released, leaving Fixed 20 + the held 30-point boost: {before}%");
+    r.cpu.set(None);
+    r.fans.tick(t0 + Duration::from_secs(65));
+    assert_eq!(duty_percent(&r, SYS_FAN1), before, "the short gap keeps the boost");
+    r.fans.tick(t0 + Duration::from_secs(66));
+    assert_eq!(duty_percent(&r, SYS_FAN1), before, "still inside the sensor-loss timeout");
+    r.fans.tick(t0 + Duration::from_secs(67));
+    assert_eq!(duty_percent(&r, SYS_FAN1), 20, "after the timeout the plain Fixed duty returns");
+}
+
+#[test]
 fn issue255_the_floor_reason_names_the_limit_not_the_live_temperature() {
     let t0 = Instant::now();
     let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
@@ -1828,8 +1873,8 @@ fn issue255_the_floor_reason_names_the_limit_not_the_live_temperature() {
     let status = r.fans.status();
     assert_eq!(
         header(&status, "cpu_fan").override_reason.as_deref(),
-        Some("hot floor 50% while CPU is over 50 °C"),
-        "the decay-tail reason names the limit, never the live reading"
+        Some("hot floor 50% until CPU has stayed under 50 °C"),
+        "the decay-tail reason says what the latch waits for, with no false temperature claim"
     );
 }
 
@@ -1884,10 +1929,10 @@ fn issue255_the_safety_ceiling_still_forces_full_speed() {
     let duty = tick_cpu_at_temp(&mut r, t0, 1, 90.0);
     assert_eq!(duty, 255, "the ceiling still runs the header at 100 %: {duty}");
     let status = r.fans.status();
-    assert!(
-        header(&status, "cpu_fan").override_reason.as_deref().unwrap_or_default().starts_with("at the safety ceiling"),
-        "the ceiling reason is unchanged: {:?}",
-        header(&status, "cpu_fan").override_reason
+    assert_eq!(
+        header(&status, "cpu_fan").override_reason.as_deref(),
+        Some("at the safety ceiling: CPU reached 90 °C"),
+        "the ceiling reason names the fixed ceiling, not the live reading"
     );
 }
 
