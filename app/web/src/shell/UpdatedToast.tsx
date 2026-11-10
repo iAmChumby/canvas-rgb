@@ -5,7 +5,7 @@ import { usePathname, useRouter } from "next/navigation";
 import { dismissNotification, notify } from "@/components/Notify";
 import { updateDismissUpdated } from "@/lib/host";
 import { sendUpdate } from "@/lib/updateActions";
-import { requestNavigation } from "@/lib/navigationGuard";
+import { requestNavigation, takeAppNavigation } from "@/lib/navigationGuard";
 import { useSnap } from "@/lib/store";
 
 /** How long the "Updated to" toast stays before it goes on its own (the action-toast timeout). */
@@ -41,11 +41,15 @@ export function UpdatedToast() {
   const current = update?.current_version ?? "";
   const mountedPath = useRef(pathname);
 
-  // The first navigation to another page sends the notice. On the Updates page it goes in any
-  // case, with every other "Updated to" notice a second release may have added.
+  // The first navigation the person makes to another page sends the notice. The app's own page
+  // change (the onboarding gate's first-launch redirect, which a normal launch after an update
+  // can meet) is not the person's and does not. On the Updates page it goes in any case, with
+  // every other "Updated to" notice a second release may have added.
   useEffect(() => {
     if (pathname === mountedPath.current && !onUpdates) return;
+    const byApp = pathname !== mountedPath.current && takeAppNavigation();
     mountedPath.current = pathname;
+    if (byApp && !onUpdates) return;
     clearShown();
   }, [pathname, onUpdates]);
 

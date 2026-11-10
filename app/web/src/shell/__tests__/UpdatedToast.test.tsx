@@ -5,6 +5,8 @@ import { continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 import { getSnap, patchSnap } from "@/lib/store";
 import { fixtureState } from "@/lib/demoUpdate";
 import { GlobalBanners } from "@/shell/GlobalBanners";
+import { OnboardingGate } from "@/views/editor/OnboardingGate";
+import type { Status } from "@/proto/Status";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { UpdatesView } from "@/views/UpdatesView";
 
@@ -21,10 +23,10 @@ import { UpdatesView } from "@/views/UpdatesView";
 // also loads against the old code, which had no such export.
 const TOAST_ACTION_MS = 7000;
 
-const nav = vi.hoisted(() => ({ pathname: "/", push: vi.fn() }));
+const nav = vi.hoisted(() => ({ pathname: "/", push: vi.fn(), replace: vi.fn() }));
 
 vi.mock("next/navigation", () => ({
-  useRouter: () => ({ push: nav.push, replace: vi.fn(), prefetch: vi.fn(), back: vi.fn() }),
+  useRouter: () => ({ push: nav.push, replace: nav.replace, prefetch: vi.fn(), back: vi.fn() }),
   usePathname: () => nav.pathname,
 }));
 
@@ -63,12 +65,35 @@ afterEach(() => {
     vi.advanceTimersByTime(600);
   });
   cleanup();
-  patchSnap({ update: null });
+  patchSnap({ update: null, status: null });
   nav.push.mockClear();
+  nav.replace.mockReset();
   vi.useRealTimers();
   nav.pathname = "/";
   window.history.replaceState({}, "", "/");
 });
+
+const baseStatus: Status = {
+  version: "0.10.1",
+  power: "running",
+  brightness: 100,
+  fps_target: 30,
+  fps_measured: 30,
+  frame_time_ms: 33.3,
+  frames_rendered: 0,
+  parked: false,
+  devices_connected: 3,
+  devices_total: 4,
+  preview_subscribers: 0,
+  active_layout: "desk",
+  active_effect: null,
+  openrgb: "connected",
+  service: "connected",
+  service_down_ms: null,
+  conflicts: [],
+  show_zone_panel: false,
+  onboarding_complete: true,
+};
 
 /** The shell's two hosts: the banners' mount and the notification lane. */
 function Shelf() {
@@ -306,6 +331,83 @@ describe("the updated-to toast", () => {
     const notice = laneNotice() as HTMLElement;
     fireEvent.click(within(notice).getByRole("button", { name: /What.s new/ }));
     expect(nav.push).toHaveBeenCalledWith("/updates/");
+  });
+
+  it("a held What's new pins the notice: the pointer leaving does not start its life again", () => {
+    const view = mountUpdated();
+    settle();
+    setNavigationGuard(() => false);
+    try {
+      const notice = laneNotice() as HTMLElement;
+      const body = notice.querySelector(".notify-body") as HTMLElement;
+      fireEvent.mouseEnter(body);
+      fireEvent.click(within(notice).getByRole("button", { name: /What.s new/ }));
+      expect(nav.push).not.toHaveBeenCalled();
+      fireEvent.mouseLeave(body);
+      // Well past its life, with the prompt still up: the notice is still there.
+      act(() => {
+        vi.advanceTimersByTime(TOAST_ACTION_MS + 3000);
+      });
+      drain();
+      expect(laneNotice()).not.toBeNull();
+      expect(laneNotice()?.getAttribute("data-removed")).not.toBe("true");
+      expect(nav.push).not.toHaveBeenCalled();
+    } finally {
+      setNavigationGuard(null);
+    }
+    // The person lets the page go: the held navigation runs, and the arrival takes the notice.
+    act(() => {
+      continueNavigation();
+    });
+    expect(nav.push).toHaveBeenCalledWith("/updates/");
+    nav.pathname = "/updates/";
+    view.rerender(<Shelf />);
+    drain();
+    expect(laneNotice()).toBeNull();
+  });
+
+  it("the onboarding gate's first-launch redirect is the app's page change, not the person's: the notice stays", () => {
+    // A launch after an update by someone who put the setup off: both the notice and the redirect.
+    window.sessionStorage.clear();
+    nav.pathname = "/effects/";
+    window.history.replaceState({}, "", "/effects/?update=updated");
+    patchSnap({ update: updatedState() });
+    patchSnap({ status: { ...baseStatus, onboarding_complete: false } });
+    nav.replace.mockImplementation(() => {
+      nav.pathname = "/";
+    });
+    const view = render(
+      <>
+        <Shelf />
+        <OnboardingGate />
+      </>,
+    );
+    settle();
+    expect(laneNotice()).not.toBeNull();
+    // The gate changed the page by itself.
+    expect(nav.replace).toHaveBeenCalledWith("/");
+    view.rerender(
+      <>
+        <Shelf />
+        <OnboardingGate />
+      </>,
+    );
+    // Long enough for a dismissal to finish, short of the toast's own life.
+    drain();
+    expect(laneNotice()).not.toBeNull();
+    expect(laneNotice()?.getAttribute("data-removed")).not.toBe("true");
+    // The person's own first navigation afterwards still sends it.
+    nav.pathname = "/devices/";
+    view.rerender(
+      <>
+        <Shelf />
+        <OnboardingGate />
+      </>,
+    );
+    drain();
+    expect(laneNotice()).toBeNull();
+    patchSnap({ status: null });
+    window.sessionStorage.clear();
   });
 
   it("counts opening the Updates page as seen: updated_to is dismissed through the same command the x uses", async () => {

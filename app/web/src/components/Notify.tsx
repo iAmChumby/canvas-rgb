@@ -24,7 +24,8 @@ export interface NotifyAction {
   /**
    * Runs when the reader presses the key. The message goes with the answer, unless the answer
    * returns `false`: it did not happen yet (a navigation the unsaved-changes prompt is holding),
-   * so the message stays until the owner takes it away.
+   * so the message is pinned: no clock, not even after the pointer leaves, until the owner takes
+   * it away with `dismissNotification` or the reader closes it.
    */
   onClick: () => void | boolean;
 }
@@ -94,6 +95,20 @@ function go(id: string): void {
   forget(id);
   takenAway.add(id);
   sonnerToast.dismiss(id);
+}
+
+/**
+ * The message waits for its owner: the answer it offers has not happened yet (a navigation the
+ * unsaved-changes prompt holds). The clock stops for good, so the pointer leaving does not start
+ * it again; the owner takes the message away when the answer happens, or the reader does.
+ */
+function pin(id: string): void {
+  const hold = holds.get(id);
+  if (!hold) return;
+  if (hold.timer !== null) clearTimeout(hold.timer);
+  hold.timer = null;
+  hold.due = null;
+  hold.left = Infinity;
 }
 
 /**
@@ -252,7 +267,8 @@ function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBo
           size="sm"
           className="notify-action"
           onClick={() => {
-            if (action.onClick() !== false) go(id);
+            if (action.onClick() === false) pin(id);
+            else go(id);
           }}
         >
           {action.label}
