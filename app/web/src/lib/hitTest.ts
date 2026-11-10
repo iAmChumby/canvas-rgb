@@ -100,6 +100,8 @@ export interface HitInput {
   /** Css pixels per canvas unit. */
   k: number;
   pointer?: PointerKind;
+  /** A caller with bigger targets than the Layout page's (the builder's 44px touch handles). */
+  reachPx?: number;
   /** Alt-click: take the next part down from the picked one instead of the first. */
   under?: boolean;
 }
@@ -153,14 +155,19 @@ function handleAt(input: HitInput): HitTarget | null {
   const part = input.parts.find((p) => same(p.ref, ref));
   if (!part || part.locked) return null;
   const q = toLocal(part, input.point);
-  const reach = handleReachPx(input.pointer ?? "mouse") / input.k;
+  const reach = (input.reachPx ?? handleReachPx(input.pointer ?? "mouse")) / input.k;
   const narrowX = part.width * input.k < EDGE_HANDLE_MIN_PX;
   const narrowY = part.height * input.k < EDGE_HANDLE_MIN_PX;
+  // On a small part a finger's reach would cover the whole body, so every press would resize
+  // from the first corner. A handle on the part reaches at most a third of the part's size on
+  // each axis: the middle stays the body (a move), and a big part is unchanged (#257).
+  const reachX = Math.min(reach, part.width / 3);
+  const reachY = Math.min(reach, part.height / 3);
   let best: { target: HitTarget; d: number } | null = null;
-  const offer = (target: HitTarget, lx: number, ly: number) => {
+  const offer = (target: HitTarget, lx: number, ly: number, rx = reachX, ry = reachY) => {
     const ex = Math.abs(q.x - lx);
     const ey = Math.abs(q.y - ly);
-    if (ex > reach || ey > reach) return;
+    if (ex > rx || ey > ry) return;
     const d = Math.hypot(ex, ey);
     if (!best || d < best.d) best = { target, d };
   };
@@ -169,7 +176,8 @@ function handleAt(input: HitInput): HitTarget | null {
     if (h.sy === 0 && narrowY) continue;
     offer({ kind: "handle", ref, handle: h }, (h.sx * part.width) / 2, (h.sy * part.height) / 2);
   }
-  offer({ kind: "handle", ref, handle: "rotate" }, 0, -part.height / 2 - ROTATE_GRIP_PX / input.k);
+  // The rotate grip sits outside the part, so it keeps the full reach.
+  offer({ kind: "handle", ref, handle: "rotate" }, 0, -part.height / 2 - ROTATE_GRIP_PX / input.k, reach, reach);
   return (best as { target: HitTarget; d: number } | null)?.target ?? null;
 }
 

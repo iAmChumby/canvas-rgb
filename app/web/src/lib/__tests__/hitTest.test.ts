@@ -359,3 +359,21 @@ describe("dragThresholdPx", () => {
     expect(dragThresholdPx("touch")).toBeGreaterThan(dragThresholdPx("mouse"));
   });
 });
+
+describe("hitTest: a small part on a touch screen (#257)", () => {
+  // A 10 x 10 canvas-unit box at the phone's zoom (about 1.1 px a unit): a finger's 22 px reach
+  // used to cover the whole box, so every press resized it from the first corner.
+  const k = 1.1;
+  const small = part("zone", 0, 50, 50, 10, 10);
+  const sel = [{ kind: "zone" as const, index: 0 }];
+
+  it("moves the box when the press is in its middle", () => {
+    const hit = hitTest(input([small], 55, 55, { selection: sel, pointer: "touch", k, reachPx: 22 }));
+    expect(hit.kind).toBe("part");
+  });
+
+  it("still resizes from a corner when the press is at that corner", () => {
+    const hit = hitTest(input([small], 50.5, 50.5, { selection: sel, pointer: "touch", k, reachPx: 22 }));
+    expect(hit).toMatchObject({ kind: "handle", handle: { id: "nw" } });
+  });
+});

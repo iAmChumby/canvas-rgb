@@ -6,6 +6,16 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- Effects: the builder draws a frame for every layer on the picture, so a click picks a layer, Tab and Shift+Tab walk them, Delete removes one, Ctrl+D copies one, Make rectangle turns a whole-canvas or device area into a box you can move, Ctrl+Z takes back a whole drag however long it paused, every frame reads on any picture, a box shows a bar on each side as well as each corner to resize by, and the desk's outlines (Parts, now off to start with) also show while you drag (#257)
+
+### Fixed
+
+- Peripherals: a setting the device did not report shows as not read, instead of a made-up value (#276)
+
+## [0.11.1] - 2026-11-10
+
 ### Fixed
 
 - Peripherals: a device you have not let canvas-rgb read no longer shows made-up settings (#264)
@@ -273,7 +283,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.1...HEAD
+[0.11.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.0...v0.11.1
 [0.11.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.1...v0.10.2

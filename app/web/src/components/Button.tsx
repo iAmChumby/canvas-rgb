@@ -238,9 +238,12 @@ export function IconButton({
   busy = false,
   className,
   tip = true,
+  shortcut,
   onClick,
 }: {
   label: string;
+  /** The key that does the same, said in the tooltip beside the label ("Ctrl+Z"). */
+  shortcut?: string;
   icon: ReactNode;
   pressed?: boolean;
   /** A request from this control is in flight: disabled, `aria-busy`, a spinner after the delay. */
@@ -268,7 +271,7 @@ export function IconButton({
       <BusySlot icon={icon} spinning={spinning} size={size === "sm" ? 14 : 16} />
     </button>
   );
-  return tip ? <Tooltip label={label}>{button}</Tooltip> : button;
+  return tip ? <Tooltip label={shortcut ? `${label} (${shortcut})` : label}>{button}</Tooltip> : button;
 }
 
 /** A button that opens a file picker and hands the chosen file to `onFile`. */
