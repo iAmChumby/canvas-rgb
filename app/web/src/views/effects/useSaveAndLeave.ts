@@ -77,6 +77,10 @@ export function useSaveAndLeave({
 }) {
   const [saveState, setSaveState] = useState<"idle" | "saving">("idle");
   const [saveError, setSaveError] = useState<string | null>(null);
+  /** The stack is saved but would not start: the id that was saved and the daemon's reason. Not a
+   *  save error, so the banner says "Saved" and offers Start again, not a second write. */
+  const [startFailure, setStartFailure] = useState<{ id: string; message: string } | null>(null);
+  const [starting, setStarting] = useState(false);
   const [clash, setClash] = useState<string | null>(null);
   const [naming, setNaming] = useState(false);
   const [namingError, setNamingError] = useState<string | null>(null);
@@ -267,6 +271,7 @@ export function useSaveAndLeave({
     pendingLeave.current = then !== undefined;
     setSaveState("saving");
     setSaveError(null);
+    setStartFailure(null);
     // A replace writes under the other stack's own id: the daemon overwrites that stack and
     // nothing is deleted first, so a failed write leaves it exactly as it was.
     const body: Stack = { id: replaceId ?? `stack:${wanted}`, layers: layersForServer(draftRef.current.layers) };
@@ -315,9 +320,30 @@ export function useSaveAndLeave({
       await api.activateEffect(saved.id, { props: {}, preset: null });
       await refreshAll();
     } catch (e) {
-      setSaveError(`Saved, but it did not start: ${messageOf(e)}`);
+      setStartFailure({ id: saved.id, message: messageOf(e) });
+      // Save and leave: the builder closes, and its banner with it, so the note says what the banner
+      // would have said. It stays until it is dismissed.
+      if (then) notify(`${nameOf(saved.id)} is saved, but it did not start: ${messageOf(e)}`, "warn");
     }
     then?.();
+  };
+
+  /** Start again: the stack is already saved, so only the activation is sent once more. */
+  const startAgain = async () => {
+    const failed = startFailure;
+    // An unsaved edit: the saved stack is no longer what is on screen, so there is nothing to start.
+    if (!failed || starting || dirty || failed.id !== base?.id) return;
+    setStarting(true);
+    try {
+      await api.activateEffect(failed.id, { props: {}, preset: null });
+      await refreshAll();
+      setStartFailure(null);
+      notify(`${nameOf(failed.id)} is running`);
+    } catch (e) {
+      setStartFailure({ id: failed.id, message: messageOf(e) });
+    } finally {
+      setStarting(false);
+    }
   };
 
   /** A taken name: overwrite the other stack under its own id in one write. Nothing is deleted
@@ -376,6 +402,7 @@ export function useSaveAndLeave({
     }
     setSheetOpen(false);
     setSaveError(null);
+    setStartFailure(null);
     setClash(null);
   };
 
@@ -476,6 +503,12 @@ export function useSaveAndLeave({
     saveState,
     saveError,
     setSaveError,
+    // Hidden, not dropped, while the draft has unsaved edits: Start again would run the saved stack,
+    // not what is on screen. Undo back to the saved stack and it is offered again; Save starts the edit.
+    // And only for the stack it was about: the builder can load another stack while mounted.
+    startFailure: dirty || startFailure?.id !== base?.id ? null : startFailure,
+    starting,
+    startAgain,
     clash,
     setClash,
     naming,
