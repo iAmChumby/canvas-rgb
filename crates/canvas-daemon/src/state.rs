@@ -51,6 +51,15 @@ pub struct App {
     pub adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     /// The devices as last discovered.
     pub devices: tokio::sync::RwLock<Vec<DeviceInfo>>,
+    /// The frame writer of every driven device, keyed by device (see [`crate::device_sync`]).
+    pub device_sinks: crate::device_sync::DeviceSinks,
+    /// Where a rescan the owner asked for goes: to the supervisor, the one task that writes the
+    /// device list (#233). The supervisor takes the other end with [`App::take_rescan_inbox`].
+    pub rescan_requests: tokio::sync::mpsc::Sender<crate::openrgb_supervisor::Rescan>,
+    rescan_inbox: Mutex<Option<tokio::sync::mpsc::Receiver<crate::openrgb_supervisor::Rescan>>>,
+    /// How long a rescan may hold the adapter before the supervisor gives up on it. A field so a
+    /// test can shorten it; the daemon keeps [`crate::openrgb_supervisor::RESCAN_BUDGET`].
+    pub rescan_budget: std::time::Duration,
     /// Zone sizes by device fingerprint (the `zones.json` contents).
     ///
     /// Behind an `Arc` so the OpenRGB supervisor can share it with the API handlers.
@@ -201,7 +210,12 @@ impl App {
         let inputs = Arc::new(crate::capture::DaemonInputs::production());
         inputs.set_requested(audio_source);
         let home = store.home.clone();
+        let (rescan_requests, rescan_inbox) = tokio::sync::mpsc::channel(4);
         Self {
+            device_sinks: Default::default(),
+            rescan_requests,
+            rescan_inbox: Mutex::new(Some(rescan_inbox)),
+            rescan_budget: crate::openrgb_supervisor::RESCAN_BUDGET,
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::with_home(Vec::new(), home.clone()),
             home,
@@ -263,6 +277,12 @@ impl App {
         self.peripherals =
             crate::peripherals::PeripheralHub::with_home_and_idle(peripherals, self.home.clone(), idle);
         self
+    }
+
+    /// The receiving end of the rescan requests. The supervisor takes it once; a second call
+    /// answers `None`.
+    pub fn take_rescan_inbox(&self) -> Option<tokio::sync::mpsc::Receiver<crate::openrgb_supervisor::Rescan>> {
+        self.rescan_inbox.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     /// The active layout, if any.

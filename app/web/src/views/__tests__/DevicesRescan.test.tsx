@@ -39,6 +39,8 @@ beforeAll(() => {
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
+  // Whatever a test left in the store is gone before the next one, even when it failed first.
+  patchSnap({ devices: null, devicesTotal: null, devicesError: null });
 });
 
 const setUrl = (url: string) => window.history.replaceState({}, "", url);
@@ -93,6 +95,5 @@ describe("Try again on the Devices page", () => {
       fireEvent.click(within(row as HTMLElement).getByRole("button", { name: "Try again" }));
     });
     expect(rescan).toHaveBeenCalledTimes(1);
-    patchSnap({ devices: null, devicesTotal: null, devicesError: null });
   });
 });

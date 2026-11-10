@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Devices: Try again now rescans (it sends `?rescan=1` and shows the loading placeholder while it runs), and the service answers a rescan by asking OpenRGB for its devices again instead of returning the list it held (#233, #230)
+- Devices: Try again now rescans (it sends `?rescan=1`, and while it runs with no device listed yet the page shows the loading placeholder), and the service answers a rescan by asking OpenRGB for its devices again instead of returning the list it held. A rescan OpenRGB does not answer within 5 s reports that failure, in the onboarding's Rescan too, and no longer holds the lights back (#233, #230)
 
 ## [0.13.0] - 2026-11-10
 

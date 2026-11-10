@@ -22,6 +22,8 @@ struct FakeState {
     /// When set, device `i` is announced only once `first + i * step` has passed since `since`,
     /// as real OpenRGB finds its controllers one by one while it detects.
     detection: Option<Detection>,
+    /// While set, the server takes every packet and answers none: a real OpenRGB that stalls.
+    stalled: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -105,7 +107,7 @@ impl FakeOpenRgbServer {
         let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await?;
         let port = listener.local_addr()?.port();
         let devices = devices.into_iter().map(FakeDevice::new).collect();
-        let state = Arc::new(Mutex::new(FakeState { devices, detection }));
+        let state = Arc::new(Mutex::new(FakeState { devices, detection, stalled: false }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let acceptor = {
             let state = Arc::clone(&state);
@@ -130,6 +132,13 @@ impl FakeOpenRgbServer {
     /// no clock is involved. It gets the next index.
     pub fn announce(&self, info: DeviceInfo) {
         guard(&self.state).devices.push(FakeDevice::new(info));
+    }
+
+    /// While `stalled`, the server reads every packet and answers none, as a real OpenRGB does
+    /// while it is busy. Frames (which have no reply) still land. Starting it again with `false`
+    /// makes the server answer again.
+    pub fn stall_replies(&self, stalled: bool) {
+        guard(&self.state).stalled = stalled;
     }
 
     /// Current LED colors of controller `index`, as last written.
@@ -213,6 +222,9 @@ fn to_io(error: canvas_proto::AdapterError) -> std::io::Error {
 fn handle(state: &Mutex<FakeState>, device: u32, packet_id: u32, payload: &[u8]) -> Vec<u8> {
     let mut state = guard(state);
     let reply = |device: u32, packet_id: u32, body: &[u8]| encode_packet(device, packet_id, body).unwrap_or_default();
+    if state.stalled && matches!(packet_id, REQUEST_PROTOCOL_VERSION | REQUEST_CONTROLLER_COUNT | REQUEST_CONTROLLER_DATA) {
+        return Vec::new();
+    }
     match packet_id {
         REQUEST_PROTOCOL_VERSION => {
             let client = payload.get(..4).map_or(CLIENT_MAX_PROTOCOL_VERSION, |b| {
