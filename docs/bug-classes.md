@@ -254,10 +254,12 @@ or acts as if a step worked without checking that it did.
   sparkline breaks its line at a `null` slot instead of bridging it, and every reader of the
   history (`peakOf`) skips `null`. Only a header whose label the daemon marks "(tach only)" is
   called tach only; any other header with no duty is "duty not read". A header with no duty
-  reading is offered no mode, in the bulk bar and in the header editor alike: the daemon accepts
-  the request (it checks only the register map, `crates/canvas-svc/src/fans.rs:1202`), but every
-  write is read back (`fans.rs:1155-1168`), and with no reading the write fails and the header
-  goes back to BIOS. When adding a device value to the page, read it with `known()` and draw
+  reading is offered no Fixed or Curve, in the bulk bar and in the header editor alike: the daemon
+  accepts the request (it checks only the register map, `crates/canvas-svc/src/fans.rs:1202`), but
+  every write is read back (`fans.rs:1155-1168`), and with no reading the write fails and the
+  header goes back to BIOS. BIOS itself stays offered: it is the way back for a header left in
+  Fixed or Curve. The page's "no duty" can come from one failed poll (`fans.rs:1370` turns a read
+  error into `None`), so a lockout must never take the way back with it. When adding a device value to the page, read it with `known()` and draw
   `UnreadValue` for `undefined`.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away

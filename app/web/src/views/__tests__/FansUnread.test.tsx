@@ -106,12 +106,14 @@ describe("a header with no reading", () => {
     expect(bar).not.toMatch(/CPU fan[^.]*tach only/);
   });
 
-  it("the header editor offers no mode for it, and says why", async () => {
+  it("the header editor offers no Fixed or Curve for it and says why, but BIOS stays open", async () => {
     await page("?state=fan-unread");
     const modes = screen.getByRole("radiogroup", { name: "CPU fan mode" });
-    const radios = within(modes).getAllByRole("radio");
-    expect(radios.length).toBeGreaterThan(0);
-    for (const r of radios) expect((r as HTMLButtonElement).disabled).toBe(true);
+    const radio = (name: string) => within(modes).getByRole("radio", { name }) as HTMLButtonElement;
+    // BIOS is the way back for a header left in Fixed or Curve whose duty is not read now.
+    expect(radio("BIOS").disabled).toBe(false);
+    expect(radio("Fixed %").disabled).toBe(true);
+    expect(radio("Curve").disabled).toBe(true);
     expect(document.querySelector('[data-slot="fan-cannot-set"]')?.textContent).toBe(UNREAD_DUTY_WHY);
   });
 

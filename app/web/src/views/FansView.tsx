@@ -1176,11 +1176,11 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         <Segmented<"bios" | "fixed" | "curve">
           label={`${header.label} mode`}
           value={current}
-          disabled={cannotSet}
           options={[
+            // BIOS stays open: it is how a header with no duty reading goes back to the chip.
             { value: "bios", label: "BIOS" },
-            { value: "fixed", label: "Fixed %" },
-            { value: "curve", label: "Curve" },
+            { value: "fixed", label: "Fixed %", disabled: cannotSet },
+            { value: "curve", label: "Curve", disabled: cannotSet },
           ]}
           onChange={setMode}
         />
@@ -1188,7 +1188,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {cannotSet ? (
           // The daemon writes a duty and then reads it back (`fans.rs` `write_and_verify`); with no
           // duty reading the write cannot be confirmed and the header goes back to BIOS. So the
-          // editor offers no mode here, the same as the bulk bar.
+          // editor offers no Fixed or Curve here, the same as the bulk bar; BIOS is still offered.
           <p className="mute" data-slot="fan-cannot-set">
             {noDutyWhy(header)}
           </p>

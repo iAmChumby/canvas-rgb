@@ -113,7 +113,9 @@ export async function applyBulk(
       out.push({ ...base, state: "skipped", detail: UNAVAILABLE_WHY });
       continue;
     }
-    if (!canDrive(h)) {
+    // BIOS is still sent: it is the way back for a header left in Fixed or Curve whose duty is
+    // not read now. Fixed and Curve need a duty to read back.
+    if (!canDrive(h) && action.kind !== "bios") {
       out.push({ ...base, state: "skipped", detail: noDutyWhy(h) });
       continue;
     }

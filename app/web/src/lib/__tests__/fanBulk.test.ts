@@ -55,4 +55,13 @@ describe("applyBulk", () => {
     expect(out.find((o) => o.id === "cpu_fan")?.detail).toBe(UNREAD_DUTY_WHY);
     expect(out.find((o) => o.id === "pump_fan2")?.detail).toBe(TACH_ONLY_WHY);
   });
+
+  it("still sends BIOS to a header with no duty reading: it is the way back from Fixed or Curve (#279)", async () => {
+    const stuck = { ...header("cpu_fan"), pwm_percent: null, mode: { mode: "fixed", percent: 60 }, on_bios: false } as FanHeaderStatus;
+    const fans = { headers: [stuck], floor_percent: 20 } as unknown as FansStatus;
+    const write = vi.fn(async () => "sent" as const);
+    const out = await applyBulk(fans.headers, { kind: "bios" }, fans, write);
+    expect(write).toHaveBeenCalledWith("cpu_fan", { mode: "bios" }, expect.any(Function));
+    expect(out.find((o) => o.id === "cpu_fan")?.state).toBe("applied");
+  });
 });
