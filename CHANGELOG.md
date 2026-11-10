@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - Waiting looks the same everywhere: a button that sends something keeps its size and shows a small spinner, values and lists that are still loading show a placeholder line instead of "Loading…", "0 connected" or a made-up neutral value, effect pictures show a blank tile until the first frame arrives, and nothing flashes when the answer is quick. (#258)
+
 ## [0.10.2] - 2026-11-09
 
 ### Fixed
