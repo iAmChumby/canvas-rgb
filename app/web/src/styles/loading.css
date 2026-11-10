@@ -1,0 +1,172 @@
+/* ==========================================================================
+   The element-level loading kit (#258)
+   The busy Button and IconButton, InlineSkeleton, the Select's loading value and the placeholder of
+   a canvas that has no picture yet. Loaded after hardware.css, so these rules win at equal weight.
+   Every colour is a token, in both themes. Nothing here loops except the spinner, which stands
+   still under reduced motion (the global block in app.css zeroes animation durations).
+   ========================================================================== */
+
+/* ---------- the busy button ---------- */
+
+/* A button that waits on a request is disabled so it cannot be pressed twice, but it is not a
+   disabled button: it keeps its look and its colour, and its cursor says it is working. */
+.btn[aria-busy="true"]:disabled,
+.btn[aria-busy="true"]:disabled:hover {
+  opacity: 1;
+  cursor: progress;
+  border-color: var(--line-2);
+  color: var(--ink);
+  background-color: var(--raised);
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+}
+
+.btn.btn-primary[aria-busy="true"]:disabled,
+.btn.btn-primary[aria-busy="true"]:disabled:hover {
+  border-color: transparent;
+  color: var(--on-accent);
+  background-color: var(--live);
+  box-shadow: 0 var(--skirt-h) 0 color-mix(in oklab, var(--live) 55%, black);
+}
+
+.btn.btn-ghost[aria-busy="true"]:disabled,
+.btn.btn-ghost[aria-busy="true"]:disabled:hover {
+  border-color: transparent;
+  color: var(--dim);
+  background-color: transparent;
+  box-shadow: none;
+}
+
+.btn.btn-danger[aria-busy="true"]:disabled,
+.btn.btn-danger[aria-busy="true"]:disabled:hover {
+  color: var(--down);
+}
+
+.ibtn[aria-busy="true"]:disabled {
+  opacity: 1;
+  cursor: progress;
+}
+
+/* The icon's slot: the icon and the spinner share one cell, so the slot is as wide as the icon
+   and the button keeps its width whichever one shows. */
+.btn-slot {
+  display: inline-grid;
+  place-items: center;
+}
+
+.btn-slot > * {
+  grid-area: 1 / 1;
+}
+
+.btn-slot[data-spinning="true"] > .btn-slot-icon {
+  opacity: 0;
+}
+
+.btn-slot-icon {
+  display: inline-grid;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.btn-spinner {
+  flex: none;
+}
+
+/* A button with no icon: the spinner sits over the label, which keeps its room (so the width does
+   not change) and goes transparent. */
+.btn[data-spin="over"] {
+  position: relative;
+  color: transparent;
+}
+
+.btn[data-spin="over"][aria-busy="true"]:disabled,
+.btn[data-spin="over"][aria-busy="true"]:disabled:hover {
+  color: transparent;
+}
+
+.btn-over {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  color: var(--ink);
+  animation: canvas-fade var(--dur-fast) var(--ease) both;
+}
+
+.btn-primary .btn-over {
+  color: var(--on-accent);
+}
+
+.btn-ghost .btn-over {
+  color: var(--dim);
+}
+
+.btn-danger .btn-over {
+  color: var(--down);
+}
+
+/* ---------- inline skeleton ---------- */
+
+.inline-skel {
+  display: inline-block;
+  max-width: 100%;
+  height: 0.85em;
+  vertical-align: -0.1em;
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.inline-skel[data-shown="true"] {
+  opacity: 1;
+}
+
+/* The select's value slot, while its options are read. */
+.select-loading {
+  display: inline-flex;
+  align-items: center;
+}
+
+/* ---------- a canvas with no picture yet ---------- */
+
+/* The skeleton of a thumbnail fills the tile (the tile is positioned) and fades in after the delay. */
+.canvas-skel {
+  position: absolute;
+  inset: 0;
+  border-radius: 0;
+  animation: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+.canvas-skel[data-shown="true"] {
+  opacity: 1;
+}
+
+/* A preview canvas is its own box and cannot hold a child, so it wears the skeleton tone itself
+   while its first frame is on the way, after the delay. `held` is the delay, kept unseen. */
+.preview-canvas[data-wait="shown"] {
+  background: color-mix(in srgb, var(--raised) 60%, var(--line-2));
+  animation: canvas-fade var(--dur-fast) var(--ease) both;
+}
+
+/* ---------- the stack builder's property pane, while its schema is read ---------- */
+
+.rd-props-shape {
+  display: grid;
+  gap: var(--s2);
+  padding: var(--s1) 0;
+}
+
+.rd-props-shape > .skeleton:nth-child(even) {
+  margin-bottom: var(--s2);
+}
+
+/* A white-balance swatch whose gains have not been read: the skeleton tone, not a neutral white. */
+.rd-devices .wb-swatch[data-unknown="true"] {
+  background-color: color-mix(in srgb, var(--raised) 60%, var(--line-2));
+}
+
+.rd-devices .rd-wb-row > .inline-skel {
+  flex: 1 1 80px;
+  min-width: 64px;
+}

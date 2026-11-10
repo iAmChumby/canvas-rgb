@@ -5,7 +5,7 @@
 // offered. Reading a copy's source has its own wait and its own error.
 
 import { CaretLeft, CopySimple, FilePlus } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { BusyIcon, Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Panel } from "@/components/Panel";
 import { Thumb } from "@/components/Thumb";
@@ -61,6 +61,7 @@ export function NewEffectChooser({
                 className="eff-choose-row"
                 aria-label={`Copy ${effect.name}`}
                 disabled={busy !== null}
+                aria-busy={busy === effect.id || undefined}
                 onClick={() => onCopy(effect.id)}
               >
                 <span className="eff-choose-thumb">
@@ -69,13 +70,7 @@ export function NewEffectChooser({
                 <span className="eff-choose-name">{effect.name}</span>
                 <Chip html>HTML</Chip>
                 <span className="eff-choose-go">
-                  {busy === effect.id ? (
-                    "Reading…"
-                  ) : (
-                    <>
-                      <CopySimple size={14} aria-hidden="true" /> Copy
-                    </>
-                  )}
+                  <BusyIcon icon={<CopySimple size={14} aria-hidden="true" />} busy={busy === effect.id} /> Copy
                 </span>
               </button>
             ))}

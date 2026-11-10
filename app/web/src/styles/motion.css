@@ -1605,21 +1605,6 @@
     cy var(--dur-slow) var(--ease);
 }
 
-/* ==========================================================================
-   Thumb placeholder: a tile that has not loaded yet
-   ========================================================================== */
-
-.thumb-pending-label {
-  position: absolute;
-  inset: 0;
-  display: grid;
-  place-items: center;
-  color: var(--mute);
-  font-family: var(--fm);
-  font-size: var(--t14);
-  letter-spacing: 2px;
-}
-
 .effect-empty {
   grid-column: 1 / -1;
 }

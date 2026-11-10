@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
+import { useCanvasWait } from "@/components/Skeleton";
 import { onFrame } from "@/lib/preview";
 import { useSnap } from "@/lib/store";
 import { loadThumb, blit, type Surface, type Thumb } from "@/lib/thumbs";
@@ -29,8 +30,11 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
   const live = activeId === id;
   const [thumb, setThumb] = useState<{ id: string; data: Thumb } | null>(null);
+  // The id whose first live frame has been drawn, for a running effect whose thumbnail is late.
+  const [framed, setFramed] = useState<string | null>(null);
   const motionOff = useMotionOff();
   const visible = useDocumentVisible();
+  const wait = useCanvasWait((thumb !== null && thumb.id === id) || framed === id);
 
   // The thumbnail: fetched once per effect (loadThumb keeps the cache).
   useEffect(() => {
@@ -83,6 +87,7 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
         if (ended) return;
         stopThumb();
         blit(surface, f.rgb, 0, f.width, f.height);
+        setFramed(id);
         // Reduced motion: one live frame, then stillness.
         if (motionOff) queueMicrotask(endLive);
       });
@@ -95,5 +100,12 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
     };
   }, [id, live, thumb, motionOff, visible]);
 
-  return <canvas ref={canvasRef} className={className ? `preview-canvas ${className}` : "preview-canvas"} aria-hidden="true" />;
+  return (
+    <canvas
+      ref={canvasRef}
+      className={className ? `preview-canvas ${className}` : "preview-canvas"}
+      data-wait={wait}
+      aria-hidden="true"
+    />
+  );
 }

@@ -17,6 +17,7 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
@@ -185,6 +186,7 @@ function WhiteBalanceSection({
   name,
   shown,
   saved,
+  known,
   onDraft,
   onPut,
   onReset,
@@ -195,6 +197,9 @@ function WhiteBalanceSection({
   name: string;
   shown: WhiteBalance;
   saved: WhiteBalance;
+  /** The daemon has answered with this device's gains. False: they are being read, and the rows
+   *  are placeholders, never the neutral values standing in for them. */
+  known: boolean;
   onDraft: (deviceId: string, wb: WhiteBalance) => void;
   onPut: (deviceId: string, wb: WhiteBalance) => Promise<void>;
   onReset: (deviceId: string) => Promise<void>;
@@ -211,12 +216,17 @@ function WhiteBalanceSection({
   return (
     <div className="rd-wb" role="group" aria-label={`White balance channels for ${name}`}>
       <div className="rd-wb-head">
-        <span className="wb-swatch" style={{ backgroundColor: swatchOf(shown) }} aria-hidden="true" />
+        <span
+          className="wb-swatch"
+          data-unknown={known ? undefined : "true"}
+          style={known ? { backgroundColor: swatchOf(shown) } : undefined}
+          aria-hidden="true"
+        />
         <span className="rd-wb-title">White balance</span>
         <span className="mute rd-wb-hint">
           Show White on every light, then lower the channel this one has too much of until it matches.
         </span>
-        {!isNeutral(saved) && (
+        {known && !isNeutral(saved) && (
           <Button size="sm" variant="ghost" onClick={() => void onReset(device.id)}>
             Reset
           </Button>
@@ -225,8 +235,18 @@ function WhiteBalanceSection({
           Done
         </Button>
       </div>
-      <div className="rd-wb-rows">
-        {CHANNELS.map(({ key, label }) => (
+      <div className="rd-wb-rows" aria-busy={known || error ? undefined : true}>
+        {CHANNELS.map(({ key, label }) => !known ? (
+          error ? null : (
+            <div className="rd-wb-row" key={key} data-channel={key}>
+              <span className="rd-wb-label">{label}</span>
+              <InlineSkeleton width="100%" />
+              <span className="fig rd-wb-fig">
+                <InlineSkeleton width="3ch" />
+              </span>
+            </div>
+          )
+        ) : (
           <div className="rd-wb-row" key={key} data-channel={key}>
             <span className="rd-wb-label">{label}</span>
             <Slider
@@ -363,12 +383,17 @@ export function DevicesView() {
       <PageTitle
         title="Devices"
         context={
-          <>
-            <b>
-              {connectedCount}/{devices?.length ?? 0}
-            </b>{" "}
-            connected · {litCount} LEDs
-          </>
+          devices === null ? (
+            // Not read yet: "0/0 connected" would be a count of nothing drawn as a fact.
+            devicesError ? undefined : <InlineSkeleton width="24ch" />
+          ) : (
+            <>
+              <b>
+                {connectedCount}/{devices.length}
+              </b>{" "}
+              connected · {litCount} LEDs
+            </>
+          )
         }
       />
 
@@ -466,6 +491,7 @@ export function DevicesView() {
                     </span>
                   )}
                   {(() => {
+                    const wbKnown = whiteBalances !== null;
                     const wb = wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL;
                     const open = wbOpen === d.id;
                     return (
@@ -474,8 +500,15 @@ export function DevicesView() {
                         className="wb-key"
                         variant={open ? "primary" : "default"}
                         aria-expanded={open}
-                        aria-label={`White balance for ${shownName}${isNeutral(wb) ? "" : " (set)"}`}
-                        icon={<span className="wb-swatch" style={{ backgroundColor: swatchOf(wb) }} aria-hidden="true" />}
+                        aria-label={`White balance for ${shownName}${wbKnown && !isNeutral(wb) ? " (set)" : ""}`}
+                        icon={
+                          <span
+                            className="wb-swatch"
+                            data-unknown={wbKnown ? undefined : "true"}
+                            style={wbKnown ? { backgroundColor: swatchOf(wb) } : undefined}
+                            aria-hidden="true"
+                          />
+                        }
                         onClick={() => setWbOpen(open ? null : d.id)}
                       >
                         <span className="wb-key-text">Balance</span>
@@ -563,6 +596,7 @@ export function DevicesView() {
                     name={shownName}
                     shown={wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL}
                     saved={whiteBalances?.devices[d.id] ?? NEUTRAL}
+                    known={whiteBalances !== null}
                     onDraft={wbDraft}
                     onPut={wbPut}
                     onReset={wbReset}

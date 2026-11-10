@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ArrowsClockwise, Check, Circle } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useMotionOff } from "@/components/Motion";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Greeting } from "@/views/editor/Greeting";
 import { Fold, StepFrame } from "@/views/editor/OnboardStep";
 import { HELLO_EFFECT } from "@/views/editor/onboardEffects";
@@ -81,7 +82,7 @@ function Count({ value }: { value: number | null }) {
   return (
     <p className={s.count} aria-live="polite">
       <span className={s.countNumber} data-known={value !== null}>
-        {value === null ? "—" : <AnimatedNumber value={value} />}
+        {value === null ? <InlineSkeleton width="2ch" /> : <AnimatedNumber value={value} />}
       </span>
       <span className={s.countWord}>{value === 1 ? "light found" : "lights found"}</span>
     </p>
@@ -190,9 +191,9 @@ function Ladder({
       lead="Try these, top to bottom."
       onBack={onBack}
       primary={{
-        label: busy ? "Looking…" : "Rescan",
+        label: "Rescan",
         icon: <ArrowsClockwise size={16} />,
-        disabled: busy,
+        busy,
         onClick: () => void rescan(),
       }}
       secondary={{ label: "Continue without lights", onClick: onStart }}

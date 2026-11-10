@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { ArrowClockwise, Check, CloudSlash, SpinnerGap } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CloudSlash } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 
 /**
@@ -68,8 +68,8 @@ export function DaemonDown({
           </li>
         </ul>
         <div className="state-page-actions">
-          <Button onClick={() => void retry()} disabled={busy} icon={busy ? <SpinnerGap size={16} className="spin" /> : <ArrowClockwise size={16} />}>
-            {busy ? "Retrying…" : "Try again"}
+          <Button onClick={() => void retry()} busy={busy} icon={<ArrowClockwise size={16} />}>
+            Try again
           </Button>
           {/* One line of timing. The heading already says what is wrong, and the daemon's own
               words are jargon, so neither is repeated here. */}

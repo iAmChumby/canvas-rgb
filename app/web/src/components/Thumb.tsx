@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { loadThumb, type Thumb as ThumbData } from "@/lib/thumbs";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
+import { CanvasSkeleton } from "@/components/Skeleton";
 
 export type ThumbSize = "sm" | "md" | "lg";
 
@@ -111,6 +112,7 @@ export function Thumb({
       ref={wrapRef}
       className={`thumb thumb-${size}`}
       data-loaded={thumb ? "true" : "false"}
+      aria-busy={thumb ? undefined : true}
       data-running={animate ? "true" : "false"}
       role="img"
       aria-label={`${label} preview`}
@@ -122,9 +124,7 @@ export function Thumb({
       {thumb ? (
         <canvas ref={canvasRef} aria-hidden="true" />
       ) : (
-        <span className="thumb-pending-label" aria-hidden="true">
-          &middot;&middot;&middot;
-        </span>
+        <CanvasSkeleton />
       )}
     </span>
   );

@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
+import { useCanvasWait } from "@/components/Skeleton";
 import { blit, type Surface, type Thumb } from "@/lib/thumbs";
 
 /** The loop the daemon's previews and thumbnails run on. */
@@ -26,6 +27,7 @@ export function LoopPreview({
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const motionOff = useMotionOff();
   const visible = useDocumentVisible();
+  const wait = useCanvasWait(thumb !== null);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -48,6 +50,8 @@ export function LoopPreview({
     <canvas
       ref={canvasRef}
       className={className ? `preview-canvas ${className}` : "preview-canvas"}
+      data-wait={wait}
+      aria-busy={thumb ? undefined : true}
       role="img"
       aria-label={label}
     />

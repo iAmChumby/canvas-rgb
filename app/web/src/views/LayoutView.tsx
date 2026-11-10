@@ -20,7 +20,7 @@ import {
   SlidersHorizontal,
   X,
 } from "@phosphor-icons/react";
-import { Button, IconButton, Swap } from "@/components/Button";
+import { Button, IconButton } from "@/components/Button";
 import { useSuccessPulse } from "@/components/Motion";
 import { Panel, Field } from "@/components/Panel";
 import { EmptyState } from "@/components/EmptyState";
@@ -1041,13 +1041,12 @@ export function LayoutView() {
             variant="primary"
             size="sm"
             icon={<FloppyDisk size={16} weight="bold" />}
-            disabled={!dirty || saving}
+            busy={saving}
+            disabled={!dirty}
             onClick={save}
-            aria-label={saving ? "Saving the layout" : "Save layout"}
+            aria-label="Save layout"
           >
-            <span className="rd-lay-text">
-              <Swap labels={["Save layout", "Saving"]} at={saving ? 1 : 0} />
-            </span>
+            <span className="rd-lay-text">Save layout</span>
           </Button>
         </span>
         <Button

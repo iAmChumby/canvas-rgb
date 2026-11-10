@@ -155,7 +155,7 @@ export function PartsStep({
             Remove {removable.length > 1 ? "parts" : "part"}
           </Button>
           {missing > 0 && (
-            <Button size="sm" variant="ghost" icon={<ArrowsClockwise size={14} />} disabled={busy} onClick={() => void rescan()}>
+            <Button size="sm" variant="ghost" icon={<ArrowsClockwise size={14} />} busy={busy} onClick={() => void rescan()}>
               Rescan
             </Button>
           )}

@@ -1,9 +1,10 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { Button, ButtonLink, Swap } from "@/components/Button";
+import { Button, ButtonLink } from "@/components/Button";
 import { Field, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
 import { messageOf } from "@/lib/errors";
 import {
@@ -82,14 +83,15 @@ export function UpdatesPanel() {
         />
       </Field>
       <Field label="Last checked">
-        <span className="fig">{acts && u ? fmtChecked(u.last_check) : "—"}</span>
+        <span className="fig">{acts && !u ? <InlineSkeleton width="14ch" /> : acts && u ? fmtChecked(u.last_check) : "—"}</span>
       </Field>
       <Field label="Check now">
         <Button
-          disabled={!acts || !u || checking || isInstalling(u)}
+          busy={checking}
+          disabled={!acts || !u || isInstalling(u)}
           onClick={() => run(updateCheckNow)}
         >
-          <Swap labels={["Check now", "Checking"]} at={checking ? 1 : 0} />
+          Check now
         </Button>
       </Field>
       <Field label="Experimental builds" hint="Unstable test builds, offered early">
@@ -129,7 +131,7 @@ export function UpdatesPanel() {
             </span>
           </>
         ) : (
-          <span className="mute upd-note">—</span>
+          <span className="mute upd-note">{acts && !u ? <InlineSkeleton width="18ch" /> : "—"}</span>
         )}
       </div>
       {!acts && <p className="mute upd-note">Tray app only</p>}

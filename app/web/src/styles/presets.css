@@ -187,10 +187,6 @@ button.chip.chip-add:hover {
   font-family: inherit;
 }
 
-.preset-working {
-  margin-left: var(--s1);
-}
-
 /* The menu of a user preset's key. */
 .popover.preset-menu {
   min-width: 0;

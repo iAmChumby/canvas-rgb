@@ -1,9 +1,14 @@
 "use client";
 
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 import { CaretRight } from "@phosphor-icons/react";
 import { Panel } from "@/components/Panel";
 import { Button } from "@/components/Button";
+import { useLoadDelay } from "@/lib/loadDelay";
+
+// The delay now lives in lib/loadDelay.ts (Button needs it, and Button cannot import this file);
+// it is re-exported here, where every caller has always found it.
+export { LOAD_DELAY_MS, useLoadDelay } from "@/lib/loadDelay";
 
 /**
  * The one loading component. Every view that waits for the daemon draws its wait with this, so a
@@ -18,9 +23,6 @@ import { Button } from "@/components/Button";
  * - Values the page already knows stay on screen, marked as refreshing (`refreshing`), instead of
  *   blanking out.
  */
-
-/** A load shorter than this shows no placeholder. */
-export const LOAD_DELAY_MS = 150;
 
 /** What a frame is showing. `ready` shows the children; the other three show the frame's own. */
 export type LoadState = "loading" | "ready" | "error" | "empty";
@@ -40,23 +42,6 @@ export function stageLine(stage: LoadStage): string {
   const total = stage.total ?? 0;
   if (total > 0) return `${stage.label} · ${stage.done ?? 0} of ${total}`;
   return stage.label;
-}
-
-/**
- * True once `active` has been true for `delay` ms; false the moment it ends. A load that finishes
- * inside the delay never turns it on.
- */
-export function useLoadDelay(active: boolean, delay: number = LOAD_DELAY_MS): boolean {
-  const [elapsed, setElapsed] = useState(false);
-  useEffect(() => {
-    if (!active) return;
-    const timer = setTimeout(() => setElapsed(true), delay);
-    return () => {
-      clearTimeout(timer);
-      setElapsed(false);
-    };
-  }, [active, delay]);
-  return active && elapsed;
 }
 
 /** The stage line, with a row of ticks that fill as the reports come in. */
