@@ -225,6 +225,30 @@ or acts as if a step worked without checking that it did.
   queue drops a refresh hint), and best-effort UI calls that claim nothing afterwards.
 - **How to check a new notice or log line:** name the field or the measurement behind it. If there
   is none, it is this bug.
+- A second mechanism, same cause: the editor draws a value it never received. A control, a count or a
+  figure falls back to a default (`?? 0`, `?? "1"`, `?? "#ffffff"`, a schema default) when the answer
+  is missing, so an unknown value reads as a real one.
+  [#258](https://github.com/iAmChumby/canvas-rgb/issues/258): "0 of 0 connected" before the first
+  status. [#264](https://github.com/iAmChumby/canvas-rgb/issues/264): a device with reads off drew the
+  schema's DPI stages, colours and profile as if read.
+  [#276](https://github.com/iAmChumby/canvas-rgb/issues/276): a read that came back with only some
+  keys drew the missing ones from the schema (`app/web/src/views/PropertyControls.tsx`
+  `?? defaultFor(def.kind)`; the DPI panel's `?? 6`, `?? "1"`, `?? 0`, `?? "#ffffff"` and the
+  controller's `?? "1"` for `active-profile`, both in `PeripheralsView.tsx`).
+- **Class fix, second mechanism:** done (#276). A peripheral page asks "what does the device hold?"
+  through one helper, `known(values, key)` (`app/web/src/lib/peripherals.ts`), which answers
+  `undefined` for a key the read did not carry and never a default. `PropertyControls` takes
+  `fromDevice` (a peripheral's values, where an effect's unset key still means its default) and draws
+  an unread key as `UnreadValue` (`app/web/src/components/UnreadValue.tsx`): a dash with the tooltip
+  "not read from the device" and no control, so a default the device never held cannot be written. The
+  DPI strip and the controller's profile and button map do the same. One test over every peripheral
+  schema in the fakes (`app/web/src/views/__tests__/PeripheralPartialRead.test.tsx`) removes each key
+  in turn and fails on a control labelled with that setting, a chip with a figure or a colour for it,
+  a stage strip with no count, an active stage or an active profile that was not read. Siblings left
+  open (device figures drawn as `0` when missing, not peripheral settings): `header.pwm_percent ?? 0`
+  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty ring and the RPM figure), and
+  `h.rpm ?? 0` in the RPM history (`app/web/src/lib/store.ts`). When adding a device value to the
+  page, read it with `known()` and draw `UnreadValue` for `undefined`.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 

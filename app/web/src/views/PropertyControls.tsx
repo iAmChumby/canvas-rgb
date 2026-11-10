@@ -10,7 +10,9 @@ import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
 import { Toggle } from "@/components/Toggle";
+import { UnreadValue } from "@/components/UnreadValue";
 import { parseHex } from "@/lib/color";
+import { known } from "@/lib/peripherals";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { PropKind } from "@/proto/PropKind";
@@ -31,6 +33,10 @@ function decimalsOf(step: number): number {
  *
  * `readOnly` names the keys the device cannot be asked to change: they are shown as the values
  * they hold, not as controls. `disabled` holds every control back (the daemon may not write).
+ *
+ * `fromDevice` says the values are what a device reported (a peripheral), not what the user chose
+ * (an effect, where an unset key rightly means its default). A key the read did not carry is then
+ * drawn as not read, with no control, instead of as the schema's default (#276).
  */
 export function PropertyControls({
   schema,
@@ -39,6 +45,7 @@ export function PropertyControls({
   readOnly,
   disabled,
   optionLabel,
+  fromDevice,
 }: {
   schema: PropertySchema;
   values: Values;
@@ -47,22 +54,32 @@ export function PropertyControls({
   disabled?: boolean;
   /** The words for a Choice option's id, when the ids are not words (peripherals). */
   optionLabel?: (id: string) => string;
+  fromDevice?: boolean;
 }) {
   return (
     <div className="prop-list">
       {schema.properties.map((def) => {
-        const value = values[def.key] ?? defaultFor(def.kind);
+        const held = fromDevice ? fits(def.kind, known(values, def.key)) : (values[def.key] ?? defaultFor(def.kind));
+        const value = held ?? defaultFor(def.kind);
         const fixed = readOnly?.includes(def.key) ?? false;
         return (
-          <div className="prop-item" data-kind={def.kind.type} key={def.key}>
+          <div
+            className="prop-item"
+            data-kind={def.kind.type}
+            data-key={def.key}
+            data-read={held ? "true" : "false"}
+            key={def.key}
+          >
             <span className="field-label">
               <span>{def.label}</span>
             </span>
             <div className="prop-control">
-              {fixed ? (
+              {!held ? (
+                <UnreadValue label={def.label} />
+              ) : fixed ? (
                 <ReadOnlyValue value={value} optionLabel={optionLabel} />
               ) : (
-                control(def.key, def.label, def.kind, value, schema, values, onChange, disabled, optionLabel)
+                control(def.key, def.label, def.kind, value, schema, values, onChange, disabled, optionLabel, fromDevice)
               )}
             </div>
           </div>
@@ -94,6 +111,18 @@ function ReadOnlyValue({ value, optionLabel }: { value: PropValue; optionLabel?:
   return <span className="read-only fig">{value.value}</span>;
 }
 
+/**
+ * #276: a device value of the wrong type (a number where a switch goes) is as unread as a missing
+ * one; drawing the kind's default in its place would show a made-up setting as read. A hue and an
+ * angle are both degrees and stand in for each other.
+ */
+function fits(kind: PropKind, value: PropValue | undefined): PropValue | undefined {
+  if (!value) return undefined;
+  if (value.type === kind.type) return value;
+  const degrees = (t: string) => t === "hue" || t === "angle";
+  return degrees(value.type) && degrees(kind.type) ? value : undefined;
+}
+
 function defaultFor(kind: PropKind): PropValue {
   switch (kind.type) {
     case "color":
@@ -121,6 +150,7 @@ function control(
   onChange: (key: string, value: PropValue) => void,
   disabled?: boolean,
   optionLabel?: (id: string) => string,
+  fromDevice?: boolean,
 ) {
   const word = (o: string) => (optionLabel ? optionLabel(o) : o);
   switch (kind.type) {
@@ -130,7 +160,9 @@ function control(
       const quick: ColorSwatch[] = [];
       for (const other of schema.properties) {
         if (other.key === key || other.kind.type !== "color") continue;
-        const held = values[other.key];
+        const held = fromDevice ? fits(other.kind, known(values, other.key)) : values[other.key];
+        // A colour the device did not report is no quick swatch: it would offer a made-up one.
+        if (fromDevice && !held) continue;
         const otherHex = held && held.type === "color" ? held.value : other.kind.default;
         const parsed = parseHex(otherHex);
         if (!parsed || parsed === hex.toLowerCase()) continue;

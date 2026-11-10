@@ -6253,6 +6253,17 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* A setting the device did not report (#276): a still dash in the control's place. */
+.unread-value {
+  display: inline-flex;
+  align-items: center;
+  min-height: var(--control-h);
+  padding: 0 var(--s2);
+  color: var(--mute);
+  font-size: var(--t14);
+  cursor: help;
+}
+
 .read-only-dot {
   width: 14px;
   height: 14px;
