@@ -1181,6 +1181,17 @@ html[data-motion="reduced"] *::after {
   color: var(--ink);
 }
 
+/* An option that cannot be picked reads as off, and hovering it does not light it (#279). */
+.seg-item:disabled,
+.seg-item:disabled:hover {
+  color: var(--mute);
+  cursor: not-allowed;
+}
+
+.seg-item[aria-checked="true"]:disabled {
+  color: var(--dim);
+}
+
 /* An icon-only group: the icon is the label, so the segments are tighter. */
 .seg[data-icons="true"] .seg-item {
   padding: 0 8px;
