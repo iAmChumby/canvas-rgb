@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-11-09
+
 ### Fixed
 
 - Fans: "Don't exceed" now speeds the fan up until the temperature is back under your limit, instead of only setting a minimum speed (#255)
@@ -247,7 +249,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.8.4...v0.9.0
