@@ -7464,6 +7464,158 @@ button.chip:hover {
   font-weight: 600;
 }
 
+/* The empty stage's drop hint (#257 phase 4): a faint dashed slot that reads "put an effect here",
+   with the empty state's own words under it. It takes no press: the stage under it does. */
+.rd-canvas-drop {
+  display: grid;
+  place-items: center;
+  width: 220px;
+  max-width: 100%;
+  min-height: 56px;
+  margin-bottom: var(--s2);
+  padding: var(--s2) var(--s3);
+  border: 1px dashed var(--line-2);
+  border-radius: var(--r-sm);
+  color: var(--mute);
+  font-size: var(--t14);
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+/* The three starter stacks under an empty stage (#257 phase 4, spec §5). */
+.rd-starters {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
+.rd-starters-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--s3);
+}
+
+.rd-starters-head h2 {
+  margin: 0;
+  font-size: var(--t16);
+  font-weight: 600;
+  color: var(--ink);
+}
+
+.rd-starters-head .mute {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+  font-size: var(--t14);
+}
+
+.rd-starters-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: var(--s2);
+}
+
+.rd-starter {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: var(--s1);
+  min-height: 84px;
+  padding: var(--s2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--raised);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    border-color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease),
+    transform var(--dur-fast) var(--ease);
+}
+
+.rd-starter:hover {
+  border-color: var(--a1);
+  background: var(--hover);
+}
+
+.rd-starter:active {
+  transform: translateY(1px);
+}
+
+.rd-starter:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.rd-starter-thumbs {
+  display: flex;
+  gap: 2px;
+  min-width: 0;
+}
+
+.rd-starter-thumbs .thumb,
+.rd-starter-thumbs .thumb-sm {
+  flex: 1 1 0;
+  width: auto;
+  min-width: 0;
+  height: 34px;
+}
+
+.rd-starter-text {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rd-starter-name {
+  font-size: var(--t14);
+  font-weight: 600;
+  color: var(--ink);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.rd-starter-meta {
+  flex: none;
+  font: var(--t14) / 1.3 var(--fm);
+  color: var(--mute);
+}
+
+@media (max-width: 720px) {
+  /* Three compact tiles across: a phone shows every starter and the library's first row under
+     the stage without a scroll (#257 phase 4). */
+  .rd-starters-grid {
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: var(--s2);
+  }
+
+  .rd-starters-head {
+    align-items: center;
+  }
+
+  .rd-starter {
+    min-height: 66px;
+    padding: var(--s1) var(--s2) var(--s2);
+  }
+
+  .rd-starter-thumbs .thumb,
+  .rd-starter-thumbs .thumb-sm {
+    height: 24px;
+  }
+
+  .rd-starter-meta {
+    font-size: var(--t14);
+  }
+}
+
 /* Every visible layer's frame sits on the picture as a faint outline (#257): the stage shows
    where each layer paints before anything is picked. The picked one is `.rd-area-frame` below,
    which draws over this outline. A faint frame takes no press: the stage under it picks the
@@ -8030,33 +8182,6 @@ button.chip:hover {
   font-weight: 600;
 }
 
-.rd-how-list {
-  margin: 0 0 var(--s2);
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--s1);
-  color: var(--mute);
-  font-size: var(--t14);
-  line-height: 1.5;
-}
-
-.rd-how-list li {
-  padding-left: var(--s4);
-  position: relative;
-}
-
-.rd-how-list li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.62em;
-  width: 8px;
-  height: 2px;
-  background: var(--line-2);
-}
-
 /* ---------- the picked layer ---------- */
 
 .rd-layer-edit {
@@ -8070,6 +8195,30 @@ button.chip:hover {
   overflow-x: hidden;
   overflow-y: auto;
   overscroll-behavior: contain;
+}
+
+/* The cue that the inspector goes on below the fold (#257 phase 4): a fade that takes the last
+   28px of whatever is cut there (a control sliced mid-label reads as scrollable, not broken) with a
+   tinted band at its foot, which shows even where the fold falls in a gap between controls. It goes
+   once the pane's end is in view. */
+.rd-layer-edit::after {
+  content: "";
+  position: sticky;
+  bottom: calc(var(--s3) * -1);
+  flex: none;
+  height: 28px;
+  margin-top: -28px;
+  background:
+    linear-gradient(transparent, color-mix(in srgb, var(--ink) 14%, transparent)) 0 100% / 100% 12px no-repeat,
+    linear-gradient(to bottom, transparent, var(--panel) 80%);
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur-fast) var(--ease);
+}
+
+/* Only while the pane has more below its fold (useMoreBelow); an empty pane never has. */
+.rd-layer-edit[data-more="true"]::after {
+  opacity: 1;
 }
 
 .layer-edit-head {
@@ -8224,6 +8373,160 @@ button.chip:hover {
 
 .rd-layer-none {
   padding: var(--s3);
+}
+
+/* The inspector's sections (#257 phase 4): each a heading with a disclosure key and the controls
+   under it. A hairline separates them; the first and the mask's own rule do not double up. */
+.rd-section {
+  border-top: 1px solid var(--line);
+  margin-top: var(--s3);
+  padding-top: var(--s2);
+}
+
+.rd-section:first-of-type {
+  border-top: 0;
+  margin-top: 0;
+  padding-top: 0;
+}
+
+.rd-section-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  min-height: 28px;
+}
+
+/* The heading and its key share one lead: the heading gives the lead its size, and the key lies
+   over all of it, so the title reads as part of the key without being inside it. */
+.rd-section-lead {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  margin-left: -4px;
+  padding: 3px 6px 3px 22px;
+  color: var(--dim);
+  transition: color var(--dur-fast) var(--ease);
+}
+
+.rd-section-lead:hover {
+  color: var(--ink);
+}
+
+.rd-section-toggle {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  padding: 0 0 0 4px;
+  border: 0;
+  border-radius: var(--r-sm);
+  background: none;
+  color: inherit;
+  font: inherit;
+  cursor: pointer;
+  transition: background var(--dur-fast) var(--ease);
+}
+
+.rd-section-toggle:hover {
+  background: var(--hover);
+}
+
+.rd-section-toggle:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.rd-section-toggle svg {
+  color: var(--mute);
+  flex: none;
+}
+
+.rd-section-title {
+  margin: 0;
+  font-size: var(--t14);
+  font-weight: 600;
+  color: inherit;
+}
+
+.rd-section-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
+}
+
+.rd-section-body {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding-top: var(--s2);
+}
+
+.rd-section-body[hidden] {
+  display: none;
+}
+
+/* A section already spaces itself; the mask's own rule and the area's lines would stack. */
+.rd-section .rd-mask {
+  margin-top: 0;
+  padding-top: 0;
+  border-top: 0;
+}
+
+.rd-section .layer-area {
+  margin-bottom: 0;
+  padding-bottom: 0;
+  border-bottom: 0;
+}
+
+/* A figure that opens its field (#257 phase 4): the number beside a slider is the readout, and a
+   click or tap turns it into the field. */
+.fig-field {
+  display: inline-flex;
+  align-items: baseline;
+  justify-content: flex-end;
+  gap: 2px;
+  min-width: 52px;
+  padding: 3px 6px;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: none;
+  color: var(--ink);
+  font: inherit;
+  cursor: text;
+  transition: border-color var(--dur-fast) var(--ease), background var(--dur-fast) var(--ease);
+}
+
+.fig-field:hover:not(:disabled) {
+  border-color: var(--line-2);
+  background: var(--hover);
+}
+
+.fig-field:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.fig-field .num {
+  font-size: var(--t14);
+}
+
+.fig-field-input {
+  width: 64px;
+}
+
+/* A finger needs 44px: the readout and its field grow to it on a phone, and the desktop keeps its
+   own size. The two share one height, so opening the field moves nothing. */
+@media (max-width: 720px) {
+  .fig-field,
+  .fig-field-input {
+    min-height: 44px;
+    align-items: center;
+  }
+
+  .fig-field {
+    min-width: 56px;
+  }
 }
 
 .rd-presets {
@@ -8685,6 +8988,18 @@ button.chip:hover {
     gap: var(--s3);
   }
 
+  /* An empty stack puts the library, the starters and the layer panel under the stage; together
+     they are taller than a phone. The column scrolls rather than shrinking the picture to a
+     sliver, and the stage keeps its own height (#257 phase 4). */
+  .rd-stacks-phone .rd-stack-main[data-empty="true"] {
+    overflow-y: auto;
+    overscroll-behavior: contain;
+  }
+
+  .rd-stacks-phone .rd-stack-main[data-empty="true"] .rd-stack-stage {
+    flex: 0 0 auto;
+  }
+
   /* The preview keeps its 320:200 picture and gives up height before anything is cut. The wrap
      takes its height from its width: the picture is the stage's own 320:200 rectangle, as the
      mockup draws it, rather than a square the height happens to give. */
@@ -8975,6 +9290,14 @@ button.chip:hover {
   color: var(--dim);
 }
 
+/* "New from code" is longer than "Gradient": it wraps inside the tile rather than running out of it. */
+.rd-library-code .rd-library-name {
+  max-width: 100%;
+  white-space: normal;
+  text-align: center;
+  text-wrap: balance;
+}
+
 .rd-library-code-icon {
   display: grid;
   place-items: center;
@@ -9063,11 +9386,6 @@ button.chip:hover {
   .rd-library[data-mode="tab"] .rd-library-tile .thumb-sm {
     aspect-ratio: 2 / 1;
   }
-}
-
-.rd-layers-empty-hint {
-  color: var(--mute);
-  font-size: var(--t14);
 }
 
 /* The insertion line while a drag is over the stack: one step of motion, then still. */

@@ -4,6 +4,7 @@ import type { CSSProperties } from "react";
 import { AngleDial } from "@/components/AngleDial";
 import { ColorField } from "@/components/ColorField";
 import type { ColorSwatch } from "@/components/ColorPicker";
+import { FigureField } from "@/components/FigureField";
 import { HueRing } from "@/components/HueRing";
 import { NumberField } from "@/components/NumberField";
 import { Segmented } from "@/components/Segmented";
@@ -46,6 +47,7 @@ export function PropertyControls({
   disabled,
   optionLabel,
   fromDevice,
+  readouts,
 }: {
   schema: PropertySchema;
   values: Values;
@@ -55,6 +57,8 @@ export function PropertyControls({
   /** The words for a Choice option's id, when the ids are not words (peripherals). */
   optionLabel?: (id: string) => string;
   fromDevice?: boolean;
+  /** A number is drawn as the slider's readout, which opens its field on a click (#257). */
+  readouts?: boolean;
 }) {
   return (
     <div className="prop-list">
@@ -79,7 +83,7 @@ export function PropertyControls({
               ) : fixed ? (
                 <ReadOnlyValue value={value} optionLabel={optionLabel} />
               ) : (
-                control(def.key, def.label, def.kind, value, schema, values, onChange, disabled, optionLabel, fromDevice)
+                control(def.key, def.label, def.kind, value, schema, values, onChange, disabled, optionLabel, fromDevice, readouts)
               )}
             </div>
           </div>
@@ -151,6 +155,7 @@ function control(
   disabled?: boolean,
   optionLabel?: (id: string) => string,
   fromDevice?: boolean,
+  readouts?: boolean,
 ) {
   const word = (o: string) => (optionLabel ? optionLabel(o) : o);
   switch (kind.type) {
@@ -192,16 +197,29 @@ function control(
             disabled={disabled}
             onChange={(v) => onChange(key, { type: "number", value: v })}
           />
-          <NumberField
-            label={`${label} value`}
-            min={kind.min}
-            max={kind.max}
-            step={kind.step}
-            decimals={decimals}
-            value={n}
-            disabled={disabled}
-            onCommit={(v) => onChange(key, { type: "number", value: v })}
-          />
+          {readouts ? (
+            <FigureField
+              label={label}
+              min={kind.min}
+              max={kind.max}
+              step={kind.step}
+              decimals={decimals}
+              value={n}
+              disabled={disabled}
+              onCommit={(v) => onChange(key, { type: "number", value: v })}
+            />
+          ) : (
+            <NumberField
+              label={`${label} value`}
+              min={kind.min}
+              max={kind.max}
+              step={kind.step}
+              decimals={decimals}
+              value={n}
+              disabled={disabled}
+              onCommit={(v) => onChange(key, { type: "number", value: v })}
+            />
+          )}
         </>
       );
     }

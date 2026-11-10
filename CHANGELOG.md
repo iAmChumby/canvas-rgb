@@ -8,8 +8,9 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
-- Effects: the builder has a library beside the picture (a rail on a wide window, a tray under the picture, a tab on a phone) with Effects and Masks, a search, and a Write code tile; click a tile to add it, drag it onto the picture to place it on the whole canvas, a device, a zone (hold Shift) or a new rectangle, drag it into the layer list to choose its place, and reorder a layer by dragging its grip — with Space and the arrow keys doing the same from the keyboard, and each step said aloud (#257)
+- Effects: the builder has a library beside the picture (a rail on a wide window, a tray under the picture, a tab on a phone) with Effects and Masks, a search, and a New from code tile; click a tile to add it, drag it onto the picture to place it on the whole canvas, a device, a zone (hold Shift) or a new rectangle, drag it into the layer list to choose its place, and reorder a layer by dragging its grip — with Space and the arrow keys doing the same from the keyboard, and each step said aloud (#257)
 - Effects: drag a mask from the library's Masks tab onto a layer's row or onto the picture and that layer wears it, with a mask thumb and a remove x on the row; the picked layer shows a direction arrow to drag around it (Shift snaps to 15°) and a speed pill to scrub, for the effects whose settings have a direction or a speed (#257)
+- Effects: the picked layer's builder is five clear sections — effect and blend, area, its own properties, mask and presets — with each number shown as a readout that opens its field on a click; an empty builder is a stage with the library open, a drag outline and three starter stacks, and a starter lands whole in one click and one undo step (#257)
 
 ## [0.12.0] - 2026-11-10
 

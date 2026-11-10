@@ -459,7 +459,9 @@ describe("the stack builder", () => {
     await renderEffects("?stack=new&state=complete,stack");
     await screen.findByTestId("stack-builder");
     expect(screen.getByText("Nothing to show yet")).toBeTruthy();
-    expect(screen.getByText("The bottom layer is painted first, then each layer over it.")).toBeTruthy();
+    expect(screen.getByText("No layers yet. Pick an effect from the library, or start with a stack.")).toBeTruthy();
+    expect(screen.queryByText(/painted first/)).toBeNull();
+    expect(document.querySelector(".rd-layers-empty ul")).toBeNull();
     const save = screen.getByRole("button", { name: "Save" });
     expect(save).toHaveProperty("disabled", true);
     const tryOn = screen.getByRole("button", { name: "Try on the lights" });

@@ -522,8 +522,11 @@ export function Stage({
         {!empty && <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} aria-label="The stack's preview" />}
         {empty && (
           <div className="rd-canvas-empty">
+            {/* The stage's own drop hint (#257 phase 4, spec §5): a faint outline that reads as a
+                place an effect goes, so an empty builder is a stage rather than a prose list. */}
+            <span className="rd-canvas-drop">Drag an effect here</span>
             <strong>Nothing to show yet</strong>
-            <span>Add a layer and its picture appears here.</span>
+            <span>Or start with a stack below.</span>
           </div>
         )}
         {!empty && (parts || dragging || (drop && drop.target?.kind !== "maskLayer")) && layout && (
