@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Fans: "Don't exceed" now speeds the fan up until the temperature is back under the line, instead of only setting a minimum speed. (#255)
+
 ## [0.10.1] - 2026-11-08
 
 ### Fixed

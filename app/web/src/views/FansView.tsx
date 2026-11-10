@@ -969,6 +969,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const [hotBusy, setHotBusy] = useState(false);
   const hotKind: HotKind = mode.mode === "curve" ? source.type : "cpu";
   const hotRow = (fans.hot ?? []).find((h) => h.kind === hotKind) ?? null;
+  // The short name the daemon's own reason uses for this source, so the floor sentence and the
+  // status say the same thing: "CPU", "GPU", or a board sensor's own name.
+  const hotSource: TempSource = mode.mode === "curve" ? mode.source : { type: "cpu" };
+  const hotSourceName = hotSource.type === "board" ? hotSource.name : hotSource.type.toUpperCase();
 
   /** Sends the whole set of hot limits with one kind changed (`null` = automatic).
    * Resolves true when the service accepted it, false when the PUT failed (422). */
@@ -1114,7 +1118,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {manual && (
           <div className="rule">
             <span>
-              Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c)}.
+              Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c, hotSourceName, hotRow?.ceiling_c)}
             </span>
             {hotControls}
             {hotError}

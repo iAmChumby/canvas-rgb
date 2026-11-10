@@ -16,10 +16,10 @@ const ASPECT = 0.62;
 /**
  * A 2 to 8 point curve on a temperature × percent grid. The shaded band at the bottom is the
  * floor. From the source's hot limit (issue #130: the user's "don't exceed" line, drawn here
- * and draggable) a manual header is raised to its hot floor, so that band is drawn from the
- * line. Past the fixed safety ceiling a hatched band says every manual header runs at full
- * speed. Points drag, or take the arrow keys. The coordinates are read from the points list
- * beside it.
+ * and draggable) a manual header is raised to its hot floor and, since issue #255, speeds up
+ * further until the source is back under the line: that band is the speed-up zone. Past the
+ * fixed safety ceiling a hatched band says every manual header runs at full speed. Points drag,
+ * or take the arrow keys. The coordinates are read from the points list beside it.
  */
 export function FanCurveEditor({
   header,
@@ -345,7 +345,9 @@ export function FanCurveEditor({
             </text>
           </>
         )}
-        {/* Hot floor: from the hot line to the right, shaded up to the hot floor (G4). */}
+        {/* Issue #255: from the hot line to the right is the speed-up zone. The flat floor (G4)
+            still applies inside it, and the closed loop raises the header further until the
+            source is back under the line. */}
         <rect
           x={hotLeft}
           y={hotTop}

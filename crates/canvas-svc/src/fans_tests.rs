@@ -227,13 +227,13 @@ fn the_hot_floor_overrides_a_lower_fixed_value_and_says_why() {
     r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
     let status = r.fans.status();
     let h = header(&status, "sys_fan1");
-    assert_eq!(h.pwm_percent, Some(35), "hot floor for non-CPU headers is 35 %");
+    assert_eq!(h.pwm_percent, Some(40), "hot floor 35 % plus the first 5-point boost at 55 C");
     assert_eq!(h.mode, FanMode::Fixed { percent: 20 }, "the request is kept");
-    assert!(h.override_reason.as_deref().unwrap_or_default().starts_with("hot floor 35%"));
+    assert_eq!(h.override_reason.as_deref(), Some("holding CPU under 50 °C"));
 
     r.fans.set_header_mode("cpu_fan", FanMode::Fixed { percent: 30 }, t0).unwrap();
     let status = r.fans.status();
-    assert_eq!(header(&status, "cpu_fan").pwm_percent, Some(50), "hot floor for CPU_FAN is 50 %");
+    assert_eq!(header(&status, "cpu_fan").pwm_percent, Some(55), "hot floor 50 % plus the 5-point boost at 55 C");
 }
 
 #[test]
@@ -1045,7 +1045,9 @@ fn a_step_from_40_to_51_raises_cpu_fan_to_the_hot_floor_on_the_same_tick() {
     let before = r.chip.duty_raw(CPU_FAN);
     assert!(before < 128, "40 C is below the hot floor: {before}");
     let after = tick_cpu_at_temp(&mut r, t0, 4, 51.0);
-    assert_eq!(after, 128, "51 C engages the 50 % hot floor on the same tick: {before} -> {after}");
+    // Issue #255: the floor still engages on the same tick, and the closed loop's first step
+    // (1 point) lands with it: 50 % + 1 = 51 %, raw 130.
+    assert_eq!(after, 130, "51 C engages the 50 % hot floor and the first boost step on the same tick: {before} -> {after}");
 }
 
 #[test]
@@ -1059,8 +1061,8 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
-    assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "the floor is engaged at 51 C");
-    let mut duty = 128;
+    assert_eq!(r.chip.duty_raw(CPU_FAN), 135, "the floor is engaged at 51 C, with the boost at 3 points (53 %)");
+    let mut duty = 135;
     for s in 4..=20 {
         duty = tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
@@ -1090,7 +1092,7 @@ fn a_latched_hot_floor_never_caps_a_rising_curve() {
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
-    assert_eq!(r.chip.duty_raw(CPU_FAN), 128, "latched at the 50 % hot floor at 51 C");
+    assert_eq!(r.chip.duty_raw(CPU_FAN), 135, "latched at the 50 % hot floor at 51 C, with the boost at 3 points (53 %)");
     let duty = tick_cpu_at_temp(&mut r, t0, 4, 85.0);
     assert_eq!(duty, 255, "85 C takes the curve's 100 % on the same tick: {duty}");
 }
@@ -1403,8 +1405,8 @@ fn issue130_a_user_limit_of_55_engages_at_55_and_not_at_52() {
     r.cpu.set(Some(56.0));
     r.fans.tick(t0 + Duration::from_secs(1));
     let status = r.fans.status();
-    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(35), "56 C is at the user line: the hot floor applies");
-    assert!(header(&status, "sys_fan1").override_reason.as_deref().unwrap_or_default().starts_with("hot floor 35%"));
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(36), "56 C is at the user line: the hot floor applies, plus the boost's first point");
+    assert_eq!(header(&status, "sys_fan1").override_reason.as_deref(), Some("holding CPU under 55 °C"));
 }
 
 #[test]
@@ -1464,10 +1466,190 @@ fn issue130_board_sensors_keep_the_50_degree_line_by_default() {
     };
     r.fans.set_header_mode("sys_fan1", flat, t0).unwrap();
     let status = r.fans.status();
-    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(35), "the board automatic line stays 50 C: the hot floor applies at 55 C");
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(40), "the board automatic line stays 50 C: the hot floor applies at 55 C, plus the 5-point boost");
     let board = hot_of(&mut r, HotKind::Board);
     assert_eq!(board.limit_c, 50.0);
     assert_eq!(board.ceiling_c, 90.0);
+}
+
+// ---- Issue #255: "Don't exceed" is a closed loop, not a flat floor. ----
+
+/// The duty the chip reports for `ch`, in percent (the driver's own readback conversion).
+fn duty_percent(r: &Rig, ch: usize) -> u8 {
+    ((u32::from(r.chip.duty_raw(ch)) * 100 + 127) / 255) as u8
+}
+
+/// A flat 50 % CPU curve, so only the hot-limit boost moves the duty.
+fn flat_fifty_curve() -> FanMode {
+    FanMode::Curve { source: TempSource::Cpu, points: vec![point(30.0, 50), point(70.0, 50)] }
+}
+
+#[test]
+fn issue255_a_curve_above_the_hot_limit_speeds_up_to_full_speed() {
+    // Issue #255: a curve sitting at 50 % with the reference held at 70 C and a 50 C line
+    // climbs tick over tick and reaches 100 %.
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
+    for s in 1..=3 {
+        tick_cpu_at_temp(&mut r, t0, s, 40.0);
+    }
+    let mut last = duty_percent(&r, CPU_FAN);
+    assert!(last < 100, "40 C is below the line: {last}%");
+    let mut duties = Vec::new();
+    for s in 4..=10 {
+        r.cpu.set(Some(70.0));
+        r.fans.tick(t0 + Duration::from_secs(s));
+        let duty = duty_percent(&r, CPU_FAN);
+        if last < 100 {
+            assert!(duty > last, "the duty did not rise on tick {s}: {duties:?} then {duty}%");
+        }
+        last = duty;
+        duties.push(duty);
+    }
+    assert_eq!(*duties.last().unwrap(), 100, "the boost reaches full speed within 10 ticks: {duties:?}");
+}
+
+#[test]
+fn issue255_one_degree_over_the_line_rises_at_least_one_point_a_tick() {
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
+    for s in 1..=3 {
+        tick_cpu_at_temp(&mut r, t0, s, 40.0);
+    }
+    let mut last = duty_percent(&r, CPU_FAN);
+    for s in 4..=10 {
+        let duty = tick_cpu_at_temp(&mut r, t0, s, 51.0);
+        let duty = ((u32::from(duty) * 100 + 127) / 255) as u8;
+        assert!(
+            duty > last,
+            "51 C (the line plus one) rose only {last} -> {duty} at tick {s}: 1 point a tick is the minimum"
+        );
+        last = duty;
+    }
+}
+
+#[test]
+fn issue255_the_boost_decays_below_the_deadband_and_holds_inside_it() {
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
+    for s in 1..=3 {
+        tick_cpu_at_temp(&mut r, t0, s, 60.0);
+    }
+    let hot = duty_percent(&r, CPU_FAN);
+    assert!(hot > 50, "60 C raised the duty: {hot}%");
+    // Inside the deadband (49 C, one degree below the 50 C line) the boost holds.
+    let mut held = Vec::new();
+    for s in 4..=8 {
+        tick_cpu_at_temp(&mut r, t0, s, 49.0);
+        held.push(duty_percent(&r, CPU_FAN));
+    }
+    assert!(held.iter().all(|&d| d == hot), "the deadband held the boost at {hot}%: {held:?}");
+    // Below the deadband (45 C, five degrees under) the boost decays to 0 and the duty returns
+    // to the curve's 50 %.
+    let mut last = held[0];
+    for s in 9..=200 {
+        last = tick_cpu_at_temp(&mut r, t0, s, 45.0);
+        last = ((u32::from(last) * 100 + 127) / 255) as u8;
+    }
+    assert_eq!(last, 50, "after the boost decays the curve's 50 % returns: {last}%");
+}
+
+#[test]
+fn issue255_an_oscillating_temperature_around_the_line_never_steps_the_duty_down() {
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
+    let mut duties = Vec::new();
+    for s in 1..=120 {
+        let temp = if s % 2 == 0 { 50.5 } else { 49.5 };
+        duties.push(tick_cpu_at_temp(&mut r, t0, s, temp));
+    }
+    let falls = duties.windows(2).filter(|w| w[1] < w[0]).count();
+    assert_eq!(falls, 0, "the duty stepped down {falls} times over 120 ticks: {duties:?}");
+    // And the closed loop did engage: the duty ended above where it started (a flat floor
+    // alone leaves it where it was, which is what the old code did).
+    assert!(duties.last() > duties.first(), "the boost never engaged: {duties:?}");
+}
+
+#[test]
+fn issue255_fixed_mode_speeds_up_above_the_line() {
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
+    for s in 1..=3 {
+        tick_at_temp(&mut r, t0, s, 40.0);
+    }
+    let start = duty_percent(&r, SYS_FAN1);
+    assert!(start < 100, "40 C is below the line: {start}%");
+    let mut duties = Vec::new();
+    for s in 4..=10 {
+        r.cpu.set(Some(60.0));
+        r.fans.tick(t0 + Duration::from_secs(s));
+        duties.push(duty_percent(&r, SYS_FAN1));
+    }
+    assert!(duties.last().unwrap() >= &90, "Fixed 20 % climbs with the boost: {duties:?}");
+    assert!(duties.windows(2).all(|w| w[1] >= w[0]), "the Fixed duty never steps down while hot: {duties:?}");
+}
+
+#[test]
+fn issue255_the_gpu_kind_is_covered() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let gpu = crate::fakes::FakeGpuFans::new(1);
+    let nct: Box<dyn FanChip> = Box::new(Nct6687::detect(chip.clone(), MSI_ALT1_MAP).unwrap());
+    let composite = crate::gpu_fans::CompositeChip::new(Some(nct), Some(Box::new(gpu.clone())));
+    let gpu_temp = FakeTemp::new(40.0);
+    let temps: BTreeMap<TempSource, Box<dyn TempReader>> = BTreeMap::from([
+        (TempSource::Cpu, Box::new(FakeTemp::new(40.0)) as Box<dyn TempReader>),
+        (TempSource::Gpu, Box::new(gpu_temp.clone()) as Box<dyn TempReader>),
+    ]);
+    let config = FansFile { hot_limits: HotLimits { cpu_c: None, gpu_c: Some(50.0), board_c: None }, ..Default::default() };
+    let mut fans = FanController::new(dir.path().to_path_buf(), Some(Box::new(composite)), None, temps, config, confirmed());
+    fans.startup(t0);
+    let curve = FanMode::Curve { source: TempSource::Gpu, points: vec![point(30.0, 30), point(70.0, 30)] };
+    fans.set_header_mode("gpu_fan1", curve, t0).unwrap();
+    assert_eq!(gpu.target_of(0), Some(30), "40 C is below the 50 C GPU line: the curve, not the boost");
+    let mut targets = Vec::new();
+    for s in 1..=5 {
+        gpu_temp.set(Some(60.0));
+        fans.tick(t0 + Duration::from_secs(s));
+        targets.push(gpu.target_of(0).unwrap());
+    }
+    assert!(targets.last().unwrap() >= &60, "the GPU fan speeds up with the boost: {targets:?}");
+    assert!(targets.windows(2).all(|w| w[1] >= w[0]), "the GPU duty never steps down while hot: {targets:?}");
+}
+
+#[test]
+fn issue255_the_reason_is_the_stable_holding_sentence() {
+    let t0 = Instant::now();
+    let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
+    let mut r = rig(config, t0);
+    r.cpu.set(Some(40.0));
+    r.fans.set_header_mode("cpu_fan", flat_fifty_curve(), t0).unwrap();
+    for s in 1..=3 {
+        tick_cpu_at_temp(&mut r, t0, s, 60.0);
+    }
+    let status = r.fans.status();
+    assert_eq!(header(&status, "cpu_fan").override_reason.as_deref(), Some("holding CPU under 50 °C"));
+    // The reason names the limit, never the live temperature: it is the same at 61 C.
+    r.cpu.set(Some(61.0));
+    r.fans.tick(t0 + Duration::from_secs(4));
+    let status = r.fans.status();
+    assert_eq!(header(&status, "cpu_fan").override_reason.as_deref(), Some("holding CPU under 50 °C"));
 }
 
 #[test]

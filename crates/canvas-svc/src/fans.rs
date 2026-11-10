@@ -52,6 +52,19 @@ pub const CURVE_STEP_DOWN_HOLD: Duration = Duration::from_secs(60);
 /// The hold alone steps the duty down only when the smoothed temperature asks for at least this many
 /// percentage points less. Without it a 50/54 C input dipped the duty by 1 % every hold period.
 pub const CURVE_STEP_DOWN_MIN_PERCENT: u8 = 3;
+/// Issue #255: the smallest rise of the hot-limit boost, in percentage points per second. A
+/// reference temperature at the line still steps the duty up by at least this much, so "Don't
+/// exceed" always answers.
+pub const HOT_BOOST_MIN_RISE: f32 = 1.0;
+/// Issue #255: how fast the boost grows per degree above the line, in percentage points per
+/// second per degree. The BIOS Smart Fan step-up shape: the further over the line, the faster.
+pub const HOT_BOOST_GAIN: f32 = 1.0;
+/// Issue #255: the deadband below the line, in degrees, where the boost holds instead of
+/// decaying. A temperature hovering at the line never flips the duty (issue #17).
+pub const HOT_BOOST_DEADBAND_C: f32 = 2.0;
+/// Issue #255: how fast the boost decays below the deadband, in percentage points per second.
+/// The fall is much slower than the rise, so the fan gives the temperature time to come back.
+pub const HOT_BOOST_DECAY: f32 = 0.25;
 /// A gap between two curve updates longer than this (a missing sensor, a sleep) restarts the
 /// smoothing from the current reading.
 const CURVE_RESEED: Duration = Duration::from_secs(10);
@@ -128,6 +141,12 @@ struct CurveState {
     ceiling_latched: bool,
     /// When the temperature first fell below the ceiling while it is latched.
     ceiling_below_since: Option<Instant>,
+    /// Issue #255: the closed-loop boost above the hot limit, in percentage points. It rises
+    /// while the reference temperature is at or above the line and decays slowly below the
+    /// deadband, so the header holds the line instead of sitting on a flat floor.
+    hot_boost: f32,
+    /// When the boost was last updated, for the tick delta. `None` before the first tick.
+    boost_last_at: Option<Instant>,
 }
 
 impl CurveState {
@@ -204,6 +223,36 @@ impl CurveState {
     fn note_ceiling(&mut self, temp_c: Option<f32>, ceiling_c: f32, now: Instant) {
         note_latch(&mut self.ceiling_latched, &mut self.ceiling_below_since, temp_c, ceiling_c, now);
     }
+
+    /// Issue #255: one tick of the hot-limit boost. `temp_c` is the reference temperature and
+    /// `limit_c` the hot line. At or above the line the boost rises (fast), inside the deadband
+    /// it holds, and below the deadband it decays (slowly). While the safety ceiling is latched
+    /// the boost is frozen: the ceiling already runs the header at 100 %. A missing reading
+    /// resets it, because the loop has no measurement to close on and the sensor-loss handback
+    /// follows.
+    fn note_boost(&mut self, temp_c: Option<f32>, limit_c: f32, now: Instant, ceiling_latched: bool) {
+        if ceiling_latched {
+            self.boost_last_at = Some(now);
+            return;
+        }
+        let Some(temp) = temp_c else {
+            self.hot_boost = 0.0;
+            self.boost_last_at = Some(now);
+            return;
+        };
+        let dt = self
+            .boost_last_at
+            .map_or(1.0, |previous| now.saturating_duration_since(previous).as_secs_f32());
+        self.boost_last_at = Some(now);
+        if temp >= limit_c {
+            self.hot_boost += HOT_BOOST_MIN_RISE.max(HOT_BOOST_GAIN * (temp - limit_c)) * dt;
+        } else if temp >= limit_c - HOT_BOOST_DEADBAND_C {
+            // Inside the deadband the boost holds: a temperature hovering at the line must not
+            // flip the duty (issue #17).
+        } else {
+            self.hot_boost = (self.hot_boost - HOT_BOOST_DECAY * dt).max(0.0);
+        }
+    }
 }
 
 /// One latched-over-a-line bookkeeping step, shared by the hot floor and the safety ceiling:
@@ -239,6 +288,9 @@ fn same_hot_kind(a: &FanMode, b: &FanMode) -> bool {
 #[derive(Default)]
 struct Slot {
     curve: CurveState,
+    /// The mode this header was last driven in (issue #255). A change resets the boost: the
+    /// closed loop starts over on a new mode.
+    mode: Option<FanMode>,
     /// `Some(time)` while this service holds the header in manual mode.
     manual_since: Option<Instant>,
     /// Set by a safety or failure handback. Sticky until the user applies the header again.
@@ -736,6 +788,10 @@ impl FanController {
             return;
         }
         slot.manual_since = None;
+        // Issue #255: the closed loop ends with the header. The boost is dropped with it.
+        slot.curve.hot_boost = 0.0;
+        slot.curve.boost_last_at = None;
+        slot.mode = None;
         let id = self.chip.as_ref().and_then(|c| c.channels().get(ch)).map_or("", |s| s.id);
         if let Some(chip) = self.chip.as_mut() {
             if let Err(e) = chip.set_manual(ch, false) {
@@ -777,6 +833,12 @@ impl FanController {
         // The resume is handled. The next tick's wall-clock gap spans the sleep and must not count
         // it a second time (that would restart the grace).
         self.sleep.last_wall = None;
+        // Issue #255: a resume restarts every closed loop. The heat history before the sleep
+        // says nothing about the temperature after it.
+        for slot in &mut self.slots {
+            slot.curve.hot_boost = 0.0;
+            slot.curve.boost_last_at = None;
+        }
         let held = self.controlled();
         tracing::info!(source, headers = ?held, grace_ms = RESUME_GRACE.as_millis() as u64, "resume: fan writes held, profile re-applies after the grace");
         self.sleep.reapply.extend(held);
@@ -817,6 +879,11 @@ impl FanController {
             slot.manual_since = None;
             slot.handed_back = true;
             slot.override_reason = Some(reason);
+            // Issue #255: a handback ends the closed loop; the boost starts over when the
+            // header is applied again.
+            slot.curve.hot_boost = 0.0;
+            slot.curve.boost_last_at = None;
+            slot.mode = None;
         }
     }
 
@@ -907,6 +974,14 @@ impl FanController {
         if !self.header_available(spec.id) {
             return;
         }
+        // Issue #255: a mode change restarts the closed loop. The boost is an integral term
+        // over the current mode; carrying it across a change would apply one mode's heat
+        // history to another.
+        if self.slots[ch].mode.as_ref() != Some(&mode) {
+            self.slots[ch].curve.hot_boost = 0.0;
+            self.slots[ch].curve.boost_last_at = None;
+            self.slots[ch].mode = Some(mode.clone());
+        }
         let (target, reference, kind) = match &mode {
             FanMode::Bios => return,
             FanMode::Fixed { percent } => {
@@ -947,6 +1022,11 @@ impl FanController {
                     let target = curve.step(points, temp, now);
                     (target, Some(temp), source.hot_kind())
                 } else {
+                    // Issue #255: the closed loop ends when its reading does. The header is
+                    // handed back below; a reading that comes back starts the boost afresh
+                    // rather than applying the heat from before the gap.
+                    self.slots[ch].curve.hot_boost = 0.0;
+                    self.slots[ch].curve.boost_last_at = None;
                     let since = self.slots[ch].manual_since.unwrap_or(now);
                     let last = self.last_good.get(source).copied().unwrap_or(since);
                     if now.saturating_duration_since(last) >= Duration::from_millis(SENSOR_LOSS_TIMEOUT_MS) {
@@ -974,6 +1054,10 @@ impl FanController {
         self.slots[ch].curve.note_ceiling(reference, ceiling_c, now);
         let latched = self.slots[ch].curve.hot_latched;
         let ceiling_latched = self.slots[ch].curve.ceiling_latched;
+        // Issue #255: the closed-loop boost. It runs after the latches so the ceiling freeze
+        // sees the latch this tick engaged, and before the missing-reading hold so a sensor
+        // loss resets it.
+        self.slots[ch].curve.note_boost(reference, limit_c, now, ceiling_latched);
         // A Fixed header with no reference reading while a safety latch is set must not
         // write its lower Fixed duty over the latched 100 %. Hold the last written duty
         // (write nothing) and hand back after the sensor-loss timeout, exactly as the
@@ -994,7 +1078,16 @@ impl FanController {
         } else {
             runtime_floor_at(spec.id, self.config.floor_percent, reference, limit_c)
         };
-        let mut percent = target.max(floor);
+        let base_duty = target.max(floor);
+        // Issue #255: the boost is a closed loop on top of the curve or the Fixed duty. It is
+        // capped where the output reaches 100, so a long heat soak cannot wind it past full
+        // speed. The flat floor and the ceiling latch below are unchanged.
+        let boost = self.slots[ch]
+            .curve
+            .hot_boost
+            .min((100.0 - f32::from(base_duty)).max(0.0));
+        self.slots[ch].curve.hot_boost = boost;
+        let mut percent = (f32::from(base_duty) + boost).round().clamp(0.0, 100.0) as u8;
         let mut reason = None;
         if ceiling_latched && reference.is_some() {
             // The fixed safety ceiling (issue #130): whatever the curve or the setting asks
@@ -1007,7 +1100,15 @@ impl FanController {
                 };
                 reason = Some(format!("at the safety ceiling: {} is {:.0} °C", ceiling_name(&name), t));
             }
-        } else if floor > base && percent == floor {
+        } else if boost >= 1.0 {
+            // Issue #255: the closed loop is holding the line. The reason names the limit,
+            // never the live temperature, so the editor's stable sentence rule holds.
+            let name = match &mode {
+                FanMode::Curve { source, .. } => source_label(source),
+                _ => "CPU".to_string(),
+            };
+            reason = Some(format!("holding {} under {:.0} °C", hot_name(&name), limit_c));
+        } else if floor > base && base_duty == floor {
             if let Some(t) = reference {
                 let name = match &mode {
                     FanMode::Curve { source, .. } => source_label(source),
@@ -1015,9 +1116,6 @@ impl FanController {
                 };
                 reason = Some(format!("hot floor {floor}% while {} is {:.0} °C", hot_name(&name), t));
             }
-        }
-        if percent > 100 {
-            percent = 100;
         }
         match self.write_and_verify(ch, percent) {
             Ok(()) => {
