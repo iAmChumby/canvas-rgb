@@ -59,7 +59,7 @@ import { useDraftOnLights } from "@/views/effects/useDraftOnLights";
 import { useSaveAndLeave } from "@/views/effects/useSaveAndLeave";
 import { useSheetFocus } from "@/views/effects/useSheetFocus";
 import { useBuilderKeys } from "@/views/effects/useBuilderKeys";
-import type { LayerArea } from "@/proto/LayerArea";
+import { useAreaPicker } from "@/views/effects/useAreaPicker";
 import type { Stack } from "@/proto/Stack";
 
 export function StackBuilder({
@@ -92,7 +92,6 @@ export function StackBuilder({
   const [announce, setAnnounce] = useState("");
   /** The phone's tab under the stage: the layer list, or the library. */
   const [phoneTab, setPhoneTab] = useState<"layers" | "library">("layers");
-  const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [chooseFor, setChooseFor] = useState<string | null>(null);
   // The phone's layer sheet: Tune pushes it over the builder (D95.5.7).
   const [sheetOpen, setSheetOpen] = useState(false);
@@ -109,8 +108,6 @@ export function StackBuilder({
   const sheetRef = useRef<HTMLDivElement>(null);
   const backRef = useRef<HTMLSpanElement>(null);
   const promptRef = useRef<HTMLDivElement>(null);
-  /** The key that opened the area picker: focus returns to it on close. */
-  const areaOpener = useRef<HTMLElement | null>(null);
   /** A pointer drag or resize on the stage is in progress: undo and redo wait for it. */
   const areaDraggingRef = useRef(false);
   const nameRef = useRef("");
@@ -216,6 +213,8 @@ export function StackBuilder({
     return { id, layers: draftRef.current.layers };
   }
 
+  const area = useAreaPicker(edits.patch);
+
   const preview = usePreview({
     phase: load.phase,
     draft,
@@ -264,7 +263,7 @@ export function StackBuilder({
 
   useSheetFocus({
     sheetOpen,
-    pickerFor,
+    pickerFor: area.pickerFor,
     leaving: saver.leaving,
     setSheetOpen,
     phoneTab,
@@ -291,7 +290,7 @@ export function StackBuilder({
   useBuilderKeys({
     draft,
     sheetOpen,
-    pickerFor,
+    pickerFor: area.pickerFor,
     leaving: saver.leaving,
     naming: saver.naming,
     maskFor: mask.maskFor,
@@ -303,17 +302,6 @@ export function StackBuilder({
   });
 
   const closeChoose = () => closePopover(".rd-choose-effect", chooseRef, () => setChooseFor(null));
-
-  const closePicker = () => {
-    setPickerFor(null);
-    const opener = areaOpener.current;
-    if (opener) setTimeout(() => opener.focus(), 0);
-  };
-
-  const applyArea = (area: LayerArea) => {
-    if (pickerFor) edits.patch(pickerFor, { area });
-    closePicker();
-  };
 
   /** The library, in whichever shape this width gives it. */
   const libraryPanel = (mode: LibraryMode) => (
@@ -553,10 +541,7 @@ export function StackBuilder({
               load={load}
               setEdit={setEdit}
               setSheetOpen={setSheetOpen}
-              onOpenArea={(id, opener) => {
-                areaOpener.current = opener;
-                setPickerFor(id);
-              }}
+              onOpenArea={area.open}
               onChooseEffectOpen={setChooseFor}
               onPropChange={(id, key, value) => {
                 setDraft(
@@ -603,13 +588,13 @@ export function StackBuilder({
         onKey={mask.onMaskKey}
       />
 
-      {pickerFor && (
+      {area.pickerFor && (
         <StackAreaPicker
-          layer={draft.layers.find((layer) => layer.id === pickerFor) ?? draft.layers[0]!}
+          layer={draft.layers.find((layer) => layer.id === area.pickerFor) ?? draft.layers[0]!}
           layout={layout}
           devices={devices}
-          onUse={(area) => applyArea(area)}
-          onClose={closePicker}
+          onUse={area.apply}
+          onClose={area.close}
         />
       )}
 
@@ -643,12 +628,4 @@ export function StackBuilder({
     </div>
   );
 }
-
-
-
-
-
-
-
-
 
