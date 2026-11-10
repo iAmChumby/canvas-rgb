@@ -69,7 +69,8 @@ export interface Snap {
   displaysError: string | null;
   /** The daemon is older than the display routes: it answered 404, so it is not an error. */
   displaysUnsupported: boolean;
-  rpm: Record<string, number[]>;
+  /** Per header, one slot per poll: the RPM, or null where the chip gave no reading. */
+  rpm: Record<string, (number | null)[]>;
   /** The tray's update state. Null until the tray has answered, and in a browser with no fixture. */
   update: UpdateState | null;
   /** The areas with a load in flight after a Try again: the frame shows its placeholder while one
@@ -241,9 +242,10 @@ export async function refreshFans(n?: number): Promise<void> {
     const rpm = { ...snap.rpm };
     for (const h of fans.headers) {
       const prev = rpm[h.id] ?? [];
-      // Issue #279: a header with no reading adds no sample. A made-up 0 would draw a fan that
-      // stopped, and would pull the sparkline's peak down with it.
-      if (h.rpm !== null) rpm[h.id] = [...prev.slice(-(RPM_HISTORY - 1)), h.rpm];
+      // Issue #279: a header with no reading adds an empty slot, never a made-up 0 (that would
+      // draw a fan that stopped). The slot keeps the history true to time: one slot per poll,
+      // and the sparkline breaks its line there instead of bridging the gap.
+      rpm[h.id] = [...prev.slice(-(RPM_HISTORY - 1)), h.rpm];
     }
     patchSnap({ fans, fansError: null, rpm });
   } catch (e) {

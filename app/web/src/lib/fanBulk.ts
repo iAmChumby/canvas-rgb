@@ -41,6 +41,17 @@ export function plainLabel(label: string): string {
   return label.replace(/ \(tach only\)$/, "");
 }
 
+/** A header the daemon labels "(tach only)": it has no duty register at all. A header that merely
+ *  has no duty reading just now (#279) is not this, and must not be called this. */
+export function isTachOnly(h: FanHeaderStatus): boolean {
+  return plainLabel(h.label) !== h.label;
+}
+
+/** Why a header with no duty reading cannot be set, in the words that are true of it. */
+export function noDutyWhy(h: FanHeaderStatus): string {
+  return isTachOnly(h) ? TACH_ONLY_WHY : UNREAD_DUTY_WHY;
+}
+
 /** A header the chip can drive. A header the board does not route (issue #128: the chip has
  *  the channel, the board has no connector) and a tach-only header cannot be driven. */
 export function canDrive(h: FanHeaderStatus): boolean {
@@ -103,7 +114,7 @@ export async function applyBulk(
       continue;
     }
     if (!canDrive(h)) {
-      out.push({ ...base, state: "skipped", detail: TACH_ONLY_WHY });
+      out.push({ ...base, state: "skipped", detail: noDutyWhy(h) });
       continue;
     }
     if (isHandedBack(h)) {

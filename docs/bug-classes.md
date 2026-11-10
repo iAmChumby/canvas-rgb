@@ -248,11 +248,17 @@ or acts as if a step worked without checking that it did.
   closed by [#279](https://github.com/iAmChumby/canvas-rgb/issues/279): `header.pwm_percent ?? 0`
   and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty meter and the RPM figures,
   plus a temperature with no `celsius`), `h.rpm ?? 0` in the RPM history
-  (`app/web/src/lib/store.ts`, which now adds no sample), and the made-up `0` in the service
-  banner's `fmtSeconds` and in the demo display's fan read. The Fans page draws each missing
-  reading as `UnreadValue`, the history's peak skips unread fans, and a header whose duty was not
-  read is not offered as settable. When adding a device value to the page, read it with `known()`
-  and draw `UnreadValue` for `undefined`.
+  (`app/web/src/lib/store.ts`, which now keeps a `null` slot for a poll with no reading), and the
+  made-up `0` in the service banner's `fmtSeconds` and in the demo display's fan read. The Fans
+  page draws each missing reading as `UnreadValue`; the history keeps one slot per poll, so the
+  sparkline breaks its line at a `null` slot instead of bridging it, and every reader of the
+  history (`peakOf`) skips `null`. Only a header whose label the daemon marks "(tach only)" is
+  called tach only; any other header with no duty is "duty not read". A header with no duty
+  reading is offered no mode, in the bulk bar and in the header editor alike: the daemon accepts
+  the request (it checks only the register map, `crates/canvas-svc/src/fans.rs:1202`), but every
+  write is read back (`fans.rs:1155-1168`), and with no reading the write fails and the header
+  goes back to BIOS. When adding a device value to the page, read it with `known()` and draw
+  `UnreadValue` for `undefined`.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 

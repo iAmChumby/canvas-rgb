@@ -12,7 +12,7 @@ import { Panel, Field } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
 import { Slider } from "@/components/Slider";
-import { Sparkline, Figure } from "@/components/Readout";
+import { Sparkline, Figure, peakOf } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { UnreadValue } from "@/components/UnreadValue";
 import { usePageNarrow } from "@/components/MediaQuery";
@@ -22,7 +22,7 @@ import { FansShape } from "@/components/LoadShapes";
 import { notify } from "@/components/Notify";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
 import { FanBulkBar } from "@/views/FanBulk";
-import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack, isUnavailable, plainLabel } from "@/lib/fanBulk";
+import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack, isUnavailable, noDutyWhy, plainLabel } from "@/lib/fanBulk";
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
@@ -425,12 +425,12 @@ function FanRow({
 }: {
   header: FanHeaderStatus;
   selected: boolean;
-  history: number[];
+  history: (number | null)[];
   checked: boolean;
   onTick: (shift: boolean) => void;
   onSelect: () => void;
 }) {
-  const peak = Math.max(2000, ...history);
+  const peak = peakOf(history, 2000);
   const duty = header.pwm_percent;
   const unavailable = isUnavailable(header);
   // A header whose label the daemon marks "(tach only)" cannot report a duty at all. Any other
@@ -546,12 +546,12 @@ function FanCard({
 }: {
   header: FanHeaderStatus;
   selected: boolean;
-  history: number[];
+  history: (number | null)[];
   selectMode: boolean;
   checked: boolean;
   onSelect: () => void;
 }) {
-  const peak = Math.max(2000, ...history);
+  const peak = peakOf(history, 2000);
   const duty = header.pwm_percent;
   const unavailable = isUnavailable(header);
   const tachOnly = plainLabel(header.label) !== header.label;
@@ -1050,6 +1050,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     }
   };
 
+  // A header with no duty reading (tach only, or not read, #279) cannot be set from here.
+  const cannotSet = !isUnavailable(header) && !canDrive(header);
   const manual = mode.mode !== "bios";
   const current = mode.mode;
   // The chip is doing something else than what was asked for: the daemon handed it back.
@@ -1174,6 +1176,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         <Segmented<"bios" | "fixed" | "curve">
           label={`${header.label} mode`}
           value={current}
+          disabled={cannotSet}
           options={[
             { value: "bios", label: "BIOS" },
             { value: "fixed", label: "Fixed %" },
@@ -1182,6 +1185,15 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           onChange={setMode}
         />
 
+        {cannotSet ? (
+          // The daemon writes a duty and then reads it back (`fans.rs` `write_and_verify`); with no
+          // duty reading the write cannot be confirmed and the header goes back to BIOS. So the
+          // editor offers no mode here, the same as the bulk bar.
+          <p className="mute" data-slot="fan-cannot-set">
+            {noDutyWhy(header)}
+          </p>
+        ) : (
+        <>
         {mode.mode === "bios" && (
           <p className="mute">Chip auto control. Floors off.</p>
         )}
@@ -1315,6 +1327,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               {header.pwm_percent === null ? <UnreadValue label="Duty" /> : <AnimatedNumber value={header.pwm_percent} />}
             </Figure>
           </p>
+        )}
+        </>
         )}
       </div>
       )}

@@ -1,6 +1,7 @@
 import { act, cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
-import { patchSnap, refreshFans } from "@/lib/store";
+import { getSnap, patchSnap, refreshFans } from "@/lib/store";
+import { UNREAD_DUTY_WHY } from "@/lib/fanBulk";
 import { FansView } from "@/views/FansView";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -43,7 +44,7 @@ beforeAll(() => {
 afterEach(() => {
   vi.restoreAllMocks();
   cleanup();
-  patchSnap({ fans: null, fansError: null });
+  patchSnap({ fans: null, fansError: null, rpm: {} });
   window.history.replaceState({}, "", "/fans/");
 });
 
@@ -90,13 +91,50 @@ describe("a header with no reading", () => {
     expect(unread(rpmCell as HTMLElement, "RPM")).not.toBeNull();
     expect(unread(dutyCell as HTMLElement, "Duty")).not.toBeNull();
     // The editor panel repeats the reading: it is the same unknown there.
-    expect(unread(screen.getByText("CPU fan", { selector: ".panel-title, h2, h3" }).closest(".panel") ?? document.body, "RPM")).not.toBeNull();
+    const panel = screen.getByText("CPU fan", { selector: ".panel-title, h2, h3" }).closest(".panel");
+    expect(panel).not.toBeNull();
+    expect(unread(panel as HTMLElement, "RPM")).not.toBeNull();
   });
 
-  it("does not put up a warning that the fan stopped", async () => {
+  it("the bulk bar names it as duty not read, never as tach only", async () => {
     await page("?state=fan-unread");
-    // A fan that was never read has not stopped, and no notice may say it has.
-    expect(document.body.textContent ?? "").not.toMatch(/stopped|not spinning|stalled/i);
+    const bar = (document.querySelector(".fan-bulk-idle")?.textContent ?? "").replace(/\s+/g, " ");
+    // The daemon labels only Pump fan 2 "(tach only)". The CPU fan has a duty register; it just
+    // gave no reading. The old bar listed it as "CPU fan, Pump fan 2: tach only, read-only."
+    expect(bar).toContain("Pump fan 2: tach only, read-only.");
+    expect(bar).toContain("CPU fan: duty not read, cannot be set.");
+    expect(bar).not.toMatch(/CPU fan[^.]*tach only/);
+  });
+
+  it("the header editor offers no mode for it, and says why", async () => {
+    await page("?state=fan-unread");
+    const modes = screen.getByRole("radiogroup", { name: "CPU fan mode" });
+    const radios = within(modes).getAllByRole("radio");
+    expect(radios.length).toBeGreaterThan(0);
+    for (const r of radios) expect((r as HTMLButtonElement).disabled).toBe(true);
+    expect(document.querySelector('[data-slot="fan-cannot-set"]')?.textContent).toBe(UNREAD_DUTY_WHY);
+  });
+
+  it("the header editor stays live for a header read at 0%", async () => {
+    await page("?state=fan-stopped");
+    const modes = screen.getByRole("radiogroup", { name: "CPU fan mode" });
+    for (const r of within(modes).getAllByRole("radio")) expect((r as HTMLButtonElement).disabled).toBe(false);
+    expect(document.querySelector('[data-slot="fan-cannot-set"]')).toBeNull();
+  });
+
+  it("keeps a gap in the RPM history instead of a 0 or a skipped poll", async () => {
+    await page("?state=fan-stopped");
+    window.history.replaceState({}, "", "/fans/?state=fan-unread");
+    await act(async () => {
+      await refreshFans();
+    });
+    window.history.replaceState({}, "", "/fans/?state=fan-stopped");
+    await act(async () => {
+      await refreshFans();
+    });
+    const history = getSnap().rpm["cpu_fan"] ?? [];
+    // Read at 0, then not read, then read at 0: three polls, three slots, the middle one empty.
+    expect(history.slice(-3)).toEqual([0, null, 0]);
   });
 
   it("a header read at 0 RPM and 0% still shows 0", async () => {
