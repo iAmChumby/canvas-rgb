@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-10
+
 ### Added
 
 - Effects: give any layer of a stacked effect an animated mask, like a flame over warm white, to shape where it shows (#256)
@@ -264,7 +266,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.3...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.3...v0.11.0
 [0.10.3]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.2...v0.10.3
 [0.10.2]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.10.0...v0.10.1
