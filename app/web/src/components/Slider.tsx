@@ -34,7 +34,8 @@ export function Slider({
   step = 1,
   label,
   floor,
-  disabled,
+  disabled: disabledProp,
+  busy = false,
   onChange,
   onCommit,
 }: {
@@ -45,10 +46,16 @@ export function Slider({
   label: string;
   floor?: number;
   disabled?: boolean;
+  /**
+   * A request sent from this slider is in flight: it ignores presses and keys like a disabled
+   * one, but keeps keyboard focus and its look, and says `aria-busy` (the loading kit's rule).
+   */
+  busy?: boolean;
   onChange: (v: number) => void;
   onCommit?: (v: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
+  const disabled = disabledProp || busy;
   const [dragging, setDragging] = useState(false);
   // While dragging, the cap and the fill follow the pointer itself, between steps; `value` (and
   // `onChange`) see only the snapped steps. Null when no drag is on: then `value` places the cap.
@@ -160,15 +167,16 @@ export function Slider({
       className="slider"
       style={style}
       role="slider"
-      tabIndex={disabled ? -1 : 0}
+      tabIndex={disabledProp ? -1 : 0}
       aria-label={label}
       aria-orientation="horizontal"
       aria-valuemin={min}
       aria-valuemax={max}
       aria-valuenow={value}
       aria-disabled={disabled ? true : undefined}
+      aria-busy={busy || undefined}
       data-dragging={dragging ? "true" : "false"}
-      data-disabled={disabled ? "true" : undefined}
+      data-disabled={disabledProp ? "true" : undefined}
       draggable={false}
       onDragStart={refuseDragStart}
       onPointerDown={onPointerDown}

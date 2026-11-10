@@ -60,6 +60,23 @@ export function BusyIcon({ icon, busy, size = 14 }: { icon: ReactNode; busy: boo
 }
 
 /**
+ * The wait mark of a status line that says a request is out ("Applying"): a small spinner after
+ * `LOAD_DELAY_MS`, with the words for a screen reader only. It draws nothing when not `busy`, so
+ * the line it stands in keeps whatever room its owner reserved, and a fast answer never flashes.
+ * The element that owns the line carries `aria-busy`; the spinner is a drawing.
+ */
+export function WaitMark({ busy, label, size = 14 }: { busy: boolean; label: string; size?: number }) {
+  const spinning = useLoadDelay(busy);
+  if (!busy) return null;
+  return (
+    <span className="wait-mark" data-spinning={spinning ? "true" : "false"}>
+      {spinning && <BusySpinner size={size} />}
+      <span className="sr-only">{label}</span>
+    </span>
+  );
+}
+
+/**
  * The one button. `busy` is the standard wait of a control that sends a request (Save, Apply,
  * Check, Rescan), the busy-button pattern of Primer's `loading` and Radix Themes':
  *
