@@ -12,6 +12,7 @@ import { baseFloor } from "@/lib/fan-rules";
 import {
   actionWords,
   applyBulk,
+  isTachOnly,
   plainLabel,
   summaryOf,
   type BulkAction,
@@ -75,7 +76,11 @@ export function FanBulkBar({
     (pickedFrom && curves.find((h) => h.id === pickedFrom)?.id) ?? focusedCurve?.id ?? curves[0]?.id ?? null;
   const from = curves.find((h) => h.id === fromId);
   const floor = baseFloor("", fans.floor_percent);
-  const tach = fans.headers.filter((h) => h.pwm_percent === null);
+  // A header with no duty is either one the daemon calls tach only, or one whose duty was not
+  // read (#279). The bar names each for what it is.
+  const noDuty = fans.headers.filter((h) => h.available && h.pwm_percent === null);
+  const tach = noDuty.filter(isTachOnly);
+  const unread = noDuty.filter((h) => !isTachOnly(h));
 
   const failed = result?.outcomes.some((o) => o.state === "failed") ?? false;
 
@@ -114,6 +119,7 @@ export function FanBulkBar({
         <span>
           Tick headers to set several at once.
           {tach.length > 0 && ` ${tach.map((h) => plainLabel(h.label)).join(", ")}: tach only, read-only.`}
+          {unread.length > 0 && ` ${unread.map((h) => h.label).join(", ")}: duty not read, cannot be set.`}
         </span>
       </div>
 

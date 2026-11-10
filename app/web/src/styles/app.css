@@ -546,8 +546,10 @@ html[data-motion="reduced"] *::after {
 
 /* A control in the strip has no room above it: its label opens downwards, over the page. */
 .strip .tip-bubble {
+  --tip-side: bottom;
+  --tip-align: end;
   bottom: auto;
-  top: calc(100% + 6px);
+  top: calc(100% + var(--tip-gap));
   left: auto;
   right: 0;
   transform: none;
@@ -1177,6 +1179,17 @@ html[data-motion="reduced"] *::after {
 
 .seg-item:hover {
   color: var(--ink);
+}
+
+/* An option that cannot be picked reads as off, and hovering it does not light it (#279). */
+.seg-item:disabled,
+.seg-item:disabled:hover {
+  color: var(--mute);
+  cursor: not-allowed;
+}
+
+.seg-item[aria-checked="true"]:disabled {
+  color: var(--dim);
 }
 
 /* An icon-only group: the icon is the label, so the segments are tighter. */
@@ -1978,13 +1991,23 @@ button.chip:hover {
 .tip {
   position: relative;
   display: inline-flex;
+  /* Where the bubble would like to sit, read by Tooltip.tsx (#271). The rules below are the
+     no-script answer; while a bubble is shown the script measures it and keeps it inside the
+     window, shifting it along its edge and flipping it to the other side when it has no room. */
+  --tip-side: top;
+  --tip-align: center;
+  --tip-gap: 6px;
 }
 
 .tip-bubble {
   position: absolute;
-  bottom: calc(100% + 6px);
+  bottom: calc(100% + var(--tip-gap));
   left: 50%;
   z-index: 30;
+  /* One line where one line fits, and a wrapped column where it does not: a bubble is never
+     wider than the window (#271). */
+  width: max-content;
+  max-width: calc(100vw - 16px);
   transform: translateX(-50%);
   padding: var(--s1) var(--s2);
   border: 1px solid var(--line-2);
@@ -1992,7 +2015,7 @@ button.chip:hover {
   background: var(--raised);
   color: var(--ink);
   font-size: var(--t14);
-  white-space: nowrap;
+  white-space: normal;
   opacity: 0;
   pointer-events: none;
   transition: opacity var(--dur-fast) var(--ease);
@@ -2328,6 +2351,7 @@ button.chip:hover {
    reaches past the frame. */
 .rd-layout .rd-lay-seg-tip .tip-bubble,
 .rd-layout .stage-mode-tip .tip-bubble {
+  --tip-align: end;
   white-space: normal;
   width: 260px;
   text-align: left;
@@ -2676,6 +2700,7 @@ button.chip:hover {
 /* The chip sits at the right end of the toolbar, so its bubble hangs from the right edge rather
    than from its middle. */
 .rd-effects .effect-toolbar .tip-bubble {
+  --tip-align: end;
   left: auto;
   right: 0;
   transform: none;
@@ -5898,8 +5923,10 @@ button.chip:hover {
   font-weight: 600;
 }
 
-/* The bubble hangs from the right edge of its switch, so it never reaches past the page. */
-.rd-peri-toggle .tip-bubble {
+/* The bubble hangs from the right edge of its switch, so it never reaches past the page. The
+   class is on the Tooltip: the bubble is the switch's sibling inside it, never its child. */
+.rd-peri-tip > .tip-bubble {
+  --tip-align: end;
   white-space: normal;
   width: 240px;
   text-align: left;
@@ -6264,6 +6291,20 @@ button.chip:hover {
   cursor: help;
 }
 
+/* In the Fans readouts the dash takes a figure's place, not a control's: it keeps the line's own
+   size, and a meter with no reading is a bare track rather than a bar at 0 (#279). */
+.rd-fans .unread-value {
+  min-height: 0;
+  padding: 0;
+  font-size: inherit;
+}
+
+.rd-fans .meter[data-unread="true"] {
+  background: transparent;
+  outline: 1px dashed var(--line-2);
+  outline-offset: -1px;
+}
+
 .read-only-dot {
   width: 14px;
   height: 14px;
@@ -6545,6 +6586,7 @@ button.chip:hover {
 
 .banner .tip-bubble,
 .curve-row .tip-bubble {
+  --tip-align: end;
   left: auto;
   right: 0;
   transform: none;
@@ -7013,11 +7055,13 @@ button.chip:hover {
 /* The transport's tooltips open inwards, so they stay over the rail and never reach over the
    page. */
 .rail-deck-transport .tip:first-child .tip-bubble {
+  --tip-align: start;
   left: 0;
   transform: none;
 }
 
 .rail-deck-transport .tip:last-child .tip-bubble {
+  --tip-align: end;
   right: 0;
   left: auto;
   transform: none;

@@ -244,11 +244,23 @@ or acts as if a step worked without checking that it did.
   DPI strip and the controller's profile and button map do the same. One test over every peripheral
   schema in the fakes (`app/web/src/views/__tests__/PeripheralPartialRead.test.tsx`) removes each key
   in turn and fails on a control labelled with that setting, a chip with a figure or a colour for it,
-  a stage strip with no count, an active stage or an active profile that was not read. Siblings left
-  open (device figures drawn as `0` when missing, not peripheral settings): `header.pwm_percent ?? 0`
-  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty ring and the RPM figure), and
-  `h.rpm ?? 0` in the RPM history (`app/web/src/lib/store.ts`). When adding a device value to the
-  page, read it with `known()` and draw `UnreadValue` for `undefined`.
+  a stage strip with no count, an active stage or an active profile that was not read. Siblings
+  closed by [#279](https://github.com/iAmChumby/canvas-rgb/issues/279): `header.pwm_percent ?? 0`
+  and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty meter and the RPM figures,
+  plus a temperature with no `celsius`), `h.rpm ?? 0` in the RPM history
+  (`app/web/src/lib/store.ts`, which now keeps a `null` slot for a poll with no reading), and the
+  made-up `0` in the service banner's `fmtSeconds` and in the demo display's fan read. The Fans
+  page draws each missing reading as `UnreadValue`; the history keeps one slot per poll, so the
+  sparkline breaks its line at a `null` slot instead of bridging it, and every reader of the
+  history (`peakOf`) skips `null`. Only a header whose label the daemon marks "(tach only)" is
+  called tach only; any other header with no duty is "duty not read". A header with no duty
+  reading is offered no Fixed or Curve, in the bulk bar and in the header editor alike: the daemon
+  accepts the request (it checks only the register map, `crates/canvas-svc/src/fans.rs:1202`), but
+  every write is read back (`fans.rs:1155-1168`), and with no reading the write fails and the
+  header goes back to BIOS. BIOS itself stays offered: it is the way back for a header left in
+  Fixed or Curve. The page's "no duty" can come from one failed poll (`fans.rs:1370` turns a read
+  error into `None`), so a lockout must never take the way back with it. When adding a device value to the page, read it with `known()` and draw
+  `UnreadValue` for `undefined`.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 
@@ -522,6 +534,18 @@ scroll, so the content was clipped and unreachable.
   `.hot-controls` was `nowrap` but its figure's own `.row-wrap` was not, so at 1024, 960 and 390
   "°C" dropped 16.1 px under the figure, and at 960 and 390 "Reset to automatic" passed the note by
   17.7 and 23.9 px (measured on origin/main with the check below).
+- [#271](https://github.com/iAmChumby/canvas-rgb/issues/271): a shown tooltip (`.tip-bubble`) was
+  placed by CSS alone, so a long label ran past the window (Layout's "Place Channel 1" reached
+  x = 1925 on a 1920 window) and was cut off by its pane (Peripherals' "Read again", 189.6 px past
+  the pane's right edge at 1920, 199.2 px past the window's left edge at 390).
+  `app/web/src/lib/tooltipPlacement.ts` is the collision rule in our own code (what Floating UI's
+  `flip` and `shift` and Radix's collision padding do; no dependency): the bubble keeps the CSS's
+  preferred side and alignment, slides along that edge to stay 8 px inside the window and inside
+  the nearest ancestor that clips it, flips to the other side when the preferred one has no room,
+  and wraps when the window has no room for one line. It is measured on show and again on resize
+  or scroll while shown; the move has no transition, so reduced motion needs nothing extra.
+  Six placement cases are unit-tested
+  (`app/web/src/lib/__tests__/tooltipPlacement.test.ts`).
 - **Class fix, second mechanism:** done (#263, #268). `tools/overflow-check.mjs` serves the static
   export and opens every view of the demo (plus Peripherals once read and Fans with a limit set) at
   the six redesign sizes in both themes. It fails on an element past the right edge of its `.panel`,
@@ -531,7 +555,10 @@ scroll, so the content was clipped and unreachable.
   it. A view that measured nothing fails too. It skips scroll-x containers (never a `.panel`: an
   `overflow-y: auto` panel computes `overflow-x: auto`, as the Fans right panel does), anything not
   drawn, and content a clipping ancestor cuts off inside the window. `--mutate-overflow` puts a
-  40 px wider element into one box per view and every row must then fail. Run it after
+  40 px wider element into one box per view and every row must then fail. Since #271
+  `--hover-tips` replaces the edge measure with a hover pass: it hovers every control that draws a
+  tooltip and fails on a shown bubble that passes the window by more than 1 px or that an ancestor
+  cuts off (78 hits on origin/main, 0 after #271). Run it after
   `npm --prefix app/web run build`. Not in CI yet (it needs Playwright's browser). When it finds an
   overflow, let the row wrap as groups (the browser decides from the control's own width) and keep
   every state of a row the same width, so a state change never moves it.

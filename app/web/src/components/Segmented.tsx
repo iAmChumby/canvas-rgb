@@ -6,6 +6,8 @@ export interface SegOption<T extends string> {
   value: T;
   label: string;
   icon?: ReactNode;
+  /** This one option cannot be picked; the others still can. */
+  disabled?: boolean;
 }
 
 interface ThumbBox {
@@ -86,9 +88,14 @@ export function Segmented<T extends string>({
     e.preventDefault();
     const at = options.findIndex((o) => o.value === value);
     const dir = e.key === "ArrowRight" ? 1 : -1;
-    const next = (at + dir + options.length) % options.length;
+    // Arrows step over an option that cannot be picked, as a native radio group does.
+    let next = at;
+    for (let i = 0; i < options.length; i++) {
+      next = (next + dir + options.length) % options.length;
+      if (!options[next]?.disabled) break;
+    }
     const opt = options[next];
-    if (!opt) return;
+    if (!opt || opt.disabled || next === at) return;
     onChange(opt.value);
     refs.current[next]?.focus();
   };
@@ -120,7 +127,7 @@ export function Segmented<T extends string>({
             aria-checked={checked}
             tabIndex={checked ? 0 : -1}
             className="seg-item"
-            disabled={disabled}
+            disabled={disabled || o.disabled}
             aria-label={iconOnly ? o.label : undefined}
             title={iconOnly ? o.label : undefined}
             onClick={() => onChange(o.value)}

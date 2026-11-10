@@ -15,6 +15,9 @@ import type { WriteResult } from "@/lib/fanWrites";
 /** Why a tach-only header cannot be ticked. */
 export const TACH_ONLY_WHY = "Tach only: canvas-rgb reads its speed and cannot set it.";
 
+/** Why a header with no duty reading cannot be ticked. */
+export const UNREAD_DUTY_WHY = "canvas-rgb has not read this header's duty, so it will not set it.";
+
 /** Why a header the board does not route cannot be ticked (issue #128). */
 export const UNAVAILABLE_WHY = "Not on this board: this header is not fitted on your board.";
 
@@ -36,6 +39,17 @@ export interface BulkOutcome {
 /** A header's label without the "(tach only)" the daemon appends: the row's chip says it. */
 export function plainLabel(label: string): string {
   return label.replace(/ \(tach only\)$/, "");
+}
+
+/** A header the daemon labels "(tach only)": it has no duty register at all. A header that merely
+ *  has no duty reading just now (#279) is not this, and must not be called this. */
+export function isTachOnly(h: FanHeaderStatus): boolean {
+  return plainLabel(h.label) !== h.label;
+}
+
+/** Why a header with no duty reading cannot be set, in the words that are true of it. */
+export function noDutyWhy(h: FanHeaderStatus): string {
+  return isTachOnly(h) ? TACH_ONLY_WHY : UNREAD_DUTY_WHY;
 }
 
 /** A header the chip can drive. A header the board does not route (issue #128: the chip has
@@ -99,8 +113,10 @@ export async function applyBulk(
       out.push({ ...base, state: "skipped", detail: UNAVAILABLE_WHY });
       continue;
     }
-    if (!canDrive(h)) {
-      out.push({ ...base, state: "skipped", detail: TACH_ONLY_WHY });
+    // BIOS is still sent: it is the way back for a header left in Fixed or Curve whose duty is
+    // not read now. Fixed and Curve need a duty to read back.
+    if (!canDrive(h) && action.kind !== "bios") {
+      out.push({ ...base, state: "skipped", detail: noDutyWhy(h) });
       continue;
     }
     if (isHandedBack(h)) {
