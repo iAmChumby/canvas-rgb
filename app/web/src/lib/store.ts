@@ -255,10 +255,14 @@ export async function refreshFans(n?: number): Promise<void> {
   }
 }
 
-export async function refreshDevices(n?: number): Promise<void> {
+/**
+ * Reads the device list. `rescan` asks the daemon to look at the hardware again first
+ * (`?rescan=1`, issue #233) instead of answering from the list it holds.
+ */
+export async function refreshDevices(n?: number, opts?: { rescan?: boolean }): Promise<void> {
   const req = n ?? beginRequest("devices");
   try {
-    const devices = (await api.devices()).devices;
+    const devices = (await (opts?.rescan ? api.rescanDevices() : api.devices())).devices;
     if (!isNewest("devices", req)) return;
     markAnswered("devices", req);
     patchSnap({ devices, devicesError: null, devicesTotal: devices.length });
@@ -346,7 +350,9 @@ export async function refreshDisplays(n?: number): Promise<void> {
 /** Asks for a load again, the way the Try again button does. */
 export const retryStatus = (): Promise<void> => retryArea("status", refreshStatus);
 export const retryFans = (): Promise<void> => retryArea("fans", refreshFans);
-export const retryDevices = (): Promise<void> => retryArea("devices", refreshDevices);
+/** Try again on the Devices page: a rescan, with the placeholder while it runs (issue #230). */
+export const retryDevices = (): Promise<void> =>
+  retryArea("devices", (n) => refreshDevices(n, { rescan: true }));
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
 export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);

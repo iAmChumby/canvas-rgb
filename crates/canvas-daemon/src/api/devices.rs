@@ -2,7 +2,7 @@
 //! `POST /api/v1/devices/{id}/identify`, and the white balance (#50):
 //! `GET /api/v1/white-balance`, `PUT/DELETE /api/v1/devices/{id}/white-balance`.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::Json;
 use canvas_proto::api::{DevicesResponse, IdentifyRequest, PatchZone, WhiteBalances};
 use canvas_proto::color::WhiteBalance;
@@ -12,10 +12,60 @@ use std::sync::Arc;
 use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 
+/// The query of `GET /api/v1/devices`.
+#[derive(Debug, Default, serde::Deserialize)]
+pub struct ListQuery {
+    /// `?rescan=1` (or `true`): ask OpenRGB for its devices again before answering.
+    #[serde(default)]
+    rescan: Option<String>,
+}
+
+impl ListQuery {
+    fn wants_rescan(&self) -> bool {
+        matches!(self.rescan.as_deref(), Some("1" | "true"))
+    }
+}
+
 /// `GET /api/v1/devices`.
-pub async fn list_devices(State(app): State<Arc<App>>) -> Json<DevicesResponse> {
-    let devices = app.devices.read().await.clone();
-    Json(DevicesResponse { devices })
+///
+/// Answers with the list the daemon holds. With `?rescan=1` it asks OpenRGB for its devices
+/// again first (within [`RESCAN_BUDGET`](crate::openrgb_supervisor::RESCAN_BUDGET), which is
+/// shorter than the editor's rescan deadline), keeps what it found as the held list and answers
+/// with that. A rescan that fails answers with the failure and leaves the held list alone: it
+/// never hands back the old list as if it were new.
+pub async fn list_devices(
+    State(app): State<Arc<App>>,
+    Query(query): Query<ListQuery>,
+) -> ApiResult<Json<DevicesResponse>> {
+    if !query.wants_rescan() {
+        let devices = app.devices.read().await.clone();
+        return Ok(Json(DevicesResponse { devices }));
+    }
+
+    let sizes = app.zones.read().await.clone();
+    let found = tokio::time::timeout(crate::openrgb_supervisor::RESCAN_BUDGET, async {
+        let mut adapter = app.adapter.lock().await;
+        crate::openrgb_supervisor::rescan_devices(adapter.as_mut(), &sizes).await
+    })
+    .await
+    .map_err(|_| ApiFailure::service_unavailable("OpenRGB did not answer the rescan in time"))?
+    .map_err(|e| {
+        tracing::warn!(error = %e, "the device rescan failed");
+        ApiFailure::service_unavailable(format!("could not rescan the devices: {e}"))
+    })?;
+
+    {
+        let mut list = app.devices.write().await;
+        *list = found.clone();
+    }
+    // The engine needs the new devices; the supervisor's next refresh sees the change too and
+    // places the new zones and adds their frame sinks.
+    if let Some(layout) = app.active_layout().await {
+        app.set_layout(&layout, &found);
+        app.stacks.publish_areas(&layout, &found);
+    }
+    tracing::info!(count = found.len(), "the devices were rescanned");
+    Ok(Json(DevicesResponse { devices: found }))
 }
 
 /// `PATCH /api/v1/devices/{id}/zones/{zone}`.

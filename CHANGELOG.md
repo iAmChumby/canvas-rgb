@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Devices: Try again now rescans (it sends `?rescan=1` and shows the loading placeholder while it runs), and the service answers a rescan by asking OpenRGB for its devices again instead of returning the list it held (#233, #230)
+
 ## [0.13.0] - 2026-11-10
 
 ### Changed

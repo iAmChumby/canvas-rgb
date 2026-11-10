@@ -269,6 +269,28 @@ fn device_key(devices: &[DeviceInfo]) -> Vec<(String, bool, Vec<u32>)> {
     key
 }
 
+/// How long `GET /api/v1/devices?rescan=1` may work before it answers with a failure. The editor
+/// gives the request `DEVICE_RESCAN_TIMEOUT_MS` (30 s, `app/web/src/lib/api.ts`), so the daemon
+/// answers first and the editor never has to give up on a daemon that is still working.
+pub const RESCAN_BUDGET: Duration = Duration::from_secs(25);
+
+/// A rescan the owner asked for (#233): asks OpenRGB for its devices again and returns them.
+///
+/// On a live connection the list is read again (and a saved zone size a new device lacks is
+/// applied, as the 5 s refresh does). With no connection the adapter connects first, so a rescan
+/// is also a retry of the link. This reads what OpenRGB reports now; making OpenRGB look at the
+/// hardware again needs a `rescan` on the adapter trait, which lives in the spine.
+pub async fn rescan_devices(
+    adapter: &mut dyn DeviceAdapter,
+    zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
+) -> Result<Vec<DeviceInfo>, String> {
+    if adapter.is_connected() {
+        refresh_devices(adapter, zone_sizes).await
+    } else {
+        connect_and_prepare(adapter, zone_sizes).await
+    }
+}
+
 /// Re-reads the device list on a live connection. A saved zone size that the device doesn't
 /// have yet (a device that appeared since connect) is applied, then the list is read again.
 async fn refresh_devices(
