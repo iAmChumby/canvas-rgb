@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState, type KeyboardEvent, type PointerEvent } from "react";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { HotLimitStatus } from "@/proto/HotLimitStatus";
-import { HOT_FLOOR, HOT_CPU_FAN_FLOOR, HOT_TEMP_C, CPU_FAN } from "@/lib/fan-rules";
+import { HOT_TEMP_C, hotFloor } from "@/lib/fan-rules";
 import { clamp } from "@/lib/format";
 import { dragThresholdPx } from "@/lib/hitTest";
 import { cancelPress } from "@/lib/pressDrag";
@@ -16,10 +16,10 @@ const ASPECT = 0.62;
 /**
  * A 2 to 8 point curve on a temperature × percent grid. The shaded band at the bottom is the
  * floor. From the source's hot limit (issue #130: the user's "don't exceed" line, drawn here
- * and draggable) a manual header is raised to its hot floor, so that band is drawn from the
- * line. Past the fixed safety ceiling a hatched band says every manual header runs at full
- * speed. Points drag, or take the arrow keys. The coordinates are read from the points list
- * beside it.
+ * and draggable) a manual header is raised to its hot floor and, since issue #255, speeds up
+ * further until the source is back under the line: that band is the speed-up zone. Past the
+ * fixed safety ceiling a hatched band says every manual header runs at full speed. Points drag,
+ * or take the arrow keys. The coordinates are read from the points list beside it.
  */
 export function FanCurveEditor({
   header,
@@ -249,9 +249,10 @@ export function FanCurveEditor({
     commitHot(next);
   };
 
-  const hotFloor = header === CPU_FAN ? HOT_CPU_FAN_FLOOR : HOT_FLOOR;
-  const hotTop = yOf(hotFloor);
   const hotLeft = xOf(hotValue);
+  // Issue #255 review: the flat hot floor (50 % CPU_FAN, 35 % others) still applies inside the
+  // speed-up zone, so it is drawn as a dashed level from the line to the ceiling.
+  const hotFloorY = yOf(hotFloor(header, floor));
   const hotLabel = `Don't exceed ${hotValue} °C${hot ? (hot.user_set ? " · set by you" : " · automatic") : ""}`;
   // The chart shows the figure only; the full words are on the handle (aria-valuetext) and in
   // the controls above the chart. The label sits at the top, left of its line when it fits (a
@@ -280,6 +281,9 @@ export function FanCurveEditor({
         <defs>
           <pattern id="ceiling-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
             <line x1="0" y1="0" x2="0" y2="8" stroke="var(--down)" strokeWidth="1.5" opacity="0.45" />
+          </pattern>
+          <pattern id="speedup-hatch" width="8" height="8" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+            <line x1="0" y1="0" x2="0" y2="8" stroke="var(--warn)" strokeWidth="1.5" opacity="0.5" />
           </pattern>
         </defs>
         {pctGrid.map((p) => (
@@ -345,14 +349,30 @@ export function FanCurveEditor({
             </text>
           </>
         )}
-        {/* Hot floor: from the hot line to the right, shaded up to the hot floor (G4). */}
-        <rect
-          x={hotLeft}
-          y={hotTop}
-          width={MARGIN.left + plotW - hotLeft}
-          height={MARGIN.top + plotH - hotTop}
-          fill="color-mix(in srgb, var(--warn) 16%, transparent)"
-        />
+        {/* Issue #255 review: from the hot line to the ceiling is the speed-up zone. The flat
+            floor (G4) still applies inside it, and the closed loop raises the header further
+            until the source is back under the line. */}
+        {hot && ceilX > hotLeft && (
+          <g>
+            <title>{`${header} speeds up above the don't exceed line`}</title>
+            <rect x={hotLeft} y={MARGIN.top} width={ceilX - hotLeft} height={plotH} fill="url(#speedup-hatch)" />
+            <line x1={hotLeft} x2={ceilX} y1={hotFloorY} y2={hotFloorY} stroke="var(--warn)" strokeDasharray="2 4" />
+            <text
+              x={hotLeft + 14}
+              y={MARGIN.top + plotH - 8}
+              transform={`rotate(-90 ${hotLeft + 14} ${MARGIN.top + plotH - 8})`}
+              textAnchor="start"
+              fill="var(--warn)"
+              stroke="var(--panel)"
+              strokeWidth={4}
+              paintOrder="stroke"
+              fontSize={14}
+              fontFamily="var(--fm)"
+            >
+              speeds up
+            </text>
+          </g>
+        )}
         <line x1={hotLeft} x2={hotLeft} y1={MARGIN.top} y2={MARGIN.top + plotH} stroke="var(--warn)" strokeDasharray="4 4" />
         {/* The hot line's handle: drag it, or use the arrow keys. */}
         <rect

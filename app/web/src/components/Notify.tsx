@@ -21,7 +21,26 @@ export type NotifyTone = "ok" | "warn" | "down" | "info";
 /** An answer a notification offers: the key beside the message. */
 export interface NotifyAction {
   label: string;
-  onClick: () => void;
+  /**
+   * Runs when the reader presses the key. The message goes with the answer, unless the answer
+   * returns `false`: it did not happen yet (a navigation the unsaved-changes prompt is holding),
+   * so the message is pinned: no clock, not even after the pointer leaves, until the owner takes
+   * it away with `dismissNotification` or the reader closes it.
+   */
+  onClick: () => void | boolean;
+}
+
+/** Extra policy for one message: a second line, a life of its own, and what the close key means. */
+export interface NotifyOptions {
+  /** A second line under the message. */
+  detail?: string;
+  /** How long the message stays before it goes on its own. It replaces the tone's rule. */
+  lifeMs?: number;
+  /**
+   * Runs when the reader takes the message away by hand: the close key, or a swipe. A timeout, an
+   * answer and `dismissNotification` do not run it.
+   */
+  onClose?: () => void;
 }
 
 /** How long a plain note stays up before it goes. */
@@ -65,10 +84,31 @@ function forget(id: string): void {
   holds.delete(id);
 }
 
+/**
+ * The messages the app took away (a timeout, an answer, `dismissNotification`). The library says
+ * "dismissed" for those too; only a message it dismissed that is not in this set was swiped away.
+ */
+const takenAway = new Set<string>();
+
 /** The notification goes: the library plays the leave motion. */
 function go(id: string): void {
   forget(id);
+  takenAway.add(id);
   sonnerToast.dismiss(id);
+}
+
+/**
+ * The message waits for its owner: the answer it offers has not happened yet (a navigation the
+ * unsaved-changes prompt holds). The clock stops for good, so the pointer leaving does not start
+ * it again; the owner takes the message away when the answer happens, or the reader does.
+ */
+function pin(id: string): void {
+  const hold = holds.get(id);
+  if (!hold) return;
+  if (hold.timer !== null) clearTimeout(hold.timer);
+  hold.timer = null;
+  hold.due = null;
+  hold.left = Infinity;
 }
 
 /**
@@ -111,26 +151,64 @@ function touch(id: string, patch: Partial<Hold>): void {
  *
  * A note (a success, a piece of information) goes after three seconds. An error, a warning and
  * anything that offers an answer stays until it is dismissed, because a message nobody can
- * finish reading is the problem this replaces.
+ * finish reading is the problem this replaces. `options.lifeMs` gives a message a life of its own:
+ * it still carries its close key, and it goes on its own when the life is spent. The return value
+ * is the message's identity, for `dismissNotification`.
  */
-export function notify(text: string, tone: NotifyTone = "ok", action?: NotifyAction): void {
+export function notify(
+  text: string,
+  tone: NotifyTone = "ok",
+  action?: NotifyAction,
+  options?: NotifyOptions,
+): string {
   const id = notificationId(tone, text);
   const keeps = tone === "down" || tone === "warn" || action !== undefined;
+  const life = options?.lifeMs ?? (keeps ? Infinity : NOTE_MS);
   sonnerToast.custom(
-    () => <NotifyBody id={id} text={text} tone={tone} action={action} keeps={keeps} />,
+    () => (
+      <NotifyBody
+        id={id}
+        text={text}
+        tone={tone}
+        action={action}
+        keeps={keeps}
+        detail={options?.detail}
+        onClose={options?.onClose}
+      />
+    ),
     // The library's own timer never runs: this file's clock owns the life of every message.
-    { id, duration: Infinity, testId: id, onDismiss: () => forget(id) },
+    {
+      id,
+      duration: Infinity,
+      testId: id,
+      onDismiss: () => {
+        forget(id);
+        // A swipe is as deliberate as the close key: it means what the close key means.
+        if (!takenAway.delete(id)) options?.onClose?.();
+      },
+    },
   );
+  takenAway.delete(id);
   const before = holds.get(id);
   if (before?.timer !== null && before?.timer !== undefined) clearTimeout(before.timer);
   holds.set(id, {
     hover: before?.hover ?? false,
     focus: before?.focus ?? false,
-    left: keeps ? Infinity : NOTE_MS,
+    left: life,
     due: null,
     timer: null,
   });
-  if (!keeps) sync(id);
+  // A message that waits for the reader has no clock to start; sync leaves it alone.
+  sync(id);
+  return id;
+}
+
+/**
+ * Takes one message away by the identity `notify` returned. A message that must not outlive its
+ * page (the "Updated to" notice, on the Updates page) uses it.
+ */
+export function dismissNotification(id: string): void {
+  go(id);
 }
 
 /**
@@ -141,19 +219,24 @@ export function dismissNotifications(): void {
   for (const id of Array.from(holds.keys())) go(id);
 }
 
-interface NotifyBodyProps {  id: string;
+interface NotifyBodyProps {
+  id: string;
   text: string;
   tone: NotifyTone;
   action?: NotifyAction;
   /** True when the notification waits for the reader instead of a clock. */
   keeps: boolean;
+  /** A second line under the message. */
+  detail?: string;
+  /** Runs when the reader closes the message with its close key. */
+  onClose?: () => void;
 }
 
 /**
  * The body of a notification: the mark for its tone, the words, and the answers it carries. It
  * is the only part of a notification the app draws.
  */
-function NotifyBody({ id, text, tone, action, keeps }: NotifyBodyProps) {
+function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBodyProps) {
   const Icon = TONE_ICON[tone];
   return (
     <div
@@ -174,15 +257,18 @@ function NotifyBody({ id, text, tone, action, keeps }: NotifyBodyProps) {
       <span className="notify-icon" aria-hidden="true">
         <Icon size={16} weight="fill" />
       </span>
-      <span className="notify-text">{text}</span>
+      <span className="notify-text">
+        {detail ? <span className="notify-title">{text}</span> : text}
+        {detail && <span className="notify-detail">{detail}</span>}
+      </span>
       {action && (
         <Button
           variant="ghost"
           size="sm"
           className="notify-action"
           onClick={() => {
-            action.onClick();
-            go(id);
+            if (action.onClick() === false) pin(id);
+            else go(id);
           }}
         >
           {action.label}
@@ -195,7 +281,10 @@ function NotifyBody({ id, text, tone, action, keeps }: NotifyBodyProps) {
           size="sm"
           className="notify-close"
           icon={<X size={14} weight="bold" />}
-          onClick={() => go(id)}
+          onClick={() => {
+            onClose?.();
+            go(id);
+          }}
         />
       )}
     </div>

@@ -20,8 +20,16 @@ export function hotFloor(header: string, configured: number): number {
   return Math.max(baseFloor(header, configured), header === CPU_FAN ? HOT_CPU_FAN_FLOOR : HOT_FLOOR);
 }
 
-/** G4's rule, with the numbers filled in. Issue #130: the line is the source's hot limit now. */
-export function hotRuleText(limitC?: number): string {
-  const line = limitC === undefined ? "its hot limit" : `its hot limit of ${limitC} °C`;
-  return `Below ${HOT_FLOOR}% (CPU_FAN ${HOT_CPU_FAN_FLOOR}%) is raised at or above ${line}`;
+/**
+ * G4's rule and issue #255's closed loop, with the numbers filled in. Issue #130: the line is
+ * the source's hot limit now. Above the line the header speeds up until the source is back under
+ * it, and at the fixed safety ceiling it runs at full speed. The source is the short name the
+ * daemon's own reason sentence uses, so the page and the status agree.
+ */
+export function hotRuleText(limitC: number | undefined, source: string, ceilingC: number | undefined): string {
+  // The service rounds the limit the same way before putting it in the status reason, so the
+  // sentence and the reason always name the same number.
+  const line = limitC === undefined ? "its hot limit" : `${Math.round(limitC)} °C`;
+  const ceiling = ceilingC === undefined ? "its safety ceiling" : `${Math.round(ceilingC)} °C`;
+  return `Above ${line} the fan speeds up to bring ${source} back under it; at ${ceiling} it runs at full speed.`;
 }

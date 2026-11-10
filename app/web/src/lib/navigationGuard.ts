@@ -59,3 +59,20 @@ export function continueNavigation(): void {
 export function cancelNavigation(): void {
   pending = null;
 }
+
+let appDriven = false;
+
+/**
+ * The app is about to change the page on its own (the onboarding gate's first-launch redirect), not
+ * the person. Whoever follows the person's navigations takes the mark with `takeAppNavigation`.
+ */
+export function markAppNavigation(): void {
+  appDriven = true;
+}
+
+/** True once for each `markAppNavigation`: the page change that just happened was the app's. */
+export function takeAppNavigation(): boolean {
+  const was = appDriven;
+  appDriven = false;
+  return was;
+}

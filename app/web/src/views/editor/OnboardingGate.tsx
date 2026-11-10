@@ -3,7 +3,7 @@
 import { useEffect } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { useSnap } from "@/lib/store";
-import { requestNavigation } from "@/lib/navigationGuard";
+import { markAppNavigation, requestNavigation } from "@/lib/navigationGuard";
 import { markRedirected, redirectedThisLaunch, shouldOpen } from "@/views/editor/flow";
 
 /**
@@ -22,7 +22,14 @@ export function OnboardingGate() {
     const onLayoutPage = pathname === "/" || pathname === "";
     // The gate never runs while the code editor is open (the onboarding owns the window), but
     // the guard costs nothing and keeps every navigation behind the one question.
-    if (!onLayoutPage && shouldOpen(status)) requestNavigation(() => router.replace("/"));
+    if (!onLayoutPage && shouldOpen(status)) {
+      requestNavigation(() => {
+        // The page change is the app's, not the person's: the "Updated to" toast, which a person's
+        // first navigation sends away, must survive it.
+        markAppNavigation();
+        router.replace("/");
+      });
+    }
   }, [status, pathname, router]);
 
   return null;
