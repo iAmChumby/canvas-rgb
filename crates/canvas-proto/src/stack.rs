@@ -70,6 +70,54 @@ pub struct StackLayer {
     pub opacity: u8,
     #[serde(default = "default_true")]
     pub visible: bool,
+    /// Issue #256: an animated mask that shapes this layer only. `None` (and every file written
+    /// before masks existed) draws the layer whole.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub mask: Option<LayerMask>,
+}
+
+/// A layer's mask: another effect, run every frame over the layer's area, whose picture sets how
+/// much of the layer shows (Photoshop's layer mask, After Effects' luma/alpha track matte).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LayerMask {
+    /// An effect id, as for a layer: a built-in, an `html:` one or a stock one. Never `stack:`.
+    pub effect: String,
+    /// The values the mask effect runs with; missing keys take its schema's defaults.
+    #[serde(default)]
+    pub props: Props,
+    /// Which part of the mask's picture is read.
+    #[serde(default)]
+    pub source: MaskSource,
+    /// Flips the mask: what was hidden shows and what showed is hidden.
+    #[serde(default)]
+    pub invert: bool,
+    /// 0..=100: how strongly the mask applies. 0 leaves the layer whole; 100 applies it fully.
+    #[serde(default = "full_opacity")]
+    pub amount: u8,
+}
+
+/// The channel of the mask's picture that sets the layer's coverage.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum MaskSource {
+    /// Brightness: white shows the layer, black hides it.
+    #[default]
+    Luma,
+    /// The mask picture's alpha.
+    Alpha,
+}
+
+impl MaskSource {
+    /// The names, as the API writes them.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Luma => "luma",
+            Self::Alpha => "alpha",
+        }
+    }
 }
 
 fn full_opacity() -> u8 {
@@ -211,6 +259,32 @@ mod tests {
         ] {
             assert_eq!(mode.as_str(), name);
             assert_eq!(serde_json::to_string(&mode).unwrap(), format!("\"{name}\""));
+        }
+    }
+
+    #[test]
+    fn issue256_a_layer_without_a_mask_reads_and_writes_as_before() {
+        let json = r#"{ "id": "l1", "effect": "solid" }"#;
+        let layer: StackLayer = serde_json::from_str(json).unwrap();
+        assert_eq!(layer.mask, None);
+        let written = serde_json::to_string(&layer).unwrap();
+        assert!(!written.contains("mask"), "no mask key is written for an unmasked layer: {written}");
+    }
+
+    #[test]
+    fn issue256_a_mask_round_trips_with_its_defaults() {
+        let json = r#"{ "id": "l1", "effect": "white", "mask": { "effect": "fire" } }"#;
+        let layer: StackLayer = serde_json::from_str(json).unwrap();
+        let mask = layer.mask.clone().expect("the mask is read");
+        assert_eq!(mask.effect, "fire");
+        assert_eq!(mask.source, MaskSource::Luma);
+        assert!(!mask.invert);
+        assert_eq!(mask.amount, 100);
+        let back: StackLayer = serde_json::from_str(&serde_json::to_string(&layer).unwrap()).unwrap();
+        assert_eq!(back, layer);
+        for (source, name) in [(MaskSource::Luma, "luma"), (MaskSource::Alpha, "alpha")] {
+            assert_eq!(source.as_str(), name);
+            assert_eq!(serde_json::to_string(&source).unwrap(), format!("\"{name}\""));
         }
     }
 }

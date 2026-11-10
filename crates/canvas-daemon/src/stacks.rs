@@ -141,6 +141,16 @@ pub fn layer_effect_id<'a>(known: &'a KnownEffects, effect: &str) -> Option<&'a 
     known.takes(effect)
 }
 
+/// How a refusal names a layer: by the name the person gave it, which the editor shows, and by
+/// its id only when it has no name (the id is internal: `l1` means nothing on screen).
+fn who(layer: &StackLayer) -> String {
+    if layer.name.trim().is_empty() {
+        format!("layer {}", layer.id)
+    } else {
+        format!("layer \"{}\"", layer.name.trim())
+    }
+}
+
 /// The part of a layer that decides whether it can exist at all: its id, its name and its
 /// effect. A layer that fails this is a different stack, so it is dropped at load and refused at
 /// PUT.
@@ -159,8 +169,8 @@ fn check_layer_structure(layer: &StackLayer, seen: &mut Vec<String>) -> Result<(
         .map_err(|e| format!("layer {}: {e}", layer.id))?;
     if layer.effect.starts_with(STACK_ID_PREFIX) {
         return Err(format!(
-            "layer {}: {} is a stack, and a stack cannot contain a stack",
-            layer.id, layer.effect
+            "{}: {} is a stack, and a stack cannot contain a stack",
+            who(layer), layer.effect
         ));
     }
     Ok(())
@@ -173,28 +183,36 @@ fn check_layer_structure(layer: &StackLayer, seen: &mut Vec<String>) -> Result<(
 fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
     if layer.opacity > 100 {
         return Err(format!(
-            "layer {}: opacity must be 0..=100, and it is {}",
-            layer.id, layer.opacity
+            "{}: opacity must be 0..=100, and it is {}",
+            who(layer), layer.opacity
         ));
+    }
+    if let Some(mask) = &layer.mask {
+        if mask.amount > 100 {
+            return Err(format!(
+                "{}: the mask's amount must be 0..=100, and it is {}",
+                who(layer), mask.amount
+            ));
+        }
     }
     if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
         let finite = x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
         if !finite {
             return Err(format!(
-                "layer {}: a rectangle's numbers must be finite, and x is {x}, y is {y}, width is {width}, height is {height}",
-                layer.id
+                "{}: a rectangle's numbers must be finite, and x is {x}, y is {y}, width is {width}, height is {height}",
+                who(layer)
             ));
         }
         if !(0.0..=320.0).contains(&width) || !(0.0..=200.0).contains(&height) {
             return Err(format!(
-                "layer {}: a rectangle is at most 320 wide and 200 tall, and it is {width} by {height}",
-                layer.id
+                "{}: a rectangle is at most 320 wide and 200 tall, and it is {width} by {height}",
+                who(layer)
             ));
         }
         if width < 0.0 || height < 0.0 {
             return Err(format!(
-                "layer {}: a rectangle's width and height are 0 or more",
-                layer.id
+                "{}: a rectangle's width and height are 0 or more",
+                who(layer)
             ));
         }
         let canvas_w = canvas_proto::CANVAS_WIDTH as f32;
@@ -204,34 +222,68 @@ fn check_layer_values(layer: &StackLayer, index: usize) -> Result<(), String> {
         // it as an edge failure instead of panicking.
         if x < 0.0 {
             return Err(format!(
-                "layer {} ({}) at index {index}: the left edge x = {x} is past the canvas; x must be 0 or more in the {canvas_w}-wide canvas",
-                layer.id, layer.effect
+                "{} ({}) at index {index}: the left edge x = {x} is past the canvas; x must be 0 or more in the {canvas_w}-wide canvas",
+                who(layer), layer.effect
             ));
         }
         if y < 0.0 {
             return Err(format!(
-                "layer {} ({}) at index {index}: the top edge y = {y} is past the canvas; y must be 0 or more in the {canvas_h}-tall canvas",
-                layer.id, layer.effect
+                "{} ({}) at index {index}: the top edge y = {y} is past the canvas; y must be 0 or more in the {canvas_h}-tall canvas",
+                who(layer), layer.effect
             ));
         }
         if x + width > canvas_w {
             return Err(format!(
-                "layer {} ({}) at index {index}: the right edge x + width = {} is past the {canvas_w}-wide canvas",
-                layer.id,
+                "{} ({}) at index {index}: the right edge x + width = {} is past the {canvas_w}-wide canvas",
+                who(layer),
                 layer.effect,
                 x + width
             ));
         }
         if y + height > canvas_h {
             return Err(format!(
-                "layer {} ({}) at index {index}: the bottom edge y + height = {} is past the {canvas_h}-tall canvas",
-                layer.id,
+                "{} ({}) at index {index}: the bottom edge y + height = {} is past the {canvas_h}-tall canvas",
+                who(layer),
                 layer.effect,
                 y + height
             ));
         }
     }
     Ok(())
+}
+
+/// A layer's mask has to be an effect the daemon can run (#256): never a stack, and never an id
+/// that resolves to nothing. An HTML mask is allowed and counts toward the HTML cap.
+fn check_mask(layer: &StackLayer, known: &KnownEffects) -> Result<(), String> {
+    let Some(mask) = &layer.mask else { return Ok(()) };
+    if mask.effect.starts_with(STACK_ID_PREFIX) {
+        return Err(format!(
+            "{}: the mask effect {} is a stack, and a stack cannot contain a stack",
+            who(layer), mask.effect
+        ));
+    }
+    if layer_effect_id(known, &mask.effect).is_none() {
+        return Err(format!(
+            "{}: the mask effect {:?} is not an effect",
+            who(layer), mask.effect
+        ));
+    }
+    Ok(())
+}
+
+/// The HTML slots one layer takes: one for its own effect and one for its mask (#256). A stack
+/// may hold `STACK_HTML_MAX` slots in all, and save and load both count them with this. A mask
+/// whose effect does not resolve takes no slot: it cannot build, so the layer draws unmasked.
+pub fn html_slots(layer: &StackLayer, known: &KnownEffects) -> usize {
+    let mask = layer.mask.as_ref().is_some_and(|mask| {
+        is_html_effect(&mask.effect) && layer_effect_id(known, &mask.effect).is_some()
+    });
+    usize::from(is_html_effect(&layer.effect)) + usize::from(mask)
+}
+
+/// True for a layer that takes at least one HTML slot: the capped, slow kind.
+pub fn layer_counts_as_html(layer: &StackLayer, known: &KnownEffects) -> bool {
+    html_slots(layer, known) > 0
 }
 
 /// Checks one stack before it is saved (the D95.1.1 table).
@@ -253,7 +305,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
             stack.layers.len()
         ));
     }
-    let html = stack.layers.iter().filter(|l| is_html_effect(&l.effect)).count();
+    let html: usize = stack.layers.iter().map(|layer| html_slots(layer, known)).sum();
     if html > STACK_HTML_MAX {
         return Err(format!(
             "a stack holds at most {STACK_HTML_MAX} HTML layers, and this one has {html}"
@@ -262,6 +314,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
     let mut seen = Vec::new();
     for (index, layer) in stack.layers.iter().enumerate() {
         check_layer_structure(layer, &mut seen)?;
+        check_mask(layer, known)?;
         check_layer_values(layer, index)?;
     }
     Ok(())
@@ -300,11 +353,7 @@ pub fn canonicalise_and_validate(
     stacks: &Stacks,
     known: &KnownEffects,
 ) -> Result<(), StackRefusal> {
-    for layer in &mut stack.layers {
-        if let Some(id) = layer_effect_id(known, &layer.effect) {
-            layer.effect = id.to_string();
-        }
-    }
+    canonicalise(stack, known);
     let name = stack.name().to_string();
     let others: Vec<Stack> = stacks
         .all()
@@ -322,9 +371,44 @@ pub fn canonicalise_and_validate(
     validate_stack(stack, known, &others).map_err(StackRefusal::Invalid)
 }
 
+/// Every layer's and mask's effect id, as the builder takes it: a display name ("Fire") becomes
+/// its id, and a name that resolves to nothing is left as it was.
+fn canonicalise(stack: &mut Stack, known: &KnownEffects) {
+    for layer in &mut stack.layers {
+        if let Some(id) = layer_effect_id(known, &layer.effect) {
+            layer.effect = id.to_string();
+        }
+        if let Some(mask) = &mut layer.mask {
+            if let Some(id) = layer_effect_id(known, &mask.effect) {
+                mask.effect = id.to_string();
+            }
+        }
+    }
+}
+
+/// A config bundle's stack: canonicalised the way a save does, then checked the way a load does
+/// (#256). A mask whose effect does not resolve is kept — the layer draws unmasked — so a bundle
+/// that a file could hold imports instead of refusing the whole config for a part it can report.
+pub fn canonicalise_and_validate_for_import(
+    stack: &mut Stack,
+    known: &KnownEffects,
+    others: &[Stack],
+) -> Result<(), String> {
+    canonicalise(stack, known);
+    let checked = checked_for_load(stack, stack.layers.clone(), known);
+    validate_stack(&checked, known, others)
+}
+
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
 /// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8). A layer's effect is
 /// stored as the canonical id the builder takes, so a file that spelled a display name runs.
+///
+/// A mask is **never** dropped here, even when its effect does not resolve (#256): the file is the
+/// source of truth, so the mask stays in memory and is written back as saved. The compositor
+/// reports the missing mask and draws the layer unmasked (`checked_for_load` drops it only from
+/// the copy that is validated). Only the HTML cap can leave a layer out: a layer whose own effect
+/// and mask together do not fit the `STACK_HTML_MAX` slots is dropped whole, which is never more
+/// than the save rule would refuse, and the file is kept aside before the next write.
 fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
     let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
@@ -346,18 +430,33 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
         if let Some(id) = layer_effect_id(known, &layer.effect) {
             layer.effect = id.to_string();
         }
-        // A layer counts toward the HTML cap once it is a layer the stack can run.
-        if is_html_effect(&layer.effect) {
-            if html >= STACK_HTML_MAX {
+        // A mask's effect is canonicalised like a layer's. One that does not resolve is kept as
+        // it was saved: the layer runs unmasked and its status names the missing mask (#256).
+        if let Some(mask) = &mut layer.mask {
+            if let Some(id) = layer_effect_id(known, &mask.effect) {
+                mask.effect = id.to_string();
+            } else {
                 tracing::warn!(
                     stack = %stack.id,
                     layer = %layer.id,
-                    "the stack has more HTML layers than a stack may hold; the rest are dropped"
+                    mask = %mask.effect,
+                    "a layer's mask does not resolve to an effect; the layer draws unmasked and the mask is kept as saved"
                 );
-                continue;
             }
-            html += 1;
         }
+        // One rule, shared with the save: a layer's own effect and its mask take one HTML slot
+        // each. A layer that does not fit the cap is dropped whole, never a mask alone.
+        let slots = html_slots(&layer, known);
+        if html + slots > STACK_HTML_MAX {
+            tracing::warn!(
+                stack = %stack.id,
+                layer = %layer.id,
+                slots,
+                "the stack has more HTML layers than a stack may hold; this layer is dropped"
+            );
+            continue;
+        }
+        html += slots;
         if let Err(reason) = check_layer_values(&layer, index) {
             // A value is not a reason to drop the layer: the compositor clamps it (D95.3.6).
             tracing::warn!(stack = %stack.id, %reason, "a layer's value is out of range; the compositor neutralises it");
@@ -370,11 +469,26 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
 /// The stack a load validates: the layers that were kept, with the values the compositor would
 /// neutralise clamped first. The stored stack keeps the file's own values; only a structural
 /// problem, a bad name or a broken cap drops the whole stack (D95.3.6).
-fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
+///
+/// A mask whose effect does not resolve is dropped from **this copy only**: it cannot be built, so
+/// validating it as a mask would drop the whole stack for a part the file may still fix. The kept
+/// stack keeps it, and the compositor reports it missing (#256).
+fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>, known: &KnownEffects) -> Stack {
     let layers = layers
         .into_iter()
         .map(|mut layer| {
             layer.opacity = layer.opacity.min(100);
+            // A mask that cannot build is left out of the copy the compositor will run; the kept
+            // stack still holds it, as saved (#256).
+            let mask_cannot_build = layer.mask.as_ref().is_some_and(|mask| {
+                mask.effect.starts_with(STACK_ID_PREFIX)
+                    || layer_effect_id(known, &mask.effect).is_none()
+            });
+            if mask_cannot_build {
+                layer.mask = None;
+            } else if let Some(mask) = &mut layer.mask {
+                mask.amount = mask.amount.min(100);
+            }
             if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
                 let finite =
                     x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
@@ -511,7 +625,7 @@ impl Stacks {
             // The stack is checked as the compositor will run it: a value a hand-written file
             // got wrong is clamped first, so only the structure, the name and the caps can cost
             // the whole stack (D95.3.6).
-            let checked = checked_for_load(&stack, layers.clone());
+            let checked = checked_for_load(&stack, layers.clone(), known);
             if let Err(reason) = validate_stack(&checked, known, &accepted) {
                 tracing::warn!(stack = %stack.id, %reason, "a stack was dropped as it was loaded");
                 dropped = true;
@@ -813,6 +927,22 @@ mod tests {
     use super::*;
     use canvas_proto::stack::{BlendMode, LayerArea};
 
+    #[test]
+    fn a_refusal_names_the_layer_the_person_sees_not_its_id() {
+        let mut named = layer("l1", "solid");
+        named.name = "Warm white".into();
+        named.opacity = 150;
+        let named_err = check_layer_values(&named, 0).unwrap_err();
+        assert!(named_err.starts_with("layer \"Warm white\":"), "{named_err}");
+        assert!(!named_err.contains("l1"), "the internal id stays out of it: {named_err}");
+
+        let mut unnamed = layer("l2", "solid");
+        unnamed.name = String::new();
+        unnamed.opacity = 150;
+        let unnamed_err = check_layer_values(&unnamed, 0).unwrap_err();
+        assert!(unnamed_err.starts_with("layer l2:"), "with no name, the id is all there is: {unnamed_err}");
+    }
+
     fn stack(id: &str, layers: Vec<StackLayer>) -> Stack {
         Stack { id: id.to_string(), layers }
     }
@@ -827,6 +957,7 @@ mod tests {
             blend: BlendMode::Normal,
             opacity: 100,
             visible: true,
+            mask: None,
         }
     }
 

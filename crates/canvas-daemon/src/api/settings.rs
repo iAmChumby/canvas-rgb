@@ -245,9 +245,12 @@ pub async fn config_import(
     let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
     let mut stacks: Vec<canvas_proto::stack::Stack> = Vec::new();
     for stack in &bundle.stacks {
-        crate::stacks::validate_stack(stack, &known, &stacks)
+        // Canonicalised as a save does, then checked as a load does (#256): a mask whose effect
+        // does not resolve is kept, and the layer draws unmasked, instead of refusing the config.
+        let mut stack = stack.clone();
+        crate::stacks::canonicalise_and_validate_for_import(&mut stack, &known, &stacks)
             .map_err(ApiFailure::validation)?;
-        stacks.push(stack.clone());
+        stacks.push(stack);
     }
 
     let home = app.store.read().await.home.clone();

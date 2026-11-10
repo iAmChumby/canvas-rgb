@@ -31,7 +31,12 @@ fn summary(known: &KnownEffects, stack: &Stack) -> StackSummary {
     let missing = stack
         .layers
         .iter()
-        .filter(|layer| crate::stacks::layer_effect_id(known, &layer.effect).is_none())
+        .filter(|layer| {
+            crate::stacks::layer_effect_id(known, &layer.effect).is_none()
+                || layer.mask.as_ref().is_some_and(|mask| {
+                    crate::stacks::layer_effect_id(known, &mask.effect).is_none()
+                })
+        })
         .map(|layer| layer.id.clone())
         .collect();
     StackSummary {
@@ -41,7 +46,7 @@ fn summary(known: &KnownEffects, stack: &Stack) -> StackSummary {
         html_layers: stack
             .layers
             .iter()
-            .filter(|layer| crate::stacks::is_html_effect(&layer.effect))
+            .filter(|layer| crate::stacks::layer_counts_as_html(layer, known))
             .count() as u32,
         missing,
     }
@@ -77,6 +82,11 @@ fn layer_statuses(app: &Arc<App>, stack: &Stack) -> Vec<StackLayerStatus> {
             let (status, last_ms) = if layer.effect.starts_with(STACK_ID_PREFIX) {
                 (StackLayerState::NestedStack, None)
             } else if crate::stacks::layer_effect_id(&known, &layer.effect).is_none() {
+                (StackLayerState::MissingEffect, None)
+            } else if layer.mask.as_ref().is_some_and(|mask| {
+                crate::stacks::layer_effect_id(&known, &mask.effect).is_none()
+            }) {
+                // The layer runs; its mask does not, so it draws unmasked (#256).
                 (StackLayerState::MissingEffect, None)
             } else if areas.is_empty_area(&layer.area) {
                 (StackLayerState::NoArea, None)
