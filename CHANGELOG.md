@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Peripherals: opening the page no longer pauses the mouse; its settings are read while you are not using it (#127)
+
 ## [0.10.2] - 2026-11-09
 
 ### Fixed

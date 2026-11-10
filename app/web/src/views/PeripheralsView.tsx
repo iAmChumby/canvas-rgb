@@ -681,7 +681,7 @@ function PeripheralDetail({
                 />
               </span>
             </Tooltip>
-            <Tooltip label="asks the device for its settings again, for changes made on the mouse itself">
+            <Tooltip label="asks the device for its settings again, for changes made on the mouse itself; this pauses the mouse for a few seconds">
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"

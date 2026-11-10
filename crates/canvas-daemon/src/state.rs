@@ -106,6 +106,9 @@ pub struct App {
     pub displays: crate::displays::DisplayHub,
     /// The peripherals: the mouse and the controller, and what the daemon may do with them.
     pub peripherals: crate::peripherals::PeripheralHub,
+    /// The user data folder (`store.home`), for the pieces made after the store: the peripheral
+    /// hub saves its kept values here (#127).
+    home: PathBuf,
     /// The identify override: while it is active the engine's frames reach no device.
     pub identify: Arc<crate::identify::IdentifyGate>,
     /// When the last frame reached a device; the quit path logs it so the service log lines up (#81).
@@ -197,9 +200,11 @@ impl App {
         let audio_source = store.config.audio_source.clone();
         let inputs = Arc::new(crate::capture::DaemonInputs::production());
         inputs.set_requested(audio_source);
+        let home = store.home.clone();
         Self {
             displays: crate::displays::DisplayHub::new(display_adapter),
-            peripherals: crate::peripherals::PeripheralHub::new(Vec::new()),
+            peripherals: crate::peripherals::PeripheralHub::with_home(Vec::new(), home.clone()),
+            home,
             identify: Arc::default(),
             last_frame: Arc::default(),
             transient: Default::default(),
@@ -245,7 +250,18 @@ impl App {
         mut self,
         peripherals: Vec<Box<dyn crate::peripherals::Peripheral>>,
     ) -> Self {
-        self.peripherals = crate::peripherals::PeripheralHub::new(peripherals);
+        self.peripherals = crate::peripherals::PeripheralHub::with_home(peripherals, self.home.clone());
+        self
+    }
+
+    /// Like [`App::with_peripherals`], with an input-idle clock the tests drive (#127).
+    pub fn with_peripherals_idle(
+        mut self,
+        peripherals: Vec<Box<dyn crate::peripherals::Peripheral>>,
+        idle: Arc<dyn crate::peripherals::InputIdle>,
+    ) -> Self {
+        self.peripherals =
+            crate::peripherals::PeripheralHub::with_home_and_idle(peripherals, self.home.clone(), idle);
         self
     }
 

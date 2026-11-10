@@ -1,4 +1,4 @@
-//! The peripherals: the mouse and the game controller canvas-rgb can read and configure.
+﻿//! The peripherals: the mouse and the game controller canvas-rgb can read and configure.
 //!
 //! A peripheral is a device with settings and no lights of its own. The daemon never opens one
 //! it was not told to: the vendor app may own it, and both would write the same device. What
@@ -17,10 +17,24 @@
 //! metadata of the machine and do no I/O on the device itself. The hub asks an adapter who owns
 //! a device with `describe`, which is metadata only too, so the device that is opened is always
 //! the one the owner asked for.
+//!
+//! # Opening the view reads nothing (#127)
+//!
+//! A settings read holds a receiver's firmware in blocking HID calls for seconds, and the
+//! pointer stalls while it does (issue #7: 200-250 ms gaps). So the daemon answers every plain
+//! `GET /peripherals/{id}` from values it keeps, never from the device: the kept values are
+//! loaded from `peripheral-values.json` on start, so also the first open after a restart reads
+//! nothing. A device is read only:
+//!
+//! - through `?fresh=true`, the person's own **Read again** (the one stall they ask for);
+//! - in the background, and only after Windows reports no keyboard or mouse input for
+//!   [`PERIPHERAL_IDLE_READ_S`], when the kept values are missing or older than [`KEPT_STALE`].
+//!
+//! The idle question goes through [`InputIdle`], so a test drives it.
 
 use std::collections::BTreeMap;
-use std::path::Path;
-use std::time::{Duration, Instant};
+use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use std::sync::{Arc, Mutex as StdMutex};
 
@@ -44,8 +58,108 @@ pub const PERIPHERALS_SCHEMA: u32 = 1;
 /// enumerate on every request.
 pub const DISCOVERY_CACHE: Duration = Duration::from_secs(5);
 
+/// The file the kept values live in, next to `peripherals.json`. They survive a restart, so the
+/// first open after one reads nothing (#127).
+pub const KEPT_VALUES_FILE: &str = "peripheral-values.json";
+/// The schema version of `peripheral-values.json`.
+pub const KEPT_VALUES_SCHEMA: u32 = 1;
+/// Kept values older than this are refreshed in the background, once the person is idle.
+pub const KEPT_STALE: Duration = Duration::from_secs(30 * 60);
+/// How long Windows must report no keyboard or mouse input before a background read (#127).
+pub const PERIPHERAL_IDLE_READ_S: u64 = 10;
+/// The version of the adapters whose read produced the kept values. Values saved by another
+/// build are ignored: its decode may not mean the same thing.
+pub const ADAPTER_VERSION: &str = env!("CARGO_PKG_VERSION");
+
 /// The message the detail carries when the values are missing because reads are off.
 pub const READS_OFF: &str = "reads are off for this device";
+/// The message the detail carries when reads are on but the device has not been read yet: no
+/// read happens on a view open (#127).
+pub const NOT_READ_YET: &str = "the device's settings have not been read yet";
+
+/// What Windows says about the person's keyboard and mouse.
+///
+/// The daemon reads a device only while this says the person is away, so a read's stall lands
+/// on an idle mouse. It is a trait so the tests drive it instead of the real clock.
+pub trait InputIdle: Send + Sync {
+    /// How long it has been since the last keyboard or mouse input.
+    fn idle_for(&self) -> Duration;
+}
+
+/// A closure is an [`InputIdle`] too, which the tests use to step the clock.
+impl<F> InputIdle for F
+where
+    F: Fn() -> Duration + Send + Sync,
+{
+    fn idle_for(&self) -> Duration {
+        self()
+    }
+}
+
+/// The real input clock: `GetLastInputInfo` from user32.
+#[derive(Debug, Default)]
+pub struct WindowsInputIdle;
+
+impl InputIdle for WindowsInputIdle {
+    fn idle_for(&self) -> Duration {
+        #[cfg(windows)]
+        {
+            use windows::Win32::System::SystemInformation::GetTickCount;
+            use windows::Win32::UI::Input::KeyboardAndMouse::{GetLastInputInfo, LASTINPUTINFO};
+            let mut info = LASTINPUTINFO {
+                cbSize: std::mem::size_of::<LASTINPUTINFO>() as u32,
+                dwTime: 0,
+            };
+            // SAFETY: `info` is a valid, writable LASTINPUTINFO whose cbSize is its own size.
+            let ok = unsafe { GetLastInputInfo(&mut info) };
+            if ok.as_bool() {
+                // Both calls count milliseconds since boot in 32 bits: the wrapping difference
+                // is the idle time and stays right across the 49-day tick wrap.
+                let idle_ms = unsafe { GetTickCount() }.wrapping_sub(info.dwTime);
+                return Duration::from_millis(u64::from(idle_ms));
+            }
+            // A failed call must never look like an idle person: zero forbids every read.
+            Duration::ZERO
+        }
+        #[cfg(not(windows))]
+        {
+            Duration::ZERO
+        }
+    }
+}
+
+/// `peripheral-values.json`: the values the daemon keeps for each device, so a restart answers
+/// the first open without touching the device (#127).
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KeptValuesFile {
+    pub schema_version: u32,
+    /// The kept values per device id.
+    #[serde(default)]
+    pub devices: BTreeMap<String, KeptValues>,
+}
+
+/// One device's kept values, and the adapter version that read them.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct KeptValues {
+    /// The adapter that owns the device, e.g. `attack-shark-x6`.
+    pub adapter: String,
+    /// The adapter's version: values from another build are ignored.
+    pub adapter_version: String,
+    /// Seconds since the Unix epoch when the device was last read.
+    pub read_at: u64,
+    /// The values, keyed by property key.
+    pub values: Props,
+}
+
+/// The kept values file's path in `home`.
+fn kept_values_path(home: &Path) -> PathBuf {
+    home.join(KEPT_VALUES_FILE)
+}
+
+/// Seconds since the Unix epoch, or 0 when the wall clock is before it.
+fn now_unix_s() -> u64 {
+    SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0)
+}
 
 /// `peripherals.json`: what the daemon may do with each device.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -163,14 +277,20 @@ pub struct PeripheralHub {
     /// The stage of the read that is running, per device id. A plain lock, never held across an
     /// await and never the adapters' lock: asking for it must answer while a read is still open.
     progress: Arc<StdMutex<BTreeMap<String, ReadProgress>>>,
+    /// Where the kept values survive a restart. `None` in the unit tests that do not need it.
+    kept_path: Option<PathBuf>,
+    /// What Windows (or a test's fake) says about the person's keyboard and mouse.
+    idle: Arc<dyn InputIdle>,
 }
 
 /// The values kept for one device, and the adapter that read them.
 struct Kept {
     /// The adapter that owns the device, so a failed enumeration of another adapter leaves
     /// these alone.
-    adapter: &'static str,
+    adapter: String,
     props: Props,
+    /// Seconds since the Unix epoch when the read finished.
+    read_at: u64,
 }
 
 /// Clears the stage of a read when the read ends or its request is dropped, and stops a sink that
@@ -339,17 +459,61 @@ mod sink_hook {
 }
 
 impl PeripheralHub {
-    /// The hub with these adapters. The daemon builds it with the real adapters; the tests
-    /// build it with fakes.
+    /// The hub with these adapters, keeping its values in memory only. The unit tests use it;
+    /// the daemon uses [`PeripheralHub::with_home`].
     pub fn new(adapters: Vec<Box<dyn Peripheral>>) -> Self {
+        Self::build(adapters, None, Arc::new(WindowsInputIdle))
+    }
+
+    /// The hub the daemon runs: its kept values are loaded from and saved to `home`, so the
+    /// first open after a restart reads nothing (#127).
+    pub fn with_home(adapters: Vec<Box<dyn Peripheral>>, home: impl Into<PathBuf>) -> Self {
+        Self::build(adapters, Some(kept_values_path(&home.into())), Arc::new(WindowsInputIdle))
+    }
+
+    /// A hub whose input clock the test drives.
+    pub fn with_idle(adapters: Vec<Box<dyn Peripheral>>, idle: Arc<dyn InputIdle>) -> Self {
+        Self::build(adapters, None, idle)
+    }
+
+    /// A hub whose kept values live in `home` and whose input clock the test drives.
+    pub fn with_home_and_idle(
+        adapters: Vec<Box<dyn Peripheral>>,
+        home: impl Into<PathBuf>,
+        idle: Arc<dyn InputIdle>,
+    ) -> Self {
+        Self::build(adapters, Some(kept_values_path(&home.into())), idle)
+    }
+
+    fn build(
+        adapters: Vec<Box<dyn Peripheral>>,
+        kept_path: Option<PathBuf>,
+        idle: Arc<dyn InputIdle>,
+    ) -> Self {
+        // Values saved by another adapter version are dropped here, with a log line each; a
+        // file that does not parse is ignored the same way. Never fatal (#127).
+        let reads = kept_path
+            .as_deref()
+            .map(load_kept_values)
+            .unwrap_or_default();
         Self {
             adapters: tokio::sync::Mutex::new(adapters),
             discovery: tokio::sync::Mutex::new(None),
             progress: Arc::new(StdMutex::new(BTreeMap::new())),
-            reads: std::sync::Mutex::new(BTreeMap::new()),
+            reads: std::sync::Mutex::new(reads),
             fresh_done: std::sync::Mutex::new(BTreeMap::new()),
             reads_applied: std::sync::Mutex::new(BTreeMap::new()),
+            kept_path,
+            idle,
         }
+    }
+
+    /// The device's settings as the daemon keeps them, with every write since merged in.
+    ///
+    /// This never touches the device: opening the view is answered from here, or with
+    /// [`NOT_READ_YET`](crate::peripherals::NOT_READ_YET) when nothing has been read (#127).
+    pub fn kept(&self, device: &DeviceId) -> Option<Props> {
+        self.kept_read(device)
     }
 
     /// The stage of the read of this device that is running now, [`ReadProgress::IDLE`] when none
@@ -410,10 +574,17 @@ impl PeripheralHub {
         }
         // A device that an adapter no longer lists is gone: what was kept for it is stale. An
         // adapter whose enumeration failed said nothing, so its devices keep their values.
-        self.reads
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .retain(|id, kept| failed.contains(&kept.adapter) || found.iter().any(|info| &info.id == id));
+        let dropped = {
+            let mut reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+            let before = reads.len();
+            reads.retain(|id, kept| {
+                failed.contains(&kept.adapter.as_str()) || found.iter().any(|info| &info.id == id)
+            });
+            reads.len() != before
+        };
+        if dropped {
+            self.save_kept();
+        }
         found
     }
 
@@ -426,24 +597,12 @@ impl PeripheralHub {
         Ok(schema)
     }
 
-    /// The device's settings, from the values the hub keeps when it has them. The device is
-    /// opened and read only when nothing is kept for it.
-    pub async fn read(&self, device: &DeviceId) -> Result<Props, AdapterError> {
-        self.read_with(device, false).await
-    }
-
-    /// The device's settings, read from the device now even when values are kept.
-    pub async fn read_fresh(&self, device: &DeviceId) -> Result<Props, AdapterError> {
-        self.read_with(device, true).await
-    }
-
-    /// The device's settings. The device is opened first if it is not open.
+    /// The device's settings, read from the device now. This is the only path that touches a
+    /// device: the person's **Read again** (`?fresh=true`) and the idle background refresh.
     ///
-    /// Unless `fresh` is set, the values kept from the last good read (with the writes since
-    /// merged in) answer: opening the view again, or reading after a change, never touches the
-    /// device. A failed read keeps nothing. A read that fails because the device is gone closes
-    /// it, so the next read opens it again.
-    async fn read_with(&self, device: &DeviceId, fresh: bool) -> Result<Props, AdapterError> {
+    /// The device is opened first if it is not open. A failed read keeps nothing. A read that
+    /// fails because the device is gone closes it, so the next read opens it again.
+    pub async fn read_fresh(&self, device: &DeviceId) -> Result<Props, AdapterError> {
         // How many fresh reads of this device had finished when this ask arrived.
         let done_on_arrival = self.fresh_finished(device);
         // One lock for all adapters. A blocking open inside an adapter holds it, so a slow open
@@ -460,12 +619,9 @@ impl PeripheralHub {
             live: live.clone(),
             progress: self.progress.clone(),
         };
-        // Kept values of a device that has since been closed are not an answer. `is_connected`
-        // only says the adapter still holds its handle: an unplug shows on the next I/O or the
-        // next enumeration, which drops the kept values.
-        if adapter.is_connected() && (!fresh || self.fresh_finished(device) > done_on_arrival) {
-            // A fresh ask that waited while another fresh read of this device ran takes that
-            // one's result (a double click is one read).
+        // A read that waited while another read of this device ran takes that one's result (a
+        // double click, or a Read again that lands during the background refresh, is one read).
+        if adapter.is_connected() && self.fresh_finished(device) > done_on_arrival {
             if let Some(props) = self.kept_read(device) {
                 return Ok(props);
             }
@@ -499,18 +655,22 @@ impl PeripheralHub {
         adapter.set_read_sink(None);
         match &result {
             Ok(props) => {
-                self.reads
+                self.reads.lock().unwrap_or_else(|e| e.into_inner()).insert(
+                    device.clone(),
+                    Kept {
+                        adapter: adapter.name().to_string(),
+                        props: props.clone(),
+                        read_at: now_unix_s(),
+                    },
+                );
+                *self
+                    .fresh_done
                     .lock()
                     .unwrap_or_else(|e| e.into_inner())
-                    .insert(device.clone(), Kept { adapter: adapter.name(), props: props.clone() });
-                if fresh {
-                    *self
-                        .fresh_done
-                        .lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .entry(device.clone())
-                        .or_insert(0) += 1;
-                }
+                    .entry(device.clone())
+                    .or_insert(0) += 1;
+                // The values survive a restart now (#127).
+                self.save_kept();
             }
             Err(error) => {
                 // A failed read leaves nothing kept: the old values may no longer be true.
@@ -535,7 +695,88 @@ impl PeripheralHub {
 
     /// Forgets the kept values of this device: they are stale.
     fn forget_read(&self, device: &DeviceId) {
-        self.reads.lock().unwrap_or_else(|e| e.into_inner()).remove(device);
+        let removed = self.reads.lock().unwrap_or_else(|e| e.into_inner()).remove(device).is_some();
+        if removed {
+            self.save_kept();
+        }
+    }
+
+    /// True when this device's kept values are missing or older than [`KEPT_STALE`].
+    pub fn needs_refresh(&self, device: &DeviceId) -> bool {
+        let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+        match reads.get(device) {
+            None => true,
+            Some(kept) => now_unix_s().saturating_sub(kept.read_at) > KEPT_STALE.as_secs(),
+        }
+    }
+
+    /// One background pass (#127): reads each device whose values are missing or stale, and only
+    /// once the person has left the keyboard and mouse alone for [`PERIPHERAL_IDLE_READ_S`].
+    ///
+    /// It returns how many devices were read. A read is abandoned before it starts when input
+    /// arrived while an earlier device was being read. Nothing on the view-open path calls this.
+    pub async fn refresh_idle(&self, devices: &[DeviceId]) -> usize {
+        let needed: Vec<DeviceId> =
+            devices.iter().filter(|device| self.needs_refresh(device)).cloned().collect();
+        if needed.is_empty() {
+            return 0;
+        }
+        let enough = Duration::from_secs(PERIPHERAL_IDLE_READ_S);
+        if self.idle.idle_for() < enough {
+            return 0;
+        }
+        let mut read = 0;
+        for device in needed {
+            // The person came back: the read that has not started is abandoned.
+            if self.idle.idle_for() < enough {
+                break;
+            }
+            if !self.needs_refresh(&device) {
+                continue;
+            }
+            match self.read_fresh(&device).await {
+                Ok(_) => read += 1,
+                // A device that is not here is not a failure: it is read when it comes back.
+                Err(AdapterError::UnknownDevice(_) | AdapterError::NotConnected) => {}
+                Err(error) => {
+                    tracing::warn!(device = %device, error = %error, "the peripheral's idle read failed")
+                }
+            }
+        }
+        read
+    }
+
+    /// Writes the kept values to their file, when the hub has one. A failed save is a warning:
+    /// the daemon keeps answering from memory.
+    fn save_kept(&self) {
+        let Some(path) = &self.kept_path else {
+            return;
+        };
+        let devices: BTreeMap<String, KeptValues> = {
+            let reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+            reads
+                .iter()
+                .map(|(id, kept)| {
+                    (
+                        id.0.clone(),
+                        KeptValues {
+                            adapter: kept.adapter.clone(),
+                            adapter_version: ADAPTER_VERSION.to_string(),
+                            read_at: kept.read_at,
+                            values: kept.props.clone(),
+                        },
+                    )
+                })
+                .collect()
+        };
+        let file = KeptValuesFile { schema_version: KEPT_VALUES_SCHEMA, devices };
+        if let Err(error) = crate::storage::write_json(path, &file) {
+            tracing::warn!(
+                path = %path.display(),
+                error = %error,
+                "the kept peripheral values could not be saved"
+            );
+        }
     }
 
     /// Writes the given settings to the device. Only the keys present are written.
@@ -554,14 +795,22 @@ impl PeripheralHub {
         match &result {
             Ok(effective) => {
                 // The device holds what it reports back now, including keys it changed itself:
-                // merge them into the kept values, so the next read needs no trip to the
-                // device. Nothing kept means the next read reads.
-                if let Some(kept) =
-                    self.reads.lock().unwrap_or_else(|e| e.into_inner()).get_mut(device)
-                {
-                    for (key, value) in effective {
-                        kept.props.insert(key.clone(), value.clone());
+                // merge them into the kept values, so the next open needs no trip to the
+                // device. Nothing kept means the values wait for the idle background read.
+                let merged = {
+                    let mut reads = self.reads.lock().unwrap_or_else(|e| e.into_inner());
+                    match reads.get_mut(device) {
+                        Some(kept) => {
+                            for (key, value) in effective {
+                                kept.props.insert(key.clone(), value.clone());
+                            }
+                            true
+                        }
+                        None => false,
                     }
+                };
+                if merged {
+                    self.save_kept();
                 }
             }
             Err(error) => {
@@ -587,13 +836,15 @@ impl PeripheralHub {
         let (index, _) = owner_of(&mut adapters, device).await?;
         let adapter = adapters[index].as_mut();
         // Only a change of `reads` makes the kept values stale: the device is opened or closed.
-        // A repeat of the same access, or a change of `writes` alone, keeps them.
+        // A repeat of the same access, or a change of `writes` alone, keeps them. The first
+        // apply after a start is not a change: it is what opens the device the values in the
+        // file came from (#127).
         let previous = self
             .reads_applied
             .lock()
             .unwrap_or_else(|e| e.into_inner())
             .insert(device.clone(), access.reads);
-        if previous != Some(access.reads) {
+        if previous.is_some_and(|reads| reads != access.reads) {
             self.forget_read(device);
         }
         // The gate follows the access, whatever the access is. Writes need reads, so an
@@ -632,6 +883,93 @@ async fn owner_of(
 /// wrong.
 fn device_failure(error: &AdapterError) -> bool {
     matches!(error, AdapterError::Io(_) | AdapterError::NotConnected)
+}
+
+/// Reads the kept values file. A missing file has nothing kept; one that does not parse, or an
+/// entry from another adapter version, is ignored with a log line and never fatal (#127).
+fn load_kept_values(path: &Path) -> BTreeMap<DeviceId, Kept> {
+    let Some(bytes) = crate::paths::read_optional(path) else {
+        return BTreeMap::new();
+    };
+    let file: KeptValuesFile = match serde_json::from_slice(&bytes) {
+        Ok(file) => file,
+        Err(error) => {
+            tracing::error!(
+                path = %path.display(),
+                error = %error,
+                "peripheral-values.json did not parse; the kept peripheral values are ignored"
+            );
+            return BTreeMap::new();
+        }
+    };
+    if file.schema_version != KEPT_VALUES_SCHEMA {
+        tracing::warn!(
+            path = %path.display(),
+            found = file.schema_version,
+            expected = KEPT_VALUES_SCHEMA,
+            "peripheral-values.json has another schema version; its values are ignored"
+        );
+        return BTreeMap::new();
+    }
+    let mut kept = BTreeMap::new();
+    for (id, values) in file.devices {
+        if values.adapter_version != ADAPTER_VERSION {
+            tracing::warn!(
+                device = %id,
+                found = %values.adapter_version,
+                expected = ADAPTER_VERSION,
+                "kept peripheral values from another adapter version are ignored"
+            );
+            continue;
+        }
+        kept.insert(
+            DeviceId(id),
+            Kept { adapter: values.adapter, props: values.values, read_at: values.read_at },
+        );
+    }
+    kept
+}
+
+/// Starts the background refresh (#127): every second, it reads a device whose kept values are
+/// missing or older than [`KEPT_STALE`], and only once Windows reports no keyboard or mouse
+/// input for [`PERIPHERAL_IDLE_READ_S`]. Opening the view never triggers a read.
+pub fn start_idle_refresh(app: Arc<App>) {
+    tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(Duration::from_secs(1));
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            if app.shutting_down.load(std::sync::atomic::Ordering::SeqCst) != 0 {
+                return;
+            }
+            let saved: Vec<DeviceId> = {
+                let store = app.store.read().await;
+                store
+                    .peripherals
+                    .peripherals
+                    .iter()
+                    .filter(|(_, access)| access.reads)
+                    .map(|(id, _)| DeviceId(id.clone()))
+                    .collect()
+            };
+            let wanted: Vec<DeviceId> =
+                saved.into_iter().filter(|id| app.peripherals.needs_refresh(id)).collect();
+            if wanted.is_empty() {
+                continue;
+            }
+            // Only the devices the adapters can see: an unplugged device is not opened and does
+            // not log a failure every pass. The enumeration is metadata only and cached.
+            let found = app.peripherals.discover().await;
+            let present: Vec<DeviceId> = wanted
+                .into_iter()
+                .filter(|id| found.iter().any(|info| &info.id == id))
+                .collect();
+            if present.is_empty() {
+                continue;
+            }
+            app.peripherals.refresh_idle(&present).await;
+        }
+    });
 }
 
 /// Applies the saved access to every device that has one.
@@ -780,7 +1118,7 @@ mod tests {
         let reader = {
             let hub = hub.clone();
             let id = id.clone();
-            tokio::spawn(async move { hub.read(&id).await })
+            tokio::spawn(async move { hub.read_fresh(&id).await })
         };
 
         // The sink is at the gate: it has checked the flag and has not written the stage yet.
@@ -840,7 +1178,7 @@ mod tests {
         let _reader = {
             let hub = hub.clone();
             let id = id.clone();
-            tokio::spawn(async move { hub.read(&id).await })
+            tokio::spawn(async move { hub.read_fresh(&id).await })
         };
         // The sink is at the gate and nothing opens it: the wait gives up and the test fails.
         sink_hook::wait_until_reached();

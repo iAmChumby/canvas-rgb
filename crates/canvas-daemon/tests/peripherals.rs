@@ -220,8 +220,10 @@ async fn a_get_with_reads_off_never_reads_the_device() {
     assert_eq!(log.connects, 0, "the device is not opened");
 }
 
+/// #127: a plain GET never touches the device. With nothing kept it says so; **Read again**
+/// (`?fresh=true`) is the one ask that reads.
 #[tokio::test]
-async fn a_get_with_reads_on_reads_the_device() {
+async fn a_get_with_reads_on_reads_nothing_and_a_fresh_read_reads_the_device() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let id = fake.id().0.clone();
@@ -234,16 +236,113 @@ async fn a_get_with_reads_on_reads_the_device() {
     .await;
     assert_eq!(access.status(), StatusCode::OK);
 
-    let response = call(&router, "GET", &path_of(&id)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    let values = body.get("values").and_then(|v| v.as_object()).expect("the values");
-    assert_eq!(values.len(), 3, "the device's own values are reported");
+    let body = json(call(&router, "GET", &path_of(&id)).await).await;
     assert!(
-        body.get("problem").expect("the problem is there").is_null(),
-        "a good read has no problem"
+        body.get("values").and_then(|v| v.as_object()).expect("the values").is_empty(),
+        "no values are invented on a view open"
     );
-    assert_eq!(fake.log().reads, 1);
+    assert!(
+        body.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "the response says nothing is read yet: {body}"
+    );
+    assert_eq!(fake.log().reads, 0, "opening the view is no device read");
+
+    let fresh = json(call(&router, "GET", &format!("{}?fresh=true", path_of(&id))).await).await;
+    assert_eq!(
+        fresh.get("values").and_then(|v| v.as_object()).map(|v| v.len()),
+        Some(3),
+        "Read again reports the device's own values"
+    );
+    assert_eq!(fake.log().reads, 1, "Read again is the one ask that reads");
+}
+
+/// #127: the daemon start reads the kept values file, so the first open after a restart (or an
+/// update, or a logon) is answered from it and makes zero device reads.
+#[tokio::test]
+async fn a_restart_answers_the_first_open_from_the_kept_values_file_and_reads_nothing() {
+    let fake = FakePeripheral::default();
+    let home = TempHome::new();
+    let id = fake.id().0.clone();
+    // The file the daemon wrote before it restarted, with the values the fake read then.
+    let mut file = serde_json::json!({"schema_version": 1, "devices": {}});
+    file["devices"][id.as_str()] = serde_json::json!({
+        "adapter": "fake-peripheral",
+        "adapter_version": env!("CARGO_PKG_VERSION"),
+        "read_at": 1_700_000_000u64,
+        "values": fake.log().values,
+    });
+    std::fs::write(home.path.join("peripheral-values.json"), serde_json::to_vec(&file).unwrap())
+        .expect("the kept values file is written");
+    std::fs::write(
+        home.path.join("peripherals.json"),
+        format!(r#"{{"schema_version":1,"peripherals":{{"{id}":{{"reads":true,"writes":false}}}}}}"#),
+    )
+    .expect("the access file is written");
+
+    let (router, app, _home) = build_in(fake.clone(), home.path.clone(), home);
+    canvas_daemon::peripherals::apply_saved(&app).await;
+
+    let body = json(call(&router, "GET", &path_of(&id)).await).await;
+    assert_eq!(
+        body.get("values").and_then(|v| v.as_object()).map(|v| v.len()),
+        Some(3),
+        "the first open after the restart carries the file's values: {body}"
+    );
+    assert_eq!(body.get("problem"), Some(&serde_json::Value::Null));
+    assert_eq!(fake.log().reads, 0, "the restart and the first open read nothing");
+}
+
+/// #127: with no kept values file the first open still reads nothing, and the response says the
+/// settings have not been read yet instead of inventing values.
+#[tokio::test]
+async fn a_first_open_with_no_kept_values_reads_nothing_and_says_so() {
+    let fake = FakePeripheral::default();
+    let (router, app, _home) = build(fake.clone());
+    let id = fake.id().0.clone();
+    let access = call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    assert_eq!(access.status(), StatusCode::OK);
+    canvas_daemon::peripherals::apply_saved(&app).await;
+
+    let body = json(call(&router, "GET", &path_of(&id)).await).await;
+    assert!(
+        body.get("values").and_then(|v| v.as_object()).expect("the values").is_empty(),
+        "no value is invented: {body}"
+    );
+    assert!(
+        body.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "the response says nothing is read yet: {body}"
+    );
+    assert_eq!(fake.log().reads, 0, "a first open with no file reads nothing");
+}
+
+/// #127: a kept values file that does not parse is ignored and logged; the daemon starts, the
+/// route answers, and nothing is read.
+#[tokio::test]
+async fn a_corrupt_kept_values_file_is_ignored_logged_and_not_fatal() {
+    let fake = FakePeripheral::default();
+    let home = TempHome::new();
+    let id = fake.id().0.clone();
+    std::fs::write(home.path.join("peripheral-values.json"), b"{ this is not json")
+        .expect("the corrupt file is written");
+    let logs = common::LogBuf::default();
+    let (router, _app, _home) = {
+        let _capture = logs.install();
+        build_in(fake.clone(), home.path.clone(), home)
+    };
+    let text = logs.text();
+    assert!(
+        text.contains("peripheral-values.json did not parse"),
+        "the ignored file is logged: {text}"
+    );
+
+    let access = call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
+    assert_eq!(access.status(), StatusCode::OK);
+    let body = json(call(&router, "GET", &path_of(&id)).await).await;
+    assert!(
+        body.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "the daemon starts from nothing kept: {body}"
+    );
+    assert_eq!(fake.log().reads, 0, "a corrupt file never leads to a read on open");
 }
 
 /// The path of the fake peripheral's read stage.
@@ -294,7 +393,7 @@ async fn a_read_reports_its_stages_in_order_while_the_device_read_is_still_open(
 
     let reader = {
         let router = router.clone();
-        let path = path_of(&id);
+        let path = format!("{}?fresh=true", path_of(&id));
         tokio::spawn(async move { call(&router, "GET", &path).await.status() })
     };
 
@@ -334,7 +433,7 @@ async fn a_read_that_reports_nothing_is_one_stage_and_then_idle() {
     }
     let reader = {
         let router = router.clone();
-        let path = path_of(&id);
+        let path = format!("{}?fresh=true", path_of(&id));
         tokio::spawn(async move { call(&router, "GET", &path).await.status() })
     };
     next_step(&mut reached_rx, "the read is open").await;
@@ -364,7 +463,7 @@ async fn start_held_read(
     }
     let reader = {
         let router = router.clone();
-        let path = path_of(&id);
+        let path = format!("{}?fresh=true", path_of(&id));
         tokio::spawn(async move { json(call(&router, "GET", &path).await).await })
     };
     next_step(&mut reached_rx, "the read is open").await;
@@ -538,11 +637,11 @@ async fn a_patch_with_writes_on_reaches_the_device_with_exactly_the_given_keys()
     assert_eq!(writes[0].get("dpi-stage-1"), Some(&PropValue::Number(1600.0)));
 }
 
-/// Issue #7: opening the Peripherals view must not run the device's feature reports more than
-/// once. The view-open here is the Rail's list, the view's list, and the detail asked for twice
-/// at once (a reload or a second window) and again right after.
+/// #127: one view open makes zero device reads. The view-open here is the Rail's list, the
+/// view's list, and the detail asked for twice at once (a reload or a second window) and again
+/// right after.
 #[tokio::test]
-async fn one_view_open_reads_the_device_once() {
+async fn one_view_open_reads_the_device_zero_times() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let id = fake.id().0.clone();
@@ -561,14 +660,17 @@ async fn one_view_open_reads_the_device_once() {
     let (a, b) = tokio::join!(call(&router, "GET", &path), call(&router, "GET", &path));
     assert_eq!(a.status(), StatusCode::OK);
     assert_eq!(b.status(), StatusCode::OK);
-    let again = call(&router, "GET", &path).await;
-    let values = json(again).await;
-    assert_eq!(
-        values.get("values").and_then(|v| v.as_object()).map(|v| v.len()),
-        Some(3),
-        "the shared read still carries the values"
+    let again = json(call(&router, "GET", &path).await).await;
+    assert!(
+        again.get("values").and_then(|v| v.as_object()).expect("the values").is_empty(),
+        "the first open has nothing to show yet: {again}"
     );
-    assert_eq!(fake.log().reads, 1, "three detail requests, one read of the device");
+    assert!(
+        again.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "the first open says nothing is read yet: {again}"
+    );
+    assert_eq!(fake.log().reads, 0, "opening the view reads nothing");
+    assert_eq!(fake.log().connects, 1, "the access opens the device; a read is what the idle rule gates");
 }
 
 /// Opens reads for the fake and returns its id path.
@@ -580,14 +682,15 @@ async fn reads_on(router: &axum::Router, fake: &FakePeripheral, writes: bool) ->
     path_of(&id)
 }
 
-/// Issue #7: the daemon keeps what it read. A second view-open, however much later, makes no
-/// device read (a read stalls the pointer for seconds on the receiver's radio link).
+/// Issue #7/#127: the daemon keeps what it read. A second view-open, however much later, makes
+/// no device read (a read stalls the pointer for seconds on the receiver's radio link).
 #[tokio::test]
 async fn kept_values_answer_a_get_more_than_two_seconds_later_without_a_device_read() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    // Read again is the one ask that reads; the opens after it are answered from the values.
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     tokio::time::sleep(Duration::from_millis(2200)).await;
     let again = json(call(&router, "GET", &path).await).await;
@@ -596,7 +699,8 @@ async fn kept_values_answer_a_get_more_than_two_seconds_later_without_a_device_r
         Some(3),
         "the kept values are the answer"
     );
-    assert_eq!(fake.log().reads, 1, "two GETs 2.2 s apart, one device read");
+    assert_eq!(again.get("problem"), Some(&serde_json::Value::Null));
+    assert_eq!(fake.log().reads, 1, "one Read again and a view open 2.2 s later: one device read");
 }
 
 /// A write is merged into the kept values: the GET after it answers with the written value and
@@ -606,7 +710,7 @@ async fn a_write_is_merged_into_the_kept_values_and_no_read_follows() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, true).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     let patched = call_with_body(
         &router,
@@ -636,7 +740,7 @@ async fn fresh_reads_the_device_even_with_kept_values() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     call(&router, "GET", &path).await;
     assert_eq!(fake.log().reads, 1);
     // The mouse changed on its own (its DPI button).
@@ -649,19 +753,26 @@ async fn fresh_reads_the_device_even_with_kept_values() {
     assert_eq!(after.pointer("/values/dpi-stage-1/value").and_then(|v| v.as_f64()), Some(1200.0));
 }
 
-/// Turning reads off and on again closes and reopens the device: the kept values are stale.
+/// Turning reads off and on again closes and reopens the device: the kept values are stale, so
+/// the view open says nothing is read yet and only Read again reads.
 #[tokio::test]
-async fn turning_reads_off_and_on_makes_the_next_get_read() {
+async fn turning_reads_off_and_on_forgets_the_kept_values() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     let id = fake.id().0.clone();
     call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":false,"writes":false}"#).await;
     reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
-    assert_eq!(fake.log().reads, 2, "the device was closed and opened: a read");
+    let body = json(call(&router, "GET", &path).await).await;
+    assert!(
+        body.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "the reopened device has nothing kept: {body}"
+    );
+    assert_eq!(fake.log().reads, 1, "the view open still reads nothing");
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
+    assert_eq!(fake.log().reads, 2, "Read again reads the reopened device");
 }
 
 /// F2: a change of `writes` alone, or the same access again, makes no device read.
@@ -670,7 +781,7 @@ async fn a_writes_only_toggle_or_a_repeat_put_keeps_the_values_and_reads_nothing
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     reads_on(&router, &fake, true).await; // writes on
     call(&router, "GET", &path).await;
@@ -688,7 +799,7 @@ async fn a_key_the_device_changed_by_itself_is_kept_as_the_device_reports_it() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, true).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     fake.0.lock().unwrap().side_effect = Some(("dpi-stage-2".into(), PropValue::Number(3200.0)));
     let patched = call_with_body(
         &router,
@@ -708,28 +819,13 @@ async fn a_key_the_device_changed_by_itself_is_kept_as_the_device_reports_it() {
     );
 }
 
-/// F3: an adapter whose enumeration failed said nothing about its devices.
-#[tokio::test]
-async fn a_failed_enumeration_keeps_the_values_of_that_adapters_devices() {
-    use canvas_daemon::peripherals::{Peripheral, PeripheralHub};
-    let fake = FakePeripheral::default();
-    let hub = PeripheralHub::new(vec![Box::new(fake.clone()) as Box<dyn Peripheral>]);
-    let id = fake.id();
-    hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
-    hub.read(&id).await.unwrap();
-    fake.0.lock().unwrap().fail_discover = true;
-    assert!(hub.discover_now().await.is_empty());
-    hub.read(&id).await.unwrap();
-    assert_eq!(fake.log().reads, 1, "the scan failed: the values stay");
-}
-
 /// F4: `fresh` takes true, false, 1 and 0; anything else is a JSON validation error.
 #[tokio::test]
 async fn fresh_takes_true_false_one_and_zero_and_refuses_anything_else_as_json() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     for (query, reads) in [("fresh=0", 1), ("fresh=false", 1), ("fresh=1", 2), ("fresh=true", 3)] {
         let response = call(&router, "GET", &format!("{path}?{query}")).await;
@@ -755,7 +851,7 @@ async fn a_second_fresh_read_while_one_is_in_flight_shares_its_result() {
     let hub = Arc::new(PeripheralHub::new(vec![Box::new(fake.clone()) as Box<dyn Peripheral>]));
     let id = fake.id();
     hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
-    hub.read(&id).await.unwrap();
+    hub.read_fresh(&id).await.unwrap();
     assert_eq!(fake.log().reads, 1);
     let (reached_tx, mut reached_rx) = tokio::sync::mpsc::unbounded_channel();
     let go = Arc::new(tokio::sync::Semaphore::new(0));
@@ -787,7 +883,7 @@ async fn a_write_that_failed_on_the_device_drops_the_kept_values() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, true).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     fake.0.lock().unwrap().fail_write = 1;
     let failed = call_with_body(
@@ -798,8 +894,14 @@ async fn a_write_that_failed_on_the_device_drops_the_kept_values() {
     )
     .await;
     assert_eq!(failed.status(), StatusCode::INTERNAL_SERVER_ERROR);
-    call(&router, "GET", &path).await;
-    assert_eq!(fake.log().reads, 2, "the next GET reads the device");
+    let body = json(call(&router, "GET", &path).await).await;
+    assert!(
+        body.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "nothing is kept after the failed write: {body}"
+    );
+    assert_eq!(fake.log().reads, 1, "the view open after it still reads nothing");
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
+    assert_eq!(fake.log().reads, 2, "Read again reads the device");
 }
 
 /// A write the adapter refuses before sending anything changed nothing: the values stand.
@@ -808,7 +910,7 @@ async fn a_refused_write_keeps_the_values_and_the_next_get_reads_nothing() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, true).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     for body in [
         r#"{"dpi-stage-99":{"type":"number","value":1600}}"#,
@@ -829,7 +931,7 @@ async fn fresh_given_twice_is_a_json_validation_error() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     let response = call(&router, "GET", &format!("{path}?fresh=1&fresh=0")).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = json(response).await;
@@ -840,60 +942,49 @@ async fn fresh_given_twice_is_a_json_validation_error() {
     assert_eq!(fake.log().reads, 1);
 }
 
-/// A read that fails leaves nothing kept: the next GET reads again.
+/// A fresh read that fails leaves nothing kept: the view open says so and reads nothing, and
+/// the next Read again reads.
 #[tokio::test]
 async fn a_failed_read_drops_the_kept_values() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let path = reads_on(&router, &fake, false).await;
-    call(&router, "GET", &path).await;
+    call(&router, "GET", &format!("{path}?fresh=true")).await;
     assert_eq!(fake.log().reads, 1);
     fake.0.lock().unwrap().fail_read = 1;
     let failed = json(call(&router, "GET", &format!("{path}?fresh=true")).await).await;
     assert!(failed.get("problem").and_then(|v| v.as_str()).is_some(), "the failure is reported");
     assert_eq!(fake.log().reads, 2);
     let again = json(call(&router, "GET", &path).await).await;
-    assert_eq!(fake.log().reads, 3, "nothing was kept: the plain GET reads");
-    assert_eq!(again.get("problem"), Some(&serde_json::Value::Null));
+    assert_eq!(fake.log().reads, 2, "nothing was kept, and the plain GET still reads nothing");
+    assert!(
+        again.get("problem").and_then(|v| v.as_str()).is_some_and(|p| p.contains("not been read yet")),
+        "the view open says nothing is read yet: {again}"
+    );
+    let fresh = json(call(&router, "GET", &format!("{path}?fresh=true")).await).await;
+    assert_eq!(fake.log().reads, 3, "Read again reads");
+    assert_eq!(fresh.get("problem"), Some(&serde_json::Value::Null));
 }
 
 
-/// A device that drops out of the enumeration loses its kept values: when it comes back, the
-/// next GET reads it.
+/// #127: the values kept from a read are served while the device is not open. This is what a
+/// restart looks like: the file's values answer the first open before the adapter is connected.
 #[tokio::test]
-async fn a_device_that_leaves_the_enumeration_loses_its_kept_values() {
-    use canvas_daemon::peripherals::{Peripheral, PeripheralHub};
-    let fake = FakePeripheral::default();
-    let hub = PeripheralHub::new(vec![Box::new(fake.clone()) as Box<dyn Peripheral>]);
-    let id = fake.id();
-    hub.apply(&id, PeripheralAccess { reads: true, writes: false }).await.unwrap();
-    hub.discover().await;
-    hub.read(&id).await.unwrap();
-    hub.read(&id).await.unwrap();
-    assert_eq!(fake.log().reads, 1);
-    // The device is unplugged and the enumeration notices; then it is plugged back in.
-    let found = std::mem::take(&mut fake.0.lock().unwrap().found);
-    hub.discover_now().await;
-    fake.0.lock().unwrap().found = found;
-    hub.discover_now().await;
-    hub.read(&id).await.unwrap();
-    assert_eq!(fake.log().reads, 2, "the kept values were dropped with the device");
-}
-
-/// Kept values of a device that is no longer open are not an answer: the next GET opens and reads it.
-#[tokio::test]
-async fn kept_values_are_not_served_for_a_device_that_is_no_longer_open() {
+async fn kept_values_are_served_while_the_device_is_not_open() {
     let fake = FakePeripheral::default();
     let (router, _app, _home) = build(fake.clone());
     let id = fake.id().0.clone();
     call_with_body(&router, "PUT", &access_path_of(&id), r#"{"reads":true,"writes":false}"#).await;
-    call(&router, "GET", &path_of(&id)).await;
+    call(&router, "GET", &format!("{}?fresh=true", path_of(&id))).await;
     assert_eq!(fake.log().reads, 1);
     fake.0.lock().unwrap().connected = false;
-    call(&router, "GET", &path_of(&id)).await;
-    let log = fake.log();
-    assert_eq!(log.reads, 2, "the unplugged device is opened again and read, not answered from memory");
-    assert_eq!(log.connects, 2);
+    let detail = json(call(&router, "GET", &path_of(&id)).await).await;
+    assert_eq!(
+        detail.get("values").and_then(|v| v.as_object()).map(|v| v.len()),
+        Some(3),
+        "the open is answered from the values, not the closed device"
+    );
+    assert_eq!(fake.log().reads, 1, "the view open reads nothing");
 }
 
 #[tokio::test]
@@ -1164,7 +1255,8 @@ async fn the_cli_prints_the_peripherals_and_the_detail() {
     )
     .await;
     assert_eq!(access.status(), StatusCode::OK);
-    let detail = json(call(&router, "GET", &path_of(&id)).await).await;
+    // A read has to happen first; Read again (fresh) is the one that does it (#127).
+    let detail = json(call(&router, "GET", &format!("{}?fresh=true", path_of(&id))).await).await;
     let api = FakeApi::new(serde_json::Value::Null)
         .with(&format!("GET {}/{id}", routes::PERIPHERALS), detail);
     let Output::Text(text) = canvas_daemon::cli::peripherals_show(&api, &id, false)
