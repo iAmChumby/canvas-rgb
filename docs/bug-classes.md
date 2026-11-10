@@ -551,22 +551,37 @@ scroll, so the content was clipped and unreachable.
   or scroll while shown; the move has no transition, so reduced motion needs nothing extra.
   Six placement cases are unit-tested
   (`app/web/src/lib/__tests__/tooltipPlacement.test.ts`).
-- **Class fix, second mechanism:** done (#263, #268). `tools/overflow-check.mjs` serves the static
-  export and opens every view of the demo (plus Peripherals once read and Fans with a limit set) at
-  the six redesign sizes in both themes. It fails on an element past the right edge of its `.panel`,
-  its `.rule` note or its view's row container (Devices and the Effects gallery, which draw no
-  panel), on a note past its panel, on anything past the window, on a `.panel` wider than the window
-  or scrolling sideways, on a document that scrolls sideways, and on a figure whose unit wraps under
-  it. A view that measured nothing fails too. It skips scroll-x containers (never a `.panel`: an
-  `overflow-y: auto` panel computes `overflow-x: auto`, as the Fans right panel does), anything not
-  drawn, and content a clipping ancestor cuts off inside the window. `--mutate-overflow` puts a
-  40 px wider element into one box per view and every row must then fail. Since #271
-  `--hover-tips` replaces the edge measure with a hover pass: it hovers every control that draws a
-  tooltip and fails on a shown bubble that passes the window by more than 1 px or that an ancestor
-  cuts off (78 hits on origin/main, 0 after #271). Run it after
-  `npm --prefix app/web run build`. Not in CI yet (it needs Playwright's browser). When it finds an
-  overflow, let the row wrap as groups (the browser decides from the control's own width) and keep
-  every state of a row the same width, so a state change never moves it.
+- **Class fix, second mechanism:** done (#263, #268, #285). `tools/overflow-check.mjs` serves the
+  static export and measures the rows in its `VIEWS` list at the six redesign sizes in both
+  themes, and nothing else. The rows: the first paint of every view (Layout, Effects, Devices,
+  Displays, Peripherals, Fans, Settings, Updates), and these states: Peripherals once read, Fans
+  with a limit set, Fans in Curve mode, Fans with the temperature source list open, the effect
+  editor (Sample HTML's code), the StackBuilder (`?stack=Sunset glow`), Layout with a zone selected,
+  with a part selected and with the Add part popover open, and Updates with a release waiting.
+  Not measured: every other state, including the dialogs, toasts, the onboarding, every other
+  popover and listbox, the StackBuilder's other layers and each other Effects state. It fails on:
+  an element past the right edge of its `.panel`, its `.rule` note or its view's row container
+  (Devices and the Effects gallery, which draw no panel); a note past its panel; any element past
+  the window's right or left edge (`.content { overflow: hidden }` hides such an element, so a clip
+  is no excuse); a `.panel` wider than the window or scrolling sideways; a document that scrolls
+  sideways; a figure whose unit wraps under it; and a portal (a `Popover` or a `Select` list, both
+  drawn into `body`) past the window on any side or past the right edge of the box its opening
+  control sits in. A view that measured nothing fails too. What it skips: anything not drawn,
+  Layout's `canvas.stage-canvas` (the zoomed view, clipped by its stage on purpose), and content
+  inside a scroller whose CSS says `overflow-x: auto|scroll` and whose own edge is inside the edge
+  measured. An `overflow-y: auto` list or panel computes `overflow-x: auto` too, and is not such a
+  scroller: what it holds past the panel edge is reported. `--mutate-overflow` plants ten
+  overflows in every row, one per measuring path (a wider element in a box, an element outside any
+  box past either window edge, a `.panel` past the window, a `.panel` wider than the window, a body
+  wider than the window, an element past the panel inside a vertical scroller, a sideways-scrolling
+  panel, a wrapped figure, a portal past its panel), and fails when a row does not report the one
+  planted. Since #271 `--hover-tips` replaces the edge measure with a hover pass over the rows
+  that have no popup open: it hovers every control that draws a tooltip and fails on a shown bubble
+  that passes the window by more than 1 px or that an ancestor cuts off (78 hits on origin/main,
+  0 after #271). Run it after `npm --prefix app/web run build`. Not in CI yet (it needs
+  Playwright's browser). When it finds an overflow, let the row wrap as groups (the browser decides
+  from the control's own width) and keep every state of a row the same width, so a state change
+  never moves it.
 
 ### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
 
