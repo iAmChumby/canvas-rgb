@@ -323,6 +323,11 @@ line. Three mechanisms, and one bug the timing only exposed.
   limit, and `marker_is_overdue` compared whole seconds to `limit.as_secs()`, which is 0; the marker was
   "overdue" whenever the wall clock crossed a second during the test (`crates/canvas-svc/src/update_install.rs`).
   Reproduced locally: 1 failure in 60 runs. A product bug as well: a sub-second limit rounded to nothing.
+- [#282](https://github.com/iAmChumby/canvas-rgb/issues/282): `a_panic_in_the_sweeper_does_not_stop_the_next_sweep`
+  waited for the draft slot to empty, then read the engine. The sweeper empties the slot before it
+  awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
+  engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
+  fake bumps), never on a flag the code sets before the awaited work.
 - [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
   (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` failed with a
   line missing from the capture. The line was not always the same one: the "terminating the daemon" INFO
