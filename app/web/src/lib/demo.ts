@@ -98,7 +98,7 @@ import { stackThumbnailBytes } from "@/lib/stackFrame";
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.10.2";
+const APP_VERSION = "0.10.3";
 const SCHEMA_VERSION = 1;
 
 function scenario(): Set<string> {
@@ -501,8 +501,37 @@ function activeLayout(): Layout {
 
 /** When each open read started. */
 const readStartedAt = new Map<string, number>();
-/** The devices the demo daemon has read once and keeps the values of, like the daemon does (#7). */
-const keptReads = new Set<string>();
+/**
+ * The devices the demo daemon keeps values for, with when each was read (Unix ms), like the
+ * daemon's `peripheral-values.json` does (#127). A plain GET answers from them and never reads.
+ */
+const keptReads = new Map<string, number>();
+/** True once the kept values were seeded, so a reload of the page does not seed them twice. */
+let keptSeeded = false;
+/** How long ago the seeded values were read: a daemon that read them a little while back. */
+const SEEDED_AGE_MS = 3 * 60 * 1000;
+
+/**
+ * `?peripherals=unread` starts with nothing read, as a first run does: the page shows "Not read
+ * yet" until Read again reads.
+ */
+function startsUnread(): boolean {
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).get("peripherals") === "unread";
+}
+
+/** Seeds the kept values the first time a peripheral is asked about. */
+function seedKeptReads(devices: DemoPeripheral[]): void {
+  if (keptSeeded) return;
+  keptSeeded = true;
+  if (startsUnread()) return;
+  const asleep = scenario().has("asleep");
+  for (const device of devices) {
+    // A mouse that is asleep has not been read: it answers only a Read again, with the adapter's words.
+    if (asleep && device.info.kind === "mouse") continue;
+    keptReads.set(device.info.id, Date.now() - SEEDED_AGE_MS);
+  }
+}
 /** Opening, waking, then five reports a little under a second apart. */
 const OPEN_MS = 700;
 const WAKE_MS = 1500;
@@ -833,6 +862,8 @@ function validateDisplay(pathId: string, config: DisplayConfig): void {
 
 /** The daemon's own words when a peripheral's access is asked for. */
 const READS_OFF = "reads are off for this device";
+/** The daemon's words when reads are on and nothing has been read yet. */
+const NOT_READ_YET = "the device's settings have not been read yet";
 
 /**
  * Checks one value against the property's kind, the way the adapter does: the key must be
@@ -1415,8 +1446,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         access,
         problem: READS_OFF,
       };
-      // The daemon reads the device only when it keeps nothing, or when `?fresh=true` asks.
-      const readsDevice = access.reads && (url.searchParams.get("fresh") === "true" || !keptReads.has(id));
+      seedKeptReads(s.peripherals);
+      // A plain GET never reads the device (#127): it answers from what is kept, or says nothing
+      // has been read. Only `?fresh=true` (Read again) reads.
+      const readsDevice = access.reads && url.searchParams.get("fresh") === "true";
       // `?state=slow-read`: the read goes through its stages, as a mouse that has to wake does.
       if (readsDevice && slowRead()) {
         readStartedAt.set(id, Date.now());
@@ -1424,13 +1457,25 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         readStartedAt.delete(id);
       }
       if (access.reads) {
-        // A mouse that is asleep answers nothing: the adapter says so.
-        if (scenario().has("asleep") && device.info.kind === "mouse") {
-          detail.problem = "the mouse is asleep: move it and try again";
-        } else {
+        if (readsDevice) {
+          // A mouse that is asleep answers nothing: the adapter says so.
+          if (scenario().has("asleep") && device.info.kind === "mouse") {
+            detail.problem = "the mouse is asleep: move it and try again";
+          } else {
+            detail.values = { ...device.values };
+            keptReads.set(id, Date.now());
+            detail.problem = null;
+          }
+        } else if (keptReads.has(id)) {
           detail.values = { ...device.values };
-          keptReads.add(id);
           detail.problem = null;
+        } else {
+          detail.problem = NOT_READ_YET;
+        }
+        // The daemon sends a number; the generated type says bigint for a u64.
+        const readAt = keptReads.get(id);
+        if (readAt !== undefined && detail.problem === null) {
+          detail.read_at_ms = readAt as unknown as bigint;
         }
       }
       return detail;
@@ -1454,8 +1499,11 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (next.writes && !next.reads) {
         fail(422, "validation", "config writes need reads: turn reads on too");
       }
+      // Only a change of `reads` forgets the kept values; the first access after a start is not a
+      // change, and a change of `writes` keeps them (as the daemon's `apply` does).
+      const before = s.peripheralAccess[id];
+      if (before && before.reads !== !!next.reads) keptReads.delete(id);
       s.peripheralAccess[id] = { reads: !!next.reads, writes: !!next.writes };
-      keptReads.delete(id);
       return s.peripheralAccess[id];
     }
     return bad();
