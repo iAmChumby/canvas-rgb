@@ -116,9 +116,7 @@ describe("the stack builder", () => {
     await openBuilder();
     await waitFor(() => expect(layerNames()).toHaveLength(3));
     previewCalls().length = 0;
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    const solid = await screen.findByRole("option", { name: /Solid/ });
-    fireEvent.click(solid);
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
     await waitFor(() => expect(previewCalls().some((call) => call.stack?.layers.length === 4)).toBe(true));
     const last = previewCalls().at(-1);
@@ -129,8 +127,7 @@ describe("the stack builder", () => {
   it("asks before leaving with unsaved changes", async () => {
     await openBuilder();
     await waitFor(() => expect(layerNames()).toHaveLength(3));
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
     // The in-app leave goes through the guard the dirty effect registers.
     await waitForStackGuard();
@@ -185,8 +182,7 @@ describe("the stack builder", () => {
     await waitFor(() => expect(layerNames()).toHaveLength(3));
     saveCalls().length = 0;
     // A layer change first, so the Save has something to write.
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
     fireEvent.click(screen.getByRole("button", { name: "Save" }));
     await waitFor(() => expect(saveCalls()).toHaveLength(1));
@@ -214,8 +210,7 @@ describe("the stack builder", () => {
     try {
       await renderEffects("?stack=new&state=complete,stack");
       await screen.findByTestId("stack-builder");
-      fireEvent.click(screen.getByRole("button", { name: "Add the first layer" }));
-      fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+      fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
       await waitFor(() => expect(layerNames()).toHaveLength(1));
 
       fireEvent.click(screen.getByRole("button", { name: "Save" }));
@@ -469,8 +464,8 @@ describe("the stack builder", () => {
     expect(save).toHaveProperty("disabled", true);
     const tryOn = screen.getByRole("button", { name: "Try on the lights" });
     expect(tryOn).toHaveProperty("disabled", true);
-    fireEvent.click(screen.getByRole("button", { name: "Add the first layer" }));
-    await screen.findByRole("dialog", { name: "Add a layer" });
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
+    await waitFor(() => expect(layerNames()).toHaveLength(1));
   });
 
   it("changes the picked layer's opacity, and the preview carries it", async () => {
@@ -533,8 +528,7 @@ describe("the stack builder", () => {
   it("keeps the saved stack's name in the URL after the first save", async () => {
     await renderEffects("?stack=new&state=complete,stack");
     await screen.findByTestId("stack-builder");
-    fireEvent.click(screen.getByRole("button", { name: "Add the first layer" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(1));
 
     fireEvent.click(screen.getByRole("button", { name: "Save" }));

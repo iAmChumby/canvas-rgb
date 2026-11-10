@@ -115,8 +115,7 @@ describe("the stack builder's states", () => {
 
   it("shows a save error in the layer column with Try again, and keeps the draft", async () => {
     await openBuilder();
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(layerNames()).toHaveLength(4));
     const write = vi.spyOn(api, "putStack").mockRejectedValueOnce(
       new ApiFailure(500, "internal", "could not write stacks.json: the file is locked"),
@@ -133,12 +132,11 @@ describe("the stack builder's states", () => {
     }
   });
 
-  it("shows eight layers as 8 / 8, with Add layer disabled and the cap as its reason", async () => {
+  it("shows eight layers as 8 / 8, with every tile disabled and the cap as its reason", async () => {
     await renderEffects("?stack=Eight%20layers&state=complete,stack");
     await waitFor(() => expect(screen.getByText("8 / 8")).toBeTruthy());
-    const add = screen.getByRole("button", { name: /Add layer/ });
+    const add = screen.getByRole("button", { name: "Add Solid" });
     expect(add).toHaveProperty("disabled", true);
-    expect(add.getAttribute("aria-label")).toContain("a stack holds 8");
     expect(add.getAttribute("title")).toContain("A stack holds 8 layers");
   });
 
@@ -165,14 +163,20 @@ describe("the stack builder's states", () => {
     expect(heat?.props.intensity).toEqual({ type: "number", value: 90 });
   });
 
-  it("closes the Add popover on Escape and puts focus back on the key that opened it", async () => {
+  it("filters the library's tiles by the search, and clears again", async () => {
     await openBuilder();
-    const add = screen.getByRole("button", { name: /Add layer/ });
-    fireEvent.click(add);
-    await screen.findByRole("dialog", { name: "Add a layer" });
-    fireEvent.keyDown(document.body, { key: "Escape" });
-    await waitFor(() => expect(screen.queryByRole("dialog", { name: "Add a layer" })).toBeNull());
-    await waitFor(() => expect(document.activeElement).toBe(add));
+    const search = screen.getByRole("searchbox", { name: "Search the library" });
+    const names = () =>
+      [...document.querySelectorAll<HTMLElement>(".rd-library [data-lib-tile]")]
+        .map((tile) => tile.dataset.effect)
+        .filter((id) => id !== undefined);
+    const before = names().length;
+    fireEvent.change(search, { target: { value: "fire" } });
+    // Fire leads, and the tiles that do not match its words are gone.
+    await waitFor(() => expect(names()[0]).toBe("fire"));
+    expect(names().length).toBeLessThan(before);
+    fireEvent.change(search, { target: { value: "" } });
+    await waitFor(() => expect(names()).toHaveLength(before));
   });
 
   it("closes the area picker on Escape and puts focus back on Change area", async () => {

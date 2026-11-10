@@ -15,6 +15,7 @@ import { useEffect, useMemo, useRef, useState, type KeyboardEvent, type PointerE
 import { ArrowClockwise, ArrowCounterClockwise } from "@phosphor-icons/react";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import { EDGE_HANDLE_MIN_PX, hitTest, type HandleDef, type HitPart, type PartRef, type PointerKind } from "@/lib/hitTest";
+import type { DropTarget } from "@/lib/dropTargets";
 import { Chip } from "@/components/Chip";
 import { IconButton } from "@/components/Button";
 import { Toggle } from "@/components/Toggle";
@@ -140,6 +141,7 @@ export function Stage({
   onDelete,
   onDuplicate,
   onMakeRect,
+  drop,
 }: {
   stack: Stack;
   layout: Layout | null;
@@ -160,6 +162,8 @@ export function Stage({
   onDelete?: (id: string) => void;
   onDuplicate?: (id: string) => void;
   onMakeRect?: (id: string) => void;
+  /** A library drag in progress (#257 phase 2): its target on the stage, and the words for it. */
+  drop?: { target: DropTarget | null; words: string | null } | null;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -239,6 +243,22 @@ export function Stage({
     [visibleZones, stageW],
   );
   const pxPerUnit = stageW > 0 ? stageW / CANVAS_W : 0;
+  /** The outlines that would take a drop: every placement of a device, or one zone. */
+  const dropZones = useMemo(() => {
+    const target = drop?.target ?? null;
+    if (!target || !layout) return null;
+    if (target.kind !== "device" && target.kind !== "zone") return null;
+    return new Set(
+      layout.zones
+        .filter(
+          (zone) =>
+            zone.device_id === target.device &&
+            (target.kind === "device" || zone.zone_index === target.zone),
+        )
+        .map(zoneKey),
+    );
+  }, [drop, layout]);
+
   /** Whether a side of `units` long has room for its bar (unmeasured: yes). */
   const markN = (units: number) => (pxPerUnit === 0 || units * pxPerUnit >= EDGE_HANDLE_MIN_PX ? "on" : "off");
   // Only a rectangle is dragged here. A whole-canvas, device or zone area follows the layout;
@@ -433,6 +453,7 @@ export function Stage({
         className="rd-canvas"
         ref={stageRef}
         data-empty={empty ? "true" : "false"}
+        data-drop={drop?.target?.kind === "canvas" ? "true" : undefined}
         tabIndex={0}
         role="group"
         aria-label="The stage. Tab and Shift+Tab pick a layer, Escape clears the pick."
@@ -441,6 +462,11 @@ export function Stage({
         onDragStart={refuseDragStart}
         draggable={false}
       >
+        {drop && (
+          <div className="rd-drop-strip" data-over={drop.target?.kind === "canvas" ? "true" : "false"}>
+            Whole canvas
+          </div>
+        )}
         {!empty && <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} aria-label="The stack's preview" />}
         {empty && (
           <div className="rd-canvas-empty">
@@ -448,7 +474,7 @@ export function Stage({
             <span>Add a layer and its picture appears here.</span>
           </div>
         )}
-        {!empty && (parts || dragging) && layout && (
+        {!empty && (parts || dragging || drop) && layout && (
           <div className="rd-parts" aria-hidden="true">
             {visibleZones.map((zone) => {
               const key = zoneKey(zone);
@@ -456,6 +482,7 @@ export function Stage({
                 <span
                   key={key}
                   className="rd-part-outline"
+                  data-drop={dropZones?.has(key) ? "true" : undefined}
                   style={{
                     left: `${(zone.x / CANVAS_W) * 100}%`,
                     top: `${(zone.y / CANVAS_H) * 100}%`,
@@ -537,7 +564,24 @@ export function Stage({
               </div>
             );
           })}
+        {drop?.target?.kind === "rect" && (
+          <span
+            className="rd-drop-rect"
+            aria-hidden="true"
+            style={{
+              left: `${(drop.target.x / CANVAS_W) * 100}%`,
+              top: `${(drop.target.y / CANVAS_H) * 100}%`,
+              width: `${(drop.target.width / CANVAS_W) * 100}%`,
+              height: `${(drop.target.height / CANVAS_H) * 100}%`,
+            }}
+          >
+            <em>New rectangle</em>
+          </span>
+        )}
       </div>
+      {drop && drop.words && (drop.target?.kind === "device" || drop.target?.kind === "zone") && (
+        <span className="rd-drop-label">{drop.words}</span>
+      )}
       {!empty && picked && asRect && picked.area.kind !== "rect" && (
         <span className="rd-stage-float">
           <Chip

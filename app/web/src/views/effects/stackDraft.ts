@@ -170,6 +170,14 @@ export function addLayer(layers: StackLayer[], layer: StackLayer): StackLayer[] 
   return [...layers, layer];
 }
 
+/** The layer list with a new layer inserted at a bottom-first slot (0 under everything, `at` on top). */
+export function insertLayerAt(layers: StackLayer[], layer: StackLayer, at: number): StackLayer[] {
+  const place = Math.max(0, Math.min(layers.length, Math.round(at)));
+  const next = [...layers];
+  next.splice(place, 0, layer);
+  return next;
+}
+
 export function removeLayer(layers: StackLayer[], id: string): StackLayer[] {
   return layers.filter((layer) => layer.id !== id);
 }

@@ -5,13 +5,14 @@
 // second engine (`?stack=1`); Try on the lights is a stack draft; Save writes the stack and
 // activates it. Nothing here writes an effect file or the layout except those two routes.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent, type RefObject } from "react";
 import {
   ArrowCounterClockwise,
   ArrowLeft,
   CaretLeft,
   CircleHalf,
   CopySimple,
+  DotsSixVertical,
   Eraser,
   Eye,
   EyeSlash,
@@ -44,6 +45,7 @@ import { useMediaQuery } from "@/components/MediaQuery";
 import { Highlighted, matchEffect } from "@/components/Search";
 import { PropertyControls } from "@/views/PropertyControls";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
+import { Library, type LibraryMode } from "@/views/effects/Library";
 import { Stage, StageTools } from "@/views/effects/Stage";
 import {
   addLayer,
@@ -54,6 +56,7 @@ import {
   areaPosition,
   duplicateLayer,
   htmlLayers,
+  insertLayerAt,
   isHtmlEffect,
   layerNameProblem,
   layerValues,
@@ -81,6 +84,28 @@ import {
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { canRedo, canUndo, endRun, historyOf, record, redo, reset, undo, type History } from "@/lib/draftHistory";
+import { dropArea, dropTargetAt, dropTargetWords, type DropTarget } from "@/lib/dropTargets";
+import {
+  CANCEL_ANNOUNCEMENT,
+  TOUCH_HOLD_MS,
+  cycleTarget,
+  dropAnnouncement,
+  liftAnnouncement,
+  lifted,
+  liftsOnHold,
+  liftsOnMove,
+  NO_DRAG,
+  pressMoved,
+  readDropBoxes,
+  reorderToSlot,
+  stackSlots,
+  stageTargets,
+  targetAnnouncement,
+  targetKey,
+  type DragSource,
+  type DragState,
+  type TargetNames,
+} from "@/lib/dragSession";
 import { onStackPreviewFeed } from "@/lib/stackPreview";
 import {
   cancelNavigation,
@@ -128,6 +153,18 @@ const BLENDS: { value: BlendMode; label: string; note: string }[] = [
 type DraftState = "off" | "starting" | "running" | "expiring" | "restoring" | "restore-error";
 /** Why the unsaved prompt is open, recorded when it opens and read when it is answered. */
 type LeaveReason = "back" | "navigation" | "close";
+/** A press that has not yet travelled far enough to be a drag (#257 phase 2). */
+interface Press {
+  source: DragSource;
+  pointerId: number;
+  pointerType: string;
+  start: { x: number; y: number };
+  lifted: boolean;
+  timer: ReturnType<typeof setTimeout> | null;
+  element: HTMLElement | null;
+  move: (event: PointerEvent) => void;
+  up: (event: PointerEvent) => void;
+}
 
 function nameOf(id: string): string {
   return id.startsWith("stack:") ? id.slice("stack:".length) : id;
@@ -163,12 +200,15 @@ export function StackBuilder({
   initialName,
   onClose,
   onName,
+  onWriteCode,
 }: {
   /** The `?stack=` value: a saved stack's name, or `new`. */
   initialName: string;
   onClose: () => void;
   /** A newly saved stack's name: the URL becomes `?stack=<name>` without reloading. */
   onName: (name: string) => void;
+  /** The library's last tile: leave the builder and open the HTML effect flow. */
+  onWriteCode?: () => void;
 }) {
   const isNew = initialName === "new";
   const devices = useSnap((s) => s.devices);
@@ -207,8 +247,12 @@ export function StackBuilder({
   const [presets, setPresets] = useState<{ builtIn: Preset[]; user: Preset[] }>({ builtIn: [], user: [] });
   // Parts (the desk's outlines) starts off; a drag shows them anyway (spec §3).
   const [parts, setParts] = useState(false);
-  const [addOpen, setAddOpen] = useState(false);
-  const [addQuery, setAddQuery] = useState("");
+  /** The library drag session (#257 phase 2): what is lifted and where it would land. */
+  const [drag, setDrag] = useState<DragState>(NO_DRAG);
+  /** The live region's line: every lift, target and drop is said here. */
+  const [announce, setAnnounce] = useState("");
+  /** The phone's tab under the stage: the layer list, or the library. */
+  const [phoneTab, setPhoneTab] = useState<"layers" | "library">("layers");
   const [pickerFor, setPickerFor] = useState<string | null>(null);
   const [renaming, setRenaming] = useState<string | null>(null);
   const [renameText, setRenameText] = useState("");
@@ -221,6 +265,8 @@ export function StackBuilder({
   const leaveAfterName = useRef<(() => void) | null>(null);
   /** The name a new stack was saved under: the guard entry the builder lands on takes it. */
   const pendingName = useRef<string | null>(null);
+  /** The code flow was asked for from the library: it opens once a dirty builder has left. */
+  const pendingCode = useRef(false);
   const [leaving, setLeaving] = useState<LeaveReason | false>(false);
   const [previewError, setPreviewError] = useState<string | null>(null);
   /** What the preview feed says is wrong with it: the daemon refuses a second stack socket. */
@@ -239,6 +285,9 @@ export function StackBuilder({
   const [presetProblem, setPresetProblem] = useState<string | null>(null);
   const [otherStacks, setOtherStacks] = useState<{ id: string; name: string }[]>([]);
   const narrow = useMediaQuery("(max-width: 720px)");
+  /** The library's shape at this width (spec §3): a rail, a tray under the stage, or a tab. */
+  const wide = useMediaQuery("(min-width: 1180px)");
+  const libraryMode: LibraryMode = narrow ? "tab" : wide ? "rail" : "tray";
   // The phone's layer sheet: Tune pushes it over the builder (D95.5.7).
   const [sheetOpen, setSheetOpen] = useState(false);
   const [chooseFor, setChooseFor] = useState<string | null>(null);
@@ -247,9 +296,13 @@ export function StackBuilder({
   /** The row the mask picker's keyboard cursor is on: an index into leads + rest (#256). */
   const [maskActive, setMaskActive] = useState(0);
   /** A layer row picked up by a finger on its grip, and the row it is over. */
-  const [touchId, setTouchId] = useState<string | null>(null);
+  const dragRef = useRef<DragState>(NO_DRAG);
+  /** A press that has not yet become a drag: the tile or grip it started on, and its pointer. */
+  const press = useRef<Press | null>(null);
+  /** A drag just ended: the click that follows the release is not a tap-to-add. */
+  const suppressClick = useRef(false);
 
-  const addRef = useRef<HTMLSpanElement>(null);
+  const libraryRef = useRef<HTMLDivElement>(null);
   const tuneRef = useRef<HTMLSpanElement>(null);
   const chooseRef = useRef<HTMLSpanElement>(null);
   const maskAnchor = useRef<HTMLElement | null>(null);
@@ -262,7 +315,6 @@ export function StackBuilder({
   const leaveWasOpen = useRef(false);
   /** The key that opened the area picker: focus returns to it on close. */
   const areaOpener = useRef<HTMLElement | null>(null);
-  const touchDrag = useRef<{ id: string; over: string | null } | null>(null);
   const draftRef = useRef(draft);
   /** A pointer drag or resize on the stage is in progress: undo and redo wait for it. */
   const areaDragging = useRef(false);
@@ -369,7 +421,6 @@ export function StackBuilder({
     }
   };
 
-  const closeAdd = () => closePopover(".rd-add-layer:not(.rd-choose-effect)", addRef, () => setAddOpen(false));
   const closeChoose = () => closePopover(".rd-choose-effect", chooseRef, () => setChooseFor(null));
 
   /** The area picker closed: focus goes back to the key that opened it. */
@@ -391,6 +442,7 @@ export function StackBuilder({
 
   /** Keep editing: the leave prompt closes, and focus goes back where it was. */
   const keepEditing = useCallback(() => {
+    pendingCode.current = false;
     setLeaving(false);
     cancelNavigation();
   }, []);
@@ -440,8 +492,10 @@ export function StackBuilder({
   // The sheet is opened by Tune: it takes focus, and gives it back to Tune when it closes. Tune
   // is a key and not a remembered element, so a tap on a phone (where the body is the active
   // element) still puts focus on the key the sheet came from. When the picked layer is gone —
-  // its Delete closed the sheet and there is no Tune left — focus goes to Add layer.
+  // its Delete closed the sheet and there is no Tune left — focus goes to the library.
   const sheetWasOpen = useRef(false);
+  /** The library tab was opened to catch the focus: its first tile takes the keyboard next. */
+  const wantLibraryFocus = useRef(false);
   useEffect(() => {
     if (sheetOpen) {
       sheetWasOpen.current = true;
@@ -453,9 +507,23 @@ export function StackBuilder({
     if (!sheetWasOpen.current) return;
     sheetWasOpen.current = false;
     const tune = tuneRef.current?.querySelector<HTMLElement>("button");
-    const add = addRef.current?.querySelector<HTMLElement>("button");
-    (tune ?? add)?.focus();
+    const library = libraryRef.current?.querySelector<HTMLElement>("[data-lib-tile]");
+    if (!tune && !library) {
+      // A phone with no layer left has no Tune and no library on this tab: open the library and
+      // its first tile takes the focus, so the keyboard is never stranded on the body.
+      wantLibraryFocus.current = true;
+      setPhoneTab("library");
+      return;
+    }
+    (tune ?? library)?.focus();
   }, [sheetOpen]);
+
+  // The library tab opened for a fallback focus: its first tile takes the keyboard.
+  useEffect(() => {
+    if (!wantLibraryFocus.current || phoneTab !== "library") return;
+    wantLibraryFocus.current = false;
+    libraryRef.current?.querySelector<HTMLElement>("[data-lib-tile]")?.focus();
+  }, [phoneTab]);
 
   // The leave prompt is a modal over the builder and over the sheet: it takes focus, Tab stays
   // inside it, and Escape is Keep editing. Focus goes back where it was when it closes.
@@ -474,8 +542,8 @@ export function StackBuilder({
     leaveOpener.current = null;
     const back = backRef.current?.querySelector<HTMLElement>("button");
     const tune = tuneRef.current?.querySelector<HTMLElement>("button");
-    const add = addRef.current?.querySelector<HTMLElement>("button");
-    const target = opener && opener.isConnected ? opener : (back ?? tune ?? add);
+    const library = libraryRef.current?.querySelector<HTMLElement>("[data-lib-tile]");
+    const target = opener && opener.isConnected ? opener : (back ?? tune ?? library);
     target?.focus();
   }, [leaving]);
 
@@ -966,6 +1034,10 @@ export function StackBuilder({
     }
     if (sentinelPushed.current) closeDirect();
     else onClose();
+    if (pendingCode.current) {
+      pendingCode.current = false;
+      onWriteCode?.();
+    }
   };
 
   useEffect(() => {
@@ -1164,6 +1236,16 @@ export function StackBuilder({
     else onClose();
   };
 
+  /** The library's "Write code" tile: the code flow, once a dirty builder has left. */
+  const writeCode = () => {
+    if (dirty) {
+      pendingCode.current = true;
+      setLeaving("close");
+      return;
+    }
+    onWriteCode?.();
+  };
+
   // ---- undo and redo (#257) ---------------------------------------------------------
 
   // Undo and redo go through the functional updater, so a change and a step asked for in the same
@@ -1215,10 +1297,10 @@ export function StackBuilder({
       ) {
         return;
       }
-      // Any open surface owns the keyboard: the Add layer popover, the mask picker, the layer
-      // sheet, the area picker, the leave and name prompts. The DOM check catches a popover or
+      // Any open surface owns the keyboard: the mask picker, the layer sheet, the area picker,
+      // the leave and name prompts, and a drag in progress. The DOM check catches a popover or
       // dialog the flags above do not know about.
-      if (sheetOpen || pickerFor || leaving || naming || addOpen || maskFor) return;
+      if (sheetOpen || pickerFor || leaving || naming || maskFor || drag.source) return;
       if (document.querySelector('.popover[role="dialog"]:not([inert]), [role="alertdialog"], [aria-modal="true"]')) return;
       const key = event.key.toLowerCase();
       if (key === "z" && !event.shiftKey) {
@@ -1240,7 +1322,7 @@ export function StackBuilder({
     return () => window.removeEventListener("keydown", onKey);
     // `duplicate` reads the draft it was rendered with; the listener is re-registered with it.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [draft, sheetOpen, pickerFor, leaving, naming, addOpen, maskFor]);
+  }, [draft, sheetOpen, pickerFor, leaving, naming, maskFor, drag.source]);
 
   const leavePrompt = (
     <div className="rd-scrim" role="presentation">
@@ -1457,7 +1539,7 @@ export function StackBuilder({
     setMaskActive(next);
   };
 
-  const addOne = async (effect: string) => {
+  const addOne = async (effect: string, place?: { area?: LayerArea; at?: number }) => {
     const refusal = addLayerRefusal(draftRef.current.layers, effect);
     if (refusal) {
       setAddProblem(refusal);
@@ -1490,24 +1572,27 @@ export function StackBuilder({
     const layer: StackLayer = {
       ...makeLayer(effect, freeLayerName(schema?.name ?? effect, layers), schema, props),
       id,
+      ...(place?.area ? { area: place.area } : {}),
     };
     // The ref is updated with the draft, so a queued add sees this layer.
-    const next = { ...draftRef.current, layers: addLayer(layers, layer) };
+    const next = {
+      ...draftRef.current,
+      layers:
+        place?.at === undefined ? addLayer(layers, layer) : insertLayerAt(layers, layer, place.at),
+    };
     draftRef.current = next;
     setDraft(next);
     pick(id);
-    setAddOpen(false);
-    setAddQuery("");
   };
 
-  const addEffect = (effect: string) => {
+  const addEffect = (effect: string, place?: { area?: LayerArea; at?: number }) => {
     // One add at a time, in the order the clicks came (D95.5.3). A second click on a different
     // row waits its turn and lands; a second click on the same row is the same add.
     if (addQueued.current.has(effect)) return;
     addQueued.current.add(effect);
     const run = addChain.current.then(async () => {
       try {
-        await addOne(effect);
+        await addOne(effect, place);
       } finally {
         addQueued.current.delete(effect);
       }
@@ -1569,47 +1654,248 @@ export function StackBuilder({
     closePicker();
   };
 
-  // ---- touch reorder ------------------------------------------------------------------
-  // A finger on the grip moves the row past its neighbours' middles; the row reorders as it
-  // passes, so what the finger is over is what the list shows (D95.5.3, D95.5.7).
+  // ---- the drag session (#257 phase 2) ------------------------------------------------
+  // One place lifts a tile or a row, follows the pointer or the keyboard, and says what a drop
+  // would do. The old pointer reorder and the HTML5 drag lived here; both are gone.
 
-  const touchStart = (event: ReactPointerEvent<HTMLButtonElement>, layer: StackLayer) => {
-    // A mouse keeps the HTML drag and drop it already has; a finger and a pen use this.
-    if (event.pointerType === "mouse") return;
-    event.currentTarget.setPointerCapture(event.pointerId);
-    touchDrag.current = { id: layer.id, over: null };
-    setTouchId(layer.id);
+  const targetNames = (): TargetNames => ({ layout, devices, layers: draftRef.current.layers });
+
+  const showDrag = (next: DragState) => {
+    dragRef.current = next;
+    setDrag(next);
   };
 
-  const touchMove = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    const drag = touchDrag.current;
-    if (!drag) return;
-    event.preventDefault();
-    const rows = Array.from(document.querySelectorAll<HTMLElement>(".rd-layers .layer-row"));
-    let over: string | null = null;
-    for (const row of rows) {
-      const box = row.getBoundingClientRect();
-      if (event.clientY >= box.top && event.clientY <= box.bottom) {
-        over = row.dataset.layerId ?? null;
-        break;
-      }
-    }
-    if (!over || over === drag.id || over === drag.over) return;
-    drag.over = over;
-    setDraft((now) => {
-      const target = now.layers.findIndex((layer) => layer.id === over);
-      if (target < 0) return now;
-      return { ...now, layers: moveLayer(now.layers, drag.id, target) };
+  /** A target changed: the live region says where the drop would land now. */
+  const sayTarget = (target: DropTarget | null) => {
+    setAnnounce(target ? targetAnnouncement(target, targetNames()) : "");
+  };
+
+  const endPress = () => {
+    const current = press.current;
+    if (!current) return;
+    if (current.timer !== null) clearTimeout(current.timer);
+    window.removeEventListener("pointermove", current.move);
+    window.removeEventListener("pointerup", current.up);
+    window.removeEventListener("pointercancel", current.up);
+    press.current = null;
+  };
+
+  const clearDrag = () => {
+    endPress();
+    showDrag(NO_DRAG);
+  };
+
+  const moveDrag = (point: { x: number; y: number }, shift: boolean) => {
+    const current = dragRef.current;
+    if (!current.source) return;
+    const target = dropTargetAt({
+      point,
+      boxes: readDropBoxes(),
+      layout,
+      payload: current.source.kind,
+      shift,
     });
+    if (targetKey(target) !== targetKey(current.target)) sayTarget(target);
+    showDrag({ ...current, target, point });
   };
 
-  const touchEnd = (event: ReactPointerEvent<HTMLButtonElement>) => {
-    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
-      event.currentTarget.releasePointerCapture(event.pointerId);
+  /** The drop, applied once: one drop is one undo step. */
+  const commitDrop = (source: DragSource, target: DropTarget | null) => {
+    const names = targetNames();
+    if (!target) {
+      setAnnounce(CANCEL_ANNOUNCEMENT);
+      clearDrag();
+      return;
     }
-    touchDrag.current = null;
-    setTouchId(null);
+    if (source.kind === "effect") {
+      if (target.kind === "stackSlot" || target.kind === "row") {
+        void addEffect(source.effect, { at: target.kind === "stackSlot" ? target.at : target.index + 1 });
+      } else {
+        const area = dropArea(target);
+        if (area) void addEffect(source.effect, { area });
+      }
+    } else if (target.kind === "stackSlot" || target.kind === "row") {
+      // A drop on a row takes that row's place: it goes above it.
+      const at = target.kind === "stackSlot" ? target.at : target.index + 1;
+      setDraft((now) => ({ ...now, layers: reorderToSlot(now.layers, source.id, at) }));
+    }
+    setAnnounce(dropAnnouncement(source, target, names));
+    clearDrag();
   };
+
+  const beginKeyboard = (source: DragSource) => {
+    const layers = draftRef.current.layers;
+    const first: DropTarget | null =
+      source.kind === "effect"
+        ? (stageTargets(layout)[0] ?? null)
+        : { kind: "stackSlot", at: Math.max(0, layers.findIndex((layer) => layer.id === source.id)) };
+    showDrag(lifted(source, "keyboard", first));
+    setAnnounce(liftAnnouncement(source));
+  };
+
+  const beginPress = (source: DragSource, event: ReactPointerEvent<HTMLElement>) => {
+    if (event.button > 0 || dragRef.current.source) return;
+    endPress();
+    const pointerType = event.pointerType || "mouse";
+    const start = { x: event.clientX, y: event.clientY };
+    const element = event.currentTarget;
+    const current: Press = {
+      source,
+      pointerId: event.pointerId,
+      pointerType,
+      start,
+      lifted: false,
+      timer: null,
+      element,
+      move: () => {},
+      up: () => {},
+    };
+    /** The move or the hold went past the slop: the drag begins where the press did. */
+    const lift = () => {
+      if (current.lifted) return;
+      current.lifted = true;
+      if (current.timer !== null) {
+        clearTimeout(current.timer);
+        current.timer = null;
+      }
+      try {
+        element.setPointerCapture(current.pointerId);
+      } catch {
+        // A pointer that is already gone has nothing to capture.
+      }
+      const target = dropTargetAt({ point: start, boxes: readDropBoxes(), layout, payload: source.kind });
+      showDrag({ source, mode: pointerType === "touch" ? "touch" : "pointer", target, point: start });
+      setAnnounce(liftAnnouncement(source));
+    };
+    current.move = (e) => {
+      if (e.pointerId !== current.pointerId || !press.current) return;
+      if (!current.lifted) {
+        if (!liftsOnMove(pointerType) || !pressMoved(start, { x: e.clientX, y: e.clientY })) return;
+        lift();
+      }
+      // The press is the drag's: a finger does not scroll the page under the ghost.
+      e.preventDefault();
+      moveDrag({ x: e.clientX, y: e.clientY }, e.shiftKey);
+    };
+    current.up = (e) => {
+      if (e.pointerId !== current.pointerId) return;
+      const wasLifted = current.lifted;
+      endPress();
+      if (!wasLifted) return;
+      // The click that follows a release must not also add the tile.
+      suppressClick.current = true;
+      setTimeout(() => {
+        suppressClick.current = false;
+      }, 0);
+      if (e.type === "pointercancel") {
+        setAnnounce(CANCEL_ANNOUNCEMENT);
+        clearDrag();
+        return;
+      }
+      commitDrop(source, dragRef.current.target);
+    };
+    press.current = current;
+    window.addEventListener("pointermove", current.move, { passive: false });
+    window.addEventListener("pointerup", current.up);
+    window.addEventListener("pointercancel", current.up);
+    if (liftsOnHold(pointerType)) {
+      current.timer = setTimeout(() => {
+        current.timer = null;
+        lift();
+      }, TOUCH_HOLD_MS);
+    }
+  };
+
+  /** The keyboard's target step for Up/Down: the nearest slot, then one place at a time. */
+  const slotStep = (current: DropTarget | null, step: 1 | -1): DropTarget | null => {
+    const slots = stackSlots(draftRef.current.layers.length);
+    if (current?.kind !== "stackSlot") return (step > 0 ? slots[slots.length - 1] : slots[0]) ?? null;
+    return cycleTarget(slots, current, step);
+  };
+
+  // The keyboard sensor: the arrows pick, Enter drops, Escape cancels. Capture, so a key that
+  // steers the drag is not also a key the tile or the row under it acts on.
+  useEffect(() => {
+    if (!drag.source || drag.mode !== "keyboard") return;
+    const source = drag.source;
+    const onKey = (event: KeyboardEvent) => {
+      const current = dragRef.current;
+      if (event.key === "Escape") {
+        event.preventDefault();
+        setAnnounce(CANCEL_ANNOUNCEMENT);
+        clearDrag();
+        return;
+      }
+      if (event.key === "Enter" || event.key === " ") {
+        event.preventDefault();
+        commitDrop(source, current.target);
+        return;
+      }
+      if (event.key === "ArrowLeft" || event.key === "ArrowRight") {
+        if (source.kind !== "effect") return;
+        event.preventDefault();
+        const next = cycleTarget(stageTargets(layout), current.target, event.key === "ArrowRight" ? 1 : -1);
+        showDrag({ ...current, target: next });
+        sayTarget(next);
+        return;
+      }
+      if (event.key === "ArrowUp" || event.key === "ArrowDown") {
+        event.preventDefault();
+        const next = slotStep(current.target, event.key === "ArrowUp" ? 1 : -1);
+        showDrag({ ...current, target: next });
+        sayTarget(next);
+      }
+    };
+    window.addEventListener("keydown", onKey, true);
+    return () => window.removeEventListener("keydown", onKey, true);
+    // The names and the handlers read the draft and the desk from the render they began in; a
+    // move re-renders the page, and only a new lift starts a new listener.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [drag.source, drag.mode, layout, devices]);
+
+  /** A tile's click: a tap or a click adds the effect on top, whole canvas (spec §4). */
+  const onTileAdd = (effect: string) => {
+    if (suppressClick.current) {
+      suppressClick.current = false;
+      return;
+    }
+    void addEffect(effect);
+  };
+
+  const onTileLiftStart = (effect: EffectSummary, event: ReactPointerEvent<HTMLButtonElement>) => {
+    beginPress({ kind: "effect", effect: effect.id, name: effect.name }, event);
+  };
+
+  const onTileLiftKey = (effect: EffectSummary, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (dragRef.current.source) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    beginKeyboard({ kind: "effect", effect: effect.id, name: effect.name });
+  };
+
+  /** The grip's press: a mouse or pen lifts on the move, a finger on the hold. */
+  const onGripDown = (layer: StackLayer, event: ReactPointerEvent<HTMLButtonElement>) => {
+    beginPress({ kind: "layer", id: layer.id, name: layer.name }, event);
+  };
+
+  /** Space or Enter on the grip lifts the row for the keyboard sensor. */
+  const onGripKey = (layer: StackLayer, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+    if (dragRef.current.source) return;
+    if (event.key !== "Enter" && event.key !== " ") return;
+    if (event.ctrlKey || event.metaKey || event.altKey) return;
+    event.preventDefault();
+    beginKeyboard({ kind: "layer", id: layer.id, name: layer.name });
+  };
+
+  const insertAt =
+    drag.source && drag.target
+      ? drag.target.kind === "stackSlot"
+        ? drag.target.at
+        : drag.target.kind === "row"
+          ? drag.target.index + 1
+          : null
+      : null;
 
   // ---- presets ----------------------------------------------------------------------
 
@@ -1632,16 +1918,7 @@ export function StackBuilder({
     }
   };
 
-  // ---- the list of effects for Add layer --------------------------------------------
-
-  const addable = useMemo(() => {
-    const list = (effects ?? []).filter((effect) => !effect.id.startsWith("stack:"));
-    const q = addQuery.trim();
-    return list
-      .map((effect) => ({ effect, match: matchEffect(q, effect.name, effect.description) }))
-      .filter((row): row is { effect: EffectSummary; match: NonNullable<typeof row.match> } => row.match !== null)
-      .sort((a, b) => (b.match.score ?? 0) - (a.match.score ?? 0));
-  }, [effects, addQuery]);
+  // ---- the list of effects for Choose effect ----------------------------------------
 
   /** Every effect a layer may take: a stack is never offered (D95.4.8). */
   const chooseList = useMemo(() => {
@@ -1675,14 +1952,9 @@ export function StackBuilder({
     );
   };
 
-  /** One row of an effect list: Add layer offers it with its cap's reason, Choose effect picks
-   *  it for the picked layer. */
-  const effectRow = (
-    row: { effect: EffectSummary; match: NonNullable<ReturnType<typeof matchEffect>> },
-    forAdd: boolean,
-  ) => {
-    const refusal = forAdd ? addLayerRefusal(draft.layers, row.effect.id) : null;
-    const full = !forAdd && html > 0 && !isHtmlEffect(pickedLayer?.effect ?? "") && isHtmlEffect(row.effect.id);
+  /** One row of the Choose-effect list: it gives the picked layer another effect. */
+  const effectRow = (row: { effect: EffectSummary; match: NonNullable<ReturnType<typeof matchEffect>> }) => {
+    const full = html > 0 && !isHtmlEffect(pickedLayer?.effect ?? "") && isHtmlEffect(row.effect.id);
     return (
       <li key={row.effect.id}>
         <button
@@ -1690,13 +1962,7 @@ export function StackBuilder({
           className="rd-add-row"
           role="option"
           aria-selected={pickedLayer?.effect === row.effect.id}
-          disabled={refusal !== null}
-          title={refusal ?? undefined}
           onClick={() => {
-            if (forAdd) {
-              void addEffect(row.effect.id);
-              return;
-            }
             if (!chooseFor) return;
             void chooseEffect(chooseFor, row.effect.id);
             closeChoose();
@@ -1707,9 +1973,7 @@ export function StackBuilder({
             <span className="rd-add-name">
               <Highlighted text={row.effect.name} ranges={row.match.ranges} />
             </span>
-            <span className="rd-add-desc">
-              {refusal ?? (full ? "HTML layers are full" : row.effect.description)}
-            </span>
+            <span className="rd-add-desc">{full ? "HTML layers are full" : row.effect.description}</span>
           </span>
           {isHtmlEffect(row.effect.id) && <Chip html>HTML</Chip>}
         </button>
@@ -1718,6 +1982,27 @@ export function StackBuilder({
   };
 
   // ---- rendering --------------------------------------------------------------------
+
+  /** What the stage calls the target a drag is over, in the live region's own words. */
+  const dragWords = drag.target
+    ? dropTargetWords(drag.target, { layout, devices, layers: draft.layers })
+    : null;
+
+  /** The library, in whichever shape this width gives it. */
+  const libraryPanel = (mode: LibraryMode) => (    <Panel className="rd-library-panel" title="Library">
+      <Library
+        mode={mode}
+        effects={effects}
+        layers={draft.layers}
+        problem={addProblem}
+        containerRef={libraryRef}
+        onAdd={onTileAdd}
+        onLiftStart={onTileLiftStart}
+        onLiftKey={onTileLiftKey}
+        onWriteCode={writeCode}
+      />
+    </Panel>
+  );
 
   return (
     <div
@@ -1788,7 +2073,7 @@ export function StackBuilder({
       )}
 
       {phase === "error" ? (
-        <div className="rd-stack-body">
+        <div className="rd-stack-body" data-library={libraryMode}>
           <div className="rd-stack-main">
             <ErrorPanel
               title="The stack could not be read"
@@ -1810,7 +2095,8 @@ export function StackBuilder({
           }
           label="Loading the stack"
         >
-          <div className="rd-stack-body">
+          <div className="rd-stack-body" data-library={libraryMode}>
+            {libraryMode === "rail" && libraryPanel("rail")}
             <div className="rd-stack-main">
               {saveError && (
                 <ErrorPanel
@@ -1850,6 +2136,7 @@ export function StackBuilder({
                   onDelete={remove}
                   onDuplicate={duplicate}
                   onMakeRect={makeRect}
+                  drop={drag.source?.kind === "effect" ? { target: drag.target, words: dragWords } : null}
                 />
                 {draftState === "off" ? (
                   <div className="rd-stage-foot">
@@ -1928,31 +2215,32 @@ export function StackBuilder({
                 )}
               </Panel>
 
+              {libraryMode === "tray" && libraryPanel("tray")}
+
+              {narrow && (
+                <div className="rd-phone-tabs">
+                  <Segmented<"layers" | "library">
+                    label="What shows under the stage"
+                    value={phoneTab}
+                    options={[
+                      { value: "layers", label: "Layers" },
+                      { value: "library", label: "Library" },
+                    ]}
+                    onChange={setPhoneTab}
+                  />
+                </div>
+              )}
+
+              {narrow && phoneTab === "library" && libraryPanel("tab")}
+
+              {(!narrow || phoneTab === "layers") && (
               <Panel
                 className="rd-layers"
                 title="Layers"
                 actions={
-                  <>
-                    <span className="mute fig" style={{ fontSize: "var(--t14)" }}>
-                      {count} / {MAX_LAYERS}
-                    </span>
-                    <span ref={addRef}>
-                      <Button
-                        size="sm"
-                        variant="primary"
-                        icon={<Plus size={15} />}
-                        aria-label={`Add layer${count >= MAX_LAYERS ? ` (a stack holds ${MAX_LAYERS})` : ""}`}
-                        disabled={count >= MAX_LAYERS}
-                        title={count >= MAX_LAYERS ? `A stack holds ${MAX_LAYERS} layers` : undefined}
-                        onClick={() => {
-                          setAddQuery("");
-                          setAddOpen((open) => !open);
-                        }}
-                      >
-                        <span className="rd-btn-text">Add layer</span>
-                      </Button>
-                    </span>
-                  </>
+                  <span className="mute fig" style={{ fontSize: "var(--t14)" }}>
+                    {count} / {MAX_LAYERS}
+                  </span>
                 }
               >
                 {count === 0 ? (
@@ -1963,9 +2251,7 @@ export function StackBuilder({
                       <li>A layer paints on its canvas, a device, a zone or a rectangle.</li>
                       <li>Blend and opacity mix it over what is under it.</li>
                     </ul>
-                    <Button size="sm" variant="primary" icon={<Plus size={15} />} onClick={() => setAddOpen(true)}>
-                      Add the first layer
-                    </Button>
+                    <p className="rd-layers-empty-hint">Pick an effect from the library to start.</p>
                   </div>
                 ) : (
                   <ol className="layer-list" aria-label="Layers, top first">
@@ -1974,24 +2260,17 @@ export function StackBuilder({
                       const words = statusWords(status?.status, status?.last_ms);
                       const index = draft.layers.indexOf(layer);
                       return (
+                        <Fragment key={layer.id}>
+                        {insertAt === index + 1 && <li className="rd-insert-line" aria-hidden="true" />}
                         <li
-                          key={layer.id}
                           className="layer-row"
                           data-layer-id={layer.id}
+                          data-layer-index={index}
                           data-selected={layer.id === picked ? "true" : "false"}
                           data-hidden={layer.visible ? "false" : "true"}
-                          data-dragging={touchId === layer.id ? "true" : "false"}
+                          data-dragging={drag.source?.kind === "layer" && drag.source.id === layer.id ? "true" : "false"}
                           tabIndex={0}
                           aria-current={layer.id === picked ? "true" : undefined}
-                          onDragOver={(event) => {
-                            event.preventDefault();
-                            event.dataTransfer.dropEffect = "move";
-                          }}
-                          onDrop={(event) => {
-                            event.preventDefault();
-                            const id = event.dataTransfer.getData("text/plain");
-                            if (id) reorder(id, index);
-                          }}
                           onClick={() => pick(layer.id)}
                           onKeyDown={(event) => {
                             // A row is in the tab order so the picked layer can be changed from
@@ -2012,29 +2291,25 @@ export function StackBuilder({
                           <button
                             type="button"
                             className="layer-grip"
-                            draggable
                             aria-label={`Reorder ${layer.name}`}
-                            title="Drag to reorder; Alt+↑/↓ on the keyboard"
-                            onDragStart={(event) => {
-                              event.dataTransfer.effectAllowed = "move";
-                              event.dataTransfer.setData("text/plain", layer.id);
-                            }}
-                            onPointerDown={(event) => touchStart(event, layer)}
-                            onPointerMove={touchMove}
-                            onPointerUp={touchEnd}
-                            onPointerCancel={touchEnd}
+                            title="Drag to reorder, or press Space; Alt+↑/↓ on the keyboard"
+                            onPointerDown={(event) => onGripDown(layer, event)}
                             onKeyDown={(event) => {
-                              if (!event.altKey) return;
-                              if (event.key === "ArrowUp" && index < count - 1) {
-                                event.preventDefault();
-                                reorder(layer.id, index + 1);
-                              } else if (event.key === "ArrowDown" && index > 0) {
-                                event.preventDefault();
-                                reorder(layer.id, index - 1);
+                              if (dragRef.current.source) return;
+                              if (event.altKey) {
+                                if (event.key === "ArrowUp" && index < count - 1) {
+                                  event.preventDefault();
+                                  reorder(layer.id, index + 1);
+                                } else if (event.key === "ArrowDown" && index > 0) {
+                                  event.preventDefault();
+                                  reorder(layer.id, index - 1);
+                                }
+                                return;
                               }
+                              onGripKey(layer, event);
                             }}
                           >
-                            <DotsIcon />
+                            <DotsSixVertical size={16} aria-hidden="true" />
                           </button>
                           <span className="layer-thumbs">
                             <Thumb
@@ -2131,11 +2406,14 @@ export function StackBuilder({
                             }
                           />
                         </li>
+                        </Fragment>
                       );
                     })}
+                    {insertAt === 0 && <li className="rd-insert-line" aria-hidden="true" />}
                   </ol>
                 )}
               </Panel>
+              )}
 
               {narrow && pickedLayer && (
                 <section className="panel rd-layer-summary" aria-label="The picked layer">
@@ -2596,32 +2874,6 @@ export function StackBuilder({
         </LoadFrame>
       )}
 
-      <Popover anchor={addRef} open={addOpen} onClose={closeAdd} label="Add a layer" className="rd-add-layer">
-        <div className="stack rd-add-layer-body">
-          <div className="rd-add-search">
-            <input
-              className="text-in"
-              value={addQuery}
-              onChange={(event) => setAddQuery(event.target.value)}
-              placeholder="Search effects"
-              aria-label="Search effects"
-              autoFocus
-            />
-          </div>
-          <ul className="rd-add-list" role="listbox" aria-label="Effects to add">
-            {addable.map((row) => effectRow(row, true))}
-            {addable.length === 0 && (
-              <li className="dim rd-add-empty">No effect matches that.</li>
-            )}
-          </ul>
-          {addProblem && (
-            <p className="error-line" role="alert">
-              {addProblem}
-            </p>
-          )}
-        </div>
-      </Popover>
-
       <Popover
         anchor={chooseRef}
         open={chooseFor !== null}
@@ -2631,7 +2883,7 @@ export function StackBuilder({
       >
         <div className="stack rd-add-layer-body">
           <ul className="rd-add-list" role="listbox" aria-label="Effects to choose">
-            {chooseList.map((row) => effectRow(row, false))}
+            {chooseList.map((row) => effectRow(row))}
           </ul>
         </div>
       </Popover>
@@ -2735,6 +2987,28 @@ export function StackBuilder({
       )}
 
       {leaving && leavePrompt}
+
+      {drag.source && drag.point && (
+        <div
+          className="rd-drag-ghost"
+          data-kind={drag.source.kind}
+          style={{ left: `${drag.point.x + 12}px`, top: `${drag.point.y + 12}px` }}
+          aria-hidden="true"
+        >
+          {drag.source.kind === "effect" ? (
+            <Thumb id={drag.source.effect} size="sm" label={drag.source.name} live />
+          ) : (
+            <span className="rd-drag-ghost-grip">
+              <DotsSixVertical size={16} />
+            </span>
+          )}
+          <span className="rd-drag-ghost-name">{drag.source.name}</span>
+        </div>
+      )}
+
+      <p className="sr-only rd-live" role="status" aria-live="polite" aria-atomic="true">
+        {announce}
+      </p>
     </div>
   );
 }
@@ -2747,16 +3021,6 @@ function BackKey({ onClick }: { onClick: () => void }) {
       icon={<ArrowLeft size={16} />}
       onClick={onClick}
     />
-  );
-}
-
-function DotsIcon() {
-  return (
-    <svg width={16} height={16} viewBox="0 0 16 16" aria-hidden="true">
-      {[4, 8, 12].map((cy) =>
-        [5, 11].map((cx) => <circle key={`${cx}-${cy}`} cx={cx} cy={cy} r={1.3} fill="currentColor" />),
-      )}
-    </svg>
   );
 }
 

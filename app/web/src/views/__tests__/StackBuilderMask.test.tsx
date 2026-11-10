@@ -185,13 +185,11 @@ describe("the stack builder's masks", () => {
     await waitFor(() => expect(screen.getAllByRole("listitem").length).toBeGreaterThanOrEqual(3));
     // Two HTML layers take both slots.
     for (const name of ["Sample HTML", "Ink Drop"]) {
-      await waitFor(() => expect(screen.queryByRole("listbox", { name: "Effects to add" })).toBeNull());
-      fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-      fireEvent.click(await screen.findByRole("option", { name: new RegExp(name) }));
-      await waitFor(() => expect(screen.getAllByRole("listitem").length).toBeGreaterThanOrEqual(4));
+      const before = screen.getAllByRole("listitem").length;
+      fireEvent.click(await screen.findByRole("button", { name: `Add ${name}` }));
+      await waitFor(() => expect(screen.getAllByRole("listitem").length).toBeGreaterThan(before));
     }
     // The bottom layer is not HTML; give it a Fire mask, then ask for an HTML mask.
-    await waitFor(() => expect(screen.queryByRole("listbox", { name: "Effects to add" })).toBeNull());
     fireEvent.click(screen.getByRole("button", { name: "Add a mask to Sunset" }));
     const masks = await screen.findByRole("listbox", { name: "Effects to use as a mask" });
     fireEvent.click(within(masks).getByRole("option", { name: /^Fire/ }));
@@ -200,17 +198,19 @@ describe("the stack builder's masks", () => {
     const maskOptions = await screen.findByRole("listbox", { name: "Mask effect" });
     fireEvent.click(within(maskOptions).getByRole("option", { name: /Wet Smear/ }));
 
-    const problem = await screen.findByText("A stack holds 2 HTML layers");
-    expect(problem.getAttribute("role")).toBe("alert");
-    const mask = document.querySelector(".rd-mask");
-    expect(mask?.contains(problem)).toBe(true);
+    const mask = document.querySelector(".rd-mask") as HTMLElement;
+    const problem = await within(mask).findByRole("alert");
+    expect(problem.textContent).toBe("A stack holds 2 HTML layers");
+    expect(mask.contains(problem)).toBe(true);
     expect(problem.closest(".rd-layer-edit .rd-mask")).not.toBeNull();
 
     // The refusal belongs to the layer it was said on: picking another layer clears it (#256).
     const other = document.querySelector<HTMLElement>('.layer-row[data-layer-id="l1"]');
     expect(other).not.toBeNull();
     fireEvent.click(other!);
-    await waitFor(() => expect(screen.queryByText("A stack holds 2 HTML layers")).toBeNull());
+    await waitFor(() =>
+      expect(document.querySelector(".rd-mask")?.textContent).not.toContain("A stack holds 2 HTML layers"),
+    );
   });
 
   it("moves through the mask picker with the arrow keys and chooses with Enter", async () => {

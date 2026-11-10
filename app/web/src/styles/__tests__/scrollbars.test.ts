@@ -104,6 +104,8 @@ const SCROLL_PANES = [
   ".rd-peri-keys",
   ".table-scroll",
   ".rd-layers > .layer-list",
+  ".rd-library-scroll",
+  '.rd-library[data-mode="tray"] .rd-library-scroll',
   ".rd-layer-edit",
   ".rd-picker",
   ".rd-add-list",

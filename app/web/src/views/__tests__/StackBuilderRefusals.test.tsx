@@ -89,9 +89,7 @@ async function pickLayer(name: string) {
 
 /** Adds a layer from the library by the effect's name. */
 async function addLayer(effect: string) {
-  fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-  const row = await screen.findByRole("option", { name: new RegExp(`^${effect}`) });
-  fireEvent.click(row);
+  fireEvent.click(await screen.findByRole("button", { name: `Add ${effect}` }));
 }
 
 /** The layer's own panel: the picked layer's fields. */
@@ -164,12 +162,12 @@ describe("the stack builder says a refusal where the control refused", () => {
     const option = await screen.findByRole("option", { name: /Wet Smear/ });
     fireEvent.click(option);
 
-    const problem = await screen.findByText("A stack holds 2 HTML layers");
+    const problem = await within(layerPanel()).findByText("A stack holds 2 HTML layers");
     expect(problem.getAttribute("role")).toBe("alert");
     expect(layerPanel().contains(problem)).toBe(true);
   });
 
-  it("says why an HTML layer cannot be added, on the row that cannot be added", async () => {
+  it("says why an HTML layer cannot be added, on the tile that cannot add it", async () => {
     await openBuilder("Sunset glow");
     await waitFor(() => expect(layerNames()).toHaveLength(3));
     await addLayer("Sample HTML");
@@ -177,11 +175,10 @@ describe("the stack builder says a refusal where the control refused", () => {
     await addLayer("Ink Drop");
     await waitFor(() => expect(layerNames()).toHaveLength(5));
 
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    const row = await screen.findByRole("option", { name: /Wet Smear/ });
-    // The reason stands with the row, and the row will not take the click.
-    expect(within(row).getByText("A stack holds 2 HTML layers")).toBeTruthy();
-    expect(row.getAttribute("disabled")).not.toBeNull();
+    const tile = screen.getByRole("button", { name: "Add Wet Smear" });
+    // The reason stands on the tile, and the tile will not add it.
+    expect(within(tile).getByText("A stack holds 2 HTML layers")).toBeTruthy();
+    expect(tile).toHaveProperty("disabled", true);
   });
 
   it("says the HTML layers are full when the cap is reached while an effect is read", async () => {
@@ -217,7 +214,7 @@ describe("the stack builder says a refusal where the control refused", () => {
     await act(async () => {
       release();
     });
-    const problem = await screen.findByText("A stack holds 2 HTML layers");
+    const problem = await within(layerPanel()).findByText("A stack holds 2 HTML layers");
     expect(problem.getAttribute("role")).toBe("alert");
     expect(layerPanel().contains(problem)).toBe(true);
   });
@@ -243,8 +240,7 @@ describe("the stack builder says a refusal where the control refused", () => {
       return original(id);
     });
 
-    fireEvent.click(screen.getByRole("button", { name: /Add layer/ }));
-    fireEvent.click(await screen.findByRole("option", { name: /^Wet Smear/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Wet Smear" }));
     await waitFor(() => expect(blocked).toBe(true));
 
     // While the layer is read, another layer becomes an HTML one: the stack is full of them.
@@ -258,8 +254,8 @@ describe("the stack builder says a refusal where the control refused", () => {
     });
     const problem = await screen.findByRole("alert");
     expect(problem.textContent).toBe("A stack holds 2 HTML layers");
-    // The message stands under the list of effects to add.
-    expect(screen.getByRole("listbox", { name: "Effects to add" }).parentElement?.contains(problem)).toBe(true);
+    // The message stands under the library's tiles.
+    expect(document.querySelector(".rd-library-panel")?.contains(problem)).toBe(true);
     // The layer was not added.
     expect(layerNames()).toHaveLength(4);
   });

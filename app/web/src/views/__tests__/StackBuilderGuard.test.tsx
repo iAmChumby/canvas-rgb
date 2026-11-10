@@ -138,8 +138,7 @@ describe("the builder's unsaved guard", () => {
     window.history.pushState({ canvasRgbStack: "new" }, "", "/effects/?stack=new&state=complete,stack");
     await mount();
     await screen.findByTestId("stack-builder");
-    fireEvent.click(await screen.findByRole("button", { name: "Add the first layer" }));
-    fireEvent.click(await screen.findByRole("option", { name: /Solid/ }));
+    fireEvent.click(await screen.findByRole("button", { name: "Add Solid" }));
     await waitFor(() => expect(screen.getByText("Unsaved")).toBeTruthy());
     await waitForStackGuard();
 
