@@ -241,6 +241,22 @@ export function PeripheralsView() {
     failures.current[id] = failuresOf(id) + 1;
   };
 
+  // A read has landed: an edit for a key it did not carry is dropped from the state (#276), so a
+  // later read that carries the key again does not bring the old edit back over what the device
+  // holds. (`liveStaged` hides such an edit in the meantime.)
+  const dropUnreadEdits = useCallback(
+    (id: string, d: PeripheralDetail) => {
+      setStagedFor(id, (prev) => {
+        const out: Props = {};
+        for (const [key, value] of Object.entries(prev)) {
+          if (known(d.values, key) !== undefined) out[key] = value;
+        }
+        return out;
+      });
+    },
+    [setStagedFor],
+  );
+
   // Asks for one device's detail again: after a write, or after the access changed (the daemon
   // answers those from the values it keeps), or on the Read again key (`forceRead`: the daemon
   // reads the device). `landed` says that the change is already on the device, so a failed
@@ -258,6 +274,7 @@ export function PeripheralsView() {
       if (n !== detailRequest.current) return;
       remember(id, d);
       setLoaded({ id, detail: d });
+      dropUnreadEdits(id, d);
       if (!keepsStaged(id)) setStagedFor(id, {});
       // Read again is the user's own new action on this device: it clears the device's failed
       // write's message, when it started after that failure (#151). No other read does.
@@ -275,7 +292,7 @@ export function PeripheralsView() {
     }
     // editsOf / keepsStaged read refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [setStagedFor, setDeviceSaveError]);
+  }, [setStagedFor, setDeviceSaveError, dropUnreadEdits]);
 
   // Lists the devices. The first run and "Try again" both come through here. The stop handle is
   // kept, so a retry that is still running when the page goes away is dropped with it.
@@ -338,6 +355,7 @@ export function PeripheralsView() {
         setReloadingId(null);
         remember(id, d);
         setLoaded({ id, detail: d });
+        dropUnreadEdits(id, d);
         if (!keepsStaged(id)) setStagedFor(id, {});
         setDetailError(null);
         setChangeSaved(false);
@@ -354,7 +372,7 @@ export function PeripheralsView() {
     };
     // editsOf / keepsStaged read refs only.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedId]);
+  }, [selectedId, dropUnreadEdits]);
 
   // "Not read yet": the daemon has read nothing from the device and reads it while the person is
   // away. The page asks again every few seconds with a plain GET (it never touches the device)
@@ -375,6 +393,7 @@ export function PeripheralsView() {
           if (stop || (isUnread(d) && d.problem === NOT_READ_YET_PROBLEM)) return;
           remember(id, d);
           setLoaded({ id, detail: d });
+          dropUnreadEdits(id, d);
           setDetailError(null);
         })
         .catch(() => {
@@ -385,21 +404,33 @@ export function PeripheralsView() {
       stop = true;
       clearInterval(timer);
     };
-  }, [selectedId, awaitingIdleRead]);
+  }, [selectedId, awaitingIdleRead, dropUnreadEdits]);
 
+  // An edit for a key the latest read did not carry is dropped, not shown as read (#276): the
+  // page offers no control for an unread setting, so the edit can only be left from an earlier
+  // read, and writing it would send a value the device was never seen to hold. While no read is
+  // on the page (detail is null) the edits are kept as they are.
+  const liveStaged = useMemo(() => {
+    if (!detail) return staged;
+    const out: Props = {};
+    for (const [key, value] of Object.entries(staged)) {
+      if (known(detail.values, key) !== undefined) out[key] = value;
+    }
+    return out;
+  }, [staged, detail]);
   // The values the controls show: what the device holds, with the staged edits on top.
   const values: Values = useMemo(
-    () => ({ ...(detail?.values ?? {}), ...staged }) as Values,
-    [detail, staged],
+    () => ({ ...(detail?.values ?? {}), ...liveStaged }) as Values,
+    [detail, liveStaged],
   );
 
   const changed = useMemo(() => {
     const out: Props = {};
-    for (const [key, value] of Object.entries(staged)) {
+    for (const [key, value] of Object.entries(liveStaged)) {
       if (!sameValue(detail?.values[key], value)) out[key] = value;
     }
     return out;
-  }, [staged, detail]);
+  }, [liveStaged, detail]);
 
   // The edits that are not on the device yet: they are the ones the strip counts.
   const changedCount = Object.keys(changed).length;

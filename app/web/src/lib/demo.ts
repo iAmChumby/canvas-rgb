@@ -523,14 +523,18 @@ function startsUnread(): boolean {
 /**
  * `?state=partial-read`: a read that comes back without some keys (the X6's third DPI stage and its
  * LED colour), as a device that answered only part of its report does (#276). The page must show
- * those two as not read, never as a default.
+ * those two as not read, never as a default. `?state=partial-read:<key>+<key>` leaves out the keys named.
  */
 const PARTIAL_READ_MISSING = ["dpi-stage-3", "led-colour"];
 
 /** The values a read reports: all of them, or all but the keys `?state=partial-read` leaves out. */
 function reportedValues(values: Props): Props {
   const out = { ...values };
-  if (scenario().has("partial-read")) for (const key of PARTIAL_READ_MISSING) delete out[key];
+  for (const name of scenario()) {
+    if (name === "partial-read") for (const key of PARTIAL_READ_MISSING) delete out[key];
+    // `partial-read:dpi-stage-count+active-profile` leaves out the keys it names.
+    if (name.startsWith("partial-read:")) for (const key of name.slice("partial-read:".length).split("+")) delete out[key];
+  }
   return out;
 }
 

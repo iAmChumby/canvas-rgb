@@ -6257,7 +6257,7 @@ button.chip:hover {
 .unread-value {
   display: inline-flex;
   align-items: center;
-  min-height: 32px;
+  min-height: var(--control-h);
   padding: 0 var(--s2);
   color: var(--mute);
   font-size: var(--t14);

@@ -223,7 +223,8 @@ or acts as if a step worked without checking that it did.
   uninstaller skipped an unreadable SignalRGB restore record and still said it finished). Left on
   purpose: `composite.rs` `ensure_royuan` (the keyboard is optional), `state.rs` `try_send` (a full
   queue drops a refresh hint), and best-effort UI calls that claim nothing afterwards.
-
+- **How to check a new notice or log line:** name the field or the measurement behind it. If there
+  is none, it is this bug.
 - A second mechanism, same cause: the editor draws a value it never received. A control, a count or a
   figure falls back to a default (`?? 0`, `?? "1"`, `?? "#ffffff"`, a schema default) when the answer
   is missing, so an unknown value reads as a real one.
@@ -248,8 +249,6 @@ or acts as if a step worked without checking that it did.
   and `header.rpm ?? 0` in `app/web/src/views/FansView.tsx` (the duty ring and the RPM figure), and
   `h.rpm ?? 0` in the RPM history (`app/web/src/lib/store.ts`). When adding a device value to the
   page, read it with `known()` and draw `UnreadValue` for `undefined`.
-- **How to check a new notice or log line:** name the field or the measurement behind it. If there
-  is none, it is this bug.
 
 ### `cause:bad-file-part`: a part of an effect file that cannot be read takes the whole effect away
 
