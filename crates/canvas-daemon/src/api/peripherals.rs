@@ -92,7 +92,7 @@ pub async fn get_peripheral(
     } else {
         (Props::new(), Some(READS_OFF.to_string()))
     };
-    Ok(Json(PeripheralDetail { info, schema, values, access, problem }))
+    Ok(Json(PeripheralDetail { info, schema, values, access, problem, read_at_ms: None }))
 }
 
 /// `PATCH /api/v1/peripherals/{id}`: writes the given keys to the device.
