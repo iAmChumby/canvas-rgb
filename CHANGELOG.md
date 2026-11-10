@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Peripherals: a device you have not let canvas-rgb read no longer shows made-up settings (#264)
+- Peripherals and Fans: controls that ran past their panel on narrower windows now fit (#263, #268)
 
 ## [0.11.0] - 2026-11-10
 
