@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- The "Updated to" message that greets you after an update now appears in the corner with the rest of the app's messages: it shows the new version, offers What's new, goes away by itself after a few seconds, and stays put while you point at it. (#168)
+
 ## [0.10.1] - 2026-11-08
 
 ### Fixed

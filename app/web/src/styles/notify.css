@@ -91,6 +91,17 @@
   overflow-wrap: anywhere;
 }
 
+/* A message with a second line: the first reads as the title, the second as its detail. */
+.notify-title {
+  display: block;
+  font-weight: 600;
+}
+
+.notify-detail {
+  display: block;
+  color: var(--dim);
+}
+
 /* The answer a notification offers: the app's own key, in the tone's colour. */
 .notify-action {
   flex: none;
