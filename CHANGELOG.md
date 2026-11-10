@@ -10,11 +10,14 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Effects: the builder draws a frame for every layer on the picture, so a click picks a layer, Tab and Shift+Tab walk them, Delete removes one, Ctrl+D copies one, Make rectangle turns a whole-canvas or device area into a box you can move, Ctrl+Z takes back a whole drag however long it paused, every frame reads on any picture, a box shows a bar on each side as well as each corner to resize by, and the desk's outlines (Parts, now off to start with) also show while you drag (#257)
 
+### Fixed
+
+- Peripherals: a setting the device did not report shows as not read, instead of a made-up value (#276)
+
 ## [0.11.1] - 2026-11-10
 
 ### Fixed
 
-- Peripherals: a setting the device did not report shows as not read, instead of a made-up value (#276)
 - Peripherals: a device you have not let canvas-rgb read no longer shows made-up settings (#264)
 - Peripherals and Fans: controls that ran past their panel on narrower windows now fit (#263, #268)
 - Devices: the light strip's Size key reads in full instead of "Si" (#273)
