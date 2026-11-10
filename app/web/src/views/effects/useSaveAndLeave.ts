@@ -321,6 +321,9 @@ export function useSaveAndLeave({
       await refreshAll();
     } catch (e) {
       setStartFailure({ id: saved.id, message: messageOf(e) });
+      // Save and leave: the builder closes, and its banner with it, so the note says what the banner
+      // would have said. It stays until it is dismissed.
+      if (then) notify(`${nameOf(saved.id)} is saved, but it did not start: ${messageOf(e)}`, "warn");
     }
     then?.();
   };
@@ -329,7 +332,7 @@ export function useSaveAndLeave({
   const startAgain = async () => {
     const failed = startFailure;
     // An unsaved edit: the saved stack is no longer what is on screen, so there is nothing to start.
-    if (!failed || starting || dirty) return;
+    if (!failed || starting || dirty || failed.id !== base?.id) return;
     setStarting(true);
     try {
       await api.activateEffect(failed.id, { props: {}, preset: null });
@@ -502,7 +505,8 @@ export function useSaveAndLeave({
     setSaveError,
     // Hidden, not dropped, while the draft has unsaved edits: Start again would run the saved stack,
     // not what is on screen. Undo back to the saved stack and it is offered again; Save starts the edit.
-    startFailure: dirty ? null : startFailure,
+    // And only for the stack it was about: the builder can load another stack while mounted.
+    startFailure: dirty || startFailure?.id !== base?.id ? null : startFailure,
     starting,
     startAgain,
     clash,
