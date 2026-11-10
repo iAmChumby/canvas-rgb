@@ -26,14 +26,20 @@ export function parseThumbnail(buf: ArrayBuffer): Thumb | null {
 
 const cache = new Map<string, Promise<Thumb | null>>();
 
-/** Loads one effect's thumbnail once. A failed load resolves to null (the tile stays blank). */
+/**
+ * Loads one effect's thumbnail once. A failed load resolves to null (the tile shows "no picture")
+ * and is not kept, so the next tile that mounts asks again (a daemon hiccup is not cached).
+ */
 export function loadThumb(id: string): Promise<Thumb | null> {
   let hit = cache.get(id);
   if (!hit) {
     hit = api
       .effectThumbnail(id)
       .then(parseThumbnail)
-      .catch(() => null);
+      .catch(() => {
+        cache.delete(id);
+        return null;
+      });
     cache.set(id, hit);
   }
   return hit;

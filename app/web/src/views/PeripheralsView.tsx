@@ -17,6 +17,7 @@ import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { PeripheralDetailShape, PeripheralListShape } from "@/components/LoadShapes";
 import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
@@ -518,7 +519,7 @@ export function PeripheralsView() {
 
   return (
     <div className="rd-page rd-peripherals">
-      <PageTitle title="Peripherals" context={<>{rows.length} found</>} />
+      <PageTitle title="Peripherals" contextBusy={list === null && !listError} context={list === null && !listError ? <InlineSkeleton width="8ch" /> : <>{rows.length} found</>} />
       {/* The pending changes and the way to send them sit in the strip, beside the save (R4). */}
       <PageActions>
         {changedCount > 0 && (
@@ -536,15 +537,16 @@ export function PeripheralsView() {
             >
               <span className="rd-peri-revert-label">Revert</span>
             </Button>
-            <Button variant="primary" size="sm" disabled={saving} onClick={() => void apply()}>
-              {saving ? "Sending" : "Apply"}
+            <Button variant="primary" size="sm" busy={saving} onClick={() => void apply()}>
+              Apply
             </Button>
           </>
         )}
       </PageActions>
 
       {/* The device column becomes a row of keys: one click, as now. */}
-      <div className="rd-peri-keys">        <LoadFrame
+      <div className="rd-peri-keys">
+        <LoadFrame
           className="load-col"
           state={listState}
           shape={<PeripheralListShape />}

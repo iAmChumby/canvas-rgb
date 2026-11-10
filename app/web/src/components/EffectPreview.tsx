@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
+import { useCanvasWait } from "@/components/Skeleton";
 import { onFrame } from "@/lib/preview";
 import { useSnap } from "@/lib/store";
 import { loadThumb, blit, type Surface, type Thumb } from "@/lib/thumbs";
@@ -29,14 +30,22 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
   const live = activeId === id;
   const [thumb, setThumb] = useState<{ id: string; data: Thumb } | null>(null);
+  // The id whose first live frame has been drawn, for a running effect whose thumbnail is late.
+  const [framed, setFramed] = useState<string | null>(null);
   const motionOff = useMotionOff();
   const visible = useDocumentVisible();
+  // The thumbnail fetch answered with nothing (`loadThumb` resolves null when it fails).
+  const [missed, setMissed] = useState<string | null>(null);
+  const loaded = (thumb !== null && thumb.id === id) || framed === id;
+  const wait = useCanvasWait(loaded, !loaded && missed === id && !live);
 
   // The thumbnail: fetched once per effect (loadThumb keeps the cache).
   useEffect(() => {
     let current = true;
     void loadThumb(id).then((t) => {
-      if (current && t) setThumb({ id, data: t });
+      if (!current) return;
+      if (t) setThumb({ id, data: t });
+      else setMissed(id);
     });
     return () => {
       current = false;
@@ -83,6 +92,7 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
         if (ended) return;
         stopThumb();
         blit(surface, f.rgb, 0, f.width, f.height);
+        setFramed(id);
         // Reduced motion: one live frame, then stillness.
         if (motionOff) queueMicrotask(endLive);
       });
@@ -95,5 +105,12 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
     };
   }, [id, live, thumb, motionOff, visible]);
 
-  return <canvas ref={canvasRef} className={className ? `preview-canvas ${className}` : "preview-canvas"} aria-hidden="true" />;
+  return (
+    <canvas
+      ref={canvasRef}
+      className={className ? `preview-canvas ${className}` : "preview-canvas"}
+      data-wait={wait}
+      aria-hidden="true"
+    />
+  );
 }

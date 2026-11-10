@@ -7,6 +7,7 @@ import { Button, FileButton } from "@/components/Button";
 import { ColorField } from "@/components/ColorField";
 import { Field, Panel, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
 import { NumberField } from "@/components/NumberField";
 import { Slider } from "@/components/Slider";
@@ -177,7 +178,7 @@ export function SettingsView() {
           <Panel title="Rendering">
             <Field
               label="Frame rate"
-              hint={<span className="fig">{status ? fmt1(status.fps_measured) : "—"} fps measured</span>}
+              hint={<span className="fig" aria-busy={!status || undefined}>{status ? fmt1(status.fps_measured) : <InlineSkeleton width="4ch" />} fps measured</span>}
             >
               <span className="row-wrap field-slider">
                 <Slider
@@ -325,7 +326,7 @@ export function SettingsView() {
             {err && <p className="error-line" style={{ marginTop: 8 }}>{err}</p>}
           </Panel>
 
-          <Panel title="Version" actions={<span className="fig rd-version">{status?.version ?? "—"}</span>}>
+          <Panel title="Version" actions={<span className="fig rd-version" aria-busy={!status || undefined}>{status ? status.version : <InlineSkeleton width="8ch" />}</span>}>
             <UpdatesPanel />
             <div className="row-wrap" style={{ marginTop: 12 }}>
               <Button

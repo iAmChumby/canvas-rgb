@@ -25,7 +25,7 @@ export function StepFrame({
   lead?: ReactNode;
   children?: ReactNode;
   onBack?: (() => void) | null;
-  primary: { label: string; onClick?: () => void; href?: string; disabled?: boolean; icon?: ReactNode };
+  primary: { label: string; onClick?: () => void; href?: string; disabled?: boolean; busy?: boolean; icon?: ReactNode };
   /** A quiet second action, under the primary one (Set up later, Skip). */
   secondary?: { label: string; onClick: () => void; icon?: ReactNode } | null;
   /** A quieter third, on the other side of the row (Nothing lit up?). */
@@ -62,7 +62,7 @@ export function StepFrame({
             {primary.label}
           </ButtonLink>
         ) : (
-          <Button variant="primary" icon={primary.icon} disabled={primary.disabled} onClick={primary.onClick} className={s.cta}>
+          <Button variant="primary" icon={primary.icon} disabled={primary.disabled} busy={primary.busy} onClick={primary.onClick} className={s.cta}>
             {primary.label}
           </Button>
         )}

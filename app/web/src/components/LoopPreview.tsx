@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react";
 import { useDocumentVisible } from "@/lib/motion";
 import { useMotionOff } from "@/components/Motion";
+import { useCanvasWait } from "@/components/Skeleton";
 import { blit, type Surface, type Thumb } from "@/lib/thumbs";
 
 /** The loop the daemon's previews and thumbnails run on. */
@@ -17,15 +18,19 @@ export function LoopPreview({
   thumb,
   className,
   label,
+  failed = false,
 }: {
   thumb: Thumb | null;
   className?: string;
   /** What the picture is, for a reader: "Preview of Comet". */
   label: string;
+  /** The preview errored and no picture is coming: the wait is over, the box stands still. */
+  failed?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const motionOff = useMotionOff();
   const visible = useDocumentVisible();
+  const wait = useCanvasWait(thumb !== null, failed);
 
   useEffect(() => {
     const canvas = canvasRef.current;
@@ -48,6 +53,8 @@ export function LoopPreview({
     <canvas
       ref={canvasRef}
       className={className ? `preview-canvas ${className}` : "preview-canvas"}
+      data-wait={wait}
+      aria-busy={thumb || failed ? undefined : true}
       role="img"
       aria-label={label}
     />

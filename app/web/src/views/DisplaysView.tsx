@@ -10,6 +10,7 @@ import { NumberField } from "@/components/NumberField";
 import { Field, Panel, StateDot } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
@@ -89,12 +90,15 @@ export function DigitReadout({
   decimals,
   temperature,
   unit,
+  pending = false,
 }: {
   value: number | null;
   digits: number;
   decimals: number;
   temperature: boolean;
   unit: DisplayUnit;
+  /** The sensors have not been read yet: the readout is a placeholder, not "No reading yet". */
+  pending?: boolean;
 }) {
   const target = displayDigits(value, digits, decimals, temperature);
   // The number counts first and is split into digits after, so each digit rolls through its
@@ -105,8 +109,12 @@ export function DigitReadout({
   const mark = temperature ? (unit === "celsius" ? "°C" : "°F") : "RPM";
   if (value === null) {
     return (
-      <div className="digit-readout" data-blank="true">
-        <span className="digit-readout-empty">No reading yet</span>
+      <div className="digit-readout" data-blank="true" aria-busy={pending || undefined}>
+        {pending ? (
+          <InlineSkeleton width="9ch" />
+        ) : (
+          <span className="digit-readout-empty">No reading yet</span>
+        )}
       </div>
     );
   }
@@ -168,9 +176,19 @@ function previewValue(
 }
 
 /** One display: what it shows now, and the source it is driven from. */
-function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | null }) {
+function DisplayCard({
+  row,
+  fans,
+  fansLoading,
+}: {
+  row: DisplayStatus;
+  fans: FansStatus | null;
+  /** The fan and sensor read has not answered yet: sensor-driven values are unknown, not absent. */
+  fansLoading: boolean;
+}) {
   const [draft, setDraft] = useState<DisplayConfig>(row.config);
-  const [busy, setBusy] = useState(false);
+  const [doing, setDoing] = useState<"save" | "stop" | null>(null);
+  const busy = doing !== null;
   const [error, setError] = useState<string | null>(null);
 
   const boardSensors = (fans?.temps ?? []).filter((t) => t.source.type === "board");
@@ -199,6 +217,9 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
   // What the pump head would show with the source in the editor, in the unit it is written in.
   const preview = previewValue(draft.source, draft.unit, fans, row.shown?.value ?? null);
   const shown = row.shown;
+  // A source that reads a sensor has no value yet while the sensors are being read: unknown, not "—".
+  const sensorSource = draft.source.kind !== "fixed" && draft.source.kind !== "api";
+  const sensorsPending = fansLoading && sensorSource;
   const blockedBy = row.info.blocked_by;
 
   const set = (patch: Partial<DisplayConfig>) => {
@@ -207,7 +228,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
   };
 
   const save = async () => {
-    setBusy(true);
+    setDoing("save");
     setError(null);
     try {
       await api.putDisplay(row.info.id, draft);
@@ -215,12 +236,12 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
     } catch (e) {
       setError(messageOf(e));
     } finally {
-      setBusy(false);
+      setDoing(null);
     }
   };
 
   const stop = async () => {
-    setBusy(true);
+    setDoing("stop");
     setError(null);
     try {
       await api.deleteDisplay(row.info.id);
@@ -228,7 +249,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
     } catch (e) {
       setError(messageOf(e));
     } finally {
-      setBusy(false);
+      setDoing(null);
     }
   };
 
@@ -246,10 +267,10 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             {blockedBy ? `waiting for ${blockedBy}` : row.info.connected ? "connected" : "not connected"}
           </StateDot>
           <span className="rd-display-actions">
-            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} disabled={!dirty || busy} onClick={() => void save()}>
+            <Button variant="primary" icon={<FloppyDisk size={16} weight="bold" />} busy={doing === "save"} disabled={!dirty || (busy && doing !== "save")} onClick={() => void save()}>
               Save
             </Button>
-            <Button variant="ghost" disabled={busy} onClick={() => void stop()}>
+            <Button variant="ghost" busy={doing === "stop"} disabled={busy && doing !== "stop"} onClick={() => void stop()}>
               Stop
             </Button>
             {dirty && <span className="mute">Unsaved</span>}
@@ -281,14 +302,15 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
             decimals={draft.decimals}
             temperature={temperature}
             unit={draft.unit}
+            pending={sensorsPending && preview === null}
           />
-          <p className="readout-now">
+          <p className="readout-now" aria-busy={(sensorsPending && shown?.value === null) || undefined}>
             <span className="readout-now-label">Now</span>
             {shown ? (
               <>
                 {" "}
                 <span className="fig">
-                  {shown.value === null ? "—" : <AnimatedNumber value={shown.value} decimals={shown.mode === "temperature" ? draft.decimals : 0} />} {shown.mode === "temperature" ? (shown.unit === "celsius" ? "°C" : "°F") : "RPM"}
+                  {shown.value === null ? sensorsPending ? <InlineSkeleton width="4ch" /> : "—" : <AnimatedNumber value={shown.value} decimals={shown.mode === "temperature" ? draft.decimals : 0} />} {shown.mode === "temperature" ? (shown.unit === "celsius" ? "°C" : "°F") : "RPM"}
                 </span>
                 {shown.blink ? " · blinking" : ""}
               </>
@@ -308,6 +330,7 @@ function DisplayCard({ row, fans }: { row: DisplayStatus; fans: FansStatus | nul
               label={`${row.info.name} source`}
               value={sourceKey(draft.source)}
               options={options}
+              loading={sensorsPending}
               onChange={(key) => {
                 const source = sourceFromKey(key, draft.source);
                 set({ source, decimals: isRpm(source) ? 0 : draft.decimals });
@@ -385,6 +408,9 @@ export function DisplaysView() {
   const displaysError = useSnap((s) => s.displaysError);
   const displaysUnsupported = useSnap((s) => s.displaysUnsupported);
   const fans = useSnap((s) => s.fans);
+  const fansError = useSnap((s) => s.fansError);
+  // The first read of the sensors has neither answered nor failed.
+  const fansLoading = fans === null && fansError === null;
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("displays"));
 
@@ -460,6 +486,7 @@ export function DisplaysView() {
             key={`${row.info.id}:${JSON.stringify(row.config)}`}
             row={row}
             fans={fans}
+            fansLoading={fansLoading}
           />
         ))}
       </LoadFrame>

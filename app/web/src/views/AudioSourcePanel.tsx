@@ -5,6 +5,7 @@ import { SpeakerHigh } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { Field, Panel } from "@/components/Panel";
 import { Select, type SelectGroup, type SelectOption } from "@/components/Select";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Toggle } from "@/components/Toggle";
 import { Popover } from "@/components/Popover";
 import { useMediaQuery } from "@/components/MediaQuery";
@@ -32,7 +33,7 @@ export function audioStatusWords(state: AudioTestState | null): string {
     case "off":
       return "Live while this panel is open";
     case "waiting":
-      return "Waiting for the device…";
+      return "Waiting for the device";
     case "not_listening":
       return "Press Listen to test this input";
     case "no_device":
@@ -56,6 +57,20 @@ export function audioStatusWords(state: AudioTestState | null): string {
     default:
       return "Live while this panel is open";
   }
+}
+
+/**
+ * The state line. While the device has not answered it is a skeleton line (after the load delay),
+ * with the words kept for a screen reader; every other state is its words.
+ */
+function StateWords({ words, waiting }: { words: string; waiting: boolean }) {
+  if (!waiting) return <>{words}</>;
+  return (
+    <>
+      <InlineSkeleton width="22ch" />
+      <span className="sr-only">{words}</span>
+    </>
+  );
 }
 
 /** The 24-cell flat LED meter: lit cells take --ok/--work/--warn by level. */
@@ -310,12 +325,14 @@ export function AudioSourcePanel() {
         options={flatOptions}
         groups={groups}
         onChange={(v) => void pick(v)}
-        disabled={!sources}
+        loading={!sources && !err}
+        disabled={!sources && !!err}
       />
     </span>
   );
 
   const words = audioStatusWords(state);
+  const waiting = state?.status === "waiting";
   // S3 in the compact form: with an input picked and Listen off, nothing is live
   // yet, so the state slot carries the disclosure (short, one line, the full
   // sentence in `title`); with Listen on it carries the live state. The readings
@@ -348,9 +365,10 @@ export function AudioSourcePanel() {
               className="audio-state audio-state-compact"
               role="status"
               title={compactTitle}
+              aria-busy={(waiting && !compactNote) || undefined}
               data-note={compactNote ? "true" : undefined}
             >
-              {compactWords}
+              <StateWords words={compactWords} waiting={waiting && !compactNote} />
             </span>
             {inputSelected && (
               <Toggle label="Listen to this input" checked={listen} onChange={setListen} />
@@ -381,8 +399,8 @@ export function AudioSourcePanel() {
         </>
       ) : (
         <>
-          <p className="audio-state" role="status">
-            {words}
+          <p className="audio-state" role="status" aria-busy={waiting || undefined}>
+            <StateWords words={words} waiting={waiting} />
           </p>
           {err && <p className="error-line">{err}</p>}
           {readings}

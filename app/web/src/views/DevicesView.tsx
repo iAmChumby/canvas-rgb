@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useState, type CSSProperties, type ReactElement } from "react";
+import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import {
   ArrowClockwise,
   Cpu,
@@ -17,6 +17,7 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { Panel } from "@/components/Panel";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
@@ -185,22 +186,31 @@ function WhiteBalanceSection({
   name,
   shown,
   saved,
+  known,
   onDraft,
   onPut,
   onReset,
   onClose,
+  onRetry,
   error,
 }: {
   device: DeviceInfo;
   name: string;
   shown: WhiteBalance;
   saved: WhiteBalance;
+  /** The daemon has answered with this device's gains. False: they are being read, and the rows
+   *  are placeholders, never the neutral values standing in for them. */
+  known: boolean;
   onDraft: (deviceId: string, wb: WhiteBalance) => void;
   onPut: (deviceId: string, wb: WhiteBalance) => Promise<void>;
   onReset: (deviceId: string) => Promise<void>;
   onClose: () => void;
+  /** Reads the white balances again, when the first read failed. */
+  onRetry: () => void;
   error: string | null;
 }) {
+  // The read failed and nothing is known: an error and a way to ask again, never a skeleton for ever.
+  const readFailed = !known && error !== null;
   const commit = (channel: Channel) => (pct: number) => {
     void onPut(device.id, { ...shown, [channel]: pct / 100 });
   };
@@ -211,12 +221,17 @@ function WhiteBalanceSection({
   return (
     <div className="rd-wb" role="group" aria-label={`White balance channels for ${name}`}>
       <div className="rd-wb-head">
-        <span className="wb-swatch" style={{ backgroundColor: swatchOf(shown) }} aria-hidden="true" />
+        <span
+          className="wb-swatch"
+          data-unknown={known ? undefined : readFailed ? "failed" : "true"}
+          style={known ? { backgroundColor: swatchOf(shown) } : undefined}
+          aria-hidden="true"
+        />
         <span className="rd-wb-title">White balance</span>
         <span className="mute rd-wb-hint">
           Show White on every light, then lower the channel this one has too much of until it matches.
         </span>
-        {!isNeutral(saved) && (
+        {known && !isNeutral(saved) && (
           <Button size="sm" variant="ghost" onClick={() => void onReset(device.id)}>
             Reset
           </Button>
@@ -225,8 +240,28 @@ function WhiteBalanceSection({
           Done
         </Button>
       </div>
-      <div className="rd-wb-rows">
-        {CHANNELS.map(({ key, label }) => (
+      <div className="rd-wb-rows" aria-busy={known || readFailed ? undefined : true}>
+        {readFailed && (
+          <div className="rd-wb-failed">
+            <span className="error-line" role="alert">
+              The white balance could not be read. {error}
+            </span>
+            <Button size="sm" onClick={onRetry}>
+              Try again
+            </Button>
+          </div>
+        )}
+        {CHANNELS.map(({ key, label }) => !known ? (
+          readFailed ? null : (
+            <div className="rd-wb-row" key={key} data-channel={key}>
+              <span className="rd-wb-label">{label}</span>
+              <InlineSkeleton width="100%" />
+              <span className="fig rd-wb-fig">
+                <InlineSkeleton width="3ch" />
+              </span>
+            </div>
+          )
+        ) : (
           <div className="rd-wb-row" key={key} data-channel={key}>
             <span className="rd-wb-label">{label}</span>
             <Slider
@@ -241,7 +276,7 @@ function WhiteBalanceSection({
           </div>
         ))}
       </div>
-      {error && <p className="error-line">{error}</p>}
+      {error && !readFailed && <p className="error-line">{error}</p>}
     </div>
   );
 }
@@ -290,20 +325,31 @@ export function DevicesView() {
   const [wbError, setWbError] = useState<string | null>(null);
   // The one device whose white balance is open under its row, if any.
   const [wbOpen, setWbOpen] = useState<string | null>(null);
-  useEffect(() => {
-    let live = true;
+  // Each read carries a number; only the newest read may answer (a retry supersedes a slow one).
+  const wbRead = useRef(0);
+  const readWb = useCallback(() => {
+    const n = ++wbRead.current;
     api
       .getWhiteBalance()
       .then((wb) => {
-        if (live) setWhiteBalances(wb);
+        if (wbRead.current === n) setWhiteBalances(wb);
       })
       .catch((e: unknown) => {
-        if (live) setWbError(messageOf(e));
+        if (wbRead.current === n) setWbError(messageOf(e));
       });
-    return () => {
-      live = false;
-    };
   }, []);
+  // "Try again" after a failed read: the error goes, the read is asked for again.
+  const retryWb = () => {
+    setWbError(null);
+    readWb();
+  };
+  useEffect(() => {
+    const reads = wbRead;
+    readWb();
+    return () => {
+      reads.current++;
+    };
+  }, [readWb]);
 
   const wbDraft = (deviceId: string, wb: WhiteBalance) =>
     setWbDrafts((d) => ({ ...d, [deviceId]: wb }));
@@ -362,13 +408,19 @@ export function DevicesView() {
     <div className="rd-page rd-devices">
       <PageTitle
         title="Devices"
+        contextBusy={devices === null && !devicesError}
         context={
-          <>
-            <b>
-              {connectedCount}/{devices?.length ?? 0}
-            </b>{" "}
-            connected · {litCount} LEDs
-          </>
+          devices === null ? (
+            // Not read yet: "0/0 connected" would be a count of nothing drawn as a fact.
+            devicesError ? undefined : <InlineSkeleton width="24ch" />
+          ) : (
+            <>
+              <b>
+                {connectedCount}/{devices.length}
+              </b>{" "}
+              connected · {litCount} LEDs
+            </>
+          )
         }
       />
 
@@ -466,6 +518,7 @@ export function DevicesView() {
                     </span>
                   )}
                   {(() => {
+                    const wbKnown = whiteBalances !== null;
                     const wb = wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL;
                     const open = wbOpen === d.id;
                     return (
@@ -474,8 +527,15 @@ export function DevicesView() {
                         className="wb-key"
                         variant={open ? "primary" : "default"}
                         aria-expanded={open}
-                        aria-label={`White balance for ${shownName}${isNeutral(wb) ? "" : " (set)"}`}
-                        icon={<span className="wb-swatch" style={{ backgroundColor: swatchOf(wb) }} aria-hidden="true" />}
+                        aria-label={`White balance for ${shownName}${wbKnown && !isNeutral(wb) ? " (set)" : ""}`}
+                        icon={
+                          <span
+                            className="wb-swatch"
+                            data-unknown={wbKnown ? undefined : wbError ? "failed" : "true"}
+                            style={wbKnown ? { backgroundColor: swatchOf(wb) } : undefined}
+                            aria-hidden="true"
+                          />
+                        }
                         onClick={() => setWbOpen(open ? null : d.id)}
                       >
                         <span className="wb-key-text">Balance</span>
@@ -563,10 +623,12 @@ export function DevicesView() {
                     name={shownName}
                     shown={wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL}
                     saved={whiteBalances?.devices[d.id] ?? NEUTRAL}
+                    known={whiteBalances !== null}
                     onDraft={wbDraft}
                     onPut={wbPut}
                     onReset={wbReset}
                     onClose={() => setWbOpen(null)}
+                    onRetry={retryWb}
                     error={wbError}
                   />
                 )}

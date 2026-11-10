@@ -58,7 +58,7 @@ function explain(e: unknown, doing: Doing): string {
  * Under the keys sit two lines of fixed height, so no state moves the page. The first (36 px)
  * says what the lights are running ("Matches Storm", "Custom values"), or, when the live values
  * differ from the running preset, "Changed from Storm" with Update, Save as new and Reset, or
- * holds the name field while a name is typed, or "Saving...". The second (22 px) prints the
+ * holds the name field while a name is typed, or a Save key that spins while it is sent. The second (22 px) prints the
  * change ("Speed 8 to 35") or, when something was refused, the reason.
  *
  * The strip owns only what it shows (the name field, the open menu). Every change goes out
@@ -265,19 +265,19 @@ export function PresetStrip({
           onEnter={() => void submit()}
           onEscape={close}
         />
-        {saveWord ? (
-          <span className="preset-status preset-working">Saving&hellip;</span>
-        ) : narrow ? (
+        {/* The keys stay where they are while the save is sent: Save wears the busy spinner and
+            Cancel waits, so nothing under the pointer is replaced by a word. */}
+        {narrow ? (
           <>
-            <IconButton tip={false} label={verb} icon={<Check size={16} weight="bold" />} onClick={() => void submit()} />
-            <IconButton tip={false} label="Cancel" icon={<X size={16} />} onClick={close} />
+            <IconButton tip={false} label={verb} busy={saveWord} icon={<Check size={16} weight="bold" />} onClick={() => void submit()} />
+            <IconButton tip={false} label="Cancel" disabled={saveWord} icon={<X size={16} />} onClick={close} />
           </>
         ) : (
           <>
-            <Button variant="primary" size="sm" onClick={() => void submit()}>
+            <Button variant="primary" size="sm" busy={saveWord} onClick={() => void submit()}>
               {verb}
             </Button>
-            <Button variant="ghost" size="sm" onClick={close}>
+            <Button variant="ghost" size="sm" disabled={saveWord} onClick={close}>
               Cancel
             </Button>
           </>
@@ -290,13 +290,7 @@ export function PresetStrip({
         <span className="preset-diff" title={`Changed from ${running.name}`}>
           <span className="preset-diff-led" aria-hidden="true" />
           <span className="preset-status preset-changed">
-            {saveWord ? (
-              <>Saving&hellip;</>
-            ) : (
-              <>
-                Changed from <span className="preset-status-name">{running.name}</span>
-              </>
-            )}
+            Changed from <span className="preset-status-name">{running.name}</span>
           </span>
         </span>
         <span className="preset-actions">
@@ -304,7 +298,8 @@ export function PresetStrip({
             <Button
               variant="primary"
               size="sm"
-              disabled={busy || disabled}
+              busy={working === "update"}
+              disabled={(busy && working !== "update") || disabled}
               aria-label={`Update ${running.name}`}
               onClick={() => void doUpdate()}
             >
@@ -320,7 +315,8 @@ export function PresetStrip({
           <IconButton
             label={`Reset to ${running.name}`}
             icon={<ArrowCounterClockwise size={16} />}
-            disabled={busy}
+            busy={working === "apply"}
+            disabled={busy && working !== "apply"}
             onClick={() => void doReset()}
           />
         </span>
@@ -335,7 +331,8 @@ export function PresetStrip({
         <Button
           size="sm"
           icon={<ArrowCounterClockwise size={14} />}
-          disabled={busy}
+          busy={working === "undo"}
+          disabled={busy && working !== "undo"}
           onClick={() => void attempt("undo", onUndo)}
         >
           Undo
@@ -411,7 +408,8 @@ export function PresetStrip({
                   <Button
                     variant="danger"
                     size="sm"
-                    disabled={busy}
+                    busy={working === "delete"}
+                    disabled={busy && working !== "delete"}
                     onClick={() => {
                       const name = menu.name;
                       setMenu(null);

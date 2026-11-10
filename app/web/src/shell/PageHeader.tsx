@@ -98,10 +98,13 @@ function useSlot(pick: (slots: StripSlots) => HTMLElement | null): HTMLElement |
 export function PageTitle({
   title,
   context,
+  contextBusy = false,
   leading,
 }: {
   title: string;
   context?: ReactNode;
+  /** The context holds a placeholder: its numbers are still being read. */
+  contextBusy?: boolean;
   /** A quiet control before the title (a build mode's back key). */
   leading?: ReactNode;
 }) {
@@ -111,7 +114,7 @@ export function PageTitle({
     <span className="rd-title">
       {leading}
       <h1>{title}</h1>
-      {context ? <span className="rd-context">{context}</span> : null}
+      {context ? <span className="rd-context" aria-busy={contextBusy || undefined}>{context}</span> : null}
     </span>,
     slot,
   );

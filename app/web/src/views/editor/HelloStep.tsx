@@ -4,6 +4,7 @@ import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ArrowsClockwise, Check, Circle } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { useMotionOff } from "@/components/Motion";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Greeting } from "@/views/editor/Greeting";
 import { Fold, StepFrame } from "@/views/editor/OnboardStep";
 import { HELLO_EFFECT } from "@/views/editor/onboardEffects";
@@ -79,9 +80,9 @@ export function HelloStep({
 /** "11 lights found", in mono. A dash while the count is not known. */
 function Count({ value }: { value: number | null }) {
   return (
-    <p className={s.count} aria-live="polite">
+    <p className={s.count} aria-live="polite" aria-busy={value === null || undefined}>
       <span className={s.countNumber} data-known={value !== null}>
-        {value === null ? "—" : <AnimatedNumber value={value} />}
+        {value === null ? <InlineSkeleton width="2ch" /> : <AnimatedNumber value={value} />}
       </span>
       <span className={s.countWord}>{value === 1 ? "light found" : "lights found"}</span>
     </p>
@@ -129,7 +130,7 @@ function Waking({ onLater }: { onLater: () => void }) {
   return (
     <StepFrame
       center
-      title="Waking up your lights…"
+      title="Waking up your lights"
       lead="This takes a moment."
       primary={{ label: "Map my PC", icon: <ArrowRight size={16} weight="bold" />, disabled: true }}
       tertiary={{ label: "Set up later", onClick: onLater }}
@@ -190,9 +191,9 @@ function Ladder({
       lead="Try these, top to bottom."
       onBack={onBack}
       primary={{
-        label: busy ? "Looking…" : "Rescan",
+        label: "Rescan",
         icon: <ArrowsClockwise size={16} />,
-        disabled: busy,
+        busy,
         onClick: () => void rescan(),
       }}
       secondary={{ label: "Continue without lights", onClick: onStart }}

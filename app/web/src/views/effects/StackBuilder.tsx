@@ -30,7 +30,7 @@ import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
 import { Popover } from "@/components/Popover";
 import { Select } from "@/components/Select";
-import { Skeleton } from "@/components/Skeleton";
+import { InlineSkeleton, Skeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
 import { NumberField } from "@/components/NumberField";
 import { Thumb } from "@/components/Thumb";
@@ -125,12 +125,13 @@ function layerLabel(
   schemas: Record<string, PropertySchema | null>,
   effects: EffectSummary[] | null,
   effect: string,
-): string {
+): string | null {
   const schema = schemas[effect];
   if (schema?.name) return schema.name;
   const listed = effects?.find((entry) => entry.id === effect)?.name;
   if (listed) return listed;
-  return schema === null ? "Missing effect" : "Loading…";
+  // null: the name has not arrived. The caller draws an InlineSkeleton, never a word standing in for it.
+  return schema === null ? "Missing effect" : null;
 }
 
 /** A name for a new layer that is not already one of the stack's. */
@@ -1108,7 +1109,7 @@ export function StackBuilder({
           <Button
             size="sm"
             variant="primary"
-            disabled={saveState === "saving"}
+            busy={saveState === "saving"}
             onClick={() => {
               // The leave the prompt was asked about, carried out once there is a name.
               const reason: LeaveReason = leaving || "close";
@@ -1442,10 +1443,11 @@ export function StackBuilder({
           icon={<FloppyDisk size={14} />}
           aria-label={narrow ? "Save" : undefined}
           title={narrow ? "Save the stack" : undefined}
-          disabled={count === 0 || saveState === "saving" || phase !== "ready" || loadError !== null}
+          busy={saveState === "saving"}
+          disabled={count === 0 || phase !== "ready" || loadError !== null}
           onClick={() => void save()}
         >
-          <span className="rd-btn-text">{saveState === "saving" ? "Saving…" : "Save"}</span>
+          <span className="rd-btn-text">Save</span>
         </Button>
       </PageActions>
 
@@ -1463,7 +1465,7 @@ export function StackBuilder({
             running, the lights change to this stack.
           </span>
           <div className="row-wrap">
-            <Button size="sm" variant="danger" disabled={saveState === "saving"} onClick={() => void replaceOther()}>
+            <Button size="sm" variant="danger" busy={saveState === "saving"} onClick={() => void replaceOther()}>
               Replace
             </Button>
             <Button size="sm" variant="ghost" onClick={() => setClash(null)}>
@@ -1565,13 +1567,13 @@ export function StackBuilder({
                     <span className="eff-draft-mark" data-state={draftState} aria-hidden="true" />
                     <span className="note">
                       {draftState === "starting"
-                        ? "Starting the draft…"
+                        ? "Starting the draft"
                         : draftState === "running"
                           ? "Draft on the lights"
                           : draftState === "expiring"
                             ? `Draft on the lights, expiring in ${expiresIn}s`
                             : draftState === "restoring"
-                              ? "Restoring the previous effect…"
+                              ? "Restoring the previous effect"
                               : "The previous effect could not be restored."}
                     </span>
                     <span className="row-wrap">
@@ -1581,13 +1583,14 @@ export function StackBuilder({
                         </Button>
                       ) : (
                         <>
-                          <Button size="sm" variant="ghost" disabled={draftState === "restoring"} onClick={() => void stopDraft()}>
+                          <Button size="sm" variant="ghost" busy={draftState === "restoring"} onClick={() => void stopDraft()}>
                             Stop
                           </Button>
                           <Button
                             size="sm"
                             variant={leaving ? "default" : "primary"}
-                            disabled={saveState === "saving" || count === 0}
+                            busy={saveState === "saving"}
+                            disabled={count === 0}
                             onClick={() => void save()}
                           >
                             Save
@@ -1706,7 +1709,7 @@ export function StackBuilder({
                           >
                             <DotsIcon />
                           </button>
-                          <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, effects, layer.effect)} />
+                          <Thumb id={layer.effect} size="sm" label={layerLabel(schemas, effects, layer.effect) ?? "Effect"} />
                           <span className="layer-text">
                             {renaming === layer.id ? (
                               <div onClick={(event) => event.stopPropagation()}>
@@ -1764,11 +1767,11 @@ export function StackBuilder({
                 <section className="panel rd-layer-summary" aria-label="The picked layer">
                   <div className="layer-edit-head">
                     <div className="layer-edit-title">
-                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect)} />
+                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect) ?? "Effect"} />
                       <div>
                         <h2>{pickedLayer.name}</h2>
-                        <span className="mute">
-                          {layerLabel(schemas, effects, pickedLayer.effect)} · {areaName(pickedLayer.area, layout, devices)}
+                        <span className="mute" aria-busy={layerLabel(schemas, effects, pickedLayer.effect) === null || undefined}>
+                          {layerLabel(schemas, effects, pickedLayer.effect) ?? <InlineSkeleton width="10ch" />} · {areaName(pickedLayer.area, layout, devices)}
                         </span>
                       </div>
                     </div>
@@ -1807,11 +1810,11 @@ export function StackBuilder({
                 <Panel className="rd-layer-edit">
                   <div className="layer-edit-head">
                     <div className="layer-edit-title">
-                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect)} />
+                      <Thumb id={pickedLayer.effect} size="md" label={layerLabel(schemas, effects, pickedLayer.effect) ?? "Effect"} />
                       <div>
                         <h2>{pickedLayer.name}</h2>
-                        <span className="mute">
-                          {layerLabel(schemas, effects, pickedLayer.effect)} · layer {draft.layers.indexOf(pickedLayer) + 1} of{" "}
+                        <span className="mute" aria-busy={layerLabel(schemas, effects, pickedLayer.effect) === null || undefined}>
+                          {layerLabel(schemas, effects, pickedLayer.effect) ?? <InlineSkeleton width="10ch" />} · layer {draft.layers.indexOf(pickedLayer) + 1} of{" "}
                           {count}
                         </span>
                       </div>
@@ -1835,6 +1838,11 @@ export function StackBuilder({
                       <span>Effect</span>
                       <Select
                         label="Effect"
+                        loading={
+                          effects === null ||
+                          (schemas[pickedLayer.effect] === undefined &&
+                            !effects.some((effect) => effect.id === pickedLayer.effect))
+                        }
                         value={pickedLayer.effect}
                         options={[
                           // A layer whose effect is gone (or is a stack, which the list never offers)
@@ -1844,10 +1852,7 @@ export function StackBuilder({
                             : [
                                 {
                                   value: pickedLayer.effect,
-                                  label:
-                                    schemas[pickedLayer.effect] === null
-                                      ? "Missing effect"
-                                      : layerLabel(schemas, effects, pickedLayer.effect),
+                                  label: layerLabel(schemas, effects, pickedLayer.effect) ?? "Effect",
                                 },
                               ]),
                           ...(effects ?? [])
@@ -1930,7 +1935,22 @@ export function StackBuilder({
                       </span>
                     </div>
                   ) : schemas[pickedLayer.effect] === undefined ? (
-                    <p className="dim">Loading the effect&apos;s properties…</p>
+                    <LoadFrame
+                      state="loading"
+                      label="Loading the effect's properties"
+                      shape={
+                        // The shape of the property rows that come: a label on the left, its control on
+                        // the right, one row each (a colour, a slider, a choice).
+                        <div className="rd-props-shape">
+                          {[0.32, 0.26, 0.36].map((label, i) => (
+                            <div className="rd-props-row" key={i}>
+                              <Skeleton width={`${label * 100}%`} height={14} />
+                              <Skeleton width={i === 0 ? "34%" : "52%"} height={i === 0 ? 24 : 18} radius={i === 0 ? 6 : 9} />
+                            </div>
+                          ))}
+                        </div>
+                      }
+                    />
                   ) : (
                     <PropertyControls
                       schema={schemas[pickedLayer.effect] as PropertySchema}

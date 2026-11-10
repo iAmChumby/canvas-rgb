@@ -244,13 +244,14 @@ export function UpdatesView() {
               <StateLine u={u} />
               <div className="row-wrap upd-more">
                 <Button
-                  disabled={u.phase.kind === "checking" || isInstalling(u) || !acts}
+                  busy={u.phase.kind === "checking"}
+                  disabled={isInstalling(u) || !acts}
                   onClick={() => {
                     setErr(null);
                     void sendUpdate(updateCheckNow).then(setErr);
                   }}
                 >
-                  <Swap labels={["Check now", "Checking"]} at={u.phase.kind === "checking" ? 1 : 0} />
+                  Check now
                 </Button>
                 <span className="mute upd-note">
                   {acts ? `Last checked ${fmtChecked(u.last_check)}` : "Tray app only"}
