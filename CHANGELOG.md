@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Peripherals and Fans: controls that ran past their panel on narrower windows now fit (#263, #268)
+
 ## [0.11.0] - 2026-11-10
 
 ### Added
