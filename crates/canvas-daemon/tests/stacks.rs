@@ -3712,9 +3712,10 @@ fn a_masks_effect_is_part_of_the_stacks_structure() {
     assert_eq!(hash(&fire), hash(&half));
 }
 
-/// A hand-written file whose mask names an effect nothing builds loads with the layer unmasked.
+/// A hand-written file whose mask names an effect nothing builds keeps that mask: the layer draws
+/// unmasked and reports it missing, and the mask is still written back on a save (#256).
 #[tokio::test]
-async fn a_file_with_a_mask_that_does_not_resolve_loads_the_layer_unmasked() {
+async fn a_file_with_a_mask_that_does_not_resolve_keeps_the_mask_and_draws_unmasked() {
     let home = TempHome::new("t-mask-load");
     std::fs::write(
         home.path.join(STACKS_FILE),
@@ -3727,12 +3728,176 @@ async fn a_file_with_a_mask_that_does_not_resolve_loads_the_layer_unmasked() {
     let harness = harness_at(home);
     let loaded = harness.app.stacks.get("stack:HandMask").expect("the stack loads");
     assert_eq!(loaded.layers.len(), 2, "a bad mask does not drop its layer");
-    assert!(loaded.layers[0].mask.is_none(), "the unresolvable mask is dropped");
+    assert_eq!(
+        loaded.layers[0].mask.as_ref().map(|mask| mask.effect.as_str()),
+        Some("no-such-effect"),
+        "the unresolvable mask is kept, as saved"
+    );
     let mask = loaded.layers[1].mask.as_ref().expect("the good mask stays");
     assert_eq!(mask.effect, "fire");
     assert_eq!(mask.amount, 50);
+
+    // The detail says the mask is missing, and the compositor draws the layer unmasked.
+    let detail = json(
+        harness
+            .router
+            .clone()
+            .oneshot(request("GET", &stack_path("stack:HandMask")))
+            .await
+            .unwrap(),
+    )
+    .await;
+    assert_eq!(detail["layers"][0]["status"], "missing_effect", "{detail}");
+    let mut effect = canvas_daemon::create_effect(
+        &harness.app.user_effects,
+        &harness.app.stacks,
+        "stack:HandMask",
+    )
+    .expect("the stack builds");
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    assert!(
+        canvas.pixels.iter().any(|pixel| pixel.iter().any(|c| *c > 0.0)),
+        "the layer with the missing mask still paints, unmasked"
+    );
+
+    // A save writes the file back with the mask still in it: a load never loses it.
+    harness.app.stacks.save().expect("the store writes");
+    let text = std::fs::read_to_string(harness.home.path.join(STACKS_FILE)).expect("the file is read");
+    let file: canvas_proto::stack::StackFile = serde_json::from_str(&text).expect("the file parses");
+    let saved = file.stacks.iter().find(|stack| stack.id == "stack:HandMask").expect("the stack is saved");
+    assert_eq!(
+        saved.layers[0].mask.as_ref().map(|mask| mask.effect.as_str()),
+        Some("no-such-effect"),
+        "the mask is still in stacks.json after a load and a save: {text}"
+    );
 }
 
+/// The HTML cap is one rule: a layer and its mask take one slot each, and the same count refuses
+/// the save and trims a file found on disk. Two HTML layers each with an HTML mask is four slots,
+/// so the save is a 422 and a hand-written file keeps only the first layer (two slots).
+#[tokio::test]
+async fn the_html_cap_counts_a_layer_and_its_mask_the_same_at_save_and_load() {
+    let harness = build("t-html-slots");
+    for file in ["a.html", "b.html", "c.html", "d.html"] {
+        add_html(&harness, file, VALID_HTML);
+    }
+    let four = stack(
+        "stack:FourSlots",
+        vec![
+            masked_layer("l1", "html:a", a_mask("html:b")),
+            masked_layer("l2", "html:c", a_mask("html:d")),
+        ],
+    );
+    let (status, message) = put_stack_body(
+        &harness,
+        "stack:FourSlots",
+        &serde_json::to_string(&four).unwrap(),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(message.contains("at most 2 HTML layers") && message.contains("4"), "{message}");
+
+    // The same stack found on disk keeps only what fits the two slots: the first layer with its
+    // mask, and the second layer is left out (never a mask on its own).
+    let home = TempHome::new("t-html-slots-load");
+    std::fs::write(
+        home.path.join(STACKS_FILE),
+        serde_json::json!({
+            "schema_version": 1,
+            "stacks": [four],
+        })
+        .to_string(),
+    )
+    .unwrap();
+    let harness = harness_at(home);
+    for file in ["a.html", "b.html", "c.html", "d.html"] {
+        add_html(&harness, file, VALID_HTML);
+    }
+    harness.app.stacks.reload(&harness.app.user_effects);
+    let loaded = harness.app.stacks.get("stack:FourSlots").expect("the stack loads");
+    assert_eq!(loaded.layers.len(), 1, "one layer fits the two slots");
+    assert_eq!(loaded.layers[0].id, "l1");
+    assert_eq!(
+        loaded.layers[0].mask.as_ref().map(|mask| mask.effect.as_str()),
+        Some("html:b"),
+        "a layer's mask is not dropped on its own"
+    );}
+
+
+/// A mask that overruns its budget is held, then faulted; a faulted mask leaves the layer
+/// unmasked, as the comments promise (#256).
+#[test]
+fn a_mask_faulted_by_overrun_leaves_the_layer_unmasked() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
+    let lay = layout(
+        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
+        RenderScale::P100,
+        SamplingMode::Nearest,
+    );
+    let stack = stack(
+        "stack:SlowMask",
+        vec![masked_layer("l1", "layer", a_mask("html:slow"))],
+    );
+    let clock = ManualClock::new();
+    let leaves: LeafBuilder = {
+        let clock = clock.clone();
+        Arc::new(move |id: &str| {
+            let (colour, cost) = if id == "html:slow" {
+                ([0.0, 0.0, 0.0], Some((clock.clone(), 20)))
+            } else {
+                ([1.0, 0.0, 0.0], None)
+            };
+            Ok(Box::new(Paint {
+                colour,
+                updates: Arc::new(AtomicU64::new(0)),
+                cost,
+                id: id.to_string(),
+            }) as Box<dyn Effect>)
+        })
+    };
+    let statuses = Arc::new(Mutex::new(Vec::new()));
+    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        .with_clock(clock.clock())
+        .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)))
+        .with_status_sink(Arc::clone(&statuses));
+    effect.init(&Props::new());
+    let mut canvas = Canvas::with_scale(1.0);
+
+    // The first overrun holds the mask for 250 ms; a held mask keeps its last picture (black).
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "a held mask still shapes the layer");
+    assert_eq!(
+        statuses.lock().unwrap().iter().find(|status| status.id == "l1").map(|status| status.status),
+        Some(StackLayerState::Held)
+    );
+    clock.advance_ms(100);
+    step(&mut effect, &mut canvas);
+    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the held mask is not updated");
+
+    // The trials overrun too: 500 ms, 1 s, then the mask is faulted and the layer is unmasked.
+    clock.advance_ms(151);
+    step(&mut effect, &mut canvas);
+    clock.advance_ms(400);
+    step(&mut effect, &mut canvas);
+    clock.advance_ms(100);
+    step(&mut effect, &mut canvas);
+    clock.advance_ms(900);
+    step(&mut effect, &mut canvas);
+    clock.advance_ms(100);
+    step(&mut effect, &mut canvas);
+    assert_eq!(
+        canvas.get(5, 5),
+        [1.0, 0.0, 0.0],
+        "a mask faulted by overrun no longer shapes the layer"
+    );
+    assert_eq!(
+        statuses.lock().unwrap().iter().find(|status| status.id == "l1").map(|status| status.status),
+        Some(StackLayerState::Faulted),
+        "the layer's status says its mask faulted"
+    );
+}
 
 /// HTML whose script does not parse: the builder refuses it, so a PUT of it answers 422.
 const BROKEN_HTML: &str = "<head><title>Broken</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar = ;\n</script>";

@@ -728,19 +728,23 @@ struct MaskLayer {
 }
 
 impl MaskLayer {
-    /// True while the mask shapes the layer: it built, it has not faulted, and its values apply.
+    /// True while the mask shapes the layer: it built, it has not faulted (a panic or an overrun
+    /// that faulted it), and its values apply. A mask that is merely held keeps its last picture
+    /// and still shapes the layer; a faulted one leaves the layer unmasked (#256).
     fn applies(&self) -> bool {
-        self.fault.is_none()
+        self.fault.is_none() && !matches!(self.hold, Hold::Faulted)
     }
 }
 
 /// The coverage one mask pixel gives, 0 (hidden) to 1 (whole), before invert and amount.
 ///
-/// Luma is Rec. 709 on the picture's 8-bit-ish channels (`0.2126 R + 0.7152 G + 0.0722 B`); it is
-/// linear-enough for a light mask and needs no colour-space conversion. The compositor's canvases
-/// are RGB with no alpha channel, so Alpha reads the picture's strongest channel: a pixel the mask
-/// effect left black is transparent, and any colour it drew is opaque at its strongest channel's
-/// strength.
+/// Luma is Rec. 709's weights on the picture's **encoded sRGB** values
+/// (`0.2126 R + 0.7152 G + 0.0722 B`): the video-luma convention. Nothing here linearises — the
+/// canvas holds encoded values, exactly as `Rgb8::to_f32` divides its channels by 255 with no
+/// transfer function — so this is a perceptual-enough brightness, not linear luminance. The
+/// compositor's canvases are RGB with no alpha channel, so Alpha reads the picture's strongest
+/// channel: a pixel the mask effect left black is transparent, and any colour it drew is opaque at
+/// its strongest channel's strength.
 pub fn mask_coverage(source: MaskSource, pixel: [f32; 3]) -> f32 {
     let channel = |v: f32| if v.is_nan() { 0.0 } else { v.clamp(0.0, 1.0) };
     let [r, g, b] = pixel.map(channel);

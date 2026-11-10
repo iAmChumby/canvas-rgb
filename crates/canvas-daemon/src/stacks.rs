@@ -261,13 +261,16 @@ fn check_mask(layer: &StackLayer, known: &KnownEffects) -> Result<(), String> {
     Ok(())
 }
 
-/// True for a layer or its mask when it is an HTML effect: the capped, slow kind.
+/// The HTML slots one layer takes: one for its own effect and one for its mask (#256). A stack
+/// may hold `STACK_HTML_MAX` slots in all, and save and load both count them with this.
+pub fn html_slots(layer: &StackLayer) -> usize {
+    usize::from(is_html_effect(&layer.effect))
+        + usize::from(layer.mask.as_ref().is_some_and(|mask| is_html_effect(&mask.effect)))
+}
+
+/// True for a layer that takes at least one HTML slot: the capped, slow kind.
 pub fn layer_counts_as_html(layer: &StackLayer) -> bool {
-    is_html_effect(&layer.effect)
-        || layer
-            .mask
-            .as_ref()
-            .is_some_and(|mask| is_html_effect(&mask.effect))
+    html_slots(layer) > 0
 }
 
 /// Checks one stack before it is saved (the D95.1.1 table).
@@ -289,7 +292,7 @@ pub fn validate_stack(stack: &Stack, known: &KnownEffects, others: &[Stack]) -> 
             stack.layers.len()
         ));
     }
-    let html = stack.layers.iter().filter(|l| layer_counts_as_html(l)).count();
+    let html: usize = stack.layers.iter().map(html_slots).sum();
     if html > STACK_HTML_MAX {
         return Err(format!(
             "a stack holds at most {STACK_HTML_MAX} HTML layers, and this one has {html}"
@@ -367,6 +370,13 @@ pub fn canonicalise_and_validate(
 /// The layers of a stack loaded from a file: the ones the compositor cannot run are dropped with
 /// a logged reason, and the rest of the stack runs (D95.1.6, D95.4.8). A layer's effect is
 /// stored as the canonical id the builder takes, so a file that spelled a display name runs.
+///
+/// A mask is **never** dropped here, even when its effect does not resolve (#256): the file is the
+/// source of truth, so the mask stays in memory and is written back as saved. The compositor
+/// reports the missing mask and draws the layer unmasked (`checked_for_load` drops it only from
+/// the copy that is validated). Only the HTML cap can leave a layer out: a layer whose own effect
+/// and mask together do not fit the `STACK_HTML_MAX` slots is dropped whole, which is never more
+/// than the save rule would refuse, and the file is kept aside before the next write.
 fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
     let mut seen: Vec<String> = Vec::new();
     let mut out: Vec<StackLayer> = Vec::new();
@@ -388,51 +398,33 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
         if let Some(id) = layer_effect_id(known, &layer.effect) {
             layer.effect = id.to_string();
         }
-        // A mask's effect is canonicalised like a layer's, and one that does not resolve is
-        // dropped with its reason: the layer runs unmasked (#256).
-        if let Some(mask) = layer.mask.take() {
-            let resolved = layer_effect_id(known, &mask.effect);
-            if mask.effect.starts_with(STACK_ID_PREFIX) || resolved.is_none() {
+        // A mask's effect is canonicalised like a layer's. One that does not resolve is kept as
+        // it was saved: the layer runs unmasked and its status names the missing mask (#256).
+        if let Some(mask) = &mut layer.mask {
+            if let Some(id) = layer_effect_id(known, &mask.effect) {
+                mask.effect = id.to_string();
+            } else {
                 tracing::warn!(
                     stack = %stack.id,
                     layer = %layer.id,
                     mask = %mask.effect,
-                    "a layer's mask does not resolve to an effect; the layer draws unmasked"
+                    "a layer's mask does not resolve to an effect; the layer draws unmasked and the mask is kept as saved"
                 );
-            } else {
-                let mut mask = mask;
-                if let Some(id) = resolved {
-                    mask.effect = id.to_string();
-                }
-                // An HTML mask counts toward the cap like an HTML layer.
-                if is_html_effect(&mask.effect) && html >= STACK_HTML_MAX {
-                    tracing::warn!(
-                        stack = %stack.id,
-                        layer = %layer.id,
-                        mask = %mask.effect,
-                        "the stack has more HTML layers than a stack may hold; a layer's mask is dropped and the layer draws unmasked"
-                    );
-                } else {
-                    if is_html_effect(&mask.effect) {
-                        html += 1;
-                    }
-                    mask.amount = mask.amount.min(100);
-                    layer.mask = Some(mask);
-                }
             }
         }
-        // A layer counts toward the HTML cap once it is a layer the stack can run.
-        if is_html_effect(&layer.effect) {
-            if html >= STACK_HTML_MAX {
-                tracing::warn!(
-                    stack = %stack.id,
-                    layer = %layer.id,
-                    "the stack has more HTML layers than a stack may hold; the rest are dropped"
-                );
-                continue;
-            }
-            html += 1;
+        // One rule, shared with the save: a layer's own effect and its mask take one HTML slot
+        // each. A layer that does not fit the cap is dropped whole, never a mask alone.
+        let slots = html_slots(&layer);
+        if html + slots > STACK_HTML_MAX {
+            tracing::warn!(
+                stack = %stack.id,
+                layer = %layer.id,
+                slots,
+                "the stack has more HTML layers than a stack may hold; this layer is dropped"
+            );
+            continue;
         }
+        html += slots;
         if let Err(reason) = check_layer_values(&layer, index) {
             // A value is not a reason to drop the layer: the compositor clamps it (D95.3.6).
             tracing::warn!(stack = %stack.id, %reason, "a layer's value is out of range; the compositor neutralises it");
@@ -445,11 +437,26 @@ fn loaded_layers(stack: &Stack, known: &KnownEffects) -> Vec<StackLayer> {
 /// The stack a load validates: the layers that were kept, with the values the compositor would
 /// neutralise clamped first. The stored stack keeps the file's own values; only a structural
 /// problem, a bad name or a broken cap drops the whole stack (D95.3.6).
-fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>) -> Stack {
+///
+/// A mask whose effect does not resolve is dropped from **this copy only**: it cannot be built, so
+/// validating it as a mask would drop the whole stack for a part the file may still fix. The kept
+/// stack keeps it, and the compositor reports it missing (#256).
+fn checked_for_load(stack: &Stack, layers: Vec<StackLayer>, known: &KnownEffects) -> Stack {
     let layers = layers
         .into_iter()
         .map(|mut layer| {
             layer.opacity = layer.opacity.min(100);
+            // A mask that cannot build is left out of the copy the compositor will run; the kept
+            // stack still holds it, as saved (#256).
+            let mask_cannot_build = layer.mask.as_ref().is_some_and(|mask| {
+                mask.effect.starts_with(STACK_ID_PREFIX)
+                    || layer_effect_id(known, &mask.effect).is_none()
+            });
+            if mask_cannot_build {
+                layer.mask = None;
+            } else if let Some(mask) = &mut layer.mask {
+                mask.amount = mask.amount.min(100);
+            }
             if let canvas_proto::stack::LayerArea::Rect { x, y, width, height } = layer.area {
                 let finite =
                     x.is_finite() && y.is_finite() && width.is_finite() && height.is_finite();
@@ -586,7 +593,7 @@ impl Stacks {
             // The stack is checked as the compositor will run it: a value a hand-written file
             // got wrong is clamped first, so only the structure, the name and the caps can cost
             // the whole stack (D95.3.6).
-            let checked = checked_for_load(&stack, layers.clone());
+            let checked = checked_for_load(&stack, layers.clone(), known);
             if let Err(reason) = validate_stack(&checked, known, &accepted) {
                 tracing::warn!(stack = %stack.id, %reason, "a stack was dropped as it was loaded");
                 dropped = true;
