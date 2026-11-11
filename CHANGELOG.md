@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Effects: the onboarding greeting's restore no longer lands over a just-re-activated onboarding effect when the timer fires in between (#94)
+- Command palette: a screen reader is told which row Enter runs, Tab stays inside the palette and focus goes back to the key that opened it, and the short list is the phone's list instead of every window's; while the phone layer sheet is open the palette owns Tab and Escape (the sheet no longer closes with it), and a command that moved focus itself does not have focus stolen back to the palette's opener (#232)
 - Effects: an HTML effect that is still rendering now shows that it is loading (the preview, the stack builder's picture, Import and Replace), and a slow tile waits for its picture instead of showing "no picture" after 10 seconds (#296)
 - Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
 - Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)
