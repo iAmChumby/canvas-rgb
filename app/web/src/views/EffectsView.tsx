@@ -167,9 +167,16 @@ export function EffectsView() {
       if (getSnap().status?.active_effect === id) {
         await api.patchActiveProps(batch);
       } else {
-        // The first edit to a stopped effect starts it, with the edited values on top.
-        await api.activateEffect(id, { props: batch, preset: null });
-        await refreshAll();
+        // The first edit to a stopped effect starts it, with the edited values on top. The
+        // Activate button is the control that starts the effect, so it shows the wait for the
+        // activation this edit asked for.
+        setActivating(true);
+        try {
+          await api.activateEffect(id, { props: batch, preset: null });
+          await refreshAll();
+        } finally {
+          setActivating(false);
+        }
       }
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
       clearWrite(id);
@@ -814,7 +821,7 @@ export function EffectsView() {
                   <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} live />
                 ) : (
                   <div className="effect-live-frame" key={detail.schema.id}>
-                    <EffectPreview id={detail.schema.id} />
+                    <EffectPreview id={detail.schema.id} label={`Preview of ${detail.schema.name}`} note />
                   </div>
                 )}
               </div>
@@ -1089,7 +1096,8 @@ export function EffectsView() {
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
-          disabled={importing || editing}
+          disabled={editing}
+          busy={importing}
           label="Import"
           onFile={(file) => void sendImport(file, false)}
         >
@@ -1207,7 +1215,7 @@ export function EffectsView() {
                 <Button
                   variant="primary"
                   size="sm"
-                  disabled={importing}
+                  busy={importing}
                   onClick={() => void sendImport(new File([replaceWith.html], replaceWith.fileName), true)}
                 >
                   Replace

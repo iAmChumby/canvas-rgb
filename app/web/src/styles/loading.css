@@ -197,6 +197,13 @@
   animation: canvas-fade var(--dur-fast) var(--ease) both;
 }
 
+/* The stack builder's preview canvas is its own box too: the same tone and the same fade while
+   the first frame of the feed is on the way. */
+.rd-canvas canvas[data-wait="shown"] {
+  background: var(--skeleton);
+  animation: canvas-fade var(--dur-fast) var(--ease) both;
+}
+
 /* ---------- the stack builder's property pane, while its schema is read ---------- */
 
 .rd-props-shape {
@@ -228,6 +235,23 @@
   background: var(--sunk);
   outline: 1px dashed var(--line-2);
   outline-offset: -1px;
+}
+
+/* The detail pane's preview, while the daemon renders the tile: a short visible note in the
+   preview's corner, since the canvas itself cannot say it is working. The canvas wears the
+   skeleton tone; this is only the words. */
+.effect-preview-note {
+  position: absolute;
+  left: var(--s2);
+  bottom: var(--s2);
+  z-index: 1;
+  padding: 2px var(--s2);
+  border-radius: var(--r-sm);
+  font-size: var(--t12);
+  line-height: 1.5;
+  color: var(--mute);
+  background: color-mix(in srgb, var(--panel) 88%, transparent);
+  pointer-events: none;
 }
 
 /* A white-balance read that failed: an empty dashed swatch, and the error with a way to ask again. */

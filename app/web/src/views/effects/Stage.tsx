@@ -19,6 +19,7 @@ import type { DropTarget } from "@/lib/dropTargets";
 import { Chip } from "@/components/Chip";
 import { IconButton } from "@/components/Button";
 import { Toggle } from "@/components/Toggle";
+import { useCanvasWait } from "@/components/Skeleton";
 import { FrameHandles } from "@/views/effects/Handles";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -196,7 +197,12 @@ export function Stage({
   const [dragging, setDragging] = useState(false);
   /** The picture's width in css pixels (0 until measured): the labels and edge marks fit to it. */
   const [stageW, setStageW] = useState(0);
+  /** The first frame from the stack preview feed: the canvas's wait is over once one lands. */
+  const [framed, setFramed] = useState(false);
   const empty = stack.layers.length === 0;
+  // The wait before the first frame: the canvas stays dark, but it says it is waiting and, after
+  // the delay, wears the skeleton tone like every other canvas in the editor.
+  const wait = useCanvasWait(framed);
 
   useEffect(() => {
     const el = stageRef.current;
@@ -221,6 +227,8 @@ export function Stage({
   useEffect(
     () =>
       onStackFrame((frame) => {
+        // The first frame is in: the wait is over, whatever the paint below does with it.
+        setFramed(true);
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext("2d");
@@ -519,7 +527,17 @@ export function Stage({
             Whole canvas
           </div>
         )}
-        {!empty && <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} aria-label="The stack's preview" />}
+        {!empty && (
+          <canvas
+            ref={canvasRef}
+            width={CANVAS_W}
+            height={CANVAS_H}
+            role="img"
+            aria-label="The stack's preview"
+            aria-busy={framed ? undefined : true}
+            data-wait={wait}
+          />
+        )}
         {empty && (
           <div className="rd-canvas-empty">
             {/* The stage's own drop hint (#257 phase 4, spec §5): a faint outline that reads as a

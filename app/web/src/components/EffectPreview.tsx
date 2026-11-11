@@ -25,7 +25,12 @@ export type PreviewValues = { [key: string]: PropValue };
 /** The loop the daemon's thumbnails run on. */
 const THUMB_FPS = 12;
 
-export function EffectPreview({ id, className }: { id: string; className?: string }) {
+/**
+ * The preview of one effect. `label` names the picture for a screen reader ("Preview of Aurora").
+ * `note` draws a short visible note while the daemon's thumbnail is on its way, for the detail
+ * pane, where the canvas has the frame to itself and nothing else says it is working.
+ */
+export function EffectPreview({ id, className, label = "Effect preview", note = false }: { id: string; className?: string; label?: string; note?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const activeId = useSnap((s) => s.status?.active_effect ?? null);
   const live = activeId === id;
@@ -106,11 +111,20 @@ export function EffectPreview({ id, className }: { id: string; className?: strin
   }, [id, live, thumb, motionOff, visible]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      className={className ? `preview-canvas ${className}` : "preview-canvas"}
-      data-wait={wait}
-      aria-hidden="true"
-    />
+    <>
+      <canvas
+        ref={canvasRef}
+        className={className ? `preview-canvas ${className}` : "preview-canvas"}
+        data-wait={wait}
+        role="img"
+        aria-label={label}
+        aria-busy={loaded || wait === "failed" ? undefined : true}
+      />
+      {note && wait === "shown" && (
+        <span className="effect-preview-note" aria-hidden="true">
+          Rendering…
+        </span>
+      )}
+    </>
   );
 }
