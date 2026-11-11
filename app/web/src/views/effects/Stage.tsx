@@ -154,6 +154,7 @@ export function Stage({
   onMakeRect,
   drop,
   dragging: libraryDrag,
+  feedFailed = false,
 }: {
   stack: Stack;
   layout: Layout | null;
@@ -185,6 +186,9 @@ export function Stage({
   /** Some drag runs, whether or not it is over the picture (a mask over a row): the stage's own
    *  floating keys stand aside. */
   dragging?: boolean;
+  /** The preview feed was refused (another window shows a stack preview): the canvas's wait ends
+   *  as failed, so it is no longer busy and the stage's own note says why. */
+  feedFailed?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -202,7 +206,15 @@ export function Stage({
   const empty = stack.layers.length === 0;
   // The wait before the first frame: the canvas stays dark, but it says it is waiting and, after
   // the delay, wears the skeleton tone like every other canvas in the editor.
-  const wait = useCanvasWait(framed);
+  const wait = useCanvasWait(framed, feedFailed);
+  // An emptied stack unmounts the canvas; the next one waits for its own first frame again. Set
+  // during render when `empty` changes (React's pattern for state that follows a prop), not in an
+  // effect, so no frame paints the stale state.
+  const [wasEmpty, setWasEmpty] = useState(empty);
+  if (wasEmpty !== empty) {
+    setWasEmpty(empty);
+    if (empty) setFramed(false);
+  }
 
   useEffect(() => {
     const el = stageRef.current;
@@ -534,7 +546,7 @@ export function Stage({
             height={CANVAS_H}
             role="img"
             aria-label="The stack's preview"
-            aria-busy={framed ? undefined : true}
+            aria-busy={framed || feedFailed ? undefined : true}
             data-wait={wait}
           />
         )}

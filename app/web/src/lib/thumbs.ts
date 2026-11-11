@@ -27,14 +27,46 @@ export function parseThumbnail(buf: ArrayBuffer): Thumb | null {
 const cache = new Map<string, Promise<Thumb | null>>();
 
 /**
+ * At most this many thumbnail requests are on the wire at once (#296 review). The daemon renders
+ * two at a time (`CONCURRENT_RENDERS`), and a thumbnail may take up to `THUMBNAIL_TIMEOUT_MS` to
+ * answer, so sending every tile at once would hold every HTTP/1.1 socket the browser keeps for the
+ * daemon (6 per host) and stall the fan poll and Activate behind them. The rest wait here, in
+ * order, and their deadline starts only when they are sent.
+ */
+export const THUMBS_IN_FLIGHT = 2;
+let inFlight = 0;
+const waiting: Array<() => void> = [];
+
+/** Runs `send` when one of the THUMBS_IN_FLIGHT places is free. */
+function queued<T>(send: () => Promise<T>): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const start = () => {
+      inFlight += 1;
+      send()
+        .then(resolve, reject)
+        .finally(() => {
+          inFlight -= 1;
+          waiting.shift()?.();
+        });
+    };
+    if (inFlight < THUMBS_IN_FLIGHT) start();
+    else waiting.push(start);
+  });
+}
+
+/** How many thumbnail requests are on the wire now (for tests). */
+export function thumbsInFlight(): number {
+  return inFlight;
+}
+
+/**
  * Loads one effect's thumbnail once. A failed load resolves to null (the tile shows "no picture")
  * and is not kept, so the next tile that mounts asks again (a daemon hiccup is not cached).
  */
 export function loadThumb(id: string): Promise<Thumb | null> {
   let hit = cache.get(id);
   if (!hit) {
-    hit = api
-      .effectThumbnail(id)
+    hit = queued(() => api.effectThumbnail(id))
       .then(parseThumbnail)
       .catch(() => {
         cache.delete(id);

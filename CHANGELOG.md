@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Effects: the Effects page waits where it waited silently — a preview that is rendering wears the skeleton and says so, the stack builder's canvas does the same until its first frame, the Import and Replace buttons show the wait while they work, and editing a stopped effect shows the Activate wait until it starts; an effect thumbnail answering slowly lands instead of showing "no picture" at ten seconds (#296)
+- Effects: an HTML effect that is still rendering now shows that it is loading (the preview, the stack builder's picture, Import and Replace), and a slow tile waits for its picture instead of showing "no picture" after 10 seconds (#296)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
 
 ## [0.13.0] - 2026-11-10

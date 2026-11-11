@@ -108,6 +108,7 @@ export function StackStage({
       }
     >
       <Stage
+        feedFailed={feedProblem !== null}
         stack={draft}
         layout={layout}
         devices={devices}

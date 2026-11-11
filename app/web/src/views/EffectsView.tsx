@@ -154,7 +154,12 @@ export function EffectsView() {
     valuesRef.current = values;
   }, [values]);
 
-  const [activating, setActivating] = useState(false);
+  // How many activations are on the wire: the Activate key and an edit to a stopped effect can each
+  // send one, and the key stays busy until the last of them lands, not the first (#296 review).
+  const [activations, setActivations] = useState(0);
+  const activating = activations > 0;
+  const startActivating = () => setActivations((n) => n + 1);
+  const endActivating = () => setActivations((n) => Math.max(0, n - 1));
 
   /** Sends the waiting values to the effect they were edited on, and to no other. */
   const flush = async () => {
@@ -172,12 +177,12 @@ export function EffectsView() {
         // The first edit to a stopped effect starts it, with the edited values on top. The
         // Activate button is the control that starts the effect, so it shows the wait for the
         // activation this edit asked for.
-        setActivating(true);
+        startActivating();
         try {
           await api.activateEffect(id, { props: batch, preset: null });
           await refreshAll();
         } finally {
-          setActivating(false);
+          endActivating();
         }
       }
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
@@ -244,7 +249,7 @@ export function EffectsView() {
     if (!selectedId) return;
     const id = selectedId;
     clearWrite(id);
-    setActivating(true);
+    startActivating();
     try {
       await api.activateEffect(id, { props: {}, preset });
       await refreshAll();
@@ -256,7 +261,7 @@ export function EffectsView() {
     } catch (e) {
       failWrite(id, e);
     } finally {
-      setActivating(false);
+      endActivating();
     }
   };
 
