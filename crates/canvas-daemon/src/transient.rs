@@ -110,7 +110,7 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
             }
             inner.pending = false;
         }
-        restore(&app).await;
+        restore_armed(&app, generation).await;
     });
 }
 
@@ -123,6 +123,36 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
 /// waits for it.
 pub async fn restore(app: &Arc<App>) {
     let _gate = app.draft.gate().lock().await;
+    restore_locked(app).await;
+}
+
+/// [`restore`] for the onboarding timer: the generation is rechecked under the gate before
+/// anything is applied (#94).
+///
+/// The timer releases the transient lock before the gate, so an activation can land while the
+/// timer is on its way to the gate. The activating route bumps the generation (`cancel`) just
+/// BEFORE it takes the gate (`hold_for_replace`), and re-arms under it. Either way a stale timer
+/// applies nothing: if it reaches the gate first it already sees the bumped generation; if the
+/// activation holds the gate first, the timer sees the re-armed generation when it gets in.
+async fn restore_armed(app: &Arc<App>, generation: u64) {
+    let _gate = app.draft.gate().lock().await;
+    {
+        let inner = app.transient.lock();
+        if inner.generation != generation {
+            tracing::info!(
+                "the onboarding restore is skipped: a newer activation re-armed the timer"
+            );
+            return;
+        }
+    }
+    restore_locked(app).await;
+}
+
+/// [`restore`] with the draft gate already held: the draft check, the layout read and
+/// the apply, exactly as before. `restore` (tests and direct callers) takes the gate
+/// and comes here; `restore_armed` rechecks the generation under the gate and only then
+/// comes here.
+async fn restore_locked(app: &Arc<App>) {
     if app.draft.is_active() {
         tracing::info!("the onboarding restore is skipped: a draft holds the lights");
         return;

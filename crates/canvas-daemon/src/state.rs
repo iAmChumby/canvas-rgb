@@ -38,6 +38,10 @@ impl PreviewRegistry {
     }
 }
 
+/// The longest a fans route waits on the service for one exchange while it holds `fans_last`
+/// (issue #225). A healthy service answers in milliseconds; past this the route answers 503.
+pub const FANS_LOCK_PIPE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// The state every handler sees.
 pub struct App {
     /// The on-disk state. Written rarely (a settings change) and read often.
@@ -92,6 +96,10 @@ pub struct App {
     pub fans: tokio::sync::RwLock<Option<FansStatus>>,
     /// The last fan config the daemon pushed to the service (G10 export while down).
     pub fans_last: tokio::sync::RwLock<Option<FansFile>>,
+    /// How long a pipe exchange made while holding `fans_last` may take before the route answers
+    /// 503 (issue #225). The pipe client has no timeout of its own, so a hung service would
+    /// otherwise hold the lock, and with it config export and every other fans writer.
+    pub fans_pipe_limit: std::time::Duration,
     /// SignalRGB conflicts, refreshed every 5 s.
     pub conflicts: tokio::sync::RwLock<Vec<canvas_proto::api::Conflict>>,
     /// Where OpenRGB is, as the daemon sees it.
@@ -257,6 +265,7 @@ impl App {
             service_down_ms: AtomicU64::new(0),
             fans: tokio::sync::RwLock::new(None),
             fans_last: tokio::sync::RwLock::new(None),
+            fans_pipe_limit: FANS_LOCK_PIPE_LIMIT,
             conflicts: tokio::sync::RwLock::new(Vec::new()),
             openrgb: tokio::sync::RwLock::new(LinkState::Down),
             shutting_down: AtomicU32::new(0),

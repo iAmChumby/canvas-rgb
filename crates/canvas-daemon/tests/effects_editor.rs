@@ -1654,3 +1654,56 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
     app.shutting_down
         .store(1, std::sync::atomic::Ordering::SeqCst);
 }
+
+// Runs on the default current-thread runtime on purpose: the onboarding timer (armed at scale 0)
+// first runs when the test yields after taking the gate, so the order below is fixed. The order is
+// enforced by the held gate; `wait_until` polls only to see the timer reach it. A multi-thread
+// flavor would race the timer against the gate.
+#[tokio::test]
+async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_effect() {
+    let (_router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let prior = color("#112233");
+    prior_effect(&app, "solid", prior.clone()).await;
+
+    // The greeting is on the lights, the way the activate route leaves them, and its timer
+    // is armed. Waits run at zero, so the timer fires on the next poll, not after hello's
+    // run plus the grace.
+    app.transient.set_time_scale(0.0);
+    canvas_daemon::apply_effect(
+        &app,
+        canvas_effects::onboard::HELLO_ID,
+        &canvas_proto::Props::new(),
+    )
+    .await
+    .expect("hello applies");
+    canvas_daemon::transient::arm(&app, canvas_effects::onboard::HELLO_ID);
+    // The re-armed timer must not fire in this test, so waits run at the normal rate again.
+    app.transient.set_time_scale(1.0);
+
+    // The draft gate is held, so the timer's restore blocks on it.
+    let gate = app.draft.gate().lock().await;
+    // The timer has passed its own check: it is pending on the gate, with hello's generation.
+    wait_until(|| !app.transient.is_pending()).await;
+
+    // Meanwhile the owner activates the sweep, as the route does: the effect goes on the
+    // lights and a fresh timer is armed.
+    canvas_daemon::apply_effect(
+        &app,
+        canvas_effects::onboard::SWEEP_ID,
+        &canvas_proto::Props::new(),
+    )
+    .await
+    .expect("sweep applies");
+    canvas_daemon::transient::arm(&app, canvas_effects::onboard::SWEEP_ID);
+
+    // The stale timer goes in next. Once we hold the gate behind it, it is over.
+    drop(gate);
+    let _after = app.draft.gate().lock().await;
+
+    let (id, _props) = running(&engine);
+    assert_eq!(
+        id.as_deref(),
+        Some(canvas_effects::onboard::SWEEP_ID),
+        "the stale timer must not restore the saved effect over the just-activated onboarding effect"
+    );
+}

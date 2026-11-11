@@ -30,6 +30,10 @@ pub enum PipeRequest {
     PutProfile { profile: FanProfile },
     /// Refused with `conflict` for the active profile or the last one.
     DeleteProfile { name: String },
+    /// Issue #295: the fan config the service holds (`fans.toml` as loaded and corrected), answered
+    /// with [`PipeResponse::FanConfig`]. The daemon starts every whole-config push from it, so a
+    /// push never carries a stale or default copy, and the daemon never reads the service's file.
+    GetFanConfig,
     /// Replaces `%ProgramData%\canvas-rgb\fans.toml` (daemon is the writer).
     PutFanConfig { config: FansFile },
     OpenRgbState,
@@ -65,6 +69,8 @@ pub enum PipeResponse {
     Hello { protocol: u32, service_version: String },
     Ok,
     FanStatus { status: FansStatus },
+    /// The answer to [`PipeRequest::GetFanConfig`].
+    FanConfig { config: FansFile },
     OpenRgb { state: OpenRgbServerState, port: u16 },
     /// `InstallUpdate` passed every check and setup is running. `version` is the signed one.
     UpdateStarted { version: String },

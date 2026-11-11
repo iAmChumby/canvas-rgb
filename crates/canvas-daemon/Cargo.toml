@@ -83,3 +83,5 @@ windows-core = "0.62"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
+# The tests drive time themselves (`start_paused`): a route's bound is tested without a wall clock.
+tokio = { workspace = true, features = ["test-util"] }
