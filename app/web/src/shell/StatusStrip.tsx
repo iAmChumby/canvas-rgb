@@ -6,6 +6,7 @@ import { Button, IconButton, Swap } from "@/components/Button";
 import { IconSwap } from "@/components/IconSwap";
 import { Crossfade } from "@/components/Crossfade";
 import { useMediaQuery } from "@/components/MediaQuery";
+import { PHONE_QUERY } from "@/lib/MediaQuery";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { Popover } from "@/components/Popover";
 import { notify } from "@/components/Notify";
@@ -89,7 +90,7 @@ export function StatusStrip({
   const tone: Tone = list[0]?.tone ?? "ok";
   // On a phone the row has room for the link's name, not for the whole sentence. The full
   // words are the button's own label, so nothing is lost.
-  const phone = useMediaQuery("(max-width: 720px)");
+  const phone = useMediaQuery(PHONE_QUERY);
   const fullText = list[0]?.text ?? ALL_GOOD;
   const markText = list[0] ? (phone ? (list[0].short ?? list[0].text) : list[0].text) : ALL_GOOD;
   // The swatch's own name, for the widths where the effect's name is dropped from the row.

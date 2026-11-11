@@ -20,7 +20,7 @@ use canvas_proto::config::{FansFile, FANS_SCHEMA};
 use canvas_proto::fans::{
     floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor_at, validate_hot_limits, validate_mode,
     validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError, FansStatus, HotKind,
-    HotLimitStatus, HotLimits, TempReading, TempSource, SENSOR_LOSS_TIMEOUT_MS,
+    HotLimitStatus, HotLimits, TempReading, TempSource, HOT_LIMIT_MIN_C, SENSOR_LOSS_TIMEOUT_MS,
 };
 use canvas_proto::Rgb8;
 use std::collections::{BTreeMap, BTreeSet};
@@ -595,11 +595,52 @@ impl FanController {
         self.hot_logged = false;
     }
 
+    /// The config the controller runs on: `fans.toml` as loaded and corrected
+    /// (`correct_hot_limits`, #225), plus every change since (#295: the daemon starts each
+    /// whole-config push from this).
+    pub fn config(&self) -> &FansFile {
+        &self.config
+    }
+
     /// Sets the CPU rated maximum from a brand string (tests can set the brand directly).
     pub fn set_cpu_brand(&mut self, cpu_brand: Option<&str>) {
         self.cpu_rated_max_c = cpu_brand.and_then(rated_cpu_max_c);
         self.cpu_brand = cpu_brand.map(str::to_string);
         self.hot_logged = false;
+    }
+
+    /// Issue #225: corrects the hot limits loaded from `fans.toml`, in memory. A hand-edited value
+    /// under `HOT_LIMIT_MIN_C` is raised to it, the line the runtime clamp in `hot_limit_status`
+    /// has always enforced for it, so a typo never loosens the limit. A value over the settable
+    /// maximum, or not a finite number, falls back to the automatic line (stricter than the
+    /// maximum it would otherwise be clamped to). Each correction logs a WARN naming the value;
+    /// the other limits and the rest of the file load as written. Call it after the rated maxima
+    /// are set (`set_rated`), because the settable range depends on them.
+    ///
+    /// The file is not rewritten: saving would drop its comments and any key the schema does not
+    /// know, and the owner's edit is theirs to fix. The WARN repeats on every start until they do.
+    pub fn correct_hot_limits(&mut self) {
+        for kind in [HotKind::Cpu, HotKind::Gpu, HotKind::Board] {
+            let Some(celsius) = self.config.hot_limits.get(kind) else { continue };
+            let max = hot_limit_status(kind, &self.config.hot_limits, self.rated_for(kind)).max_settable_c;
+            // Below the minimum first, so `-inf` lands on the minimum the runtime clamp has always
+            // given it, never on the hotter automatic line. NaN fails both comparisons below and
+            // falls to automatic, stricter than the NaN the runtime clamp would pass through.
+            let corrected = if celsius < HOT_LIMIT_MIN_C {
+                tracing::warn!(?kind, celsius, min = HOT_LIMIT_MIN_C, "fans.toml has a hot limit below its allowed range; using the minimum (fans.toml is left as written)");
+                Some(HOT_LIMIT_MIN_C)
+            } else if !celsius.is_finite() || celsius > max {
+                tracing::warn!(?kind, celsius, max, "fans.toml has a hot limit above its allowed range; using the automatic one (fans.toml is left as written)");
+                None
+            } else {
+                continue;
+            };
+            match kind {
+                HotKind::Cpu => self.config.hot_limits.cpu_c = corrected,
+                HotKind::Gpu => self.config.hot_limits.gpu_c = corrected,
+                HotKind::Board => self.config.hot_limits.board_c = corrected,
+            }
+        }
     }
 
     /// The rated maximum for a hot kind, when known. Board sensors have no part maximum.

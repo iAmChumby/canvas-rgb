@@ -302,6 +302,25 @@ second on the status poll, so the effect tears down and starts again before it c
   `Popover.tsx:113`, `IdentifyWalker.tsx:144` re-bind listeners; `OnboardingGate.tsx:23`,
   `LayoutView.tsx:922`, `Onboarding.tsx:310` are ref-guarded one-time actions).
 
+- [#295](https://github.com/iAmChumby/canvas-rgb/issues/295): the fan header editor was keyed on the
+  polled mode (`FansView.tsx`) and drew the polled mode, so a poll that landed before the service's
+  answer remounted it and dropped the mode and curve points being edited. Fix: the editor keeps its own
+  draft and takes the service's mode only when nothing is pending and the mode was not its own
+  (`app/web/src/views/__tests__/FansEditorDraft.test.tsx`). Siblings: `DisplaysView.tsx` keys each card
+  on its saved config (`JSON.stringify(row.config)`), so a save from elsewhere resets that card's draft;
+  left as is, it is stated in its comment.
+- The same issue's other half was in the daemon, not React: `PUT /fans/hot` built the whole-config push
+  from `fans_last`, which is empty after a daemon start and never sees `SetHeaderMode`, so the first
+  hot-limit set reset every header to BIOS. Fix: a whole-config push starts from the config the service
+  holds, asked for over the pipe (`GetFanConfig`; `crates/canvas-daemon/src/api/fans.rs`
+  `base_fans_config`). The daemon never reads `%ProgramData%\canvas-rgb\fans.toml` itself: that tree's
+  owner and reparse-point checks belong to the service, so the first cut, which read the file, was
+  refused in review. The mode and profile PATCHes take the same `fans_last` lock the pushes hold, so a
+  push cannot replace a change made inside its window, and `put_profile` reads the base before its first
+  send. Tests in `crates/canvas-daemon/tests/api.rs` (`issue295_*`). Rule: a writer that replaces a whole
+  config asks the owner for its current copy, never its own cache, never a file the owner guards, and
+  never the defaults.
+
 ### `cause:timing-test`: a test whose verdict depends on how long the machine takes
 
 A test passes on a quiet PC and fails once in a while on a shared CI runner, with no code change. It
@@ -717,3 +736,43 @@ then reads as if it shipped in an old release, or lands in a section whose tag i
   release renames `## [Unreleased]` to `## [<new>]` and adds a fresh `## [Unreleased]` above it, so the
   released content stays as context and the shape passes.
   The check's own tests build throwaway git repos (`tools/tests/`).
+
+### `cause:retry-after`: a wait the server names, trusted past the render it gates
+
+A route answers 503 with `Retry-After`, and the client schedules its retry with exactly that wait.
+A wrong, abusive or future header then holds the client in "busy" for as long as the header says.
+The handle of the timer that holds that wait is overwritten when a new one is stored, so two
+retries can wait for one busy answer.
+
+- [#97](https://github.com/iAmChumby/canvas-rgb/issues/97): both faults hit twice, once in the code
+  editor and once in the stack builder, which inherited the editor's design. The class fix shipped
+  in PR #169 (`a0e19da`, `1010c17`), released in 0.8.3 (`CHANGELOG.md`, the 0.8.3 section with the #97
+  line):
+  - the wait is clamped to `MAX_PREVIEW_RETRY_MS = 30_000` at both call sites
+    (`app/web/src/views/effects/EffectEditor.tsx`, `app/web/src/views/effects/usePreview.ts` — the
+    latter moved out of `StackBuilder.tsx` in #257 phase 4). 30 s because the renderer's own budget is
+    30 s (`RENDER_BUDGET`, `crates/canvas-daemon/src/thumbnail.rs`) and the editor's preview deadline is
+    35 s (`EFFECT_PREVIEW_TIMEOUT_MS`, `app/web/src/lib/api.ts`), so a retry inside one render cycle is
+    always honoured and a header past the cycle is not; the daemon's contract is `Retry-After: 1`
+    (`crates/canvas-daemon/src/api/editor.rs`, the 503 with `.with_retry_after(1)`).
+  - the retry timer is cleared before the ref is overwritten at the start of every run
+    (`runPreview` in `EffectEditor.tsx`, `sendPreview` in `usePreview.ts`), so one busy answer costs one
+    retry and never two; a busy daemon is tried once, not polled.
+  - an in-flight preview a newer draft supersedes is let go of client side: `send`/`request` take an
+    optional `{ signal }` (`app/web/src/lib/api.ts`), a caller abort surfaces as `AbortError` (not the
+    deadline's `ApiFailure`), and the editor drops aborts in its catch. Regression tests:
+    `app/web/src/views/__tests__/EffectPreviewRetry.test.tsx`, `StackPreviewRetry.test.tsx`,
+    `StackPreviewRetryTimer.test.tsx`; the five of them fail on the pre-#169 tree and pass on it and
+    after it.
+- **The daemon keeps rendering an aborted request.** The preview's slot permit
+  (`tokio::sync::OwnedSemaphorePermit`) is moved into the blocking task (`let _slot = slot;` inside the
+  `spawn_blocking` closure, `crates/canvas-daemon/src/api/editor.rs`), with the note that a client that
+  goes away does not free the slot while the render still runs. The client abort frees only the client's
+  socket; the render is not cancelled and the slot stays held for its full budget.
+- **Sibling search:** `git grep retryAfterMs` — the two preview call sites above are the only consumers,
+  and both clamp; `git grep -i retry-after` finds no other schedule built on a server-told wait.
+- **Rule:** a schedule built from a server-told wait is clamped to the caller's own render budget, and
+  a timer stored in a ref is cleared before the ref is overwritten.
+- Left: the installed-app checks on #97 (Back/Forward and mouse back with unsaved code, the close/reload
+  warning, CSS `round()` in WebView2), the phone code layer and screen readers need the installed app
+  and are out of the fakes' reach. #97 carries no `cause:` label (not applied; left to the main agent).
