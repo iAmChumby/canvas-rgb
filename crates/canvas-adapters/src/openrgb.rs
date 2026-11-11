@@ -115,9 +115,10 @@ struct Link {
     writer: tokio::sync::Mutex<Option<OwnedWriteHalf>>,
     /// Serializes request/reply pairs: at most one reply is ever awaited.
     request_gate: tokio::sync::Mutex<()>,
-    /// Set when a write was cut in the middle: the socket may hold a part of a packet, so
-    /// the link is broken. The next writer drops the socket instead of writing into the
-    /// middle of the half-written packet.
+    /// Set when the link is unusable: a write was cut in the middle (the socket may hold a
+    /// part of a packet), or a request went out and was not answered (a late reply would
+    /// answer the next request). The next writer drops the socket instead of writing into
+    /// the middle of the half-written packet, and the supervisor reconnects.
     broken: AtomicBool,
 }
 
@@ -141,11 +142,6 @@ struct Session {
     keepalive: Duration,
     /// Bumped by every `reset_custom_mode`, so a send in flight can tell it was overtaken.
     resets: u64,
-    /// Requests that were sent and then given up on (their future was dropped, or the reply
-    /// timed out). OpenRGB answers in order and puts no request id in a reply, so the reply to an
-    /// abandoned request would answer the next request with the same device and packet id: the
-    /// reader drops it instead (see `read_loop`).
-    abandoned: Vec<Abandoned>,
     /// The controllers being resized, and what each resize is doing. A frame for one of them
     /// is skipped until the re-enumerate lands, so no frame of the old zone size reaches
     /// OpenRGB while it is re-configuring the controller.
@@ -165,21 +161,6 @@ struct Resize {
     in_flight: bool,
 }
 
-/// A request that was sent and given up on before its reply came.
-struct Abandoned {
-    device: u32,
-    packet_id: u32,
-    since: Instant,
-}
-
-impl Session {
-    /// Forgets the abandoned requests whose reply is overdue: it may never come, and a reply that
-    /// late is taken as the answer it looks like.
-    fn prune_abandoned(&mut self, now: Instant) {
-        self.abandoned.retain(|a| now.saturating_duration_since(a.since) < REPLY_TIMEOUT);
-    }
-}
-
 impl Default for Session {
     fn default() -> Self {
         Self {
@@ -193,7 +174,6 @@ impl Default for Session {
             mode_sent: HashSet::new(),
             keepalive: CUSTOM_MODE_KEEPALIVE,
             resets: 0,
-            abandoned: Vec::new(),
             resizing: HashMap::new(),
             discovering: 0,
         }
@@ -210,8 +190,6 @@ struct Pending {
 /// timeout, or its future being dropped mid-wait.
 struct InFlight<'a> {
     link: &'a Link,
-    device: u32,
-    packet_id: u32,
     /// The request went out, so the server may still answer it.
     sent: bool,
 }
@@ -221,9 +199,15 @@ impl Drop for InFlight<'_> {
         let mut session = guard(&self.link.session);
         // A slot the reader already took means the reply arrived: nothing is owed.
         let unanswered = session.pending.take().is_some();
-        if self.sent && unanswered && session.connected {
-            session.abandoned.push(Abandoned { device: self.device, packet_id: self.packet_id, since: Instant::now() });
+        if !self.sent || !unanswered || !session.connected {
+            return;
         }
+        // The request went out and nobody answered it. OpenRGB answers in order and puts no
+        // request id in a reply, so the reply may still come and would answer the next
+        // request. The link is unusable: it is broken and lost, and the supervisor
+        // reconnects. A fresh connection has no stale replies.
+        drop(session);
+        self.link.break_link();
     }
 }
 
@@ -234,8 +218,14 @@ impl Drop for InFlight<'_> {
 /// as the rescan budget does) can leave a part of a packet on the socket. The next writer
 /// would then write into the middle of it, and OpenRGB would read two packets out of one.
 /// The link is broken instead: the socket is dropped and the supervisor reconnects.
+///
+/// The guard owns the socket lock, so the link is broken *before* the lock is released: a
+/// writer that waits for the lock cannot take it, see a whole link, and write into the middle
+/// of the half-written packet.
 struct SendGuard<'a> {
     link: &'a Link,
+    /// The socket lock, held for the write.
+    writer: tokio::sync::MutexGuard<'a, Option<OwnedWriteHalf>>,
     /// The write may have put a part of the packet on the socket.
     armed: bool,
     /// The write finished (or failed): the link is whole.
@@ -249,9 +239,29 @@ impl Drop for SendGuard<'_> {
         }
         // The write was cut in the middle. The socket may hold a part of a packet: it is
         // dropped, and the link is marked lost, so no other writer writes into the middle
-        // of it.
+        // of it. This happens while the socket lock is still held (the guard owns it).
         self.link.broken.store(true, Ordering::SeqCst);
+        *self.writer = None;
         self.link.lose_current();
+    }
+}
+
+/// A resize that is running: the frames for the controller are skipped until it ends.
+///
+/// The guard ends the resize however the resize ends. A handler that was cancelled (the
+/// client went away in the middle of the PATCH) must not leave the controller's frames
+/// skipped for the rest of the connection.
+struct ResizeGuard<'a> {
+    link: &'a Link,
+    index: u32,
+}
+
+impl Drop for ResizeGuard<'_> {
+    fn drop(&mut self) {
+        let mut session = guard(&self.link.session);
+        if let Some(resize) = session.resizing.get_mut(&self.index) {
+            resize.in_flight = false;
+        }
     }
 }
 
@@ -298,7 +308,6 @@ impl Link {
             }
             session.connected = false;
             session.pending = None;
-            session.abandoned.clear();
             session.reader.take()
         };
         if let Some(reader) = reader {
@@ -315,6 +324,17 @@ impl Link {
     fn lose_current(&self) {
         let epoch = guard(&self.session).epoch;
         self.lose(epoch);
+    }
+
+    /// The link is unusable: it is marked broken and lost, so no writer writes into it and
+    /// the supervisor reconnects.
+    ///
+    /// This is what an unanswered request does. OpenRGB answers in order and puts no request
+    /// id in a reply, so a reply that arrives late would answer the next request. A fresh
+    /// connection has no stale replies, so the link is dropped instead of being patched up.
+    fn break_link(&self) {
+        self.broken.store(true, Ordering::SeqCst);
+        self.lose_current();
     }
 }
 
@@ -463,9 +483,6 @@ impl OpenRgbAdapter {
     /// [`SendGuard`] then breaks the link, so the next writer does not write into the middle
     /// of it.
     async fn write_packet(&self, device: u32, bytes: &[u8], frame: bool) -> Result<(), AdapterError> {
-        // Declared before the socket lock, so it drops after it: the guard can then take the
-        // socket out of the link when the write was cut in the middle.
-        let mut guard = SendGuard { link: &self.link, armed: false, done: false };
         let mut writer = self.link.writer.lock().await;
         // A write that was cut in the middle left the socket with a part of a packet on it:
         // the socket is dropped instead of carrying on.
@@ -476,23 +493,34 @@ impl OpenRgbAdapter {
             return Err(AdapterError::Protocol(format!(
                 "the OpenRGB controller {device} is being resized")));
         }
-        let Some(stream) = writer.as_mut() else {
+        if writer.is_none() {
             return Err(AdapterError::NotConnected);
-        };
+        }
+        // The guard owns the socket lock: a write that is given up on breaks the link before
+        // the lock is released, so a writer that waits for the lock cannot slip in between
+        // and write into the middle of the half-written packet.
+        let mut guard = SendGuard { link: &self.link, writer, armed: false, done: false };
         // Armed before the write: a write that is given up on from here on may have put a
         // part of the packet on the socket.
         guard.armed = true;
         let written = async {
-            stream.write_all(bytes).await?;
-            stream.flush().await
+            match guard.writer.as_mut() {
+                Some(stream) => {
+                    stream.write_all(bytes).await?;
+                    stream.flush().await
+                }
+                None => Err(std::io::Error::new(
+                    std::io::ErrorKind::NotConnected,
+                    "the OpenRGB socket is gone",
+                )),
+            }
         }
         .await;
         guard.done = true;
         match written {
             Ok(()) => Ok(()),
             Err(error) => {
-                *writer = None;
-                drop(writer);
+                *guard.writer = None;
                 self.link.lose_current();
                 Err(AdapterError::Io(error))
             }
@@ -501,20 +529,19 @@ impl OpenRgbAdapter {
 
     /// Sends a request and waits for the reply with the same device index and packet id.
     ///
-    /// Safe to cancel (a caller may give up on it, as the rescan budget does): dropping the future
-    /// clears the reply slot and, when the request was already sent, records it as abandoned.
+    /// Safe to cancel (a caller may give up on it, as the rescan budget does): dropping the
+    /// future clears the reply slot, and a request that went out and was not answered loses
+    /// the link.
     ///
-    /// The next request does not wait for the late reply of an abandoned one. It used to, and
-    /// that cost a rescan its whole budget: a request whose reply timed out left an abandoned
-    /// entry behind, and the next request waited out the reply timeout for a reply that may
-    /// never come, so it never went out. The late reply cannot answer the wrong request
-    /// anyway: OpenRGB answers in order, and the reader drops the reply of an abandoned
-    /// request (see `read_loop`).
+    /// A request whose reply never comes leaves the link unusable: OpenRGB answers in order
+    /// and puts no request id in a reply, so the reply may still come and would answer the
+    /// next request. The link is broken and lost, and the supervisor reconnects: a fresh
+    /// connection has no stale replies.
     async fn request(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
         let _gate = self.link.request_gate.lock().await;
         let (reply, received) = oneshot::channel();
         // Declared after the gate, so it drops first: the slot is cleared while the gate is held.
-        let mut in_flight = InFlight { link: &self.link, device, packet_id, sent: false };
+        let mut in_flight = InFlight { link: &self.link, sent: false };
         guard(&self.link.session).pending = Some(Pending { device, packet_id, reply });
         // Checked after the reply slot is set: a reader that ended first has already cleared
         // the session, so the request fails here instead of waiting out the timeout.
@@ -526,9 +553,13 @@ impl OpenRgbAdapter {
         match tokio::time::timeout(REPLY_TIMEOUT, received).await {
             Ok(Ok(reply)) => Ok(reply),
             Ok(Err(_)) => Err(AdapterError::NotConnected),
-            Err(_) => Err(AdapterError::Protocol(format!(
-                "no reply to packet {packet_id} for device {device} within {}s",
-                REPLY_TIMEOUT.as_secs()))),
+            Err(_) => {
+                // The reply never came: the link is unusable, and the supervisor reconnects.
+                self.link.break_link();
+                Err(AdapterError::Protocol(format!(
+                    "no reply to packet {packet_id} for device {device} within {}s",
+                    REPLY_TIMEOUT.as_secs())))
+            }
         }
     }
 
@@ -586,14 +617,6 @@ impl OpenRgbAdapter {
         let resize = session.resizing.entry(index).or_insert(Resize { epoch: 0, in_flight: false });
         resize.epoch += 1;
         resize.in_flight = true;
-    }
-
-    /// Ends a resize of a controller: the frames for it go out again.
-    fn end_resize(&self, index: u32) {
-        let mut session = guard(&self.link.session);
-        if let Some(resize) = session.resizing.get_mut(&index) {
-            resize.in_flight = false;
-        }
     }
 
     /// Switches a controller to direct/custom mode, then sends a frame. The mode is sent again
@@ -787,7 +810,6 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.epoch += 1;
             session.connected = false;
             session.pending = None;
-            session.abandoned.clear();
             session.controllers.clear();
             session.custom_mode.clear();
             session.mode_sent.clear();
@@ -828,6 +850,10 @@ impl DeviceAdapter for OpenRgbAdapter {
         // re-enumerate lands, so no frame of the old zone size reaches OpenRGB in between,
         // and no frame stamps the mode back on after the resize cleared it.
         self.begin_resize(controller.index);
+        // The guard ends the resize however it ends: a handler that was cancelled (the client
+        // went away in the middle of the PATCH) must not leave the frames of this controller
+        // skipped for the rest of the connection.
+        let _resize = ResizeGuard { link: &self.link, index: controller.index };
         let resized = async {
             self.send(controller.index, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
             // The next frame to this controller must re-enter custom mode after OpenRGB reconfigures it.
@@ -837,7 +863,6 @@ impl DeviceAdapter for OpenRgbAdapter {
             Ok(())
         }
         .await;
-        self.end_resize(controller.index);
         resized
     }
 
@@ -895,15 +920,9 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
             if session.epoch != epoch {
                 return;
             }
-            session.prune_abandoned(Instant::now());
-            // The reply to a request that was given up on: it answers nobody. The oldest
-            // abandoned request that matches is the one this reply belongs to (OpenRGB
-            // answers in order), and it is the first one that is dropped.
-            if let Some(at) = session.abandoned.iter().position(|a| a.device == device && a.packet_id == packet_id) {
-                session.abandoned.remove(at);
-                drop(session);
-                continue;
-            }
+            // The reply to the request that is waiting for it. A reply that arrives late
+            // (the request was given up on) never gets here: an unanswered request loses
+            // the link, and the reader is aborted with it.
             session.pending.take_if(|p| p.device == device && p.packet_id == packet_id)
         };
         if let Some(pending) = reply {
@@ -1277,4 +1296,3 @@ mod keepalive_tests {
         assert_eq!(server.custom_mode_writes(0), 1, "the mode was set again for no reason");
     }
 }
-

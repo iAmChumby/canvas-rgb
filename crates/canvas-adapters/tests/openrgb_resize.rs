@@ -94,3 +94,49 @@ async fn a_frame_for_a_controller_being_resized_does_not_reach_openrgb() {
     assert_eq!(server.custom_mode_writes(0), 2, "the mode was not set again after the resize");
     assert_eq!(server.update_leds_writes(0), 2, "the frame after the resize did not go out");
 }
+
+/// A resize that was cancelled does not skip the frames of that controller forever.
+///
+/// The client went away in the middle of the PATCH: the resize is dropped before it reads the
+/// list again. The frames of that controller must go out again, not stay skipped for the rest
+/// of the connection.
+#[tokio::test]
+async fn a_cancelled_resize_does_not_skip_the_frames_of_that_controller_forever() {
+    let server = FakeOpenRgbServer::start(vec![header()]).await.expect("fake server");
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+    adapter.connect().await.expect("connect");
+    adapter.discover().await.expect("a plain discover");
+
+    let id = DeviceId("openrgb:jar".into());
+    // The first frame sets the mode and writes the colours.
+    adapter.write_frame_shared(&id, &[Rgb8::WHITE; 8]).await.expect("the first frame");
+    until("the first frame reached OpenRGB", || server.update_leds_writes(0) == 1).await;
+
+    // The server keeps its replies back: a request holds the request gate, and the resize
+    // waits for that gate when it reads the list again.
+    server.hold_replies(true);
+    let mut asking = adapter.clone();
+    let asking_id = id.clone();
+    let holding = tokio::spawn(async move { asking.read_back(&asking_id).await });
+    until("the request holds the gate", || server.held_replies() == 1).await;
+
+    // The resize starts: it writes the new zone size, then waits for the gate to read the
+    // list again.
+    let mut resizing = adapter.clone();
+    let resize_id = id.clone();
+    let resize = tokio::spawn(async move { resizing.set_zone_size(&resize_id, 0, 12).await });
+    until("the zone was resized", || server.zone_leds(0, 0) == Some(12)).await;
+
+    // The client goes away in the middle of the PATCH: the resize is dropped.
+    resize.abort();
+    let _ = resize.await;
+
+    // The frames of that controller go out again: the cancelled resize does not keep them
+    // skipped for the rest of the connection.
+    adapter.write_frame_shared(&id, &[Rgb8::WHITE; 8]).await.expect("the frame after the cancelled resize");
+    until("the frame after the cancelled resize reached OpenRGB", || server.update_leds_writes(0) == 2).await;
+
+    // The request that held the gate is given up on too, so the test leaves nothing waiting.
+    holding.abort();
+    let _ = holding.await;
+}
