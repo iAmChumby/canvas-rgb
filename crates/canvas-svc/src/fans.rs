@@ -63,23 +63,23 @@ pub const HOT_BOOST_MIN_RISE: f32 = 1.0;
 /// same reading. [`HOT_BOOST_RISE_MAX`] bounds both.
 pub const HOT_BOOST_GAIN: f32 = 1.0;
 /// Issue #297: the band above the line, in degrees, inside which the hold answers in proportion
-/// to how far over the line the reading is instead of winding up. A CPU hovering around its line
+/// to how far over the aim the reading is instead of winding up. A CPU hovering around its line
 /// (a 7800X3D idles at the issue's 50 °C line) stays inside this band, so the duty settles a few
 /// points over the curve instead of climbing to full speed; a sustained excursion past the band
-/// winds the loop up exactly as issue #255 designed. Above the band the old rule stands.
+/// winds the loop up exactly as issue #255 designed. A clear degree past it winds up at once.
 pub const HOT_BOOST_BAND_C: f32 = 3.0;
-/// Issue #297: the proportional answer's gain, in percentage points per degree over the line,
-/// inside [`HOT_BOOST_BAND_C`]. It reaches full speed ten degrees over the line; on a 7800X3D
-/// that is exactly the automatic line plus the fixed ceiling's distance (74 + 10 = the part's
-/// 84 °C ceiling), and a lower user line gets there sooner, which is what makes a 50 °C line
-/// run the fans hard. The same gain issue #255 used per second, now applied per degree.
+/// Issue #297: the proportional answer's gain, in percentage points per degree over the aim.
+/// Ten points a degree makes the answer the whole answer for a mild excursion, and the band's top
+/// (this times [`HOT_BOOST_BAND_C`], thirty points) caps it, so the proportional part alone never
+/// runs a header flat out; the wind-up past the band is what reaches full speed. The same gain
+/// issue #255 used per second, now applied per degree.
 pub const HOT_BOOST_GAIN_PER_C: f32 = 10.0;
 /// Issue #297: how long the reading must stay past [`HOT_BOOST_BAND_C`] before the loop winds
 /// up. A hover that only pokes past the band for a tick or two never starts it, so it cannot
 /// ratchet the duty to full speed; a sustained excursion still winds up, and the proportional
 /// answer during the wait keeps the fan no slower than issue #255 was.
 pub const HOT_BOOST_ONSET_HOLD: Duration = Duration::from_secs(5);
-/// Issue #297: the fastest the boost may climb, in percentage points per second. At the line the
+/// Issue #297: the fastest the boost may climb, in percentage points per second. At the aim the
 /// rise is [`HOT_BOOST_MIN_RISE`], and it grows with the error until it is this: a rate limit on
 /// the way up, as the issue asks, matching the slow release on the way down.
 pub const HOT_BOOST_RISE_MAX: f32 = 12.0;
