@@ -8,7 +8,7 @@
 
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
-use canvas_proto::{DeviceAdapter, DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
+use canvas_proto::{DeviceAdapter, DeviceId, DeviceInfo, DeviceKind, Rgb8, ZoneInfo, ZoneKind};
 use std::time::Duration;
 
 fn stick(serial: &str) -> DeviceInfo {
@@ -91,4 +91,52 @@ async fn the_late_reply_of_a_dropped_request_does_not_answer_the_next_one() {
         .expect("the second discovery works");
     let ids: Vec<_> = found.iter().map(|d| d.id.0.as_str()).collect();
     assert_eq!(ids, ["openrgb:one", "openrgb:two"], "the next request got its own answer");
+}
+
+/// A request whose reply timed out does not make the next request wait for that reply.
+///
+/// The reply of a request that timed out may never come: OpenRGB went silent. The next
+/// request used to wait out the reply timeout for it, so a rescan spent its whole budget
+/// waiting and never went out. The next request goes out at once, and it still gets its own
+/// answer: the late reply of the abandoned request is dropped by the reader.
+#[tokio::test]
+async fn a_request_that_timed_out_does_not_make_the_next_one_wait() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+    adapter.connect().await.expect("connect");
+    adapter.discover().await.expect("a plain discover");
+
+    // The server keeps the reply back: the request waits for it, and gives up on it when the
+    // adapter's own reply timeout passes.
+    server.hold_replies(true);
+    let id = DeviceId("openrgb:one".into());
+    let mut asking = adapter.clone();
+    let first_id = id.clone();
+    let first = tokio::spawn(async move { asking.read_back(&first_id).await });
+    until("the request is waiting for its reply", || server.held_replies() == 1).await;
+    let failed = tokio::time::timeout(Duration::from_secs(60), first)
+        .await
+        .expect("the request ends")
+        .expect("its task ends");
+    assert!(failed.is_err(), "the request answered anyway");
+
+    // The colours the next read must see: the frame lands while the reply is still held.
+    adapter.write_frame_shared(&id, &[Rgb8::WHITE; 8]).await.expect("the frame");
+    until("the frame reached the lights", || server.colors(0) == vec![Rgb8::WHITE; 8]).await;
+
+    // The next request goes out at once: it does not wait for the late reply.
+    let mut next = adapter.clone();
+    let next_id = id.clone();
+    let second = tokio::spawn(async move { next.read_back(&next_id).await });
+    until("the next request is on the wire", || server.held_replies() == 2).await;
+
+    // The slow OpenRGB catches up: the late reply first (it answers nobody), then the reply
+    // of the request that is waiting for it.
+    server.release_replies();
+    let colours = tokio::time::timeout(Duration::from_secs(60), second)
+        .await
+        .expect("the request ends")
+        .expect("its task ends")
+        .expect("the request works");
+    assert_eq!(colours, vec![Rgb8::WHITE; 8], "the next request got the old answer");
 }

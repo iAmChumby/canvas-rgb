@@ -33,6 +33,15 @@ struct FakeState {
     holding: bool,
     /// The replies kept back, with the connection each belongs to, in the order they were made.
     held: Vec<(u64, Vec<u8>)>,
+    /// While set, the server stops reading the socket: the client's writes fill it and then
+    /// block, as they do against a busy OpenRGB that never reads.
+    reading_paused: bool,
+    /// How many requests the client is still waiting a reply for.
+    outstanding: u32,
+    /// How many frames arrived while a request was still waiting for its reply.
+    frames_while_waiting: u32,
+    /// How many `UPDATE_LEDS` packets each controller received.
+    led_writes: Vec<u32>,
 }
 
 #[derive(Clone, Copy)]
@@ -115,7 +124,8 @@ impl FakeOpenRgbServer {
     ) -> std::io::Result<Self> {
         let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await?;
         let port = listener.local_addr()?.port();
-        let devices = devices.into_iter().map(FakeDevice::new).collect();
+        let devices: Vec<FakeDevice> = devices.into_iter().map(FakeDevice::new).collect();
+        let led_writes = vec![0; devices.len()];
         let state = Arc::new(Mutex::new(FakeState {
             devices,
             detection,
@@ -123,6 +133,10 @@ impl FakeOpenRgbServer {
             swallowed: 0,
             holding: false,
             held: Vec::new(),
+            reading_paused: false,
+            outstanding: 0,
+            frames_while_waiting: 0,
+            led_writes,
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
@@ -151,7 +165,9 @@ impl FakeOpenRgbServer {
     /// OpenRGB announces one more controller now, after the others: the test decides when, so
     /// no clock is involved. It gets the next index.
     pub fn announce(&self, info: DeviceInfo) {
-        guard(&self.state).devices.push(FakeDevice::new(info));
+        let mut state = guard(&self.state);
+        state.devices.push(FakeDevice::new(info));
+        state.led_writes.push(0);
     }
 
     /// While `stalled`, the server reads every packet and answers none, as a real OpenRGB does
@@ -177,6 +193,25 @@ impl FakeOpenRgbServer {
     /// How many replies are being kept back.
     pub fn held_replies(&self) -> usize {
         guard(&self.state).held.len()
+    }
+
+    /// While set, the server stops reading the socket: the client's writes fill it and then
+    /// block, as they do against a busy OpenRGB that never reads.
+    pub fn stop_reading(&self, stopped: bool) {
+        guard(&self.state).reading_paused = stopped;
+    }
+
+    /// How many frames (colour writes) arrived while a request was still waiting for its reply.
+    ///
+    /// A frame that goes out while the server owes a reply proves the frame did not wait for
+    /// the request that is holding the adapter.
+    pub fn frames_while_a_request_waited(&self) -> u32 {
+        guard(&self.state).frames_while_waiting
+    }
+
+    /// How many `UPDATE_LEDS` packets the controller received.
+    pub fn update_leds_writes(&self, index: u32) -> u32 {
+        guard(&self.state).led_writes.get(index as usize).copied().unwrap_or(0)
     }
 
     /// Sends every reply that was kept back, in the order they were made, then returns. The
@@ -237,6 +272,12 @@ async fn serve(
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
+        if guard(&state).reading_paused {
+            // The client fills the socket: the server stops reading, as a busy OpenRGB does.
+            // The connection stays open, so the client's writes block instead of failing.
+            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+            continue;
+        }
         let read = tokio::select! {
             read = stream.read(&mut chunk) => read?,
             changed = release.changed() => {
@@ -273,6 +314,21 @@ async fn serve(
             }
             let payload = buffer[HEADER_LEN..HEADER_LEN + size].to_vec();
             buffer.drain(..HEADER_LEN + size);
+            // A request leaves the client waiting for a reply; a frame does not. The count says
+            // whether a frame arrived while the client was still waiting for one.
+            {
+                let mut state = guard(&state);
+                if is_request(packet_id) {
+                    state.outstanding += 1;
+                } else if packet_id == UPDATE_LEDS {
+                    if state.outstanding > 0 {
+                        state.frames_while_waiting += 1;
+                    }
+                    if let Some(count) = state.led_writes.get_mut(device as usize) {
+                        *count += 1;
+                    }
+                }
+            }
             let reply = handle(&state, device, packet_id, &payload);
             if reply.is_empty() {
                 continue;
@@ -283,11 +339,17 @@ async fn serve(
                     state.held.push((connection, reply));
                     continue;
                 }
+                state.outstanding = state.outstanding.saturating_sub(1);
             }
             stream.write_all(&reply).await?;
             stream.flush().await?;
         }
     }
+}
+
+/// Whether a packet is a request the client waits a reply for.
+fn is_request(packet_id: u32) -> bool {
+    matches!(packet_id, REQUEST_PROTOCOL_VERSION | REQUEST_CONTROLLER_COUNT | REQUEST_CONTROLLER_DATA)
 }
 
 fn to_io(error: canvas_proto::AdapterError) -> std::io::Error {

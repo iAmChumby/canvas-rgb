@@ -11,6 +11,7 @@ use canvas_proto::{
     ZoneInfo, ZoneKind,
 };
 use std::collections::{HashMap, HashSet};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -114,9 +115,10 @@ struct Link {
     writer: tokio::sync::Mutex<Option<OwnedWriteHalf>>,
     /// Serializes request/reply pairs: at most one reply is ever awaited.
     request_gate: tokio::sync::Mutex<()>,
-    /// Woken when an abandoned request's late reply arrived (or the session ended), so the next
-    /// request stops waiting for it.
-    drained: tokio::sync::Notify,
+    /// Set when a write was cut in the middle: the socket may hold a part of a packet, so
+    /// the link is broken. The next writer drops the socket instead of writing into the
+    /// middle of the half-written packet.
+    broken: AtomicBool,
 }
 
 struct Session {
@@ -142,8 +144,25 @@ struct Session {
     /// Requests that were sent and then given up on (their future was dropped, or the reply
     /// timed out). OpenRGB answers in order and puts no request id in a reply, so the reply to an
     /// abandoned request would answer the next request with the same device and packet id: the
-    /// reader drops it instead, and the next request waits for it (see `request`).
+    /// reader drops it instead (see `read_loop`).
     abandoned: Vec<Abandoned>,
+    /// The controllers being resized, and what each resize is doing. A frame for one of them
+    /// is skipped until the re-enumerate lands, so no frame of the old zone size reaches
+    /// OpenRGB while it is re-configuring the controller.
+    resizing: HashMap<u32, Resize>,
+    /// How many discoveries are running. A frame that arrives while the list is empty and a
+    /// discovery is running is skipped: it would have to wait for the request gate the
+    /// discovery holds.
+    discovering: u32,
+}
+
+/// What a controller's resize is doing.
+struct Resize {
+    /// Bumped on every resize of this controller. A frame that was built for the list before
+    /// the resize is stale, and it may not stamp the mode back on.
+    epoch: u64,
+    /// A resize is in flight: the controller is being re-configured right now.
+    in_flight: bool,
 }
 
 /// A request that was sent and given up on before its reply came.
@@ -175,6 +194,8 @@ impl Default for Session {
             keepalive: CUSTOM_MODE_KEEPALIVE,
             resets: 0,
             abandoned: Vec::new(),
+            resizing: HashMap::new(),
+            discovering: 0,
         }
     }
 }
@@ -203,6 +224,47 @@ impl Drop for InFlight<'_> {
         if self.sent && unanswered && session.connected {
             session.abandoned.push(Abandoned { device: self.device, packet_id: self.packet_id, since: Instant::now() });
         }
+    }
+}
+
+/// The write that is on the socket, watched so a write that is given up on leaves the link
+/// broken.
+///
+/// The write holds the socket lock across `write_all`, so dropping it (a caller that gave up,
+/// as the rescan budget does) can leave a part of a packet on the socket. The next writer
+/// would then write into the middle of it, and OpenRGB would read two packets out of one.
+/// The link is broken instead: the socket is dropped and the supervisor reconnects.
+struct SendGuard<'a> {
+    link: &'a Link,
+    /// The write may have put a part of the packet on the socket.
+    armed: bool,
+    /// The write finished (or failed): the link is whole.
+    done: bool,
+}
+
+impl Drop for SendGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed || self.done {
+            return;
+        }
+        // The write was cut in the middle. The socket may hold a part of a packet: it is
+        // dropped, and the link is marked lost, so no other writer writes into the middle
+        // of it.
+        self.link.broken.store(true, Ordering::SeqCst);
+        self.link.lose_current();
+    }
+}
+
+/// A discovery that is running: a frame that arrives while the device list is empty is
+/// skipped rather than waiting for the request gate the discovery holds.
+struct Discovery<'a> {
+    link: &'a Link,
+}
+
+impl Drop for Discovery<'_> {
+    fn drop(&mut self) {
+        let mut session = guard(&self.link.session);
+        session.discovering = session.discovering.saturating_sub(1);
     }
 }
 
@@ -239,7 +301,6 @@ impl Link {
             session.abandoned.clear();
             session.reader.take()
         };
-        self.drained.notify_waiters();
         if let Some(reader) = reader {
             reader.abort();
         }
@@ -276,7 +337,7 @@ impl OpenRgbAdapter {
             session: Mutex::new(Session::default()),
             writer: tokio::sync::Mutex::new(None),
             request_gate: tokio::sync::Mutex::new(()),
-            drained: tokio::sync::Notify::new(),
+            broken: AtomicBool::new(false),
         });
         {
             let mut links = guard(&LINKS);
@@ -319,6 +380,13 @@ impl OpenRgbAdapter {
     /// waiting on OpenRGB. The daemon's frame writers go through here (a clone of the adapter
     /// shares the link), so a discovery that is stalled on a reply does not hold a frame back.
     pub async fn write_frame_shared(&self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
+        // The device list is empty and a discovery is running: the controller lookup below
+        // would read the list again, and that takes the request gate the discovery holds. A
+        // frame is cheap to lose and the discovery is about to fill the list, so the frame is
+        // skipped instead of waiting behind it.
+        if self.list_is_empty() && self.discovery_running() {
+            return Err(AdapterError::Protocol("the device list is being read".into()));
+        }
         let controller = self.controller(device).await?;
         let led_count = controller.led_count() as usize;
         if colors.len() != led_count {
@@ -330,6 +398,16 @@ impl OpenRgbAdapter {
 
     fn require_connected(&self) -> Result<(), AdapterError> {
         if guard(&self.link.session).connected { Ok(()) } else { Err(AdapterError::NotConnected) }
+    }
+
+    /// Whether the controller list of this connection is empty.
+    fn list_is_empty(&self) -> bool {
+        guard(&self.link.session).controllers.is_empty()
+    }
+
+    /// Whether a discovery is running on this link.
+    fn discovery_running(&self) -> bool {
+        guard(&self.link.session).discovering > 0
     }
 
     /// Looks up a controller by its daemon-facing id. Enumerates once when this connection has
@@ -362,17 +440,55 @@ impl OpenRgbAdapter {
             .ok_or_else(|| AdapterError::UnknownDevice(device.clone()))
     }
 
+    /// Sends a request packet and waits for nothing.
     async fn send(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<(), AdapterError> {
         let bytes = encode_packet(device, packet_id, payload)?;
+        self.write_packet(device, &bytes, false).await
+    }
+
+    /// Sends a frame packet (`SET_CUSTOM_MODE`, `UPDATE_LEDS`).
+    ///
+    /// A controller that is being resized is skipped: the frame was built for the zone sizes
+    /// the controller had before the resize, and OpenRGB is re-configuring it right now. The
+    /// check is under the socket lock, so it cannot slip between the resize and the frame.
+    async fn send_frame(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<(), AdapterError> {
+        let bytes = encode_packet(device, packet_id, payload)?;
+        self.write_packet(device, &bytes, true).await
+    }
+
+    /// Writes one packet on the socket, under the socket lock.
+    ///
+    /// The lock is held across the write, so the packets keep their order. A write that is
+    /// given up on (the future is dropped) can leave a part of a packet on the socket: the
+    /// [`SendGuard`] then breaks the link, so the next writer does not write into the middle
+    /// of it.
+    async fn write_packet(&self, device: u32, bytes: &[u8], frame: bool) -> Result<(), AdapterError> {
+        // Declared before the socket lock, so it drops after it: the guard can then take the
+        // socket out of the link when the write was cut in the middle.
+        let mut guard = SendGuard { link: &self.link, armed: false, done: false };
         let mut writer = self.link.writer.lock().await;
+        // A write that was cut in the middle left the socket with a part of a packet on it:
+        // the socket is dropped instead of carrying on.
+        if self.link.broken.swap(false, Ordering::SeqCst) {
+            *writer = None;
+        }
+        if frame && self.resize_in_flight(device) {
+            return Err(AdapterError::Protocol(format!(
+                "the OpenRGB controller {device} is being resized")));
+        }
         let Some(stream) = writer.as_mut() else {
             return Err(AdapterError::NotConnected);
         };
+        // Armed before the write: a write that is given up on from here on may have put a
+        // part of the packet on the socket.
+        guard.armed = true;
         let written = async {
-            stream.write_all(&bytes).await?;
+            stream.write_all(bytes).await?;
             stream.flush().await
-        };
-        match written.await {
+        }
+        .await;
+        guard.done = true;
+        match written {
             Ok(()) => Ok(()),
             Err(error) => {
                 *writer = None;
@@ -387,9 +503,15 @@ impl OpenRgbAdapter {
     ///
     /// Safe to cancel (a caller may give up on it, as the rescan budget does): dropping the future
     /// clears the reply slot and, when the request was already sent, records it as abandoned.
+    ///
+    /// The next request does not wait for the late reply of an abandoned one. It used to, and
+    /// that cost a rescan its whole budget: a request whose reply timed out left an abandoned
+    /// entry behind, and the next request waited out the reply timeout for a reply that may
+    /// never come, so it never went out. The late reply cannot answer the wrong request
+    /// anyway: OpenRGB answers in order, and the reader drops the reply of an abandoned
+    /// request (see `read_loop`).
     async fn request(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
         let _gate = self.link.request_gate.lock().await;
-        self.wait_for_abandoned().await;
         let (reply, received) = oneshot::channel();
         // Declared after the gate, so it drops first: the slot is cleared while the gate is held.
         let mut in_flight = InFlight { link: &self.link, device, packet_id, sent: false };
@@ -410,30 +532,6 @@ impl OpenRgbAdapter {
         }
     }
 
-    /// Waits until no abandoned request is owed a reply (or the reply is overdue), so the next
-    /// request cannot be answered with an old reply. Called with the request gate held.
-    async fn wait_for_abandoned(&self) {
-        loop {
-            // Registered before the check, so a reply that lands in between still wakes it.
-            let drained = self.link.drained.notified();
-            tokio::pin!(drained);
-            drained.as_mut().enable();
-            let wait = {
-                let mut session = guard(&self.link.session);
-                let now = Instant::now();
-                session.prune_abandoned(now);
-                match session.abandoned.first() {
-                    None => return,
-                    Some(oldest) => REPLY_TIMEOUT.saturating_sub(now.saturating_duration_since(oldest.since)),
-                }
-            };
-            tokio::select! {
-                () = &mut drained => {}
-                () = tokio::time::sleep(wait) => {}
-            }
-        }
-    }
-
     fn protocol_version(&self) -> u32 {
         guard(&self.link.session).protocol_version
     }
@@ -442,6 +540,11 @@ impl OpenRgbAdapter {
     async fn enumerate(&self) -> Result<Vec<Controller>, AdapterError> {
         self.require_connected()?;
         let version = self.protocol_version();
+        {
+            let mut session = guard(&self.link.session);
+            session.discovering += 1;
+        }
+        let _discovery = Discovery { link: &self.link };
         let count_reply = self.request(0, REQUEST_CONTROLLER_COUNT, &[]).await?;
         let count = read_u32(&count_reply, "controller count")?;
         if count > MAX_CONTROLLERS {
@@ -467,10 +570,39 @@ impl OpenRgbAdapter {
         Ok(controllers)
     }
 
+    /// The epoch of a controller's resize: bumped on every resize, so a frame that was built
+    /// for the list before the resize can tell it is stale.
+    fn resize_epoch(&self, index: u32) -> u64 {
+        guard(&self.link.session).resizing.get(&index).map_or(0, |resize| resize.epoch)
+    }
+    /// Whether a controller is being resized right now.
+    fn resize_in_flight(&self, index: u32) -> bool {
+        guard(&self.link.session).resizing.get(&index).is_some_and(|resize| resize.in_flight)
+    }
+
+    /// Starts a resize of a controller: the frames for it are skipped until it ends.
+    fn begin_resize(&self, index: u32) {
+        let mut session = guard(&self.link.session);
+        let resize = session.resizing.entry(index).or_insert(Resize { epoch: 0, in_flight: false });
+        resize.epoch += 1;
+        resize.in_flight = true;
+    }
+
+    /// Ends a resize of a controller: the frames for it go out again.
+    fn end_resize(&self, index: u32) {
+        let mut session = guard(&self.link.session);
+        if let Some(resize) = session.resizing.get_mut(&index) {
+            resize.in_flight = false;
+        }
+    }
+
     /// Switches a controller to direct/custom mode, then sends a frame. The mode is sent again
     /// after a reset (resume, resize) and whenever the keepalive interval has passed, so a
     /// controller that fell back to its built-in mode heals on its own.
     async fn send_leds(&self, index: u32, colors: &[Rgb8]) -> Result<(), AdapterError> {
+        // The controller's resize epoch: a resize that starts while this frame is on its way
+        // makes the frame stale, and the frame may not stamp the mode back on.
+        let epoch = self.resize_epoch(index);
         let reason = {
             let session = guard(&self.link.session);
             match session.custom_mode.get(&index) {
@@ -482,21 +614,24 @@ impl OpenRgbAdapter {
         };
         if let Some(reason) = reason {
             // Stamped before the send. A resume that lands during the await bumps `resets`; the
-            // controller is then not recorded, so the next frame sends the mode again.
+            // controller is then not recorded, so the next frame sends the mode again. A resize
+            // that lands during the await bumps the epoch; the controller is then not recorded
+            // either, so the frame after the resize sends the mode again.
             let sent_at = self.clocks.monotonic();
             let sent_wall = self.clocks.wall();
             let resets = guard(&self.link.session).resets;
-            self.send(index, SET_CUSTOM_MODE, &[]).await?;
+            self.send_frame(index, SET_CUSTOM_MODE, &[]).await?;
             let first_on_connection = {
                 let mut session = guard(&self.link.session);
-                if session.resets == resets {
+                let same_epoch = session.resizing.get(&index).is_none_or(|resize| resize.epoch == epoch);
+                if session.resets == resets && same_epoch {
                     session.custom_mode.insert(index, ModeStamp { at: sent_at, wall: sent_wall });
                 }
                 session.mode_sent.insert(index)
             };
             self.log_mode_sent(index, reason, first_on_connection);
         }
-        self.send(index, UPDATE_LEDS, &update_leds_payload(colors)?).await
+        self.send_frame(index, UPDATE_LEDS, &update_leds_payload(colors)?).await
     }
 
     /// Says that `SET_CUSTOM_MODE` went to controller `index` (#81). OpenRGB turns each one into an
@@ -619,6 +754,8 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.epoch
         };
         *self.link.writer.lock().await = Some(write);
+        // A new socket: the link is whole again.
+        self.link.broken.store(false, Ordering::SeqCst);
         let reader = tokio::spawn(read_loop(read, Arc::clone(&self.link), epoch));
         {
             let mut session = guard(&self.link.session);
@@ -654,13 +791,14 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.controllers.clear();
             session.custom_mode.clear();
             session.mode_sent.clear();
+            session.resizing.clear();
             session.reader.take()
         };
-        self.link.drained.notify_waiters();
         if let Some(reader) = reader {
             reader.abort();
         }
         *self.link.writer.lock().await = None;
+        self.link.broken.store(false, Ordering::SeqCst);
         Ok(())
     }
 
@@ -686,12 +824,21 @@ impl DeviceAdapter for OpenRgbAdapter {
             return Err(AdapterError::Zone { device: device.clone(), zone, reason: "zone is not resizable".into() });
         }
         let size = leds.max(info.leds_min).min(info.leds_max);
-        self.send(controller.index, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
-        // The next frame to this controller must re-enter custom mode after OpenRGB reconfigures it.
-        guard(&self.link.session).custom_mode.remove(&controller.index);
-        // Ordered after the resize on the same socket, so the reply reflects the new size.
-        self.enumerate().await?;
-        Ok(())
+        // The controller is being re-configured: a frame for it is skipped until the
+        // re-enumerate lands, so no frame of the old zone size reaches OpenRGB in between,
+        // and no frame stamps the mode back on after the resize cleared it.
+        self.begin_resize(controller.index);
+        let resized = async {
+            self.send(controller.index, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
+            // The next frame to this controller must re-enter custom mode after OpenRGB reconfigures it.
+            guard(&self.link.session).custom_mode.remove(&controller.index);
+            // Ordered after the resize on the same socket, so the reply reflects the new size.
+            self.enumerate().await?;
+            Ok(())
+        }
+        .await;
+        self.end_resize(controller.index);
+        resized
     }
 
     async fn identify(&mut self, device: &DeviceId, zone: u32, led: u32) -> Result<(), AdapterError> {
@@ -749,11 +896,12 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
                 return;
             }
             session.prune_abandoned(Instant::now());
-            // The reply to a request that was given up on: it answers nobody.
+            // The reply to a request that was given up on: it answers nobody. The oldest
+            // abandoned request that matches is the one this reply belongs to (OpenRGB
+            // answers in order), and it is the first one that is dropped.
             if let Some(at) = session.abandoned.iter().position(|a| a.device == device && a.packet_id == packet_id) {
                 session.abandoned.remove(at);
                 drop(session);
-                link.drained.notify_waiters();
                 continue;
             }
             session.pending.take_if(|p| p.device == device && p.packet_id == packet_id)
@@ -1129,3 +1277,4 @@ mod keepalive_tests {
         assert_eq!(server.custom_mode_writes(0), 1, "the mode was set again for no reason");
     }
 }
+
