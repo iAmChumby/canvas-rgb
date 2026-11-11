@@ -21,6 +21,20 @@ export function hotFloor(header: string, configured: number): number {
 }
 
 /**
+ * Issue #297: the fixed threshold under which the editor warns that a CPU line keeps the
+ * closed-loop "Don't exceed" hold engaged, so the fans run hard to hold it. It is a fixed rule and
+ * not a reading of the part's idle temperature: `HOT_TEMP_C` (50 °C, the code's own hot line, still
+ * the automatic line for every board sensor) plus 10 °C. The warning says what the rule is, never
+ * that it knows where this CPU idles.
+ */
+export const CPU_IDLE_LIMIT_C = HOT_TEMP_C + 10;
+
+/** Whether a user-set CPU hot limit is under the warning threshold (#297), as the warning says ("Below 60 °C"). */
+export function cpuLimitInIdleRange(kind: string, limitC: number): boolean {
+  return kind === "cpu" && limitC < CPU_IDLE_LIMIT_C;
+}
+
+/**
  * G4's rule and issue #255's closed loop, with the numbers filled in. Issue #130: the line is
  * the source's hot limit now. Above the line the header speeds up until the source is back under
  * it, and at the fixed safety ceiling it runs at full speed. The source is the short name the
@@ -32,4 +46,15 @@ export function hotRuleText(limitC: number | undefined, source: string, ceilingC
   const line = limitC === undefined ? "its hot limit" : `${Math.round(limitC)} °C`;
   const ceiling = ceilingC === undefined ? "its safety ceiling" : `${Math.round(ceilingC)} °C`;
   return `Above ${line} the fan speeds up to bring ${source} back under it; at ${ceiling} it runs at full speed.`;
+}
+
+/**
+ * The same sentence cut to one line, for when the idle-range warning is drawn under the control
+ * (issue #297): the warning carries the "the fans run hard" half, so the note gives back a line
+ * and the panel adds the warning's one line and no more (#109, #294, #299).
+ */
+export function hotRuleShortText(limitC: number | undefined, ceilingC: number | undefined): string {
+  const line = limitC === undefined ? "its hot limit" : `${Math.round(limitC)} °C`;
+  const ceiling = ceilingC === undefined ? "its safety ceiling" : `${Math.round(ceilingC)} °C`;
+  return `Above ${line} the fan speeds up; at ${ceiling} it runs at full speed.`;
 }

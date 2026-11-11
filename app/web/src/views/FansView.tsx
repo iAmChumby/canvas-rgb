@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useLayoutEffect, useRef, useState, type CSSProperties, type RefObject } from "react";
-import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, X } from "@phosphor-icons/react";
+import { ArrowClockwise, Check, CopySimple, DotsThreeOutline, Eye, EyeSlash, Fan, FloppyDisk, ListChecks, Minus, Plus, Trash, WarningCircle, X } from "@phosphor-icons/react";
 import { Button, IconButton, WaitMark } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
 import { Chip } from "@/components/Chip";
@@ -27,7 +27,7 @@ import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
 import { getSnap, refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
-import { baseFloor, hotRuleText } from "@/lib/fan-rules";
+import { baseFloor, CPU_IDLE_LIMIT_C, cpuLimitInIdleRange, hotRuleShortText, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
@@ -1215,6 +1215,19 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       {hotErr}
     </span>
   );
+  // Issue #297: a CPU line at or under the fixed warning threshold (60 °C) keeps the closed-loop
+  // hold engaged almost all the time, so the fans run hard to hold it. The sentence states the
+  // fixed rule and nothing it cannot know: it never claims to know where this CPU idles. It is one
+  // line: the sentence is short enough to fit the right panel at 390 as well as at 1440, and the
+  // note's own sentence is cut to its short form while it shows, so the panel adds one line and
+  // not three (#109, #294, #299).
+  const hotIdle = hotRow?.user_set === true && cpuLimitInIdleRange(hotKind, hotRow.limit_c);
+  const hotIdleWarning = hotIdle && hotRow && (
+    <span className="hot-warn" role="status" data-slot="hot-idle-warning">
+      <WarningCircle size={14} aria-hidden="true" />
+      <span>Below {CPU_IDLE_LIMIT_C} °C the fans run hard to hold this line.</span>
+    </span>
+  );
 
   return (
     <Panel
@@ -1272,9 +1285,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
         {manual && (
           <div className="rule fan-floor-note">
             <span>
-              Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotRuleText(hotRow?.limit_c, hotSourceName, hotRow?.ceiling_c)}
+              Floor <span className="fig" style={{ color: "var(--ink)" }}><AnimatedNumber value={base} />%</span>. {hotIdle ? hotRuleShortText(hotRow?.limit_c, hotRow?.ceiling_c) : hotRuleText(hotRow?.limit_c, hotSourceName, hotRow?.ceiling_c)}
             </span>
             {hotControls}
+            {hotIdleWarning}
             {hotError}
           </div>
         )}

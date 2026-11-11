@@ -52,16 +52,34 @@ pub const CURVE_STEP_DOWN_HOLD: Duration = Duration::from_secs(60);
 /// The hold alone steps the duty down only when the smoothed temperature asks for at least this many
 /// percentage points less. Without it a 50/54 C input dipped the duty by 1 % every hold period.
 pub const CURVE_STEP_DOWN_MIN_PERCENT: u8 = 3;
-/// Issue #255: the smallest rise of the hot-limit boost, in percentage points per second. A
-/// reference temperature at the line still steps the duty up by at least this much, so "Don't
-/// exceed" always answers.
+/// Issue #255: the smallest rise of the hot-limit boost, in percentage points per second at the
+/// line. The rise grows from here with the error, so "Don't exceed" always answers.
 pub const HOT_BOOST_MIN_RISE: f32 = 1.0;
-/// Issue #255: how fast the boost grows per degree above the line, in percentage points per
-/// second per degree. The BIOS Smart Fan step-up shape: the further over the line, the faster.
+/// Issue #255: how fast the boost grows per degree of error, in percentage points per second per
+/// degree, on top of [`HOT_BOOST_MIN_RISE`]. The BIOS Smart Fan step-up shape: the further over
+/// the line, the faster. Issue #297: at or above the line this is issue #255's own rise, measured
+/// from the line and with no ceiling (see [`CurveState::note_boost`]). Below the line the rise is
+/// [`HOT_BOOST_MIN_RISE`] and [`HOT_BOOST_GAIN_PER_C`] sets the answer it climbs to, so this gain
+/// only scales the wind-up.
 pub const HOT_BOOST_GAIN: f32 = 1.0;
-/// Issue #255: the deadband below the line, in degrees, where the boost holds instead of
-/// decaying. A temperature hovering at the line never flips the duty (issue #17).
+/// Issue #297: the proportional answer's gain, in percentage points per degree over the aim. Ten
+/// points a degree makes one degree over the aim ten points of boost, and the aim is a degree
+/// under the line, so the answer a reading *at* the line asks for is ten points. This gain only
+/// shapes the answer at or under the line; at or above it the wind-up is issue #255's own rise.
+pub const HOT_BOOST_GAIN_PER_C: f32 = 10.0;
+/// Issue #255: the deadband below the aim ([`HOT_HOLD_AIM_MARGIN_C`] under the line), in degrees,
+/// where the boost holds instead of decaying. A temperature hovering at the line never flips the
+/// duty (issue #17).
 pub const HOT_BOOST_DEADBAND_C: f32 = 2.0;
+/// Issue #297 review: how far under the line the hold aims, in degrees. The hot floor latch
+/// (#130) moves the CPU header in steps of five points (its 50 % floor against the curve's 45 %
+/// at the line), and the loop answers a degree with ten of them, so a hold that settles exactly
+/// on the line is carried over it on every latch cycle; the strict seconds over the line are the
+/// number the safety rule counts. Aiming a degree under keeps the whole cycle below the line,
+/// and still holds it far closer than issue #255's fourteen-degree margin. The aim shapes the
+/// answer *under* the line only: at or above the line the wind-up is issue #255's own rise, so
+/// the aim can never make the fan slower than #255 there.
+pub const HOT_HOLD_AIM_MARGIN_C: f32 = 1.0;
 /// Issue #255: how fast the boost decays below the deadband, in percentage points per second.
 /// The fall is much slower than the rise, so the fan gives the temperature time to come back.
 pub const HOT_BOOST_DECAY: f32 = 0.25;
@@ -71,6 +89,10 @@ pub const HOT_BOOST_MAX_DT_S: f32 = 2.0;
 /// Issue #255 review: the boost's own upper bound, in percentage points (anti-windup). The
 /// output is capped at 100 separately, so the term is still there when the curve later drops.
 pub const HOT_BOOST_MAX: f32 = 100.0;
+/// Issue #297: how often the hot-hold state may be logged per header. The loop runs at 1 Hz and
+/// the duty can change on every tick, so a line per tick would bury the log; a change held back
+/// by this interval is written by the first tick after it.
+pub const HOT_LOG_MIN_INTERVAL: Duration = Duration::from_secs(5);
 /// A gap between two curve updates longer than this (a missing sensor, a sleep) restarts the
 /// smoothing from the current reading.
 const CURVE_RESEED: Duration = Duration::from_secs(10);
@@ -153,6 +175,19 @@ struct CurveState {
     hot_boost: f32,
     /// When the boost was last updated, for the tick delta. `None` before the first tick.
     boost_last_at: Option<Instant>,
+    /// Issue #297: what the last hot-hold INFO line said, and when it was written. The line is
+    /// written on a change, never more often than `HOT_LOG_MIN_INTERVAL`.
+    hot_log: Option<HotLogLine>,
+    hot_log_at: Option<Instant>,
+}
+
+/// Issue #297: the hot-hold state one log line described, so the next tick can tell whether
+/// anything changed worth another line.
+#[derive(Clone, PartialEq)]
+struct HotLogLine {
+    engaged: bool,
+    asked: u8,
+    reason: Option<String>,
 }
 
 impl CurveState {
@@ -216,6 +251,23 @@ impl CurveState {
         self.below_since = None;
     }
 
+    /// Issue #297: whether this tick's hot-hold state is worth an INFO line, and records it.
+    /// A line goes out on a change (engaged or released, the duty asked, or the reason), never
+    /// more often than `HOT_LOG_MIN_INTERVAL`; a change held back by the interval is written by
+    /// the first tick after it, because the state still differs from the last one written.
+    fn wants_hot_log(&mut self, now: Instant, engaged: bool, asked: u8, reason: &Option<String>) -> bool {
+        let state = HotLogLine { engaged, asked, reason: reason.clone() };
+        if self.hot_log.as_ref() == Some(&state) {
+            return false;
+        }
+        if self.hot_log_at.is_some_and(|at| now.saturating_duration_since(at) < HOT_LOG_MIN_INTERVAL) {
+            return false;
+        }
+        self.hot_log = Some(state);
+        self.hot_log_at = Some(now);
+        true
+    }
+
     /// Latches the hot floor: engages on every reading at or above `limit_c`, and releases only
     /// after the temperature stays below the limit for the curve's hold time. It is a floor
     /// under the curve, never a cap. A missing reading changes nothing.
@@ -231,12 +283,30 @@ impl CurveState {
     }
 
     /// Issue #255: one tick of the hot-limit boost. `temp_c` is the reference temperature and
-    /// `limit_c` the hot line. At or above the line the boost rises (fast), inside the deadband
-    /// it holds, and below the deadband it decays (slowly). While the safety ceiling is latched
-    /// the boost is frozen: the ceiling already runs the header at 100 %. A missing reading
-    /// keeps the boost through the short gap: the Curve arm holds its write and the Fixed arm
-    /// keeps its duty until `SENSOR_LOSS_TIMEOUT_MS`. The Curve handback clears it; the Fixed
-    /// arm drops it at the timeout and writes its plain duty again.
+    /// `limit_c` the hot line. Issue #297 splits it two by whether the reading is at or above the
+    /// line, which is where issue #255 started winding up:
+    ///
+    /// - **at or above the line** the loop winds up at issue #255's own rise,
+    ///   `max(HOT_BOOST_MIN_RISE, HOT_BOOST_GAIN x degrees over the line)` points a second, or at
+    ///   the aim-based rise (`HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN x degrees over the aim`, a point
+    ///   a second faster) when that is bigger — whichever it is, never slower than issue #255 was
+    ///   at the same reading, and with **no ceiling**: a 35 °C excursion still winds up at 35+
+    ///   points a second, as #255 did. Issue #297 review: a ceiling here made this branch answer a
+    ///   real heat event slower than main did.
+    /// - **below the line** the loop answers in proportion: `HOT_BOOST_GAIN_PER_C` points per
+    ///   degree over the aim ([`HOT_HOLD_AIM_MARGIN_C`] under the line), so the answer rises to at
+    ///   most ten points as the reading approaches the line, at [`HOT_BOOST_MIN_RISE`] a second,
+    ///   and holds there rather than stepping down on noise (issue #17). This is the only place
+    ///   the hold smooths: a reading at or under its line settles instead of climbing to full
+    ///   speed, and every reading over the line gets #255's answer or faster.
+    ///
+    /// Below the aim by more than [`HOT_BOOST_DEADBAND_C`] the boost decays at
+    /// [`HOT_BOOST_DECAY`], exactly as issue #255 did; inside that deadband it holds.
+    ///
+    /// While the safety ceiling is latched the boost is frozen: the ceiling already runs the
+    /// header at 100 %. A missing reading keeps the boost through the short gap: the Curve arm
+    /// holds its write and the Fixed arm keeps its duty until `SENSOR_LOSS_TIMEOUT_MS`. The Curve
+    /// handback clears it; the Fixed arm drops it at the timeout and writes its plain duty again.
     fn note_boost(&mut self, temp_c: Option<f32>, limit_c: f32, now: Instant, ceiling_latched: bool) {
         if ceiling_latched {
             self.boost_last_at = Some(now);
@@ -253,17 +323,34 @@ impl CurveState {
             .map_or(1.0, |previous| now.saturating_duration_since(previous).as_secs_f32())
             .min(HOT_BOOST_MAX_DT_S);
         self.boost_last_at = Some(now);
-        if temp >= limit_c {
-            // Anti-windup: bound the term itself, never the output's shortfall, so a curve that
-            // later steps down while the temperature is still over the line keeps the fan up.
-            self.hot_boost = (self.hot_boost + HOT_BOOST_MIN_RISE.max(HOT_BOOST_GAIN * (temp - limit_c)) * dt)
-                .min(HOT_BOOST_MAX);
-        } else if temp >= limit_c - HOT_BOOST_DEADBAND_C {
-            // Inside the deadband the boost holds: a temperature hovering at the line must not
-            // flip the duty (issue #17).
-        } else {
+        let aim_c = limit_c - HOT_HOLD_AIM_MARGIN_C;
+        let off_aim = temp - aim_c;
+        if off_aim <= -HOT_BOOST_DEADBAND_C {
             self.hot_boost = (self.hot_boost - HOT_BOOST_DECAY * dt).max(0.0);
+            return;
         }
+        let over_line = temp - limit_c;
+        if over_line >= 0.0 {
+            // Issue #297 review: at or above the line the fan must never answer slower than issue
+            // #255 did, at any reading. #255's rise is `max(1, degrees over)` a second with no
+            // ceiling; the aim term is a point a second faster, and `max` keeps the promise even
+            // if the constants move. Anti-windup bounds the term itself, never the output's
+            // shortfall, so a curve that steps down while the source is still over the line keeps
+            // the fan up.
+            let main_rise = HOT_BOOST_MIN_RISE.max(HOT_BOOST_GAIN * over_line);
+            let aim_rise = HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * off_aim;
+            self.hot_boost = (self.hot_boost + main_rise.max(aim_rise) * dt).min(HOT_BOOST_MAX);
+        } else if off_aim > 0.0 {
+            // Below the line: the proportional answer, approached at no more than
+            // HOT_BOOST_MIN_RISE a second and never past its own answer, so a reading that stays
+            // under the line settles and holds instead of winding up (issue #17, #297).
+            let target = HOT_BOOST_GAIN_PER_C * off_aim;
+            if self.hot_boost < target {
+                self.hot_boost = (self.hot_boost + HOT_BOOST_MIN_RISE * dt).min(target);
+            }
+        }
+        // Inside the deadband, or at a target the loop already holds, nothing moves: a
+        // temperature hovering under the line must not flip the duty (issue #17).
     }
 }
 
@@ -1181,6 +1268,24 @@ impl FanController {
                 "hot floor {floor}% until {} has stayed under {limit_text} °C",
                 hot_name(&name)
             ));
+        }
+        // Issue #297: the hot hold's state at INFO, rate-limited, so a real run can confirm why
+        // the fans moved: the reading, the line, the error, engaged or released, the boost and
+        // the duty asked. The issue's log had no temperature on any of these lines.
+        let engaged = latched || boost >= 1.0;
+        if self.slots[ch].curve.wants_hot_log(now, engaged, percent, &reason) {
+            tracing::info!(
+                header = spec.id,
+                celsius = ?reference,
+                limit_c,
+                error_c = reference.map(|t| t - limit_c),
+                hold = if engaged { "engaged" } else { "released" },
+                latched,
+                boost,
+                asked = percent,
+                reason = ?reason,
+                "hot hold state"
+            );
         }
         match self.write_and_verify(ch, percent) {
             Ok(()) => {
