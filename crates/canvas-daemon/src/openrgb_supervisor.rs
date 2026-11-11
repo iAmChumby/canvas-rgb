@@ -450,6 +450,21 @@ fn answer_all(waiting: &mut Vec<Rescan>, result: &Result<Vec<DeviceInfo>, String
     }
 }
 
+/// The delay before the next attempt.
+///
+/// The backoff paces the automatic attempts. An attempt the owner asked for does not make the
+/// next automatic one wait longer: the backoff is not advanced for it, and the delay it waits is
+/// the one it already had.
+fn next_delay(backoff: &mut Backoff, from_rescan: bool) -> Duration {
+    if from_rescan {
+        backoff.current()
+    } else {
+        let (delay, next_backoff) = backoff.advanced();
+        *backoff = next_backoff;
+        delay
+    }
+}
+
 /// [`supervise`], with callbacks the supervisor awaits and the rescans the owner asks for (#233).
 ///
 /// `on_devices` is awaited before the loop goes on, so the lists are applied in the order they
@@ -485,6 +500,9 @@ pub async fn supervise_with_rescans<D, L>(
             connect_and_prepare(guard.as_mut(), &sizes).await
         })
         .await;
+        // The rescans that queued while the attempt ran share its answer: one attempt answers
+        // them all, and none of them waits for another's turn.
+        take_queued(&mut rescans, &mut waiting);
         if cut {
             // The attempt was dropped mid-way, possibly between the socket and the handshake: a
             // link that says "connected" with no protocol version would be taken for a good one.
@@ -518,17 +536,23 @@ pub async fn supervise_with_rescans<D, L>(
                             if rescan.reply.is_closed() {
                                 continue;
                             }
+                            // The rescans that queued meanwhile share this attempt and its
+                            // answer: one discovery answers them all, and none of them waits for
+                            // another's turn (#233).
+                            let mut group = vec![rescan];
                             let sizes = zone_sizes.read().await.clone();
-                            let (result, _) = within(Some(rescan.budget), async {
+                            let (result, _) = within(group.iter().map(|r| r.budget).max(), async {
                                 let mut guard = adapter.lock().await;
                                 rescan_devices(guard.as_mut(), &sizes).await
                             })
                             .await;
+                            // The rescans that queued while the attempt ran share its answer.
+                            take_queued(&mut rescans, &mut group);
                             if let Ok(devices) = &result {
                                 last = device_key(devices);
                                 on_devices(devices.clone()).await;
                             }
-                            let _ = rescan.reply.send(result);
+                            answer_all(&mut group, &result);
                             continue;
                         }
                     }
@@ -566,13 +590,7 @@ pub async fn supervise_with_rescans<D, L>(
                 on_link(LinkState::Down).await;
                 // The backoff paces the automatic attempts: an attempt the owner asked for does
                 // not make the next automatic one wait longer.
-                let delay = if from_rescan {
-                    backoff.current()
-                } else {
-                    let (delay, next_backoff) = backoff.advanced();
-                    backoff = next_backoff;
-                    delay
-                };
+                let delay = next_delay(&mut backoff, from_rescan);
                 let pause = tokio::time::sleep(delay);
                 tokio::pin!(pause);
                 loop {
@@ -611,6 +629,18 @@ mod tests {
         assert_eq!(seen[1], Duration::from_millis(500));
         assert_eq!(*seen.last().unwrap(), BACKOFF_MAX);
         assert_eq!(backoff.reset().current(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn a_rescan_does_not_advance_the_automatic_backoff() {
+        let mut backoff = Backoff::new();
+        // The automatic attempts back off: 500 ms, then 1 s.
+        assert_eq!(next_delay(&mut backoff, false), Duration::from_millis(500));
+        assert_eq!(next_delay(&mut backoff, false), Duration::from_millis(1000));
+        // An attempt the owner asked for waits the delay the backoff already had, and does not
+        // make the next automatic attempt wait longer.
+        assert_eq!(next_delay(&mut backoff, true), Duration::from_millis(1000));
+        assert_eq!(next_delay(&mut backoff, false), Duration::from_millis(2000));
     }
 
     #[test]
