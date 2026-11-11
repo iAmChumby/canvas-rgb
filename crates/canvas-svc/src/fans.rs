@@ -20,7 +20,7 @@ use canvas_proto::config::{FansFile, FANS_SCHEMA};
 use canvas_proto::fans::{
     floor_for, hot_limit_status, rated_cpu_max_c, runtime_floor_at, validate_hot_limits, validate_mode,
     validate_profile, CurvePoint, FanHeaderStatus, FanMode, FanProfile, FanValidationError, FansStatus, HotKind,
-    HotLimitStatus, HotLimits, TempReading, TempSource, SENSOR_LOSS_TIMEOUT_MS,
+    HotLimitStatus, HotLimits, TempReading, TempSource, HOT_LIMIT_MIN_C, SENSOR_LOSS_TIMEOUT_MS,
 };
 use canvas_proto::Rgb8;
 use std::collections::{BTreeMap, BTreeSet};
@@ -488,34 +488,33 @@ impl FanController {
         self.hot_logged = false;
     }
 
-    /// Issue #225: validates the hot limits loaded from `fans.toml`. A hand-edited value outside
-    /// `HOT_LIMIT_MIN_C..=max_settable_c` (or not a finite number) falls back to automatic with a
-    /// WARN naming it; the other limits and the rest of the file load as written. Call it after
-    /// the rated maxima are set (`set_rated`), because the settable range depends on them. The
-    /// corrected file is saved, so the file, the export and the enforced line all agree.
-    pub fn drop_invalid_hot_limits(&mut self) {
-        let mut dropped = false;
+    /// Issue #225: corrects the hot limits loaded from `fans.toml`, in memory. A hand-edited value
+    /// under `HOT_LIMIT_MIN_C` is raised to it, the line the runtime clamp in `hot_limit_status`
+    /// has always enforced for it, so a typo never loosens the limit. A value over the settable
+    /// maximum, or not a finite number, falls back to the automatic line (stricter than the
+    /// maximum it would otherwise be clamped to). Each correction logs a WARN naming the value;
+    /// the other limits and the rest of the file load as written. Call it after the rated maxima
+    /// are set (`set_rated`), because the settable range depends on them.
+    ///
+    /// The file is not rewritten: saving would drop its comments and any key the schema does not
+    /// know, and the owner's edit is theirs to fix. The WARN repeats on every start until they do.
+    pub fn correct_hot_limits(&mut self) {
         for kind in [HotKind::Cpu, HotKind::Gpu, HotKind::Board] {
             let Some(celsius) = self.config.hot_limits.get(kind) else { continue };
-            let mut only = HotLimits::default();
+            let max = hot_limit_status(kind, &self.config.hot_limits, self.rated_for(kind)).max_settable_c;
+            let corrected = if !celsius.is_finite() || celsius > max {
+                tracing::warn!(?kind, celsius, max, "fans.toml has a hot limit above its allowed range; using the automatic one (fans.toml is left as written)");
+                None
+            } else if celsius < HOT_LIMIT_MIN_C {
+                tracing::warn!(?kind, celsius, min = HOT_LIMIT_MIN_C, "fans.toml has a hot limit below its allowed range; using the minimum (fans.toml is left as written)");
+                Some(HOT_LIMIT_MIN_C)
+            } else {
+                continue;
+            };
             match kind {
-                HotKind::Cpu => only.cpu_c = Some(celsius),
-                HotKind::Gpu => only.gpu_c = Some(celsius),
-                HotKind::Board => only.board_c = Some(celsius),
-            }
-            if let Err(e) = validate_hot_limits(&only, self.cpu_rated_max_c, self.gpu_rated_max_c) {
-                tracing::warn!(?kind, celsius, error = %e, "fans.toml has an out-of-range hot limit; using the automatic one");
-                match kind {
-                    HotKind::Cpu => self.config.hot_limits.cpu_c = None,
-                    HotKind::Gpu => self.config.hot_limits.gpu_c = None,
-                    HotKind::Board => self.config.hot_limits.board_c = None,
-                }
-                dropped = true;
-            }
-        }
-        if dropped {
-            if let Err(e) = self.persist() {
-                tracing::warn!(error = %e, "could not save fans.toml after dropping an out-of-range hot limit");
+                HotKind::Cpu => self.config.hot_limits.cpu_c = corrected,
+                HotKind::Gpu => self.config.hot_limits.gpu_c = corrected,
+                HotKind::Board => self.config.hot_limits.board_c = corrected,
             }
         }
     }

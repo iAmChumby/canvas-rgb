@@ -1564,6 +1564,9 @@ async fn issue225_put_profile_holds_the_fans_lock_across_both_sends() {
     });
     // Give the hot PUT every chance to push its config while PutProfile is held.
     let_other_tasks_run().await;
+    // The hot PUT is still waiting (on the fans lock): were it done already, the test below
+    // would pass without proving anything.
+    assert!(!hot_task.is_finished(), "the hot PUT finished while PutProfile was still held");
     gate.notify_one();
     let profile_resp = profile_task.await.expect("the profile task joins");
     let hot_resp = hot_task.await.expect("the hot task joins");
@@ -1589,6 +1592,106 @@ async fn issue225_put_profile_holds_the_fans_lock_across_both_sends() {
     let saved = app.fans_last.read().await.clone().expect("fans_last is saved");
     assert_eq!(saved.hot_limits.cpu_c, Some(70.0), "the hot change survived");
     assert!(saved.profiles.iter().any(|p| p.name == "quiet"), "the profile change survived");
+}
+
+/// A service that answers `Ok` to everything except one request kind, which it never answers.
+struct HangingPipe {
+    hang_on: fn(&canvas_proto::pipe::PipeRequest) -> bool,
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for HangingPipe {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        if (self.hang_on)(request) {
+            std::future::pending::<()>().await;
+        }
+        Ok(canvas_proto::pipe::PipeResponse::Ok)
+    }
+}
+
+/// Issue #225: a service that never answers must not hold `fans_last` for ever. The route
+/// answers 503 within the bound and the lock is free afterwards.
+async fn assert_hung_service_is_a_503_and_frees_the_lock(
+    hang_on: fn(&canvas_proto::pipe::PipeRequest) -> bool,
+    method: &str,
+    uri: &str,
+    body: &str,
+) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(
+        store,
+        Arc::new(FakeEngine::default()),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    );
+    app.pipe = Arc::new(HangingPipe { hang_on });
+    app.fans_pipe_limit = std::time::Duration::from_millis(150);
+    let app = Arc::new(app);
+    *app.fans.write().await = Some(fans_with_hot());
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let router = api::router(app.clone());
+
+    // The outer 3 s (20x the 150 ms bound) keeps a regression (no bound) from hanging the test run: it fails here.
+    let response = tokio::time::timeout(
+        std::time::Duration::from_secs(3),
+        router.oneshot(request_with_body(method, uri, body)),
+    )
+    .await
+    .expect("the route answered within 3 s: a hung service must not hang the route")
+    .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // The lock is free: another fans_last user proceeds at once.
+    let free = tokio::time::timeout(std::time::Duration::from_millis(500), app.fans_last.write()).await;
+    assert!(free.is_ok(), "fans_last is still held after the route answered 503");
+}
+
+fn profile_body_quiet() -> String {
+    serde_json::json!({
+        "name": "quiet",
+        "headers": {"cpu_fan": {"mode": "fixed", "percent": 40}}
+    })
+    .to_string()
+}
+
+#[tokio::test]
+async fn issue225_put_profile_with_a_service_that_never_answers_put_profile_is_a_503_and_frees_the_lock() {
+    assert_hung_service_is_a_503_and_frees_the_lock(
+        |r| matches!(r, canvas_proto::pipe::PipeRequest::PutProfile { .. }),
+        "PUT",
+        "/api/v1/fans/profiles/quiet",
+        &profile_body_quiet(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn issue225_put_profile_with_a_service_that_never_answers_the_config_push_is_a_503_and_frees_the_lock() {
+    assert_hung_service_is_a_503_and_frees_the_lock(
+        |r| matches!(r, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }),
+        "PUT",
+        "/api/v1/fans/profiles/quiet",
+        &profile_body_quiet(),
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn issue225_put_fans_hot_with_a_service_that_never_answers_is_a_503_and_frees_the_lock() {
+    assert_hung_service_is_a_503_and_frees_the_lock(
+        |r| matches!(r, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }),
+        "PUT",
+        routes::FAN_HOT,
+        r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#,
+    )
+    .await;
 }
 
 fn install_body(installer: &str, signature: &str) -> String {
