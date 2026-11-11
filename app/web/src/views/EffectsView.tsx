@@ -154,6 +154,8 @@ export function EffectsView() {
     valuesRef.current = values;
   }, [values]);
 
+  const [activating, setActivating] = useState(false);
+
   /** Sends the waiting values to the effect they were edited on, and to no other. */
   const flush = async () => {
     if (timer.current) clearTimeout(timer.current);
@@ -238,7 +240,6 @@ export function EffectsView() {
   const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
   const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
 
-  const [activating, setActivating] = useState(false);
   const activate = async (preset: string | null) => {
     if (!selectedId) return;
     const id = selectedId;

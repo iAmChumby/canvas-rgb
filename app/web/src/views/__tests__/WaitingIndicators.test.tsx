@@ -48,7 +48,7 @@ vi.mock("@/lib/stackPreview", () => ({
     frames.add(listener);
     return () => frames.delete(listener);
   },
-  onStackPreviewFeed: (_listener: (problem: string | null) => void) => () => undefined,
+  onStackPreviewFeed: () => () => undefined,
 }));
 
 beforeAll(() => {
