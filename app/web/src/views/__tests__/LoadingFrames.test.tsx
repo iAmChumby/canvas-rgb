@@ -339,15 +339,24 @@ describe("the devices list", () => {
   });
 
   it("shows no grey placeholder beside the error", async () => {
-    // The right column holds the walker. Next to an error a grey skeleton reads as a page
-    // that is still loading, so the column says nothing instead.
+    // The list frame keeps the list's shape under the error so the page is as tall as the list
+    // will be (`.load-shape`, hidden and aria-hidden). Anything grey outside that shape sits
+    // beside the error and reads as a page that is still loading, so there is none.
     setUrl("/devices/?state=fail:devices");
     await act(async () => {
       await refreshDevices();
     });
     render(<DevicesView />);
     await screen.findByText("The devices could not be read");
-    expect(document.querySelectorAll(".devices-grid > .stack .skeleton")).toHaveLength(0);
+    const page = document.querySelector(".rd-devices") as HTMLElement;
+    const frame = page.querySelector(".load-list") as HTMLElement;
+    expect(frame.dataset.state).toBe("error");
+    // The shape is there and hidden from everyone; the error is in the note beside it.
+    const shape = frame.querySelector(".load-shape") as HTMLElement;
+    expect(shape.getAttribute("aria-hidden")).toBe("true");
+    expect(frame.querySelector(".load-note")?.textContent).toContain("The devices could not be read");
+    const visible = [...page.querySelectorAll(".skeleton")].filter((el) => !el.closest(".load-shape"));
+    expect(visible).toHaveLength(0);
   });
 });
 

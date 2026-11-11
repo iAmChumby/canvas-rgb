@@ -16,7 +16,11 @@
 //   - a panel that scrolls sideways itself (its content is wider than it shows);
 //   - a figure's unit that has wrapped under the figure ("70" over "°C", #268);
 //   - a portal (a Popover or a Select's list, both drawn into `body`) that passes the window on any
-//     side, or the right edge of the box its opening control sits in.
+//     side, or the right edge of the box its opening control sits in;
+//   - on a desktop window (721 px and over, where a view fits the window and the document never
+//     scrolls: R1), a view's own scroll pane (FIT_PANES) that scrolls vertically, and each panel
+//     it cuts off at the bottom (#294). A pane is where R1 sends what is taller than the window; a
+//     desktop size is meant to have nothing taller. A phone scrolls the document, not a pane.
 // The slack is 1 px. Left out of every check: an element not drawn (display none, visibility hidden,
 // opacity 0: a tooltip before hover; a fixed sheet or toast that is parked that way counts too), an
 // element that is only there for a screen reader (1-2 px), and an element inside a scroller that
@@ -59,7 +63,7 @@
 //                                                        box, outside, outside-left, panel, wide,
 //                                                        doc, scroll-list, scrolls, wrapped,
 //                                                        portal, canvas-left, canvas-unclipped,
-//                                                        stage-sibling) and FAIL when a row does
+//                                                        stage-sibling, pane) and FAIL when a row does
 //                                                        not report one. `--mutate-overflow
 //                                                        box,doc` plants only those.
 //   node tools/overflow-check.mjs --hover-tips           hover every control that draws a tooltip
@@ -85,7 +89,7 @@ const flag = (name) => {
 const out = path.resolve(flag("--out") ?? path.join(repo, "app", "web", "out"));
 // Playwright lives in tools/poison-compare/js (as for tools/nav-check.mjs). A worktree that has not
 // run `npm ci` there can point PLAYWRIGHT_DIR at another checkout's copy of that folder.
-const pwDir = [process.env.PLAYWRIGHT_DIR, path.join(repo, "tools", "poison-compare", "js")]
+const pwDir = [process.env.PLAYWRIGHT_DIR && path.resolve(process.env.PLAYWRIGHT_DIR), path.join(repo, "tools", "poison-compare", "js")]
   .filter(Boolean)
   .find((d) => fs.existsSync(path.join(d, "node_modules", "playwright")));
 if (!pwDir) throw new Error("Playwright not found: run `npm ci` in tools/poison-compare/js, or set PLAYWRIGHT_DIR");
@@ -96,7 +100,7 @@ const shotsDir = flag("--shots");
 const shotTag = shotsDir ? args[args.indexOf("--shots") + 2] : null;
 const MODES = [
   "box", "outside", "outside-left", "panel", "wide", "doc", "scroll-list", "scrolls", "wrapped", "portal",
-  "canvas-left", "canvas-unclipped", "stage-sibling",
+  "canvas-left", "canvas-unclipped", "stage-sibling", "pane",
 ];
 const mutateAt = args.indexOf("--mutate-overflow");
 const mutate = mutateAt !== -1;
@@ -108,6 +112,16 @@ const SIZES = (flag("--sizes") ?? "1920x1040,1440x900,1280x860,1024x768,960x1032
   .split(",")
   .map((s) => s.split("x").map(Number));
 const SCHEMES = ["dark", "light"];
+/**
+ * The scroll panes R1 gives a view for a window that is too short for it (see the "R1 on a desktop
+ * window" block of app/web/src/styles/app.css). On a desktop size (a window over PHONE_MAX wide)
+ * none of them is meant to scroll: the fit-window rule is that every panel fits, so a pane that has
+ * something to scroll for is a view that does not fit (#294). Settings' `.rd-settings-scroll`, the
+ * Peripherals detail, the Effects inspector and the Fans right panel. What's new's notes and its
+ * one-column grid are left out: they scroll by design (#124), since release notes have no fixed
+ * length. The mutation plants its own pane under the first of these classes.
+ */
+const FIT_PANES = ".rd-settings-scroll, .peripheral-detail, .rd-eff-inspector, .rd-fans-right > .panel";
 const SLACK_PX = 1;
 const T = 20000;
 const PHONE_MAX = 720;
@@ -180,6 +194,21 @@ async function sourceList(page) {
   await page.waitForSelector(".listbox", { timeout: T });
 }
 
+/** Settings: a microphone picked in Audio source (a Select, its list drawn into body), the Listen toggle drawn. */
+async function settingsMic(page) {
+  await page.getByRole("combobox", { name: "Audio source", exact: true }).click();
+  await page.waitForSelector(".listbox", { timeout: T });
+  await page.getByRole("option", { name: "Microphone", exact: true }).click();
+  await page.getByRole("switch", { name: "Listen to this input", exact: true }).waitFor({ timeout: T });
+}
+
+/** Settings: the microphone picked and Listen on, so the state line carries a live reading's words. */
+async function settingsListen(page) {
+  await settingsMic(page);
+  await page.getByRole("switch", { name: "Listen to this input", exact: true }).click();
+  await page.waitForSelector('[role="status"]:not([data-note="true"])', { timeout: T });
+}
+
 /**
  * Every view of the demo, and the states of it that draw more than the first paint does.
  * `boxes` adds row containers to measure besides `.panel` and `.rule`. `prep` clicks the row into
@@ -202,6 +231,14 @@ const VIEWS = [
   { name: "fans-curve", url: "/fans/", prep: fansCurve },
   { name: "fans-source", url: "/fans/", prep: sourceList, overlay: true },
   { name: "settings", url: "/settings/" },
+  // The states that make a Settings panel taller: a microphone picked (the Listen toggle, the
+  // effect note), Listen on, a release waiting, an experimental build (the Editor choice), and
+  // an install that failed with a long message (the update status line wraps).
+  { name: "settings-mic", url: "/settings/", prep: settingsMic },
+  { name: "settings-listen", url: "/settings/", prep: settingsListen },
+  { name: "settings-update", url: "/settings/?update=available" },
+  { name: "settings-dev", url: "/settings/?update=dev" },
+  { name: "settings-failed", url: "/settings/?update=install-failed-text" },
   // No tray in a plain browser: the page waits, then says so (one panel). `?update=available` is
   // the fixture with a release waiting: its update card and the notes' panels.
   { name: "updates", url: "/updates/" },
@@ -275,10 +312,12 @@ const server = http.createServer((req, res) => {
  *   stage-sibling
  *                a clipping `.stage` that holds a `canvas.stage-canvas` and a sibling 40 px past the
  *                window's right edge (the stage's clip excuses the canvas, not the sibling)
+ *   pane         a scroll pane (the first class of FIT_PANES) 40 px high that holds a 120 px panel,
+ *                so it scrolls and cuts the panel (desktop sizes only: a phone scrolls the document)
  *
  * Self-contained: it runs in the page (its source is sent there).
  */
-const PLANT = (mode, { BOX }) => {
+const PLANT = (mode, { BOX, FIT_PANES }) => {
   const undo = [];
   const vw = document.documentElement.clientWidth;
   const drawn = (b) => b.getBoundingClientRect().width > 0 && b.checkVisibility({ visibilityProperty: true, opacityProperty: true });
@@ -402,6 +441,13 @@ const PLANT = (mode, { BOX }) => {
       if (mode === "stage-sibling") add(stage, make("div", "ovf-mutant", `position:absolute;top:8px;left:0;${small};width:${vw + 40}px`));
       return () => undo.reverse().forEach((f) => f());
     }
+    case "pane": {
+      const cls = FIT_PANES.split(",")[0].trim().replace(/^\./, "");
+      const pane = make("div", `ovf-mutant ${cls}`, "width:200px;height:40px;overflow-y:auto;flex:none;margin:0;padding:0");
+      placeAt(pane, content, { left: 0 });
+      add(pane, make("div", "panel", "height:120px;width:100%;flex:none;margin:0;padding:0;border:0;min-height:0"));
+      return () => undo.reverse().forEach((f) => f());
+    }
     default:
       return null;
   }
@@ -422,6 +468,7 @@ const EXPECT = {
   "canvas-left": "window-left",
   "canvas-unclipped": "window",
   "stage-sibling": "window",
+  pane: "scrolls-y",
 };
 
 /**
@@ -434,7 +481,7 @@ const EXPECT = {
 const KNOWN_CLIPPED = "canvas.stage-canvas";
 
 /** Runs in the page: everything wrong with the edges. */
-const MEASURE = ({ slack, extraBoxes, KNOWN_CLIPPED }) => {
+const MEASURE = ({ slack, extraBoxes, KNOWN_CLIPPED, FIT_PANES, PHONE_MAX }) => {
   const BOX = [".panel", ".rule", extraBoxes].filter(Boolean).join(", ");
   const vw = document.documentElement.clientWidth;
   // A box that is in the page but not drawn (a skeleton kept for its height, `visibility: hidden`)
@@ -621,6 +668,26 @@ const MEASURE = ({ slack, extraBoxes, KNOWN_CLIPPED }) => {
       }
     }
   }
+
+  // 5. The fit-window rule (#294): on a desktop window every view fits, and a scroll pane is only
+  // where R1 puts what is taller than a short window. A pane that scrolls (or clips) on a desktop
+  // size is a view that does not fit; each panel it cuts off at the bottom is named. A phone
+  // scrolls the document and has no pane.
+  if (vw > PHONE_MAX) {
+    for (const pane of document.querySelectorAll(FIT_PANES)) {
+      if (!drawnBox(pane) || getComputedStyle(pane).overflowY === "visible") continue;
+      const over = pane.scrollHeight - pane.clientHeight;
+      if (over <= slack) continue;
+      hits.push({ kind: "scrolls-y", el: name(pane), text: text(pane.querySelector(".panel-head, h2, h3") ?? pane), over, shown: pane.clientHeight });
+      const edge = pane.getBoundingClientRect().top + pane.clientTop + pane.clientHeight;
+      for (const panel of pane.querySelectorAll(".panel")) {
+        if (panel.parentElement?.closest(".panel") && pane.contains(panel.parentElement.closest(".panel"))) continue;
+        if (!drawnBox(panel)) continue;
+        const cut = panel.getBoundingClientRect().bottom - edge;
+        if (cut > slack) hits.push({ kind: "panel-cut", el: name(panel), text: text(panel.querySelector(".panel-head, h2, h3") ?? panel), pane: name(pane), over: round(cut) });
+      }
+    }
+  }
   return {
     vw,
     boxes: boxes.length,
@@ -644,7 +711,7 @@ const RUN = new Function(
    const BOX = [".panel", ".rule", opts.extraBoxes].filter(Boolean).join(", ");
    const planted = {};
    for (const mode of opts.modes) {
-     const undo = PLANT(mode, { slack: opts.slack, BOX });
+     const undo = PLANT(mode, { slack: opts.slack, BOX, FIT_PANES: opts.FIT_PANES });
      if (!undo) { planted[mode] = null; continue; }
      try { planted[mode] = MEASURE(opts); } finally { undo(); }
    }
@@ -673,6 +740,10 @@ const describe = (x) => {
       return `the document scrolls sideways by ${x.over}px`;
     case "scrolls":
       return `${x.el} scrolls sideways: its content is ${x.over}px wider than it`;
+    case "scrolls-y":
+      return `${x.el} ("${x.text}") scrolls vertically at a desktop size: its content is ${x.over}px taller than the ${x.shown}px it shows (the fit-window rule: no scroll)`;
+    case "panel-cut":
+      return `${x.el} "${x.text}" ends ${x.over}px below the bottom of ${x.pane}, so it is cut off until the pane scrolls`;
     case "wrapped":
       return `${x.el} "${x.text}" has wrapped under its figure, ${x.over}px below the figure's bottom`;
     default:
@@ -868,6 +939,8 @@ async function main() {
           const anchor = known ? extraBoxes : ".panel";
           const bad = [];
           const unknown = [];
+          // A phone scrolls the document, so no pane is planted on it (and none is expected).
+          const rowModes = mutateModes.filter((mode) => mode !== "pane" || w > PHONE_MAX);
           let m = null;
           let detail = "-";
           let mutantNote = "";
@@ -888,7 +961,7 @@ async function main() {
               for (const b of h.hits) bad.push(b);
               if (h.tips === 0) bad.push("nothing was measured: the view draws no tooltip");
             } else {
-              const run = await page.evaluate(RUN, { slack: SLACK_PX, extraBoxes, KNOWN_CLIPPED, modes: mutateModes });
+              const run = await page.evaluate(RUN, { slack: SLACK_PX, extraBoxes, KNOWN_CLIPPED, FIT_PANES, PHONE_MAX, modes: rowModes });
               m = run.base;
               detail = `${m.panels} panels, ${m.boxes - m.panels} other boxes, ${m.portals} portals`;
               for (const u of m.unknowns) unknown.push(`UNKNOWN: ${u.el} "${u.text}" was not measured against its opening control's box (${u.why}); its window edges were`);
@@ -900,7 +973,7 @@ async function main() {
                 const was = m.hits.find((x) => x.kind === "doc")?.over ?? 0;
                 const got = [];
                 const lost = [];
-                for (const mode of mutateModes) {
+                for (const mode of rowModes) {
                   const p = run.planted[mode];
                   const kind = EXPECT[mode];
                   const seen = !p ? false : p.hits.some((x) => x.kind === kind && (kind === "doc" ? x.over >= was + 30 : x.el.includes("ovf-mutant")));
@@ -914,7 +987,7 @@ async function main() {
                   }
                 }
                 detail += `, ${m.hits.length} real hits (not counted)`;
-                mutantNote = `caught ${got.length} of ${mutateModes.length}: ${got.join(", ") || "none"}${lost.length ? `; NOT caught: ${lost.join(", ")}` : ""}`;
+                mutantNote = `caught ${got.length} of ${rowModes.length}: ${got.join(", ") || "none"}${lost.length ? `; NOT caught: ${lost.join(", ")}` : ""}`;
               } else {
                 for (const x of m.hits) bad.push(describe(x));
               }

@@ -368,6 +368,32 @@ line. Three mechanisms, and one bug the timing only exposed.
   (`crates/canvas-svc/src/openrgb_tests.rs`) pitted a 1 s tokio ticker and `Instant::now()` against the 5 s
   detection cap: the count the fake server reported, the moment the cap fell on, and whether the count looked
   settled were all read off the wall clock, so a late tick moved the verdict.
+- [#250](https://github.com/iAmChumby/canvas-rgb/issues/250): `capture_wiring::an_audio_effect_reads_the_source_and_lights_the_sink`
+  waited its full 10 s on CI while the five tests beside it finished in 0.05 s. Not load: a lost wake-up in
+  the render loop (`crates/canvas-core/src/engine.rs`). The thread decides "nothing consumes frames, park",
+  releases the state lock, then locks again and waits for the change counter (`wake_generation`) to move.
+  It read that counter in the second lock, after the gap, so a sink added in the gap was already counted and
+  the wait saw no change; the 100 ms `PARK_POLL` only re-loops the same test. The thread slept until the next
+  unrelated change, here never. A real fault in the daemon too: a preview or device that connects in that
+  gap stays dark. Fixed: the counter is read under the lock that makes the decision. Evidence:
+  `a_consumer_that_arrives_between_the_park_decision_and_the_wait_is_not_slept_through` holds the thread in
+  the gap with a test hook and fails 20 s on the old read, passes on the new; with a 100 ms sleep injected in
+  the gap, the CI test failed 5/5 on the old read and 0/20 on the new (0/20 on the old read with no gap).
+  [#143](https://github.com/iAmChumby/canvas-rgb/issues/143) (a first frame not seen within 3 s,
+  `canvas-core/src/tests.rs`) has the same symptom and was settled by raising the ceiling to 20 s; the
+  ceiling never could have helped a thread that sleeps until the next change. UNKNOWN whether that sighting
+  was this race.
+- [#194](https://github.com/iAmChumby/canvas-rgb/issues/194): `the_preview_socket_opens_with_only_a_query_token`
+  reset once (`10054`). The test opened a real loopback socket for a check of the daemon's HTTP handshake. In
+  a loop of the whole `api` test binary on a PC busy with other builds it failed 1 in 45 runs with
+  `10060` (the connect timed out) in all three socket tests at once, on the line that opens the socket, with
+  the server untouched; sccache's loopback connection timed out the same way on the same PC. So the test read
+  its verdict off the operating system's network stack. UNKNOWN: whether the single `10054` of the report
+  had the same trigger (its line was not kept). Fixed: these tests run the server over `tokio::io::duplex`
+  through axum's `Listener` trait (`serve_in_memory` in `crates/canvas-daemon/tests/common/mod.rs`), so
+  nothing between the two ends can drop or reset. The same shape in `tests/stacks.rs` (the preview
+  sockets) moved too. After: 0 in 45 runs of the same loop. 1 in 45 before is too rare to prove the cure;
+  the in-memory server removes the stack from the test, which the count cannot show.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
@@ -575,12 +601,12 @@ scroll, so the content was clipped and unreachable.
   right edge while its own `.stage` clips it and sits inside the window, and content inside a
   scroller whose CSS says `overflow-x: auto|scroll` and whose own edge is inside the edge
   measured. An `overflow-y: auto` list or panel computes `overflow-x: auto` too, and is not such a
-  scroller: what it holds past the panel edge is reported. `--mutate-overflow` plants thirteen
+  scroller: what it holds past the panel edge is reported. `--mutate-overflow` plants fourteen
   overflows in every row, one per measuring path (a wider element in a box, an element outside any
   box past either window edge, a `.panel` past the window, a `.panel` wider than the window, a body
   wider than the window, an element past the panel inside a vertical scroller, a sideways-scrolling
   panel, a wrapped figure, a portal past its panel, a stage canvas past the left window edge, a
-  stage canvas in a stage that does not clip, a sibling of a stage canvas past the window), fails
+  stage canvas in a stage that does not clip, a sibling of a stage canvas past the window, a fit-window scroll pane that scrolls), fails
   when a row does not report the one planted, and prints per row which kinds it caught and which it
   did not. Since #271 `--hover-tips` replaces the edge measure with a hover pass over the rows
   that have no popup open: it hovers every control that draws a tooltip and fails on a shown bubble
@@ -589,6 +615,25 @@ scroll, so the content was clipped and unreachable.
   Playwright's browser). When it finds an overflow, let the row wrap as groups (the browser decides
   from the control's own width) and keep every state of a row the same width, so a state change
   never moves it.
+- A third mechanism, same cause: a fit-window view grows a panel or a row after its layout was
+  fitted, and a column ends up taller than the pane R1 gives it, so the pane scrolls at a desktop
+  size and the last panel shows only its header.
+  [#294](https://github.com/iAmChumby/canvas-rgb/issues/294): Settings gained the Audio source
+  panel (#166) and the Warmth row (#50) after the fit, and at 1024x768 the left column ran 46 px
+  past `.rd-settings-scroll` (673 px tall). The sideways measures above never see it, because
+  nothing passes the window: the pane clips it. The fix reorders the panels so the browser's column
+  balance puts Audio source with Rendering, and tightens the rows in a short window
+  (`@container page (max-height: 720px)`: 1024x768 but not 1280x860, measured on the page container).
+- **Class fix, third mechanism:** the check is in (#294); Settings is fixed, and its first full run
+  found 20 hits still open in the Fans right panel and the Effects inspector (#299).
+  `tools/overflow-check.mjs` reports, on a desktop size (721 px and over), each scroll pane in
+  `FIT_PANES` (Settings, the Peripherals detail, the Effects inspector, the Fans right panel; What's
+  new's notes scroll by design, #124, so they are left out) that scrolls or clips vertically
+  (`scrollHeight` over `clientHeight` by more than 1 px), and each panel it cuts off at the bottom.
+  A phone scrolls the document, so it is left out. `--mutate-overflow pane` plants a 40 px pane
+  that holds a 120 px panel and fails when a row does not report it. Settings has rows for the
+  states that make a panel taller (`settings-mic`, `settings-listen`, `settings-update`,
+  `settings-dev`, `settings-failed`).
 
 ### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
 

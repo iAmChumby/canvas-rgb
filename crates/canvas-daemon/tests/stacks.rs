@@ -269,29 +269,21 @@ async fn put_stack_draft_router(
         .expect("the router answers")
 }
 
-/// A temporary server for the preview WebSockets. It binds port 0: no test touches the
-/// daemon's own 9430.
-async fn serve(router: axum::Router) -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("the port is free");
-    let addr = listener.local_addr().expect("the address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-    addr
+/// A temporary in-memory server for the preview WebSockets: no port, no operating-system
+/// network stack. A loopback socket gave these tests the stack's own faults (a connect that timed
+/// out, a read that was reset) on a loaded PC (#194, `cause:timing-test`).
+fn serve(router: axum::Router) -> common::MemoryServer {
+    common::serve_in_memory(router)
 }
 
 /// Opens a preview WebSocket and returns it once the 101 is read. The token rides in the
 /// query, as a browser's must.
 async fn open_preview_socket(
-    addr: std::net::SocketAddr,
+    server: &common::MemoryServer,
     extra_query: &str,
-) -> tokio::net::TcpStream {
+) -> tokio::io::DuplexStream {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(addr)
-        .await
-        .expect("the socket opens");
+    let mut stream = server.connect();
     let request = format!(
         "GET {}?token={TOKEN}{extra_query} HTTP/1.1\r\nHost: 127.0.0.1:9430\r\nConnection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n",
         routes::PREVIEW
@@ -315,7 +307,7 @@ async fn open_preview_socket(
 }
 
 /// Reads one server binary message (the server's frames are unmasked).
-async fn read_binary_message(stream: &mut tokio::net::TcpStream) -> Vec<u8> {
+async fn read_binary_message(stream: &mut tokio::io::DuplexStream) -> Vec<u8> {
     use tokio::io::AsyncReadExt;
     let mut header = [0u8; 2];
     stream
@@ -2500,8 +2492,8 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
     );
 
     // `?stack=1` streams the preview engine; the plain socket still streams the running effect.
-    let addr = serve(harness.router.clone()).await;
-    let mut stack_socket = open_preview_socket(addr, "&stack=1").await;
+    let server = serve(harness.router.clone());
+    let mut stack_socket = open_preview_socket(&server, "&stack=1").await;
     let stack_sink = preview_sink(&harness.preview_engine).await;
     submit_frame(&stack_sink, &[1, 2, 3, 4, 5, 6]);
     let frame = tokio::time::timeout(Duration::from_secs(5), read_binary_message(&mut stack_socket))
@@ -2513,7 +2505,7 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
         "the stack socket did not touch the main engine"
     );
 
-    let mut main_socket = open_preview_socket(addr, "").await;
+    let mut main_socket = open_preview_socket(&server, "").await;
     let main_sink = preview_sink(&harness.engine).await;
     submit_frame(&main_sink, &[9, 9, 9, 8, 8, 8]);
     let frame = tokio::time::timeout(Duration::from_secs(5), read_binary_message(&mut main_socket))
@@ -4432,7 +4424,7 @@ async fn a_stale_pages_stop_and_delete_end_nothing() {
 }
 
 /// Reads one server frame: its opcode and payload (the server's frames are unmasked).
-async fn read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
+async fn read_frame(stream: &mut tokio::io::DuplexStream) -> (u8, Vec<u8>) {
     use tokio::io::AsyncReadExt;
     let mut header = [0u8; 2];
     stream
@@ -4462,14 +4454,14 @@ async fn read_frame(stream: &mut tokio::net::TcpStream) -> (u8, Vec<u8>) {
 #[tokio::test]
 async fn a_second_stack_preview_socket_is_refused_with_a_reason() {
     let harness = build("r3-one-socket");
-    let addr = serve(harness.router.clone()).await;
+    let server = serve(harness.router.clone());
 
     // The first stack socket takes the preview engine's sink.
-    let mut first = open_preview_socket(addr, "&stack=1").await;
+    let mut first = open_preview_socket(&server, "&stack=1").await;
     let sink = preview_sink(&harness.preview_engine).await;
 
     // The second is closed at once, with a reason the page can show, and takes nothing.
-    let mut second = open_preview_socket(addr, "&stack=1").await;
+    let mut second = open_preview_socket(&server, "&stack=1").await;
     let (opcode, payload) = tokio::time::timeout(Duration::from_secs(10), read_frame(&mut second))
         .await
         .expect("the second socket is answered, not left hanging");
