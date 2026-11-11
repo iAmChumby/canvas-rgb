@@ -2721,19 +2721,36 @@ button.chip:hover {
   }
 }
 
-/* A short window (the content box under 700 px): the inspector's rows tighten, so the head,
-   the presets and the properties all stand in the window (R5). */
-@container page (max-height: 700px) {
-  .rd-effects .rd-eff-inspector {
-    gap: var(--s2);
-  }
+/* A short desktop window (the page container under 720 px: 1024x768 at 673 px, not 1280x860 at
+   765 px, measured on the page container, #294's rule): the inspector's rhythm tightens, so the
+   head, the presets and the properties all stand in the window (#299). A phone is left out (R1):
+   its document scrolls. */
+@media (min-width: 721px) {
+  @container page (max-height: 720px) {
+    .rd-effects .rd-eff-inspector {
+      gap: var(--s2);
+    }
 
-  .rd-effects .rd-eff-inspector .panel {
-    padding: var(--s2);
-  }
+    .rd-effects .rd-eff-inspector .panel {
+      padding: var(--s2);
+    }
 
-  .rd-effects .rd-eff-inspector .prop-item {
-    min-height: 36px;
+    .rd-effects .rd-eff-inspector .panel-head {
+      margin-bottom: var(--s2);
+    }
+
+    .rd-effects .rd-eff-inspector .prop-item {
+      min-height: 36px;
+      padding: 0;
+    }
+
+    .rd-effects .preset-line {
+      margin-top: var(--s2);
+    }
+
+    .rd-effects .preset-note {
+      margin-top: 0;
+    }
   }
 }
 
@@ -5049,6 +5066,52 @@ button.chip:hover {
 .rd-settings .rd-settings-grid .panel-head {
   display: flex;
   align-items: baseline;
+}
+
+/* The fans editor in a short desktop window (the page container under 800 px: 1280x860 at
+   765 px and 1024x768 at 673 px, not 1440x900 at 805 px, measured on the page container):
+   the pane clears the window with the last point row whole (#299, the same rule as #294's
+   Settings block). The panel's inset, its head's gap and the field rows tighten and the
+   chart's shape does, through the `aspect` prop the editor passes at the same heights. A phone is left out (R1): its document scrolls. */
+@media (min-width: 721px) {
+  @container page (max-height: 800px) {
+    .rd-fans .rd-fans-right > .panel {
+      padding: var(--s3);
+    }
+
+    .rd-fans .rd-fans-right > .panel > .panel-head {
+      margin-bottom: var(--s2);
+    }
+
+    .rd-fans .rd-fans-right .field {
+      min-height: 40px;
+      padding: var(--s1) 0;
+    }
+
+    .rd-fans .curve-rows {
+      gap: var(--s1);
+    }
+  }
+
+  /* Shorter still (1024x768 at 673 px): the inset, the head's gap and the field rows tighten
+     further and the floor note hugs its text, so the panel clears the window (#299). */
+  @container page (max-height: 720px) {
+    .rd-fans .rd-fans-right > .panel {
+      padding: var(--s2);
+    }
+
+    .rd-fans .rd-fans-right > .panel > .panel-head {
+      margin-bottom: var(--s1);
+    }
+
+    .rd-fans .rd-fans-right .field {
+      min-height: 36px;
+    }
+
+    .rd-fans .rule.fan-floor-note {
+      padding: var(--s1) var(--s2);
+    }
+  }
 }
 
 /* A short desktop window (page content 720 px and under: 1024x768 at 673 px, not 1280x860 at
