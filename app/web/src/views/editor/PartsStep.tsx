@@ -8,8 +8,7 @@ import { StepFrame } from "@/views/editor/OnboardStep";
 import { missingParts } from "@/views/editor/HardwareLine";
 import type { Sel } from "@/views/editor/parts";
 import { allRuns, placementsOfRun, setupZones, shapeForKind, placeForPart } from "@/views/editor/setup";
-import { api } from "@/lib/endpoints";
-import { patchSnap, refreshStatus } from "@/lib/store";
+import { rescanForDevices, refreshStatus } from "@/lib/store";
 import type { LengthUnit } from "@/lib/zones";
 import s from "@/views/editor/onboarding.module.css";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -58,6 +57,7 @@ export function PartsStep({
 }) {
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState<string | null>(null);
+  const [failure, setFailure] = useState<string | null>(null);
   const missing = missingParts(layout, devices);
   const lit = layout.zones.length;
   const dark = (layout.landmarks ?? []).filter((l) => l.kind !== "case").length;
@@ -102,12 +102,14 @@ export function PartsStep({
 
   const rescan = async () => {
     setBusy(true);
+    setFailure(null);
     try {
-      const res = await api.rescanDevices();
-      patchSnap({ devices: res.devices });
+      // The store keeps the list and its total in step; this request's own failure (the daemon says
+      // 503 when OpenRGB did not answer) is shown below, not swallowed.
+      const outcome = await rescanForDevices();
+      // A newer rescan took over: its outcome is the one to show, not an old error.
+      if (outcome !== undefined) setFailure(outcome);
       await refreshStatus();
-    } catch {
-      // Asked again on the next press.
     } finally {
       setBusy(false);
     }
@@ -161,6 +163,7 @@ export function PartsStep({
           )}
         </div>
         {note && <p className={s.hint}>{note}</p>}
+        {failure && !busy && <p className="error-line">Rescan failed: {failure}</p>}
       </div>
     </StepFrame>
   );

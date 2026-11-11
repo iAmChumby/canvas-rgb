@@ -258,6 +258,13 @@ impl canvas_adapters::resume::ResumeBehavior for FakeAdapter {
     }
 }
 
+impl canvas_adapters::frame_lane::FrameLane for FakeAdapter {
+    fn frame_lane(&self) -> Option<canvas_adapters::openrgb::OpenRgbAdapter> {
+        // A test fake: it has no OpenRGB link, so its frames go through the adapter.
+        None
+    }
+}
+
 #[async_trait::async_trait]
 impl DeviceAdapter for FakeAdapter {
     fn name(&self) -> &'static str {

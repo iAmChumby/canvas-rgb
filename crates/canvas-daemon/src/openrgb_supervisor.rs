@@ -269,6 +269,46 @@ fn device_key(devices: &[DeviceInfo]) -> Vec<(String, bool, Vec<u32>)> {
     key
 }
 
+/// How long a rescan may hold the adapter: about one reply timeout of the OpenRGB adapter (5 s).
+/// The handlers that take the adapter lock (a zone resize, the first run) wait for it, so a stalled
+/// OpenRGB delays them this long and no longer (#233). The frame writers do not wait: they write
+/// through the adapter's own link (`App::frame_lane`), so the lights keep moving. The adapter's own
+/// reply timeout ends a single stalled request; this ends a slow trickle of them.
+pub const RESCAN_BUDGET: Duration = Duration::from_secs(5);
+
+/// How long `GET /api/v1/devices?rescan=1` waits for the supervisor past the rescan's own budget:
+/// the supervisor may be partway through its own refresh when the request arrives. The editor
+/// gives the request `DEVICE_RESCAN_TIMEOUT_MS` (30 s, `app/web/src/lib/api.ts`), so the daemon
+/// answers first.
+pub const RESCAN_QUEUE_WAIT: Duration = Duration::from_secs(5);
+
+/// A rescan the owner asked for, sent to the supervisor (#233). The supervisor is the one task
+/// that reads devices and applies them, so a rescan takes the same path as every other list.
+#[derive(Debug)]
+pub struct Rescan {
+    /// How long the supervisor may hold the adapter for it.
+    pub budget: Duration,
+    /// The devices OpenRGB reported, already applied; or why it could not be done.
+    pub reply: tokio::sync::oneshot::Sender<Result<Vec<DeviceInfo>, String>>,
+}
+
+/// A rescan the owner asked for (#233): asks OpenRGB for its devices again and returns them.
+///
+/// On a live connection the list is read again (and a saved zone size a new device lacks is
+/// applied, as the 5 s refresh does). With no connection the adapter connects first, so a rescan
+/// is also a retry of the link. This reads what OpenRGB reports now; making OpenRGB look at the
+/// hardware again needs a `rescan` on the adapter trait, which lives in the spine.
+pub async fn rescan_devices(
+    adapter: &mut dyn DeviceAdapter,
+    zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
+) -> Result<Vec<DeviceInfo>, String> {
+    if adapter.is_connected() {
+        refresh_devices(adapter, zone_sizes).await
+    } else {
+        connect_and_prepare(adapter, zone_sizes).await
+    }
+}
+
 /// Re-reads the device list on a live connection. A saved zone size that the device doesn't
 /// have yet (a device that appeared since connect) is applied, then the list is read again.
 async fn refresh_devices(
@@ -346,42 +386,190 @@ pub async fn supervise(
     zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
     mut on_devices: impl FnMut(Vec<DeviceInfo>),
     mut on_link: impl FnMut(LinkState),
-    mut stop: tokio::sync::watch::Receiver<bool>,
+    stop: tokio::sync::watch::Receiver<bool>,
 ) {
+    supervise_with_rescans(
+        adapter,
+        zone_sizes,
+        move |devices| {
+            on_devices(devices);
+            std::future::ready(())
+        },
+        move |link| {
+            on_link(link);
+            std::future::ready(())
+        },
+        None,
+        stop,
+    )
+    .await;
+}
+
+/// Waits for the next rescan; never answers when there is no inbox or it closed.
+async fn next_rescan(inbox: &mut Option<tokio::sync::mpsc::Receiver<Rescan>>) -> Rescan {
+    if let Some(receiver) = inbox {
+        if let Some(rescan) = receiver.recv().await {
+            return rescan;
+        }
+        *inbox = None;
+    }
+    std::future::pending().await
+}
+
+/// Runs `work` for at most `budget` (no limit for `None`). A timeout is an error, and the flag says
+/// the work was cut off: its future was dropped mid-way, so it may have left a half-made state.
+async fn within<T>(
+    budget: Option<Duration>,
+    work: impl std::future::Future<Output = Result<T, String>>,
+) -> (Result<T, String>, bool) {
+    match budget {
+        None => (work.await, false),
+        Some(budget) => match tokio::time::timeout(budget, work).await {
+            Ok(result) => (result, false),
+            Err(_) => (Err("OpenRGB did not answer in time".to_string()), true),
+        },
+    }
+}
+
+/// Moves the rescans that already queued (and whose owner still waits) into `waiting`: they share
+/// the next attempt and its answer.
+fn take_queued(inbox: &mut Option<tokio::sync::mpsc::Receiver<Rescan>>, waiting: &mut Vec<Rescan>) {
+    if let Some(receiver) = inbox {
+        while let Ok(rescan) = receiver.try_recv() {
+            waiting.push(rescan);
+        }
+    }
+    // An owner that gave up needs no answer, and no attempt on its account.
+    waiting.retain(|rescan| !rescan.reply.is_closed());
+}
+
+/// Answers every waiting rescan with the same result.
+fn answer_all(waiting: &mut Vec<Rescan>, result: &Result<Vec<DeviceInfo>, String>) {
+    for rescan in waiting.drain(..) {
+        let _ = rescan.reply.send(result.clone());
+    }
+}
+
+/// The delay before the next attempt.
+///
+/// The backoff paces the automatic attempts. An attempt the owner asked for does not make the
+/// next automatic one wait longer: the backoff is not advanced for it, and the delay it waits is
+/// the one it already had.
+fn next_delay(backoff: &mut Backoff, from_rescan: bool) -> Duration {
+    if from_rescan {
+        backoff.current()
+    } else {
+        let (delay, next_backoff) = backoff.advanced();
+        *backoff = next_backoff;
+        delay
+    }
+}
+
+/// [`supervise`], with callbacks the supervisor awaits and the rescans the owner asks for (#233).
+///
+/// `on_devices` is awaited before the loop goes on, so the lists are applied in the order they
+/// were read; a rescan is answered after its list was applied. A rescan while the link is down
+/// ends the wait for the next attempt and tries to connect at once, within its budget; rescans
+/// that arrive meanwhile share that attempt and its answer. A rescan never advances the automatic
+/// backoff, and a rescan whose owner gave up starts nothing.
+pub async fn supervise_with_rescans<D, L>(
+    adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
+    zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
+    mut on_devices: impl FnMut(Vec<DeviceInfo>) -> D,
+    mut on_link: impl FnMut(LinkState) -> L,
+    mut rescans: Option<tokio::sync::mpsc::Receiver<Rescan>>,
+    mut stop: tokio::sync::watch::Receiver<bool>,
+) where
+    D: std::future::Future<Output = ()>,
+    L: std::future::Future<Output = ()>,
+{
     let mut backoff = Backoff::new();
+    // The rescans that ended the wait for the next attempt: that attempt answers them.
+    let mut waiting: Vec<Rescan> = Vec::new();
     loop {
         if *stop.borrow() {
             return;
         }
+        take_queued(&mut rescans, &mut waiting);
+        let from_rescan = !waiting.is_empty();
         // Every attempt is "connecting"; `Down` only follows a failure.
-        on_link(LinkState::Connecting);
+        on_link(LinkState::Connecting).await;
         let sizes = zone_sizes.read().await.clone();
-        let result = {
+        let (result, cut) = within(waiting.iter().map(|r| r.budget).max(), async {
             let mut guard = adapter.lock().await;
             connect_and_prepare(guard.as_mut(), &sizes).await
-        };
+        })
+        .await;
+        // The rescans that queued while the attempt ran share its answer: one attempt answers
+        // them all, and none of them waits for another's turn.
+        take_queued(&mut rescans, &mut waiting);
+        if cut {
+            // The attempt was dropped mid-way, possibly between the socket and the handshake: a
+            // link that says "connected" with no protocol version would be taken for a good one.
+            let _ = adapter.lock().await.disconnect().await;
+        }
         match result {
             Ok(devices) => {
                 tracing::info!(count = devices.len(), "connected to OpenRGB");
                 let mut last = device_key(&devices);
-                on_devices(devices);
+                on_devices(devices.clone()).await;
+                answer_all(&mut waiting, &Ok(devices));
                 backoff = backoff.reset();
                 // Wait for the connection to drop before trying again. Every 5 s, re-read the
                 // device list: OpenRGB may still be detecting when we connect (seen live: 0
                 // devices at connect, never refreshed), and devices can come and go.
+                //
+                // One interval for the whole connection: a stream of rescans must not push the
+                // link check and the refresh back by restarting a sleep each time.
+                let mut tick = tokio::time::interval(Duration::from_millis(500));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await;
                 let mut ticks = 0u32;
                 loop {
                     if *stop.borrow() {
                         return;
                     }
-                    tokio::time::sleep(Duration::from_millis(500)).await;
+                    tokio::select! {
+                        _ = tick.tick() => {}
+                        rescan = next_rescan(&mut rescans) => {
+                            // The owner gave up on it: do not hold the adapter for nobody.
+                            if rescan.reply.is_closed() {
+                                continue;
+                            }
+                            // The rescans that queued meanwhile share this attempt and its
+                            // answer: one discovery answers them all, and none of them waits for
+                            // another's turn (#233).
+                            let mut group = vec![rescan];
+                            let sizes = zone_sizes.read().await.clone();
+                            let (result, cut) = within(group.iter().map(|r| r.budget).max(), async {
+                                let mut guard = adapter.lock().await;
+                                rescan_devices(guard.as_mut(), &sizes).await
+                            })
+                            .await;
+                            // The rescans that queued while the attempt ran share its answer.
+                            take_queued(&mut rescans, &mut group);
+                            if cut {
+                                // The attempt was dropped mid-way: a saved zone size may have
+                                // been applied and the list not read again. The link is dropped,
+                                // as on the connect path, so the next attempt reads everything
+                                // again instead of trusting half-applied state.
+                                let _ = adapter.lock().await.disconnect().await;
+                            }
+                            if let Ok(devices) = &result {
+                                last = device_key(devices);
+                                on_devices(devices.clone()).await;
+                            }
+                            answer_all(&mut group, &result);
+                            continue;
+                        }
+                    }
                     let connected = {
                         let guard = adapter.lock().await;
                         guard.is_connected()
                     };
                     if !connected {
                         tracing::info!("OpenRGB went away; reconnecting");
-                        on_link(LinkState::Connecting);
+                        on_link(LinkState::Connecting).await;
                         break;
                     }
                     ticks += 1;
@@ -396,7 +584,7 @@ pub async fn supervise(
                         Ok(devices) if device_key(&devices) != last => {
                             tracing::info!(count = devices.len(), "the OpenRGB device list changed");
                             last = device_key(&devices);
-                            on_devices(devices);
+                            on_devices(devices).await;
                         }
                         Ok(_) => {}
                         Err(e) => tracing::debug!(error = %e, "could not re-read the OpenRGB devices"),
@@ -405,12 +593,26 @@ pub async fn supervise(
             }
             Err(e) => {
                 tracing::debug!(error = %e, "OpenRGB is not reachable yet");
-                on_link(LinkState::Down);
-                let (delay, next_backoff) = backoff.advanced();
-                backoff = next_backoff;
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    _ = stop.changed() => return,
+                answer_all(&mut waiting, &Err(e));
+                on_link(LinkState::Down).await;
+                // The backoff paces the automatic attempts: an attempt the owner asked for does
+                // not make the next automatic one wait longer.
+                let delay = next_delay(&mut backoff, from_rescan);
+                let pause = tokio::time::sleep(delay);
+                tokio::pin!(pause);
+                loop {
+                    tokio::select! {
+                        () = &mut pause => break,
+                        _ = stop.changed() => return,
+                        rescan = next_rescan(&mut rescans) => {
+                            // An owner that gave up does not cut the wait short.
+                            if rescan.reply.is_closed() {
+                                continue;
+                            }
+                            waiting.push(rescan);
+                            break;
+                        }
+                    }
                 }
             }
         }
@@ -434,6 +636,18 @@ mod tests {
         assert_eq!(seen[1], Duration::from_millis(500));
         assert_eq!(*seen.last().unwrap(), BACKOFF_MAX);
         assert_eq!(backoff.reset().current(), Duration::from_millis(250));
+    }
+
+    #[test]
+    fn a_rescan_does_not_advance_the_automatic_backoff() {
+        let mut backoff = Backoff::new();
+        // The automatic attempts back off: 500 ms, then 1 s.
+        assert_eq!(next_delay(&mut backoff, false), Duration::from_millis(500));
+        assert_eq!(next_delay(&mut backoff, false), Duration::from_millis(1000));
+        // An attempt the owner asked for waits the delay the backoff already had, and does not
+        // make the next automatic attempt wait longer.
+        assert_eq!(next_delay(&mut backoff, true), Duration::from_millis(1000));
+        assert_eq!(next_delay(&mut backoff, false), Duration::from_millis(2000));
     }
 
     #[test]

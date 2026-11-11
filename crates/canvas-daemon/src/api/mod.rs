@@ -231,6 +231,29 @@ impl axum::response::IntoResponse for ApiFailure {
 /// The result type every handler returns.
 pub type ApiResult<T> = Result<T, ApiFailure>;
 
+/// Reads the boolean query parameter `key` from the raw query: `true` or `1` is on; `false`, `0` or
+/// no `key` is off. Any other value, or `key` given twice, is a validation error in the API's JSON
+/// shape (a typed extractor would answer with axum's plain-text 400). One rule for every flag
+/// (`?fresh=`, `?rescan=`), so a typo is an error and never a silent plain read.
+pub fn parse_flag(query: Option<&str>, key: &str) -> Result<bool, ApiFailure> {
+    let mut seen: Option<&str> = None;
+    for pair in query.unwrap_or("").split('&') {
+        let (name, value) = pair.split_once('=').unwrap_or((pair, ""));
+        if name != key {
+            continue;
+        }
+        if seen.is_some() {
+            return Err(ApiFailure::validation(format!("{key} is given more than once")));
+        }
+        seen = Some(value);
+    }
+    match seen {
+        None | Some("false") | Some("0") => Ok(false),
+        Some("true") | Some("1") => Ok(true),
+        Some(other) => Err(ApiFailure::validation(format!("{key} is {other}; use true, false, 1 or 0"))),
+    }
+}
+
 /// A request body, within `limit` bytes, or the API's own error shape.
 ///
 /// The body is read as bytes so an oversized one is answered with [`ApiFailure`] and not with

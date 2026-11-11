@@ -255,10 +255,16 @@ export async function refreshFans(n?: number): Promise<void> {
   }
 }
 
-export async function refreshDevices(n?: number): Promise<void> {
+/**
+ * Reads the device list. `rescan` asks the daemon to read OpenRGB's device list again first
+ * (`?rescan=1`, issue #233) instead of answering from the list it holds. The daemon re-reads what
+ * OpenRGB reports; it does not make OpenRGB look at the hardware again (a real re-detect is
+ * issue #290).
+ */
+export async function refreshDevices(n?: number, opts?: { rescan?: boolean }): Promise<void> {
   const req = n ?? beginRequest("devices");
   try {
-    const devices = (await api.devices()).devices;
+    const devices = (await (opts?.rescan ? api.rescanDevices() : api.devices())).devices;
     if (!isNewest("devices", req)) return;
     markAnswered("devices", req);
     patchSnap({ devices, devicesError: null, devicesTotal: devices.length });
@@ -267,6 +273,17 @@ export async function refreshDevices(n?: number): Promise<void> {
     markAnswered("devices", req);
     patchSnap({ devicesError: messageOf(e) });
   }
+}
+
+/**
+ * Rescans the devices and says how THIS request went: its error text, `null` when it worked, or
+ * `undefined` when a newer request answered first. The snapshot then holds the newer outcome, and
+ * a `devicesError` left by an earlier request is not this one's to report.
+ */
+export async function rescanForDevices(): Promise<string | null | undefined> {
+  const n = beginRequest("devices");
+  await refreshDevices(n, { rescan: true });
+  return isNewest("devices", n) ? getSnap().devicesError : undefined;
 }
 
 export async function refreshEffects(n?: number): Promise<void> {
@@ -346,7 +363,9 @@ export async function refreshDisplays(n?: number): Promise<void> {
 /** Asks for a load again, the way the Try again button does. */
 export const retryStatus = (): Promise<void> => retryArea("status", refreshStatus);
 export const retryFans = (): Promise<void> => retryArea("fans", refreshFans);
-export const retryDevices = (): Promise<void> => retryArea("devices", refreshDevices);
+/** Try again on the Devices page: a rescan, with the placeholder while it runs (issue #230). */
+export const retryDevices = (): Promise<void> =>
+  retryArea("devices", (n) => refreshDevices(n, { rescan: true }));
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
 export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);

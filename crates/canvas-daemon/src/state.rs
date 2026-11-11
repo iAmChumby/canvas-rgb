@@ -4,6 +4,7 @@
 //! tasks share: the on-disk store, the engine handle, the OpenRGB adapter, the device
 //! list, the preview subscribers and the pipe client.
 
+use canvas_adapters::frame_lane::FrameLane;
 use canvas_adapters::resume::ResumeBehavior;
 use canvas_proto::api::{LinkState, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo};
@@ -53,8 +54,22 @@ pub struct App {
     /// The OpenRGB adapter. Behind an async mutex: the SDK client is not `Sync` on its
     /// own, and the API handlers await it.
     pub adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
+    /// The OpenRGB link the frame writers use, when the adapter has one to share (the daemon's
+    /// composite does, and the OpenRGB adapter itself). A frame through it does not wait on the
+    /// adapter lock, which the supervisor holds while it waits on OpenRGB for a reply (#233).
+    /// `None`: the adapter has no OpenRGB link, and every frame goes through the adapter.
+    pub frame_lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
     /// The devices as last discovered.
     pub devices: tokio::sync::RwLock<Vec<DeviceInfo>>,
+    /// The frame writer of every driven device, keyed by device (see [`crate::device_sync`]).
+    pub device_sinks: crate::device_sync::DeviceSinks,
+    /// Where a rescan the owner asked for goes: to the supervisor, the one task that writes the
+    /// device list (#233). The supervisor takes the other end with [`App::take_rescan_inbox`].
+    pub rescan_requests: tokio::sync::mpsc::Sender<crate::openrgb_supervisor::Rescan>,
+    rescan_inbox: Mutex<Option<tokio::sync::mpsc::Receiver<crate::openrgb_supervisor::Rescan>>>,
+    /// How long a rescan may hold the adapter before the supervisor gives up on it. A field so a
+    /// test can shorten it; the daemon keeps [`crate::openrgb_supervisor::RESCAN_BUDGET`].
+    pub rescan_budget: std::time::Duration,
     /// Zone sizes by device fingerprint (the `zones.json` contents).
     ///
     /// Behind an `Arc` so the OpenRGB supervisor can share it with the API handlers.
@@ -156,8 +171,9 @@ impl App {
     ///
     /// The daemon uses this too, so the tests and the daemon build the same state.
     ///
-    /// The adapter must say what it does on a resume (`ResumeBehavior`): an adapter that does
-    /// not cannot be handed to the app, so it does not compile.
+    /// The adapter must say what it does on a resume (`ResumeBehavior`) and whether it has a
+    /// frame lane (`FrameLane`): an adapter that does not cannot be handed to the app, so it
+    /// does not compile.
     pub fn new<A>(
         store: crate::storage::Store,
         engine: Arc<dyn Engine>,
@@ -167,7 +183,7 @@ impl App {
         quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     ) -> Self
     where
-        A: DeviceAdapter + ResumeBehavior + 'static,
+        A: DeviceAdapter + ResumeBehavior + FrameLane + 'static,
     {
         Self::with_displays(
             store,
@@ -193,7 +209,7 @@ impl App {
         display_adapter: Box<D>,
     ) -> Self
     where
-        A: DeviceAdapter + ResumeBehavior + 'static,
+        A: DeviceAdapter + ResumeBehavior + FrameLane + 'static,
         D: canvas_proto::traits::NumericDisplayAdapter + ResumeBehavior + 'static,
     {
         let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
@@ -213,7 +229,15 @@ impl App {
         let inputs = Arc::new(crate::capture::DaemonInputs::production());
         inputs.set_requested(audio_source);
         let home = store.home.clone();
+        let (rescan_requests, rescan_inbox) = tokio::sync::mpsc::channel(4);
+        // The frame lane comes from the adapter itself: the OpenRGB adapter and the composite
+        // share one link, and the frame writers write through it (#233).
+        let frame_lane = adapter.frame_lane();
         Self {
+            device_sinks: Default::default(),
+            rescan_requests,
+            rescan_inbox: Mutex::new(Some(rescan_inbox)),
+            rescan_budget: crate::openrgb_supervisor::RESCAN_BUDGET,
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::with_home(Vec::new(), home.clone()),
             home,
@@ -229,6 +253,7 @@ impl App {
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
+            frame_lane,
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
             preview_subs: PreviewRegistry::default(),
@@ -277,6 +302,12 @@ impl App {
         self.peripherals =
             crate::peripherals::PeripheralHub::with_home_and_idle(peripherals, self.home.clone(), idle);
         self
+    }
+
+    /// The receiving end of the rescan requests. The supervisor takes it once; a second call
+    /// answers `None`.
+    pub fn take_rescan_inbox(&self) -> Option<tokio::sync::mpsc::Receiver<crate::openrgb_supervisor::Rescan>> {
+        self.rescan_inbox.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
     /// The active layout, if any.

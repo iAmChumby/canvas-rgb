@@ -65,6 +65,12 @@ impl CompositeAdapter {
         id.0.starts_with(ROYUAN_PREFIX)
     }
 
+    /// Whether the composite hands this device's frames to OpenRGB (every device it does not
+    /// serve natively).
+    pub fn is_openrgb_device(id: &DeviceId) -> bool {
+        !Self::is_royuan(id)
+    }
+
     /// Opens the keyboard if it is closed and the retry window has passed.
     async fn ensure_royuan(&mut self) -> Result<(), AdapterError> {
         if !self.keyboard_enabled {
@@ -179,5 +185,13 @@ impl canvas_adapters::resume::ResumeBehavior for CompositeAdapter {
         // The composite drives two adapters that hold a mode: the OpenRGB controllers and the
         // ROYUAN keyboard. Both set their mode again after a resume (#5).
         canvas_adapters::resume::OnResume::SetsModeAgain
+    }
+}
+
+impl canvas_adapters::frame_lane::FrameLane for CompositeAdapter {
+    fn frame_lane(&self) -> Option<OpenRgbAdapter> {
+        // The OpenRGB link, shared with the adapter: the frame writers write on it and never
+        // wait for the adapter lock the supervisor holds while it waits on OpenRGB (#233).
+        Some(self.openrgb.clone())
     }
 }

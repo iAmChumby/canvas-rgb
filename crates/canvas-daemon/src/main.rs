@@ -189,6 +189,9 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
+    // The frame writers write to OpenRGB through the adapter's own link, so a discovery that is
+    // waiting on a reply does not hold the lights back (#233). The app takes the lane from the
+    // adapter it is given.
     let mut app_inner = if use_real_display {
         App::with_displays(
             store,
@@ -515,66 +518,10 @@ fn load_zone_sizes() -> std::collections::BTreeMap<String, std::collections::BTr
     }
 }
 
-/// Gives every connected device a frame sink in the engine: a bounded(1) channel into a
-/// writer task that sends each frame to the adapter. Devices that went away lose theirs.
-/// Without this the engine has no sinks, stays parked, and nothing reaches the lights.
-async fn sync_device_sinks(
-    app: &Arc<App>,
-    devices: &[canvas_proto::DeviceInfo],
-    sinks: &tokio::sync::Mutex<std::collections::HashMap<canvas_proto::DeviceId, tokio::task::JoinHandle<()>>>,
-) {
-    let mut sinks = sinks.lock().await;
-    let live: std::collections::HashSet<_> = devices
-        .iter()
-        .filter(|d| d.connected)
-        .filter(|d| {
-            let driven = canvas_daemon::is_driven(&d.id);
-            if !driven && !sinks.contains_key(&d.id) {
-                tracing::info!(device = %d.id, "this device is never driven; it gets no frames");
-            }
-            driven
-        })
-        .map(|d| d.id.clone())
-        .collect();
-    sinks.retain(|id, writer| {
-        if live.contains(id) {
-            return true;
-        }
-        app.engine.remove_sink(id);
-        writer.abort();
-        tracing::info!(device = %id, "device gone; its frame sink is removed");
-        false
-    });
-    for id in live {
-        if sinks.contains_key(&id) {
-            continue;
-        }
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
-        let adapter = app.adapter.clone();
-        let writer_id = id.clone();
-        // The writer task records the time of every frame that went out (#81). It lives in the
-        // library, so a test can run it and prove that it records.
-        let writer = tokio::spawn(canvas_daemon::writer::writer_loop(
-            adapter,
-            writer_id,
-            rx,
-            Arc::clone(&app.last_frame),
-        ));
-        app.engine.add_sink(id.clone(), Arc::new(canvas_daemon::state::DeviceSink::with_gate(id.clone(), tx, app.identify.clone())));
-        tracing::info!(device = %id, "device frame sink added");
-        sinks.insert(id, writer);
-    }
-}
-
 /// Keeps the OpenRGB connection alive and re-applies the zone sizes.
 fn spawn_openrgb_supervisor(app: Arc<App>, fakes: bool) {
-    let adapter = app.adapter.clone();
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     let app_for_supervisor = app.clone();
-    let zones = app_for_supervisor.zones.clone();
-    // Devices that have a frame sink registered with the engine.
-    let sinks: Arc<tokio::sync::Mutex<std::collections::HashMap<canvas_proto::DeviceId, tokio::task::JoinHandle<()>>>> =
-        Arc::default();
     tokio::spawn(async move {
         // OpenRGB is starting: the UI shows "waking up", not "broken".
         *app_for_supervisor.openrgb.write().await = LinkState::Connecting;
@@ -597,71 +544,9 @@ fn spawn_openrgb_supervisor(app: Arc<App>, fakes: bool) {
         }
         let _restarts = canvas_daemon::openrgb_supervisor::RestartBudget::default();
 
-        canvas_daemon::openrgb_supervisor::supervise(
-            adapter,
-            // The zone sizes are shared with the app, so a resize shows up here.
-            zones,
-            {
-                let app = app_for_supervisor.clone();
-                let sinks = sinks.clone();
-                move |devices| {
-                    let app = app.clone();
-                    let sinks = sinks.clone();
-                    // The device list and the layout are updated on the runtime, because
-                    // the callback is not async.
-                    tokio::spawn(async move {
-                        {
-                            let mut list = app.devices.write().await;
-                            *list = devices.clone();
-                        }
-                        {
-                            let mut state = app.openrgb.write().await;
-                            *state = LinkState::Connected;
-                        }
-                        // After the first run, a zone that appears (a late device, a
-                        // header that got its LEDs) is placed instead of staying black.
-                        {
-                            let mut store = app.store.write().await;
-                            if store.config.first_run_done {
-                                let added = store.active_layout_mut().map_or(0, |layout| {
-                                    canvas_daemon::first_run::place_missing_zones(layout, &devices)
-                                });
-                                if added > 0 {
-                                    tracing::info!(added, "new zones were placed on the canvas");
-                                    if let Err(e) = store.save_layouts() {
-                                        tracing::warn!(error = %e, "could not save the layouts");
-                                    }
-                                }
-                            }
-                        }
-                        // The engine needs the new devices and the zone sizes.
-                        if let Some(layout) = app.active_layout().await {
-                            let device_list = app.devices.read().await.clone();
-                            app.set_layout(&layout, &device_list);
-                            app.stacks.publish_areas(&layout, &device_list);
-                        }
-                        sync_device_sinks(&app, &devices, &sinks).await;
-                        // The first run waits for the devices.
-                        canvas_daemon::first_run::maybe_run(&app).await;
-                    });
-                }
-            },
-            {
-                let app = app_for_supervisor.clone();
-                // The link state follows every attempt. `Connected` is set with the devices.
-                move |link| {
-                    if link == LinkState::Connected {
-                        return;
-                    }
-                    let app = app.clone();
-                    tokio::spawn(async move {
-                        *app.openrgb.write().await = link;
-                    });
-                }
-            },
-            stop_rx,
-        )
-        .await;
+        // Every device list, the refresh and the owner's rescan alike, goes through the same
+        // function (`device_sync::apply_devices`).
+        canvas_daemon::device_sync::supervise_app(app_for_supervisor, stop_rx).await;
     });
     // The supervisor stops when the daemon quits.
     tokio::spawn(async move {

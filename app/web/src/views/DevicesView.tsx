@@ -23,7 +23,7 @@ import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { refreshDevices, retryDevices, useSnap } from "@/lib/store";
+import { retryDevices, useSnap } from "@/lib/store";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
 import type { WhiteBalance } from "@/proto/WhiteBalance";
@@ -446,7 +446,10 @@ export function DevicesView() {
               ? "error"
               : "loading"
             : devices.length === 0
-              ? "empty"
+              ? // A rescan is running: the empty answer is the old one, so the frame waits.
+                retrying
+                ? "loading"
+                : "empty"
               : "ready"
         }
         shape={
@@ -470,7 +473,7 @@ export function DevicesView() {
               icon={<Memory size={22} />}
               title="No device found"
               action={
-                <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                <Button size="sm" icon={<ArrowClockwise size={16} />} busy={retrying} onClick={() => void retryDevices()}>
                   Try again
                 </Button>
               }
@@ -568,7 +571,7 @@ export function DevicesView() {
                       icon={<Memory size={20} />}
                       title={`${d.name} reports no zones`}
                       action={
-                        <Button size="sm" icon={<ArrowClockwise size={16} />} onClick={() => void refreshDevices()}>
+                        <Button size="sm" icon={<ArrowClockwise size={16} />} busy={retrying} onClick={() => void retryDevices()}>
                           Try again
                         </Button>
                       }

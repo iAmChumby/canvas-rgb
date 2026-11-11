@@ -33,22 +33,7 @@ pub async fn list_peripherals(State(app): State<Arc<App>>) -> Json<PeripheralsRe
 /// twice, is a validation error in the API's JSON shape (a typed extractor would answer with
 /// axum's plain-text 400).
 fn parse_fresh(query: Option<&str>) -> Result<bool, ApiFailure> {
-    let mut seen: Option<&str> = None;
-    for pair in query.unwrap_or("").split('&') {
-        let (key, value) = pair.split_once('=').unwrap_or((pair, ""));
-        if key != "fresh" {
-            continue;
-        }
-        if seen.is_some() {
-            return Err(ApiFailure::validation("fresh is given more than once"));
-        }
-        seen = Some(value);
-    }
-    match seen {
-        None | Some("false") | Some("0") => Ok(false),
-        Some("true") | Some("1") => Ok(true),
-        Some(other) => Err(ApiFailure::validation(format!("fresh is {other}; use true, false, 1 or 0"))),
-    }
+    crate::api::parse_flag(query, "fresh")
 }
 
 /// `GET /api/v1/peripherals/{id}`: what the device is, what it has and what it holds now.
