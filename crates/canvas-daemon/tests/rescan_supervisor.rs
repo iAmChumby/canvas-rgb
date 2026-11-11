@@ -29,6 +29,8 @@ struct Counts {
     /// How many times the supervisor asked whether the link is up: once per rescan and once
     /// per tick.
     checks: AtomicUsize,
+    /// How many times the supervisor dropped the link.
+    disconnects: AtomicUsize,
     connected: AtomicBool,
 }
 
@@ -39,6 +41,10 @@ impl Counts {
 
     fn discoveries(&self) -> usize {
         self.discoveries.load(Ordering::SeqCst)
+    }
+
+    fn disconnects(&self) -> usize {
+        self.disconnects.load(Ordering::SeqCst)
     }
 }
 
@@ -149,6 +155,7 @@ impl DeviceAdapter for TestAdapter {
     }
 
     async fn disconnect(&mut self) -> Result<(), AdapterError> {
+        self.counts.disconnects.fetch_add(1, Ordering::SeqCst);
         self.counts.connected.store(false, Ordering::SeqCst);
         Ok(())
     }
@@ -425,4 +432,39 @@ async fn a_stream_of_rescans_does_not_starve_the_link_tick() {
     })
     .await;
     streaming.abort();
+}
+
+/// A rescan that is cut in the middle drops the link (#233, review).
+///
+/// The budget ran out while the rescan was working: a saved zone size may have been applied
+/// and the list not read again. The link is dropped, as on the connect path, so the next
+/// attempt reads everything again instead of trusting half-applied state.
+#[tokio::test]
+async fn a_rescan_that_is_cut_in_the_middle_drops_the_link() {
+    let counts = Arc::new(Counts::default());
+    let discover_gate = Gate::new(true);
+    let adapter = TestAdapter {
+        devices: vec![TestAdapter::stick("one")],
+        counts: Arc::clone(&counts),
+        connect: Connect::Works,
+        first_gate: None,
+        gate: None,
+        discover_gate: Some(Arc::clone(&discover_gate)),
+    };
+    let supervisor = supervisor(adapter);
+
+    // The first attempt reads the devices.
+    until("the first discovery", || counts.discoveries() == 1).await;
+
+    // The next discovery waits: the rescan's budget runs out while it waits.
+    discover_gate.shut();
+    let rescan = rescan(&supervisor, Duration::from_millis(100)).await;
+
+    // The link is dropped, so the next attempt reads everything again.
+    until("the link was dropped", || counts.disconnects() == 1).await;
+    let answered = tokio::time::timeout(Duration::from_secs(30), rescan)
+        .await
+        .expect("the rescan is answered")
+        .expect("the answer came");
+    assert!(answered.is_err(), "the cut rescan answered with a list: {answered:?}");
 }
