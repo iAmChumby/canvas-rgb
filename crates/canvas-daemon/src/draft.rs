@@ -556,7 +556,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             Some(slot) => slot.prior.clone(),
             None => app.active_layout().await.and_then(|layout| layout.effect),
         };
-        let Ok(acquired) = app.preview_slots.clone().try_acquire_owned() else {
+        let Ok(acquired) = app.draft_slots.clone().try_acquire_owned() else {
             return Err(PutError::Busy);
         };
         slot = acquired;
@@ -718,7 +718,7 @@ pub async fn put_stack(
             Some(slot) => slot.prior.clone(),
             None => app.active_layout().await.and_then(|layout| layout.effect),
         };
-        let Ok(acquired) = app.preview_slots.clone().try_acquire_owned() else {
+        let Ok(acquired) = app.draft_slots.clone().try_acquire_owned() else {
             return Err(PutError::Busy);
         };
         slot = acquired;

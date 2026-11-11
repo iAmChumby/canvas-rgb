@@ -2550,10 +2550,15 @@ async fn a_preview_put_is_superseded_by_a_newer_epoch_or_sequence_and_delete_cle
     assert_eq!(body["applied"], false);
     assert_eq!(body["epoch"], page_b);
 
-    // A preview shares the two render slots with `POST /effects/preview`.
+    // A preview shares the two render slots with `POST /effects/preview`. A beat that starts no
+    // build (the same structure, values only) is never refused as busy (#102 review); a new
+    // structure, which would start a build, is.
     let first = harness.app.preview_slots.clone().try_acquire_owned().unwrap();
     let second = harness.app.preview_slots.clone().try_acquire_owned().unwrap();
-    let busy = put_preview(&harness, &preview, page_b, 2).await;
+    let same = put_preview(&harness, &preview, page_b, 2).await;
+    assert_eq!(same.status(), StatusCode::OK, "a values-only beat takes no render slot");
+    let other = stack("stack:Sup", vec![layer("l1", "solid"), layer("l2", "solid")]);
+    let busy = put_preview(&harness, &other, page_b, 3).await;
     assert_eq!(busy.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(
         busy.headers().get("retry-after").and_then(|v| v.to_str().ok()),
@@ -5023,7 +5028,7 @@ fn draft_id_of(html: &str) -> String {
 }
 
 #[tokio::test]
-async fn a_distinct_draft_source_does_not_build_while_the_preview_slots_are_held() {
+async fn a_distinct_draft_source_does_not_build_while_the_draft_slots_are_held() {
     let mut gated = GatedUser::new();
     let harness = build_with_draft("r4-draft-bound", gated.builder());
     gated.forget_counts();

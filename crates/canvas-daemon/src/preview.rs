@@ -404,9 +404,9 @@ pub async fn put(
     epoch: &str,
     seq: u64,
 ) -> Result<StackPreviewResponse, PreviewError> {
-    let Ok(slot) = app.preview_slots.clone().try_acquire_owned() else {
-        return Err(PreviewError::Busy);
-    };
+    // The render slot is taken only when a new build starts (below): a beat that only changes
+    // values, or joins the build in flight, starts nothing and is never refused as busy.
+    let slot;
 
     // The one check a Save also runs, on the canonical stack (D95.4.4, D95.4.5): a layer written
     // by its display name is the id it becomes, so the HTML cap counts it, the name rule leaves
@@ -479,6 +479,10 @@ pub async fn put(
             return Ok(answer(app, true, epoch, seq, layers));
         }
         // A different structure, or the first open: this PUT's build owns the route.
+        let Ok(acquired) = app.preview_slots.clone().try_acquire_owned() else {
+            return Err(PreviewError::Busy);
+        };
+        slot = acquired;
         token = app.stack_preview.begin_build(stack, &structure, props.clone());
     }
 
