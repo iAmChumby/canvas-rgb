@@ -249,6 +249,9 @@ describe("the fan status slot", () => {
     fireEvent.click(await screen.findByRole("radio", { name: "Fixed %" }));
     await screen.findByLabelText("CPU fan duty");
     const slot = () => document.querySelector<HTMLElement>(".fan-status-busy") as HTMLElement;
+    // The editor shows Fixed at once (it keeps its own draft, #295), so the Fixed write is still
+    // out here: let it settle before the write this test holds back.
+    await waitFor(() => expect(slot().getAttribute("aria-busy")).toBeNull());
     const line = slot().parentElement;
     const real = api.patchFanHeader.bind(api);
     const gate = hold(undefined);

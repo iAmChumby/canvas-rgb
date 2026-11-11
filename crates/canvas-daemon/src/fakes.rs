@@ -476,10 +476,29 @@ pub fn fake_fans_status() -> FansStatus {
     }
 }
 
-/// An in-process fake of the service pipe: answers `Hello`, `FanStatus` and
-/// `OpenRgbState` from the fakes, and `Ok` for everything else. Never opens
+/// The fans config the fake service holds: the modes [`fake_fans_status`] reports, in the Default
+/// profile, so a hot-limit PUT in fakes mode keeps them (issue #295).
+pub fn fake_fans_file() -> canvas_proto::config::FansFile {
+    let mut config = canvas_proto::config::FansFile::default();
+    for header in fake_fans_status().headers {
+        config.profiles[0].headers.insert(header.id, header.mode);
+    }
+    config
+}
+
+/// An in-process fake of the service pipe: answers `Hello`, `FanStatus`, `OpenRgbState` and
+/// `GetFanConfig` from the fakes, and `Ok` for everything else. `SetHeaderMode` and `PutFanConfig`
+/// change the config it holds, as the real service changes its own. Never opens
 /// `\\.\pipe\canvas-rgb-svc`.
-pub struct FakePipeLink;
+pub struct FakePipeLink {
+    config: std::sync::Mutex<canvas_proto::config::FansFile>,
+}
+
+impl Default for FakePipeLink {
+    fn default() -> Self {
+        Self { config: std::sync::Mutex::new(fake_fans_file()) }
+    }
+}
 
 #[async_trait::async_trait]
 impl crate::pipe_client::PipeLink for FakePipeLink {
@@ -494,6 +513,21 @@ impl crate::pipe_client::PipeLink for FakePipeLink {
                 state: canvas_proto::pipe::OpenRgbServerState::Running,
                 port: fake_openrgb_port(),
             }),
+            PipeRequest::GetFanConfig => Ok(PipeResponse::FanConfig {
+                config: self.config.lock().unwrap().clone(),
+            }),
+            PipeRequest::SetHeaderMode { header, mode } => {
+                let mut config = self.config.lock().unwrap();
+                let active = config.active_profile.clone();
+                if let Some(profile) = config.profiles.iter_mut().find(|p| p.name == active) {
+                    profile.headers.insert(header.clone(), mode.clone());
+                }
+                Ok(PipeResponse::Ok)
+            }
+            PipeRequest::PutFanConfig { config } => {
+                *self.config.lock().unwrap() = config.clone();
+                Ok(PipeResponse::Ok)
+            }
             _ => Ok(PipeResponse::Ok),
         }
     }
@@ -713,7 +747,7 @@ mod tests {
     #[tokio::test]
     async fn the_fake_pipe_answers_without_touching_the_real_pipe() {
         use crate::pipe_client::PipeLink;
-        let link = FakePipeLink;
+        let link = FakePipeLink::default();
         let hello = link
             .exchange(&PipeRequest::Hello { protocol: 1, daemon_pid: 1 })
             .await
@@ -728,6 +762,48 @@ mod tests {
         match openrgb {
             PipeResponse::OpenRgb { port, .. } => assert_eq!(port, fake_openrgb_port()),
             other => panic!("expected openrgb state, got {other:?}"),
+        }
+    }
+
+    /// Issue #295: the fakes mode answers `GetFanConfig` from the config it holds, so a hot-limit
+    /// PUT in fakes mode starts from the modes the fake service already has and keeps them.
+    #[tokio::test]
+    async fn the_fake_pipe_holds_a_fans_config_the_whole_config_push_starts_from() {
+        use crate::pipe_client::PipeLink;
+        let link = FakePipeLink::default();
+        let curve = fake_fans_file().profiles[0].headers.get("cpu_fan").cloned();
+        assert!(matches!(curve, Some(canvas_proto::fans::FanMode::Curve { .. })), "the fake service starts with a curve: {curve:?}");
+
+        link.exchange(&PipeRequest::SetHeaderMode {
+            header: "cpu_fan".into(),
+            mode: canvas_proto::fans::FanMode::Fixed { percent: 55 },
+        })
+        .await
+        .expect("the fake pipe takes a header mode");
+        let mut next = match link.exchange(&PipeRequest::GetFanConfig).await.expect("the fake pipe answers its config") {
+            PipeResponse::FanConfig { config } => config,
+            other => panic!("expected a fan config, got {other:?}"),
+        };
+        assert_eq!(
+            next.profiles[0].headers.get("cpu_fan"),
+            Some(&canvas_proto::fans::FanMode::Fixed { percent: 55 }),
+            "the mode set through SetHeaderMode is in the config the fake service holds"
+        );
+
+        next.hot_limits.cpu_c = Some(70.0);
+        link.exchange(&PipeRequest::PutFanConfig { config: next.clone() })
+            .await
+            .expect("the fake pipe takes a whole config");
+        match link.exchange(&PipeRequest::GetFanConfig).await.expect("the fake pipe answers its config") {
+            PipeResponse::FanConfig { config } => {
+                assert_eq!(config.hot_limits.cpu_c, Some(70.0), "a whole-config push replaces the fake's config");
+                assert_eq!(
+                    config.profiles[0].headers.get("cpu_fan"),
+                    Some(&canvas_proto::fans::FanMode::Fixed { percent: 55 }),
+                    "the push kept the mode the fake service had"
+                );
+            }
+            other => panic!("expected a fan config, got {other:?}"),
         }
     }
 }

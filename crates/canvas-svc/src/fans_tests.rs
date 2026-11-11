@@ -2103,3 +2103,144 @@ fn an_edited_curve_keeps_the_ceiling_latch_until_the_hold_ends() {
     }
     assert_ne!(last, 255, "after 60 s below the ceiling the latch released: {last}");
 }
+
+// ---- Issue #225: fans.toml hot limits are validated on load ----
+
+fn write_fans_toml(dir: &TempDir, hot_limits: HotLimits) {
+    let file = FansFile { hot_limits, ..Default::default() };
+    store::save_fans(&paths::fans_path(dir.path()), &file).unwrap();
+}
+
+#[test]
+fn issue225_a_hand_edited_hot_limit_past_the_ceiling_loads_as_automatic() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    // A hand-edited file: cpu_c is past the ceiling gap, board_c is fine.
+    write_fans_toml(&dir, HotLimits { cpu_c: Some(95.0), gpu_c: None, board_c: Some(60.0) });
+    let loaded = store::load_fans(&paths::fans_path(dir.path())).unwrap().unwrap();
+    assert_eq!(loaded.hot_limits.cpu_c, Some(95.0), "the schema check alone keeps the bad value");
+
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = controller(&dir, &chip, &cpu, loaded, t0);
+    let (_, log) = crate::test_logs::captured(|| fans.correct_hot_limits());
+
+    let status = fans.status();
+    let cpu_row = status.hot.iter().find(|s| s.kind == HotKind::Cpu).unwrap();
+    assert!(!cpu_row.user_set, "an out-of-range cpu limit falls back to automatic: {cpu_row:?}");
+    assert_eq!(cpu_row.limit_c, cpu_row.auto_c);
+    let board_row = status.hot.iter().find(|s| s.kind == HotKind::Board).unwrap();
+    assert!(board_row.user_set && board_row.limit_c == 60.0, "the rest of the file still loads: {board_row:?}");
+    assert!(log.contains("WARN") && log.contains("95"), "a WARN names the value: {log}");
+}
+
+#[test]
+fn issue225_a_hand_edited_hot_limit_below_the_minimum_is_enforced_at_the_minimum() {
+    use canvas_proto::fans::HOT_LIMIT_MIN_C;
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    // 30 °C is under the 40 °C floor of the settable range. The runtime clamp has always
+    // enforced 40 for it; loading must not turn it into the (much hotter) automatic line.
+    write_fans_toml(&dir, HotLimits { cpu_c: Some(30.0), gpu_c: None, board_c: Some(30.0) });
+    let loaded = store::load_fans(&paths::fans_path(dir.path())).unwrap().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = controller(&dir, &chip, &cpu, loaded, t0);
+    fans.set_cpu_brand(Some("AMD Ryzen 7 7800X3D 8-Core Processor"));
+    let (_, log) = crate::test_logs::captured(|| fans.correct_hot_limits());
+
+    let status = fans.status();
+    for kind in [HotKind::Cpu, HotKind::Board] {
+        let row = status.hot.iter().find(|s| s.kind == kind).unwrap();
+        assert!(row.user_set, "{kind:?}: a below-minimum limit stays the user's: {row:?}");
+        assert_eq!(row.limit_c, HOT_LIMIT_MIN_C, "{kind:?}: enforced at the minimum, not automatic: {row:?}");
+        assert!(row.limit_c < row.auto_c, "{kind:?}: the minimum is stricter than automatic: {row:?}");
+    }
+    assert!(log.contains("WARN") && log.contains("30"), "a WARN names the value: {log}");
+}
+
+#[test]
+fn issue225_non_finite_hot_limits_never_load_hotter_than_the_runtime_clamp() {
+    use canvas_proto::fans::HOT_LIMIT_MIN_C;
+    // TOML accepts inf, -inf and nan. `-inf` was clamped to the 40 °C minimum at run time; it must
+    // stay there, never become the hotter automatic line. `+inf` and NaN go to automatic, which is
+    // stricter than the maximum (+inf) or the NaN line (NaN) the runtime clamp would give.
+    let cases = [
+        (f32::NEG_INFINITY, Some(HOT_LIMIT_MIN_C)),
+        (f32::INFINITY, None),
+        (f32::NAN, None),
+    ];
+    for (value, want) in cases {
+        let t0 = Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let file = FansFile { hot_limits: HotLimits { cpu_c: Some(value), gpu_c: None, board_c: Some(value) }, ..Default::default() };
+        let chip = FakeChip::new(MSI_ALT1_MAP);
+        let cpu = FakeTemp::new(40.0);
+        let mut fans = controller(&dir, &chip, &cpu, file, t0);
+        fans.set_cpu_brand(Some("AMD Ryzen 7 7800X3D 8-Core Processor"));
+        fans.correct_hot_limits();
+        let status = fans.status();
+        for kind in [HotKind::Cpu, HotKind::Board] {
+            let row = status.hot.iter().find(|s| s.kind == kind).unwrap();
+            match want {
+                Some(min) => {
+                    assert!(row.user_set, "{value} {kind:?}: stays the user's: {row:?}");
+                    assert_eq!(row.limit_c, min, "{value} {kind:?}: enforced at the minimum: {row:?}");
+                }
+                None => {
+                    assert!(!row.user_set, "{value} {kind:?}: falls back to automatic: {row:?}");
+                    assert_eq!(row.limit_c, row.auto_c, "{value} {kind:?}: {row:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
+fn issue225_loading_a_bad_hot_limit_leaves_fans_toml_as_written_and_warns_on_every_start() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let path = paths::fans_path(dir.path());
+    // A hand-edited file: a comment and a key the schema does not know, around a saved file
+    // whose cpu_c is past the ceiling and whose board_c is under the minimum.
+    write_fans_toml(&dir, HotLimits { cpu_c: Some(95.0), gpu_c: None, board_c: Some(30.0) });
+    let saved = std::fs::read_to_string(&path).unwrap();
+    let original = format!(
+        r#"# my fan notes
+my_own_key = "keep me"
+{saved}# end of my notes
+"#
+    );
+    std::fs::write(&path, &original).unwrap();
+
+    for start in 1..=2 {
+        let loaded = store::load_fans(&path).unwrap().unwrap();
+        let chip = FakeChip::new(MSI_ALT1_MAP);
+        let cpu = FakeTemp::new(40.0);
+        let mut fans = controller(&dir, &chip, &cpu, loaded, t0);
+        let (_, log) = crate::test_logs::captured(|| fans.correct_hot_limits());
+        assert!(log.contains("95") && log.contains("30"), "start {start}: a WARN names both values: {log}");
+        assert_eq!(
+            std::fs::read_to_string(&path).unwrap(),
+            original,
+            "start {start}: the corrected value is enforced in memory only; the file is left as the owner wrote it"
+        );
+    }
+}
+
+#[test]
+fn issue225_valid_hot_limits_are_left_alone_and_nothing_is_logged() {
+    let t0 = Instant::now();
+    let dir = tempfile::tempdir().unwrap();
+    let limits = HotLimits { cpu_c: Some(70.0), gpu_c: None, board_c: Some(60.0) };
+    write_fans_toml(&dir, limits);
+    let loaded = store::load_fans(&paths::fans_path(dir.path())).unwrap().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(40.0);
+    let mut fans = controller(&dir, &chip, &cpu, loaded, t0);
+    let (_, log) = crate::test_logs::captured(|| fans.correct_hot_limits());
+    let status = fans.status();
+    let cpu_row = status.hot.iter().find(|s| s.kind == HotKind::Cpu).unwrap();
+    assert!(cpu_row.user_set && cpu_row.limit_c == 70.0, "{cpu_row:?}");
+    assert!(!log.contains("hot limit"), "no line for a valid file: {log}");
+}
