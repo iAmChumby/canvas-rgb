@@ -961,6 +961,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const [points, setPoints] = useState<CurvePoint[]>(header.mode.mode === "curve" ? header.mode.points : defaultCurve(base));
   const [source, setSource] = useState<TempSource>(header.mode.mode === "curve" ? header.mode.source : { type: "cpu" });
   const pointsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // The curve edit waiting for that timer. Picking another header closes this editor, so the edit
+  // is sent then instead of dropped with the timer (issue #295 review).
+  const pendingCurve = useRef<(() => void) | null>(null);
   // Writes sent and not yet answered, and whether a curve edit waits for its timer. While either
   // is true the draft is ahead of the service, so a poll that says otherwise is stale.
   const [writing, setWriting] = useState(0);
@@ -972,21 +975,33 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const serverKey = modeKey(mode);
   const [adopted, setAdopted] = useState<string | null>(serverKey);
   const [sentKey, setSentKey] = useState<string | null>(null);
-  if (adopted !== serverKey && writing === 0 && !unsent) {
-    setAdopted(serverKey);
-    if (serverKey !== sentKey) {
-      setChosen(mode.mode);
-      if (mode.mode === "fixed") setPercent(mode.percent);
-      if (mode.mode === "curve") {
-        setPoints(mode.points);
-        setSource(mode.source);
+  if (writing === 0 && !unsent) {
+    // The poll has confirmed the mode this editor sent: clear the mark, so a later change by another
+    // client back to that same mode is taken like any other (issue #295 review).
+    if (sentKey !== null && serverKey === sentKey) setSentKey(null);
+    if (adopted !== serverKey) {
+      setAdopted(serverKey);
+      if (serverKey !== sentKey) {
+        setChosen(mode.mode);
+        if (mode.mode === "fixed") setPercent(mode.percent);
+        if (mode.mode === "curve") {
+          setPoints(mode.points);
+          setSource(mode.source);
+        }
       }
     }
   }
 
   useEffect(
     () => () => {
-      if (pointsTimer.current) clearTimeout(pointsTimer.current);
+      // The editor is closing: a curve edit still waiting for its timer is sent now, not dropped.
+      if (pointsTimer.current) {
+        clearTimeout(pointsTimer.current);
+        pointsTimer.current = null;
+      }
+      const flush = pendingCurve.current;
+      pendingCurve.current = null;
+      if (flush) flush();
     },
     [],
   );
@@ -995,6 +1010,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const cancelCurve = () => {
     if (pointsTimer.current) clearTimeout(pointsTimer.current);
     pointsTimer.current = null;
+    pendingCurve.current = null;
     setUnsent(false);
   };
 
@@ -1043,10 +1059,13 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     setPoints(pts);
     cancelCurve();
     setUnsent(true);
+    const send = () => apply({ mode: "curve", source, points: pts });
+    pendingCurve.current = send;
     pointsTimer.current = setTimeout(() => {
       pointsTimer.current = null;
+      pendingCurve.current = null;
       setUnsent(false);
-      void apply({ mode: "curve", source, points: pts });
+      void send();
     }, 250);
   };
 

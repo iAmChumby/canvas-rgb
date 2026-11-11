@@ -1,4 +1,4 @@
-//! The API's behaviour, tested against the in-test fakes.
+﻿//! The API's behaviour, tested against the in-test fakes.
 //!
 //! These tests never touch the real hardware and never call the real engine, effects or
 //! adapters: the daemon's state is built from the fakes in `common`.
@@ -1023,6 +1023,15 @@ impl canvas_daemon::pipe_client::PipeLink for FakePipe {
         &self,
         request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        // The whole-config pushes ask the service for the config it holds first (#295); this fake
+        // holds a default one. `Down` and `Broke` still fail: that is the service not answering.
+        if matches!(request, canvas_proto::pipe::PipeRequest::GetFanConfig)
+            && !matches!(self.reply, FakeReply::Down | FakeReply::Broke)
+        {
+            return Ok(canvas_proto::pipe::PipeResponse::FanConfig {
+                config: canvas_proto::config::FansFile::default(),
+            });
+        }
         match self.reply {
             FakeReply::Ok => Ok(canvas_proto::pipe::PipeResponse::Ok),
             FakeReply::Started(version) => Ok(canvas_proto::pipe::PipeResponse::UpdateStarted {
@@ -1092,10 +1101,12 @@ fn fans_with_hot() -> canvas_proto::fans::FansStatus {
     status
 }
 
-/// Logs every pipe request the daemon makes.
+/// Logs every pipe request the daemon makes. `GetFanConfig` is answered from `config`, as the
+/// service's own config (the base of a whole-config push, issue #295).
 struct LogPipe {
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
     status: Option<canvas_proto::fans::FansStatus>,
+    config: canvas_proto::config::FansFile,
 }
 
 #[async_trait::async_trait]
@@ -1113,6 +1124,9 @@ impl canvas_daemon::pipe_client::PipeLink for LogPipe {
                     "the pipe is not up",
                 ))),
             },
+            canvas_proto::pipe::PipeRequest::GetFanConfig => Ok(canvas_proto::pipe::PipeResponse::FanConfig {
+                config: self.config.clone(),
+            }),
             _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
         }
     }
@@ -1135,7 +1149,11 @@ fn build_with_recording_pipe(
         tx,
     );
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
-    app.pipe = Arc::new(LogPipe { sent: Arc::clone(&sent), status: Some(status.clone()) });
+    app.pipe = Arc::new(LogPipe {
+        sent: Arc::clone(&sent),
+        status: Some(status.clone()),
+        config: canvas_proto::config::FansFile::default(),
+    });
     let app = Arc::new(app);
     (api::router(app.clone()), app, home, sent)
 }
@@ -1147,6 +1165,8 @@ struct SlowFirstPipe {
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
     entered: Arc<std::sync::Mutex<u32>>,
     status: canvas_proto::fans::FansStatus,
+    /// The config the service holds, answered by `GetFanConfig` and replaced by `PutFanConfig`.
+    config: std::sync::Mutex<canvas_proto::config::FansFile>,
 }
 
 #[async_trait::async_trait]
@@ -1169,6 +1189,13 @@ impl canvas_daemon::pipe_client::PipeLink for SlowFirstPipe {
         self.sent.lock().unwrap().push(request.clone());
         match request {
             canvas_proto::pipe::PipeRequest::FanStatus => Ok(canvas_proto::pipe::PipeResponse::FanStatus { status: self.status.clone() }),
+            canvas_proto::pipe::PipeRequest::GetFanConfig => Ok(canvas_proto::pipe::PipeResponse::FanConfig {
+                config: self.config.lock().unwrap().clone(),
+            }),
+            canvas_proto::pipe::PipeRequest::PutFanConfig { config } => {
+                *self.config.lock().unwrap() = config.clone();
+                Ok(canvas_proto::pipe::PipeResponse::Ok)
+            }
             _ => Ok(canvas_proto::pipe::PipeResponse::Ok),
         }
     }
@@ -1191,8 +1218,12 @@ async fn issue130_put_fans_hot_valid_sends_put_fan_config_with_the_values() {
     assert_eq!(cpu.get("user_set").and_then(|v| v.as_bool()), Some(true));
 
     let sent = sent.lock().unwrap();
-    assert_eq!(sent.len(), 1, "one pipe request: the whole config: {sent:?}");
-    match &sent[0] {
+    assert_eq!(sent.len(), 2, "the base the service holds, then the whole config: {sent:?}");
+    assert!(
+        matches!(&sent[0], canvas_proto::pipe::PipeRequest::GetFanConfig),
+        "the push starts from the config the service holds, not from a file the daemon read: {sent:?}"
+    );
+    match &sent[1] {
         canvas_proto::pipe::PipeRequest::PutFanConfig { config } => {
             assert_eq!(config.hot_limits.cpu_c, Some(70.0));
             assert_eq!(config.hot_limits.gpu_c, None);
@@ -1299,6 +1330,7 @@ async fn two_concurrent_puts_keep_both_changes() {
         sent: Arc::clone(&sent),
         entered: Arc::clone(&entered),
         status: fans_with_hot(),
+        config: std::sync::Mutex::new(canvas_proto::config::FansFile::default()),
     });
     let app = Arc::new(app);
     *app.fans.write().await = Some(fans_with_hot());
@@ -3378,8 +3410,8 @@ async fn preset_props_are_fitted_to_the_schema_and_capped() {
 #[tokio::test]
 async fn a_saved_hue_for_the_gradient_angle_is_listed_and_used_as_the_same_degrees() {
     // A gradient saved before the angle kind existed stores its angle as a hue. The fitter must
-    // read it as the same degrees, both when the preset is listed and when it is used — not
-    // silently drop it and let the 90° default show.
+    // read it as the same degrees, both when the preset is listed and when it is used â€” not
+    // silently drop it and let the 90Â° default show.
     let (router, _app, _home) = build();
     let (status, _) = send(
         &router,
@@ -4110,19 +4142,51 @@ async fn white_balance_stops_at_the_device_cap() {
 
 // ---- Issue #295: a hot-limit PUT must not reset the header modes ----
 
+/// What the fake service answers to `GetFanConfig`. The daemon asks the service for the config a
+/// whole-config push starts from (issue #295 review): it never reads the service's file itself.
+#[derive(Clone, Copy, PartialEq)]
+enum ConfigAnswer {
+    /// The config the fake holds.
+    Config,
+    /// The service refuses the read.
+    Refuse,
+    /// The service never answers.
+    Hang,
+}
+
 /// A fake fan service that keeps a config the way the real one does: `SetHeaderMode` writes the
-/// mode into the ACTIVE profile, `PutFanConfig` replaces the whole config, and every change is
-/// saved to `fans.toml` (here under `file`). It records every request.
+/// mode into the ACTIVE profile, `SetProfile` switches the active profile, `PutFanConfig` replaces
+/// the whole config, and `GetFanConfig` answers from it. It records every request.
 struct ModelService {
     config: std::sync::Mutex<canvas_proto::config::FansFile>,
-    file: std::path::PathBuf,
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+    answer: ConfigAnswer,
+    /// The push's landing: `entered` fires when a whole config arrives and `release` holds it until
+    /// the test lets it go, so a push can be held in flight while another route tries its own write
+    /// (the window a header-mode or profile PATCH must not slip into).
+    entered: std::sync::Mutex<Option<tokio::sync::oneshot::Sender<()>>>,
+    release: std::sync::Mutex<Option<tokio::sync::oneshot::Receiver<()>>>,
 }
 
 impl ModelService {
-    fn save(&self, config: &canvas_proto::config::FansFile) {
-        std::fs::create_dir_all(self.file.parent().expect("the file has a folder")).expect("the folder is made");
-        std::fs::write(&self.file, toml::to_string(config).expect("the config serializes")).expect("the file is written");
+    fn new(config: canvas_proto::config::FansFile, answer: ConfigAnswer) -> Self {
+        Self {
+            config: std::sync::Mutex::new(config),
+            sent: Arc::new(std::sync::Mutex::new(Vec::new())),
+            answer,
+            entered: std::sync::Mutex::new(None),
+            release: std::sync::Mutex::new(None),
+        }
+    }
+
+    /// Holds the next whole-config push: the returned receiver fires when it arrives, and the
+    /// returned sender lets it land.
+    fn gate(&self) -> (tokio::sync::oneshot::Receiver<()>, tokio::sync::oneshot::Sender<()>) {
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+        *self.entered.lock().unwrap() = Some(entered_tx);
+        *self.release.lock().unwrap() = Some(release_rx);
+        (entered_rx, release_tx)
     }
 }
 
@@ -4134,21 +4198,54 @@ impl canvas_daemon::pipe_client::PipeLink for ModelService {
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
         use canvas_proto::pipe::{PipeRequest, PipeResponse};
         self.sent.lock().unwrap().push(request.clone());
-        let mut config = self.config.lock().unwrap();
         match request {
+            PipeRequest::GetFanConfig => {
+                match self.answer {
+                    ConfigAnswer::Refuse => {
+                        return Ok(PipeResponse::Error {
+                            code: canvas_proto::api::error_codes::SERVICE_UNAVAILABLE.into(),
+                            message: "the service refused the test read".into(),
+                        })
+                    }
+                    ConfigAnswer::Hang => std::future::pending::<()>().await,
+                    ConfigAnswer::Config => {}
+                }
+                Ok(PipeResponse::FanConfig { config: self.config.lock().unwrap().clone() })
+            }
             PipeRequest::SetHeaderMode { header, mode } => {
+                let mut config = self.config.lock().unwrap();
                 let active = config.active_profile.clone();
-                let profile = config.profiles.iter_mut().find(|p| p.name == active).expect("the active profile exists");
-                profile.headers.insert(header.clone(), mode.clone());
-                self.save(&config);
+                if let Some(profile) = config.profiles.iter_mut().find(|p| p.name == active) {
+                    profile.headers.insert(header.clone(), mode.clone());
+                }
+                Ok(PipeResponse::Ok)
+            }
+            PipeRequest::SetProfile { name } => {
+                self.config.lock().unwrap().active_profile = name.clone();
+                Ok(PipeResponse::Ok)
+            }
+            PipeRequest::PutProfile { profile } => {
+                let mut config = self.config.lock().unwrap();
+                match config.profiles.iter_mut().find(|p| p.name == profile.name) {
+                    Some(existing) => *existing = profile.clone(),
+                    None => config.profiles.push(profile.clone()),
+                }
+                Ok(PipeResponse::Ok)
             }
             PipeRequest::PutFanConfig { config: next } => {
-                *config = next.clone();
-                self.save(&config);
+                // The push has landed: let the test hold it here, as a slow service would.
+                if let Some(tx) = self.entered.lock().unwrap().take() {
+                    let _ = tx.send(());
+                }
+                let waiting = self.release.lock().unwrap().take();
+                if let Some(rx) = waiting {
+                    let _ = rx.await;
+                }
+                *self.config.lock().unwrap() = next.clone();
+                Ok(PipeResponse::Ok)
             }
-            _ => {}
+            _ => Ok(PipeResponse::Ok),
         }
-        Ok(PipeResponse::Ok)
     }
 }
 
@@ -4162,15 +4259,10 @@ fn curve_mode() -> canvas_proto::fans::FanMode {
     }
 }
 
-/// The app with a [`ModelService`] behind it. `programdata/fans.toml` under the test home is the
-/// service's own file. The service starts with `cpu_fan` on a curve in the Default profile, as
-/// it does after a restart of the daemon alone.
-fn build_with_model_service() -> (
-    axum::Router,
-    Arc<App>,
-    TempHome,
-    Arc<ModelService>,
-) {
+/// The app with a [`ModelService`] behind it. The service starts with `cpu_fan` on a curve in the
+/// Default profile, as it does after a restart of the daemon alone. Nothing is written to disk: the
+/// service's config is reachable only through `GetFanConfig`, as the real one is.
+fn build_with_model_service(answer: ConfigAnswer) -> (axum::Router, Arc<App>, TempHome, Arc<ModelService>) {
     let home = TempHome::new();
     let store = canvas_daemon::storage::Store::at(&home.path);
     let engine = Arc::new(FakeEngine::default());
@@ -4178,14 +4270,8 @@ fn build_with_model_service() -> (
     let mut app = App::new(store, engine, Box::new(FakeAdapter::default()), TOKEN.to_string(), "0.1.0-test".to_string(), tx);
     let mut config = canvas_proto::config::FansFile::default();
     config.profiles[0].headers.insert("cpu_fan".into(), curve_mode());
-    let service = Arc::new(ModelService {
-        config: std::sync::Mutex::new(config),
-        file: home.path.join("programdata").join("fans.toml"),
-        sent: Arc::new(std::sync::Mutex::new(Vec::new())),
-    });
-    service.save(&service.config.lock().unwrap());
+    let service = Arc::new(ModelService::new(config, answer));
     app.pipe = service.clone();
-    app.service_fans_file = Some(service.file.clone());
     let app = Arc::new(app);
     let status = fans_with_hot();
     app.fans.try_write().expect("nothing holds the status").replace(status);
@@ -4193,31 +4279,55 @@ fn build_with_model_service() -> (
 }
 
 const HOT_BODY: &str = r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#;
+const FIXED_55_BODY: &str = r#"{"mode":"fixed","percent":55}"#;
+const QUIET_BODY: &str = r#"{"name":"quiet","headers":{"cpu_fan":{"mode":"fixed","percent":40}}}"#;
 
 fn cpu_fan_mode(service: &ModelService) -> Option<canvas_proto::fans::FanMode> {
     service.config.lock().unwrap().profiles[0].headers.get("cpu_fan").cloned()
 }
 
+/// The requests of one kind the service got after `from`.
+fn count_since(
+    service: &ModelService,
+    from: usize,
+    want: impl Fn(&canvas_proto::pipe::PipeRequest) -> bool,
+) -> usize {
+    service.sent.lock().unwrap()[from..].iter().filter(|r| want(r)).count()
+}
+
+fn pushes_since(service: &ModelService, from: usize) -> usize {
+    count_since(service, from, |r| matches!(r, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }))
+}
+
 #[tokio::test]
-async fn issue295_a_hot_limit_put_after_a_daemon_start_keeps_the_service_header_modes() {
-    // A fresh daemon: `fans_last` is empty, the service already has cpu_fan on a curve.
-    let (router, app, _home, service) = build_with_model_service();
+async fn issue295_a_hot_limit_put_starts_from_the_config_the_service_holds() {
+    // A fresh daemon: `fans_last` is empty and there is no file to read. The service already has
+    // cpu_fan on a curve; a whole-config push must carry it, which only `GetFanConfig` can say.
+    let (router, app, _home, service) = build_with_model_service(ConfigAnswer::Config);
     assert!(app.fans_last.read().await.is_none());
     let response = router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(cpu_fan_mode(&service), Some(curve_mode()), "the hot limit reset cpu_fan: {:?}", service.config.lock().unwrap());
     assert_eq!(service.config.lock().unwrap().hot_limits.cpu_c, Some(70.0), "the hot limit itself arrived");
+    let sent = service.sent.lock().unwrap();
+    assert!(
+        matches!(sent.first(), Some(canvas_proto::pipe::PipeRequest::GetFanConfig)),
+        "the push starts from the config the service holds: {sent:?}"
+    );
+    assert!(
+        matches!(sent.last(), Some(canvas_proto::pipe::PipeRequest::PutFanConfig { .. })),
+        "and pushes the whole config after it: {sent:?}"
+    );
 }
 
 #[tokio::test]
 async fn issue295_a_hot_limit_put_after_a_mode_change_keeps_that_mode() {
-    // The daemon has pushed a config before (`fans_last` is Some); then the editor sets cpu_fan to
-    // fixed 55 through PATCH, which the service stores in its profile but the daemon never sees.
-    let (router, app, _home, service) = build_with_model_service();
-    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    // Then the editor sets cpu_fan to fixed 55 through PATCH, which the service stores in its
+    // profile. The next hot-limit PUT must carry that mode, never the one before the PATCH.
+    let (router, _app, _home, service) = build_with_model_service(ConfigAnswer::Config);
     let patch = router
         .clone()
-        .oneshot(request_with_body("PATCH", "/api/v1/fans/headers/cpu_fan", r#"{"mode":"fixed","percent":55}"#))
+        .oneshot(request_with_body("PATCH", "/api/v1/fans/headers/cpu_fan", FIXED_55_BODY))
         .await
         .expect("the router answers");
     assert_eq!(patch.status(), StatusCode::OK);
@@ -4232,16 +4342,126 @@ async fn issue295_a_hot_limit_put_after_a_mode_change_keeps_that_mode() {
 }
 
 #[tokio::test]
-async fn issue295_a_service_file_that_cannot_be_read_sends_nothing() {
-    let (router, _app, _home, service) = build_with_model_service();
-    std::fs::write(&service.file, "this is = not [a fans file").expect("the file is overwritten");
+async fn issue295_a_service_that_refuses_its_config_is_a_503_and_sends_nothing() {
+    let (router, _app, _home, service) = build_with_model_service(ConfigAnswer::Refuse);
     let before = service.sent.lock().unwrap().len();
     let response = router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers");
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
-    let pushes = service.sent.lock().unwrap()[before..]
-        .iter()
-        .filter(|r| matches!(r, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }))
-        .count();
-    assert_eq!(pushes, 0, "a config the daemon could not base on the service's own was pushed");
+    assert_eq!(pushes_since(&service, before), 0, "a config the daemon could not base on the service's own was pushed");
     assert_eq!(cpu_fan_mode(&service), Some(curve_mode()));
+}
+
+#[tokio::test(start_paused = true)]
+async fn issue295_a_service_that_does_not_answer_its_config_is_a_503_and_sends_nothing() {
+    // The paused clock turns the route's bound into an instant: the service never answers, and the
+    // write is refused instead of holding `fans_last` for good.
+    let (router, _app, _home, service) = build_with_model_service(ConfigAnswer::Hang);
+    let before = service.sent.lock().unwrap().len();
+    let response = router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(pushes_since(&service, before), 0, "nothing is pushed when the base never arrives");
+    assert_eq!(cpu_fan_mode(&service), Some(curve_mode()));
+}
+
+#[tokio::test]
+async fn issue295_a_header_mode_patch_waits_for_a_push_in_flight() {
+    // The push has read its base and its whole config is at the service, held there. A PATCH
+    // started in that window must wait for the push: otherwise the push's older copy puts the old
+    // mode back.
+    let (router, _app, _home, service) = build_with_model_service(ConfigAnswer::Config);
+    let (entered, release) = service.gate();
+    let hot = tokio::spawn({
+        let router = router.clone();
+        async move { router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers") }
+    });
+    entered.await.expect("the push reached the service");
+    // Everything the service has seen so far is the push's; the PATCH comes after this point.
+    let before = service.sent.lock().unwrap().len();
+    let patch = tokio::spawn({
+        let router = router.clone();
+        async move {
+            router
+                .oneshot(request_with_body("PATCH", "/api/v1/fans/headers/cpu_fan", FIXED_55_BODY))
+                .await
+                .expect("the router answers")
+        }
+    });
+    // Let the PATCH run while the push is held: with the lock it can send nothing yet (more yields
+    // only give a lockless PATCH more chances, so this never fails on the fixed code).
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        count_since(&service, before, |r| matches!(r, canvas_proto::pipe::PipeRequest::SetHeaderMode { .. })),
+        0,
+        "the PATCH sent a mode inside the push's window"
+    );
+    release.send(()).expect("the push is waiting");
+    assert_eq!(hot.await.expect("the push task joins").status(), StatusCode::OK);
+    assert_eq!(patch.await.expect("the patch task joins").status(), StatusCode::OK);
+    assert_eq!(
+        cpu_fan_mode(&service),
+        Some(canvas_proto::fans::FanMode::Fixed { percent: 55 }),
+        "the push put cpu_fan back: {:?}",
+        service.config.lock().unwrap()
+    );
+    assert_eq!(service.config.lock().unwrap().hot_limits.cpu_c, Some(70.0), "and the hot limit arrived");
+}
+
+#[tokio::test]
+async fn issue295_a_profile_patch_waits_for_a_push_in_flight() {
+    // Same window, the other PATCH: the profile lives in the config the push replaces.
+    let (router, _app, _home, service) = build_with_model_service(ConfigAnswer::Config);
+    let (entered, release) = service.gate();
+    let hot = tokio::spawn({
+        let router = router.clone();
+        async move { router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers") }
+    });
+    entered.await.expect("the push reached the service");
+    let before = service.sent.lock().unwrap().len();
+    let switch = tokio::spawn({
+        let router = router.clone();
+        let body = r#"{"name":"Quiet"}"#.to_string();
+        async move {
+            router
+                .oneshot(request_with_body("PATCH", "/api/v1/fans/profile", &body))
+                .await
+                .expect("the router answers")
+        }
+    });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    assert_eq!(
+        count_since(&service, before, |r| matches!(r, canvas_proto::pipe::PipeRequest::SetProfile { .. })),
+        0,
+        "the PATCH switched the profile inside the push's window"
+    );
+    release.send(()).expect("the push is waiting");
+    assert_eq!(hot.await.expect("the push task joins").status(), StatusCode::OK);
+    assert_eq!(switch.await.expect("the switch task joins").status(), StatusCode::OK);
+    let profile = service.config.lock().unwrap().active_profile.clone();
+    assert_eq!(profile, "Quiet", "the push put the old profile back");
+}
+
+#[tokio::test]
+async fn issue295_a_profile_put_that_cannot_read_the_base_saves_nothing() {
+    // The base is read BEFORE the first send (issue #295 review): a write that cannot start is
+    // refused with 503, instead of saving the profile and then saying nothing was changed.
+    let (router, _app, _home, service) = build_with_model_service(ConfigAnswer::Refuse);
+    let before = service.sent.lock().unwrap().len();
+    let response = router
+        .oneshot(request_with_body("PUT", "/api/v1/fans/profiles/quiet", QUIET_BODY))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(
+        count_since(&service, before, |r| matches!(r, canvas_proto::pipe::PipeRequest::PutProfile { .. })),
+        0,
+        "the profile was saved before the base was read"
+    );
+    assert!(
+        !service.config.lock().unwrap().profiles.iter().any(|p| p.name == "quiet"),
+        "the service took a profile from a write that claimed nothing was changed"
+    );
 }

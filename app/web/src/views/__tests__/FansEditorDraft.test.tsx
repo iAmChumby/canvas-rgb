@@ -234,6 +234,42 @@ describe("the header editor keeps its draft (#295)", () => {
     expect(field("CPU fan duty value").value).toBe("45");
   });
 
+  it("another client setting back the mode this editor sent is shown", async () => {
+    await page();
+    const patch = slowPatch();
+    fireEvent.click(radio("Fixed %"));
+    await waitFor(() => expect(patch.spy).toHaveBeenCalledTimes(1));
+    const sentMode = patch.waiting[0].mode as FanMode & { percent: number };
+    await act(async () => {
+      patch.land();
+    });
+    // The poll confirms this editor's own write; the "sent" mark must not outlive that.
+    await poll(2);
+    expect(checked("Fixed %")).toBe(true);
+    // Another client moves the header to Curve, then puts the mode this editor sent back.
+    service.modes.cpu_fan = CURVE;
+    await poll();
+    await waitFor(() => expect(checked("Curve")).toBe(true));
+    service.modes.cpu_fan = sentMode;
+    await poll();
+    await waitFor(() => expect(checked("Fixed %")).toBe(true));
+    expect(field("CPU fan duty value").value).toBe(String(sentMode.percent));
+  });
+
+  it("the last curve edit before another header is picked is still sent", async () => {
+    await page({ cpu_fan: CURVE });
+    const sent: FanMode[] = [];
+    vi.spyOn(api, "patchFanHeader").mockImplementation(async (_h: string, mode: FanMode) => {
+      sent.push(mode);
+      return {} as never;
+    });
+    await typeInto("Point 1 percent", "60");
+    // That edit waits 250 ms; picking another header closes this editor before the timer fires.
+    fireEvent.click(screen.getByText("System fan 1"));
+    await screen.findByRole("radiogroup", { name: "System fan 1 mode" });
+    await waitFor(() => expect(sent.some((m) => m.mode === "curve" && m.points[0]?.percent === 60)).toBe(true));
+  });
+
   it("a refused write puts the editor back on the service's mode and says why", async () => {
     await page({ cpu_fan: CURVE });
     vi.spyOn(api, "patchFanHeader").mockRejectedValue(new ApiFailure(422, "validation", "refused for the test"));

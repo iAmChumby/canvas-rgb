@@ -311,10 +311,15 @@ second on the status poll, so the effect tears down and starts again before it c
   left as is, it is stated in its comment.
 - The same issue's other half was in the daemon, not React: `PUT /fans/hot` built the whole-config push
   from `fans_last`, which is empty after a daemon start and never sees `SetHeaderMode`, so the first
-  hot-limit set reset every header to BIOS. Fix: a whole-config push starts from the service's own
-  `fans.toml` (`crates/canvas-daemon/src/api/fans.rs` `base_fans_config`); tests in
-  `crates/canvas-daemon/tests/api.rs` (`issue295_*`). Rule: a writer that replaces a whole config reads
-  the owner's current copy first, never its own cache and never the defaults.
+  hot-limit set reset every header to BIOS. Fix: a whole-config push starts from the config the service
+  holds, asked for over the pipe (`GetFanConfig`; `crates/canvas-daemon/src/api/fans.rs`
+  `base_fans_config`). The daemon never reads `%ProgramData%\canvas-rgb\fans.toml` itself: that tree's
+  owner and reparse-point checks belong to the service, so the first cut, which read the file, was
+  refused in review. The mode and profile PATCHes take the same `fans_last` lock the pushes hold, so a
+  push cannot replace a change made inside its window, and `put_profile` reads the base before its first
+  send. Tests in `crates/canvas-daemon/tests/api.rs` (`issue295_*`). Rule: a writer that replaces a whole
+  config asks the owner for its current copy, never its own cache, never a file the owner guards, and
+  never the defaults.
 
 ### `cause:timing-test`: a test whose verdict depends on how long the machine takes
 

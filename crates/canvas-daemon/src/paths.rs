@@ -5,7 +5,7 @@
 //! machine-wide `%ProgramData%\canvas-rgb` follow the same override so a test run stays
 //! self-contained.
 
-use canvas_proto::config::{BACKUPS_DIR, BACKUPS_KEPT, CONFIG_FILE, EFFECTS_FILE, FANS_FILE, LAYOUTS_FILE, ZONES_FILE};
+use canvas_proto::config::{BACKUPS_DIR, BACKUPS_KEPT, CONFIG_FILE, EFFECTS_FILE, LAYOUTS_FILE, ZONES_FILE};
 use canvas_proto::consts;
 use std::path::{Path, PathBuf};
 
@@ -70,11 +70,6 @@ pub fn effects_dir() -> PathBuf {
 /// when the service is down).
 pub fn fans_last_file() -> PathBuf {
     home().join("fans.last.toml")
-}
-
-/// Where the service keeps `%ProgramData%\canvas-rgb\fans.toml`.
-pub fn service_fans_file() -> PathBuf {
-    machine_dir().join(FANS_FILE)
 }
 
 pub fn token_file() -> PathBuf {

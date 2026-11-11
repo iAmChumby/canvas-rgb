@@ -217,7 +217,7 @@ async fn daemon_main(fakes: bool) -> Exit {
     if fakes {
         // In-process fake service pipe and a capture that never starts: the
         // real pipe, screen and audio are never touched.
-        app_inner.pipe = Arc::new(canvas_daemon::fakes::FakePipeLink);
+        app_inner.pipe = Arc::new(canvas_daemon::fakes::FakePipeLink::default());
         // N7: the swap discards the persisted pick `App::with_displays`
         // applied, so re-apply it to the disabled inputs after the swap.
         let persisted_pick = app_inner.inputs.requested();
@@ -225,8 +225,6 @@ async fn daemon_main(fakes: bool) -> Exit {
         app_inner.inputs.set_requested(persisted_pick);
         app_inner.fakes = true;
     }
-    // The service's own fans.toml: the fans routes that push a whole config start from it (#295).
-    app_inner.service_fans_file = Some(canvas_daemon::paths::service_fans_file());
     let app = Arc::new(app_inner);
     if fakes {
         *app.fans.write().await = Some(canvas_daemon::fakes::fake_fans_status());
