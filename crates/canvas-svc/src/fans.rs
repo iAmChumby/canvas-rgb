@@ -71,6 +71,10 @@ pub const HOT_BOOST_MAX_DT_S: f32 = 2.0;
 /// Issue #255 review: the boost's own upper bound, in percentage points (anti-windup). The
 /// output is capped at 100 separately, so the term is still there when the curve later drops.
 pub const HOT_BOOST_MAX: f32 = 100.0;
+/// Issue #297: how often the hot-hold state may be logged per header. The loop runs at 1 Hz and
+/// the duty can change on every tick, so a line per tick would bury the log; a change held back
+/// by this interval is written by the first tick after it.
+pub const HOT_LOG_MIN_INTERVAL: Duration = Duration::from_secs(5);
 /// A gap between two curve updates longer than this (a missing sensor, a sleep) restarts the
 /// smoothing from the current reading.
 const CURVE_RESEED: Duration = Duration::from_secs(10);
@@ -153,6 +157,19 @@ struct CurveState {
     hot_boost: f32,
     /// When the boost was last updated, for the tick delta. `None` before the first tick.
     boost_last_at: Option<Instant>,
+    /// Issue #297: what the last hot-hold INFO line said, and when it was written. The line is
+    /// written on a change, never more often than `HOT_LOG_MIN_INTERVAL`.
+    hot_log: Option<HotLogLine>,
+    hot_log_at: Option<Instant>,
+}
+
+/// Issue #297: the hot-hold state one log line described, so the next tick can tell whether
+/// anything changed worth another line.
+#[derive(Clone, PartialEq)]
+struct HotLogLine {
+    engaged: bool,
+    asked: u8,
+    reason: Option<String>,
 }
 
 impl CurveState {
@@ -214,6 +231,23 @@ impl CurveState {
         self.peak = self.smoothed.unwrap_or_default();
         self.changed_at = Some(now);
         self.below_since = None;
+    }
+
+    /// Issue #297: whether this tick's hot-hold state is worth an INFO line, and records it.
+    /// A line goes out on a change (engaged or released, the duty asked, or the reason), never
+    /// more often than `HOT_LOG_MIN_INTERVAL`; a change held back by the interval is written by
+    /// the first tick after it, because the state still differs from the last one written.
+    fn wants_hot_log(&mut self, now: Instant, engaged: bool, asked: u8, reason: &Option<String>) -> bool {
+        let state = HotLogLine { engaged, asked, reason: reason.clone() };
+        if self.hot_log.as_ref() == Some(&state) {
+            return false;
+        }
+        if self.hot_log_at.is_some_and(|at| now.saturating_duration_since(at) < HOT_LOG_MIN_INTERVAL) {
+            return false;
+        }
+        self.hot_log = Some(state);
+        self.hot_log_at = Some(now);
+        true
     }
 
     /// Latches the hot floor: engages on every reading at or above `limit_c`, and releases only
@@ -1140,6 +1174,24 @@ impl FanController {
                 "hot floor {floor}% until {} has stayed under {limit_text} °C",
                 hot_name(&name)
             ));
+        }
+        // Issue #297: the hot hold's state at INFO, rate-limited, so a real run can confirm why
+        // the fans moved: the reading, the line, the error, engaged or released, the boost and
+        // the duty asked. The issue's log had no temperature on any of these lines.
+        let engaged = latched || boost >= 1.0;
+        if self.slots[ch].curve.wants_hot_log(now, engaged, percent, &reason) {
+            tracing::info!(
+                header = spec.id,
+                celsius = ?reference,
+                limit_c,
+                error_c = reference.map(|t| t - limit_c),
+                hold = if engaged { "engaged" } else { "released" },
+                latched,
+                boost,
+                asked = percent,
+                reason = ?reason,
+                "hot hold state"
+            );
         }
         match self.write_and_verify(ch, percent) {
             Ok(()) => {

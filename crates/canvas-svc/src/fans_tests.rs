@@ -1472,7 +1472,41 @@ fn issue130_board_sensors_keep_the_50_degree_line_by_default() {
     assert_eq!(board.ceiling_c, 90.0);
 }
 
+// ---- Issue #297: the hot hold must not swing the fans between the curve and 100 %. ----
+
+#[test]
+fn issue297_the_hot_hold_state_is_logged_with_the_reading_and_rate_limited() {
+    // The issue's log had no temperature on the hot-hold lines, so the cause could not be
+    // read off a real run. Every change now names the reading, the line, the error, whether
+    // the hold is engaged, the boost and the duty asked -- and at most one line per 5 s.
+    let t0 = Instant::now();
+    let mut config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), ..Default::default() }, ..Default::default() };
+    config.profiles[0].headers.insert("cpu_fan".into(), cpu_curve());
+    let (_, text) = crate::test_logs::captured(|| {
+        let mut r = rig(config, t0);
+        // Eight seconds hot, eight cool, over four minutes: the duty moves most ticks, so a
+        // line per tick would print about 240.
+        for s in 1..=240 {
+            let temp = if (s / 8) % 2 == 0 { 55.0 } else { 45.0 };
+            tick_cpu_at_temp(&mut r, t0, s, temp);
+        }
+        // A long cool-down releases the hold, and the release is a line too (the boost decays
+        // at a quarter point a second, so this takes a few hundred seconds of fake clock).
+        for s in 241..=800 {
+            tick_cpu_at_temp(&mut r, t0, s, 40.0);
+        }
+    });
+    let lines = text.matches("hot hold state").count();
+    assert!(lines > 0, "the hold never said anything: {text}");
+    assert!(lines <= 161, "{lines} hot-hold lines over 800 s: the 5 s rate limit did not hold");
+    assert!(text.contains("celsius=Some("), "the line names the reading: {text}");
+    assert!(text.contains("limit_c=50.0"), "the line names the line in force: {text}");
+    assert!(text.contains("engaged") && text.contains("released"), "both states are named: {text}");
+    assert!(text.contains("asked="), "the line names the duty asked: {text}");
+}
+
 // ---- Issue #255: "Don't exceed" is a closed loop, not a flat floor. ----
+
 
 /// The duty the chip reports for `ch`, in percent (the driver's own readback conversion).
 fn duty_percent(r: &Rig, ch: usize) -> u8 {
