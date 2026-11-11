@@ -15,7 +15,7 @@ import { useEffect, type RefObject } from "react";
 
 /** What Tab reaches inside a dialog, in document order. */
 const FOCUSABLE =
-  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+  'button:not([disabled]):not([tabindex="-1"]), [href]:not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"]), select:not([disabled]):not([tabindex="-1"]), textarea:not([disabled]):not([tabindex="-1"]), [tabindex]:not([tabindex="-1"])';
 
 export function useFocusTrap({
   panelRef,
@@ -39,8 +39,10 @@ export function useFocusTrap({
     const onKey = (event: KeyboardEvent) => {
       if (event.key !== "Tab" && event.key !== "Escape") return;
       // A key this dialog owns must not travel further: a trap behind it (the sheet's, for the
-      // palette) would otherwise act on it even mid-panel, where no focus moved.
-      event.stopPropagation();
+      // palette) would otherwise act on it even mid-panel, where no focus moved. The sheet (the
+      // bubble listener) stops only its Escape, as it always did, so the page's own Tab
+      // listeners still see Tab while it is open.
+      if (capture || event.key === "Escape") event.stopPropagation();
       if (event.key === "Escape") {
         event.preventDefault();
         onEscape();

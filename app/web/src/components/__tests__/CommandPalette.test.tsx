@@ -115,9 +115,11 @@ describe("the command palette", () => {
     const field = screen.getByRole("combobox", { name: "Search commands" });
     await waitFor(() => expect(document.activeElement).toBe(field));
     const panel = screen.getByRole("dialog", { name: "Command palette" });
-    const items = Array.from(panel.querySelectorAll<HTMLElement>("button:not([disabled]), input:not([disabled])"));
+    // The tab stops: the field and the palette's own keys. The options are not tab stops (APG).
+    const items = Array.from(
+      panel.querySelectorAll<HTMLElement>('button:not([disabled]):not([tabindex="-1"]), input:not([disabled]):not([tabindex="-1"])'),
+    );
     const last = items[items.length - 1]!;
-    expect(last).not.toBe(field);
 
     // Tab from the last key wraps to the first.
     last.focus();
@@ -191,6 +193,29 @@ describe("the command palette", () => {
     await waitFor(() => expect(field.getAttribute("aria-activedescendant")).toBe(options[1]!.id));
     fireEvent.keyDown(document.body, { key: "Enter" });
     expect(ran).toEqual(["details"]);
+  });
+
+  it("keeps the highlight when the shell rebuilds the same commands (the once-a-second status poll)", async () => {
+    const view = render(<CommandPalette commands={commands()} short={shortCommands()} onClose={() => {}} />);
+    const field = screen.getByRole("combobox", { name: "Search commands" });
+    fireEvent.keyDown(document.body, { key: "ArrowDown" });
+    fireEvent.keyDown(document.body, { key: "ArrowDown" });
+    const last = within(screen.getByRole("listbox")).getAllByRole("option")[3]!.id;
+    await waitFor(() => expect(field.getAttribute("aria-activedescendant")).toBe(last));
+
+    // A new array with the same rows, as every status poll gives: the highlight stays.
+    view.rerender(<CommandPalette commands={commands()} short={shortCommands()} onClose={() => {}} />);
+    view.rerender(<CommandPalette commands={commands()} short={shortCommands()} onClose={() => {}} />);
+    expect(field.getAttribute("aria-activedescendant")).toBe(last);
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(ran).toEqual(["theme"]);
+  });
+
+  it("keeps the options out of the tab order, so Tab never moves focus off the field onto a row", async () => {
+    render(<CommandPalette commands={commands()} short={shortCommands()} onClose={() => {}} />);
+    for (const option of within(screen.getByRole("listbox")).getAllByRole("option")) {
+      if (option.tagName === "BUTTON") expect(option.getAttribute("tabindex")).toBe("-1");
+    }
   });
 
   it("renders the empty line outside the listbox and closes aria-expanded when nothing matches", async () => {

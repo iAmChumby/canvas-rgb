@@ -51,6 +51,8 @@ function Frame({ children }: { children: ReactNode }) {
   /** The onboarding has the whole window: the rail, the strip and the banners are hidden. */
   const takeover = useTakeover();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Stable, so the palette's key listener is not torn down and added again on every status poll.
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
   /** The status details hang under the strip's mark. The palette can open them too, so the
    *  state lives here. */
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -284,7 +286,7 @@ function Frame({ children }: { children: ReactNode }) {
         </main>
       </div>
       {paletteOpen && (
-        <CommandPalette commands={commands} short={shortCommands} onClose={() => setPaletteOpen(false)} />
+        <CommandPalette commands={commands} short={shortCommands} onClose={closePalette} />
       )}
     </div>
   );
