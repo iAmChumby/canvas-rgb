@@ -4107,3 +4107,141 @@ async fn white_balance_stops_at_the_device_cap() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
 }
+
+// ---- Issue #295: a hot-limit PUT must not reset the header modes ----
+
+/// A fake fan service that keeps a config the way the real one does: `SetHeaderMode` writes the
+/// mode into the ACTIVE profile, `PutFanConfig` replaces the whole config, and every change is
+/// saved to `fans.toml` (here under `file`). It records every request.
+struct ModelService {
+    config: std::sync::Mutex<canvas_proto::config::FansFile>,
+    file: std::path::PathBuf,
+    sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
+}
+
+impl ModelService {
+    fn save(&self, config: &canvas_proto::config::FansFile) {
+        std::fs::create_dir_all(self.file.parent().expect("the file has a folder")).expect("the folder is made");
+        std::fs::write(&self.file, toml::to_string(config).expect("the config serializes")).expect("the file is written");
+    }
+}
+
+#[async_trait::async_trait]
+impl canvas_daemon::pipe_client::PipeLink for ModelService {
+    async fn exchange(
+        &self,
+        request: &canvas_proto::pipe::PipeRequest,
+    ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
+        use canvas_proto::pipe::{PipeRequest, PipeResponse};
+        self.sent.lock().unwrap().push(request.clone());
+        let mut config = self.config.lock().unwrap();
+        match request {
+            PipeRequest::SetHeaderMode { header, mode } => {
+                let active = config.active_profile.clone();
+                let profile = config.profiles.iter_mut().find(|p| p.name == active).expect("the active profile exists");
+                profile.headers.insert(header.clone(), mode.clone());
+                self.save(&config);
+            }
+            PipeRequest::PutFanConfig { config: next } => {
+                *config = next.clone();
+                self.save(&config);
+            }
+            _ => {}
+        }
+        Ok(PipeResponse::Ok)
+    }
+}
+
+fn curve_mode() -> canvas_proto::fans::FanMode {
+    canvas_proto::fans::FanMode::Curve {
+        source: canvas_proto::fans::TempSource::Cpu,
+        points: vec![
+            canvas_proto::fans::CurvePoint { temp_c: 30.0, percent: 30 },
+            canvas_proto::fans::CurvePoint { temp_c: 70.0, percent: 70 },
+        ],
+    }
+}
+
+/// The app with a [`ModelService`] behind it. `programdata/fans.toml` under the test home is the
+/// service's own file. The service starts with `cpu_fan` on a curve in the Default profile, as
+/// it does after a restart of the daemon alone.
+fn build_with_model_service() -> (
+    axum::Router,
+    Arc<App>,
+    TempHome,
+    Arc<ModelService>,
+) {
+    let home = TempHome::new();
+    let store = canvas_daemon::storage::Store::at(&home.path);
+    let engine = Arc::new(FakeEngine::default());
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let mut app = App::new(store, engine, Box::new(FakeAdapter::default()), TOKEN.to_string(), "0.1.0-test".to_string(), tx);
+    let mut config = canvas_proto::config::FansFile::default();
+    config.profiles[0].headers.insert("cpu_fan".into(), curve_mode());
+    let service = Arc::new(ModelService {
+        config: std::sync::Mutex::new(config),
+        file: home.path.join("programdata").join("fans.toml"),
+        sent: Arc::new(std::sync::Mutex::new(Vec::new())),
+    });
+    service.save(&service.config.lock().unwrap());
+    app.pipe = service.clone();
+    app.service_fans_file = Some(service.file.clone());
+    let app = Arc::new(app);
+    let status = fans_with_hot();
+    app.fans.try_write().expect("nothing holds the status").replace(status);
+    (api::router(app.clone()), app, home, service)
+}
+
+const HOT_BODY: &str = r#"{"cpu_c":70.0,"gpu_c":null,"board_c":null}"#;
+
+fn cpu_fan_mode(service: &ModelService) -> Option<canvas_proto::fans::FanMode> {
+    service.config.lock().unwrap().profiles[0].headers.get("cpu_fan").cloned()
+}
+
+#[tokio::test]
+async fn issue295_a_hot_limit_put_after_a_daemon_start_keeps_the_service_header_modes() {
+    // A fresh daemon: `fans_last` is empty, the service already has cpu_fan on a curve.
+    let (router, app, _home, service) = build_with_model_service();
+    assert!(app.fans_last.read().await.is_none());
+    let response = router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(cpu_fan_mode(&service), Some(curve_mode()), "the hot limit reset cpu_fan: {:?}", service.config.lock().unwrap());
+    assert_eq!(service.config.lock().unwrap().hot_limits.cpu_c, Some(70.0), "the hot limit itself arrived");
+}
+
+#[tokio::test]
+async fn issue295_a_hot_limit_put_after_a_mode_change_keeps_that_mode() {
+    // The daemon has pushed a config before (`fans_last` is Some); then the editor sets cpu_fan to
+    // fixed 55 through PATCH, which the service stores in its profile but the daemon never sees.
+    let (router, app, _home, service) = build_with_model_service();
+    *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
+    let patch = router
+        .clone()
+        .oneshot(request_with_body("PATCH", "/api/v1/fans/headers/cpu_fan", r#"{"mode":"fixed","percent":55}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(patch.status(), StatusCode::OK);
+    let response = router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        cpu_fan_mode(&service),
+        Some(canvas_proto::fans::FanMode::Fixed { percent: 55 }),
+        "the hot limit put cpu_fan back: {:?}",
+        service.config.lock().unwrap()
+    );
+}
+
+#[tokio::test]
+async fn issue295_a_service_file_that_cannot_be_read_sends_nothing() {
+    let (router, _app, _home, service) = build_with_model_service();
+    std::fs::write(&service.file, "this is = not [a fans file").expect("the file is overwritten");
+    let before = service.sent.lock().unwrap().len();
+    let response = router.oneshot(request_with_body("PUT", routes::FAN_HOT, HOT_BODY)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let pushes = service.sent.lock().unwrap()[before..]
+        .iter()
+        .filter(|r| matches!(r, canvas_proto::pipe::PipeRequest::PutFanConfig { .. }))
+        .count();
+    assert_eq!(pushes, 0, "a config the daemon could not base on the service's own was pushed");
+    assert_eq!(cpu_fan_mode(&service), Some(curve_mode()));
+}

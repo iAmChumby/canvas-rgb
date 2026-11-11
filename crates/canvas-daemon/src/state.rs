@@ -98,6 +98,10 @@ pub struct App {
     pub effect_writes: tokio::sync::Mutex<()>,
     /// The OpenRGB server the daemon started (milestone 1). The quit path stops it.
     pub openrgb_child: Mutex<Option<crate::openrgb_supervisor::ServerProcess>>,
+    /// The service's own `fans.toml`, which it rewrites on every header mode, profile and hot-limit
+    /// change (issue #295). The fans routes that push the WHOLE config read it first, so a push
+    /// carries the modes the service already has. `None` in tests and wherever no service runs.
+    pub service_fans_file: Option<PathBuf>,
     /// The link to the service. Every fan request goes through it.
     pub pipe: Arc<dyn crate::pipe_client::PipeLink>,
     /// The effect thumbnails rendered so far.
@@ -236,6 +240,7 @@ impl App {
             effects_dir: crate::paths::effects_dir(),
             effect_writes: tokio::sync::Mutex::new(()),
             openrgb_child: Mutex::new(None),
+            service_fans_file: None,
             pipe: Arc::new(crate::pipe_client::ServicePipe),
             thumbnails: crate::thumbnail::ThumbnailCache::default(),
         }
