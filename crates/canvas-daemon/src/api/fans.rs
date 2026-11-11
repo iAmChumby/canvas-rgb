@@ -379,7 +379,11 @@ pub async fn put_profile(
         Some(existing) => *existing = profile.clone(),
         None => next.profiles.push(profile.clone()),
     }
-    // Send first: the daemon's copy is updated below only after the service said Ok.
+    // Send first: the daemon's copy is updated below only after the service said Ok. Known gap:
+    // `PutProfile` above already saved the profile in the service, so if this push fails or times
+    // out the route answers 503 while the service has the profile. The next whole-config push
+    // starts from the service's own config (`GetFanConfig`), so it carries the profile and the two
+    // agree again; the daemon's copy here only feeds the export while the service is down.
     let response = send_under_fans_lock(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() }).await?;
     expect_ok(response)?;
     crate::logging::warn_if_err("could not save the daemon's copy of the fans file", crate::storage::save_fans_last(&home, &next));

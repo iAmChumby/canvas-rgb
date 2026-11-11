@@ -1519,10 +1519,13 @@ async fn issue225_a_fail_sensor_the_service_takes_is_200() {
 // ---- Issue #225: put_profile holds the fans-config lock across both of its sends ----
 
 /// A service that logs each request as it ARRIVES and holds `PutProfile` until the test
-/// opens the gate. No clock: the test drives the interleaving.
+/// opens the gate. No clock: the test drives the interleaving. It keeps a fans config as the
+/// service does (#295): `GetFanConfig` answers it, `PutProfile` adds to it, `PutFanConfig`
+/// replaces it, so every push starts from what the service holds.
 struct GatedPutProfilePipe {
     sent: Arc<std::sync::Mutex<Vec<canvas_proto::pipe::PipeRequest>>>,
     gate: Arc<tokio::sync::Notify>,
+    config: Arc<std::sync::Mutex<canvas_proto::config::FansFile>>,
 }
 
 #[async_trait::async_trait]
@@ -1532,8 +1535,20 @@ impl canvas_daemon::pipe_client::PipeLink for GatedPutProfilePipe {
         request: &canvas_proto::pipe::PipeRequest,
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
         self.sent.lock().unwrap().push(request.clone());
-        if matches!(request, canvas_proto::pipe::PipeRequest::PutProfile { .. }) {
-            self.gate.notified().await;
+        match request {
+            canvas_proto::pipe::PipeRequest::GetFanConfig => {
+                return Ok(canvas_proto::pipe::PipeResponse::FanConfig { config: self.config.lock().unwrap().clone() });
+            }
+            canvas_proto::pipe::PipeRequest::PutProfile { profile } => {
+                self.gate.notified().await;
+                let mut config = self.config.lock().unwrap();
+                config.profiles.retain(|p| p.name != profile.name);
+                config.profiles.push(profile.clone());
+            }
+            canvas_proto::pipe::PipeRequest::PutFanConfig { config } => {
+                *self.config.lock().unwrap() = config.clone();
+            }
+            _ => {}
         }
         Ok(canvas_proto::pipe::PipeResponse::Ok)
     }
@@ -1562,7 +1577,11 @@ async fn issue225_put_profile_holds_the_fans_lock_across_both_sends() {
     );
     let sent = Arc::new(std::sync::Mutex::new(Vec::new()));
     let gate = Arc::new(tokio::sync::Notify::new());
-    app.pipe = Arc::new(GatedPutProfilePipe { sent: Arc::clone(&sent), gate: Arc::clone(&gate) });
+    app.pipe = Arc::new(GatedPutProfilePipe {
+        sent: Arc::clone(&sent),
+        gate: Arc::clone(&gate),
+        config: Arc::new(std::sync::Mutex::new(canvas_proto::config::FansFile::default())),
+    });
     let app = Arc::new(app);
     *app.fans.write().await = Some(fans_with_hot());
     *app.fans_last.write().await = Some(canvas_proto::config::FansFile::default());
@@ -1626,7 +1645,8 @@ async fn issue225_put_profile_holds_the_fans_lock_across_both_sends() {
     assert!(saved.profiles.iter().any(|p| p.name == "quiet"), "the profile change survived");
 }
 
-/// A service that answers `Ok` to everything except one request kind, which it never answers.
+/// A service that answers `Ok` to everything (and its default fans config to `GetFanConfig`,
+/// so a push reaches the send under test) except one request kind, which it never answers.
 struct HangingPipe {
     hang_on: fn(&canvas_proto::pipe::PipeRequest) -> bool,
 }
@@ -1639,6 +1659,9 @@ impl canvas_daemon::pipe_client::PipeLink for HangingPipe {
     ) -> Result<canvas_proto::pipe::PipeResponse, canvas_daemon::pipe_client::PipeError> {
         if (self.hang_on)(request) {
             std::future::pending::<()>().await;
+        }
+        if matches!(request, canvas_proto::pipe::PipeRequest::GetFanConfig) {
+            return Ok(canvas_proto::pipe::PipeResponse::FanConfig { config: canvas_proto::config::FansFile::default() });
         }
         Ok(canvas_proto::pipe::PipeResponse::Ok)
     }
