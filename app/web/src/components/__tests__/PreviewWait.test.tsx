@@ -57,7 +57,7 @@ describe("the detail pane's preview", () => {
     });
     expect(canvas.dataset.wait).toBe("shown");
     const note = container.querySelector(".effect-preview-note");
-    expect(note?.textContent).toBe("Rendering…");
+    expect(note?.textContent).toBe("Rendering");
   });
 
   it("drops the busy state, the skeleton and the note when the thumbnail lands", async () => {

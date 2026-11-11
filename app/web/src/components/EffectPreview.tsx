@@ -122,7 +122,7 @@ export function EffectPreview({ id, className, label = "Effect preview", note = 
       />
       {note && wait === "shown" && (
         <span className="effect-preview-note" aria-hidden="true">
-          Rendering…
+          Rendering
         </span>
       )}
     </>
