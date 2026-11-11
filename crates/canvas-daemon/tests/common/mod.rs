@@ -887,3 +887,58 @@ impl canvas_daemon::peripherals::Peripheral for FakePeripheral {
         self.0.lock().unwrap().sink = SinkSlot(sink);
     }
 }
+
+// ---------------------------------------------------------------- an in-memory server
+
+/// The way into an in-memory server: each [`MemoryServer::connect`] is one connection.
+///
+/// A test that drives a real HTTP/WebSocket handshake needs hyper's connection code, not the
+/// operating system's network stack. A loopback socket gave the test the stack's own faults:
+/// on a loaded PC a connect timed out (`10060`) and a read was reset (`10054`) with the server
+/// untouched (#194, `cause:timing-test`). A `tokio::io::duplex` pair runs the same hyper code
+/// with nothing between the two ends to drop a packet.
+pub struct MemoryServer {
+    connections: tokio::sync::mpsc::UnboundedSender<tokio::io::DuplexStream>,
+}
+
+impl MemoryServer {
+    /// Opens a connection: the returned end is the client's, and the server has the other.
+    pub fn connect(&self) -> tokio::io::DuplexStream {
+        let (client, server) = tokio::io::duplex(64 * 1024);
+        self.connections
+            .send(server)
+            .expect("the in-memory server is serving");
+        client
+    }
+}
+
+/// The server's side: it hands `axum::serve` each duplex end as a connection.
+struct MemoryListener {
+    incoming: tokio::sync::mpsc::UnboundedReceiver<tokio::io::DuplexStream>,
+}
+
+impl axum::serve::Listener for MemoryListener {
+    type Io = tokio::io::DuplexStream;
+    type Addr = ();
+
+    async fn accept(&mut self) -> (Self::Io, Self::Addr) {
+        match self.incoming.recv().await {
+            Some(io) => (io, ()),
+            // The server handle is gone: nothing more will connect.
+            None => std::future::pending().await,
+        }
+    }
+
+    fn local_addr(&self) -> std::io::Result<Self::Addr> {
+        Ok(())
+    }
+}
+
+/// Serves `router` over in-memory connections, on the current runtime.
+pub fn serve_in_memory(router: axum::Router) -> MemoryServer {
+    let (connections, incoming) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(async move {
+        let _ = axum::serve(MemoryListener { incoming }, router).await;
+    });
+    MemoryServer { connections }
+}

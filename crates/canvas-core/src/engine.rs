@@ -242,9 +242,22 @@ pub struct CoreEngine {
     /// A test reads it to check that a panicking effect logs once and is never called
     /// again until it is replaced.
     effect_panics: std::sync::atomic::AtomicU64,
+    /// A test's hook, called on the render thread between its decision to run or park and
+    /// the park wait (#250). Set before the thread starts, so it sees every iteration.
+    #[cfg(test)]
+    decided_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
 }
 
 impl CoreEngine {
+    /// Runs the test's hook, if it set one. Called with no lock held.
+    #[cfg(test)]
+    fn decided_hook(&self) {
+        let hook = self.decided_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = hook {
+            hook();
+        }
+    }
+
     /// Wakes the render thread so it re-reads the state.
     fn wake(&self) {
         self.wake.notify_all();
@@ -554,15 +567,27 @@ impl Drop for CoreEngine {
 ///
 /// The public entry point is [`crate::spawn`], which hands out the trait object.
 pub fn spawn_core(settings: EngineSettings) -> Arc<CoreEngine> {
-    let engine = Arc::new(CoreEngine {
-        state: Mutex::new(State::new(&settings)),
+    let engine = new_core(&settings);
+    start_render_thread(&engine);
+    engine
+}
+
+/// The engine with no render thread yet. A test sets its hook on it, then starts the thread.
+fn new_core(settings: &EngineSettings) -> Arc<CoreEngine> {
+    Arc::new(CoreEngine {
+        state: Mutex::new(State::new(settings)),
         wake: Condvar::new(),
         thread: Mutex::new(None),
         park_wakeups: std::sync::atomic::AtomicU64::new(0),
         effect_panics: std::sync::atomic::AtomicU64::new(0),
-    });
+        #[cfg(test)]
+        decided_hook: Mutex::new(None),
+    })
+}
 
-    let thread_engine = Arc::clone(&engine);
+/// Starts the render thread of an engine made by [`new_core`].
+fn start_render_thread(engine: &Arc<CoreEngine>) {
+    let thread_engine = Arc::clone(engine);
     let handle = std::thread::Builder::new()
         .name("canvas-rgb-render".into())
         .spawn(move || render_loop(thread_engine))
@@ -576,8 +601,23 @@ pub fn spawn_core(settings: EngineSettings) -> Arc<CoreEngine> {
             warn!("could not spawn the render thread");
         }
     }
+}
 
+/// An engine whose render thread has not started, with a hook on its park decision (#250).
+#[cfg(test)]
+pub(crate) fn new_core_with_decided_hook(
+    settings: &EngineSettings,
+    hook: Arc<dyn Fn() + Send + Sync>,
+) -> Arc<CoreEngine> {
+    let engine = new_core(settings);
+    *engine.decided_hook.lock().unwrap_or_else(|e| e.into_inner()) = Some(hook);
     engine
+}
+
+/// Starts the render thread of an engine made by [`new_core_with_decided_hook`].
+#[cfg(test)]
+pub(crate) fn start_core(engine: &Arc<CoreEngine>) {
+    start_render_thread(engine);
 }
 
 /// Starts the render thread and returns its handle.
@@ -662,7 +702,10 @@ fn render_loop(engine: Arc<CoreEngine>) {
 
     loop {
         // ---- read the state --------------------------------------------------
-        let (running, fps, resumed) = {
+        // `decided_at` is the state's change counter, read under the same lock as the
+        // decision below. The park wait compares against it, so a change that lands after
+        // the decision (a consumer arriving) is seen by the wait and not slept through.
+        let (running, fps, resumed, decided_at) = {
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
             if state.stop {
                 break;
@@ -691,8 +734,13 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 }
                 last_power = state.power;
             }
-            (running, state.fps, resumed)
+            (running, state.fps, resumed, state.wake_generation)
         };
+
+        // A test holds the thread here, between the decision and the park wait, to land a
+        // change in that gap (#250).
+        #[cfg(test)]
+        engine.decided_hook();
 
         if !running {
             // Parked or paused: sleep until something changes.
@@ -708,9 +756,12 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 info!("paused: wrote one black frame to every sink");
             }
             // Wait until the state changes. The generation counter closes the race
-            // between the check above and the wait below: if a change landed in
-            // between, the counter moved and the wait returns immediately.
-            let seen = state.wake_generation;
+            // between the decision above and the wait below: `decided_at` was read with
+            // the decision, so a change that landed in between has moved the counter past
+            // it and the wait returns at once. (It used to read the counter here, after
+            // the gap: a consumer that arrived in the gap was already counted, the wait
+            // saw no change, and the loop slept until the next unrelated change, #250.)
+            let seen = decided_at;
             while state.wake_generation == seen && !state.stop {
                 let (guard, _timeout) = engine
                     .wake

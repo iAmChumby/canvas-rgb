@@ -9,6 +9,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Devices: Try again now rescans (it sends `?rescan=1`, and while it runs with no device listed yet the page shows the loading placeholder), and the daemon answers a rescan by reading OpenRGB's device list again instead of returning the list it held. A rescan OpenRGB does not answer within 5 s reports that failure, in the onboarding's Rescan too, and the lights keep moving while it waits (#233, #230)
+- Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
+- Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
 
 ## [0.13.0] - 2026-11-10
