@@ -636,13 +636,13 @@ pub async fn thumbnail(
         tracing::debug!(effect = %schema.id, cache = "hit", "thumbnail tile");
         return Ok(binary_response(&bytes));
     }
-    tracing::debug!(effect = %schema.id, cache = "miss", "thumbnail tile");
     // A render that was given up is remembered: the library is told the tile was given up
     // instead of asking for it again on every open.
     if let Some(why) = app.thumbnails.failure(generation, &schema.id) {
         tracing::debug!(effect = %schema.id, cache = "failure", "thumbnail tile");
         return Err(ApiFailure::service_unavailable(given_up(&id, &why)));
     }
+    tracing::debug!(effect = %schema.id, cache = "miss", "thumbnail tile");
 
     let user = Arc::clone(&app.user_effects);
     let stacks = Arc::clone(&app.stacks);

@@ -108,16 +108,13 @@ export const EFFECT_IMPORT_TIMEOUT_MS = 60_000;
 export const EFFECT_PREVIEW_TIMEOUT_MS = 35_000;
 
 /**
- * The deadline of an effect thumbnail: the daemon renders the tile headless inside the
- * renderer's own 30 s budget (`RENDER_BUDGET`, `crates/canvas-daemon/src/thumbnail.rs`), two at
- * a time (`CONCURRENT_RENDERS`), and the library asks for every tile at once. A tile can sit in
- * that queue while two other renders finish first, so the deadline covers one full render of
- * queue time ahead of this one plus the render itself, and five seconds of margin — the same
- * shape as the draft preview's deadline above.
- *
- * The daemon's queue is unbounded, so a first open of a large library can still outlast this
- * deadline; the tile then shows the no-picture box and the next open re-asks, which is answered
- * from the daemon's cache.
+ * The deadline of an effect thumbnail, from the moment it is sent: the daemon renders the tile
+ * headless inside the renderer's own 30 s budget (`RENDER_BUDGET`,
+ * `crates/canvas-daemon/src/thumbnail.rs`), two at a time (`CONCURRENT_RENDERS`). The editor
+ * sends at most two at once (`THUMBS_IN_FLIGHT`, `lib/thumbs.ts`) and the rest wait on its side,
+ * so a sent request waits for at most one render ahead of it on a daemon shared with another
+ * window, plus its own render and five seconds of margin: the same shape as the draft preview's
+ * deadline above. A daemon that hangs instead of answering costs this long per pair of tiles.
  */
 export const THUMBNAIL_TIMEOUT_MS = 65_000;
 

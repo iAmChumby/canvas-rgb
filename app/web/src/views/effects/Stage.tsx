@@ -206,7 +206,8 @@ export function Stage({
   const empty = stack.layers.length === 0;
   // The wait before the first frame: the canvas stays dark, but it says it is waiting and, after
   // the delay, wears the skeleton tone like every other canvas in the editor.
-  const wait = useCanvasWait(framed, feedFailed);
+  // No canvas while the stack is empty, so no wait runs: the delay starts when the first layer mounts it.
+  const wait = useCanvasWait(framed || empty, feedFailed);
   // An emptied stack unmounts the canvas; the next one waits for its own first frame again. Set
   // during render when `empty` changes (React's pattern for state that follows a prop), not in an
   // effect, so no frame paints the stale state.

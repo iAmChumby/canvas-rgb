@@ -47,7 +47,7 @@ export function EffectPreview({ id, className, label = "Effect preview", note = 
   // The thumbnail: fetched once per effect (loadThumb keeps the cache).
   useEffect(() => {
     let current = true;
-    void loadThumb(id).then((t) => {
+    void loadThumb(id, { first: true }).then((t) => {
       if (!current) return;
       if (t) setThumb({ id, data: t });
       else setMissed(id);

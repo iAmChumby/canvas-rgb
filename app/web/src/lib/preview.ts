@@ -196,7 +196,7 @@ function demoFrame(t: number): Frame {
   const thumb = demoThumbs.get(id);
   if (!thumb) {
     if (id && !demoThumbs.has(id)) {
-      void loadThumb(id).then((loaded) => {
+      void loadThumb(id, { first: true }).then((loaded) => {
         if (loaded) demoThumbs.set(id, loaded);
       });
     }

@@ -31,14 +31,15 @@ const cache = new Map<string, Promise<Thumb | null>>();
  * two at a time (`CONCURRENT_RENDERS`), and a thumbnail may take up to `THUMBNAIL_TIMEOUT_MS` to
  * answer, so sending every tile at once would hold every HTTP/1.1 socket the browser keeps for the
  * daemon (6 per host) and stall the fan poll and Activate behind them. The rest wait here, in
- * order, and their deadline starts only when they are sent.
+ * order, and their deadline starts only when they are sent. A picture the person is looking at
+ * (the selected effect's preview, the rail, the desk) asks with `first` and goes to the front.
  */
 export const THUMBS_IN_FLIGHT = 2;
 let inFlight = 0;
-const waiting: Array<() => void> = [];
+const waiting: Array<{ id: string; start: () => void }> = [];
 
-/** Runs `send` when one of the THUMBS_IN_FLIGHT places is free. */
-function queued<T>(send: () => Promise<T>): Promise<T> {
+/** Runs `send` when one of the THUMBS_IN_FLIGHT places is free; `first` jumps the queue. */
+function queued<T>(id: string, send: () => Promise<T>, first: boolean): Promise<T> {
   return new Promise<T>((resolve, reject) => {
     const start = () => {
       inFlight += 1;
@@ -46,11 +47,12 @@ function queued<T>(send: () => Promise<T>): Promise<T> {
         .then(resolve, reject)
         .finally(() => {
           inFlight -= 1;
-          waiting.shift()?.();
+          waiting.shift()?.start();
         });
     };
     if (inFlight < THUMBS_IN_FLIGHT) start();
-    else waiting.push(start);
+    else if (first) waiting.unshift({ id, start });
+    else waiting.push({ id, start });
   });
 }
 
@@ -63,10 +65,15 @@ export function thumbsInFlight(): number {
  * Loads one effect's thumbnail once. A failed load resolves to null (the tile shows "no picture")
  * and is not kept, so the next tile that mounts asks again (a daemon hiccup is not cached).
  */
-export function loadThumb(id: string): Promise<Thumb | null> {
+export function loadThumb(id: string, opts: { first?: boolean } = {}): Promise<Thumb | null> {
   let hit = cache.get(id);
+  if (hit && opts.first) {
+    // Asked for already but still waiting: the picture the person is looking at goes first.
+    const at = waiting.findIndex((w) => w.id === id);
+    if (at > 0) waiting.unshift(...waiting.splice(at, 1));
+  }
   if (!hit) {
-    hit = queued(() => api.effectThumbnail(id))
+    hit = queued(id, () => api.effectThumbnail(id), opts.first === true)
       .then(parseThumbnail)
       .catch(() => {
         cache.delete(id);

@@ -98,7 +98,7 @@ export function RailStrip({ effectId, paused }: { effectId: string | null; pause
     // The fallback: the effect's own thumbnail, which the daemon renders for every effect.
     // It is only used while no live frame has arrived.
     if (effectId) {
-      void loadThumb(effectId).then((thumb) => {
+      void loadThumb(effectId, { first: true }).then((thumb) => {
         if (stopped || live || !thumb) return;
         const bytes = thumb.w * thumb.h * 3;
         paint(sampleColumns(thumb.data.subarray(0, bytes), thumb.w, thumb.h, CELLS));
