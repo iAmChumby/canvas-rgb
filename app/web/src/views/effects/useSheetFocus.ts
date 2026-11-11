@@ -4,7 +4,8 @@
 // inside the sheet, Escape closes it, opening it takes the first key and closing it gives focus
 // back to Tune (or the library), and a resize to desktop lands focus on the picked layer's row.
 
-import { useEffect, useRef, type RefObject } from "react";
+import { useCallback, useEffect, useRef, type RefObject } from "react";
+import { useFocusTrap } from "@/components/useFocusTrap";
 
 /** What Tab reaches inside a dialog, in document order. */
 const FOCUSABLE =
@@ -38,44 +39,10 @@ export function useSheetFocus({
   // The sheet's own keys: Tab stays inside it while it is open, and Escape closes it. While the
   // area picker or the leave prompt is over the sheet, that dialog owns the keys and the sheet's
   // trap steps aside. Tab from outside the sheet comes back in rather than leaving the keyboard
-  // on the page behind it.
-  useEffect(() => {
-    if (!sheetOpen || pickerFor || leaving) return;
-    const onKey = (event: KeyboardEvent) => {
-      if (event.key === "Escape") {
-        event.preventDefault();
-        event.stopPropagation();
-        setSheetOpen(false);
-        return;
-      }
-      if (event.key !== "Tab") return;
-      const sheet = sheetRef.current;
-      if (!sheet) return;
-      const items = Array.from(sheet.querySelectorAll<HTMLElement>(FOCUSABLE));
-      if (items.length === 0) {
-        event.preventDefault();
-        sheet.focus();
-        return;
-      }
-      const first = items[0]!;
-      const last = items[items.length - 1]!;
-      const active = document.activeElement;
-      if (!sheet.contains(active)) {
-        event.preventDefault();
-        (event.shiftKey ? last : first).focus();
-        return;
-      }
-      if (event.shiftKey && (active === first || active === sheet)) {
-        event.preventDefault();
-        last.focus();
-      } else if (!event.shiftKey && (active === last || active === sheet)) {
-        event.preventDefault();
-        first.focus();
-      }
-    };
-    document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
-  }, [sheetOpen, pickerFor, leaving, setSheetOpen, sheetRef]);
+  // on the page behind it. The trap is the palette's own, at the sheet's legacy placement: a
+  // bubble listener on document.
+  const closeSheet = useCallback(() => setSheetOpen(false), [setSheetOpen]);
+  useFocusTrap({ panelRef: sheetRef, onEscape: closeSheet, capture: false, enabled: sheetOpen && !pickerFor && !leaving });
 
   // The sheet is opened by Tune: it takes focus, and gives it back to Tune when it closes. Tune
   // is a key and not a remembered element, so a tap on a phone (where the body is the active
