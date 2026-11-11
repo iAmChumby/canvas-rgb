@@ -269,6 +269,9 @@ describe("the draft on the lights", () => {
     ).toBeTruthy();
     expect(screen.getByRole("button", { name: "Retry" })).toBeTruthy();
     expect(screen.getByTestId("effect-editor")).toBeTruthy();
+    // The file is saved: the editor's own line says so, and never that it could not be saved (#235).
+    expect(screen.getByText(/^Saved, but it did not start: /)).toBeTruthy();
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     // The retry stops the draft, and the saved-but-not-started effect is reported and closed.
     expect(
@@ -279,6 +282,21 @@ describe("the draft on the lights", () => {
       const status = await api.draft();
       expect(status.active).toBe(false);
     });
+    setState("html,fast-draft,presets");
+  });
+
+  it("reports a saved effect that did not start as saved, never as a failed save", async () => {
+    setState("html,fast-draft,presets,activate-fail");
+    await openEditor("Edited sample");
+    // No draft is running: the header's Save writes the file, and the activation is refused.
+    await replaceSource(`${EDITED}
+<!-- saved, not started -->`);
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    expect(await screen.findByText(/^Edited sample is saved, but it did not start/, {}, { timeout: 5000 })).toBeTruthy();
+    await waitFor(() => expect(screen.queryByTestId("effect-editor")).toBeNull(), { timeout: 3000 });
+    expect(screen.queryByText(/could not be saved/)).toBeNull();
+    // The effect is in the library to start from, with its own Activate.
+    expect(screen.getByRole("button", { name: "Open Edited sample" })).toBeTruthy();
     setState("html,fast-draft,presets");
   });
 
