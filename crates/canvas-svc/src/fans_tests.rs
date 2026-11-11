@@ -2386,12 +2386,13 @@ fn issue297_a_start_above_the_limit_starts_from_the_curve_and_ramps() {
     }
     let step = worst_step(&traces);
     let peak = traces.iter().map(DutyTrace::peak).max().unwrap_or(0);
+    let full = worst(&traces, DutyTrace::secs_at_100);
     // 52.5 C on the issue's curve asks for 46 %; 50 % is the cpu_fan hot floor, and a
     // proportional answer of a point or two is the ramp's first step.
-    println!("start-up: first ask {first} %, max step {step} pts/s, peak {peak} %");
+    println!("start-up: first ask {first} %, max step {step} pts/s, peak {peak} %, {full} s at 100 %");
     assert!(first <= 56, "the first ask at 52.5 C was {first} %, not the curve's answer plus a step");
     assert!(step <= 5, "start-up ramped {step} points in one second: {traces:?}");
-    assert_eq!(worst(&traces, DutyTrace::secs_at_100), 0, "start-up reached 100 % on a hover: {traces:?}");
+    assert_eq!(full, 0, "start-up reached 100 % on a hover: {traces:?}");
 }
 
 #[test]
