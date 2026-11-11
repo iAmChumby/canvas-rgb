@@ -10,10 +10,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Devices: Try again now rescans (it sends `?rescan=1`, and while it runs with no device listed yet the page shows the loading placeholder), and the daemon answers a rescan by reading OpenRGB's device list again instead of returning the list it held. A rescan OpenRGB does not answer within 5 s reports that failure, in the onboarding's Rescan too, and the lights keep moving while it waits (#233, #230)
 - Devices: a rescan against an OpenRGB that went silent sends its request at once instead of waiting out the reply timeout first, so it still answers within its 5 s budget. A frame for a controller whose zone is being resized waits for the resize instead of reaching it with the old size, and a frame write that is given up on no longer leaves a half-written packet on the OpenRGB connection (#233)
+- Command palette: a screen reader is told which row Enter runs, Tab stays inside the palette and focus goes back to the key that opened it, and the short list is the phone's list instead of every window's; while the phone layer sheet is open the palette owns Tab and Escape (the sheet no longer closes with it), and a command that moved focus itself does not have focus stolen back to the palette's opener (#232)
 - Effects: an HTML effect that is still rendering now shows that it is loading (the preview, the stack builder's picture, Import and Replace), and a slow tile waits for its picture instead of showing "no picture" after 10 seconds (#296)
 - Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
 - Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
+- Stacks: a preview or draft beat no longer waits for the build it has already superseded, and a structure that comes back while its own build is still loading rejoins that build instead of queuing another (#102)
+- Effects and stacks: previews and drafts each build at most two at once (a new build past that answers 503 with Retry-After; a beat that only changes values or joins a build in flight is never refused), and a client that goes away mid-build no longer frees a slot the build still holds (#102)
 
 ## [0.13.0] - 2026-11-10
 

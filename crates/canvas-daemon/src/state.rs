@@ -143,6 +143,10 @@ pub struct App {
     /// The preview render slots. A preview renders up to 30 s of a blocking thread, so at most
     /// [`crate::api::editor::PREVIEW_CONCURRENT`] run at once and the rest answer 503.
     pub preview_slots: Arc<tokio::sync::Semaphore>,
+    /// The draft builds' own render slots (HTML and stack drafts), apart from the previews', so a
+    /// stack builder's preview and draft of one structure change never take every slot and refuse
+    /// the next change (#102 review). The two pools bound the daemon at four builds at once.
+    pub draft_slots: Arc<tokio::sync::Semaphore>,
     /// Fakes mode (#199, debug builds only): the daemon talks only to fakes. The
     /// auth guard reads it to accept the UI-capture origin (#200) only here.
     pub fakes: bool,
@@ -236,6 +240,7 @@ impl App {
             import_seam: Mutex::new(None),
             input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
+            draft_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             fakes: false,
             store: tokio::sync::RwLock::new(store),
             engine,
