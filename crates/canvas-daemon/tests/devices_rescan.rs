@@ -270,10 +270,10 @@ async fn the_rescan_flag_follows_the_rule_every_flag_follows() {
 /// writer must not wait on the adapter lock the rescan holds.
 ///
 /// The budget is the production one (`RESCAN_BUDGET`, 5 s), so the rescan may hold the adapter
-/// that long. The frame must reach the lights while the rescan still holds it: the wait is on the
-/// frame the fake records, and the check that the rescan still holds the adapter is what says the
-/// frame did not wait for it. With the old writer the frame waited for the rescan to give the
-/// adapter up, and the check below failed.
+/// that long. The frame must reach the lights while the rescan still holds it: the fake counts
+/// the frames that arrive while it still owes a reply, and that count is what says the frame did
+/// not wait for the rescan. The verdict is that count, not the clock: the old writer waited for
+/// the rescan to give the adapter up, and no frame arrived while the reply was owed.
 #[tokio::test]
 async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
@@ -286,14 +286,15 @@ async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
         let router = rig.router.clone();
         tokio::spawn(async move { router.oneshot(request("/api/v1/devices?rescan=1")).await.expect("the router answers").status() })
     };
-    // The supervisor now holds the adapter, waiting for a reply that never comes.
+    // The supervisor now holds the adapter, waiting for a reply that never comes: the fake
+    // swallowed the request.
     tokio::time::timeout(Duration::from_secs(30), async {
-        while rig.app.adapter.try_lock().is_ok() {
+        while server.swallowed_requests() == 0 {
             tokio::time::sleep(Duration::from_millis(2)).await;
         }
     })
     .await
-    .expect("the rescan never took the adapter");
+    .expect("the rescan never reached OpenRGB");
 
     // A frame goes to the writer while the adapter is held, and must reach the lights.
     sink.submit(vec![Rgb8::WHITE; 8]);
@@ -304,9 +305,11 @@ async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     })
     .await
     .expect("the frame never reached the lights");
-    // The rescan still holds the adapter: the frame did not wait for it.
-    assert!(
-        rig.app.adapter.try_lock().is_err(),
+    // The frame arrived while the fake still owed the rescan its reply: it did not wait for the
+    // rescan to give the adapter up.
+    assert_eq!(
+        server.frames_while_a_request_waited(),
+        1,
         "the frame waited for the rescan to give the adapter up"
     );
 

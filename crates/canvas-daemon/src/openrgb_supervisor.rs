@@ -541,13 +541,20 @@ pub async fn supervise_with_rescans<D, L>(
                             // another's turn (#233).
                             let mut group = vec![rescan];
                             let sizes = zone_sizes.read().await.clone();
-                            let (result, _) = within(group.iter().map(|r| r.budget).max(), async {
+                            let (result, cut) = within(group.iter().map(|r| r.budget).max(), async {
                                 let mut guard = adapter.lock().await;
                                 rescan_devices(guard.as_mut(), &sizes).await
                             })
                             .await;
                             // The rescans that queued while the attempt ran share its answer.
                             take_queued(&mut rescans, &mut group);
+                            if cut {
+                                // The attempt was dropped mid-way: a saved zone size may have
+                                // been applied and the list not read again. The link is dropped,
+                                // as on the connect path, so the next attempt reads everything
+                                // again instead of trusting half-applied state.
+                                let _ = adapter.lock().await.disconnect().await;
+                            }
                             if let Ok(devices) = &result {
                                 last = device_key(devices);
                                 on_devices(devices.clone()).await;
