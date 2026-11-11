@@ -52,15 +52,15 @@ pub const CURVE_STEP_DOWN_HOLD: Duration = Duration::from_secs(60);
 /// The hold alone steps the duty down only when the smoothed temperature asks for at least this many
 /// percentage points less. Without it a 50/54 C input dipped the duty by 1 % every hold period.
 pub const CURVE_STEP_DOWN_MIN_PERCENT: u8 = 3;
-/// Issue #255: the smallest rise of the hot-limit boost, in percentage points per second. A
-/// reference temperature at the line still steps the duty up by at least this much, so "Don't
-/// exceed" always answers.
+/// Issue #255: the smallest rise of the hot-limit boost, in percentage points per second at the
+/// line. The rise grows from here with the error, so "Don't exceed" always answers.
 pub const HOT_BOOST_MIN_RISE: f32 = 1.0;
-/// Issue #255: how fast the boost grows per degree above the line, in percentage points per
-/// second per degree, on top of [`HOT_BOOST_MIN_RISE`]. The BIOS Smart Fan step-up shape: the
-/// further over the line, the faster. Issue #297: the same rise applies inside
-/// [`HOT_BOOST_BAND_C`] as the proportional answer's slew, so the loop is never slower than
-/// issue #255's was at any reading over the line.
+/// Issue #255: how fast the boost grows per degree of error, in percentage points per second per
+/// degree, on top of [`HOT_BOOST_MIN_RISE`]. The BIOS Smart Fan step-up shape: the further over
+/// the line, the faster. Issue #297: this is the rise of the proportional answer inside
+/// [`HOT_BOOST_BAND_C`], and the wind-up past the band measures the same rule from the aim
+/// ([`HOT_HOLD_AIM_MARGIN_C`] under the line), so it is never slower than issue #255 was at the
+/// same reading. [`HOT_BOOST_RISE_MAX`] bounds both.
 pub const HOT_BOOST_GAIN: f32 = 1.0;
 /// Issue #297: the band above the line, in degrees, inside which the hold answers in proportion
 /// to how far over the line the reading is instead of winding up. A CPU hovering around its line
@@ -86,6 +86,15 @@ pub const HOT_BOOST_RISE_MAX: f32 = 12.0;
 /// Issue #255: the deadband below the line, in degrees, where the boost holds instead of
 /// decaying. A temperature hovering at the line never flips the duty (issue #17).
 pub const HOT_BOOST_DEADBAND_C: f32 = 2.0;
+/// Issue #297 review: how far under the line the hold aims, in degrees. The hot floor latch
+/// (#130) moves the CPU header in steps of five points (its 50 % floor against the curve's 45 %
+/// at the line), and the loop answers a degree with ten of them, so a hold that settles exactly
+/// on the line is carried over it on every latch cycle; the strict seconds over the line are the
+/// number the safety rule counts. Aiming a degree under keeps the whole cycle below the line,
+/// and still holds it far closer than issue #255's fourteen-degree margin. It aims *under* the
+/// line and holds there: the answer above the aim is proportional, and it is still the line,
+/// never the aim, that says when to wind up.
+pub const HOT_HOLD_AIM_MARGIN_C: f32 = 1.0;
 /// Issue #255: how fast the boost decays below the deadband, in percentage points per second.
 /// The fall is much slower than the rise, so the fan gives the temperature time to come back.
 pub const HOT_BOOST_DECAY: f32 = 0.25;
@@ -294,14 +303,15 @@ impl CurveState {
 
     /// Issue #255: one tick of the hot-limit boost. `temp_c` is the reference temperature and
     /// `limit_c` the hot line. Issue #297 splits it in three by how far the reading is from the
-    /// line:
+    /// aim, [`HOT_HOLD_AIM_MARGIN_C`] under the line:
     ///
-    /// - past the band over it (and past it for [`HOT_BOOST_ONSET_HOLD`], or a clear degree past
-    ///   it at once), the loop winds up as issue #255 designed, at a rise never slower than that
-    ///   rule and never faster than [`HOT_BOOST_RISE_MAX`];
-    /// - inside the band, a proportional answer ([`HOT_BOOST_GAIN_PER_C`] points per degree),
+    /// - past the band over the line (and past it for [`HOT_BOOST_ONSET_HOLD`], or a clear degree
+    ///   past it at once), the loop winds up as issue #255 designed, at a rise never slower than
+    ///   that rule and never faster than [`HOT_BOOST_RISE_MAX`];
+    /// - over the aim, a proportional answer ([`HOT_BOOST_GAIN_PER_C`] points per degree),
     ///   rate-limited on the way up and holding rather than stepping down on noise (issue #17);
-    /// - below the line it holds through the deadband and decays slowly under it.
+    ///   the line, not the aim, decides when that becomes a wind-up;
+    /// - below the aim it holds through the deadband and decays slowly under it.
     ///
     /// While the safety ceiling is latched the boost is frozen: the ceiling already runs the
     /// header at 100 %. A missing reading keeps the boost through the short gap: the Curve arm
@@ -323,13 +333,21 @@ impl CurveState {
             .map_or(1.0, |previous| now.saturating_duration_since(previous).as_secs_f32())
             .min(HOT_BOOST_MAX_DT_S);
         self.boost_last_at = Some(now);
-        let error = temp - limit_c;
-        if error <= -HOT_BOOST_DEADBAND_C {
+        let aim_c = limit_c - HOT_HOLD_AIM_MARGIN_C;
+        let off_aim = temp - aim_c;
+        if off_aim <= -HOT_BOOST_DEADBAND_C {
             self.hot_over_since = None;
             self.hot_boost = (self.hot_boost - HOT_BOOST_DECAY * dt).max(0.0);
             return;
         }
-        let over_since = if error >= HOT_BOOST_BAND_C {
+        // Issue #297 review: the *target* is measured from the aim under the line; the excursion
+        // that winds the loop up is measured from the line itself, so a hover near the line
+        // still never starts it. Inside the band the answer is approached at issue #255's rise
+        // over the line, so a hover moves the duty by at most five points a second; a wind-up is
+        // #255's rise measured from the aim the loop regulates to, which is a point a second
+        // faster, and it is bounded by [`HOT_BOOST_RISE_MAX`] either way.
+        let over_line = temp - limit_c;
+        let over_since = if over_line >= HOT_BOOST_BAND_C {
             *self.hot_over_since.get_or_insert(now)
         } else {
             self.hot_over_since = None;
@@ -338,23 +356,23 @@ impl CurveState {
         // Issue #297: the onset hold guards the band's edge, where a hover (and a noisy Ryzen
         // `Tctl`) touches it. A reading a clear degree past the band is a real overshoot and
         // winds up at once, so the loop is never slower than issue #255 there.
-        let sustained = error >= HOT_BOOST_BAND_C + 1.0
-            || (error >= HOT_BOOST_BAND_C && now.saturating_duration_since(over_since) >= HOT_BOOST_ONSET_HOLD);
+        let sustained = over_line >= HOT_BOOST_BAND_C + 1.0
+            || (over_line >= HOT_BOOST_BAND_C && now.saturating_duration_since(over_since) >= HOT_BOOST_ONSET_HOLD);
         if sustained {
-            // A sustained excursion past the band: wind the loop up. The rise is issue #255's
-            // `max(MIN_RISE, GAIN*error)` or faster, capped. Anti-windup bounds the term itself,
-            // never the output's shortfall, so a curve that later steps down while the source is
-            // still over the line keeps the fan up.
-            let rise = (HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * error).min(HOT_BOOST_RISE_MAX);
+            // A sustained excursion past the band: wind the loop up. Anti-windup bounds the term
+            // itself, never the output's shortfall, so a curve that later steps down while the
+            // source is still over the line keeps the fan up.
+            let rise = (HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * (over_line + HOT_HOLD_AIM_MARGIN_C))
+                .min(HOT_BOOST_RISE_MAX);
             self.hot_boost = (self.hot_boost + rise * dt).min(HOT_BOOST_MAX);
-        } else if error > 0.0 {
-            // The proportional answer, with the same rise rule: a reading a degree over the line
-            // asks for `HOT_BOOST_GAIN_PER_C` points, a point and a half inside the band. Issue
-            // #297: a hover cannot wind this past its own answer, so the duty settles instead of
-            // climbing to full speed.
-            let target = (HOT_BOOST_GAIN_PER_C * error.min(HOT_BOOST_BAND_C)).clamp(0.0, HOT_BOOST_MAX);
+        } else if off_aim > 0.0 {
+            // The proportional answer: it asks for `HOT_BOOST_GAIN_PER_C` points per degree over
+            // the aim, so one degree over the aim is ten points and the band's edge is its top.
+            // Issue #297: a hover cannot wind this past its own answer, so the duty settles
+            // instead of climbing to full speed.
+            let target = (HOT_BOOST_GAIN_PER_C * off_aim).clamp(0.0, HOT_BOOST_BAND_C * HOT_BOOST_GAIN_PER_C);
             if self.hot_boost < target {
-                let rise = (HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * error).min(HOT_BOOST_RISE_MAX);
+                let rise = (HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * over_line.max(0.0)).min(HOT_BOOST_RISE_MAX);
                 self.hot_boost = (self.hot_boost + rise * dt).min(target);
             }
         }

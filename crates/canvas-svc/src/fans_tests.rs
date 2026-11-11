@@ -227,13 +227,13 @@ fn the_hot_floor_overrides_a_lower_fixed_value_and_says_why() {
     r.fans.set_header_mode("sys_fan1", FanMode::Fixed { percent: 20 }, t0).unwrap();
     let status = r.fans.status();
     let h = header(&status, "sys_fan1");
-    assert_eq!(h.pwm_percent, Some(41), "hot floor 35 % plus the first six proportional points at 55 C");
+    assert_eq!(h.pwm_percent, Some(42), "hot floor 35 % plus the wind-up's first seven points at 55 C");
     assert_eq!(h.mode, FanMode::Fixed { percent: 20 }, "the request is kept");
     assert_eq!(h.override_reason.as_deref(), Some("holding CPU under 50 °C"));
 
     r.fans.set_header_mode("cpu_fan", FanMode::Fixed { percent: 30 }, t0).unwrap();
     let status = r.fans.status();
-    assert_eq!(header(&status, "cpu_fan").pwm_percent, Some(56), "hot floor 50 % plus the first six proportional points at 55 C");
+    assert_eq!(header(&status, "cpu_fan").pwm_percent, Some(57), "hot floor 50 % plus the wind-up's first seven points at 55 C");
 }
 
 #[test]
@@ -1466,7 +1466,7 @@ fn issue130_board_sensors_keep_the_50_degree_line_by_default() {
     };
     r.fans.set_header_mode("sys_fan1", flat, t0).unwrap();
     let status = r.fans.status();
-    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(41), "the board automatic line stays 50 C: the hot floor applies at 55 C, plus the boost's first six points");
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(42), "the board automatic line stays 50 C: the hot floor applies at 55 C, plus the wind-up's first seven points");
     let board = hot_of(&mut r, HotKind::Board);
     assert_eq!(board.limit_c, 50.0);
     assert_eq!(board.ceiling_c, 90.0);
@@ -1550,7 +1550,9 @@ fn issue255_a_curve_above_the_hot_limit_speeds_up_to_full_speed() {
 fn issue297_one_degree_over_the_line_answers_at_once_then_holds() {
     // Issue #255's rule was "at least one point a tick for ever", which is the surge #297
     // reports: a CPU parked one degree over its line climbed to full speed. The answer must
-    // still start at once; it stops at its proportional answer instead of climbing on.
+    // still start at once; it stops at its proportional answer instead of climbing on. The
+    // answer is measured from the hold's aim, one degree under the line, so a reading one degree
+    // over the line is two degrees over the aim: twenty points, climbed at two a second.
     let t0 = Instant::now();
     let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
     let mut r = rig(config, t0);
@@ -1560,18 +1562,18 @@ fn issue297_one_degree_over_the_line_answers_at_once_then_holds() {
         tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
     let mut last = duty_percent(&r, CPU_FAN);
-    // One degree over asks for ten points (HOT_BOOST_GAIN_PER_C), climbed at two a second.
-    for s in 4..=8 {
+    for s in 4..=13 {
         let duty = tick_cpu_at_temp(&mut r, t0, s, 51.0);
         let duty = ((u32::from(duty) * 100 + 127) / 255) as u8;
         assert!(duty > last, "51 C rose only {last} -> {duty} at tick {s}: the answer must start at once");
+        assert!(duty - last <= 2, "51 C stepped {last} -> {duty} at tick {s}: two points a second is the rise");
         last = duty;
     }
-    assert_eq!(last, 60, "one degree over asks for the curve's 50 % plus ten points: {last} %");
-    for s in 9..=40 {
+    assert_eq!(last, 70, "one degree over the line is two over the aim: the curve's 50 % plus twenty points: {last} %");
+    for s in 14..=40 {
         let duty = tick_cpu_at_temp(&mut r, t0, s, 51.0);
         let duty = ((u32::from(duty) * 100 + 127) / 255) as u8;
-        assert_eq!(duty, 60, "the answer settled and must hold at {last} %, not climb: {duty} % at {s} s");
+        assert_eq!(duty, 70, "the answer settled and must hold at {last} %, not climb: {duty} % at {s} s");
     }
 }
 
@@ -1755,7 +1757,7 @@ fn issue255_a_missing_reading_keeps_the_boost_until_the_handback() {
         tick_cpu_at_temp(&mut r, t0, s, 60.0);
     }
     let before = duty_percent(&r, CPU_FAN);
-    assert_eq!(before, 83, "the boost reached 33 points: {before}%");
+    assert_eq!(before, 86, "the boost reached 36 points: {before}%");
     r.cpu.set(None);
     r.fans.tick(t0 + Duration::from_secs(4));
     assert_eq!(duty_percent(&r, CPU_FAN), before, "the no-write hold keeps the duty across the gap");
@@ -1775,7 +1777,7 @@ fn issue255_a_long_tick_gap_counts_at_most_two_seconds() {
     // 25 s at the line plus ten would add 275 points unbound. Two seconds count, at the rise
     // rule's 11 points a second for ten degrees over (issue #297's cap is 12).
     let duty = tick_cpu_at_temp(&mut r, t0, 26, 60.0);
-    assert_eq!(((u32::from(duty) * 100 + 127) / 255) as u8, 72, "the gap counted 2 s, not 25: raw {duty}");
+    assert_eq!(((u32::from(duty) * 100 + 127) / 255) as u8, 74, "the gap counted 2 s, not 25: raw {duty}");
 }
 
 #[test]
@@ -1788,7 +1790,7 @@ fn issue255_a_hot_limit_change_resets_the_boost() {
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 60.0);
     }
-    assert_eq!(duty_percent(&r, CPU_FAN), 83, "the boost is built before the change");
+    assert_eq!(duty_percent(&r, CPU_FAN), 86, "the boost is built before the change");
     tick_cpu_at_temp(&mut r, t0, 4, 49.0);
     let file = FansFile {
         hot_limits: HotLimits { cpu_c: Some(60.0), gpu_c: None, board_c: None },
@@ -1889,7 +1891,7 @@ fn issue255_a_fixed_header_drops_the_boost_after_a_lost_reading() {
         tick_at_temp(&mut r, t0, s, 49.0);
     }
     let before = duty_percent(&r, SYS_FAN1);
-    assert_eq!(before, 53, "the latch released, leaving Fixed 20 + the held 33-point boost: {before}%");
+    assert_eq!(before, 56, "the latch released, leaving Fixed 20 + the held 36-point boost: {before}%");
     r.cpu.set(None);
     r.fans.tick(t0 + Duration::from_secs(65));
     assert_eq!(duty_percent(&r, SYS_FAN1), before, "the short gap keeps the boost");
@@ -2301,6 +2303,22 @@ fn time_above(temps: &[f32], limit_c: f32) -> (usize, usize) {
     (longest, total)
 }
 
+/// The 63 W thermal run from `start_c` for `seconds` ticks: the CPU temperature after every tick
+/// (the start itself is index 0) and the six channels' duties. One helper, so the model the
+/// safety rule is measured on is the same one the behaviour tests use.
+fn issue297_thermal_run(start_c: f32, seconds: usize) -> (Vec<f32>, Vec<DutyTrace>) {
+    let t0 = Instant::now();
+    let (mut r, mut traces) = issue297_rig(t0, start_c);
+    let mut temps = vec![start_c];
+    let mut temp = start_c;
+    for s in 1..=seconds {
+        issue297_tick(&mut r, t0, s as u64, temp, &mut traces);
+        temp = issue297_thermal(temp, traces[0].duties.last().copied().unwrap_or(0), 63.0);
+        temps.push(temp);
+    }
+    (temps, traces)
+}
+
 #[test]
 fn issue297_a_hovering_cpu_does_not_surge_to_full_speed() {
     let t0 = Instant::now();
@@ -2381,21 +2399,9 @@ fn issue297_the_hover_meets_the_limit_without_hunting() {
     // A thermal model rather than a fixed trace: the CPU fan's duty moves the temperature, so
     // "the limit is still met" is a real claim. 63 W into a 400 J/K block settles at 50 C at
     // 45 % duty, so the line sits where a 7800X3D idles.
-    let t0 = Instant::now();
-    let start_c = 54.0;
-    let (mut r, mut traces) = issue297_rig(t0, start_c);
+    let (temps, traces) = issue297_thermal_run(54.0, 1800);
     let seconds = 1800;
-    let mut temps = vec![start_c];
-    let mut temp = start_c;
-    for s in 1..=seconds {
-        issue297_tick(&mut r, t0, s as u64, temp, &mut traces);
-        temp = issue297_thermal(temp, traces[0].duties.last().copied().unwrap_or(0), 63.0);
-        temps.push(temp);
-    }
     let (longest_above, total_above) = time_above(&temps, 50.0);
-    // Issue #297 review: the strict seconds-over-the-line are not the safety number to bound:
-    // the loop now settles at 49.9 C, so the floor latch's own five-point cycle crosses the line
-    // by hundredths. Time more than half a degree over is, and the peak temperature is.
     let (longest_half, total_half) = time_above(&temps, 50.5);
     let max_temp = temps.iter().copied().fold(f32::MIN, f32::max);
     let excess: f32 = temps.iter().map(|t| (t - 50.0).max(0.0)).sum();
@@ -2407,13 +2413,38 @@ fn issue297_the_hover_meets_the_limit_without_hunting() {
     );
     // Before #297 (origin/main): 28 s above 50 (longest 25), 22 s more than half a degree over,
     // 56.3 degree-seconds over the line, the same 54 C peak, settled 49.6 C, 0.3 changes/min and
-    // 71 s at full speed. The loop now settles on the line instead of 14 C under it, so it spends
-    // a few more seconds a hundredth over it, but it is never hotter overall and never at full
-    // speed.
+    // 71 s at full speed -- reached by winding up to 100 % and staying there. The hold now aims a
+    // degree under the line, so the latch's own five-point cycle never carries the CPU over it:
+    // every one of these is better, and the time over the line is a stricter rule in its own
+    // test below.
     assert!(max_temp <= 54.0, "the peak rose to {max_temp:.1} C");
-    assert!(longest_above <= 30, "the CPU stayed over the line for {longest_above} s at once (was 25)");
     assert!(excess <= 56.3, "the CPU was hotter overall: {excess:.1} degree-seconds over the line (was 56.3)");
     assert!(settled <= 51.0, "the loop settled at {settled:.1} C, over the 50 C line");
     assert!(full == 0, "the loop ran at full speed for {full} s holding a 50 C line (was 71 s)");
     assert!(changes <= 3.0, "the duty turned round {changes:.1} times a minute holding the line");
+}
+
+/// The rule this pull request is held to, on the model above: main's own numbers.
+#[test]
+fn issue297_the_thermal_model_spends_no_more_time_over_the_line_than_main_did() {
+    // "Nothing may let the CPU run hotter than the limit for longer than it does today." These
+    // are origin/main's numbers for this exact model (the issue's curve on six headers, a 50 C
+    // CPU line, a 400 J/K block under 63 W, a 54 C start, 1800 ticks), measured by putting
+    // main's `note_boost` back and running this model against it:
+    //   28 s over 50 C in total, the longest run 25 s.
+    // The previous attempt at #297 (`8641bc1`) spent 39 s over the line, longest 26 s, because
+    // the loop settled on the line and the latch's five-point cycle crossed it on every cycle.
+    const MAIN_TOTAL_ABOVE_S: usize = 28;
+    const MAIN_LONGEST_ABOVE_S: usize = 25;
+    let (temps, _) = issue297_thermal_run(54.0, 1800);
+    let (longest_above, total_above) = time_above(&temps, 50.0);
+    println!("thermal over the line: {total_above} s in total, longest {longest_above} s (main: {MAIN_TOTAL_ABOVE_S} / {MAIN_LONGEST_ABOVE_S})");
+    assert!(
+        total_above <= MAIN_TOTAL_ABOVE_S,
+        "the CPU spent {total_above} s over the 50 C line, main spent {MAIN_TOTAL_ABOVE_S} s"
+    );
+    assert!(
+        longest_above <= MAIN_LONGEST_ABOVE_S,
+        "the CPU stayed over the 50 C line for {longest_above} s at once, main stayed {MAIN_LONGEST_ABOVE_S} s"
+    );
 }
