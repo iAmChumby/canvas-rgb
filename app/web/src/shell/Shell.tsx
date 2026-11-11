@@ -51,6 +51,8 @@ function Frame({ children }: { children: ReactNode }) {
   /** The onboarding has the whole window: the rail, the strip and the banners are hidden. */
   const takeover = useTakeover();
   const [paletteOpen, setPaletteOpen] = useState(false);
+  // Stable, so the palette's key listener is not torn down and added again on every status poll.
+  const closePalette = useCallback(() => setPaletteOpen(false), []);
   /** The status details hang under the strip's mark. The palette can open them too, so the
    *  state lives here. */
   const [detailsOpen, setDetailsOpen] = useState(false);
@@ -208,7 +210,8 @@ function Frame({ children }: { children: ReactNode }) {
   }, [router, status, statusError, effects, togglePower, runEffect]);
 
   // A phone opens the palette with what is going on, the pages, the lights and the effects
-  // you would switch to. Typing still searches the whole list.
+  // you would switch to. The palette shows this list below the phone breakpoint; a desktop
+  // window shows every command. Typing still searches the whole list.
   const shortCommands = useMemo<Command[]>(() => {
     const list = commands.filter((c) => c.group === "Pages" || c.group === "Lights");
     const running = (effects ?? []).find((e) => e.id === status?.active_effect);
@@ -283,7 +286,7 @@ function Frame({ children }: { children: ReactNode }) {
         </main>
       </div>
       {paletteOpen && (
-        <CommandPalette commands={commands} short={shortCommands} onClose={() => setPaletteOpen(false)} />
+        <CommandPalette commands={commands} short={shortCommands} onClose={closePalette} />
       )}
     </div>
   );
