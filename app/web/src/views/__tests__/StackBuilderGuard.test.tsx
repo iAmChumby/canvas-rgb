@@ -1,6 +1,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NotifyHost } from "@/components/Notify";
+import { api } from "@/lib/endpoints";
+import { ApiFailure } from "@/lib/errors";
 import { refreshAll } from "@/lib/store";
 import { waitForStackGuard } from "@/test/historyGuard";
 import { Rail } from "@/shell/Rail";
@@ -175,6 +177,32 @@ describe("the builder's unsaved guard", () => {
 
     await waitFor(() => expect(window.location.pathname).toBe("/devices/"));
     await waitFor(() => expect(screen.queryByTestId("stack-builder")).toBeNull());
+  });
+
+  it("Save on Back that saves but does not start says so in a note that stays (#235)", async () => {
+    window.history.replaceState({}, "", "/devices/?state=stack");
+    window.history.pushState(
+      { canvasRgbStack: "Sunset glow" },
+      "",
+      "/effects/?stack=Sunset%20glow&state=complete,stack",
+    );
+    await mount();
+    await builderReady();
+    await dirty();
+    const start = vi.spyOn(api, "activateEffect").mockRejectedValueOnce(
+      new ApiFailure(503, "service_unavailable", "the engine is busy"),
+    );
+    try {
+      window.history.back();
+      const dialog = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+      fireEvent.click(within(dialog).getByRole("button", { name: "Save" }));
+      await waitFor(() => expect(window.location.pathname).toBe("/devices/"));
+      await waitFor(() => expect(screen.queryByTestId("stack-builder")).toBeNull());
+      // The banner left with the builder: the note carries the failure instead.
+      expect(await screen.findByText(/Sunset glow is saved, but it did not start: .*the engine is busy/)).toBeTruthy();
+    } finally {
+      start.mockRestore();
+    }
   });
 
   it("asks before a rail click leaves the builder, and Discard goes on", async () => {

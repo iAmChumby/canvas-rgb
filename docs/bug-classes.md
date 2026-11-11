@@ -368,6 +368,32 @@ line. Three mechanisms, and one bug the timing only exposed.
   (`crates/canvas-svc/src/openrgb_tests.rs`) pitted a 1 s tokio ticker and `Instant::now()` against the 5 s
   detection cap: the count the fake server reported, the moment the cap fell on, and whether the count looked
   settled were all read off the wall clock, so a late tick moved the verdict.
+- [#250](https://github.com/iAmChumby/canvas-rgb/issues/250): `capture_wiring::an_audio_effect_reads_the_source_and_lights_the_sink`
+  waited its full 10 s on CI while the five tests beside it finished in 0.05 s. Not load: a lost wake-up in
+  the render loop (`crates/canvas-core/src/engine.rs`). The thread decides "nothing consumes frames, park",
+  releases the state lock, then locks again and waits for the change counter (`wake_generation`) to move.
+  It read that counter in the second lock, after the gap, so a sink added in the gap was already counted and
+  the wait saw no change; the 100 ms `PARK_POLL` only re-loops the same test. The thread slept until the next
+  unrelated change, here never. A real fault in the daemon too: a preview or device that connects in that
+  gap stays dark. Fixed: the counter is read under the lock that makes the decision. Evidence:
+  `a_consumer_that_arrives_between_the_park_decision_and_the_wait_is_not_slept_through` holds the thread in
+  the gap with a test hook and fails 20 s on the old read, passes on the new; with a 100 ms sleep injected in
+  the gap, the CI test failed 5/5 on the old read and 0/20 on the new (0/20 on the old read with no gap).
+  [#143](https://github.com/iAmChumby/canvas-rgb/issues/143) (a first frame not seen within 3 s,
+  `canvas-core/src/tests.rs`) has the same symptom and was settled by raising the ceiling to 20 s; the
+  ceiling never could have helped a thread that sleeps until the next change. UNKNOWN whether that sighting
+  was this race.
+- [#194](https://github.com/iAmChumby/canvas-rgb/issues/194): `the_preview_socket_opens_with_only_a_query_token`
+  reset once (`10054`). The test opened a real loopback socket for a check of the daemon's HTTP handshake. In
+  a loop of the whole `api` test binary on a PC busy with other builds it failed 1 in 45 runs with
+  `10060` (the connect timed out) in all three socket tests at once, on the line that opens the socket, with
+  the server untouched; sccache's loopback connection timed out the same way on the same PC. So the test read
+  its verdict off the operating system's network stack. UNKNOWN: whether the single `10054` of the report
+  had the same trigger (its line was not kept). Fixed: these tests run the server over `tokio::io::duplex`
+  through axum's `Listener` trait (`serve_in_memory` in `crates/canvas-daemon/tests/common/mod.rs`), so
+  nothing between the two ends can drop or reset. The same shape in `tests/stacks.rs` (the preview
+  sockets) moved too. After: 0 in 45 runs of the same loop. 1 in 45 before is too rare to prove the cure;
+  the in-memory server removes the stack from the test, which the count cannot show.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.

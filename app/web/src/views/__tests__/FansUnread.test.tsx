@@ -1,7 +1,7 @@
-import { act, cleanup, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { getSnap, patchSnap, refreshFans } from "@/lib/store";
-import { UNREAD_DUTY_WHY } from "@/lib/fanBulk";
+import { TACH_ONLY_WHY, UNREAD_DUTY_WHY } from "@/lib/fanBulk";
 import { FansView } from "@/views/FansView";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -148,5 +148,27 @@ describe("a header with no reading", () => {
     expect(dutyCell?.textContent).toContain("0%");
     expect(unread(rpmCell as HTMLElement, "RPM")).toBeNull();
     expect(unread(dutyCell as HTMLElement, "Duty")).toBeNull();
+  });
+});
+
+describe("a tach-only header", () => {
+  // Issue #236: the daemon labels Pump fan 2 "(tach only)": it has no duty register, so a Fixed
+  // or Curve write is refused with a 422. The editor must not offer what the service refuses.
+  it("the header editor offers no Fixed or Curve, says it cannot be set, and leaves BIOS open", async () => {
+    await page("?state=fan-unread");
+    const row = screen
+      .getAllByText("Pump fan 2")
+      .map((el) => el.closest("tr"))
+      .find((el): el is HTMLTableRowElement => el !== null);
+    if (!row) throw new Error("no Pump fan 2 row");
+    fireEvent.click(row);
+    const modes = await screen.findByRole("radiogroup", { name: "Pump fan 2 (tach only) mode" });
+    const radio = (name: string) => within(modes).getByRole("radio", { name }) as HTMLButtonElement;
+    expect(radio("Fixed %").disabled).toBe(true);
+    expect(radio("Curve").disabled).toBe(true);
+    expect(radio("BIOS").disabled).toBe(false);
+    // The reason is the tach-only one, not the duty-not-read one the CPU fan gets.
+    expect(document.querySelector('[data-slot="fan-cannot-set"]')?.textContent).toBe(TACH_ONLY_WHY);
+    expect(document.querySelector('[data-slot="fan-cannot-set"]')?.textContent).not.toBe(UNREAD_DUTY_WHY);
   });
 });
