@@ -26,9 +26,10 @@ describe("the don't-exceed sentence", () => {
   });
 });
 
-// Issue #297: a CPU line at or below the part's idle range (the code's 50 °C hot line plus the
-// 10 °C a real idle varies by) keeps the hold engaged almost all the time; the editor warns.
-describe("the CPU idle-range warning", () => {
+// Issue #297: a CPU line at or under the fixed 60 °C warning threshold (the code's 50 °C hot line
+// plus 10 °C) keeps the hold engaged almost all the time; the editor warns. It is a fixed rule, so
+// the warning says only what that rule means.
+describe("the CPU hot-line warning threshold", () => {
   it("covers a 50 °C line and not a 75 °C one", () => {
     expect(CPU_IDLE_LIMIT_C).toBe(60);
     expect(cpuLimitInIdleRange("cpu", 50)).toBe(true);

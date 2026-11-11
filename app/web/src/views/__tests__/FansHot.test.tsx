@@ -153,21 +153,21 @@ describe("the hot line on the fan curve chart", () => {
     );
   });
 
-  // Issue #297: a CPU line at or below the part's idle range (the issue's 7800X3D idles at 50)
-  // keeps the closed-loop hold engaged almost all the time, so the fans run hard to hold it.
-  // The warning says so, with the line the user set, and a limit above the idle range is silent.
+  // Issue #297: a CPU line at or under the fixed 60 °C warning threshold keeps the closed-loop
+  // hold engaged almost all the time, so the fans run hard to hold it. The warning states that
+  // fixed rule (it does not claim to know where this CPU idles), and a limit above it is silent.
   it("warns that a 50 °C CPU line runs the fans hard, and says nothing at 75 °C", async () => {
     await page();
     const input = await screen.findByLabelText("Don't exceed temperature");
     fireEvent.change(input, { target: { value: "50" } });
     fireEvent.blur(input);
-    const warning = await screen.findByText(/is in this CPU's idle range: fans run hard/);
-    expect(warning.textContent).toContain("50 °C");
+    const warning = await screen.findByText(/Below 60 °C the fans run hard to hold this line\./);
+    expect(warning.textContent).toBe("Below 60 °C the fans run hard to hold this line.");
     expect(document.querySelector('[data-slot="hot-idle-warning"]')).not.toBeNull();
 
     fireEvent.change(input, { target: { value: "75" } });
     fireEvent.blur(input);
-    await waitFor(() => expect(screen.queryByText(/is in this CPU's idle range/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/Below 60 °C the fans run hard/)).toBeNull());
     expect(document.querySelector('[data-slot="hot-idle-warning"]')).toBeNull();
 
     // The fake keeps the limit between tests: put it back to automatic.

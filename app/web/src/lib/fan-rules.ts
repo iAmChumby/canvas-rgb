@@ -21,16 +21,15 @@ export function hotFloor(header: string, configured: number): number {
 }
 
 /**
- * Issue #297: a CPU hot limit at or below this sits in the part's idle range, so the closed-loop
- * "Don't exceed" hold is engaged almost all the time and runs the fans hard to keep it. The code's
- * own hot line is `HOT_TEMP_C` (50 °C): the fixed line every board sensor still uses, and the line
- * G4 used for every source before the limit was movable. A Ryzen 7000/9000 X3D idles within a few
- * degrees of it (the issue's 7800X3D sits at 48-53 °C), so the rule is that line plus the 10 °C a
- * real idle varies by: under 60 °C, warn.
+ * Issue #297: the fixed threshold under which the editor warns that a CPU line keeps the
+ * closed-loop "Don't exceed" hold engaged, so the fans run hard to hold it. It is a fixed rule and
+ * not a reading of the part's idle temperature: `HOT_TEMP_C` (50 °C, the code's own hot line, still
+ * the automatic line for every board sensor) plus 10 °C. The warning says what the rule is, never
+ * that it knows where this CPU idles.
  */
 export const CPU_IDLE_LIMIT_C = HOT_TEMP_C + 10;
 
-/** Whether a user-set hot limit lies in the CPU's idle range and will run the fans hard (#297). */
+/** Whether a user-set CPU hot limit is at or under the warning threshold (#297). */
 export function cpuLimitInIdleRange(kind: string, limitC: number): boolean {
   return kind === "cpu" && limitC <= CPU_IDLE_LIMIT_C;
 }
