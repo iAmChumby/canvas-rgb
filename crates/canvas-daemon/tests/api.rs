@@ -1858,28 +1858,28 @@ async fn the_readback_lists_the_devices() {
 /// The headers a browser sends with a WebSocket handshake.
 const UPGRADE_HEADERS: &str = "Connection: Upgrade\r\nUpgrade: websocket\r\nSec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==";
 
-/// Starts the router on a loopback port and returns its address.
-async fn serve(router: axum::Router) -> std::net::SocketAddr {
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.expect("the port is free");
-    let addr = listener.local_addr().expect("the address");
-    tokio::spawn(async move {
-        let _ = axum::serve(listener, router).await;
-    });
-    addr
-}
-
-/// Sends a raw HTTP request over a socket and returns the answer's status line.
+/// Sends a raw HTTP request over an in-memory connection and returns the answer's status line.
+///
+/// The server is in memory (`common::serve_in_memory`), not on a loopback port: the test checks the
+/// handshake the daemon's HTTP code answers, and a real socket added the operating system's own
+/// faults to it (`10060` on connect, `10054` on read, #194).
 ///
 /// The request names `127.0.0.1:9430` as its host, because that is the host the daemon's
-/// guard allows, whatever port the test server listens on.
-async fn raw_get(addr: std::net::SocketAddr, target: &str, extra: &str) -> String {
+/// guard allows.
+async fn raw_get(server: &common::MemoryServer, target: &str, extra: &str) -> String {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
-    let mut stream = tokio::net::TcpStream::connect(addr).await.expect("the socket opens");
+    let mut stream = server.connect();
     let request = format!("GET {target} HTTP/1.1\r\nHost: 127.0.0.1:9430\r\n{extra}\r\n\r\n");
     stream.write_all(request.as_bytes()).await.expect("the request is written");
-    let mut buf = vec![0u8; 512];
-    let n = stream.read(&mut buf).await.expect("the answer is read");
-    String::from_utf8_lossy(&buf[..n]).lines().next().unwrap_or("").to_string()
+    // The status line may arrive in more than one read.
+    let mut answer = Vec::new();
+    let mut buf = [0u8; 512];
+    while !answer.contains(&b'\n') {
+        let n = stream.read(&mut buf).await.expect("the answer is read");
+        assert!(n > 0, "the server closed before it answered");
+        answer.extend_from_slice(&buf[..n]);
+    }
+    String::from_utf8_lossy(&answer).lines().next().unwrap_or("").to_string()
 }
 
 /// A WebSocket upgrade for the preview route. A browser cannot put a header on the handshake,
@@ -1924,26 +1924,26 @@ async fn the_preview_upgrade_with_only_a_query_token_passes_the_guard() {
 #[tokio::test]
 async fn the_preview_socket_opens_with_only_a_query_token() {
     let (router, _app, _home) = build();
-    let addr = serve(router).await;
+    let server = common::serve_in_memory(router);
     // The whole point of F1: a browser sends the token in the query and nothing else, and
     // the socket opens.
-    let status = raw_get(addr, &format!("{}?token={TOKEN}", routes::PREVIEW), UPGRADE_HEADERS).await;
+    let status = raw_get(&server, &format!("{}?token={TOKEN}", routes::PREVIEW), UPGRADE_HEADERS).await;
     assert!(status.contains("101"), "the socket opened: {status}");
 }
 
 #[tokio::test]
 async fn the_preview_socket_without_a_token_is_refused() {
     let (router, _app, _home) = build();
-    let addr = serve(router).await;
-    let status = raw_get(addr, routes::PREVIEW, UPGRADE_HEADERS).await;
+    let server = common::serve_in_memory(router);
+    let status = raw_get(&server, routes::PREVIEW, UPGRADE_HEADERS).await;
     assert!(status.contains("401"), "the handshake was refused: {status}");
 }
 
 #[tokio::test]
 async fn the_preview_socket_with_a_wrong_query_token_is_refused() {
     let (router, _app, _home) = build();
-    let addr = serve(router).await;
-    let status = raw_get(addr, &format!("{}?token=not-the-token", routes::PREVIEW), UPGRADE_HEADERS).await;
+    let server = common::serve_in_memory(router);
+    let status = raw_get(&server, &format!("{}?token=not-the-token", routes::PREVIEW), UPGRADE_HEADERS).await;
     assert!(status.contains("401"), "the handshake was refused: {status}");
 }
 
