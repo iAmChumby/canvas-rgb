@@ -117,10 +117,11 @@ const SCHEMES = ["dark", "light"];
  * window" block of app/web/src/styles/app.css). On a desktop size (a window over PHONE_MAX wide)
  * none of them is meant to scroll: the fit-window rule is that every panel fits, so a pane that has
  * something to scroll for is a view that does not fit (#294). Settings' `.rd-settings-scroll`, the
- * Peripherals detail, the Effects inspector, What's new's notes (and its grid, in one column) and
- * the Fans right panel. The mutation plants its own pane under the first of these classes.
+ * Peripherals detail, the Effects inspector and the Fans right panel. What's new's notes and its
+ * one-column grid are left out: they scroll by design (#124), since release notes have no fixed
+ * length. The mutation plants its own pane under the first of these classes.
  */
-const FIT_PANES = ".rd-settings-scroll, .peripheral-detail, .rd-eff-inspector, .rd-updates-notes, .rd-updates-grid, .rd-fans-right > .panel";
+const FIT_PANES = ".rd-settings-scroll, .peripheral-detail, .rd-eff-inspector, .rd-fans-right > .panel";
 const SLACK_PX = 1;
 const T = 20000;
 const PHONE_MAX = 720;

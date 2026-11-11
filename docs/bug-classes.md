@@ -597,10 +597,12 @@ scroll, so the content was clipped and unreachable.
   past `.rd-settings-scroll` (673 px tall). The sideways measures above never see it, because
   nothing passes the window: the pane clips it. The fix reorders the panels so the browser's column
   balance puts Audio source with Rendering, and tightens the rows in a short window
-  (`@container page (max-height: 800px)`, the way Peripherals and Devices do).
-- **Class fix, third mechanism:** done (#294). `tools/overflow-check.mjs` reports, on a desktop
-  size (721 px and over), each scroll pane in `FIT_PANES` (Settings, the Peripherals detail, the
-  Effects inspector, What's new, the Fans right panel) that scrolls or clips vertically
+  (`@container page (max-height: 720px)`: 1024x768 but not 1280x860, measured on the page container).
+- **Class fix, third mechanism:** the check is in (#294); Settings is fixed, and its first full run
+  found 20 hits still open in the Fans right panel and the Effects inspector (#299).
+  `tools/overflow-check.mjs` reports, on a desktop size (721 px and over), each scroll pane in
+  `FIT_PANES` (Settings, the Peripherals detail, the Effects inspector, the Fans right panel; What's
+  new's notes scroll by design, #124, so they are left out) that scrolls or clips vertically
   (`scrollHeight` over `clientHeight` by more than 1 px), and each panel it cuts off at the bottom.
   A phone scrolls the document, so it is left out. `--mutate-overflow pane` plants a 40 px pane
   that holds a 120 px panel and fails when a row does not report it. Settings has rows for the

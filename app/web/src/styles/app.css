@@ -5051,12 +5051,14 @@ button.chip:hover {
   align-items: baseline;
 }
 
-/* A short desktop window (page height 800 px and under: 1024x768, not 1280x860) tightens the
+/* A short desktop window (page content 720 px and under: 1024x768 at 673 px, not 1280x860 at
+   765 px, measured on the page container) tightens the
    rows, as Peripherals and Devices do (R5): a row of 40 px and a title that sits 8 px above its
    first row. Without it the left column of a two-column Settings runs 46 px past its pane at
-   1024x768 (#294). The phone is left out: its document scrolls and its rows keep their room. */
+   1024x768 (#294). A window 720 px wide and under is left out (R1): its document scrolls and its
+   rows keep their room. */
 @media (min-width: 721px) {
-  @container page (max-height: 800px) {
+  @container page (max-height: 720px) {
     .rd-settings .rd-settings-grid .field {
       min-height: 40px;
       padding: var(--s1) 0;
