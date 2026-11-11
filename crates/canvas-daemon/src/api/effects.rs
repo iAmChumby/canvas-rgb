@@ -633,11 +633,14 @@ pub async fn thumbnail(
     let generation = (app.user_effects.generation(), app.stacks.generation());
 
     if let Some(bytes) = app.thumbnails.get(generation, &schema.id) {
+        tracing::debug!(effect = %schema.id, cache = "hit", "thumbnail tile");
         return Ok(binary_response(&bytes));
     }
+    tracing::debug!(effect = %schema.id, cache = "miss", "thumbnail tile");
     // A render that was given up is remembered: the library is told the tile was given up
     // instead of asking for it again on every open.
     if let Some(why) = app.thumbnails.failure(generation, &schema.id) {
+        tracing::debug!(effect = %schema.id, cache = "failure", "thumbnail tile");
         return Err(ApiFailure::service_unavailable(given_up(&id, &why)));
     }
 
@@ -656,25 +659,37 @@ pub async fn thumbnail(
     // The permit is taken before the render and handed to the render task, so it is held
     // for as long as the render runs: a request whose client goes away does not let a
     // third render in while this one is still going.
+    let slot_wait_started = std::time::Instant::now();
     let slot = app.thumbnails.acquire_slot().await;
+    let queue_wait_ms = slot_wait_started.elapsed().as_millis() as u64;
+    tracing::debug!(effect = %schema.id, queue_wait_ms, "thumbnail: render slot acquired");
     let joined = tokio::task::spawn_blocking(move || -> TileOutcome {
         let _slot = slot;
         // Another render may have finished while this one waited for the slot.
         if let Some(bytes) = rendering.thumbnails.get(generation, &effect_id) {
+            tracing::debug!(effect = %effect_id, cache = "hit_after_wait", "thumbnail tile");
             return TileOutcome::Tile(bytes);
         }
         if let Some(why) = rendering.thumbnails.failure(generation, &effect_id) {
+            tracing::debug!(effect = %effect_id, cache = "failure_after_wait", "thumbnail tile");
             return TileOutcome::AlreadyGivenUp(why);
         }
         // A render that panics is caught here, inside the task, so its failure is cached below
         // like any other answer and before the slot is handed back. Caught after the task
         // instead (from the join), the permit has already dropped during the unwind and a
         // request that waited for the slot would find nothing cached and render the tile again.
+        let render_started = std::time::Instant::now();
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::create_effect_for_tile(&user, &stacks, &effect_id)
                 .map_err(crate::thumbnail::RenderError::from_build_error)
                 .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget))
         }));
+        let render_ms = render_started.elapsed().as_millis() as u64;
+        match &attempt {
+            Ok(Ok(_)) => tracing::debug!(effect = %effect_id, render_ms, "thumbnail: render finished"),
+            Ok(Err(error)) => tracing::debug!(effect = %effect_id, render_ms, error = %error, "thumbnail: render given up"),
+            Err(_) => tracing::debug!(effect = %effect_id, render_ms, "thumbnail: render panicked"),
+        }
         let result = attempt.unwrap_or_else(|payload| {
             Err(crate::thumbnail::RenderError::Failed(format!(
                 "the thumbnail render panicked: {}",
