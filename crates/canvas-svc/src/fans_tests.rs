@@ -2160,6 +2160,43 @@ fn issue225_a_hand_edited_hot_limit_below_the_minimum_is_enforced_at_the_minimum
 }
 
 #[test]
+fn issue225_non_finite_hot_limits_never_load_hotter_than_the_runtime_clamp() {
+    use canvas_proto::fans::HOT_LIMIT_MIN_C;
+    // TOML accepts inf, -inf and nan. `-inf` was clamped to the 40 °C minimum at run time; it must
+    // stay there, never become the hotter automatic line. `+inf` and NaN go to automatic, which is
+    // stricter than the maximum (+inf) or the NaN line (NaN) the runtime clamp would give.
+    let cases = [
+        (f32::NEG_INFINITY, Some(HOT_LIMIT_MIN_C)),
+        (f32::INFINITY, None),
+        (f32::NAN, None),
+    ];
+    for (value, want) in cases {
+        let t0 = Instant::now();
+        let dir = tempfile::tempdir().unwrap();
+        let file = FansFile { hot_limits: HotLimits { cpu_c: Some(value), gpu_c: None, board_c: Some(value) }, ..Default::default() };
+        let chip = FakeChip::new(MSI_ALT1_MAP);
+        let cpu = FakeTemp::new(40.0);
+        let mut fans = controller(&dir, &chip, &cpu, file, t0);
+        fans.set_cpu_brand(Some("AMD Ryzen 7 7800X3D 8-Core Processor"));
+        fans.correct_hot_limits();
+        let status = fans.status();
+        for kind in [HotKind::Cpu, HotKind::Board] {
+            let row = status.hot.iter().find(|s| s.kind == kind).unwrap();
+            match want {
+                Some(min) => {
+                    assert!(row.user_set, "{value} {kind:?}: stays the user's: {row:?}");
+                    assert_eq!(row.limit_c, min, "{value} {kind:?}: enforced at the minimum: {row:?}");
+                }
+                None => {
+                    assert!(!row.user_set, "{value} {kind:?}: falls back to automatic: {row:?}");
+                    assert_eq!(row.limit_c, row.auto_c, "{value} {kind:?}: {row:?}");
+                }
+            }
+        }
+    }
+}
+
+#[test]
 fn issue225_loading_a_bad_hot_limit_leaves_fans_toml_as_written_and_warns_on_every_start() {
     let t0 = Instant::now();
     let dir = tempfile::tempdir().unwrap();

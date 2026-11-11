@@ -502,12 +502,15 @@ impl FanController {
         for kind in [HotKind::Cpu, HotKind::Gpu, HotKind::Board] {
             let Some(celsius) = self.config.hot_limits.get(kind) else { continue };
             let max = hot_limit_status(kind, &self.config.hot_limits, self.rated_for(kind)).max_settable_c;
-            let corrected = if !celsius.is_finite() || celsius > max {
-                tracing::warn!(?kind, celsius, max, "fans.toml has a hot limit above its allowed range; using the automatic one (fans.toml is left as written)");
-                None
-            } else if celsius < HOT_LIMIT_MIN_C {
+            // Below the minimum first, so `-inf` lands on the minimum the runtime clamp has always
+            // given it, never on the hotter automatic line. NaN fails both comparisons below and
+            // falls to automatic, stricter than the NaN the runtime clamp would pass through.
+            let corrected = if celsius < HOT_LIMIT_MIN_C {
                 tracing::warn!(?kind, celsius, min = HOT_LIMIT_MIN_C, "fans.toml has a hot limit below its allowed range; using the minimum (fans.toml is left as written)");
                 Some(HOT_LIMIT_MIN_C)
+            } else if !celsius.is_finite() || celsius > max {
+                tracing::warn!(?kind, celsius, max, "fans.toml has a hot limit above its allowed range; using the automatic one (fans.toml is left as written)");
+                None
             } else {
                 continue;
             };
