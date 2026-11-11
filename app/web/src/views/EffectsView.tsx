@@ -154,6 +154,13 @@ export function EffectsView() {
     valuesRef.current = values;
   }, [values]);
 
+  // How many activations are on the wire: the Activate key and an edit to a stopped effect can each
+  // send one, and the key stays busy until the last of them lands, not the first (#296 review).
+  const [activations, setActivations] = useState(0);
+  const activating = activations > 0;
+  const startActivating = () => setActivations((n) => n + 1);
+  const endActivating = () => setActivations((n) => Math.max(0, n - 1));
+
   /** Sends the waiting values to the effect they were edited on, and to no other. */
   const flush = async () => {
     if (timer.current) clearTimeout(timer.current);
@@ -167,9 +174,16 @@ export function EffectsView() {
       if (getSnap().status?.active_effect === id) {
         await api.patchActiveProps(batch);
       } else {
-        // The first edit to a stopped effect starts it, with the edited values on top.
-        await api.activateEffect(id, { props: batch, preset: null });
-        await refreshAll();
+        // The first edit to a stopped effect starts it, with the edited values on top. The
+        // Activate button is the control that starts the effect, so it shows the wait for the
+        // activation this edit asked for.
+        startActivating();
+        try {
+          await api.activateEffect(id, { props: batch, preset: null });
+          await refreshAll();
+        } finally {
+          endActivating();
+        }
       }
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
       clearWrite(id);
@@ -231,12 +245,11 @@ export function EffectsView() {
   const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
   const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
 
-  const [activating, setActivating] = useState(false);
   const activate = async (preset: string | null) => {
     if (!selectedId) return;
     const id = selectedId;
     clearWrite(id);
-    setActivating(true);
+    startActivating();
     try {
       await api.activateEffect(id, { props: {}, preset });
       await refreshAll();
@@ -248,7 +261,7 @@ export function EffectsView() {
     } catch (e) {
       failWrite(id, e);
     } finally {
-      setActivating(false);
+      endActivating();
     }
   };
 
@@ -814,7 +827,7 @@ export function EffectsView() {
                   <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} live />
                 ) : (
                   <div className="effect-live-frame" key={detail.schema.id}>
-                    <EffectPreview id={detail.schema.id} />
+                    <EffectPreview id={detail.schema.id} label={`Preview of ${detail.schema.name}`} note />
                   </div>
                 )}
               </div>
@@ -1089,7 +1102,8 @@ export function EffectsView() {
         <FileButton
           accept=".html,text/html"
           icon={<UploadSimple size={16} />}
-          disabled={importing || editing}
+          disabled={editing}
+          busy={importing}
           label="Import"
           onFile={(file) => void sendImport(file, false)}
         >
@@ -1207,7 +1221,7 @@ export function EffectsView() {
                 <Button
                   variant="primary"
                   size="sm"
-                  disabled={importing}
+                  busy={importing}
                   onClick={() => void sendImport(new File([replaceWith.html], replaceWith.fileName), true)}
                 >
                   Replace
