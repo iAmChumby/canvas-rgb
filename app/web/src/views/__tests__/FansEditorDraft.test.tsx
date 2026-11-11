@@ -272,6 +272,23 @@ describe("the header editor keeps its draft (#295)", () => {
     await waitFor(() => expect(sent.some((m) => m.mode === "curve" && m.points[0]?.percent === 60)).toBe(true));
   });
 
+  it("a curve edit waiting when the profile switches is not written into the new profile", async () => {
+    await page({ cpu_fan: CURVE });
+    const sent: FanMode[] = [];
+    vi.spyOn(api, "patchFanHeader").mockImplementation(async (_h: string, mode: FanMode) => {
+      sent.push(mode);
+      return {} as never;
+    });
+    await typeInto("Point 1 percent", "60");
+    // Before the 250 ms timer fires, the profile changes (another client, or the profile keys):
+    // the editor closes, and the service would write a curve sent now into the new profile.
+    service.profile = "Quiet";
+    await poll();
+    await screen.findByRole("radiogroup", { name: "CPU fan mode" });
+    // Closing cleared the timer; the only send left would be the close's own flush, which ran.
+    expect(sent.some((m) => m.mode === "curve" && m.points[0]?.percent === 60)).toBe(false);
+  });
+
   it("a refused write puts the editor back on the service's mode and says why", async () => {
     await page({ cpu_fan: CURVE });
     vi.spyOn(api, "patchFanHeader").mockRejectedValue(new ApiFailure(422, "validation", "refused for the test"));

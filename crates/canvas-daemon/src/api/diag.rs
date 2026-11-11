@@ -69,12 +69,14 @@ pub async fn fail_sensor(
 ) -> ApiResult<Json<serde_json::Value>> {
     let source = parse_source(&request.source)
         .ok_or_else(|| ApiFailure::validation(format!("unknown sensor source {}", request.source)))?;
-    crate::pipe_client::send(
+    let response = crate::pipe_client::send(
         &app,
         &canvas_proto::pipe::PipeRequest::FailSensor { source: source.clone(), failed: request.failed },
     )
     .await
     .map_err(|e| ApiFailure::service_unavailable(format!("the fan service is not reachable: {e}")))?;
+    // Issue #225: the service's refusal is the answer, not a toggle that happened.
+    crate::api::fans::expect_ok(response)?;
 
     tracing::info!(?source, failed = request.failed, "the sensor failure was toggled");
     Ok(Json(serde_json::json!({ "ok": true, "source": source, "failed": request.failed })))

@@ -26,7 +26,7 @@ import { TACH_ONLY_WHY, UNAVAILABLE_WHY, UNREAD_DUTY_WHY, canDrive, isHandedBack
 import { api } from "@/lib/endpoints";
 import { writeFanMode } from "@/lib/fanWrites";
 import { messageOf } from "@/lib/errors";
-import { refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
+import { getSnap, refreshFans, retryFans as retryFansNow, useSnap } from "@/lib/store";
 import { baseFloor, hotRuleText } from "@/lib/fan-rules";
 import { clamp, fmtSeconds } from "@/lib/format";
 import type { CurvePoint } from "@/proto/CurvePoint";
@@ -961,9 +961,11 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const [points, setPoints] = useState<CurvePoint[]>(header.mode.mode === "curve" ? header.mode.points : defaultCurve(base));
   const [source, setSource] = useState<TempSource>(header.mode.mode === "curve" ? header.mode.source : { type: "cpu" });
   const pointsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  // The curve edit waiting for that timer. Picking another header closes this editor, so the edit
-  // is sent then instead of dropped with the timer (issue #295 review).
-  const pendingCurve = useRef<(() => void) | null>(null);
+  // The curve edit waiting for that timer, with the profile it was made in. Picking another header
+  // closes this editor, so the edit is sent then instead of dropped with the timer (issue #295
+  // review); a profile switch also closes it, and then the edit is dropped: the service would
+  // write it into the profile just switched to, not the one it was made in.
+  const pendingCurve = useRef<{ send: () => void; profile: string } | null>(null);
   // Writes sent and not yet answered, and whether a curve edit waits for its timer. While either
   // is true the draft is ahead of the service, so a poll that says otherwise is stale.
   const [writing, setWriting] = useState(0);
@@ -1001,7 +1003,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       }
       const flush = pendingCurve.current;
       pendingCurve.current = null;
-      if (flush) flush();
+      if (flush && getSnap().fans?.active_profile === flush.profile) flush.send();
     },
     [],
   );
@@ -1060,7 +1062,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     cancelCurve();
     setUnsent(true);
     const send = () => apply({ mode: "curve", source, points: pts });
-    pendingCurve.current = send;
+    pendingCurve.current = { send, profile: fans.active_profile };
     pointsTimer.current = setTimeout(() => {
       pointsTimer.current = null;
       pendingCurve.current = null;
