@@ -232,6 +232,40 @@ async fn a_rescan_with_openrgb_down_says_so_and_keeps_the_held_list() {
     assert_ne!(*rig.app.openrgb.read().await, LinkState::Connected);
 }
 
+/// `?rescan=` follows the rule every boolean query parameter follows (#233): `true` or `1` is on,
+/// `false` or `0` (or no parameter at all) is off, and anything else is a validation error in
+/// the API's JSON shape. A typo is never a silent plain read.
+#[tokio::test]
+async fn the_rescan_flag_follows_the_rule_every_flag_follows() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let rig = rig("flag", server.port(), Duration::from_secs(5)).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+
+    // OpenRGB finds a second stick after the daemon started.
+    server.announce(stick("two"));
+    // A flag that is on asks OpenRGB again: the new stick is in the answer.
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"]);
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=true").await, ["openrgb:one", "openrgb:two"]);
+
+    // A third stick, and a flag that is off: the plain read does not see it.
+    server.announce(stick("three"));
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=0").await, ["openrgb:one", "openrgb:two"]);
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=false").await, ["openrgb:one", "openrgb:two"]);
+    assert_eq!(ids(&rig, "/api/v1/devices").await, ["openrgb:one", "openrgb:two"]);
+    // The same read with the flag on sees it.
+    assert_eq!(
+        ids(&rig, "/api/v1/devices?rescan=1").await,
+        ["openrgb:one", "openrgb:two", "openrgb:three"]
+    );
+
+    // A typo is an error, not a silent plain read.
+    let (status, body) = get(&rig, "/api/v1/devices?rescan=yes").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", String::from_utf8_lossy(&body));
+    // The flag twice is an error too.
+    let (status, body) = get(&rig, "/api/v1/devices?rescan=1&rescan=1").await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{}", String::from_utf8_lossy(&body));
+}
+
 /// A rescan against an OpenRGB that stops answering must not freeze the lights (#233): the frame
 /// writer must not wait on the adapter lock the rescan holds.
 ///

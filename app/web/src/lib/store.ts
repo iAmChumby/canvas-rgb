@@ -256,8 +256,10 @@ export async function refreshFans(n?: number): Promise<void> {
 }
 
 /**
- * Reads the device list. `rescan` asks the daemon to look at the hardware again first
- * (`?rescan=1`, issue #233) instead of answering from the list it holds.
+ * Reads the device list. `rescan` asks the daemon to read OpenRGB's device list again first
+ * (`?rescan=1`, issue #233) instead of answering from the list it holds. The daemon re-reads what
+ * OpenRGB reports; it does not make OpenRGB look at the hardware again (a real re-detect is
+ * issue #290).
  */
 export async function refreshDevices(n?: number, opts?: { rescan?: boolean }): Promise<void> {
   const req = n ?? beginRequest("devices");
