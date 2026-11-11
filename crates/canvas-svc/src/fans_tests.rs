@@ -2,7 +2,10 @@
 
 use crate::chip::{FanChip, Nct6687, COMMAND_REG, MODE_REG, MSI_ALT1_MAP, SYS_MODE_REG};
 use crate::fakes::{FakeChip, FakeTemp};
-use crate::fans::{curve_percent, FanController, FanError, RESUME_GRACE, SUSPEND_HOLD_CAP_TICKS};
+use crate::fans::{
+    curve_percent, FanController, FanError, HOT_BOOST_DEADBAND_C, HOT_BOOST_DECAY, HOT_BOOST_GAIN, HOT_BOOST_MAX,
+    HOT_BOOST_MIN_RISE, RESUME_GRACE, SUSPEND_HOLD_CAP_TICKS,
+};
 use crate::paths;
 use crate::store;
 use crate::temps::TempReader;
@@ -1045,9 +1048,10 @@ fn a_step_from_40_to_51_raises_cpu_fan_to_the_hot_floor_on_the_same_tick() {
     let before = r.chip.duty_raw(CPU_FAN);
     assert!(before < 128, "40 C is below the hot floor: {before}");
     let after = tick_cpu_at_temp(&mut r, t0, 4, 51.0);
-    // Issue #297: the floor still engages on the same tick, and the proportional answer's first
-    // step (2 points at one degree over) lands with it: 50 % + 2 = 52 %, raw 133.
-    assert_eq!(after, 133, "51 C engages the 50 % hot floor and the first proportional step on the same tick: {before} -> {after}");
+    // Issue #297: the floor still engages on the same tick, and the wind-up's first step lands
+    // with it: one point from the minimum rise plus one per degree over the aim (two here), so
+    // 50 % + 3 = 53 %, raw 135.
+    assert_eq!(after, 135, "51 C engages the 50 % hot floor and the first wind-up step on the same tick: {before} -> {after}");
 }
 
 #[test]
@@ -1061,12 +1065,12 @@ fn the_hot_floor_releases_after_a_hold_continuously_below_50() {
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
-    assert_eq!(r.chip.duty_raw(CPU_FAN), 143, "the floor is engaged at 51 C, with the boost at 6 points (56 %)");
-    let mut duty = 143;
+    assert_eq!(r.chip.duty_raw(CPU_FAN), 150, "the floor is engaged at 51 C, with the boost at 9 points (59 %)");
+    let mut duty = 150;
     for s in 4..=20 {
         duty = tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
-    assert_eq!(duty, 133, "16 s below 50 C the latched floor still holds (50 % plus the two points of boost that have not decayed yet): {duty}");
+    assert_eq!(duty, 140, "16 s below 50 C the latched floor still holds (its 50 % plus 4.75 points of boost that have not decayed yet): {duty}");
     for s in 21..=70 {
         duty = tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
@@ -1092,7 +1096,7 @@ fn a_latched_hot_floor_never_caps_a_rising_curve() {
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
-    assert_eq!(r.chip.duty_raw(CPU_FAN), 143, "latched at the 50 % hot floor at 51 C, with the boost at 6 points (56 %)");
+    assert_eq!(r.chip.duty_raw(CPU_FAN), 150, "latched at the 50 % hot floor at 51 C, with the boost at 9 points (59 %)");
     let duty = tick_cpu_at_temp(&mut r, t0, 4, 85.0);
     assert_eq!(duty, 255, "85 C takes the curve's 100 % on the same tick: {duty}");
 }
@@ -1405,7 +1409,7 @@ fn issue130_a_user_limit_of_55_engages_at_55_and_not_at_52() {
     r.cpu.set(Some(56.0));
     r.fans.tick(t0 + Duration::from_secs(1));
     let status = r.fans.status();
-    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(37), "56 C is at the user line: the hot floor applies, plus the boost's first two points");
+    assert_eq!(header(&status, "sys_fan1").pwm_percent, Some(38), "56 C is at the user line: the hot floor applies, plus the wind-up's first three points");
     assert_eq!(header(&status, "sys_fan1").override_reason.as_deref(), Some("holding CPU under 55 °C"));
 }
 
@@ -1547,12 +1551,13 @@ fn issue255_a_curve_above_the_hot_limit_speeds_up_to_full_speed() {
 }
 
 #[test]
-fn issue297_one_degree_over_the_line_answers_at_once_then_holds() {
-    // Issue #255's rule was "at least one point a tick for ever", which is the surge #297
-    // reports: a CPU parked one degree over its line climbed to full speed. The answer must
-    // still start at once; it stops at its proportional answer instead of climbing on. The
-    // answer is measured from the hold's aim, one degree under the line, so a reading one degree
-    // over the line is two degrees over the aim: twenty points, climbed at two a second.
+fn issue297_one_degree_over_the_line_answers_at_once_and_winds_up_like_main() {
+    // Issue #255's rule was "at least one point a tick for ever", which is the surge #297 reports.
+    // Pass 1 of this PR answered a reading one degree over the line proportionally and stopped at
+    // 70 %; pass 2 holds the fan to safety first: a reading *over* the line must keep rising at
+    // least as fast as #255's `max(1, degrees over)` a second, so it starts at once, at the aim's
+    // rise (three points a second here), and winds up. The smoothing is only for readings at or
+    // under the line.
     let t0 = Instant::now();
     let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
     let mut r = rig(config, t0);
@@ -1562,19 +1567,21 @@ fn issue297_one_degree_over_the_line_answers_at_once_then_holds() {
         tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
     let mut last = duty_percent(&r, CPU_FAN);
+    assert_eq!(last, 50, "40 C under the line leaves the curve's 50 %");
+    let mut duties = Vec::new();
     for s in 4..=13 {
         let duty = tick_cpu_at_temp(&mut r, t0, s, 51.0);
         let duty = ((u32::from(duty) * 100 + 127) / 255) as u8;
         assert!(duty > last, "51 C rose only {last} -> {duty} at tick {s}: the answer must start at once");
-        assert!(duty - last <= 2, "51 C stepped {last} -> {duty} at tick {s}: two points a second is the rise");
+        assert!(duty - last <= 3, "51 C stepped {last} -> {duty} at tick {s}: three points a second is the rise");
         last = duty;
+        duties.push(duty);
     }
-    assert_eq!(last, 70, "one degree over the line is two over the aim: the curve's 50 % plus twenty points: {last} %");
-    for s in 14..=40 {
-        let duty = tick_cpu_at_temp(&mut r, t0, s, 51.0);
-        let duty = ((u32::from(duty) * 100 + 127) / 255) as u8;
-        assert_eq!(duty, 70, "the answer settled and must hold at {last} %, not climb: {duty} % at {s} s");
+    for s in 14..=25 {
+        last = ((u32::from(tick_cpu_at_temp(&mut r, t0, s, 51.0)) * 100 + 127) / 255) as u8;
+        duties.push(last);
     }
+    assert_eq!(last, 100, "one degree over the line winds up to full speed, as #255 did: {duties:?}");
 }
 
 #[test]
@@ -1627,11 +1634,11 @@ fn issue255_an_oscillating_temperature_around_the_line_never_steps_the_duty_down
 }
 
 #[test]
-fn issue255_a_pre_built_boost_holds_through_an_oscillation() {
-    // A boost built at 55 C, then 120 ticks of the line plus or minus half a degree: the window
-    // is the deadband holding, not the loop climbing towards the cap. Issue #297: the old
-    // assertion that the duty ends higher than it started was the reported surge; a hover must
-    // hold the answer it already has.
+fn issue255_a_pre_built_boost_holds_through_an_oscillation_under_the_line() {
+    // A boost built at 55 C, then 120 ticks oscillating just under the line (49.9 and 48.9 C):
+    // the window is the deadband holding, not the loop climbing towards the cap. Issue #297 pass 2:
+    // a reading *over* the line now winds up like #255 did, so the oscillation that tests the
+    // deadband has to stay under the line; the deadband itself is unchanged.
     let t0 = Instant::now();
     let config = FansFile { hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None }, ..Default::default() };
     let mut r = rig(config, t0);
@@ -1644,7 +1651,7 @@ fn issue255_a_pre_built_boost_holds_through_an_oscillation() {
     assert!(built > 128, "the boost was built at 55 C: raw {built}");
     let mut duties = Vec::new();
     for s in 4..=123 {
-        let temp = if s % 2 == 0 { 50.5 } else { 49.5 };
+        let temp = if s % 2 == 0 { 49.9 } else { 48.9 };
         duties.push(tick_cpu_at_temp(&mut r, t0, s, temp));
     }
     assert!(duties.iter().all(|&d| d == built), "the held answer moved: {duties:?}");
@@ -1912,8 +1919,8 @@ fn issue255_the_floor_reason_names_the_limit_not_the_live_temperature() {
     for s in 1..=3 {
         tick_cpu_at_temp(&mut r, t0, s, 51.0);
     }
-    // Thirty seconds at 40 C decay the six-point boost under a point; the latch still holds.
-    for s in 4..=33 {
+    // Thirty-seven seconds at 40 C decay the nine-point boost under a point; the latch still holds.
+    for s in 4..=40 {
         tick_cpu_at_temp(&mut r, t0, s, 40.0);
     }
     let status = r.fans.status();
@@ -2250,27 +2257,35 @@ fn issue297_rig(t0: Instant, start_c: f32) -> (Rig, Vec<DutyTrace>) {
     (r, traces)
 }
 
-/// The issue's hover: a slow two-minute sine between 48 and 53 C around a 50.5 C mean.
+/// The issue's hover: a slow two-minute sine between 48 and 53 C around a 50.5 C mean, so it
+/// straddles the 50 C line.
 fn issue297_sine(second: usize) -> f32 {
     50.5 + 2.5 * (std::f32::consts::TAU * second as f32 / 120.0).sin()
 }
 
-/// A deterministic seeded walk inside 48..53 C, the shape of a real Ryzen `Tctl` at idle: it
-/// wanders instead of following a clean wave, so a fix cannot be tuned to one period.
+/// A slow two-minute sine that stays under the line: 47.2 to 49.8 C around a 48.5 C mean.
+fn issue297_under_sine(second: usize) -> f32 {
+    48.5 + 1.3 * (std::f32::consts::TAU * second as f32 / 120.0).sin()
+}
+
+/// A deterministic seeded walk inside a temperature range, the shape of a real Ryzen `Tctl` at
+/// idle: it wanders instead of following a clean wave, so a fix cannot be tuned to one period.
 struct Walk {
     value: f32,
     seed: u64,
+    lo: f32,
+    hi: f32,
 }
 
 impl Walk {
-    fn new() -> Self {
-        Self { value: 50.5, seed: 0x2970_2026_1111 }
+    fn new(lo: f32, hi: f32) -> Self {
+        Self { value: (lo + hi) / 2.0, seed: 0x2970_2026_1111, lo, hi }
     }
 
     fn next(&mut self) -> f32 {
         self.seed = self.seed.wrapping_mul(6364136223846793005).wrapping_add(1442695040888963407);
         let unit = ((self.seed >> 33) as f32) / 2_147_483_648.0; // 0..1
-        self.value = (self.value + (unit - 0.5) * 2.4).clamp(48.0, 53.0);
+        self.value = (self.value + (unit - 0.5) * 2.4).clamp(self.lo, self.hi);
         self.value
     }
 }
@@ -2319,14 +2334,205 @@ fn issue297_thermal_run(start_c: f32, seconds: usize) -> (Vec<f32>, Vec<DutyTrac
     (temps, traces)
 }
 
-#[test]
-fn issue297_a_hovering_cpu_does_not_surge_to_full_speed() {
+// ---- Issue #297 pass 2: the hold may never answer a real heat event slower than #255 did. ----
+
+/// A board-style flat 30 % CPU curve: below the line the curve asks 30 %, above it the 50 % hot
+/// floor takes over, so the closed-loop boost is the only thing that can raise the duty quickly.
+/// The issue's own curve reaches 100 % at 85 °C by itself and would hide the boost entirely.
+fn issue297_low_curve() -> FanMode {
+    FanMode::Curve { source: TempSource::Cpu, points: vec![point(30.0, 30), point(70.0, 30)] }
+}
+
+/// The config the pass-2 scenarios run on: that low curve on the CPU header and the issue's 50 °C
+/// user line. A 9800X3D's 95 °C rated maximum puts the safety ceiling at 90 °C, so an 85 °C
+/// reading is a wind-up case and not the ceiling.
+fn issue297_low_config() -> FansFile {
+    FansFile {
+        hot_limits: HotLimits { cpu_c: Some(50.0), gpu_c: None, board_c: None },
+        profiles: vec![FanProfile {
+            name: "Default".into(),
+            headers: BTreeMap::from([("cpu_fan".to_string(), issue297_low_curve())]),
+        }],
+        ..Default::default()
+    }
+}
+
+/// `origin/main`'s `note_boost`, one tick, copied from `origin/main:crates/canvas-svc/src/fans.rs`
+/// (as merged at a72d7dc): at or above the line the boost grows by `max(1, degrees over)` points a
+/// second with no ceiling; inside the 2 °C deadband below the line it holds; below that it decays.
+/// The pass-2 tests measure this branch against it on the same reading trace. It was checked
+/// against the real thing: with origin/main's `note_boost` put back into `fans.rs`, the controller
+/// and this reference produced identical duty traces on every pass-2 trace.
+fn main_boost_step(boost: f32, temp_c: f32, limit_c: f32, dt: f32) -> f32 {
+    let over = temp_c - limit_c;
+    if over >= 0.0 {
+        (boost + HOT_BOOST_MIN_RISE.max(HOT_BOOST_GAIN * over) * dt).min(HOT_BOOST_MAX)
+    } else if over >= -HOT_BOOST_DEADBAND_C {
+        boost
+    } else {
+        (boost - HOT_BOOST_DECAY * dt).max(0.0)
+    }
+}
+
+/// One reading trace run twice: through the branch (the real controller on the fake chip) and
+/// through `origin/main`'s `note_boost` on the same base duty. Both start from a cold boost and
+/// the same start reading, and the hot floor latch (#130, unchanged by this pass) is followed in
+/// the reference so both ask the same base: the curve's answer, or the 50 % hot floor once the
+/// reading has been at or above the line. Only the CPU header is read.
+fn issue297_compare(temps: &[f32], curve: FanMode, config: FansFile) -> (Vec<u8>, Vec<u8>) {
+    let FanMode::Curve { points, .. } = curve.clone() else { panic!("a curve, not {curve:?}") };
     let t0 = Instant::now();
-    let (mut r, mut traces) = issue297_rig(t0, issue297_sine(0));
+    let dir = tempfile::tempdir().unwrap();
+    let chip = FakeChip::new(MSI_ALT1_MAP);
+    let cpu = FakeTemp::new(temps[0]);
+    let fans = controller(&dir, &chip, &cpu, config, t0);
+    let mut r = Rig { dir, chip, cpu, fans };
+    r.fans.set_cpu_brand(Some("AMD Ryzen 9 9800X3D 8-Core Processor"));
+    r.fans.set_header_mode("cpu_fan", curve, t0).unwrap();
+    let mut branch = Vec::new();
+    let mut main = Vec::new();
+    let mut main_boost = 0.0f32;
+    let mut latched = false;
+    for (i, temp) in temps.iter().enumerate() {
+        r.cpu.set(Some(*temp));
+        r.fans.tick(t0 + Duration::from_secs(i as u64));
+        branch.push(duty_percent(&r, CPU_FAN));
+        latched |= *temp >= 50.0;
+        main_boost = main_boost_step(main_boost, *temp, 50.0, 1.0);
+        let base = f32::from(curve_percent(&points, *temp)).max(if latched { 50.0 } else { 30.0 });
+        main.push((base + main_boost).round().clamp(0.0, 100.0) as u8);
+    }
+    (branch, main)
+}
+
+/// A flat 30 % CPU curve on the issue's 50 °C line: the pass-2 scenarios' answer to "a LOW curve".
+fn issue297_compare_low(temps: &[f32]) -> (Vec<u8>, Vec<u8>) {
+    issue297_compare(temps, issue297_low_curve(), issue297_low_config())
+}
+
+/// The first sample at which a trace reads 100 %, or `None`.
+fn first_at_100(duties: &[u8]) -> Option<usize> {
+    duties.iter().position(|d| *d == 100)
+}
+
+#[test]
+fn issue297_a_step_over_the_line_is_never_slower_than_main() {
+    // A step from 45 °C to 85 °C on the low curve: main wound up at 35 points a second and read
+    // 100 % from its second tick at 85 °C. This branch's `HOT_BOOST_RISE_MAX` (12) took five ticks
+    // on a72d7dc, which is a real heat event answered slower than main -- the pass-2 blocker.
+    let mut temps = vec![45.0];
+    temps.extend(vec![85.0; 9]);
+    let (branch, main) = issue297_compare_low(&temps);
+    println!("step 45 -> 85: branch {branch:?}, main {main:?}");
+    // origin/main's answer for this exact trace, measured by putting main's `note_boost` back:
+    // 30 % at 45 °C, then 85 % and 100 % at 85 °C (35 points a second, no ceiling).
+    assert_eq!(main, vec![30, 85, 100, 100, 100, 100, 100, 100, 100, 100], "the reference is main's answer");
+    assert!(
+        branch.iter().zip(&main).all(|(b, m)| b >= m),
+        "the branch answered slower than main on a step over the line: branch {branch:?}, main {main:?}"
+    );
+    assert!(
+        first_at_100(&branch) <= first_at_100(&main),
+        "the branch reached 100 % at {:?}, main at {:?}: branch {branch:?}, main {main:?}",
+        first_at_100(&branch),
+        first_at_100(&main)
+    );
+    assert_eq!(first_at_100(&branch), Some(2), "the branch reaches full speed on its second tick over the line: {branch:?}");
+}
+
+#[test]
+fn issue297_a_plateau_just_over_the_line_keeps_rising_like_main() {
+    // Held at 52.9 °C, inside the old 3 °C band: on a72d7dc the proportional answer stopped at the
+    // band's top (+30 points, 80 % here) and stayed there while main kept climbing to 100 %, so the
+    // CPU could sit over its line longer than on main. Every reading over the line must keep the
+    // boost rising at least as fast as main's `max(1, over)` points a second, and the band's cap
+    // may only apply at or under the line.
+    //
+    // The reading is a fixed trace, so the two metrics the rule counts -- seconds over the line and
+    // degree-seconds -- are the same 120 s and 348 degree-seconds for both runs by construction;
+    // what the rule adds here is that the fan is never slower than main at it, which the per-tick
+    // comparison measures. The coupled version of the same question is the 63 W model test.
+    let temps = vec![52.9; 120];
+    let (branch, main) = issue297_compare_low(&temps);
+    println!(
+        "plateau at line + 2.9: branch first 100 % {:?}, main first 100 % {:?}",
+        first_at_100(&branch),
+        first_at_100(&main)
+    );
+    assert!(
+        branch.iter().zip(&main).all(|(b, m)| b >= m),
+        "the branch capped the boost under a plateau over the line: branch {branch:?}, main {main:?}"
+    );
+    assert!(first_at_100(&branch) <= first_at_100(&main), "the branch reaches 100 % no later than main");
+    assert_eq!(first_at_100(&main), Some(17), "main's answer for this trace: 2.9 points a second from the 50 % floor, full speed on its 17th tick");
+}
+
+#[test]
+fn issue297_a_ramp_from_under_the_line_is_never_slower_than_main() {
+    // The reviewer's ramp: 45 °C to 80 °C over 60 s. It passes on the previous head as well as
+    // here (branch 19th tick to full speed, main 21st): a ramp that starts under the line warms
+    // the boost up in step with the temperature, so the old 12-point ceiling never bound before
+    // both rules reached 100 %. Kept because it is the shape asked for, with its numbers reported.
+    let temps: Vec<f32> = (0..=60).map(|s| 45.0 + 35.0 * s as f32 / 60.0).collect();
+    let (branch, main) = issue297_compare_low(&temps);
+    println!(
+        "ramp 45 -> 80 over 60 s: branch first 100 % {:?}, main first 100 % {:?}",
+        first_at_100(&branch),
+        first_at_100(&main)
+    );
+    assert!(
+        branch.iter().zip(&main).all(|(b, m)| b >= m),
+        "the branch answered the ramp slower than main: branch {branch:?}, main {main:?}"
+    );
+    assert_eq!(branch.iter().copied().max(), Some(100), "the ramp takes the fan to full speed");
+}
+
+#[test]
+fn issue297_a_ramp_over_the_line_from_a_cold_boost_is_never_slower_than_main() {
+    // The same load ramp on a CPU that is already 12 °C over its line: 62 °C to 80 °C over 60 s,
+    // so the boost starts cold while main's rise is already at 12 points a second and climbing.
+    // That is where the old 12-point ceiling differed from main's `max(1, over)`, and this test
+    // fails on the previous head from the tick main reaches full speed one tick first.
+    let temps: Vec<f32> = (0..=60).map(|s| 62.0 + 18.0 * s as f32 / 60.0).collect();
+    let (branch, main) = issue297_compare_low(&temps);
+    println!(
+        "ramp 62 -> 80: branch {branch:?}, main {main:?}, first 100 % {:?} vs {:?}",
+        first_at_100(&branch),
+        first_at_100(&main)
+    );
+    assert!(
+        branch.iter().zip(&main).all(|(b, m)| b >= m),
+        "the branch answered a warm ramp slower than main: branch {branch:?}, main {main:?}"
+    );
+    assert!(first_at_100(&branch) <= first_at_100(&main), "the branch reaches 100 % no later than main");
+}
+
+#[test]
+fn issue297_the_wind_up_is_never_slower_than_main_at_any_reading_over_the_line() {
+    // The pass-2 blocker in one line: for one tick from a cold boost, at every reading from just
+    // over the line to just under the safety ceiling, the branch's rise must be at least main's.
+    // Ahead of a72d7dc a 12-point ceiling made 70-85 °C readings answer at 12 instead of 20-35.
+    let mut worse = Vec::new();
+    for step in 0..=79 {
+        let temp = 50.5 + step as f32 * 0.5;
+        let (branch, main) = issue297_compare_low(&[45.0, temp]);
+        if branch[1] < main[1] {
+            worse.push((temp, branch[1], main[1]));
+        }
+    }
+    assert!(worse.is_empty(), "readings answered slower than main (reading, branch, main): {worse:?}");
+}
+
+#[test]
+fn issue297_a_hover_under_the_line_does_not_surge_to_full_speed() {
+    // The win that survives pass 2: a reading that stays at or under its line settles at the
+    // proportional answer and holds there. The sine never crosses 50 °C, so nothing winds up.
+    let t0 = Instant::now();
+    let (mut r, mut traces) = issue297_rig(t0, issue297_under_sine(0));
     let seconds = 600;
-    let mut temps = vec![issue297_sine(0)];
+    let mut temps = vec![issue297_under_sine(0)];
     for s in 1..=seconds {
-        let temp = issue297_sine(s);
+        let temp = issue297_under_sine(s);
         temps.push(temp);
         issue297_tick(&mut r, t0, s as u64, temp, &mut traces);
     }
@@ -2336,17 +2542,49 @@ fn issue297_a_hovering_cpu_does_not_surge_to_full_speed() {
     let peak = traces.iter().map(DutyTrace::peak).max().unwrap_or(0);
     let (longest_above, total_above) = time_above(&temps, 50.0);
     println!(
-        "hover sine: max step {step} pts/s, {changes:.1} changes/min, {full} s at 100 %, peak {peak} %, above limit {total_above} s (longest {longest_above} s)"
+        "hover under the line: max step {step} pts/s, {changes:.1} changes/min, {full} s at 100 %, peak {peak} %, above limit {total_above} s (longest {longest_above} s)"
     );
-    assert!(step <= 5, "the duty moved {step} points in one second on a hover: {traces:?}");
+    assert_eq!(total_above, 0, "the trace is under the line for the whole run");
+    assert!(step <= 2, "the duty moved {step} points in one second on a hover: {traces:?}");
     assert!(changes <= 3.0, "the duty turned round {changes:.1} times a minute on a hover: {traces:?}");
-    assert_eq!(full, 0, "the duty sat at 100 % for {full} s on a hover: peak {peak} %");
+    assert_eq!(full, 0, "the duty sat at 100 % for {full} s on a hover under the line: peak {peak} %");
+    assert!(peak <= 60, "the hover answered {peak} %, not the proportional answer: {traces:?}");
+}
+
+#[test]
+fn issue297_a_hover_across_the_line_answers_at_least_as_fast_as_main() {
+    // The issue's 48-53 °C sine straddles the line: its mean is half a degree over it. Pass 2's
+    // rule (every reading over the line rises at least as fast as #255 did) means this hover can
+    // no longer be smoothed: the fans climb to full speed, as main's did, and only a reading at
+    // or under the line settles. The test therefore holds the rule that still protects the CPU:
+    // at no tick is the branch slower than main. The surge itself is reported in the print below.
+    let temps: Vec<f32> = (0..=600).map(issue297_sine).collect();
+    let (branch, main) = issue297_compare(&temps, issue297_curve(), issue297_config());
+    let full = |d: &[u8]| d.iter().filter(|x| **x == 100).count();
+    let step = |d: &[u8]| d.windows(2).map(|w| w[0].abs_diff(w[1])).max().unwrap_or(0);
+    println!(
+        "hover across the line: branch {} s at 100 % (peak {} %, max step {}), main {} s at 100 % (peak {} %, max step {})",
+        full(&branch),
+        branch.iter().copied().max().unwrap_or(0),
+        step(&branch),
+        full(&main),
+        main.iter().copied().max().unwrap_or(0),
+        step(&main)
+    );
+    assert!(
+        branch.iter().zip(&main).all(|(b, m)| b >= m),
+        "the branch fell below main on a hover that crosses the line"
+    );
+    assert!(step(&branch) <= 5, "the duty moved {} points in one second: {branch:?}", step(&branch));
+    assert_eq!(first_at_100(&branch), Some(14), "the branch reaches 100 % on its 14th tick, main's is 24");
 }
 
 #[test]
 fn issue297_a_seeded_walk_hover_stays_bounded() {
+    // A deterministic walk under the line, the shape of a real Ryzen `Tctl` at idle: it wanders
+    // instead of following a clean wave, so the hold cannot be tuned to one period.
     let t0 = Instant::now();
-    let mut walk = Walk::new();
+    let mut walk = Walk::new(47.5, 49.8);
     let start = walk.next();
     let (mut r, mut traces) = issue297_rig(t0, start);
     let seconds = 600;
@@ -2364,35 +2602,48 @@ fn issue297_a_seeded_walk_hover_stays_bounded() {
     println!(
         "hover walk: max step {step} pts/s, {changes:.1} changes/min, {full} s at 100 %, peak {peak} %, above limit {total_above} s (longest {longest_above} s)"
     );
-    assert!(step <= 5, "the duty moved {step} points in one second on a hover: {traces:?}");
+    assert_eq!(total_above, 0, "the walk stays under the line");
+    assert!(step <= 2, "the duty moved {step} points in one second on a hover: {traces:?}");
     assert!(changes <= 3.0, "the duty turned round {changes:.1} times a minute on a hover: {traces:?}");
     assert_eq!(full, 0, "the duty sat at 100 % for {full} s on a hover: peak {peak} %");
 }
 
 #[test]
-fn issue297_a_start_above_the_limit_starts_from_the_curve_and_ramps() {
+fn issue297_a_start_above_the_limit_starts_from_the_curve_and_winds_up_like_main() {
     // The service starts with the CPU already a little over the line (the issue's log: the
     // curve's 47-53 % in the first seconds, then 100 %). The first ask must be the curve's
-    // answer (plus the floor and a proportional step), never a jump to full speed, and the
-    // hover that follows must stay bounded.
+    // answer (plus the floor and one step), never a jump to full speed. Pass 2: a start over the
+    // line then winds up like main, so reaching 100 % is expected and no later than main's.
     let t0 = Instant::now();
     let start_c = 52.5;
     let (mut r, mut traces) = issue297_rig(t0, start_c);
     let first = traces[0].duties[0];
     let seconds = 120;
+    let mut temps = vec![start_c];
     for s in 1..=seconds {
         let temp = issue297_sine(s + 90); // starts near 52.5 and follows the same hover
+        temps.push(temp);
         issue297_tick(&mut r, t0, s as u64, temp, &mut traces);
     }
     let step = worst_step(&traces);
     let peak = traces.iter().map(DutyTrace::peak).max().unwrap_or(0);
     let full = worst(&traces, DutyTrace::secs_at_100);
-    // 52.5 C on the issue's curve asks for 46 %; 50 % is the cpu_fan hot floor, and a
-    // proportional answer of a point or two is the ramp's first step.
-    println!("start-up: first ask {first} %, max step {step} pts/s, peak {peak} %, {full} s at 100 %");
+    let (branch, main) = issue297_compare(&temps, issue297_curve(), issue297_config());
+    // 52.5 C on the issue's curve asks for 46 %; 50 % is the cpu_fan hot floor, and one
+    // proportional step lands with it.
+    println!(
+        "start-up: first ask {first} %, max step {step} pts/s, peak {peak} %, {full} s at 100 %, first 100 % at {:?} (main {:?})",
+        first_at_100(&branch),
+        first_at_100(&main)
+    );
     assert!(first <= 56, "the first ask at 52.5 C was {first} %, not the curve's answer plus a step");
     assert!(step <= 5, "start-up ramped {step} points in one second: {traces:?}");
-    assert_eq!(full, 0, "start-up reached 100 % on a hover: {traces:?}");
+    assert!(
+        first_at_100(&branch) <= first_at_100(&main),
+        "start-up reached 100 % later than main: {:?} against {:?}",
+        first_at_100(&branch),
+        first_at_100(&main)
+    );
 }
 
 #[test]
@@ -2414,14 +2665,14 @@ fn issue297_the_hover_meets_the_limit_without_hunting() {
     );
     // Before #297 (origin/main): 28 s above 50 (longest 25), 22 s more than half a degree over,
     // 56.3 degree-seconds over the line, the same 54 C peak, settled 49.6 C, 0.3 changes/min and
-    // 71 s at full speed -- reached by winding up to 100 % and staying there. The hold now aims a
-    // degree under the line, so the latch's own five-point cycle never carries the CPU over it:
-    // every one of these is better, and the time over the line is a stricter rule in its own
-    // test below.
+    // 71 s at full speed. Pass 2 winds up faster than main at every reading over the line (the
+    // rule in `issue297_a_step_over_the_line_is_never_slower_than_main`), so the excursion reaches
+    // 100 % sooner and #255's unchanged quarter-point-a-second release then takes longer to bring
+    // it back: 185 s at full speed, every one of them at or under the line. What the safety rule
+    // counts is the time over the line, and that is lower than main's in its own test below.
     assert!(max_temp <= 54.0, "the peak rose to {max_temp:.1} C");
     assert!(excess <= 56.3, "the CPU was hotter overall: {excess:.1} degree-seconds over the line (was 56.3)");
     assert!(settled <= 51.0, "the loop settled at {settled:.1} C, over the 50 C line");
-    assert!(full == 0, "the loop ran at full speed for {full} s holding a 50 C line (was 71 s)");
     assert!(changes <= 3.0, "the duty turned round {changes:.1} times a minute holding the line");
 }
 

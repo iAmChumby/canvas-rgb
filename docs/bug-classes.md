@@ -686,20 +686,26 @@ time spent at full speed.
   it, so all six fans climbed to 100 % and sat there.
 - [#297](https://github.com/iAmChumby/canvas-rgb/issues/297): the service log shows the shape:
   curve duties 47-53 %, then 100 % on every channel within seconds, then back to the curve, then a
-  26 s climb 64 → 99 %. Fix: the hold aims a degree under the line (`HOT_HOLD_AIM_MARGIN_C`),
-  because the hot floor latch moves the CPU header in five-point steps and a loop that settles on
-  the line is carried over it on every latch cycle — and seconds over the line are what the safety
-  rule counts. Over the aim the answer is proportional (`HOT_BOOST_GAIN_PER_C` points per degree,
-  capped at the band's top) and it holds rather than stepping down on noise. Past the band over
-  the line (and past it for `HOT_BOOST_ONSET_HOLD`, or a clear degree past it at once) the loop
-  winds up at #255's rate per degree measured from the aim, so it never answers a sustained
-  excursion slower than #255 did, and `HOT_BOOST_RISE_MAX` bounds the rise. The line, never the
-  aim, decides when that happens, so a hover still never winds up. The same simulation on the
-  fakes (`fans_tests.rs`, `issue297_*`): a 48-53 °C hover goes from 576 of 600 s at 100 % to 0 s
-  at 100 %, with a largest step of 5 points a second and 1.0 direction changes a minute; the 63 W
-  thermal model settles at 49.1 °C, spends 24 s over the 50 °C line against 28 s (longest run 24 s
-  against 25 s), 50.8 degree-seconds over it against 56.3, the same 54 °C peak, and 0 s at 100 %
-  against 71 s.
+  26 s climb 64 → 99 %. Fix, and the rule it is held to: **the hold may never answer a hot reading
+  slower than #255 did.** At or above the line it winds up at #255's own rise,
+  `max(1, °C over)` points a second, measured from the aim (`HOT_HOLD_AIM_MARGIN_C`, a degree under
+  the line) so it is never below #255's, and with **no ceiling** — a 35 °C excursion still winds up
+  at 35+ points a second. The early passes of this PR put a 12-point ceiling on it and stopped a
+  proportional answer at +30 points inside a 3 °C band, which answered a *real* heat event slower
+  than main did and let a reading held 2.9 °C over the line sit at 80 % while main reached 100 %
+  (pass-2 review). Only *below* the line is there smoothing: the answer there is proportional
+  (`HOT_BOOST_GAIN_PER_C` points per degree over the aim, at most ten points as the reading reaches
+  the line), approached at a point a second, and it holds rather than stepping down on noise. The
+  aim still exists for the reason it was added: the hot floor latch moves the CPU header in
+  five-point steps, so a loop that settles *on* the line is carried over it every latch cycle, and
+  seconds over the line are what the safety rule counts. The same simulation on the fakes
+  (`fans_tests.rs`, `issue297_*`): the 63 W thermal model settles at 49.1 °C and spends 23 s over
+  the 50 °C line against main's 28 s (longest run 23 s against 25 s), 49.1 degree-seconds against
+  56.3, the same 54 °C peak; a hover *under* the line (47-50 °C) settles at 53 % and never reaches
+  100 %; a hover that straddles the line (48-53 °C, mean 50.5) reaches 100 % at 13 s against main's
+  24 s and sits there 587 of 600 s, because every reading over the line must answer at #255's rate.
+  Time at full speed is the price of that rule: 185 s in the 63 W model against main's 71 s, since
+  the excursion winds up sooner and #255's quarter-point-a-second release is unchanged.
 - **Class fix:** the rule is one function, `CurveState::note_boost`, so every fan mode goes
   through it (Curve, Fixed, GPU, board). Siblings: the curve's own step-down
   (`CurveState::step`) already carries the hysteresis of #17 and has no integral; the *latch*
@@ -711,7 +717,11 @@ time spent at full speed.
   seeded walk around its line (not just a step over it), and state the largest step a second,
   the direction changes a minute, the time at the extremes, and the time the input spends above
   the line against the same run before the change. A step response alone will not show a wind-up;
-  the hover does.
+  the hover does. Then do it the other way round: run a *step over the line*, a *plateau over it*
+  and a *ramp over it* against the old rule tick by tick and require the new rule's duty to be at
+  least the old one's at every tick, because a loop that answers a hover more gently must not
+  answer a heat event more slowly. The two requirements pull against each other, and the safety one
+  wins.
 
 ### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
 
