@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Lights and preview: the render loop no longer sleeps through a device or preview that connects in the instant it goes idle, which left an effect dark until the next change (#250)
+
 ## [0.13.0] - 2026-11-10
 
 ### Changed
