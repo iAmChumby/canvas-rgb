@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from "vitest";
 import { useState } from "react";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 
@@ -19,6 +19,11 @@ function setPhoneWidth(on: boolean) {
   for (const listener of phoneListeners) listener();
 }
 
+// The palette's beforeAll replaces these. The originals are put back afterwards, so this file
+// does not leak a half-working matchMedia or a no-op scrollIntoView into the rest of the suite.
+const originalMatchMedia = window.matchMedia;
+const originalScrollIntoView = Element.prototype.scrollIntoView;
+
 beforeAll(() => {
   window.matchMedia = ((query: string) => ({
     get matches() {
@@ -34,6 +39,11 @@ beforeAll(() => {
   })) as unknown as typeof window.matchMedia;
   // jsdom has no layout, so the palette's "keep the active row in view" call has no method.
   Element.prototype.scrollIntoView = (() => {}) as typeof Element.prototype.scrollIntoView;
+});
+
+afterAll(() => {
+  window.matchMedia = originalMatchMedia;
+  Element.prototype.scrollIntoView = originalScrollIntoView;
 });
 
 let ran: string[] = [];
@@ -163,5 +173,104 @@ describe("the command palette", () => {
     // Widened again: the full list comes back.
     act(() => setPhoneWidth(false));
     await waitFor(() => expect(screen.getAllByRole("option")).toHaveLength(4));
+  });
+
+  it("resets the highlight to the first row when the filtered list changes (a resize), so Enter always has a row to run", async () => {
+    render(<CommandPalette commands={commands()} short={shortCommands()} onClose={() => {}} />);
+    const field = screen.getByRole("combobox", { name: "Search commands" });
+
+    // Highlight the last row on a desktop window: two ArrowDowns land on "Switch the theme".
+    fireEvent.keyDown(document.body, { key: "ArrowDown" });
+    fireEvent.keyDown(document.body, { key: "ArrowDown" });
+    await waitFor(() => expect(field.getAttribute("aria-activedescendant")).toBe(within(screen.getByRole("listbox")).getAllByRole("option")[3]!.id));
+
+    // Narrowed to a phone, the filtered list shrinks under the highlight. The highlight resets to
+    // the first actionable row, so Enter has a row to run.
+    act(() => setPhoneWidth(true));
+    const options = within(screen.getByRole("listbox")).getAllByRole("option");
+    await waitFor(() => expect(field.getAttribute("aria-activedescendant")).toBe(options[1]!.id));
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    expect(ran).toEqual(["details"]);
+  });
+
+  it("renders the empty line outside the listbox and closes aria-expanded when nothing matches", async () => {
+    render(<CommandPalette commands={commands()} short={shortCommands()} onClose={() => {}} />);
+    const field = screen.getByRole("combobox", { name: "Search commands" });
+    const list = screen.getByRole("listbox");
+
+    fireEvent.change(field, { target: { value: "zzzz" } });
+
+    // The empty line is not a child of the listbox (only options are there); it is its own status.
+    expect(within(list).queryByText("Nothing matches that.")).toBeNull();
+    expect(screen.getByText("Nothing matches that.")).toBeTruthy();
+    // The popup says it is closed while there is nothing in it.
+    expect(field.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("gives every row a unique id even when two command ids sanitise to the same string", () => {
+    const clash: Command[] = [
+      { id: "a b", group: "Pages", label: "First", run: () => {} },
+      { id: "a/b", group: "Pages", label: "Second", run: () => {} },
+    ];
+    render(<CommandPalette commands={clash} onClose={() => {}} />);
+    const ids = within(screen.getByRole("listbox")).getAllByRole("option").map((o) => o.id);
+    expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it("leaves focus where a command put it instead of stealing it back to the opener", async () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open the palette
+          </button>
+          <button type="button">Elsewhere</button>
+          {open && (
+            <CommandPalette
+              commands={[
+                { id: "focus-moving", group: "Pages", label: "Move the focus", run: () => screen.getByRole("button", { name: "Elsewhere" }).focus() },
+              ]}
+              onClose={() => setOpen(false)}
+            />
+          )}
+        </>
+      );
+    }
+    render(<Harness />);
+    const opener = screen.getByRole("button", { name: "Open the palette" });
+    opener.focus();
+    fireEvent.click(opener);
+    await screen.findByRole("combobox", { name: "Search commands" });
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    // The command moved focus itself; the palette's unmount must not pull it back to the opener.
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByRole("button", { name: "Elsewhere" })));
+  });
+
+  it("returns focus to the opener when the command did not move it (a navigating command)", async () => {
+    function Harness() {
+      const [open, setOpen] = useState(false);
+      return (
+        <>
+          <button type="button" onClick={() => setOpen(true)}>
+            Open the palette
+          </button>
+          {open && (
+            // A navigating command moves the page, not the focus: it touches no element.
+            <CommandPalette
+              commands={[{ id: "go", group: "Pages", label: "Go to Layout", run: () => {} }]}
+              onClose={() => setOpen(false)}
+            />
+          )}
+        </>
+      );
+    }
+    render(<Harness />);
+    const opener = screen.getByRole("button", { name: "Open the palette" });
+    opener.focus();
+    fireEvent.click(opener);
+    await screen.findByRole("combobox", { name: "Search commands" });
+    fireEvent.keyDown(document.body, { key: "Enter" });
+    await waitFor(() => expect(document.activeElement).toBe(opener));
   });
 });

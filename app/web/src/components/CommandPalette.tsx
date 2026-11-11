@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useId, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react";
 import { MagnifyingGlass } from "@phosphor-icons/react";
 import { useMediaQuery } from "@/components/MediaQuery";
+import { PHONE_QUERY } from "@/lib/MediaQuery";
+import { useFocusTrap } from "@/components/useFocusTrap";
 
 export interface Command {
   id: string;
@@ -16,10 +18,6 @@ export interface Command {
    */
   status?: boolean;
 }
-
-/** What Tab reaches inside the palette, in document order (the pattern `useSheetFocus` uses). */
-const FOCUSABLE =
-  'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
 
 /**
  * The command palette (Ctrl+K). It searches pages, effects and the few actions that
@@ -49,10 +47,11 @@ export function CommandPalette({
   const inputRef = useRef<HTMLInputElement>(null);
   const listRef = useRef<HTMLDivElement>(null);
   const panelRef = useRef<HTMLDivElement>(null);
-  const phone = useMediaQuery("(max-width: 720px)");
-  // One id per row, so the field can name the active row with `aria-activedescendant`.
+  const phone = useMediaQuery(PHONE_QUERY);
+  // One id per row, so the field can name the active row with `aria-activedescendant`. The row's
+  // index, not the command id, keeps the id unique: two commands can sanitise to the same tail.
   const listId = useId();
-  const optionId = (command: Command) => `${listId}-${command.id.replace(/[^\w-]/g, "_")}`;
+  const optionId = (index: number) => `${listId}-${index}`;
 
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
@@ -61,6 +60,16 @@ export function CommandPalette({
     if (!q) return phone ? short ?? commands : commands;
     return commands.filter((c) => `${c.group} ${c.label} ${c.hint ?? ""}`.toLowerCase().includes(q));
   }, [commands, short, phone, query]);
+
+  // The filtered list can shrink out from under the highlight (a resize across the phone
+  // breakpoint, a new command list). Reset to the first row when it changes: adjusted during
+  // render (the pattern Popover uses for its exit), so a row is always active and Enter always
+  // has one to run.
+  const [prevFiltered, setPrevFiltered] = useState(filtered);
+  if (prevFiltered !== filtered) {
+    setPrevFiltered(filtered);
+    setActive(0);
+  }
 
   // The rows that can be picked. The status lines are read, not run.
   const actionable = useMemo(() => filtered.filter((c) => !c.status), [filtered]);
@@ -78,18 +87,29 @@ export function CommandPalette({
     return map;
   }, [filtered]);
 
-  // The row the field names: the active action, never a status line.
-  const activeCommand = actionable[active];
-  const activeId = activeCommand ? optionId(activeCommand) : undefined;
+  // The row the field names: the active action, never a status line. Found by inverting the
+  // row map, so the active row's option id comes from its place in the filtered list.
+  const activeIndex = useMemo(() => {
+    for (const [i, a] of actionRow) {
+      if (a === active) return i;
+    }
+    return undefined;
+  }, [actionRow, active]);
+  const activeId = activeIndex === undefined ? undefined : optionId(activeIndex);
 
   // The palette is mounted only while it is open, so it starts empty. The element that had the
   // keyboard when it opened takes it back when the palette closes: the strip's search key, or
   // whatever the Ctrl+K press left focused. This runs before the focus timer below, so the
-  // opener is read before the field takes the keyboard.
+  // opener is read before the field takes the keyboard. A command that moved focus itself
+  // (opened the status popover, navigated) is left where it put it.
   useEffect(() => {
     const opener = document.activeElement as HTMLElement | null;
+    const panel = panelRef.current;
     return () => {
-      if (opener && opener.isConnected) opener.focus();
+      const active = document.activeElement;
+      const stranded =
+        !active || active === document.body || !active.isConnected || (panel !== null && panel.contains(active));
+      if (stranded && opener && opener.isConnected) opener.focus();
     };
   }, []);
 
@@ -98,41 +118,13 @@ export function CommandPalette({
     return () => clearTimeout(timer);
   }, []);
 
+  // Tab and Escape belong to the palette while it is open: window capture, so a trap behind it
+  // (the phone sheet's own trap) never sees them.
+  const closePalette = useCallback(() => onClose(), [onClose]);
+  useFocusTrap({ panelRef, onEscape: closePalette });
+
   useEffect(() => {
     const onKey = (e: KeyboardEvent) => {
-      if (e.key === "Tab") {
-        // Focus stays inside the palette while it is open: Tab and Shift+Tab cycle through its
-        // keys, and a Tab from a control on the page behind it comes back in.
-        const panel = panelRef.current;
-        if (!panel) return;
-        const items = Array.from(panel.querySelectorAll<HTMLElement>(FOCUSABLE));
-        if (items.length === 0) {
-          e.preventDefault();
-          panel.focus();
-          return;
-        }
-        const first = items[0]!;
-        const last = items[items.length - 1]!;
-        const focused = document.activeElement;
-        if (!panel.contains(focused)) {
-          e.preventDefault();
-          (e.shiftKey ? last : first).focus();
-          return;
-        }
-        if (e.shiftKey && (focused === first || focused === panel)) {
-          e.preventDefault();
-          last.focus();
-        } else if (!e.shiftKey && (focused === last || focused === panel)) {
-          e.preventDefault();
-          first.focus();
-        }
-        return;
-      }
-      if (e.key === "Escape") {
-        e.preventDefault();
-        onClose();
-        return;
-      }
       if (e.key === "ArrowDown") {
         e.preventDefault();
         setActive((a) => (actionable.length ? (a + 1) % actionable.length : 0));
@@ -197,7 +189,7 @@ export function CommandPalette({
             aria-label="Search commands"
             role="combobox"
             aria-haspopup="listbox"
-            aria-expanded="true"
+            aria-expanded={filtered.length > 0}
             aria-controls={listId}
             aria-autocomplete="list"
             aria-activedescendant={activeId}
@@ -208,7 +200,6 @@ export function CommandPalette({
           />
         </div>
         <div className="cmdk-list" ref={listRef} id={listId} role="listbox" aria-label="Commands">
-          {filtered.length === 0 && <p className="cmdk-empty">Nothing matches that.</p>}
           {filtered.map((c, i) => {
             const head = groups.find((g) => g.first === i);
             const isStatus = c.status === true;
@@ -227,7 +218,7 @@ export function CommandPalette({
                     className="cmdk-item"
                     data-status="true"
                     role="option"
-                    id={optionId(c)}
+                    id={optionId(i)}
                     aria-selected="false"
                     aria-disabled="true"
                   >
@@ -239,7 +230,7 @@ export function CommandPalette({
                     type="button"
                     className="cmdk-item"
                     role="option"
-                    id={optionId(c)}
+                    id={optionId(i)}
                     aria-selected={index === active}
                     data-active={index === active ? "true" : "false"}
                     onMouseEnter={() => setActive(index ?? 0)}
@@ -256,6 +247,12 @@ export function CommandPalette({
             );
           })}
         </div>
+        {filtered.length === 0 && (
+          // Only options belong in the listbox; the empty line is a status of its own.
+          <p className="cmdk-empty" role="status">
+            Nothing matches that.
+          </p>
+        )}
       </div>
     </div>
   );
