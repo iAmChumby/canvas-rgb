@@ -239,7 +239,9 @@ describe("the header editor keeps its draft (#295)", () => {
     const patch = slowPatch();
     fireEvent.click(radio("Fixed %"));
     await waitFor(() => expect(patch.spy).toHaveBeenCalledTimes(1));
-    const sentMode = patch.waiting[0].mode as FanMode & { percent: number };
+    const first = patch.waiting[0];
+    if (!first) throw new Error("the editor sent no mode");
+    const sentMode = first.mode as FanMode & { percent: number };
     await act(async () => {
       patch.land();
     });
