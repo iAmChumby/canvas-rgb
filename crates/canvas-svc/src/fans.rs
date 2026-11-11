@@ -57,8 +57,32 @@ pub const CURVE_STEP_DOWN_MIN_PERCENT: u8 = 3;
 /// exceed" always answers.
 pub const HOT_BOOST_MIN_RISE: f32 = 1.0;
 /// Issue #255: how fast the boost grows per degree above the line, in percentage points per
-/// second per degree. The BIOS Smart Fan step-up shape: the further over the line, the faster.
+/// second per degree, on top of [`HOT_BOOST_MIN_RISE`]. The BIOS Smart Fan step-up shape: the
+/// further over the line, the faster. Issue #297: the same rise applies inside
+/// [`HOT_BOOST_BAND_C`] as the proportional answer's slew, so the loop is never slower than
+/// issue #255's was at any reading over the line.
 pub const HOT_BOOST_GAIN: f32 = 1.0;
+/// Issue #297: the band above the line, in degrees, inside which the hold answers in proportion
+/// to how far over the line the reading is instead of winding up. A CPU hovering around its line
+/// (a 7800X3D idles at the issue's 50 °C line) stays inside this band, so the duty settles a few
+/// points over the curve instead of climbing to full speed; a sustained excursion past the band
+/// winds the loop up exactly as issue #255 designed. Above the band the old rule stands.
+pub const HOT_BOOST_BAND_C: f32 = 3.0;
+/// Issue #297: the proportional answer's gain, in percentage points per degree over the line,
+/// inside [`HOT_BOOST_BAND_C`]. It reaches full speed ten degrees over the line; on a 7800X3D
+/// that is exactly the automatic line plus the fixed ceiling's distance (74 + 10 = the part's
+/// 84 °C ceiling), and a lower user line gets there sooner, which is what makes a 50 °C line
+/// run the fans hard. The same gain issue #255 used per second, now applied per degree.
+pub const HOT_BOOST_GAIN_PER_C: f32 = 10.0;
+/// Issue #297: how long the reading must stay past [`HOT_BOOST_BAND_C`] before the loop winds
+/// up. A hover that only pokes past the band for a tick or two never starts it, so it cannot
+/// ratchet the duty to full speed; a sustained excursion still winds up, and the proportional
+/// answer during the wait keeps the fan no slower than issue #255 was.
+pub const HOT_BOOST_ONSET_HOLD: Duration = Duration::from_secs(5);
+/// Issue #297: the fastest the boost may climb, in percentage points per second. At the line the
+/// rise is [`HOT_BOOST_MIN_RISE`], and it grows with the error until it is this: a rate limit on
+/// the way up, as the issue asks, matching the slow release on the way down.
+pub const HOT_BOOST_RISE_MAX: f32 = 12.0;
 /// Issue #255: the deadband below the line, in degrees, where the boost holds instead of
 /// decaying. A temperature hovering at the line never flips the duty (issue #17).
 pub const HOT_BOOST_DEADBAND_C: f32 = 2.0;
@@ -157,6 +181,10 @@ struct CurveState {
     hot_boost: f32,
     /// When the boost was last updated, for the tick delta. `None` before the first tick.
     boost_last_at: Option<Instant>,
+    /// Issue #297: when the reference first went past `HOT_BOOST_BAND_C` over the line, while it
+    /// stays there. The loop winds up only after `HOT_BOOST_ONSET_HOLD`, so a hover at the band's
+    /// edge cannot start it.
+    hot_over_since: Option<Instant>,
     /// Issue #297: what the last hot-hold INFO line said, and when it was written. The line is
     /// written on a change, never more often than `HOT_LOG_MIN_INTERVAL`.
     hot_log: Option<HotLogLine>,
@@ -265,12 +293,20 @@ impl CurveState {
     }
 
     /// Issue #255: one tick of the hot-limit boost. `temp_c` is the reference temperature and
-    /// `limit_c` the hot line. At or above the line the boost rises (fast), inside the deadband
-    /// it holds, and below the deadband it decays (slowly). While the safety ceiling is latched
-    /// the boost is frozen: the ceiling already runs the header at 100 %. A missing reading
-    /// keeps the boost through the short gap: the Curve arm holds its write and the Fixed arm
-    /// keeps its duty until `SENSOR_LOSS_TIMEOUT_MS`. The Curve handback clears it; the Fixed
-    /// arm drops it at the timeout and writes its plain duty again.
+    /// `limit_c` the hot line. Issue #297 splits it in three by how far the reading is from the
+    /// line:
+    ///
+    /// - past the band over it (and past it for [`HOT_BOOST_ONSET_HOLD`], or a clear degree past
+    ///   it at once), the loop winds up as issue #255 designed, at a rise never slower than that
+    ///   rule and never faster than [`HOT_BOOST_RISE_MAX`];
+    /// - inside the band, a proportional answer ([`HOT_BOOST_GAIN_PER_C`] points per degree),
+    ///   rate-limited on the way up and holding rather than stepping down on noise (issue #17);
+    /// - below the line it holds through the deadband and decays slowly under it.
+    ///
+    /// While the safety ceiling is latched the boost is frozen: the ceiling already runs the
+    /// header at 100 %. A missing reading keeps the boost through the short gap: the Curve arm
+    /// holds its write and the Fixed arm keeps its duty until `SENSOR_LOSS_TIMEOUT_MS`. The Curve
+    /// handback clears it; the Fixed arm drops it at the timeout and writes its plain duty again.
     fn note_boost(&mut self, temp_c: Option<f32>, limit_c: f32, now: Instant, ceiling_latched: bool) {
         if ceiling_latched {
             self.boost_last_at = Some(now);
@@ -287,17 +323,43 @@ impl CurveState {
             .map_or(1.0, |previous| now.saturating_duration_since(previous).as_secs_f32())
             .min(HOT_BOOST_MAX_DT_S);
         self.boost_last_at = Some(now);
-        if temp >= limit_c {
-            // Anti-windup: bound the term itself, never the output's shortfall, so a curve that
-            // later steps down while the temperature is still over the line keeps the fan up.
-            self.hot_boost = (self.hot_boost + HOT_BOOST_MIN_RISE.max(HOT_BOOST_GAIN * (temp - limit_c)) * dt)
-                .min(HOT_BOOST_MAX);
-        } else if temp >= limit_c - HOT_BOOST_DEADBAND_C {
-            // Inside the deadband the boost holds: a temperature hovering at the line must not
-            // flip the duty (issue #17).
-        } else {
+        let error = temp - limit_c;
+        if error <= -HOT_BOOST_DEADBAND_C {
+            self.hot_over_since = None;
             self.hot_boost = (self.hot_boost - HOT_BOOST_DECAY * dt).max(0.0);
+            return;
         }
+        let over_since = if error >= HOT_BOOST_BAND_C {
+            *self.hot_over_since.get_or_insert(now)
+        } else {
+            self.hot_over_since = None;
+            now
+        };
+        // Issue #297: the onset hold guards the band's edge, where a hover (and a noisy Ryzen
+        // `Tctl`) touches it. A reading a clear degree past the band is a real overshoot and
+        // winds up at once, so the loop is never slower than issue #255 there.
+        let sustained = error >= HOT_BOOST_BAND_C + 1.0
+            || (error >= HOT_BOOST_BAND_C && now.saturating_duration_since(over_since) >= HOT_BOOST_ONSET_HOLD);
+        if sustained {
+            // A sustained excursion past the band: wind the loop up. The rise is issue #255's
+            // `max(MIN_RISE, GAIN*error)` or faster, capped. Anti-windup bounds the term itself,
+            // never the output's shortfall, so a curve that later steps down while the source is
+            // still over the line keeps the fan up.
+            let rise = (HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * error).min(HOT_BOOST_RISE_MAX);
+            self.hot_boost = (self.hot_boost + rise * dt).min(HOT_BOOST_MAX);
+        } else if error > 0.0 {
+            // The proportional answer, with the same rise rule: a reading a degree over the line
+            // asks for `HOT_BOOST_GAIN_PER_C` points, a point and a half inside the band. Issue
+            // #297: a hover cannot wind this past its own answer, so the duty settles instead of
+            // climbing to full speed.
+            let target = (HOT_BOOST_GAIN_PER_C * error.min(HOT_BOOST_BAND_C)).clamp(0.0, HOT_BOOST_MAX);
+            if self.hot_boost < target {
+                let rise = (HOT_BOOST_MIN_RISE + HOT_BOOST_GAIN * error).min(HOT_BOOST_RISE_MAX);
+                self.hot_boost = (self.hot_boost + rise * dt).min(target);
+            }
+        }
+        // Inside the deadband, or at a target the loop already holds, nothing moves: a
+        // temperature hovering at the line must not flip the duty (issue #17).
     }
 }
 

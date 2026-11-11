@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Fans: a CPU hot limit near the idle temperature (a 50 °C line on a 7800X3D that idles at 50) no longer swings every fan between the curve and 100 %; the hold answers in proportion inside a 3 °C band, winds up only for a sustained excursion, ramps at a bounded rate both ways, and the page warns that a CPU limit at or below 60 °C runs the fans hard (#297)
 - Effects: an HTML effect that is still rendering now shows that it is loading (the preview, the stack builder's picture, Import and Replace), and a slow tile waits for its picture instead of showing "no picture" after 10 seconds (#296)
 - Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
 - Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)

@@ -635,6 +635,50 @@ scroll, so the content was clipped and unreachable.
   states that make a panel taller (`settings-mic`, `settings-listen`, `settings-update`,
   `settings-dev`, `settings-failed`).
 
+### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
+
+A loop that integrates while its input is on one side of a line has no reason to stop: a
+reading that hovers *around* the line is on the "rise" side about half the time, so the
+integral ratchets to its maximum and then releases in one long slow fall. The fan is not
+responding to the temperature any more; it is responding to how long the temperature has
+been near the line. The numbers to hold a fix to are the ones a user feels: the largest duty
+step from one second to the next, the number of times the duty turns round a minute, and the
+time spent at full speed.
+
+- [#17](https://github.com/iAmChumby/canvas-rgb/issues/17): a hovering `Tctl` stepped the curve
+  up and down. Fixed with the curve's own hysteresis (a smoothed average, a 5 °C drop before a
+  step down, a hold time, a minimum step), which is a *proportional* rule and cannot wind up.
+- [#255](https://github.com/iAmChumby/canvas-rgb/issues/255): "Don't exceed" became a closed loop:
+  above the line the duty climbed at `max(1, °C over)` points a second, held in a 2 °C deadband
+  below the line, and decayed at a quarter point a second below that. It answered a real
+  overshoot well, but it also answered a hover: with the user's 50 °C CPU line on a 7800X3D that
+  idles at 50 °C, every tick at or above 50 added to it and nothing inside the deadband removed
+  it, so all six fans climbed to 100 % and sat there.
+- [#297](https://github.com/iAmChumby/canvas-rgb/issues/297): the service log shows the shape:
+  curve duties 47-53 %, then 100 % on every channel within seconds, then back to the curve, then a
+  26 s climb 64 → 99 %. Fix: inside a 3 °C band over the line the answer is proportional —
+  `HOT_BOOST_GAIN_PER_C` points per degree, reached at `HOT_BOOST_MIN_RISE + error` points a
+  second and capped at `HOT_BOOST_RISE_MAX` — and it holds rather than stepping down on noise.
+  Past the band (and past it for `HOT_BOOST_ONSET_HOLD`, or a clear degree past it at once) the
+  loop winds up exactly as #255 designed, at a rise never slower than #255's, so a sustained
+  excursion still reaches full speed. The same simulation on the fakes (`fans_tests.rs`,
+  `issue297_*`): a 48-53 °C hover goes from 576 of 600 s at 100 % to 0 s at 100 %, with a largest
+  step of 5 points a second and 1.0-1.5 direction changes a minute; a 63 W thermal model settles
+  at 49.9 °C with no time at 100 % and 55.2 degree-seconds over the line against 56.3 before
+  (peak 54 °C both), while a 54 °C start is under the line within 26 s against 25 s.
+- **Class fix:** the rule is one function, `CurveState::note_boost`, so every fan mode goes
+  through it (Curve, Fixed, GPU, board). Siblings: the curve's own step-down
+  (`CurveState::step`) already carries the hysteresis of #17 and has no integral; the *latch*
+  that holds the hot floor for 60 s after the reading falls (`note_latch`) is the one loop left
+  that can cycle a few points around the line — in the thermal run it moves the CPU fan between
+  45 % and 50 % every ~90 s, a known limit, not the reported surge. Nothing else in the service
+  drives a duty.
+- **How to check a new closed loop:** simulate it on the fake clock over a slow sine and a
+  seeded walk around its line (not just a step over it), and state the largest step a second,
+  the direction changes a minute, the time at the extremes, and the time the input spends above
+  the line against the same run before the change. A step response alone will not show a wind-up;
+  the hover does.
+
 ### `cause:changelog-drift`: a pull request's changelog line lands in an already-released section
 
 A branch that was opened before a release still names `## [Unreleased]` where it was written, but a
