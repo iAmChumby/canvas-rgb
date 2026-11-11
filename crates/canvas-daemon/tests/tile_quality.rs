@@ -405,6 +405,14 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 /// Asks the daemon's own API (the router, the real effects and the real stock effects, the
 /// fakes only under the engine and the device) for the tile of every id, the way the library does.
 async fn tiles_served_by_the_api(ids: &[String]) -> Vec<(String, Vec<u8>)> {
+    // The tile route logs its measurements at DEBUG (the queue wait, the render ms and the cache
+    // hit/miss, issue #296). A test binary has no daemon logger, so install one: with
+    // `--nocapture` the numbers interleave with the table printed below the run.
+    let _ = tracing_subscriber::fmt()
+        .with_max_level(tracing::Level::DEBUG)
+        .with_ansi(false)
+        .with_writer(std::io::stdout)
+        .try_init();
     let home = std::env::temp_dir().join(format!("canvas-rgb-tiles-{}-{:?}", std::process::id(), std::thread::current().id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("a temp folder");

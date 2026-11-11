@@ -19,6 +19,7 @@ import type { DropTarget } from "@/lib/dropTargets";
 import { Chip } from "@/components/Chip";
 import { IconButton } from "@/components/Button";
 import { Toggle } from "@/components/Toggle";
+import { useCanvasWait } from "@/components/Skeleton";
 import { FrameHandles } from "@/views/effects/Handles";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
@@ -153,6 +154,7 @@ export function Stage({
   onMakeRect,
   drop,
   dragging: libraryDrag,
+  feedFailed = false,
 }: {
   stack: Stack;
   layout: Layout | null;
@@ -184,6 +186,9 @@ export function Stage({
   /** Some drag runs, whether or not it is over the picture (a mask over a row): the stage's own
    *  floating keys stand aside. */
   dragging?: boolean;
+  /** The preview feed was refused (another window shows a stack preview): the canvas's wait ends
+   *  as failed, so it is no longer busy and the stage's own note says why. */
+  feedFailed?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
@@ -196,7 +201,21 @@ export function Stage({
   const [dragging, setDragging] = useState(false);
   /** The picture's width in css pixels (0 until measured): the labels and edge marks fit to it. */
   const [stageW, setStageW] = useState(0);
+  /** The first frame from the stack preview feed: the canvas's wait is over once one lands. */
+  const [framed, setFramed] = useState(false);
   const empty = stack.layers.length === 0;
+  // The wait before the first frame: the canvas stays dark, but it says it is waiting and, after
+  // the delay, wears the skeleton tone like every other canvas in the editor.
+  // No canvas while the stack is empty, so no wait runs: the delay starts when the first layer mounts it.
+  const wait = useCanvasWait(framed || empty, feedFailed);
+  // An emptied stack unmounts the canvas; the next one waits for its own first frame again. Set
+  // during render when `empty` changes (React's pattern for state that follows a prop), not in an
+  // effect, so no frame paints the stale state.
+  const [wasEmpty, setWasEmpty] = useState(empty);
+  if (wasEmpty !== empty) {
+    setWasEmpty(empty);
+    if (empty) setFramed(false);
+  }
 
   useEffect(() => {
     const el = stageRef.current;
@@ -221,6 +240,8 @@ export function Stage({
   useEffect(
     () =>
       onStackFrame((frame) => {
+        // The first frame is in: the wait is over, whatever the paint below does with it.
+        setFramed(true);
         const canvas = canvasRef.current;
         if (!canvas) return;
         const ctx = canvas.getContext("2d");
@@ -519,7 +540,17 @@ export function Stage({
             Whole canvas
           </div>
         )}
-        {!empty && <canvas ref={canvasRef} width={CANVAS_W} height={CANVAS_H} aria-label="The stack's preview" />}
+        {!empty && (
+          <canvas
+            ref={canvasRef}
+            width={CANVAS_W}
+            height={CANVAS_H}
+            role="img"
+            aria-label="The stack's preview"
+            aria-busy={framed || feedFailed ? undefined : true}
+            data-wait={wait}
+          />
+        )}
         {empty && (
           <div className="rd-canvas-empty">
             {/* The stage's own drop hint (#257 phase 4, spec §5): a faint outline that reads as a
