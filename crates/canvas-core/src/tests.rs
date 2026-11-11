@@ -429,6 +429,53 @@ fn unplaced_zones_get_black_but_placed_ones_do_not() {
     engine.shutdown();
 }
 
+/// #250: a consumer that arrives while the render thread is between deciding to park and
+/// waiting is not slept through.
+///
+/// The thread decides "nothing consumes frames, park", then takes the lock again to wait. A
+/// change in that gap (a sink, a layout, an effect) bumps the engine's change counter. The wait
+/// used to read the counter after the gap, so it counted the change as already seen and slept
+/// until the next unrelated change: a `capture_wiring` run on CI waited 10 s for a frame that
+/// the thread never drew. The hook parks the thread inside the gap, the test makes the change,
+/// and the thread must draw.
+#[test]
+fn a_consumer_that_arrives_between_the_park_decision_and_the_wait_is_not_slept_through() {
+    use std::sync::mpsc;
+
+    let (reached_tx, reached_rx) = mpsc::channel::<()>();
+    let (release_tx, release_rx) = mpsc::channel::<()>();
+    let reached_tx = Mutex::new(reached_tx);
+    let release_rx = Mutex::new(release_rx);
+    // Only the first decision is held: that is the one made with no consumer.
+    let held = AtomicBool::new(false);
+    let hook: Arc<dyn Fn() + Send + Sync> = Arc::new(move || {
+        if !held.swap(true, Ordering::AcqRel) {
+            let _ = reached_tx.lock().unwrap_or_else(|e| e.into_inner()).send(());
+            let _ = release_rx.lock().unwrap_or_else(|e| e.into_inner()).recv();
+        }
+    });
+    let core = crate::engine::new_core_with_decided_hook(&settings(30), hook);
+    let engine: Arc<dyn canvas_proto::traits::Engine> = core.clone();
+    crate::engine::start_core(&core);
+
+    // The thread has decided to park, and has not waited yet.
+    reached_rx
+        .recv_timeout(FIRST_FRAME_WAIT)
+        .expect("the render thread made its first decision");
+
+    // The consumer arrives in the gap.
+    give_d0_a_layout(&engine);
+    let sink = RecordingSink::new();
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+    release_tx.send(()).expect("the thread is waiting at the hook");
+
+    assert!(
+        wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0),
+        "the sink that arrived between the decision and the wait was never given a frame"
+    );
+    engine.shutdown();
+}
+
 #[test]
 fn a_frame_has_one_color_per_led_in_zone_order() {
     let engine = spawn(settings(30));

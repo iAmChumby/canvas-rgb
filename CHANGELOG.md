@@ -9,7 +9,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Fans: setting the "don't exceed" temperature no longer puts the fans back on BIOS, the header editor keeps the mode and curve points being edited while the page refreshes, and the daemon now asks the service for the fan config it holds rather than reading the service's own file (#295)
+- Effects: an HTML effect that is still rendering now shows that it is loading (the preview, the stack builder's picture, Import and Replace), and a slow tile waits for its picture instead of showing "no picture" after 10 seconds (#296)
+- Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
+- Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
+- Stacks: a preview or draft beat no longer waits for the build it has already superseded, and a structure that comes back while its own build is still loading rejoins that build instead of queuing another (#102)
+- Effects and stacks: previews and drafts each build at most two at once (a new build past that answers 503 with Retry-After; a beat that only changes values or joins a build in flight is never refused), and a client that goes away mid-build no longer frees a slot the build still holds (#102)
 
 ## [0.13.0] - 2026-11-10
 

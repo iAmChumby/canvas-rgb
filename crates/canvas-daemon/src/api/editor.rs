@@ -207,6 +207,8 @@ pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
 /// is refused and a running draft is left alone, so a bad keystroke mid-edit never takes the
 /// lights off the last good draft. Exactly one of `html` and `stack` is set: #2's editor sends
 /// the HTML, the stack builder sends the stack with its epoch and sequence (D95.4.5).
+/// A PUT whose build would be the third at once answers 503 with `Retry-After`, like the
+/// preview routes: the heartbeat beats survive a missed answer and try again.
 pub async fn put_draft(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -258,6 +260,11 @@ pub async fn put_draft(
         crate::draft::PutError::Validation(message) => ApiFailure::validation(message),
         crate::draft::PutError::Conflict(message) => ApiFailure::conflict(message),
         crate::draft::PutError::Internal(message) => ApiFailure::internal(message),
+        crate::draft::PutError::Busy => ApiFailure::service_unavailable(format!(
+            "the daemon is already rendering {} previews; try again shortly",
+            PREVIEW_CONCURRENT
+        ))
+        .with_retry_after(1),
     })?;
     let mut status = crate::draft::status(&app);
     status.applied = Some(applied);
