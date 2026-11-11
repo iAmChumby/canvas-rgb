@@ -1212,16 +1212,15 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   );
   // Issue #297: a CPU line in the part's idle range keeps the closed-loop hold engaged almost
   // all the time, so the fans run hard to hold it. The warning names the line the user set and
-  // why, so a 50 °C line on a 50 °C idle reads as a choice, not a bug. The note's own sentence
-  // is cut to one line while it shows, so the panel keeps the height it had (#109, #294).
+  // why, so a 50 °C line on a 50 °C idle reads as a choice, not a bug. It is one line: the
+  // sentence is short enough to fit the right panel at 390 (306 px of text at 14 px) as well as
+  // at 1440, and the note's own sentence is cut to its short form while it shows, so the panel
+  // adds one line and not three (#109, #294, #299).
   const hotIdle = hotRow?.user_set === true && cpuLimitInIdleRange(hotKind, hotRow.limit_c);
   const hotIdleWarning = hotIdle && hotRow && (
     <span className="hot-warn" role="status" data-slot="hot-idle-warning">
       <WarningCircle size={14} aria-hidden="true" />
-      <span>
-        {Math.round(hotRow.limit_c)} °C is at or below this CPU&apos;s idle range: the fans will run hard
-        to hold it.
-      </span>
+      <span>{Math.round(hotRow.limit_c)} °C is in this CPU&apos;s idle range: fans run hard.</span>
     </span>
   );
 

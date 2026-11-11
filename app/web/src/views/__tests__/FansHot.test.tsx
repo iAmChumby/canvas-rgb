@@ -161,14 +161,13 @@ describe("the hot line on the fan curve chart", () => {
     const input = await screen.findByLabelText("Don't exceed temperature");
     fireEvent.change(input, { target: { value: "50" } });
     fireEvent.blur(input);
-    const warning = await screen.findByText(/at or below this CPU's idle range/);
+    const warning = await screen.findByText(/is in this CPU's idle range: fans run hard/);
     expect(warning.textContent).toContain("50 °C");
-    expect(warning.textContent).toContain("the fans will run hard to hold it");
     expect(document.querySelector('[data-slot="hot-idle-warning"]')).not.toBeNull();
 
     fireEvent.change(input, { target: { value: "75" } });
     fireEvent.blur(input);
-    await waitFor(() => expect(screen.queryByText(/at or below this CPU's idle range/)).toBeNull());
+    await waitFor(() => expect(screen.queryByText(/is in this CPU's idle range/)).toBeNull());
     expect(document.querySelector('[data-slot="hot-idle-warning"]')).toBeNull();
 
     // The fake keeps the limit between tests: put it back to automatic.

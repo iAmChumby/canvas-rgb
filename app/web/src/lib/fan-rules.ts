@@ -51,8 +51,8 @@ export function hotRuleText(limitC: number | undefined, source: string, ceilingC
 
 /**
  * The same sentence cut to one line, for when the idle-range warning is drawn under the control
- * (issue #297): the warning carries the "the fans will run hard" half, so the note keeps the
- * height it had and the Fans right panel does not start to scroll (#109, #294).
+ * (issue #297): the warning carries the "the fans run hard" half, so the note gives back a line
+ * and the panel adds the warning's one line and no more (#109, #294, #299).
  */
 export function hotRuleShortText(limitC: number | undefined, ceilingC: number | undefined): string {
   const line = limitC === undefined ? "its hot limit" : `${Math.round(limitC)} °C`;

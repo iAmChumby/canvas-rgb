@@ -158,7 +158,8 @@ async function fansIdleLimit(page) {
 }
 
 /** Fans: select the CPU fan (a card on a phone), the one the later rows act on. */
-async function fansCpu(page) {  await page.waitForSelector('[aria-label="Select CPU fan"], .fan-cards button', { timeout: T });
+async function fansCpu(page) {
+  await page.waitForSelector('[aria-label="Select CPU fan"], .fan-cards button', { timeout: T });
   if (await hasCards(page)) {
     await page.locator(".fan-cards button", { hasText: "CPU fan" }).first().click();
   }
