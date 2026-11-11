@@ -129,10 +129,11 @@ pub async fn restore(app: &Arc<App>) {
 /// [`restore`] for the onboarding timer: the generation is rechecked under the gate before
 /// anything is applied (#94).
 ///
-/// The timer releases the transient lock before the gate, so an activation that happened while
-/// the timer was on its way to the gate has already re-armed (or cancelled) the timer. The gate
-/// is what the activating route goes through (`hold_for_replace`), so by the time this recheck
-/// holds the gate the newest generation is what it sees, and a stale timer applies nothing.
+/// The timer releases the transient lock before the gate, so an activation can land while the
+/// timer is on its way to the gate. The activating route bumps the generation (`cancel`) just
+/// BEFORE it takes the gate (`hold_for_replace`), and re-arms under it. Either way a stale timer
+/// applies nothing: if it reaches the gate first it already sees the bumped generation; if the
+/// activation holds the gate first, the timer sees the re-armed generation when it gets in.
 async fn restore_armed(app: &Arc<App>, generation: u64) {
     let _gate = app.draft.gate().lock().await;
     {

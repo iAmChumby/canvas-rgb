@@ -1655,6 +1655,10 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
         .store(1, std::sync::atomic::Ordering::SeqCst);
 }
 
+// Runs on the default current-thread runtime on purpose: the onboarding timer (armed at scale 0)
+// first runs when the test yields after taking the gate, so the order below is fixed. The order is
+// enforced by the held gate; `wait_until` polls only to see the timer reach it. A multi-thread
+// flavor would race the timer against the gate.
 #[tokio::test]
 async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_effect() {
     let (_router, app, engine, _home, _folder, _clock) = build_with_clock();
