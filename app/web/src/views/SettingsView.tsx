@@ -223,6 +223,11 @@ export function SettingsView() {
             {renderErr && <p className="error-line" style={{ marginTop: 8 }}>{renderErr}</p>}
           </Panel>
 
+          {/* Audio source sits under Rendering: both are what the effects draw from, and the
+              columns balance by it. The left column then reads Rendering, Audio source,
+              Appearance; the right one the system's: Lock and quit, Setup, Version (#294). */}
+          <AudioSourcePanel />
+
           <Panel title="Appearance">
             <Field label="Theme">
               <Segmented<Theme>
@@ -291,8 +296,6 @@ export function SettingsView() {
               </span>
             </Field>
           </Panel>
-
-          <AudioSourcePanel />
 
           <Panel title="Setup">
             <Field label="Map my PC" hint="Walk through every light again">
