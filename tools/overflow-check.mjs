@@ -42,8 +42,9 @@
 // the list that draws none of those fails as well.
 //
 // What it measures is VIEWS and nothing else: the first paint of each view, plus the rows that
-// open a state by a flag (`?state=`, `?stack=`) or by clicks (Fans with a limit set and in Curve
-// mode; the effect editor and the StackBuilder; Layout with a zone and with a part selected and
+// open a state by a flag (`?state=`, `?stack=`) or by clicks (Fans with a limit set, with a limit
+// inside the CPU's idle range, and in Curve mode; the effect editor and the StackBuilder; Layout
+// with a zone and with a part selected and
 // with the Add part popover open; Fans with the temperature source list open). The popup rows have
 // `overlay: true`: they are skipped by `--hover-tips`, where an open list would cover what is
 // hovered. A state that is not a row (a dialog, a toast, the onboarding, a stack's other layers,
@@ -142,9 +143,22 @@ async function fansWithLimit(page) {
   await page.waitForSelector('button:not([aria-hidden="true"]):has-text("Reset to automatic"):not([aria-busy="true"])', { timeout: T });
 }
 
+/**
+ * Fans: a "Don't exceed" line inside the CPU's idle range (issue #297), so the "the fans will
+ * run hard to hold it" warning is drawn under the control.
+ */
+async function fansIdleLimit(page) {
+  await fansWithLimit(page);
+  const f = page.getByLabel("Don't exceed temperature", { exact: true });
+  await f.click();
+  await f.press("Control+a");
+  await f.pressSequentially("50", { delay: 20 });
+  await f.press("Enter");
+  await page.waitForSelector(".hot-warn", { timeout: T });
+}
+
 /** Fans: select the CPU fan (a card on a phone), the one the later rows act on. */
-async function fansCpu(page) {
-  await page.waitForSelector('[aria-label="Select CPU fan"], .fan-cards button', { timeout: T });
+async function fansCpu(page) {  await page.waitForSelector('[aria-label="Select CPU fan"], .fan-cards button', { timeout: T });
   if (await hasCards(page)) {
     await page.locator(".fan-cards button", { hasText: "CPU fan" }).first().click();
   }
@@ -228,6 +242,7 @@ const VIEWS = [
   { name: "peripherals-read", url: "/peripherals/?state=reads-on" },
   { name: "fans", url: "/fans/" },
   { name: "fans-limit", url: "/fans/", prep: fansWithLimit },
+  { name: "fans-idle-limit", url: "/fans/", prep: fansIdleLimit },
   { name: "fans-curve", url: "/fans/", prep: fansCurve },
   { name: "fans-source", url: "/fans/", prep: sourceList, overlay: true },
   { name: "settings", url: "/settings/" },

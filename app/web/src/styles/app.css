@@ -4596,6 +4596,23 @@ button.chip:hover {
   display: flex;
 }
 
+/* Issue #297: a CPU line inside the part's idle range. The warning colour on the note's own
+   text, one line that wraps as a sentence, so it adds no box and no button. */
+.hot-warn {
+  display: flex;
+  align-items: flex-start;
+  gap: 6px;
+  margin-top: var(--s1);
+  color: var(--warn);
+  font-size: var(--t14);
+  line-height: 1.35;
+}
+
+.hot-warn svg {
+  flex: none;
+  margin-top: 2px;
+}
+
 .rule-warn {
   border-color: color-mix(in srgb, var(--warn) 40%, transparent);
   background: color-mix(in srgb, var(--warn) 8%, var(--sunk));
