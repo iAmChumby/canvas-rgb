@@ -370,6 +370,16 @@ export function StackBuilder({
           <div className="rd-stack-body" data-library={libraryMode}>
             {libraryMode === "rail" && libraryPanel("rail")}
             <div className="rd-stack-main" data-empty={count === 0 ? "true" : undefined}>
+              {saver.startFailure && (
+                <ErrorPanel
+                  title="Saved, but it did not start"
+                  summary="canvas-rgb saved that stack, but could not start it on the lights."
+                  message={saver.startFailure.message}
+                  onRetry={() => void saver.startAgain()}
+                  retryLabel="Start again"
+                  busy={saver.starting}
+                />
+              )}
               {saver.saveError && (
                 <ErrorPanel
                   title="The stack could not be saved"
