@@ -2,8 +2,10 @@
 //!
 //! The preview runs on its own engine, with no device sink, so nothing here can touch a light.
 //! The heavy part (building a stack, which loads its HTML layers) runs on a blocking thread;
-//! the route shares [`crate::api::editor::PREVIEW_CONCURRENT`] with `POST /effects/preview`, so
-//! at most two preview builds run at once and the rest answer 503 with `Retry-After: 1`.
+//! the route shares [`crate::api::editor::PREVIEW_CONCURRENT`] with `POST /effects/preview` and
+//! the draft route, so at most two preview builds run at once and the rest answer 503 with
+//! `Retry-After: 1`. The slot a build holds is moved into the build itself: a client that goes
+//! away mid-build does not free it.
 
 use axum::extract::{Query, State};
 use axum::Json;

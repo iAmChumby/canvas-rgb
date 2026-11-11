@@ -316,9 +316,17 @@ impl Draft {
     }
 
     /// Makes a build the one allowed to land: a request for its draft again re-tokenises it,
-    /// so Y -> X -> Y rejoins the build still making Y.
-    fn adopt_build(&self, token: u64) {
-        self.lock_builds().current = Some(token);
+    /// so Y -> X -> Y rejoins the build still making Y. A stack build that is joined takes the
+    /// joining page's epoch, so the lease of the draft the build will replace is held open for
+    /// that page, whoever started the build.
+    fn adopt_build(&self, token: u64, epoch: Option<String>) {
+        let mut builds = self.lock_builds();
+        if let Some(epoch) = epoch {
+            if let Some(building) = builds.running.iter_mut().find(|b| b.token == token) {
+                building.epoch = Some(epoch);
+            }
+        }
+        builds.current = Some(token);
     }
 
     /// Starts a build and returns its token. A build already running is superseded: its result
@@ -457,6 +465,9 @@ pub enum PutError {
     Validation(String),
     /// The daemon could not hand the effect over: not the editor's problem (500).
     Internal(String),
+    /// The daemon is already rendering its limit of previews: the answer is a 503 with
+    /// `Retry-After`, like the preview routes give, and nothing starts.
+    Busy,
 }
 
 impl std::fmt::Display for PutError {
@@ -466,6 +477,7 @@ impl std::fmt::Display for PutError {
             | PutError::Conflict(message)
             | PutError::Validation(message)
             | PutError::Internal(message) => f.write_str(message),
+            PutError::Busy => f.write_str("the daemon is already rendering its limit of previews"),
         }
     }
 }
@@ -490,6 +502,9 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
 
     let token;
+    // The preview slot this build holds until it finishes. A beat that joins or renews takes
+    // no slot, so only a PUT that starts a build can be refused for lack of one.
+    let slot;
     {
         let _gate = app.draft.gate.lock().await;
         expire_locked(app).await;
@@ -524,7 +539,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         // queuing a third build.
         if let Some(building) = app.draft.find_build(|b| b.is_html(html)) {
             app.draft.update_in_flight(building.token, props);
-            app.draft.adopt_build(building.token);
+            app.draft.adopt_build(building.token, None);
             app.draft.renew_lease();
             return Ok(true);
         }
@@ -541,6 +556,10 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             Some(slot) => slot.prior.clone(),
             None => app.active_layout().await.and_then(|layout| layout.effect),
         };
+        let Ok(acquired) = app.preview_slots.clone().try_acquire_owned() else {
+            return Err(PutError::Busy);
+        };
+        slot = acquired;
         token = app.draft.begin_build(
             Building::Html { source: Arc::from(html) },
             props,
@@ -549,7 +568,11 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         );
     }
     // Every exit path from here frees the route: an error, a join error, or a panic in the
-    // blocking task must not leave a token for later beats to join.
+    // blocking task must not leave a token for later beats to join. The lease stays in this
+    // future rather than moving into the blocking task: the landing still needs the token in
+    // the book, and this lease is what takes it back on an error, a join error, a panic, or a
+    // client that goes away mid-build. The slot, on the other hand, is moved into the build,
+    // so it is held for exactly as long as the build runs.
     let _lease = BuildLease::new(&app.draft, token);
     // The newest request does not wait for a build it has already superseded: its build runs
     // beside any older one, and the older result is discarded when it lands. The engine is
@@ -563,7 +586,10 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let build_id = id.clone();
     let build_source = html.to_string();
     let build = app.draft.builder();
-    let effect = tokio::task::spawn_blocking(move || build(&build_id, &build_source))
+    let effect = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        build(&build_id, &build_source)
+    })
         .await
         .map_err(|e| PutError::Internal(format!("the draft load task failed: {e}")))?
         .map_err(|message| {
@@ -632,6 +658,9 @@ pub async fn put_stack(
     props.extend(overrides.clone());
 
     let token;
+    // The preview slot this build holds until it finishes. A beat that joins or renews takes
+    // no slot, so only a PUT that starts a build can be refused for lack of one.
+    let slot;
     {
         let _gate = app.draft.gate.lock().await;
         expire_locked(app).await;
@@ -679,7 +708,7 @@ pub async fn put_stack(
                 crate::stack::replace_live(live, stack);
             }
             app.draft.update_in_flight(building.token, &props);
-            app.draft.adopt_build(building.token);
+            app.draft.adopt_build(building.token, Some(epoch.to_string()));
             app.draft.renew_lease();
             tracing::info!(stack = %stack.id, seq, "a beat joined the stack draft build in flight");
             return Ok(true);
@@ -689,6 +718,10 @@ pub async fn put_stack(
             Some(slot) => slot.prior.clone(),
             None => app.active_layout().await.and_then(|layout| layout.effect),
         };
+        let Ok(acquired) = app.preview_slots.clone().try_acquire_owned() else {
+            return Err(PutError::Busy);
+        };
+        slot = acquired;
         token = app.draft.begin_build(
             Building::Stack {
                 stack_id: stack.id.clone(),
@@ -701,7 +734,11 @@ pub async fn put_stack(
         );
     }
     // Every exit path from here frees the route: an error, a join error, or a panic in the
-    // blocking task must not leave a token for later beats to join.
+    // blocking task must not leave a token for later beats to join. The lease stays in this
+    // future rather than moving into the blocking task: the landing still needs the token in
+    // the book, and this lease is what takes it back on an error, a join error, a panic, or a
+    // client that goes away mid-build. The slot, on the other hand, is moved into the build,
+    // so it is held for exactly as long as the build runs.
     let _lease = BuildLease::new(&app.draft, token);
     // The newest request does not wait for a build it has already superseded: its build runs
     // beside any older one, and the older result is discarded when it lands. The engine is
@@ -721,6 +758,7 @@ pub async fn put_stack(
     let build_app = Arc::clone(app);
     let build_stack = stack.clone();
     let effect = tokio::task::spawn_blocking(move || -> Result<Box<dyn Effect>, String> {
+        let _slot = slot;
         Ok(Box::new(
             crate::stack::StackEffect::new(
                 &build_stack,

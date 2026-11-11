@@ -404,7 +404,7 @@ pub async fn put(
     epoch: &str,
     seq: u64,
 ) -> Result<StackPreviewResponse, PreviewError> {
-    let Ok(_slot) = app.preview_slots.clone().try_acquire_owned() else {
+    let Ok(slot) = app.preview_slots.clone().try_acquire_owned() else {
         return Err(PreviewError::Busy);
     };
 
@@ -483,7 +483,11 @@ pub async fn put(
     }
 
     // Every exit path from here frees the route: an error, a join error, or a panic in the
-    // blocking task must not leave a token for later beats to join.
+    // blocking task must not leave a token for later beats to join. The lease stays in this
+    // future rather than moving into the blocking task: the landing still needs the token in
+    // the book, and this lease is what takes it back on an error, a join error, a panic, or a
+    // client that goes away mid-build. The slot, on the other hand, is moved into the build,
+    // so it is held for exactly as long as the build runs.
     let _lease = BuildLease::new(&app.stack_preview, token);
     // The newest request does not wait for a build it has already superseded: its build runs
     // beside any older one, and the older result is discarded when it lands. The engine is
@@ -503,6 +507,7 @@ pub async fn put(
     let build_errors = Arc::clone(&building.errors);
     let fps = Arc::new(AtomicU32::new(canvas_proto::consts::PREVIEW_MAX_FPS));
     let effect = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
         let leaf = crate::leaf_builder(&build_app.user_effects);
         let recording = {
             let errors = Arc::clone(&build_errors);
