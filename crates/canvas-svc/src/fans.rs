@@ -482,6 +482,12 @@ impl FanController {
     }
 
     /// Sets the CPU rated maximum from a brand string (tests can set the brand directly).
+    /// The config the controller runs on: `fans.toml` as loaded and corrected, plus every change
+    /// since (#295: the daemon starts each whole-config push from this).
+    pub fn config(&self) -> &FansFile {
+        &self.config
+    }
+
     pub fn set_cpu_brand(&mut self, cpu_brand: Option<&str>) {
         self.cpu_rated_max_c = cpu_brand.and_then(rated_cpu_max_c);
         self.cpu_brand = cpu_brand.map(str::to_string);

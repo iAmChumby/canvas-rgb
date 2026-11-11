@@ -109,6 +109,7 @@ impl Core {
                 PipeResponse::Ok
             }
             PipeRequest::FanStatus => PipeResponse::FanStatus { status: self.fans.status() },
+            PipeRequest::GetFanConfig => PipeResponse::FanConfig { config: self.fans.config().clone() },
             PipeRequest::SetHeaderMode { header, mode } => ok_or(self.fans.set_header_mode(&header, mode, now)),
             // Issue #146: the owner's word on whether a header is on this board. `Some(false)`
             // releases the header to BIOS, `Some(true)` says "show anyway", and `None` takes
