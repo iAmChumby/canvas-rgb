@@ -108,6 +108,17 @@ export const EFFECT_IMPORT_TIMEOUT_MS = 60_000;
 export const EFFECT_PREVIEW_TIMEOUT_MS = 35_000;
 
 /**
+ * The deadline of an effect thumbnail, from the moment it is sent: the daemon renders the tile
+ * headless inside the renderer's own 30 s budget (`RENDER_BUDGET`,
+ * `crates/canvas-daemon/src/thumbnail.rs`), two at a time (`CONCURRENT_RENDERS`). The editor
+ * sends at most two at once (`THUMBS_IN_FLIGHT`, `lib/thumbs.ts`) and the rest wait on its side,
+ * so a sent request waits for at most one render ahead of it on a daemon shared with another
+ * window, plus its own render and five seconds of margin: the same shape as the draft preview's
+ * deadline above. A daemon that hangs instead of answering costs this long per pair of tiles.
+ */
+export const THUMBNAIL_TIMEOUT_MS = 65_000;
+
+/**
  * The deadline of the config export and import: the whole configuration moves, and the export
  * asks the fan service over the pipe before it answers.
  */
@@ -159,8 +170,8 @@ export const ZONE_RESIZE_TIMEOUT_MS = 30_000;
  *
  * Every route that awaits an adapter has a line here or a reason it keeps the default:
  *
- * - the peripherals, the zone resize, the effect import, the config transfer and the rescan
- *   have named deadlines above;
+ * - the peripherals, the zone resize, the effect import, the config transfer, the effect
+ *   thumbnail and the rescan have named deadlines above;
  * - `DELETE /displays/{id}` waits for the lock of the display adapter, which the display task
  *   holds for one pass. A pass is one connect (CHIONE: 500 ms `QUERY_WAIT` + up to 1000 ms
  *   `QUERY_REPLY_TIMEOUT_MS` = 1.5 s, `crates/canvas-adapters/src/chione.rs`) and then one
@@ -178,6 +189,8 @@ export function deadlineFor(path: string): number {
   if (path.startsWith(routes.effectsImport)) return EFFECT_IMPORT_TIMEOUT_MS;
   // The draft preview: one render of the loop, inside the renderer's 30 s budget.
   if (path === routes.effectPreview) return EFFECT_PREVIEW_TIMEOUT_MS;
+  // The effect thumbnail: one render inside the renderer's budget, plus the queue ahead of it.
+  if (path.startsWith(routes.effects) && path.endsWith("/thumbnail")) return THUMBNAIL_TIMEOUT_MS;
   // The config export and import: the whole configuration moves.
   if (path.startsWith(routes.configExport) || path.startsWith(routes.configImport)) {
     return CONFIG_TRANSFER_TIMEOUT_MS;
