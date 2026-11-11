@@ -5008,7 +5008,10 @@ button.chip:hover {
 /* ---------- settings ---------- */
 
 /* The settings stand in columns of about 340 px, so no column is a tall stack and no row
-   leaves a gap: the panels flow down the columns and a panel never breaks across two. */
+   leaves a gap: the panels flow down the columns and a panel never breaks across two. The
+   browser fills the columns in the order the panels are written, as evenly as it can, so the
+   order is chosen for it: at two columns Rendering, Audio source and Appearance (and Lock and
+   quit while the window is short) go left, the rest right (#294). */
 .rd-settings .rd-settings-scroll {
   flex: 1 1 auto;
   min-height: 0;
@@ -5046,6 +5049,25 @@ button.chip:hover {
 .rd-settings .rd-settings-grid .panel-head {
   display: flex;
   align-items: baseline;
+}
+
+/* A short desktop window (page content 720 px and under: 1024x768 at 673 px, not 1280x860 at
+   765 px, measured on the page container) tightens the
+   rows, as Peripherals and Devices do (R5): a row of 40 px and a title that sits 8 px above its
+   first row. Without it the left column of a two-column Settings runs 46 px past its pane at
+   1024x768 (#294). A window 720 px wide and under is left out (R1): its document scrolls and its
+   rows keep their room. */
+@media (min-width: 721px) {
+  @container page (max-height: 720px) {
+    .rd-settings .rd-settings-grid .field {
+      min-height: 40px;
+      padding: var(--s1) 0;
+    }
+
+    .rd-settings .rd-settings-grid .panel-head {
+      margin-bottom: var(--s2);
+    }
+  }
 }
 
 /* A two-column Settings at 1024 gives a panel about 415 px: the slider row

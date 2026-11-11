@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
 - Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
 
