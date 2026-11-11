@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.13.1] - 2026-11-11
+
 ### Fixed
 
 - Fans: a CPU hot limit near the idle temperature (a 50 °C line on a 7800X3D that idles at 50) holds the line from below instead of leaving it: the hold aims a degree under the line, and any reading at or under the line settles at a proportional answer instead of climbing to 100 %. A reading over the line winds up at least as fast as the closed loop always did, with no ceiling, so a real heat event is never answered slower than before. The page warns that a CPU limit at or below 60 °C runs the fans hard (#297)
@@ -312,7 +314,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...HEAD
+[0.13.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.1...v0.12.0
 [0.11.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.0...v0.11.1
