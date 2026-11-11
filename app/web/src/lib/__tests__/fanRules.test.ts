@@ -26,15 +26,16 @@ describe("the don't-exceed sentence", () => {
   });
 });
 
-// Issue #297: a CPU line at or under the fixed 60 °C warning threshold (the code's 50 °C hot line
+// Issue #297: a CPU line under the fixed 60 °C warning threshold (the code's 50 °C hot line
 // plus 10 °C) keeps the hold engaged almost all the time; the editor warns. It is a fixed rule, so
 // the warning says only what that rule means.
 describe("the CPU hot-line warning threshold", () => {
   it("covers a 50 °C line and not a 75 °C one", () => {
     expect(CPU_IDLE_LIMIT_C).toBe(60);
     expect(cpuLimitInIdleRange("cpu", 50)).toBe(true);
-    expect(cpuLimitInIdleRange("cpu", 60)).toBe(true);
-    expect(cpuLimitInIdleRange("cpu", 61)).toBe(false);
+    expect(cpuLimitInIdleRange("cpu", 59)).toBe(true);
+    // The warning says "Below 60 °C", so a 60 °C line itself gets none.
+    expect(cpuLimitInIdleRange("cpu", 60)).toBe(false);
     expect(cpuLimitInIdleRange("cpu", 75)).toBe(false);
   });
 

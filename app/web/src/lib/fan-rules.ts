@@ -29,9 +29,9 @@ export function hotFloor(header: string, configured: number): number {
  */
 export const CPU_IDLE_LIMIT_C = HOT_TEMP_C + 10;
 
-/** Whether a user-set CPU hot limit is at or under the warning threshold (#297). */
+/** Whether a user-set CPU hot limit is under the warning threshold (#297), as the warning says ("Below 60 °C"). */
 export function cpuLimitInIdleRange(kind: string, limitC: number): boolean {
-  return kind === "cpu" && limitC <= CPU_IDLE_LIMIT_C;
+  return kind === "cpu" && limitC < CPU_IDLE_LIMIT_C;
 }
 
 /**
