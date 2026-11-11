@@ -397,12 +397,14 @@ export function FansView() {
         {selected && (
           <div className="rd-fans-right">
             {/* One live node for the whole editor, outside the keyed HeaderEditor: it is the same
-                element across a mode switch, so a reason that is there stays said once. */}
+                element across a mode switch, so a reason that is there stays said once. The editor
+                is keyed on the header and the profile only (#295): a polled mode never remounts it,
+                because a remount throws away the mode and the points being edited. */}
             <span className="sr-only" aria-live="polite" data-slot="fan-status-announce">
               {reasonKindOf(selected)}
             </span>
             <HeaderEditor
-              key={`${selected.id}|${selected.mode.mode}|${fans.active_profile}`}
+              key={`${selected.id}|${fans.active_profile}`}
               header={selected}
               fans={fans}
             />
@@ -940,15 +942,47 @@ function HeaderAvailability({ header }: { header: FanHeaderStatus }) {
   );
 }
 
+/** One mode as a string that is equal for equal modes, whatever order the keys came in. */
+function modeKey(m: FanMode): string {
+  if (m.mode === "fixed") return `fixed:${m.percent}`;
+  if (m.mode === "curve") return `curve:${sourceKey(m.source)}:${m.points.map((p) => `${p.temp_c}/${p.percent}`).join(",")}`;
+  return "bios";
+}
+
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {
   const base = baseFloor(header.id, fans.floor_percent);
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
-  const mode = header.mode;
-  const [percent, setPercent] = useState(mode.mode === "fixed" ? mode.percent : Math.max(base, 50));
-  const [points, setPoints] = useState<CurvePoint[]>(mode.mode === "curve" ? mode.points : defaultCurve(base));
-  const [source, setSource] = useState<TempSource>(mode.mode === "curve" ? mode.source : { type: "cpu" });
+  // The draft (#295): the editor's own mode, duty, points and source. What the user picked is what
+  // the editor shows. A poll never writes to it; the service's mode comes in only through the
+  // adoption below.
+  const [chosen, setChosen] = useState<FanMode["mode"]>(header.mode.mode);
+  const [percent, setPercent] = useState(header.mode.mode === "fixed" ? header.mode.percent : Math.max(base, 50));
+  const [points, setPoints] = useState<CurvePoint[]>(header.mode.mode === "curve" ? header.mode.points : defaultCurve(base));
+  const [source, setSource] = useState<TempSource>(header.mode.mode === "curve" ? header.mode.source : { type: "cpu" });
   const pointsTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Writes sent and not yet answered, and whether a curve edit waits for its timer. While either
+  // is true the draft is ahead of the service, so a poll that says otherwise is stale.
+  const [writing, setWriting] = useState(0);
+  const [unsent, setUnsent] = useState(false);
+  // The service's mode (from the poll) the draft last agreed to, and the mode this editor last
+  // sent. A polled mode that differs from the first, once nothing is pending, and from the second,
+  // was set elsewhere (another client, a profile load): that is the one change the draft takes.
+  const mode = header.mode;
+  const serverKey = modeKey(mode);
+  const [adopted, setAdopted] = useState<string | null>(serverKey);
+  const [sentKey, setSentKey] = useState<string | null>(null);
+  if (adopted !== serverKey && writing === 0 && !unsent) {
+    setAdopted(serverKey);
+    if (serverKey !== sentKey) {
+      setChosen(mode.mode);
+      if (mode.mode === "fixed") setPercent(mode.percent);
+      if (mode.mode === "curve") {
+        setPoints(mode.points);
+        setSource(mode.source);
+      }
+    }
+  }
 
   useEffect(
     () => () => {
@@ -961,23 +995,31 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const cancelCurve = () => {
     if (pointsTimer.current) clearTimeout(pointsTimer.current);
     pointsTimer.current = null;
+    setUnsent(false);
   };
 
   const apply = async (next: FanMode) => {
     setErr(null);
     setBusy(true);
+    setSentKey(modeKey(next));
+    setWriting((n) => n + 1);
     try {
       await writeFanMode(header.id, next, (e) => {
         setErr(messageOf(e));
+        // A refused write: the draft goes back to whatever the service says.
+        setSentKey(null);
+        setAdopted(null);
       });
       await refreshFans();
     } finally {
+      setWriting((n) => n - 1);
       setBusy(false);
     }
   };
 
   const setMode = (m: "bios" | "fixed" | "curve") => {
     cancelCurve();
+    setChosen(m);
     if (m === "bios") void apply({ mode: "bios" });
     if (m === "fixed") {
       setPercent(clamp(percent, base, 100));
@@ -1000,8 +1042,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   const commitCurve = (pts: CurvePoint[]) => {
     setPoints(pts);
     cancelCurve();
+    setUnsent(true);
     pointsTimer.current = setTimeout(() => {
       pointsTimer.current = null;
+      setUnsent(false);
       void apply({ mode: "curve", source, points: pts });
     }, 250);
   };
@@ -1016,11 +1060,11 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
   // Which control sent the hot limit: the figure (`set`) or Reset (`reset`). That one is busy;
   // the other waits shut.
   const [hotSent, setHotSent] = useState<"set" | "reset" | null>(null);
-  const hotKind: HotKind = mode.mode === "curve" ? source.type : "cpu";
+  const hotKind: HotKind = chosen === "curve" ? source.type : "cpu";
   const hotRow = (fans.hot ?? []).find((h) => h.kind === hotKind) ?? null;
   // The short name the daemon's own reason uses for this source, so the floor sentence and the
   // status say the same thing: "CPU", "GPU", or a board sensor's own name.
-  const hotSource: TempSource = mode.mode === "curve" ? mode.source : { type: "cpu" };
+  const hotSource: TempSource = chosen === "curve" ? source : { type: "cpu" };
   const hotSourceName = hotSource.type === "board" ? hotSource.name : hotSource.type.toUpperCase();
 
   /** Sends the whole set of hot limits with one kind changed (`null` = automatic).
@@ -1052,8 +1096,8 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
 
   // A header with no duty reading (tach only, or not read, #279) cannot be set from here.
   const cannotSet = !isUnavailable(header) && !canDrive(header);
-  const manual = mode.mode !== "bios";
-  const current = mode.mode;
+  const manual = chosen !== "bios";
+  const current = chosen;
   // The chip is doing something else than what was asked for: the daemon handed it back.
   const handedBack = header.on_bios && mode.mode !== "bios";
   // What the daemon says about this header, in words that name it. The words are on the page for
@@ -1073,7 +1117,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
     bios: "The BIOS is in charge of this fan.",
     fixed: "Fixed duty is in charge; nothing is overriding it.",
     curve: "The curve is in charge; nothing is overriding it.",
-  }[mode.mode];
+  }[chosen];
   const status = (
     <div className="fan-status" data-slot="fan-status">
       <StatusReason text={reasonText} warn={handedBack} quiet={quiet} />
@@ -1194,10 +1238,10 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           </p>
         ) : (
         <>
-        {mode.mode === "bios" && (
+        {chosen === "bios" && (
           <p className="mute">Chip auto control. Floors off.</p>
         )}
-        {mode.mode === "bios" && status}
+        {chosen === "bios" && status}
 
         {manual && (
           <div className="rule fan-floor-note">
@@ -1209,7 +1253,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           </div>
         )}
 
-        {mode.mode === "fixed" && (
+        {chosen === "fixed" && (
           <Field label="Duty">
             <div className="row-wrap field-slider">
               <Slider
@@ -1233,9 +1277,9 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
             </div>
           </Field>
         )}
-        {mode.mode === "fixed" && status}
+        {chosen === "fixed" && status}
 
-        {mode.mode === "curve" && (
+        {chosen === "curve" && (
           <>
             <Field label="Temperature source">
               <div className="row-wrap">
@@ -1320,7 +1364,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           </>
         )}
 
-        {mode.mode === "fixed" && (
+        {chosen === "fixed" && (
           <p className="mute" style={{ fontSize: 14 }}>
             Duty{" "}
             <Figure unit="%">

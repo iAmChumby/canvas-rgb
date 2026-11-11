@@ -302,6 +302,20 @@ second on the status poll, so the effect tears down and starts again before it c
   `Popover.tsx:113`, `IdentifyWalker.tsx:144` re-bind listeners; `OnboardingGate.tsx:23`,
   `LayoutView.tsx:922`, `Onboarding.tsx:310` are ref-guarded one-time actions).
 
+- [#295](https://github.com/iAmChumby/canvas-rgb/issues/295): the fan header editor was keyed on the
+  polled mode (`FansView.tsx`) and drew the polled mode, so a poll that landed before the service's
+  answer remounted it and dropped the mode and curve points being edited. Fix: the editor keeps its own
+  draft and takes the service's mode only when nothing is pending and the mode was not its own
+  (`app/web/src/views/__tests__/FansEditorDraft.test.tsx`). Siblings: `DisplaysView.tsx` keys each card
+  on its saved config (`JSON.stringify(row.config)`), so a save from elsewhere resets that card's draft;
+  left as is, it is stated in its comment.
+- The same issue's other half was in the daemon, not React: `PUT /fans/hot` built the whole-config push
+  from `fans_last`, which is empty after a daemon start and never sees `SetHeaderMode`, so the first
+  hot-limit set reset every header to BIOS. Fix: a whole-config push starts from the service's own
+  `fans.toml` (`crates/canvas-daemon/src/api/fans.rs` `base_fans_config`); tests in
+  `crates/canvas-daemon/tests/api.rs` (`issue295_*`). Rule: a writer that replaces a whole config reads
+  the owner's current copy first, never its own cache and never the defaults.
+
 ### `cause:timing-test`: a test whose verdict depends on how long the machine takes
 
 A test passes on a quiet PC and fails once in a while on a shared CI runner, with no code change. It

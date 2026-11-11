@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Fans: setting the "don't exceed" temperature no longer puts the fans back on BIOS, and the header editor keeps the mode and curve points being edited while the page refreshes (#295)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
 
 ## [0.13.0] - 2026-11-10
