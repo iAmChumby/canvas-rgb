@@ -15,7 +15,7 @@ import { Slider } from "@/components/Slider";
 import { Sparkline, Figure, peakOf } from "@/components/Readout";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { UnreadValue } from "@/components/UnreadValue";
-import { usePageNarrow } from "@/components/MediaQuery";
+import { usePageNarrow, usePageShort } from "@/components/MediaQuery";
 import { PageActions } from "@/shell/PageHeader";
 import { Details, LoadFrame } from "@/components/Loading";
 import { FansShape } from "@/components/LoadShapes";
@@ -951,6 +951,11 @@ function modeKey(m: FanMode): string {
 
 function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansStatus }) {
   const base = baseFloor(header.id, fans.floor_percent);
+  // A short window flattens the curve (the same heights the short-window rules key on),
+  // so the panel clears the window (#299).
+  const short = usePageShort(800);
+  const shorter = usePageShort(720);
+  const curveAspect = shorter ? 0.4 : short ? 0.5 : 0.62;
   const [err, setErr] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   // The draft (#295): the editor's own mode, duty, points and source. What the user picked is what
@@ -1241,7 +1246,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
       }
     >
       {isUnavailable(header) ? (
-        <div className="stack" style={{ gap: 8 }}>
+        <div className="stack" style={{ gap: 6 }}>
           <p className="mute">
             {header.override_available === false
               ? "You marked this header as not on your board, so there is no mode to set."
@@ -1250,7 +1255,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
           <HeaderAvailability header={header} />
         </div>
       ) : (
-      <div className="stack" style={{ gap: 8 }}>
+      <div className="stack" style={{ gap: 6 }}>
         <Segmented<"bios" | "fixed" | "curve">
           label={`${header.label} mode`}
           value={current}
@@ -1341,6 +1346,7 @@ function HeaderEditor({ header, fans }: { header: FanHeaderStatus; fans: FansSta
               onChange={setPoints}
               onCommit={commitCurve}
               onHotCommit={(v) => commitHot(v)}
+              aspect={curveAspect}
             />
             {status}
             <div className="curve-rows">

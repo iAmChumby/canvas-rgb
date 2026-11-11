@@ -643,9 +643,20 @@ scroll, so the content was clipped and unreachable.
   nothing passes the window: the pane clips it. The fix reorders the panels so the browser's column
   balance puts Audio source with Rendering, and tightens the rows in a short window
   (`@container page (max-height: 720px)`: 1024x768 but not 1280x860, measured on the page container).
-- **Class fix, third mechanism:** the check is in (#294); Settings is fixed, and its first full run
-  found 20 hits still open in the Fans right panel and the Effects inspector (#299).
-  `tools/overflow-check.mjs` reports, on a desktop size (721 px and over), each scroll pane in
+  [#299](https://github.com/iAmChumby/canvas-rgb/issues/299): the remaining twenty hits in that
+  run: the Fans right panel scrolled 64 px at 1280x860 and 152 px at 1024x768, both themes and all
+  four Fans rows, and the Effects inspector scrolled 42 px at 1024x768. The Fans fix is a short-window
+  compaction (`@container page (max-height: 800px)` at 1280x860 and 1024x768, and
+  `max-height: 720px` at 1024x768, wrapped in the desktop `@media (min-width: 721px)` as #294 is):
+  the panel's inset, its head's gap, the field rows and the floor note tighten, the curve flattens
+  through an `aspect` prop the editor passes at the same heights, and the stack's gap tightened to
+  6 px. The Effects fix moves its short-window block to `max-height: 720px` (the 1024x768 case),
+  wraps it in the same media query, and adds panel-head margin, zeroed property-row padding and
+  tighter preset-line margins.
+- **Class fix, third mechanism:** the check is in (#294); Settings was fixed there, and #299 fixes
+  the Fans right panel and the Effects inspector the same way, by compacting for a short window
+  rather than scrolling them. With both, the full overflow check reports 0 hits (276 view checks,
+  0 hits, 0 unknown). `tools/overflow-check.mjs` reports, on a desktop size (721 px and over), each scroll pane in
   `FIT_PANES` (Settings, the Peripherals detail, the Effects inspector, the Fans right panel; What's
   new's notes scroll by design, #124, so they are left out) that scrolls or clips vertically
   (`scrollHeight` over `clientHeight` by more than 1 px), and each panel it cuts off at the bottom.

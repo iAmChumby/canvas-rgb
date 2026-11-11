@@ -7,6 +7,7 @@ pub mod capture;
 pub mod cli;
 pub mod composite;
 pub mod conflict;
+pub mod device_sync;
 pub mod displays;
 pub mod draft;
 pub mod elevated;

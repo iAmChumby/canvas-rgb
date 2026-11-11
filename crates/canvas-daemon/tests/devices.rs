@@ -127,6 +127,13 @@ impl canvas_adapters::resume::ResumeBehavior for FlakyAdapter {
     }
 }
 
+impl canvas_adapters::frame_lane::FrameLane for FlakyAdapter {
+    fn frame_lane(&self) -> Option<canvas_adapters::openrgb::OpenRgbAdapter> {
+        // A test fake: it has no OpenRGB link, so its frames go through the adapter.
+        None
+    }
+}
+
 #[async_trait::async_trait]
 impl canvas_proto::traits::DeviceAdapter for FlakyAdapter {
     fn name(&self) -> &'static str {

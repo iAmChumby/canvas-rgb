@@ -2,7 +2,7 @@
 //! `POST /api/v1/devices/{id}/identify`, and the white balance (#50):
 //! `GET /api/v1/white-balance`, `PUT/DELETE /api/v1/devices/{id}/white-balance`.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::Json;
 use canvas_proto::api::{DevicesResponse, IdentifyRequest, PatchZone, WhiteBalances};
 use canvas_proto::color::WhiteBalance;
@@ -13,9 +13,46 @@ use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 
 /// `GET /api/v1/devices`.
-pub async fn list_devices(State(app): State<Arc<App>>) -> Json<DevicesResponse> {
-    let devices = app.devices.read().await.clone();
-    Json(DevicesResponse { devices })
+///
+/// Answers with the list the daemon holds. With `?rescan=1` (or `true`) it asks the OpenRGB
+/// supervisor to read the devices again, waits until the supervisor applied them (status, zones
+/// and frame sinks included, the same path as every refresh) and answers with that list. `0`,
+/// `false` or no `rescan` is the plain read; any other value is a 400 (the rule of every flag, see
+/// [`parse_flag`](crate::api::parse_flag)). A rescan that fails answers with the failure and leaves
+/// the held list alone: it never hands back the old list as if it were new. The supervisor is the
+/// only writer of the list, and it holds the adapter for at most the rescan's budget
+/// ([`RESCAN_BUDGET`](crate::openrgb_supervisor::RESCAN_BUDGET)); frames do not wait on it.
+pub async fn list_devices(
+    State(app): State<Arc<App>>,
+    RawQuery(query): RawQuery,
+) -> ApiResult<Json<DevicesResponse>> {
+    if !crate::api::parse_flag(query.as_deref(), "rescan")? {
+        let devices = app.devices.read().await.clone();
+        return Ok(Json(DevicesResponse { devices }));
+    }
+
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let request = crate::openrgb_supervisor::Rescan { budget: app.rescan_budget, reply };
+    // A full queue means the supervisor is not taking requests (it is gone, or stuck): say so
+    // at once instead of queueing a fifth.
+    if app.rescan_requests.try_send(request).is_err() {
+        return Err(ApiFailure::service_unavailable("the device watcher is not taking rescans"));
+    }
+    // The supervisor answers within the budget, unless it is busy with its own refresh first.
+    let wait = app.rescan_budget + crate::openrgb_supervisor::RESCAN_QUEUE_WAIT;
+    let found = match tokio::time::timeout(wait, answer).await {
+        Ok(Ok(Ok(found))) => found,
+        Ok(Ok(Err(e))) => {
+            tracing::warn!(error = %e, "the device rescan failed");
+            return Err(ApiFailure::service_unavailable(e));
+        }
+        // The supervisor is gone, or never took the request: say so.
+        Ok(Err(_)) | Err(_) => {
+            return Err(ApiFailure::service_unavailable("OpenRGB did not answer the rescan in time"));
+        }
+    };
+    tracing::info!(count = found.len(), "the devices were rescanned");
+    Ok(Json(DevicesResponse { devices: found }))
 }
 
 /// `PATCH /api/v1/devices/{id}/zones/{zone}`.

@@ -20,12 +20,32 @@ use crate::last_frame::LastFrame;
 pub async fn writer_loop(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     device: DeviceId,
+    frames: tokio::sync::mpsc::Receiver<Vec<Rgb8>>,
+    last_frame: Arc<LastFrame>,
+) {
+    writer_loop_with_lane(adapter, None, device, frames, last_frame).await;
+}
+
+/// [`writer_loop`], with the frame lane of the OpenRGB link (see [`App::frame_lane`](crate::state::App)).
+///
+/// A frame for an OpenRGB device goes through the lane: it shares the link with the adapter and
+/// does not wait on the adapter lock, which the supervisor holds while it waits on OpenRGB for a
+/// reply (a rescan, a refresh). A device the composite serves natively (the keyboard), and every
+/// device when there is no lane, goes through the adapter as before.
+pub async fn writer_loop_with_lane(
+    adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
+    lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
+    device: DeviceId,
     mut frames: tokio::sync::mpsc::Receiver<Vec<Rgb8>>,
     last_frame: Arc<LastFrame>,
 ) {
+    let lane = lane.filter(|_| crate::composite::CompositeAdapter::is_openrgb_device(&device));
     let mut failures = 0u32;
     while let Some(frame) = frames.recv().await {
-        let result = adapter.lock().await.write_frame(&device, &frame).await;
+        let result = match &lane {
+            Some(lane) => lane.write_frame_shared(&device, &frame).await,
+            None => adapter.lock().await.write_frame(&device, &frame).await,
+        };
         match result {
             Ok(()) => {
                 failures = 0;

@@ -47,3 +47,28 @@ export function usePageNarrow(max = 640): boolean {
   }, [max]);
   return narrow;
 }
+
+/**
+ * The same measurement on the height axis: the `.content` box without its vertical padding,
+ * which is what `@container page (max-height: …)` keys on. The fans editor passes its curve
+ * a flatter `aspect` at the same heights the short-window rules apply at, so the two are
+ * one condition. Reads false until the box is measured, and when there is no box.
+ */
+export function usePageShort(max = 800): boolean {
+  const [short, setShort] = useState(false);
+  useLayoutEffect(() => {
+    const box = document.querySelector<HTMLElement>(".content");
+    if (!box) return;
+    const measure = () => {
+      const cs = getComputedStyle(box);
+      const height =
+        box.clientHeight - (parseFloat(cs.paddingTop) || 0) - (parseFloat(cs.paddingBottom) || 0);
+      setShort(height > 0 && height <= max);
+    };
+    measure();
+    const watch = new ResizeObserver(measure);
+    watch.observe(box);
+    return () => watch.disconnect();
+  }, [max]);
+  return short;
+}

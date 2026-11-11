@@ -8,8 +8,7 @@ import { InlineSkeleton } from "@/components/Skeleton";
 import { Greeting } from "@/views/editor/Greeting";
 import { Fold, StepFrame } from "@/views/editor/OnboardStep";
 import { HELLO_EFFECT } from "@/views/editor/onboardEffects";
-import { api } from "@/lib/endpoints";
-import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
+import { rescanForDevices, refreshStatus, useSnap } from "@/lib/store";
 import s from "@/views/editor/onboarding.module.css";
 
 /**
@@ -169,16 +168,19 @@ function Ladder({
   const status = useSnap((st) => st.status);
   const [busy, setBusy] = useState(false);
   const [asked, setAsked] = useState(false);
+  const [failure, setFailure] = useState<string | null>(null);
   const noOtherApps = (status?.conflicts.length ?? 0) === 0;
 
   const rescan = async () => {
     setBusy(true);
+    setFailure(null);
     try {
-      const res = await api.rescanDevices();
-      patchSnap({ devices: res.devices });
+      // The store keeps the list and its total in step; this request's own failure (the daemon says
+      // 503 when OpenRGB did not answer) is shown below, not swallowed.
+      const outcome = await rescanForDevices();
+      // A newer rescan took over: its outcome is the one to show, not an old error.
+      if (outcome !== undefined) setFailure(outcome);
       await refreshStatus();
-    } catch {
-      // The daemon did not answer: the rescan is asked again on the next press.
     } finally {
       setAsked(true);
       setBusy(false);
@@ -207,7 +209,8 @@ function Ladder({
         <Rung>Turn off Fast Startup.</Rung>
         <Rung>Rescan.</Rung>
       </ol>
-      {asked && !busy && !volunteer && <p className={s.hint}>Still no lights.</p>}
+      {failure && !busy && <p className="error-line">Rescan failed: {failure}</p>}
+      {asked && !busy && !volunteer && !failure && <p className={s.hint}>Still no lights.</p>}
       <Fold label="More help">
         <p className={s.hint}>Close iCUE, Armoury Crate and Razer Synapse.</p>
         <p className={s.hint}>Plug USB lights straight into the PC.</p>

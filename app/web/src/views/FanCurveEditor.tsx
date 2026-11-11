@@ -11,7 +11,8 @@ import { cancelPress } from "@/lib/pressDrag";
 const TEMP_MIN = 20;
 const TEMP_MAX = 100;
 const MARGIN = { left: 48, right: 14, top: 14, bottom: 46 };
-const ASPECT = 0.62;
+/** The curve's height as a share of its width. The default fills the column; a short window flattens it. */
+const DEFAULT_ASPECT = 0.62;
 
 /**
  * A 2 to 8 point curve on a temperature × percent grid. The shaded band at the bottom is the
@@ -31,6 +32,7 @@ export function FanCurveEditor({
   onChange,
   onCommit,
   onHotCommit,
+  aspect = DEFAULT_ASPECT,
 }: {
   header: string;
   points: CurvePoint[];
@@ -44,6 +46,8 @@ export function FanCurveEditor({
   /** The hot line moved: drag end, arrow key, or the typed control beside the chart.
    * Resolves true when the service accepted it, false when the PUT failed (422). */
   onHotCommit?: (value: number) => Promise<boolean>;
+  /** Height as a share of width; a short window passes a flatter ratio. Defaults to 0.62. */
+  aspect?: number;
 }) {
   const wrapRef = useRef<HTMLDivElement>(null);
   const [width, setWidth] = useState(360);
@@ -64,7 +68,7 @@ export function FanCurveEditor({
     return () => ro.disconnect();
   }, []);
 
-  const height = Math.round(width * ASPECT);
+  const height = Math.round(width * aspect);
   const plotW = width - MARGIN.left - MARGIN.right;
   const plotH = height - MARGIN.top - MARGIN.bottom;
 
