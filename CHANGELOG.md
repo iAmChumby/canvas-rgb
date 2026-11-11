@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Settings: every panel fits the window with no scroll at 1024x768, 960x1032 and the larger sizes, with a microphone picked or an update waiting; Audio source now sits under Rendering and a short window tightens the rows (#294)
+
 ## [0.13.0] - 2026-11-10
 
 ### Changed
