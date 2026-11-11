@@ -5,6 +5,7 @@ import {
   EFFECT_IMPORT_TIMEOUT_MS,
   PERIPHERAL_TIMEOUT_MS,
   REQUEST_TIMEOUT_MS,
+  THUMBNAIL_TIMEOUT_MS,
   ZONE_RESIZE_TIMEOUT_MS,
   deadlineFor,
   dropApiConfig,
@@ -377,6 +378,7 @@ describe("the deadlines of the routes", () => {
   it("pins the deadline of every route that waits on a device", () => {
     expect(PERIPHERAL_TIMEOUT_MS).toBe(30_000);
     expect(EFFECT_IMPORT_TIMEOUT_MS).toBe(60_000);
+    expect(THUMBNAIL_TIMEOUT_MS).toBe(65_000);
     expect(CONFIG_TRANSFER_TIMEOUT_MS).toBe(60_000);
     expect(DEVICE_RESCAN_TIMEOUT_MS).toBe(30_000);
     // 4 stalled replies x 5 s (OpenRGB's REPLY_TIMEOUT) = 20 s, and half again as margin.
@@ -388,6 +390,8 @@ describe("the deadlines of the routes", () => {
     expect(deadlineFor("/api/v1/peripherals/x6")).toBe(PERIPHERAL_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/peripherals/x6/access")).toBe(PERIPHERAL_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/effects/import")).toBe(EFFECT_IMPORT_TIMEOUT_MS);
+    // The thumbnail: one render inside the renderer's budget plus the queue ahead of it.
+    expect(deadlineFor("/api/v1/effects/wet%20smear/thumbnail")).toBe(THUMBNAIL_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/config/export")).toBe(CONFIG_TRANSFER_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/config/import")).toBe(CONFIG_TRANSFER_TIMEOUT_MS);
     expect(deadlineFor("/api/v1/devices?rescan=1")).toBe(DEVICE_RESCAN_TIMEOUT_MS);
