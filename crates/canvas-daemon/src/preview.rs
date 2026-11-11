@@ -12,9 +12,12 @@
 //! not wait for a slow HTML layer; the gate is taken to read the slot, to swap it and to apply.
 //!
 //! A PUT whose structure is the one already building joins that build: it updates the live map
-//! and the props and starts nothing, so a build longer than the builder's beat still lands. At
-//! most one build runs per route; a PUT with a different structure waits for the one in flight
-//! to let go and supersedes its result.
+//! and the props, makes that build the current one again and starts nothing, so a build longer
+//! than the builder's beat still lands, and a structure that comes back (Y -> X -> Y) rejoins
+//! the build still making it instead of queuing a second one. A PUT with a different structure
+//! starts its own build beside the one in flight and supersedes its result, so the newest beat
+//! never waits for a build it has already superseded; the engine is still written only under
+//! the gate, so two builds never hand it an effect at once.
 
 use canvas_proto::api::{
     StackLayerState, StackLayerStatus, StackPreviewLayer, StackPreviewResponse,
@@ -66,12 +69,12 @@ pub struct PreviewSlot {
     pub statuses: Arc<Mutex<Vec<StackLayerStatus>>>,
 }
 
-/// The build in flight for this route, if one is.
+/// One build running for this route.
 ///
-/// At most one is here at a time. A PUT whose structure equals it joins it: the live map and the
-/// props move, no build starts, and the build that is running lands with the newest values. A
-/// PUT with a different structure re-tokens it, and the build that finishes after that lands
-/// nowhere.
+/// A PUT whose structure equals a running build joins it: the live map and the props move, no
+/// build starts, and that build becomes the current one again, so it lands with the newest
+/// values. A PUT with a different structure starts a build of its own and makes it current; the
+/// older build finishes and lands nowhere.
 #[derive(Clone)]
 struct InFlight {
     /// Identifies this build. Every new build takes a new token; the token in the book is the
@@ -87,6 +90,20 @@ struct InFlight {
     errors: Arc<Mutex<BTreeMap<String, String>>>,
     /// Where the effect reports a held or faulted HTML layer.
     statuses: Arc<Mutex<Vec<StackLayerStatus>>>,
+}
+
+/// Every build running for this route, and which one may land.
+///
+/// A newer PUT starts its own build beside an older one instead of waiting for it: only the
+/// current token lands, and the older result is discarded. A structure that comes back is made
+/// current again, so its still-running build lands instead of a third one starting.
+#[derive(Default)]
+struct Builds {
+    /// The builds still running. A build is removed when it lands or lets go.
+    running: Vec<InFlight>,
+    /// The token of the build whose result may land. A newer PUT, a DELETE or a structure that
+    /// is already on screen takes it away.
+    current: Option<u64>,
 }
 
 /// The preview engine and the slot it is showing.
@@ -109,12 +126,10 @@ pub struct StackPreview {
     slot: Mutex<Option<PreviewSlot>>,
     /// The epoch order: which page owns the preview and which ones are older (D95.4.4).
     epochs: EpochBook,
-    /// The build in flight, if one is.
-    in_flight: Mutex<Option<InFlight>>,
+    /// The builds running for this route and the one allowed to land.
+    builds: Mutex<Builds>,
     /// The token the next build takes.
     tokens: AtomicU64,
-    /// Held across a build, so one build runs per route even when structures change quickly.
-    build_lock: tokio::sync::Mutex<()>,
     /// Orders the slot's transitions. The build itself runs outside it.
     gate: tokio::sync::Mutex<()>,
 }
@@ -135,9 +150,8 @@ impl StackPreview {
             subs: PreviewRegistry::default(),
             slot: Mutex::new(None),
             epochs: EpochBook::default(),
-            in_flight: Mutex::new(None),
+            builds: Mutex::new(Builds::default()),
             tokens: AtomicU64::new(0),
-            build_lock: tokio::sync::Mutex::new(()),
             gate: tokio::sync::Mutex::new(()),
         }
     }
@@ -243,30 +257,33 @@ impl StackPreview {
         self.epochs.owner()
     }
 
-    /// The build in flight, copied.
-    fn in_flight(&self) -> Option<InFlight> {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .clone()
+    fn lock_builds(&self) -> std::sync::MutexGuard<'_, Builds> {
+        self.builds.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    fn in_flight_token(&self) -> Option<u64> {
-        self.in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_ref()
-            .map(|building| building.token)
+    /// A running build this request matches, copied. A structure already building is joined
+    /// rather than built a second time.
+    fn find_build(&self, matches: impl Fn(&InFlight) -> bool) -> Option<InFlight> {
+        self.lock_builds().running.iter().find(|build| matches(build)).cloned()
     }
 
-    /// Starts a build for this structure and returns its token. A build already in flight is
-    /// superseded: its result will find another token and land nowhere.
+    /// Whether `token` is still the build allowed to land.
+    fn is_current(&self, token: u64) -> bool {
+        self.lock_builds().current == Some(token)
+    }
+
+    /// Makes a build the one allowed to land: a request for its structure again re-tokenises
+    /// it, so Y -> X -> Y rejoins the build still making Y.
+    fn adopt_build(&self, token: u64) {
+        self.lock_builds().current = Some(token);
+    }
+
+    /// Starts a build for this structure and returns its token. Any build already running is
+    /// superseded: its result will find another current token and land nowhere.
     fn begin_build(&self, stack: &Stack, structure: &str, props: Props) -> u64 {
         let token = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
-        *self
-            .in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(InFlight {
+        let mut builds = self.lock_builds();
+        builds.running.push(InFlight {
             token,
             stack_id: stack.id.clone(),
             structure: structure.to_string(),
@@ -275,42 +292,45 @@ impl StackPreview {
             errors: Arc::new(Mutex::new(BTreeMap::new())),
             statuses: Arc::new(Mutex::new(Vec::new())),
         });
+        builds.current = Some(token);
         token
     }
 
-    /// Gives a beat's values to the build in flight, if `token` is still the one that owns it.
+    /// Gives a beat's values to the build `token`, if it is still running.
     fn update_in_flight(&self, token: u64, props: &Props) {
-        if let Some(building) = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .as_mut()
-        {
-            if building.token == token {
-                building.props = props.clone();
-            }
+        if let Some(building) = self.lock_builds().running.iter_mut().find(|b| b.token == token) {
+            building.props = props.clone();
         }
     }
 
-    /// Takes the build in flight when `token` is still the one that owns it, so the build can
-    /// land; `None` when a newer PUT, a DELETE or another structure superseded it.
+    /// Takes the build `token` out of the book so it can land; `None` when a newer PUT, a
+    /// DELETE or another structure superseded it. A superseded build is still removed, so a
+    /// finished build never lingers for a later request to join.
     fn take_in_flight_if(&self, token: u64) -> Option<InFlight> {
-        let mut guard = self
-            .in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-        match guard.as_ref() {
-            Some(building) if building.token == token => guard.take(),
-            _ => None,
+        let mut builds = self.lock_builds();
+        let at = builds.running.iter().position(|b| b.token == token)?;
+        let building = builds.running.remove(at);
+        if builds.current == Some(token) {
+            builds.current = None;
+            Some(building)
+        } else {
+            None
         }
     }
 
-    /// A PUT with the structure already on screen supersedes any build for another one.
+    /// Forgets a build that ended without landing (an error, a join error, a panic).
+    fn forget_build(&self, token: u64) {
+        let mut builds = self.lock_builds();
+        builds.running.retain(|b| b.token != token);
+        if builds.current == Some(token) {
+            builds.current = None;
+        }
+    }
+
+    /// A PUT with the structure already on screen supersedes any build for another one, but
+    /// leaves the builds running: one can be rejoined if its structure comes back.
     fn supersede_build(&self) {
-        *self
-            .in_flight
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+        self.lock_builds().current = None;
     }
 }
 
@@ -330,7 +350,7 @@ impl<'a> BuildLease<'a> {
 
 impl Drop for BuildLease<'_> {
     fn drop(&mut self) {
-        self.preview.take_in_flight_if(self.token);
+        self.preview.forget_build(self.token);
     }
 }
 
@@ -440,20 +460,23 @@ pub async fn put(
         }
         // The same structure is already building: this beat joins it. The live map is the one
         // the building effect reads, so the values are there when it lands; its props are the
-        // newest, and no second build starts.
-        if let Some(building) = app.stack_preview.in_flight() {
-            if building.stack_id == stack.id && building.structure == structure {
-                crate::stack::replace_live(&building.live, stack);
-                app.stack_preview.update_in_flight(building.token, &props);
-                let errors = building
-                    .errors
-                    .lock()
-                    .unwrap_or_else(|poisoned| poisoned.into_inner())
-                    .clone();
-                let layers = reports(app, stack, &errors, &building.statuses);
-                tracing::info!(stack = %stack.id, seq, "a beat joined the preview build in flight");
-                return Ok(answer(app, true, epoch, seq, layers));
-            }
+        // newest, and no second build starts. The build is made current again, so a structure
+        // that comes back (Y -> X -> Y) lands rather than queuing a third build.
+        if let Some(building) = app
+            .stack_preview
+            .find_build(|b| b.stack_id == stack.id && b.structure == structure)
+        {
+            crate::stack::replace_live(&building.live, stack);
+            app.stack_preview.update_in_flight(building.token, &props);
+            app.stack_preview.adopt_build(building.token);
+            let errors = building
+                .errors
+                .lock()
+                .unwrap_or_else(|poisoned| poisoned.into_inner())
+                .clone();
+            let layers = reports(app, stack, &errors, &building.statuses);
+            tracing::info!(stack = %stack.id, seq, "a beat joined the preview build in flight");
+            return Ok(answer(app, true, epoch, seq, layers));
         }
         // A different structure, or the first open: this PUT's build owns the route.
         token = app.stack_preview.begin_build(stack, &structure, props.clone());
@@ -462,16 +485,15 @@ pub async fn put(
     // Every exit path from here frees the route: an error, a join error, or a panic in the
     // blocking task must not leave a token for later beats to join.
     let _lease = BuildLease::new(&app.stack_preview, token);
-    // One build runs per route: a PUT with a different structure waits for the one in flight to
-    // let go, and then builds (or finds it was superseded itself).
-    let _build = app.stack_preview.build_lock.lock().await;
-    if app.stack_preview.in_flight_token() != Some(token) {
+    // The newest request does not wait for a build it has already superseded: its build runs
+    // beside any older one, and the older result is discarded when it lands. The engine is
+    // written only under the gate, so no two builds hand it an effect at once.
+    if !app.stack_preview.is_current(token) {
         return Ok(superseded(app, epoch, seq));
     }
-    let building = app
-        .stack_preview
-        .in_flight()
-        .expect("the build in flight was read under the build lock");
+    let Some(building) = app.stack_preview.find_build(|b| b.token == token) else {
+        return Ok(superseded(app, epoch, seq));
+    };
 
     // The build runs outside the gate, so DELETE and a newer PUT answer while it loads.
     let build_app = Arc::clone(app);

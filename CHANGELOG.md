@@ -10,6 +10,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Lights and preview: the render loop no longer sleeps through a device or preview that connects just as it decides to sleep, which left an effect dark until the next change (#250)
 - Effects: a stack that saved but would not start now says so, "Saved, but it did not start", with a Start again key, instead of the title "The stack could not be saved" (#235)
+- Stacks: a preview or draft beat no longer waits for the build it has already superseded, and a structure that comes back while its own build is still loading rejoins that build instead of queuing another (#102)
 
 ## [0.13.0] - 2026-11-10
 
