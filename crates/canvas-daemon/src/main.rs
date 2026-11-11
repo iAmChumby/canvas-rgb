@@ -225,6 +225,8 @@ async fn daemon_main(fakes: bool) -> Exit {
         app_inner.inputs.set_requested(persisted_pick);
         app_inner.fakes = true;
     }
+    // The service's own fans.toml: the fans routes that push a whole config start from it (#295).
+    app_inner.service_fans_file = Some(canvas_daemon::paths::service_fans_file());
     let app = Arc::new(app_inner);
     if fakes {
         *app.fans.write().await = Some(canvas_daemon::fakes::fake_fans_status());

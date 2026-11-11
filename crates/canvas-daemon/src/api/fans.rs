@@ -249,6 +249,45 @@ fn service_failure(code: &str, message: String) -> ApiFailure {
     }
 }
 
+/// The config a whole-config push (`PutFanConfig`) starts from (issue #295).
+///
+/// The push REPLACES the service's config, and the service keeps header modes in its own
+/// profile (`SetHeaderMode` never reaches the daemon's copy). So the base is the service's own
+/// `fans.toml`, read fresh under the lock: a hot-limit PUT then carries the modes, profiles and
+/// boot colour the service has. Only when the service has no such file yet does the daemon's last
+/// push (`last`), then the defaults, stand in: the service runs on defaults too. A file that is
+/// there but cannot be read refuses the write, because a default config pushed over it would put
+/// every header back on BIOS.
+async fn base_fans_config(
+    app: &Arc<App>,
+    last: Option<&canvas_proto::config::FansFile>,
+) -> Result<canvas_proto::config::FansFile, ApiFailure> {
+    if let Some(path) = &app.service_fans_file {
+        match tokio::fs::read_to_string(path).await {
+            Ok(text) => {
+                let file: canvas_proto::config::FansFile = toml::from_str(&text).map_err(|e| {
+                    tracing::warn!(path = %path.display(), error = %e, "the service's fans config cannot be read; nothing was sent");
+                    ApiFailure::service_unavailable("the service's fan config could not be read, so nothing was changed")
+                })?;
+                if file.schema_version != canvas_proto::config::FANS_SCHEMA {
+                    return Err(ApiFailure::service_unavailable(
+                        "the service's fan config is a version this app does not know, so nothing was changed",
+                    ));
+                }
+                return Ok(file);
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                tracing::warn!(path = %path.display(), error = %e, "the service's fans config cannot be opened; nothing was sent");
+                return Err(ApiFailure::service_unavailable(
+                    "the service's fan config could not be read, so nothing was changed",
+                ));
+            }
+        }
+    }
+    Ok(last.cloned().unwrap_or_default())
+}
+
 /// `PUT /api/v1/fans/profiles/{name}`.
 ///
 /// Creates or replaces a profile. The profile is validated first.
@@ -287,10 +326,7 @@ pub async fn put_profile(
     let fans = {
         let home = app.store.read().await.home.clone();
         let mut guard = app.fans_last.write().await;
-        let mut next = guard
-            .as_ref()
-            .cloned()
-            .unwrap_or_else(|| canvas_proto::config::FansFile { floor_percent: floor, ..Default::default() });
+        let mut next = base_fans_config(&app, guard.as_ref()).await?;
         next.floor_percent = floor;
         match next.profiles.iter_mut().find(|p| p.name == profile.name) {
             Some(existing) => *existing = profile.clone(),
@@ -350,7 +386,7 @@ pub async fn put_fan_hot(
     {
         let home = app.store.read().await.home.clone();
         let mut guard = app.fans_last.write().await;
-        let mut next = guard.clone().unwrap_or_default();
+        let mut next = base_fans_config(&app, guard.as_ref()).await?;
         next.hot_limits = limits;
         let response = crate::pipe_client::send(&app, &canvas_proto::pipe::PipeRequest::PutFanConfig { config: next.clone() })
             .await
