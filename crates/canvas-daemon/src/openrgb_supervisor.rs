@@ -270,9 +270,10 @@ fn device_key(devices: &[DeviceInfo]) -> Vec<(String, bool, Vec<u32>)> {
 }
 
 /// How long a rescan may hold the adapter: about one reply timeout of the OpenRGB adapter (5 s).
-/// A frame writer, the link check and the handlers wait on the same adapter lock, so a stalled
-/// OpenRGB freezes the lights for this long and no longer (#233). The adapter's own reply timeout
-/// ends a single stalled request; this ends a slow trickle of them.
+/// The handlers that take the adapter lock (a zone resize, the first run) wait for it, so a stalled
+/// OpenRGB delays them this long and no longer (#233). The frame writers do not wait: they write
+/// through the adapter's own link (`App::frame_lane`), so the lights keep moving. The adapter's own
+/// reply timeout ends a single stalled request; this ends a slow trickle of them.
 pub const RESCAN_BUDGET: Duration = Duration::from_secs(5);
 
 /// How long `GET /api/v1/devices?rescan=1` waits for the supervisor past the rescan's own budget:
@@ -415,16 +416,37 @@ async fn next_rescan(inbox: &mut Option<tokio::sync::mpsc::Receiver<Rescan>>) ->
     std::future::pending().await
 }
 
-/// Runs `work` for at most `budget` (no limit for `None`), turning a timeout into an error.
+/// Runs `work` for at most `budget` (no limit for `None`). A timeout is an error, and the flag says
+/// the work was cut off: its future was dropped mid-way, so it may have left a half-made state.
 async fn within<T>(
     budget: Option<Duration>,
     work: impl std::future::Future<Output = Result<T, String>>,
-) -> Result<T, String> {
+) -> (Result<T, String>, bool) {
     match budget {
-        None => work.await,
-        Some(budget) => tokio::time::timeout(budget, work)
-            .await
-            .unwrap_or_else(|_| Err("OpenRGB did not answer in time".to_string())),
+        None => (work.await, false),
+        Some(budget) => match tokio::time::timeout(budget, work).await {
+            Ok(result) => (result, false),
+            Err(_) => (Err("OpenRGB did not answer in time".to_string()), true),
+        },
+    }
+}
+
+/// Moves the rescans that already queued (and whose owner still waits) into `waiting`: they share
+/// the next attempt and its answer.
+fn take_queued(inbox: &mut Option<tokio::sync::mpsc::Receiver<Rescan>>, waiting: &mut Vec<Rescan>) {
+    if let Some(receiver) = inbox {
+        while let Ok(rescan) = receiver.try_recv() {
+            waiting.push(rescan);
+        }
+    }
+    // An owner that gave up needs no answer, and no attempt on its account.
+    waiting.retain(|rescan| !rescan.reply.is_closed());
+}
+
+/// Answers every waiting rescan with the same result.
+fn answer_all(waiting: &mut Vec<Rescan>, result: &Result<Vec<DeviceInfo>, String>) {
+    for rescan in waiting.drain(..) {
+        let _ = rescan.reply.send(result.clone());
     }
 }
 
@@ -432,7 +454,9 @@ async fn within<T>(
 ///
 /// `on_devices` is awaited before the loop goes on, so the lists are applied in the order they
 /// were read; a rescan is answered after its list was applied. A rescan while the link is down
-/// ends the wait for the next attempt and tries to connect at once, within its budget.
+/// ends the wait for the next attempt and tries to connect at once, within its budget; rescans
+/// that arrive meanwhile share that attempt and its answer. A rescan never advances the automatic
+/// backoff, and a rescan whose owner gave up starts nothing.
 pub async fn supervise_with_rescans<D, L>(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
@@ -445,46 +469,57 @@ pub async fn supervise_with_rescans<D, L>(
     L: std::future::Future<Output = ()>,
 {
     let mut backoff = Backoff::new();
-    // A rescan that ended the wait for the next attempt: that attempt answers it.
-    let mut waiting: Option<Rescan> = None;
+    // The rescans that ended the wait for the next attempt: that attempt answers them.
+    let mut waiting: Vec<Rescan> = Vec::new();
     loop {
         if *stop.borrow() {
             return;
         }
+        take_queued(&mut rescans, &mut waiting);
+        let from_rescan = !waiting.is_empty();
         // Every attempt is "connecting"; `Down` only follows a failure.
         on_link(LinkState::Connecting).await;
         let sizes = zone_sizes.read().await.clone();
-        let result = within(waiting.as_ref().map(|r| r.budget), async {
+        let (result, cut) = within(waiting.iter().map(|r| r.budget).max(), async {
             let mut guard = adapter.lock().await;
             connect_and_prepare(guard.as_mut(), &sizes).await
         })
         .await;
+        if cut {
+            // The attempt was dropped mid-way, possibly between the socket and the handshake: a
+            // link that says "connected" with no protocol version would be taken for a good one.
+            let _ = adapter.lock().await.disconnect().await;
+        }
         match result {
             Ok(devices) => {
                 tracing::info!(count = devices.len(), "connected to OpenRGB");
                 let mut last = device_key(&devices);
                 on_devices(devices.clone()).await;
-                if let Some(rescan) = waiting.take() {
-                    let _ = rescan.reply.send(Ok(devices));
-                }
+                answer_all(&mut waiting, &Ok(devices));
                 backoff = backoff.reset();
                 // Wait for the connection to drop before trying again. Every 5 s, re-read the
                 // device list: OpenRGB may still be detecting when we connect (seen live: 0
                 // devices at connect, never refreshed), and devices can come and go.
+                //
+                // One interval for the whole connection: a stream of rescans must not push the
+                // link check and the refresh back by restarting a sleep each time.
+                let mut tick = tokio::time::interval(Duration::from_millis(500));
+                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+                tick.tick().await;
                 let mut ticks = 0u32;
                 loop {
                     if *stop.borrow() {
                         return;
                     }
                     tokio::select! {
-                        () = tokio::time::sleep(Duration::from_millis(500)) => {}
+                        _ = tick.tick() => {}
                         rescan = next_rescan(&mut rescans) => {
                             // The owner gave up on it: do not hold the adapter for nobody.
                             if rescan.reply.is_closed() {
                                 continue;
                             }
                             let sizes = zone_sizes.read().await.clone();
-                            let result = within(Some(rescan.budget), async {
+                            let (result, _) = within(Some(rescan.budget), async {
                                 let mut guard = adapter.lock().await;
                                 rescan_devices(guard.as_mut(), &sizes).await
                             })
@@ -527,16 +562,32 @@ pub async fn supervise_with_rescans<D, L>(
             }
             Err(e) => {
                 tracing::debug!(error = %e, "OpenRGB is not reachable yet");
-                if let Some(rescan) = waiting.take() {
-                    let _ = rescan.reply.send(Err(e));
-                }
+                answer_all(&mut waiting, &Err(e));
                 on_link(LinkState::Down).await;
-                let (delay, next_backoff) = backoff.advanced();
-                backoff = next_backoff;
-                tokio::select! {
-                    () = tokio::time::sleep(delay) => {}
-                    _ = stop.changed() => return,
-                    rescan = next_rescan(&mut rescans) => waiting = Some(rescan),
+                // The backoff paces the automatic attempts: an attempt the owner asked for does
+                // not make the next automatic one wait longer.
+                let delay = if from_rescan {
+                    backoff.current()
+                } else {
+                    let (delay, next_backoff) = backoff.advanced();
+                    backoff = next_backoff;
+                    delay
+                };
+                let pause = tokio::time::sleep(delay);
+                tokio::pin!(pause);
+                loop {
+                    tokio::select! {
+                        () = &mut pause => break,
+                        _ = stop.changed() => return,
+                        rescan = next_rescan(&mut rescans) => {
+                            // An owner that gave up does not cut the wait short.
+                            if rescan.reply.is_closed() {
+                                continue;
+                            }
+                            waiting.push(rescan);
+                            break;
+                        }
+                    }
                 }
             }
         }

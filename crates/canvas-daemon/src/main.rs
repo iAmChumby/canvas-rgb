@@ -189,7 +189,10 @@ async fn daemon_main(fakes: bool) -> Exit {
 
     let (quit_tx, mut quit_rx) = tokio::sync::mpsc::unbounded_channel::<()>();
 
-    let mut app_inner = if use_real_display {
+    // The frame writers write to OpenRGB through the adapter's own link, so a discovery that is
+    // waiting on a reply does not hold the lights back (#233).
+    let frame_lane = adapter.frame_lane();
+    let app_inner = if use_real_display {
         App::with_displays(
             store,
             engine.clone(),
@@ -214,6 +217,7 @@ async fn daemon_main(fakes: bool) -> Exit {
         )
         .with_peripherals(peripherals)
     };
+    let mut app_inner = app_inner.with_frame_lane(frame_lane);
     if fakes {
         // In-process fake service pipe and a capture that never starts: the
         // real pipe, screen and audio are never touched.

@@ -88,8 +88,9 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
         let (tx, rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
         // The writer task records the time of every frame that went out (#81). It lives in the
         // library, so a test can run it and prove that it records.
-        let writer = tokio::spawn(crate::writer::writer_loop(
+        let writer = tokio::spawn(crate::writer::writer_loop_with_lane(
             app.adapter.clone(),
+            app.frame_lane.clone(),
             id.clone(),
             rx,
             Arc::clone(&app.last_frame),

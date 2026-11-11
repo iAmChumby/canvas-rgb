@@ -15,6 +15,8 @@ pub struct FakeOpenRgbServer {
     state: Arc<Mutex<FakeState>>,
     connections: Arc<Mutex<Vec<AbortHandle>>>,
     acceptor: JoinHandle<()>,
+    /// Bumped by `release_replies`; each connection writes its held replies when it changes.
+    release: tokio::sync::watch::Sender<u64>,
 }
 
 struct FakeState {
@@ -24,6 +26,13 @@ struct FakeState {
     detection: Option<Detection>,
     /// While set, the server takes every packet and answers none: a real OpenRGB that stalls.
     stalled: bool,
+    /// How many requests the server swallowed while `stalled`.
+    swallowed: u32,
+    /// While set, the server answers as usual but keeps each reply back until
+    /// [`FakeOpenRgbServer::release_replies`]: a real OpenRGB that is slow, not dead.
+    holding: bool,
+    /// The replies kept back, with the connection each belongs to, in the order they were made.
+    held: Vec<(u64, Vec<u8>)>,
 }
 
 #[derive(Clone, Copy)]
@@ -107,21 +116,32 @@ impl FakeOpenRgbServer {
         let listener = TcpListener::bind(("127.0.0.1", port.unwrap_or(0))).await?;
         let port = listener.local_addr()?.port();
         let devices = devices.into_iter().map(FakeDevice::new).collect();
-        let state = Arc::new(Mutex::new(FakeState { devices, detection, stalled: false }));
+        let state = Arc::new(Mutex::new(FakeState {
+            devices,
+            detection,
+            stalled: false,
+            swallowed: 0,
+            holding: false,
+            held: Vec::new(),
+        }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
+        let (release, _) = tokio::sync::watch::channel(0_u64);
         let acceptor = {
             let state = Arc::clone(&state);
             let connections = Arc::clone(&connections);
+            let release = release.clone();
             tokio::spawn(async move {
+                let mut next_connection = 0_u64;
                 while let Ok((stream, _)) = listener.accept().await {
-                    let handle = tokio::spawn(serve(stream, Arc::clone(&state)));
+                    next_connection += 1;
+                    let handle = tokio::spawn(serve(stream, Arc::clone(&state), next_connection, release.subscribe()));
                     let mut open = guard(&connections);
                     open.retain(|conn| !conn.is_finished());
                     open.push(handle.abort_handle());
                 }
             })
         };
-        Ok(Self { port, state, connections, acceptor })
+        Ok(Self { port, state, connections, acceptor, release })
     }
 
     pub fn port(&self) -> u16 {
@@ -139,6 +159,30 @@ impl FakeOpenRgbServer {
     /// makes the server answer again.
     pub fn stall_replies(&self, stalled: bool) {
         guard(&self.state).stalled = stalled;
+    }
+
+    /// How many requests the server has swallowed while stalled (see
+    /// [`stall_replies`](Self::stall_replies)): a test waits on this to know that a request is now
+    /// waiting on a reply that never comes.
+    pub fn swallowed_requests(&self) -> u32 {
+        guard(&self.state).swallowed
+    }
+
+    /// While `holding`, the server answers as usual but keeps each reply back (a slow OpenRGB, not
+    /// a dead one) until [`release_replies`](Self::release_replies).
+    pub fn hold_replies(&self, holding: bool) {
+        guard(&self.state).holding = holding;
+    }
+
+    /// How many replies are being kept back.
+    pub fn held_replies(&self) -> usize {
+        guard(&self.state).held.len()
+    }
+
+    /// Sends every reply that was kept back, in the order they were made, then returns. The
+    /// server keeps holding new ones if `hold_replies(true)` is still set.
+    pub fn release_replies(&self) {
+        self.release.send_modify(|n| *n += 1);
     }
 
     /// Current LED colors of controller `index`, as last written.
@@ -184,11 +228,35 @@ impl Drop for FakeOpenRgbServer {
     }
 }
 
-async fn serve(mut stream: TcpStream, state: Arc<Mutex<FakeState>>) -> std::io::Result<()> {
+async fn serve(
+    mut stream: TcpStream,
+    state: Arc<Mutex<FakeState>>,
+    connection: u64,
+    mut release: tokio::sync::watch::Receiver<u64>,
+) -> std::io::Result<()> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; 4096];
     loop {
-        let read = stream.read(&mut chunk).await?;
+        let read = tokio::select! {
+            read = stream.read(&mut chunk) => read?,
+            changed = release.changed() => {
+                if changed.is_err() {
+                    return Ok(());
+                }
+                // Every held reply of this connection goes out now, in the order it was made.
+                let mine: Vec<Vec<u8>> = {
+                    let mut state = guard(&state);
+                    let (mine, rest) = std::mem::take(&mut state.held).into_iter().partition(|(id, _)| *id == connection);
+                    state.held = rest;
+                    mine.into_iter().map(|(_, bytes)| bytes).collect()
+                };
+                for bytes in mine {
+                    stream.write_all(&bytes).await?;
+                }
+                stream.flush().await?;
+                continue;
+            }
+        };
         if read == 0 {
             return Ok(());
         }
@@ -206,10 +274,18 @@ async fn serve(mut stream: TcpStream, state: Arc<Mutex<FakeState>>) -> std::io::
             let payload = buffer[HEADER_LEN..HEADER_LEN + size].to_vec();
             buffer.drain(..HEADER_LEN + size);
             let reply = handle(&state, device, packet_id, &payload);
-            if !reply.is_empty() {
-                stream.write_all(&reply).await?;
-                stream.flush().await?;
+            if reply.is_empty() {
+                continue;
             }
+            {
+                let mut state = guard(&state);
+                if state.holding {
+                    state.held.push((connection, reply));
+                    continue;
+                }
+            }
+            stream.write_all(&reply).await?;
+            stream.flush().await?;
         }
     }
 }
@@ -223,6 +299,7 @@ fn handle(state: &Mutex<FakeState>, device: u32, packet_id: u32, payload: &[u8])
     let mut state = guard(state);
     let reply = |device: u32, packet_id: u32, body: &[u8]| encode_packet(device, packet_id, body).unwrap_or_default();
     if state.stalled && matches!(packet_id, REQUEST_PROTOCOL_VERSION | REQUEST_CONTROLLER_COUNT | REQUEST_CONTROLLER_DATA) {
+        state.swallowed += 1;
         return Vec::new();
     }
     match packet_id {

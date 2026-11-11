@@ -114,7 +114,11 @@ export const EFFECT_PREVIEW_TIMEOUT_MS = 35_000;
 export const CONFIG_TRANSFER_TIMEOUT_MS = 60_000;
 
 /**
- * The deadline of the device rescan: the USB bus is looked at again, from the start.
+ * The deadline of the device rescan (`GET /devices?rescan=1`): the daemon reads OpenRGB's device
+ * list again, or connects to OpenRGB first when the link is down. It re-reads what OpenRGB
+ * reports; it does not make OpenRGB look at the USB bus again (a real re-detect is issue #290).
+ * The daemon answers within its own budgets (`RESCAN_BUDGET` + `RESCAN_QUEUE_WAIT`, 10 s,
+ * `crates/canvas-daemon/src/openrgb_supervisor.rs`); the rest of the 30 s is margin.
  */
 export const DEVICE_RESCAN_TIMEOUT_MS = 30_000;
 
@@ -180,7 +184,7 @@ export function deadlineFor(path: string): number {
   }
   // The zone resize: the daemon waits on OpenRGB while it holds the adapter.
   if (path.startsWith(routes.devices) && path.includes("/zones/")) return ZONE_RESIZE_TIMEOUT_MS;
-  // The rescan: the USB bus is looked at again.
+  // The rescan: the daemon asks OpenRGB for its devices again, and may connect first.
   if (path.startsWith(routes.devices) && path.includes("rescan")) return DEVICE_RESCAN_TIMEOUT_MS;
   return REQUEST_TIMEOUT_MS;
 }

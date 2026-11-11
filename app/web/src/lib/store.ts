@@ -273,6 +273,17 @@ export async function refreshDevices(n?: number, opts?: { rescan?: boolean }): P
   }
 }
 
+/**
+ * Rescans the devices and says how THIS request went: its error text, `null` when it worked, or
+ * `undefined` when a newer request answered first. The snapshot then holds the newer outcome, and
+ * a `devicesError` left by an earlier request is not this one's to report.
+ */
+export async function rescanForDevices(): Promise<string | null | undefined> {
+  const n = beginRequest("devices");
+  await refreshDevices(n, { rescan: true });
+  return isNewest("devices", n) ? getSnap().devicesError : undefined;
+}
+
 export async function refreshEffects(n?: number): Promise<void> {
   const req = n ?? beginRequest("effects");
   try {

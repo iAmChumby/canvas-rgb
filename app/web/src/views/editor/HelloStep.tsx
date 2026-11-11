@@ -8,7 +8,7 @@ import { InlineSkeleton } from "@/components/Skeleton";
 import { Greeting } from "@/views/editor/Greeting";
 import { Fold, StepFrame } from "@/views/editor/OnboardStep";
 import { HELLO_EFFECT } from "@/views/editor/onboardEffects";
-import { getSnap, refreshDevices, refreshStatus, useSnap } from "@/lib/store";
+import { rescanForDevices, refreshStatus, useSnap } from "@/lib/store";
 import s from "@/views/editor/onboarding.module.css";
 
 /**
@@ -175,10 +175,11 @@ function Ladder({
     setBusy(true);
     setFailure(null);
     try {
-      // The store keeps the list and its total in step, and the failure when the daemon says
-      // OpenRGB did not answer (503): it is shown below, not swallowed.
-      await refreshDevices(undefined, { rescan: true });
-      setFailure(getSnap().devicesError);
+      // The store keeps the list and its total in step; this request's own failure (the daemon says
+      // 503 when OpenRGB did not answer) is shown below, not swallowed.
+      const outcome = await rescanForDevices();
+      // A newer rescan took over: its outcome is the one to show, not an old error.
+      if (outcome !== undefined) setFailure(outcome);
       await refreshStatus();
     } finally {
       setAsked(true);
@@ -208,7 +209,7 @@ function Ladder({
         <Rung>Turn off Fast Startup.</Rung>
         <Rung>Rescan.</Rung>
       </ol>
-      {failure && !busy && <p className="error-line">Could not rescan: {failure}</p>}
+      {failure && !busy && <p className="error-line">Rescan failed: {failure}</p>}
       {asked && !busy && !volunteer && !failure && <p className={s.hint}>Still no lights.</p>}
       <Fold label="More help">
         <p className={s.hint}>Close iCUE, Armoury Crate and Razer Synapse.</p>

@@ -49,6 +49,10 @@ pub struct App {
     /// The OpenRGB adapter. Behind an async mutex: the SDK client is not `Sync` on its
     /// own, and the API handlers await it.
     pub adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
+    /// The OpenRGB link the frame writers use, when the adapter has one to share (the daemon's
+    /// composite does). A frame through it does not wait on the adapter lock, which the supervisor
+    /// holds while it waits on OpenRGB for a reply (#233). `None`: frames go through the adapter.
+    pub frame_lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
     /// The devices as last discovered.
     pub devices: tokio::sync::RwLock<Vec<DeviceInfo>>,
     /// The frame writer of every driven device, keyed by device (see [`crate::device_sync`]).
@@ -230,6 +234,7 @@ impl App {
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
+            frame_lane: None,
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
             preview_subs: PreviewRegistry::default(),
@@ -253,6 +258,13 @@ impl App {
             pipe: Arc::new(crate::pipe_client::ServicePipe),
             thumbnails: crate::thumbnail::ThumbnailCache::default(),
         }
+    }
+
+    /// Gives the frame writers a lane on the OpenRGB link (see [`App::frame_lane`]). The lane must
+    /// be a handle on the same link the adapter uses (`CompositeAdapter::frame_lane`).
+    pub fn with_frame_lane(mut self, lane: canvas_adapters::openrgb::OpenRgbAdapter) -> Self {
+        self.frame_lane = Some(lane);
+        self
     }
 
     /// Adds the peripheral adapters: the mouse and the controller.

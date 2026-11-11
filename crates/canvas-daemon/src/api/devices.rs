@@ -2,7 +2,7 @@
 //! `POST /api/v1/devices/{id}/identify`, and the white balance (#50):
 //! `GET /api/v1/white-balance`, `PUT/DELETE /api/v1/devices/{id}/white-balance`.
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, RawQuery, State};
 use axum::Json;
 use canvas_proto::api::{DevicesResponse, IdentifyRequest, PatchZone, WhiteBalances};
 use canvas_proto::color::WhiteBalance;
@@ -12,33 +12,21 @@ use std::sync::Arc;
 use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 
-/// The query of `GET /api/v1/devices`.
-#[derive(Debug, Default, serde::Deserialize)]
-pub struct ListQuery {
-    /// `?rescan=1` (or `true`): ask OpenRGB for its devices again before answering.
-    #[serde(default)]
-    rescan: Option<String>,
-}
-
-impl ListQuery {
-    fn wants_rescan(&self) -> bool {
-        matches!(self.rescan.as_deref(), Some("1" | "true"))
-    }
-}
-
 /// `GET /api/v1/devices`.
 ///
-/// Answers with the list the daemon holds. With `?rescan=1` it asks the OpenRGB supervisor to read
-/// the devices again, waits until the supervisor applied them (status, zones and frame sinks
-/// included, the same path as every refresh) and answers with that list. A rescan that fails
-/// answers with the failure and leaves the held list alone: it never hands back the old list as
-/// if it were new. The supervisor is the only writer of the list, and it holds the adapter for at
-/// most the rescan's budget ([`RESCAN_BUDGET`](crate::openrgb_supervisor::RESCAN_BUDGET)).
+/// Answers with the list the daemon holds. With `?rescan=1` (or `true`) it asks the OpenRGB
+/// supervisor to read the devices again, waits until the supervisor applied them (status, zones
+/// and frame sinks included, the same path as every refresh) and answers with that list. `0`,
+/// `false` or no `rescan` is the plain read; any other value is a 400 (the rule of every flag, see
+/// [`parse_flag`](crate::api::parse_flag)). A rescan that fails answers with the failure and leaves
+/// the held list alone: it never hands back the old list as if it were new. The supervisor is the
+/// only writer of the list, and it holds the adapter for at most the rescan's budget
+/// ([`RESCAN_BUDGET`](crate::openrgb_supervisor::RESCAN_BUDGET)); frames do not wait on it.
 pub async fn list_devices(
     State(app): State<Arc<App>>,
-    Query(query): Query<ListQuery>,
+    RawQuery(query): RawQuery,
 ) -> ApiResult<Json<DevicesResponse>> {
-    if !query.wants_rescan() {
+    if !crate::api::parse_flag(query.as_deref(), "rescan")? {
         let devices = app.devices.read().await.clone();
         return Ok(Json(DevicesResponse { devices }));
     }
@@ -56,7 +44,7 @@ pub async fn list_devices(
         Ok(Ok(Ok(found))) => found,
         Ok(Ok(Err(e))) => {
             tracing::warn!(error = %e, "the device rescan failed");
-            return Err(ApiFailure::service_unavailable(format!("could not rescan the devices: {e}")));
+            return Err(ApiFailure::service_unavailable(e));
         }
         // The supervisor is gone, or never took the request: say so.
         Ok(Err(_)) | Err(_) => {

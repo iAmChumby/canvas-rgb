@@ -65,6 +65,19 @@ impl CompositeAdapter {
         id.0.starts_with(ROYUAN_PREFIX)
     }
 
+    /// Whether the composite hands this device's frames to OpenRGB (every device it does not
+    /// serve natively).
+    pub fn is_openrgb_device(id: &DeviceId) -> bool {
+        !Self::is_royuan(id)
+    }
+
+    /// A handle on the OpenRGB link this adapter writes frames to. It shares the connection with
+    /// the adapter, so a frame written through it needs no lock on the adapter: the daemon's
+    /// frame writers use it, and a discovery that waits on OpenRGB does not hold their frames back.
+    pub fn frame_lane(&self) -> OpenRgbAdapter {
+        self.openrgb.clone()
+    }
+
     /// Opens the keyboard if it is closed and the retry window has passed.
     async fn ensure_royuan(&mut self) -> Result<(), AdapterError> {
         if !self.keyboard_enabled {

@@ -114,6 +114,9 @@ struct Link {
     writer: tokio::sync::Mutex<Option<OwnedWriteHalf>>,
     /// Serializes request/reply pairs: at most one reply is ever awaited.
     request_gate: tokio::sync::Mutex<()>,
+    /// Woken when an abandoned request's late reply arrived (or the session ended), so the next
+    /// request stops waiting for it.
+    drained: tokio::sync::Notify,
 }
 
 struct Session {
@@ -136,6 +139,26 @@ struct Session {
     keepalive: Duration,
     /// Bumped by every `reset_custom_mode`, so a send in flight can tell it was overtaken.
     resets: u64,
+    /// Requests that were sent and then given up on (their future was dropped, or the reply
+    /// timed out). OpenRGB answers in order and puts no request id in a reply, so the reply to an
+    /// abandoned request would answer the next request with the same device and packet id: the
+    /// reader drops it instead, and the next request waits for it (see `request`).
+    abandoned: Vec<Abandoned>,
+}
+
+/// A request that was sent and given up on before its reply came.
+struct Abandoned {
+    device: u32,
+    packet_id: u32,
+    since: Instant,
+}
+
+impl Session {
+    /// Forgets the abandoned requests whose reply is overdue: it may never come, and a reply that
+    /// late is taken as the answer it looks like.
+    fn prune_abandoned(&mut self, now: Instant) {
+        self.abandoned.retain(|a| now.saturating_duration_since(a.since) < REPLY_TIMEOUT);
+    }
 }
 
 impl Default for Session {
@@ -151,6 +174,7 @@ impl Default for Session {
             mode_sent: HashSet::new(),
             keepalive: CUSTOM_MODE_KEEPALIVE,
             resets: 0,
+            abandoned: Vec::new(),
         }
     }
 }
@@ -159,6 +183,27 @@ struct Pending {
     device: u32,
     packet_id: u32,
     reply: oneshot::Sender<Vec<u8>>,
+}
+
+/// The reply slot of one request, cleared however the request ends: a reply, an error, a
+/// timeout, or its future being dropped mid-wait.
+struct InFlight<'a> {
+    link: &'a Link,
+    device: u32,
+    packet_id: u32,
+    /// The request went out, so the server may still answer it.
+    sent: bool,
+}
+
+impl Drop for InFlight<'_> {
+    fn drop(&mut self) {
+        let mut session = guard(&self.link.session);
+        // A slot the reader already took means the reply arrived: nothing is owed.
+        let unanswered = session.pending.take().is_some();
+        if self.sent && unanswered && session.connected {
+            session.abandoned.push(Abandoned { device: self.device, packet_id: self.packet_id, since: Instant::now() });
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -191,8 +236,10 @@ impl Link {
             }
             session.connected = false;
             session.pending = None;
+            session.abandoned.clear();
             session.reader.take()
         };
+        self.drained.notify_waiters();
         if let Some(reader) = reader {
             reader.abort();
         }
@@ -229,6 +276,7 @@ impl OpenRgbAdapter {
             session: Mutex::new(Session::default()),
             writer: tokio::sync::Mutex::new(None),
             request_gate: tokio::sync::Mutex::new(()),
+            drained: tokio::sync::Notify::new(),
         });
         {
             let mut links = guard(&LINKS);
@@ -261,6 +309,23 @@ impl OpenRgbAdapter {
     /// `SET_CUSTOM_MODE` first. Called after a resume.
     pub fn reset_custom_mode(&self) {
         self.link.reset_custom_mode();
+    }
+
+    /// Writes one frame through the shared link, with no `&mut` on the adapter.
+    ///
+    /// A frame is `SET_CUSTOM_MODE` and `UPDATE_LEDS`: neither has a reply, and neither is ever
+    /// awaited, so a frame cannot be taken for the reply to a request. Each packet is one write
+    /// under the socket lock, so a frame lands cleanly between the packets of a request that is
+    /// waiting on OpenRGB. The daemon's frame writers go through here (a clone of the adapter
+    /// shares the link), so a discovery that is stalled on a reply does not hold a frame back.
+    pub async fn write_frame_shared(&self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
+        let controller = self.controller(device).await?;
+        let led_count = controller.led_count() as usize;
+        if colors.len() != led_count {
+            return Err(AdapterError::Protocol(format!(
+                "frame has {} colors but {device} has {led_count} LEDs", colors.len())));
+        }
+        self.send_leds(controller.index, colors).await
     }
 
     fn require_connected(&self) -> Result<(), AdapterError> {
@@ -319,31 +384,52 @@ impl OpenRgbAdapter {
     }
 
     /// Sends a request and waits for the reply with the same device index and packet id.
+    ///
+    /// Safe to cancel (a caller may give up on it, as the rescan budget does): dropping the future
+    /// clears the reply slot and, when the request was already sent, records it as abandoned.
     async fn request(&self, device: u32, packet_id: u32, payload: &[u8]) -> Result<Vec<u8>, AdapterError> {
         let _gate = self.link.request_gate.lock().await;
+        self.wait_for_abandoned().await;
         let (reply, received) = oneshot::channel();
-        {
-            let mut session = guard(&self.link.session);
-            session.pending = Some(Pending { device, packet_id, reply });
-        }
+        // Declared after the gate, so it drops first: the slot is cleared while the gate is held.
+        let mut in_flight = InFlight { link: &self.link, device, packet_id, sent: false };
+        guard(&self.link.session).pending = Some(Pending { device, packet_id, reply });
         // Checked after the reply slot is set: a reader that ended first has already cleared
         // the session, so the request fails here instead of waiting out the timeout.
         if !guard(&self.link.session).connected {
-            guard(&self.link.session).pending = None;
             return Err(AdapterError::NotConnected);
         }
-        if let Err(error) = self.send(device, packet_id, payload).await {
-            guard(&self.link.session).pending = None;
-            return Err(error);
-        }
+        self.send(device, packet_id, payload).await?;
+        in_flight.sent = true;
         match tokio::time::timeout(REPLY_TIMEOUT, received).await {
             Ok(Ok(reply)) => Ok(reply),
             Ok(Err(_)) => Err(AdapterError::NotConnected),
-            Err(_) => {
-                guard(&self.link.session).pending = None;
-                Err(AdapterError::Protocol(format!(
-                    "no reply to packet {packet_id} for device {device} within {}s",
-                    REPLY_TIMEOUT.as_secs())))
+            Err(_) => Err(AdapterError::Protocol(format!(
+                "no reply to packet {packet_id} for device {device} within {}s",
+                REPLY_TIMEOUT.as_secs()))),
+        }
+    }
+
+    /// Waits until no abandoned request is owed a reply (or the reply is overdue), so the next
+    /// request cannot be answered with an old reply. Called with the request gate held.
+    async fn wait_for_abandoned(&self) {
+        loop {
+            // Registered before the check, so a reply that lands in between still wakes it.
+            let drained = self.link.drained.notified();
+            tokio::pin!(drained);
+            drained.as_mut().enable();
+            let wait = {
+                let mut session = guard(&self.link.session);
+                let now = Instant::now();
+                session.prune_abandoned(now);
+                match session.abandoned.first() {
+                    None => return,
+                    Some(oldest) => REPLY_TIMEOUT.saturating_sub(now.saturating_duration_since(oldest.since)),
+                }
+            };
+            tokio::select! {
+                () = &mut drained => {}
+                () = tokio::time::sleep(wait) => {}
             }
         }
     }
@@ -564,11 +650,13 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.epoch += 1;
             session.connected = false;
             session.pending = None;
+            session.abandoned.clear();
             session.controllers.clear();
             session.custom_mode.clear();
             session.mode_sent.clear();
             session.reader.take()
         };
+        self.link.drained.notify_waiters();
         if let Some(reader) = reader {
             reader.abort();
         }
@@ -586,13 +674,7 @@ impl DeviceAdapter for OpenRgbAdapter {
     }
 
     async fn write_frame(&mut self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
-        let controller = self.controller(device).await?;
-        let led_count = controller.led_count() as usize;
-        if colors.len() != led_count {
-            return Err(AdapterError::Protocol(format!(
-                "frame has {} colors but {device} has {led_count} LEDs", colors.len())));
-        }
-        self.send_leds(controller.index, colors).await
+        self.write_frame_shared(device, colors).await
     }
 
     async fn set_zone_size(&mut self, device: &DeviceId, zone: u32, leds: u32) -> Result<(), AdapterError> {
@@ -665,6 +747,14 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
             let mut session = guard(&link.session);
             if session.epoch != epoch {
                 return;
+            }
+            session.prune_abandoned(Instant::now());
+            // The reply to a request that was given up on: it answers nobody.
+            if let Some(at) = session.abandoned.iter().position(|a| a.device == device && a.packet_id == packet_id) {
+                session.abandoned.remove(at);
+                drop(session);
+                link.drained.notify_waiters();
+                continue;
             }
             session.pending.take_if(|p| p.device == device && p.packet_id == packet_id)
         };
