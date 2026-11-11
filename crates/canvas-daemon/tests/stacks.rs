@@ -5083,6 +5083,7 @@ async fn an_aborted_preview_put_keeps_its_slot_until_the_build_finishes() {
     // The client goes away mid-build, as hyper drops the handler's future: the build keeps
     // running, and its slot stays taken until it finishes.
     put.abort();
+    let _ = put.await;
     assert_eq!(
         harness.app.preview_slots.available_permits(),
         1,
