@@ -13,7 +13,10 @@
 //! A stack's identity is its structure hash (D95.4.6), so a PUT whose structure is the one
 //! already on the lights (or already building) moves values only and starts no build. A build
 //! slower than the editor's beat is still the build that lands: every beat with the same
-//! structure joins it, and at most one build runs per route.
+//! structure joins it, a structure that comes back rejoins the build still making it, and a PUT
+//! with a different structure starts its own build beside the one in flight rather than waiting
+//! for it. The engine is still written only under the gate, so no two builds hand it an effect
+//! at once.
 //!
 //! The editor renews the slot every [`canvas_proto::consts::DRAFT_HEARTBEAT`]; the slot expires
 //! [`canvas_proto::consts::DRAFT_LEASE`] after the last PUT, and the lease starts when the draft
@@ -143,11 +146,11 @@ enum Building {
     Stack { stack_id: String, structure: String, live: LiveStack },
 }
 
-/// The build in flight for the draft route, if one is.
+/// One build running for the draft route.
 ///
-/// At most one is here at a time. A PUT whose draft equals it joins it: the props and the live
-/// map move, the lease is left for the landing, and no second build starts. A PUT with a
-/// different draft re-tokens it, and the build that finishes after that lands nowhere.
+/// A PUT whose draft equals a running build joins it: the props and the live map move, the lease
+/// is left for the landing, and no second build starts. A PUT with a different draft starts a
+/// build of its own and makes it current; the older build finishes and lands nowhere.
 #[derive(Clone)]
 struct InFlight {
     /// Identifies this build; only the token in the book may land.
@@ -177,6 +180,20 @@ impl InFlight {
     }
 }
 
+/// Every build running for the draft route, and which one may land.
+///
+/// A newer PUT starts its own build beside an older one instead of waiting for it: only the
+/// current token lands, and the older result is discarded. A draft that comes back is made
+/// current again, so its still-running build lands instead of a third one starting.
+#[derive(Default)]
+struct Builds {
+    /// The builds still running. A build is removed when it lands or lets go.
+    running: Vec<InFlight>,
+    /// The token of the build whose result may land. A newer PUT, a Stop, an expiry or a
+    /// replacement takes it away.
+    current: Option<u64>,
+}
+
 /// The draft slot and the lock that orders its transitions.
 pub struct Draft {
     slot: Mutex<Option<Slot>>,
@@ -194,12 +211,10 @@ pub struct Draft {
     builder: crate::user_effects::Builder,
     /// The epoch order of a stack draft: which page owns the slot and which ones are older.
     epochs: EpochBook,
-    /// The build in flight, if one is.
-    in_flight: Mutex<Option<InFlight>>,
+    /// The builds running for this route and the one allowed to land.
+    builds: Mutex<Builds>,
     /// The token the next build takes.
     tokens: AtomicU64,
-    /// Held across a build, so one build runs per route even when drafts change quickly.
-    build_lock: tokio::sync::Mutex<()>,
     /// The build that last failed, until a draft lands.
     last_failure: Mutex<Option<FailedBuild>>,
 }
@@ -225,9 +240,8 @@ impl Draft {
             clock,
             builder,
             epochs: EpochBook::default(),
-            in_flight: Mutex::new(None),
+            builds: Mutex::new(Builds::default()),
             tokens: AtomicU64::new(0),
-            build_lock: tokio::sync::Mutex::new(()),
             last_failure: Mutex::new(None),
         }
     }
@@ -286,21 +300,37 @@ impl Draft {
         self.epochs.live()
     }
 
-    fn lock_in_flight(&self) -> MutexGuard<'_, Option<InFlight>> {
-        self.in_flight.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
+    fn lock_builds(&self) -> MutexGuard<'_, Builds> {
+        self.builds.lock().unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// The build in flight, copied.
-    fn in_flight(&self) -> Option<InFlight> {
-        self.lock_in_flight().clone()
+    /// A running build this request matches, copied. A draft already building is joined rather
+    /// than built a second time.
+    fn find_build(&self, matches: impl Fn(&InFlight) -> bool) -> Option<InFlight> {
+        self.lock_builds().running.iter().find(|build| matches(build)).cloned()
     }
 
-    fn in_flight_token(&self) -> Option<u64> {
-        self.lock_in_flight().as_ref().map(|building| building.token)
+    /// Whether `token` is still the build allowed to land.
+    fn is_current(&self, token: u64) -> bool {
+        self.lock_builds().current == Some(token)
     }
 
-    /// Starts a build and returns its token. A build already in flight is superseded: its
-    /// result will find another token and land nowhere.
+    /// Makes a build the one allowed to land: a request for its draft again re-tokenises it,
+    /// so Y -> X -> Y rejoins the build still making Y. A stack build that is joined takes the
+    /// joining page's epoch, so the lease of the draft the build will replace is held open for
+    /// that page, whoever started the build.
+    fn adopt_build(&self, token: u64, epoch: Option<String>) {
+        let mut builds = self.lock_builds();
+        if let Some(epoch) = epoch {
+            if let Some(building) = builds.running.iter_mut().find(|b| b.token == token) {
+                building.epoch = Some(epoch);
+            }
+        }
+        builds.current = Some(token);
+    }
+
+    /// Starts a build and returns its token. A build already running is superseded: its result
+    /// will find another current token and land nowhere.
     fn begin_build(
         &self,
         kind: Building,
@@ -309,33 +339,47 @@ impl Draft {
         epoch: Option<String>,
     ) -> u64 {
         let token = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
-        *self.lock_in_flight() =
-            Some(InFlight { token, kind, props: props.clone(), prior, epoch });
+        let mut builds = self.lock_builds();
+        builds.running.push(InFlight { token, kind, props: props.clone(), prior, epoch });
+        builds.current = Some(token);
         token
     }
 
-    /// Gives a beat's props to the build in flight, when `token` still owns it.
+    /// Gives a beat's props to the build `token`, if it is still running.
     fn update_in_flight(&self, token: u64, props: &Props) {
-        if let Some(building) = self.lock_in_flight().as_mut() {
-            if building.token == token {
-                building.props = props.clone();
-            }
+        if let Some(building) = self.lock_builds().running.iter_mut().find(|b| b.token == token) {
+            building.props = props.clone();
         }
     }
 
-    /// Takes the build in flight when `token` still owns it, so the build can land; `None`
-    /// when a Stop, an expiry, a replacement or a newer PUT superseded it.
+    /// Takes the build `token` out of the book so it can land; `None` when a Stop, an expiry, a
+    /// replacement or a newer PUT superseded it. A superseded build is still removed, so a
+    /// finished build never lingers for a later request to join.
     fn take_in_flight_if(&self, token: u64) -> Option<InFlight> {
-        let mut guard = self.lock_in_flight();
-        match guard.as_ref() {
-            Some(building) if building.token == token => guard.take(),
-            _ => None,
+        let mut builds = self.lock_builds();
+        let at = builds.running.iter().position(|b| b.token == token)?;
+        let building = builds.running.remove(at);
+        if builds.current == Some(token) {
+            builds.current = None;
+            Some(building)
+        } else {
+            None
         }
     }
 
-    /// A PUT whose draft is already on the lights supersedes any build for another one.
+    /// Forgets a build that ended without landing (an error, a join error, a panic).
+    fn forget_build(&self, token: u64) {
+        let mut builds = self.lock_builds();
+        builds.running.retain(|b| b.token != token);
+        if builds.current == Some(token) {
+            builds.current = None;
+        }
+    }
+
+    /// A PUT whose draft is already on the lights supersedes any build for another one, but
+    /// leaves the builds running: one can be rejoined if its draft comes back.
     fn supersede_build(&self) {
-        *self.lock_in_flight() = None;
+        self.lock_builds().current = None;
     }
 
     /// Keeps the draft on the lights alive. A beat from the page that owns it renews the slot's
@@ -348,14 +392,19 @@ impl Draft {
         }
     }
 
-    /// True while a build the owning page started is in flight for the live epoch: the slot's
-    /// lease does not end one then.
+    /// True while the current build, the one the owning page's last PUT started or rejoined, is
+    /// in flight for the live epoch: the slot's lease does not end one then.
     fn building_for_the_live_epoch(&self) -> bool {
         let Some((live, _)) = self.epochs.live() else {
             return false;
         };
-        self.in_flight()
-            .is_some_and(|building| building.epoch.as_deref() == Some(live.as_str()))
+        let builds = self.lock_builds();
+        builds.current.is_some_and(|token| {
+            builds
+                .running
+                .iter()
+                .any(|b| b.token == token && b.epoch.as_deref() == Some(live.as_str()))
+        })
     }
 
     /// The error the last build of `html` failed with, while nothing has landed since.
@@ -400,7 +449,7 @@ impl<'a> BuildLease<'a> {
 
 impl Drop for BuildLease<'_> {
     fn drop(&mut self) {
-        self.draft.take_in_flight_if(self.token);
+        self.draft.forget_build(self.token);
     }
 }
 
@@ -416,6 +465,9 @@ pub enum PutError {
     Validation(String),
     /// The daemon could not hand the effect over: not the editor's problem (500).
     Internal(String),
+    /// The daemon is already rendering its limit of previews: the answer is a 503 with
+    /// `Retry-After`, like the preview routes give, and nothing starts.
+    Busy,
 }
 
 impl std::fmt::Display for PutError {
@@ -425,6 +477,7 @@ impl std::fmt::Display for PutError {
             | PutError::Conflict(message)
             | PutError::Validation(message)
             | PutError::Internal(message) => f.write_str(message),
+            PutError::Busy => f.write_str("the daemon is already rendering its limit of previews"),
         }
     }
 }
@@ -449,6 +502,9 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
 
     let token;
+    // The preview slot this build holds until it finishes. A beat that joins or renews takes
+    // no slot, so only a PUT that starts a build can be refused for lack of one.
+    let slot;
     {
         let _gate = app.draft.gate.lock().await;
         expire_locked(app).await;
@@ -478,13 +534,14 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         }
 
         // The same source is already building: this beat joins it, and the build that started
-        // lands with the newest props. A build slower than the beat still applies.
-        if let Some(building) = app.draft.in_flight() {
-            if building.is_html(html) {
-                app.draft.update_in_flight(building.token, props);
-                app.draft.renew_lease();
-                return Ok(true);
-            }
+        // lands with the newest props. A build slower than the beat still applies. The build is
+        // made current again, so a source that comes back (Y -> X -> Y) lands rather than
+        // queuing a third build.
+        if let Some(building) = app.draft.find_build(|b| b.is_html(html)) {
+            app.draft.update_in_flight(building.token, props);
+            app.draft.adopt_build(building.token, None);
+            app.draft.renew_lease();
+            return Ok(true);
         }
 
         // This source failed to load the last time it was built and nothing has landed since:
@@ -499,6 +556,10 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             Some(slot) => slot.prior.clone(),
             None => app.active_layout().await.and_then(|layout| layout.effect),
         };
+        let Ok(acquired) = app.draft_slots.clone().try_acquire_owned() else {
+            return Err(PutError::Busy);
+        };
+        slot = acquired;
         token = app.draft.begin_build(
             Building::Html { source: Arc::from(html) },
             props,
@@ -507,11 +568,16 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
         );
     }
     // Every exit path from here frees the route: an error, a join error, or a panic in the
-    // blocking task must not leave a token for later beats to join.
+    // blocking task must not leave a token for later beats to join. The lease stays in this
+    // future rather than moving into the blocking task: the landing still needs the token in
+    // the book, and this lease is what takes it back on an error, a join error, a panic, or a
+    // client that goes away mid-build. The slot, on the other hand, is moved into the build,
+    // so it is held for exactly as long as the build runs.
     let _lease = BuildLease::new(&app.draft, token);
-    // One build per route: a PUT for another source waits for the one in flight to let go.
-    let _build = app.draft.build_lock.lock().await;
-    if app.draft.in_flight_token() != Some(token) {
+    // The newest request does not wait for a build it has already superseded: its build runs
+    // beside any older one, and the older result is discarded when it lands. The engine is
+    // written only under the gate, so no two builds hand it an effect at once.
+    if !app.draft.is_current(token) {
         return Ok(false);
     }
 
@@ -520,7 +586,10 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let build_id = id.clone();
     let build_source = html.to_string();
     let build = app.draft.builder();
-    let effect = tokio::task::spawn_blocking(move || build(&build_id, &build_source))
+    let effect = tokio::task::spawn_blocking(move || {
+        let _slot = slot;
+        build(&build_id, &build_source)
+    })
         .await
         .map_err(|e| PutError::Internal(format!("the draft load task failed: {e}")))?
         .map_err(|message| {
@@ -589,6 +658,9 @@ pub async fn put_stack(
     props.extend(overrides.clone());
 
     let token;
+    // The preview slot this build holds until it finishes. A beat that joins or renews takes
+    // no slot, so only a PUT that starts a build can be refused for lack of one.
+    let slot;
     {
         let _gate = app.draft.gate.lock().await;
         expire_locked(app).await;
@@ -627,24 +699,29 @@ pub async fn put_stack(
 
         // The same structure is already building: this beat joins it. The live map is the one
         // the building effect reads, so the values are there when it lands; its props are the
-        // newest, and no second build starts. The beat also renews the lease of the draft on the
-        // lights, which is still the one the build will replace.
-        if let Some(building) = app.draft.in_flight() {
-            if building.is_stack(&stack.id, &structure) {
-                if let Building::Stack { live, .. } = &building.kind {
-                    crate::stack::replace_live(live, stack);
-                }
-                app.draft.update_in_flight(building.token, &props);
-                app.draft.renew_lease();
-                tracing::info!(stack = %stack.id, seq, "a beat joined the stack draft build in flight");
-                return Ok(true);
+        // newest, and no second build starts. The build is made current again, so a structure
+        // that comes back (Y -> X -> Y) lands rather than queuing a third build. The beat also
+        // renews the lease of the draft on the lights, which is still the one the build will
+        // replace.
+        if let Some(building) = app.draft.find_build(|b| b.is_stack(&stack.id, &structure)) {
+            if let Building::Stack { live, .. } = &building.kind {
+                crate::stack::replace_live(live, stack);
             }
+            app.draft.update_in_flight(building.token, &props);
+            app.draft.adopt_build(building.token, Some(epoch.to_string()));
+            app.draft.renew_lease();
+            tracing::info!(stack = %stack.id, seq, "a beat joined the stack draft build in flight");
+            return Ok(true);
         }
 
         let prior = match &existing {
             Some(slot) => slot.prior.clone(),
             None => app.active_layout().await.and_then(|layout| layout.effect),
         };
+        let Ok(acquired) = app.draft_slots.clone().try_acquire_owned() else {
+            return Err(PutError::Busy);
+        };
+        slot = acquired;
         token = app.draft.begin_build(
             Building::Stack {
                 stack_id: stack.id.clone(),
@@ -657,14 +734,21 @@ pub async fn put_stack(
         );
     }
     // Every exit path from here frees the route: an error, a join error, or a panic in the
-    // blocking task must not leave a token for later beats to join.
+    // blocking task must not leave a token for later beats to join. The lease stays in this
+    // future rather than moving into the blocking task: the landing still needs the token in
+    // the book, and this lease is what takes it back on an error, a join error, a panic, or a
+    // client that goes away mid-build. The slot, on the other hand, is moved into the build,
+    // so it is held for exactly as long as the build runs.
     let _lease = BuildLease::new(&app.draft, token);
-    // One build per route: a PUT for another structure waits for the one in flight to let go.
-    let _build = app.draft.build_lock.lock().await;
-    if app.draft.in_flight_token() != Some(token) {
+    // The newest request does not wait for a build it has already superseded: its build runs
+    // beside any older one, and the older result is discarded when it lands. The engine is
+    // written only under the gate, so no two builds hand it an effect at once.
+    if !app.draft.is_current(token) {
         return Ok(false);
     }
-    let building = app.draft.in_flight().expect("the build in flight was read under the build lock");
+    let Some(building) = app.draft.find_build(|b| b.token == token) else {
+        return Ok(false);
+    };
     let live = match &building.kind {
         Building::Stack { live, .. } => Arc::clone(live),
         Building::Html { .. } => unreachable!("this PUT started a stack build"),
@@ -674,6 +758,7 @@ pub async fn put_stack(
     let build_app = Arc::clone(app);
     let build_stack = stack.clone();
     let effect = tokio::task::spawn_blocking(move || -> Result<Box<dyn Effect>, String> {
+        let _slot = slot;
         Ok(Box::new(
             crate::stack::StackEffect::new(
                 &build_stack,
