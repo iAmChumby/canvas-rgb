@@ -4,6 +4,7 @@
 //! tasks share: the on-disk store, the engine handle, the OpenRGB adapter, the device
 //! list, the preview subscribers and the pipe client.
 
+use canvas_adapters::frame_lane::FrameLane;
 use canvas_adapters::resume::ResumeBehavior;
 use canvas_proto::api::{LinkState, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo};
@@ -50,8 +51,9 @@ pub struct App {
     /// own, and the API handlers await it.
     pub adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     /// The OpenRGB link the frame writers use, when the adapter has one to share (the daemon's
-    /// composite does). A frame through it does not wait on the adapter lock, which the supervisor
-    /// holds while it waits on OpenRGB for a reply (#233). `None`: frames go through the adapter.
+    /// composite does, and the OpenRGB adapter itself). A frame through it does not wait on the
+    /// adapter lock, which the supervisor holds while it waits on OpenRGB for a reply (#233).
+    /// `None`: the adapter has no OpenRGB link, and every frame goes through the adapter.
     pub frame_lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
     /// The devices as last discovered.
     pub devices: tokio::sync::RwLock<Vec<DeviceInfo>>,
@@ -157,8 +159,9 @@ impl App {
     ///
     /// The daemon uses this too, so the tests and the daemon build the same state.
     ///
-    /// The adapter must say what it does on a resume (`ResumeBehavior`): an adapter that does
-    /// not cannot be handed to the app, so it does not compile.
+    /// The adapter must say what it does on a resume (`ResumeBehavior`) and whether it has a
+    /// frame lane (`FrameLane`): an adapter that does not cannot be handed to the app, so it
+    /// does not compile.
     pub fn new<A>(
         store: crate::storage::Store,
         engine: Arc<dyn Engine>,
@@ -168,7 +171,7 @@ impl App {
         quit_tx: tokio::sync::mpsc::UnboundedSender<()>,
     ) -> Self
     where
-        A: DeviceAdapter + ResumeBehavior + 'static,
+        A: DeviceAdapter + ResumeBehavior + FrameLane + 'static,
     {
         Self::with_displays(
             store,
@@ -194,7 +197,7 @@ impl App {
         display_adapter: Box<D>,
     ) -> Self
     where
-        A: DeviceAdapter + ResumeBehavior + 'static,
+        A: DeviceAdapter + ResumeBehavior + FrameLane + 'static,
         D: canvas_proto::traits::NumericDisplayAdapter + ResumeBehavior + 'static,
     {
         let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
@@ -215,6 +218,9 @@ impl App {
         inputs.set_requested(audio_source);
         let home = store.home.clone();
         let (rescan_requests, rescan_inbox) = tokio::sync::mpsc::channel(4);
+        // The frame lane comes from the adapter itself: the OpenRGB adapter and the composite
+        // share one link, and the frame writers write through it (#233).
+        let frame_lane = adapter.frame_lane();
         Self {
             device_sinks: Default::default(),
             rescan_requests,
@@ -234,7 +240,7 @@ impl App {
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
-            frame_lane: None,
+            frame_lane,
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
             preview_subs: PreviewRegistry::default(),
@@ -258,13 +264,6 @@ impl App {
             pipe: Arc::new(crate::pipe_client::ServicePipe),
             thumbnails: crate::thumbnail::ThumbnailCache::default(),
         }
-    }
-
-    /// Gives the frame writers a lane on the OpenRGB link (see [`App::frame_lane`]). The lane must
-    /// be a handle on the same link the adapter uses (`CompositeAdapter::frame_lane`).
-    pub fn with_frame_lane(mut self, lane: canvas_adapters::openrgb::OpenRgbAdapter) -> Self {
-        self.frame_lane = Some(lane);
-        self
     }
 
     /// Adds the peripheral adapters: the mouse and the controller.

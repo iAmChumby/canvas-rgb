@@ -5,6 +5,7 @@ pub mod attack_shark_x6;
 pub mod chione;
 pub mod eightbitdo_ultimate2;
 pub mod fake;
+pub mod frame_lane;
 pub mod openrgb;
 mod protocol;
 pub mod resume;

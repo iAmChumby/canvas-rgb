@@ -12,6 +12,7 @@ use axum::http::{Request, StatusCode};
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_daemon::api;
+use canvas_daemon::openrgb_supervisor::RESCAN_BUDGET;
 use canvas_daemon::state::App;
 use canvas_proto::api::{DevicesResponse, LinkState};
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
@@ -99,6 +100,22 @@ async fn wait_for_link(rig: &Rig, state: LinkState) {
     })
     .await
     .unwrap_or_else(|_| panic!("the link never became {state:?}"));
+}
+
+/// Waits until the device has a frame sink, and returns it. The sink is added after the link
+/// state is set, so a test that waits for the link alone can miss it.
+async fn wait_for_sink(rig: &Rig, id: &str) -> Arc<dyn canvas_proto::traits::FrameSink> {
+    let wanted = DeviceId(id.into());
+    tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            if let Some(sink) = rig.engine.sinks.lock().unwrap().get(&wanted).cloned() {
+                return sink;
+            }
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("{id} never got a frame sink"))
 }
 
 fn request(path: &str) -> Request<Body> {
@@ -216,24 +233,19 @@ async fn a_rescan_with_openrgb_down_says_so_and_keeps_the_held_list() {
 }
 
 /// A rescan against an OpenRGB that stops answering must not freeze the lights (#233): the frame
-/// writer waits on the same adapter lock, so the rescan lets go of it after its budget.
+/// writer must not wait on the adapter lock the rescan holds.
 ///
-/// The server stalls and never answers. The budget is 100 ms; the adapter's own reply timeout is
-/// 5 s, so a rescan that held the adapter for the reply timeout (or for the old 25 s budget)
-/// holds a frame back for longer than the 4 s this test allows.
+/// The budget is the production one (`RESCAN_BUDGET`, 5 s), so the rescan may hold the adapter
+/// that long. The frame must reach the lights while the rescan still holds it: the wait is on the
+/// frame the fake records, and the check that the rescan still holds the adapter is what says the
+/// frame did not wait for it. With the old writer the frame waited for the rescan to give the
+/// adapter up, and the check below failed.
 #[tokio::test]
-async fn a_rescan_against_a_stalled_openrgb_lets_the_frames_through() {
+async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
-    let rig = rig("stalled", server.port(), Duration::from_millis(100)).await;
+    let rig = rig("stalled", server.port(), RESCAN_BUDGET).await;
     wait_for_link(&rig, LinkState::Connected).await;
-    let sink = rig
-        .engine
-        .sinks
-        .lock()
-        .unwrap()
-        .get(&DeviceId("openrgb:one".into()))
-        .cloned()
-        .expect("a sink");
+    let sink = wait_for_sink(&rig, "openrgb:one").await;
 
     server.stall_replies(true);
     let rescan = {
@@ -251,13 +263,18 @@ async fn a_rescan_against_a_stalled_openrgb_lets_the_frames_through() {
 
     // A frame goes to the writer while the adapter is held, and must reach the lights.
     sink.submit(vec![Rgb8::WHITE; 8]);
-    let arrived = tokio::time::timeout(Duration::from_secs(4), async {
+    tokio::time::timeout(Duration::from_secs(30), async {
         while server.colors(0) != vec![Rgb8::WHITE; 8] {
             tokio::time::sleep(Duration::from_millis(5)).await;
         }
     })
-    .await;
-    assert!(arrived.is_ok(), "the rescan held the frame back for 4 s");
+    .await
+    .expect("the frame never reached the lights");
+    // The rescan still holds the adapter: the frame did not wait for it.
+    assert!(
+        rig.app.adapter.try_lock().is_err(),
+        "the frame waited for the rescan to give the adapter up"
+    );
 
     // The rescan itself answers that OpenRGB did not answer.
     let status = tokio::time::timeout(Duration::from_secs(30), rescan)
@@ -265,6 +282,5 @@ async fn a_rescan_against_a_stalled_openrgb_lets_the_frames_through() {
         .expect("the rescan answers")
         .expect("the request task ends");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
-    assert!(rig.app.adapter.try_lock().is_ok(), "the adapter is free once the rescan answered");
     server.stall_replies(false);
 }
