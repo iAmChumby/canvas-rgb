@@ -36,6 +36,11 @@ export const HISTORY_DEPTH = 100;
 export const LIVE_THROTTLE_MS = 60;
 /** How long a live write waits when a whole-scene save holds the daemon. */
 export const LIVE_RETRY_MS = 20;
+/**
+ * How many live writes of one group may fail in a row before the group stops trying. A daemon
+ * that is down is not asked again and again; the value stays on screen and in the queue.
+ */
+export const LIVE_FAILURES = 3;
 /** What the page says after a 409. */
 export const CONFLICT_MESSAGE = "Changed in another window";
 
@@ -84,6 +89,8 @@ interface GroupLive {
   version: Record<LiveKind, number>;
   /** When each kind was last sent, so a kind waits its 60 ms. */
   sentAt: Record<LiveKind, number>;
+  /** Live writes of this group that failed in a row. */
+  failures: number;
   /** A write for this group is on its way. */
   sending: boolean;
   /** The timer that sends the next value. */
@@ -184,15 +191,38 @@ function newest(server: Scene | null, saved: Scene | null, id: string | null): S
   return server;
 }
 
-/** The draft with the daemon's own answer for one group laid over it. */
-function adoptGroup(draft: Scene, answer: Scene, groupId: string): Scene {
+/**
+ * The draft with the daemon's own answer for one group laid over it: the rev the answer
+ * carries, and the value the live write put there.
+ *
+ * The rest of the group stays as the user left it. The answer is the daemon's whole scene,
+ * and taking the group from it would drop an edit the user made while the write was out.
+ */
+function adoptGroup(
+  draft: Scene,
+  answer: Scene,
+  groupId: string,
+  kind: LiveKind,
+  written: Props | number,
+): Scene {
   const group = answer.groups.find((g) => g.id === groupId);
   const rev = Math.max(draft.rev, answer.rev);
   if (!group) return { ...draft, rev };
   return {
     ...draft,
     rev,
-    groups: draft.groups.map((g) => (g.id === groupId ? group : g)),
+    groups: draft.groups.map((g) => {
+      if (g.id !== groupId) return g;
+      if (kind === "brightness") return { ...g, brightness: group.brightness };
+      if (g.plays.type !== "effect" || group.plays.type !== "effect") return g;
+      // The values the write put there: the daemon's own, where it has them.
+      const sent = written as Props;
+      const props = { ...g.plays.props };
+      for (const key of Object.keys(sent)) {
+        props[key] = group.plays.props[key] ?? sent[key]!;
+      }
+      return { ...g, plays: { ...g.plays, props } };
+    }),
   };
 }
 
@@ -376,12 +406,21 @@ export function useScene(): UseScene {
       for (;;) {
         const entry = outgoing.current.entries().next();
         if (entry.done) return;
-        const [sceneId, pending] = entry.value;
-        const sent = pending.scene;
-        const sentChanges = pending.changes;
+        const sceneId = entry.value[0];
+        // The whole-scene write holds the daemon: no live write starts while it is on its
+        // way, so the rev cannot move under the save.
+        writing.current = true;
         // The live writes go first: they answer the whole scene, and the save carries their rev.
         if (liveBusy.current > 0) await waitForLive();
-        writing.current = true;
+        // The pending write may have changed while we waited: a live write answered and gave
+        // it the answered rev, or an edit landed. The newest one goes.
+        const pending = outgoing.current.get(sceneId);
+        if (!pending) {
+          writing.current = false;
+          continue;
+        }
+        const sent = pending.scene;
+        const sentChanges = pending.changes;
         let answer: Scene | null = null;
         let failure: unknown = null;
         try {
@@ -529,7 +568,7 @@ export function useScene(): UseScene {
 
   /** Takes the daemon's answer for a live write: the scene, its rev, and the group's values. */
   const adoptLive = useCallback(
-    (answer: Scene, groupId: string, kind: LiveKind, version: number) => {
+    (answer: Scene, groupId: string, kind: LiveKind, version: number, written: Props | number) => {
       adoptScene(answer);
       // The pending write carries the answered rev and the answered values, so the next
       // whole-scene save neither 409s against this write nor reverts it.
@@ -537,7 +576,7 @@ export function useScene(): UseScene {
       if (pending) {
         outgoing.current.set(answer.id, {
           ...pending,
-          scene: adoptGroup(pending.scene, answer, groupId),
+          scene: adoptGroup(pending.scene, answer, groupId, kind, written),
         });
       }
       const g = live.current.get(groupId);
@@ -591,6 +630,7 @@ export function useScene(): UseScene {
       else g.queued.brightness = undefined;
       g.sentAt[kind] = now;
       const version = g.version[kind];
+      const written = kind === "props" ? (props as Props) : (brightness as number);
       g.sending = true;
       liveBusy.current += 1;
       let failure: unknown = null;
@@ -599,7 +639,7 @@ export function useScene(): UseScene {
           kind === "props"
             ? await api.scenes.patchGroupProps(g.sceneId, groupId, props as Props)
             : await api.scenes.putGroupBrightness(g.sceneId, groupId, brightness as number);
-        adoptLive(answer, groupId, kind, version);
+        adoptLive(answer, groupId, kind, version, written);
       } catch (e) {
         failure = e;
       }
@@ -611,10 +651,19 @@ export function useScene(): UseScene {
         for (const resolve of waiters) resolve();
       }
       if (failure) {
+        // The write did not land. The value that came while it was out still goes: a failed
+        // write must not take the next value with it.
+        g.failures += 1;
         fail(messageOf(failure));
-        return;
+        if (g.failures >= LIVE_FAILURES) {
+          // The daemon is not taking writes. The value stays on screen and in the queue; the
+          // next move of the slider tries again.
+          return;
+        }
+      } else {
+        g.failures = 0;
+        publish();
       }
-      publish();
       // The value that came while this one was out goes next.
       if (g.queued.props !== undefined || g.queued.brightness !== undefined) {
         void sendLiveRef.current(groupId);
@@ -641,11 +690,14 @@ export function useScene(): UseScene {
           queued: {},
           version: { props: 0, brightness: 0 },
           sentAt: { props: now, brightness: now },
+          failures: 0,
           sending: false,
           timer: null,
         };
         live.current.set(groupId, g);
       }
+      // The user moved again: the group tries again, whatever came before.
+      g.failures = 0;
       g.version[kind] += 1;
       if (kind === "props") {
         const props = value as Props;
