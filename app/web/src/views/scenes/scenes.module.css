@@ -517,9 +517,11 @@
     height: 52px;
   }
 
+  /* Tight keys: the three demo scenes and the "+" fit beside the reserved "N new" slot. */
   .strip button.sceneKey {
     min-width: 0;
-    padding: 0 var(--s3);
+    padding: 0 var(--s2);
+    gap: var(--s1);
   }
 
   .controls {
@@ -552,8 +554,8 @@
 
   /* The slot sits level with the keys: the strip's own padding sets their top. */
   .newSlot {
-    margin: var(--s3) var(--s3) 0 0;
-    width: 60px;
+    margin: var(--s3) var(--s3) 0 var(--s1);
+    width: 56px;
   }
 
   /* The phone has no room for the plus: the count and the word are the key. */
@@ -566,9 +568,17 @@
     display: none;
   }
 
+  /* Four-pixel gaps all along the strip (keys, "+"): the three demo scenes, the "+" and the reserved
+     "N new" slot fit on a 390 px phone. The trailing padding is the pinned "+" key's own. */
   .strip {
+    gap: var(--s1);
     margin: 0;
-    padding: var(--s3) var(--s3) var(--s2);
+    padding: var(--s3) var(--s1) var(--s2) var(--s3);
+  }
+
+  .plusPin {
+    margin-left: calc(var(--s1) * -1);
+    padding-left: var(--s1);
   }
 
   .frame {
