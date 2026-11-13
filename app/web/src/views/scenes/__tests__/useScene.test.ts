@@ -92,6 +92,58 @@ function liveAnswer(scene: Scene, groupId: string, props?: Props, brightness?: n
 /** The rev the fake daemon is at. Every write it answers moves it one on, as the daemon does. */
 let serverRev = 0;
 
+/**
+ * A fake daemon that holds the scenes, so the scene routes answer with the same list: a scene
+ * that is made is in the list, a scene that is deleted is out of it.
+ */
+function fakeDaemon(): { active: string; activeName: string } {
+  const scenes = clone(DEMO_SCENES.scenes);
+  let active = DEMO_SCENES.active;
+  const list = () => ({
+    active,
+    scenes: clone(scenes),
+    group_states: scenes.find((s) => s.id === active)?.groups.map((g) => ({ id: g.id, failed: null })) ?? [],
+  });
+  api.scenes.list.mockImplementation(async () => list());
+  api.scenes.setActive.mockImplementation(async (id: string) => {
+    active = id;
+    return list();
+  });
+  api.scenes.remove.mockImplementation(async (id: string) => {
+    const at = scenes.findIndex((s) => s.id === id);
+    if (at < 0) throw new ApiFailure(404, "not_found", `no scene with the id ${id}`);
+    scenes.splice(at, 1);
+    if (active === id) active = scenes[0]?.id ?? "";
+    return { ok: true };
+  });
+  api.scenes.create.mockImplementation(async (body: { name: string; copy_of?: string }) => {
+    const source = body.copy_of ? scenes.find((s) => s.id === body.copy_of) : null;
+    const made: Scene = {
+      id: `scene-${scenes.length + 1}`,
+      name: body.name,
+      rev: 1,
+      groups: source ? clone(source.groups) : [],
+    };
+    scenes.push(made);
+    return clone(made);
+  });
+  api.scenes.put.mockImplementation(async (id: string, put: { scene: Scene; expected_rev: number }) => {
+    const saved: Scene = { ...clone(put.scene), rev: put.expected_rev + 1 };
+    const at = scenes.findIndex((s) => s.id === id);
+    if (at < 0) scenes.push(saved);
+    else scenes[at] = saved;
+    return clone(saved);
+  });
+  return {
+    get active() {
+      return active;
+    },
+    get activeName() {
+      return scenes.find((s) => s.id === active)?.name ?? "";
+    },
+  };
+}
+
 /** A live write answered the way the daemon answers: the whole scene, one rev on. */
 function answerLive(groupId: string, props?: Props, brightness?: number): Scene {
   serverRev += 1;
@@ -205,6 +257,69 @@ describe("useScene", () => {
     expect(body.scene.groups).toEqual(beforeGroups);
     expect(body.scene.name).toBe(beforeName);
     await waitFor(() => expect(result.current.canRedo).toBe(true));
+  });
+
+  it("an undo puts a deleted scene back with its groups, and plays it again", async () => {
+    const daemon = fakeDaemon();
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const before = result.current.scenes.length;
+
+    act(() => {
+      result.current.remove(daemon.active);
+    });
+    await waitFor(() => expect(result.current.scenes.length).toBe(before - 1));
+    expect(result.current.canUndo).toBe(true);
+
+    act(() => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(result.current.scenes.length).toBe(before));
+    const back = result.current.scenes.find((s) => s.name === daemon.activeName);
+    expect(back?.groups.length).toBeGreaterThan(0);
+    // The scene that played before plays again.
+    expect(result.current.scene?.id).toBe(back?.id);
+  });
+
+  it("an undo puts a renamed scene's old name back", async () => {
+    const daemon = fakeDaemon();
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const id = result.current.scene?.id ?? "";
+
+    act(() => {
+      result.current.renameScene(id, "Evening wind-down");
+    });
+    await waitFor(() => expect(result.current.scene?.name).toBe("Evening wind-down"));
+    expect(result.current.canUndo).toBe(true);
+
+    act(() => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(result.current.scene?.name).toBe(daemon.activeName));
+  });
+
+  it("an undo takes a made scene away, and a redo makes it again", async () => {
+    fakeDaemon();
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const before = result.current.scenes.length;
+
+    act(() => {
+      result.current.create("Stage");
+    });
+    await waitFor(() => expect(result.current.scenes.length).toBe(before + 1));
+    expect(result.current.canUndo).toBe(true);
+
+    act(() => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(result.current.scenes.length).toBe(before));
+
+    act(() => {
+      result.current.redo();
+    });
+    await waitFor(() => expect(result.current.scenes.length).toBe(before + 1));
   });
 
   it("setProps sends at most one request per 60 ms and always the last value", async () => {
