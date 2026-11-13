@@ -20,7 +20,7 @@ use crate::api::Power;
 use crate::color::Rgb8;
 use crate::device::{AdapterCapabilities, DeviceId, DeviceInfo};
 use crate::display::{DisplayInfo, DisplayValue};
-use crate::layout::{Layout, CANVAS_HEIGHT, CANVAS_WIDTH};
+use crate::layout::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::props::{Props, PropertySchema};
 use crate::scene::{GroupMode, Light, LightId};
 use async_trait::async_trait;
@@ -184,10 +184,6 @@ pub struct RenderStats {
 /// The render loop handle. One thread, fixed-step at `fps`. Parks with no sinks and no
 /// preview. `Paused` writes black to every sink once, then stops rendering.
 pub trait Engine: Send + Sync {
-    /// Recomputes per-LED sample regions. `devices` supplies zone topology and LED counts.
-    fn set_layout(&self, layout: Layout, devices: Vec<DeviceInfo>);
-    fn set_effect(&self, effect: Box<dyn Effect>, props: &Props);
-    fn set_props(&self, props: &Props);
     fn set_fps(&self, fps: u32);
     fn set_power(&self, power: Power);
     fn set_brightness(&self, brightness: u8);

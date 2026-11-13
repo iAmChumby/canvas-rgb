@@ -32,7 +32,6 @@ pub mod routes {
     pub const EFFECTS: &str = "/api/v1/effects";
     pub const EFFECT: &str = "/api/v1/effects/{id}";
     pub const EFFECT_ACTIVATE: &str = "/api/v1/effects/{id}/activate";
-    pub const EFFECT_ACTIVE_PROPS: &str = "/api/v1/effects/active/props";
     /// `GET`: a short looping preview of the effect at its default props, rendered headless by
     /// the daemon (no devices touched). Binary: `u16 LE width, u16 LE height, u16 LE frames`, then
     /// frames x width x height x 3 RGB bytes. 64x40, 24 frames at 12 fps. Cached per effect id
@@ -93,10 +92,6 @@ pub mod routes {
     /// clears the sequence watermark. The preview engine has no device sink, so nothing here
     /// reaches a light. Same body cap as [`EFFECTS_IMPORT`].
     pub const STACK_PREVIEW: &str = "/api/v1/stacks/preview";
-    pub const LAYOUTS: &str = "/api/v1/layouts";
-    pub const LAYOUT: &str = "/api/v1/layouts/{id}";
-    /// `PUT` with [`super::SetActiveLayout`].
-    pub const LAYOUT_ACTIVE: &str = "/api/v1/layouts/active";
     pub const FANS: &str = "/api/v1/fans";
     pub const FAN_HEADER: &str = "/api/v1/fans/headers/{h}";
     pub const FAN_PROFILE: &str = "/api/v1/fans/profile";
@@ -284,8 +279,6 @@ pub struct Status {
     #[serde(default)]
     pub devices_total: u32,
     pub preview_subscribers: u32,
-    pub active_layout: Option<String>,
-    pub active_effect: Option<String>,
     /// The active scene (0.14.0). A daemon from before scenes sends none.
     #[serde(default)]
     #[ts(optional = nullable)]
@@ -834,12 +827,6 @@ pub struct SetFavorite {
 pub struct LayoutsResponse {
     pub active: String,
     pub layouts: Vec<Layout>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct SetActiveLayout {
-    pub id: String,
 }
 
 /// `PATCH /fans/headers/{h}` body is a [`FanMode`].

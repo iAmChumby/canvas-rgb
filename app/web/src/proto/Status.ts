@@ -22,7 +22,7 @@ parked: boolean, devices_connected: number,
  * device while the list is on its way, so it needs the total and not only the connected
  * count. A daemon that does not send it (an older one) reports none.
  */
-devices_total: number, preview_subscribers: number, active_layout: string | null, active_effect: string | null, 
+devices_total: number, preview_subscribers: number, 
 /**
  * The active scene (0.14.0). A daemon from before scenes sends none.
  */
