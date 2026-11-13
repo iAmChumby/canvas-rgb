@@ -624,7 +624,8 @@ impl Store {
     ///
     /// An empty list waits for the next one: with no devices there are no lights to group, and a
     /// first-run `Everything` made now would hold none. A failed write keeps the migration
-    /// pending, so the next list tries again.
+    /// pending: the next list tries again, and so does the wait's timer (`device_sync`), every
+    /// 30 s, when no new list comes.
     ///
     /// It also waits until every device the layouts place has appeared in a list, or until
     /// [`SCENES_DEVICE_WAIT`] has passed since the first non-empty list (the clock is the `now` of

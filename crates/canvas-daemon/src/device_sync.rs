@@ -59,13 +59,7 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     // with the devices known when it ends.
     if let Some(wait) = scenes_deadline {
         let app = Arc::clone(app);
-        tokio::spawn(async move {
-            tokio::time::sleep(wait + std::time::Duration::from_millis(50)).await;
-            let devices = app.devices.read().await.clone();
-            if app.store.write().await.finish_scenes(&devices) {
-                tracing::info!("scenes.json and lights.json were written when the wait for the devices ended");
-            }
-        });
+        tokio::spawn(settle_scenes_wait(app, wait));
     }
     // The engine needs the new devices and the zone sizes.
     if let Some(layout) = app.active_layout().await {
@@ -77,6 +71,32 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     // the supervisor goes on reading.
     let first_run = Arc::clone(app);
     tokio::spawn(async move { crate::first_run::maybe_run(&first_run).await });
+}
+
+/// How long the timer waits between tries when the scenes could not be written at the deadline.
+const SCENES_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Ends the wait for the devices the layouts place: at the deadline, and every [`SCENES_RETRY`]
+/// after a write that failed, it runs the migration with the device list known at that moment
+/// (read under the store lock, so a list that just arrived is never missed). It stops when the
+/// scenes are written, when nothing is pending, or when a scenes file is blocked (that waits for
+/// Luke, not for time).
+async fn settle_scenes_wait(app: Arc<App>, wait: std::time::Duration) {
+    tokio::time::sleep(wait + std::time::Duration::from_millis(50)).await;
+    loop {
+        {
+            let mut store = app.store.write().await;
+            if store.scenes_pending.is_none() || store.lights_blocked || store.scenes_blocked {
+                return;
+            }
+            let devices = app.devices.read().await.clone();
+            if store.finish_scenes(&devices) {
+                tracing::info!("scenes.json and lights.json were written when the wait for the devices ended");
+                return;
+            }
+        }
+        tokio::time::sleep(SCENES_RETRY).await;
+    }
 }
 
 /// Gives every connected device a frame sink in the engine: a bounded(1) channel into a writer
