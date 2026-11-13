@@ -106,7 +106,10 @@ describe("the store's answers", () => {
   });
 
   it("stops asking a daemon without the scene routes until its version changes", async () => {
+    // The first status read sets this daemon's version, so the test does not depend on an earlier
+    // test having set one.
     api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
     api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
     api.lights.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/lights"));
 
