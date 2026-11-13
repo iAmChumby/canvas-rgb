@@ -270,26 +270,11 @@ async fn daemon_main(fakes: bool) -> Exit {
     // user effect's name, and a layer may name one (D95.1.4).
     app.stacks.reload(&app.user_effects);
 
-    // The effect saved on the active layout runs again, so a restart does not leave the
-    // lights black until something activates an effect.
-    let saved_effect = app.active_layout().await.and_then(|layout| layout.effect);
-    if let Some(effect) = saved_effect {
-        // No draft survives a restart, but every apply follows the same rule: end one first,
-        // and keep a beat off while the saved effect goes on.
-        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
-        match canvas_daemon::apply_effect(&app, &effect.id, &effect.props).await {
-            Ok(()) => tracing::info!(effect = %effect.id, "the saved effect was restored"),
-            Err(e) => {
-                tracing::warn!(effect = %effect.id, error = %e, "the saved effect could not be restored");
-                if effect.id == canvas_daemon::migration::USER_POISON_ID {
-                    tracing::warn!(
-                        path = %canvas_daemon::paths::effects_dir().join(canvas_daemon::migration::USER_POISON_FILE).display(),
-                        "the user effect file is missing; install it to run this effect"
-                    );
-                }
-            }
-        }
-    }
+    // The active scene runs again, so a restart does not leave the lights black until something
+    // plays an effect. Its groups' effects are built here; a group whose effect is missing (a
+    // deleted HTML file) is dark and named in the log, and the others run. The device list that
+    // arrives next applies the scene to the real devices.
+    canvas_daemon::scenes::restore_active(&app).await;
 
     // The background tasks. Fakes mode gates off every task that touches a
     // real touchpoint (see `canvas_daemon::fakes`); the OpenRGB supervisor

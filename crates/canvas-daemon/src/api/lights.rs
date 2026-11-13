@@ -88,6 +88,8 @@ pub async fn patch_light(
         .map_err(|e| ApiFailure::validation(format!("the body is not a light patch: {e}")))?;
 
     let devices = app.devices.read().await.clone();
+    // A rename changes nothing the engine plays; an arrangement or a direction does.
+    let replan = patch.arrangement.is_some() || patch.reversed.is_some();
     let (light, saved) = {
         let mut store = app.store.write().await;
         let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
@@ -138,7 +140,12 @@ pub async fn patch_light(
         (store.lights.lights[index].clone(), saved)
     };
 
-    // Task 6: re-apply the active scene
+    // The engine follows: a new arrangement or direction is a new plan for the light's group.
+    if replan && saved {
+        crate::scenes::apply_active(&app, false).await;
+    } else {
+        app.scene.notify();
+    }
 
     if saved {
         tracing::info!(light = %light.id, "a light was changed");
