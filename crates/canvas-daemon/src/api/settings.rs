@@ -241,7 +241,11 @@ pub async fn config_import(
             .and_then(|s| s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c))
     };
     let (rated_cpu, rated_gpu) = (rated_of(HotKind::Cpu), rated_of(HotKind::Gpu));
-    crate::storage::validate_bundle_rated(&bundle, rated_cpu, rated_gpu)
+    // The machines's current devices, so a bundle with scenes and no lights rebuilds its lights
+    // (and so a 0.13 bundle's layouts are migrated with this machine's zones: a matrix zone is a
+    // Grid here, not a Strip).
+    let devices = app.devices.read().await.clone();
+    crate::storage::validate_bundle_rated(&bundle, &devices, rated_cpu, rated_gpu)
         .map_err(|e| ApiFailure::validation(e.to_string()))?;
 
     // The stacks in the bundle go through the rules a PUT does (D95.1.2). A bundle from before
@@ -259,9 +263,6 @@ pub async fn config_import(
     }
 
     let home = app.store.read().await.home.clone();
-    // A 0.13 bundle's layouts are migrated with the daemon's current devices, so the scenes it
-    // makes match this machine's zones (a matrix zone is a Grid, not a Strip).
-    let devices = app.devices.read().await.clone();
     crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
         .map_err(|e| match &e {
             // A file this machine cannot read refuses the import (nothing was written), and a
