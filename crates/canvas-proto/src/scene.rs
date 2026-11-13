@@ -39,10 +39,12 @@ pub const DEFAULT_GROUP_NAME: &str = "Everything";
 /// The most a group's brightness may be.
 pub const GROUP_BRIGHTNESS_MAX: u8 = 100;
 /// The most groups of one scene that may play an HTML effect. Each is a QuickJS runtime whose own
-/// script is the cost (about 5.5 ms a frame for the stock effects, whatever the canvas size); two
-/// keep a 20-group scene inside the frame budget (`docs/benchmark.md`, "Scenes: cost per group").
-/// The same limit as [`crate::stack::STACK_HTML_MAX`]. The daemon also counts a stack's HTML layers.
-pub const SCENE_HTML_MAX: usize = 2;
+/// script is the cost (about 5.5 to 6.7 ms a frame for the stock effects, whatever the canvas
+/// size; `docs/benchmark.md`, "Scenes: cost per group"). One is what is proved to fit a 20-group
+/// scene; two is unproven until the bench runs through the real engine with every stock effect
+/// (Scenes plan, Task 4 Step 5). Raise it only on that evidence. The daemon also counts a
+/// stack's HTML layers.
+pub const SCENE_HTML_MAX: usize = 1;
 /// The id prefix of an HTML effect.
 pub const HTML_EFFECT_PREFIX: &str = "html:";
 
@@ -351,7 +353,7 @@ mod tests {
     }
 
     #[test]
-    fn a_third_html_group_is_refused() {
+    fn an_html_group_over_the_limit_is_refused() {
         let html = |id: &str, member: &str| {
             let mut g = group(id, &[member]);
             g.plays = Plays::Effect { effect: format!("html:{id}"), props: Props::new() };
@@ -361,11 +363,16 @@ mod tests {
         built_in.plays = Plays::Effect { effect: "aurora".into(), props: Props::new() };
         let mut ls = lights();
         ls.push(light("d"));
-        let two = scene(vec![html("g1", "a"), html("g2", "b"), built_in.clone()]);
-        assert_eq!(html_groups(&two), 2);
-        assert_eq!(validate_scene(&two, &ls), Ok(()));
-        let three = scene(vec![html("g1", "a"), html("g2", "b"), html("g3", "c"), built_in]);
-        assert_eq!(validate_scene(&three, &ls), Err(SceneError::TooManyHtml { count: 3 }));
+        let at_max: Vec<Group> =
+            ["a", "b", "c"].iter().take(SCENE_HTML_MAX).enumerate().map(|(i, m)| html(&format!("g{i}"), m)).collect();
+        let mut ok = at_max.clone();
+        ok.push(built_in.clone());
+        assert_eq!(html_groups(&scene(ok.clone())), SCENE_HTML_MAX);
+        assert_eq!(validate_scene(&scene(ok), &ls), Ok(()));
+        let mut over = at_max;
+        over.push(html("gx", "c"));
+        over.push(built_in);
+        assert_eq!(validate_scene(&scene(over), &ls), Err(SceneError::TooManyHtml { count: SCENE_HTML_MAX + 1 }));
     }
 
     #[test]
