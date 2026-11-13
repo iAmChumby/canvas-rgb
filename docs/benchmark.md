@@ -31,9 +31,10 @@ Method: `crates/canvas-core/src/scene_bench.rs`, ignored tests, run through the 
 `cargo test -p canvas-core --release -- --ignored --nocapture --test-threads=1 bench_scene`
 
 One scene frame: every group runs its own effect on its own canvas, then its LEDs are sampled from that
-canvas (area average; whether it is the costliest of the three sampling modes for a scene is unknown
-on the sampling cost). 30 warm-up frames, then 300 timed frames. The times are for the whole frame, every
-group together. The built-in effect is `aurora`; the HTML effect is the daemon's own stock file, one QuickJS
+canvas (area average; whether it is the costliest of the three sampling modes for a scene is unknown).
+30 warm-up frames, then 300 timed frames. The times are every group's effect update and LED sampling
+together; the rest of the engine's frame (brightness, warmth, white balance, device frames) is not timed
+here (Task 4 Step 5 times it). The built-in effect is `aurora`; the HTML effect is the daemon's own stock file, one QuickJS
 runtime per group. An HTML effect runs its script at 60 Hz, so at 30 fps each HTML group runs two script
 frames per engine frame, which is why the 60 fps column is about half the 30 fps one for HTML.
 
