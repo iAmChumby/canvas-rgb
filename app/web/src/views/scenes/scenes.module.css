@@ -601,7 +601,6 @@
 }
 
 /* ---------- the status strip, while this page is open ---------- */
-
 /* The page's context line is the scene's name and what is in it. The name ellipsizes; the counts
    give way first. */
 :global(.rd-scenes-context) {
@@ -661,5 +660,600 @@
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+  }
+}
+
+/* ---------- an icon key in the page's own actions ---------- */
+
+/* The scene menu's key: a square key with a mark on it, the same size as the undo key beside
+   it, so the strip's actions are one row of keys. */
+.iconKey {
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  justify-content: center;
+}
+
+/* ---------- the open group: a sheet over the page ---------- */
+
+/* The sheet is drawn over the page, so opening it moves nothing under the pointer: the rows
+   behind keep their places to the pixel. */
+.sheetRoot {
+  position: fixed;
+  inset: 0;
+  /* Under the popovers (40) and the tooltips (60 and up): a list that drops from a key inside
+     the sheet has to open above the sheet, not behind it. */
+  z-index: 35;
+}
+
+.sheetScrim {
+  position: absolute;
+  inset: 0;
+  background: var(--scrim);
+  animation: sheet-fade var(--dur) var(--ease) both;
+}
+
+@keyframes sheet-fade {
+  from {
+    opacity: 0;
+  }
+}
+
+/* The panel itself: a drawer at the right edge of a wide window, the whole window on a phone. */
+.sheet {
+  position: absolute;
+  top: 0;
+  right: 0;
+  bottom: 0;
+  display: flex;
+  flex-direction: column;
+  width: min(560px, 100vw);
+  border-left: 1px solid var(--line-2);
+  background: var(--panel);
+  animation: sheet-in var(--dur-slow) var(--ease) both;
+}
+
+@keyframes sheet-in {
+  from {
+    transform: translateX(24px);
+    opacity: 0;
+  }
+}
+
+/* The head: the way out, the name, and the menu. The name takes the room that is left. */
+.sheetHead {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s4);
+  border-bottom: 1px solid var(--line);
+}
+
+.sheetTitle {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--ink);
+  font: 600 var(--t16) / 1.2 var(--fu);
+}
+
+/* The body scrolls: the sheet is as tall as the window, whatever the group holds. It never
+   scrolls sideways: a tooltip beside a key at the right edge would widen it, and the browser
+   would then scroll the content out of view when that key takes the focus. */
+.sheetBody {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-x: hidden;
+  overflow-y: auto;
+  padding: var(--s4);
+}
+
+.sheetStep {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.sheetStep > :global(.name-field),
+.sheetStep > :global(.text-in) {
+  width: 100%;
+}
+
+/* The key that goes on to the next step: a key, not a bar across the sheet. */
+.sheetNext {
+  align-self: flex-start;
+}
+
+.sheetLead {
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.3;
+}
+
+/* The group's live lights: the biggest thing in the sheet, as on the page. */
+.sheetRun {
+  height: 72px;
+  margin-bottom: var(--s4);
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.sheetRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+
+.sheetEffect {
+  flex: 1 1 160px;
+  min-width: 0;
+  justify-content: flex-start;
+}
+
+.sheetFader {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  margin-bottom: var(--s4);
+}
+
+.sheetPct {
+  color: var(--dim);
+  font-size: var(--t14);
+  text-align: right;
+}
+
+/* A tooltip inside the sheet hangs to the left of its key. A bubble that hangs to the right of a
+   key near the sheet's edge would widen the sheet's scroll area, and the browser would then
+   scroll the sheet sideways to show the key that took the focus. A bubble that is shown is moved
+   by the tooltip's own code, which keeps it inside the window and inside the sheet. */
+.sheetBody :global(.tip-bubble) {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
+/* A block of the sheet: the effect's controls, its presets, its devices. */
+.sheetBlock {
+  margin-top: var(--s5);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+
+.sheetBlockHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  margin-bottom: var(--s3);
+}
+
+.sheetBlockTitle {
+  margin: 0;
+  color: var(--mute);
+  font: 500 13px / 1 var(--fm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+/* The menu of the sheet and of the scene: one key a row. */
+.sheetMenu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  min-width: 190px;
+}
+
+.sheetMenu > button {
+  justify-content: flex-start;
+}
+
+/* ---------- the effect picker ---------- */
+
+/* The picker is a list, not a wall of cards: every effect is a row with its picture as a wide
+   strip and its whole name beside it. The list fills the height it is given and scrolls in the
+   sheet's own pane. */
+.picker {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.pickerSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.pickerHeading {
+  margin: 0;
+  color: var(--mute);
+  font: 500 13px / 1 var(--fm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.pickerRows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One effect: its picture as a strip, its whole name beside it, and what it is. */
+.pickRow {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s2) var(--s2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease);
+}
+
+.pickRow:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.pickRow:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.pickRow[aria-pressed="true"] {
+  background: var(--live-soft);
+}
+
+.pickRow[data-blocked="true"] {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+/* The picture: the effect's own frame, as a wide band of it. The picture keeps its own shape and
+   the band shows its middle: a strip, not a squashed picture. */
+.pickStrip {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  height: 44px;
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--mute);
+}
+
+.pickStrip :global(.thumb) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  height: 100%;
+  border: 0;
+  border-radius: 0;
+  overflow: hidden;
+}
+
+.pickStrip :global(.thumb canvas) {
+  flex: none;
+  width: 100%;
+  height: auto;
+}
+
+.pickText {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pickName {
+  display: block;
+  min-width: 0;
+  color: var(--ink);
+  font-size: var(--t15);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
+}
+
+/* Why an effect cannot be chosen, on the row it applies to. */
+.pickNote {
+  color: var(--warn);
+  font-size: var(--t14);
+  line-height: 1.25;
+}
+
+/* The effect the group plays now. */
+.pickLive {
+  color: var(--mute);
+  font: 500 13px / 1 var(--fm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* One line under the list: what the lights are showing now. It never changes height. */
+.pickerHint {
+  min-height: 2.6em;
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.3;
+}
+
+/* The head of the picker when it hangs under a row's key: what it is, and the way out. */
+.pickerHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--line);
+}
+
+.pickerHeadText {
+  color: var(--ink);
+  font: 600 var(--t15) / 1.2 var(--fu);
+}
+
+/* The picker in a popover under a row's effect key: wider than the usual list. */
+.pickerPopover {
+  max-width: min(520px, calc(100vw - 16px));
+}
+
+/* ---------- the devices in a group ---------- */
+
+.members {
+  min-width: 0;
+}
+
+.memberList {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One device: the grip that moves it, its name, and the key that takes it out. */
+.member {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s1) var(--s2);
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  transition:
+    background-color var(--dur) var(--ease),
+    border-color var(--dur) var(--ease);
+}
+
+.member:hover {
+  background: var(--hover);
+}
+
+.member[data-held="true"] {
+  border-color: var(--live);
+  background: var(--live-soft);
+}
+
+.grip {
+  cursor: grab;
+  touch-action: none;
+}
+
+.memberName {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+  color: var(--ink);
+  font-size: var(--t14);
+}
+
+.memberLeds {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.memberEmpty {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* ---------- the devices you can add ---------- */
+
+.addList {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.addSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+.addRows {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.addEmpty {
+  padding: var(--s2) 0;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.addRow {
+  border-radius: var(--r-sm);
+}
+
+.addPick {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s2) var(--s2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition: background-color var(--dur) var(--ease);
+}
+
+.addPick:hover:not(:disabled) {
+  background: var(--hover);
+}
+
+.addPick:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: -2px;
+}
+
+.addPick:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.addName {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  gap: 2px;
+  font-size: var(--t14);
+}
+
+.addMeta {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+/* Where the light is now: the group it would leave. */
+.addWhere {
+  flex: none;
+  color: var(--mute);
+  font-size: var(--t14);
+  white-space: nowrap;
+}
+
+.addPopover {
+  max-width: min(420px, calc(100vw - 16px));
+}
+
+/* ---------- the presets of the group's effect ---------- */
+
+.presetRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  align-items: center;
+}
+
+.presetNone {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.presetName {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  margin-top: var(--s3);
+}
+
+.presetName :global(.name-field) {
+  flex: 1 1 160px;
+  min-width: 0;
+}
+
+.presetError {
+  margin: var(--s2) 0 0;
+  color: var(--down);
+  font-size: var(--t14);
+}
+
+/* ---------- a phone: the open group is the whole window ---------- */
+
+@media (max-width: 720px) {
+  .sheet {
+    left: 0;
+    width: 100%;
+    border-left: 0;
+  }
+
+  @keyframes sheet-in {
+    from {
+      transform: translateY(24px);
+      opacity: 0;
+    }
+  }
+
+  .sheetBody {
+    padding: var(--s3);
+  }
+
+  .sheetRun {
+    height: 56px;
+  }
+
+  /* The picture of an effect is a strip on a phone too, but a shorter one. */
+  .pickRow {
+    grid-template-columns: 104px minmax(0, 1fr) auto;
+  }
+
+  .pickStrip {
+    height: 38px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sheet,
+  .sheetScrim {
+    animation: none;
+  }
+
+  .effTile,
+  .member {
+    transition: none;
   }
 }

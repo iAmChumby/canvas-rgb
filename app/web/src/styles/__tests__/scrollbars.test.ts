@@ -125,6 +125,7 @@ const SCROLL_PANES = [
   ".play-on-list",
   '.rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main',
   '.rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main',
+  ".sheetBody",
 ];
 
 /**

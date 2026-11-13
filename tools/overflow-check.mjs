@@ -216,6 +216,25 @@ async function settingsListen(page) {
 /** The Scenes page draws rows, not panels: the rows are its boxes. */
 const SCENE_BOXES = "[data-testid=group-row], [data-testid=unassigned-row]";
 
+/** Scenes: the open group (a sheet over the page) and the effect picker inside it. */
+async function scenesGroup(page) {
+  await page.locator('[data-testid="group-open"]').first().click();
+  await page.waitForSelector('[data-testid="group-sheet"]', { timeout: T });
+}
+
+async function scenesPicker(page) {
+  await scenesGroup(page);
+  await page.locator('[data-testid="sheet-effect"]').click();
+  await page.waitForSelector('[data-testid="effect-picker"]', { timeout: T });
+}
+
+/** Scenes: the list of devices a group can take, dropped from the sheet's own key. */
+async function scenesAddDevices(page) {
+  await scenesGroup(page);
+  await page.locator('[data-testid="sheet-add-devices"]').click();
+  await page.waitForSelector('[data-testid="add-devices"]', { timeout: T });
+}
+
 /**
  * Every view of the demo, and the states of it that draw more than the first paint does.
  * `boxes` adds row containers to measure besides `.panel` and `.rule`. `prep` clicks the row into
@@ -232,6 +251,10 @@ const VIEWS = [
   { name: "scenes-new", url: "/?state=new-light", boxes: SCENE_BOXES },
   { name: "scenes-one", url: "/?state=scene:focus", boxes: SCENE_BOXES },
   { name: "scenes-empty", url: "/?state=groups-0", boxes: SCENE_BOXES },
+  // The open group, the effect picker in it and the list of devices it drops.
+  { name: "scenes-group", url: "/", boxes: SCENE_BOXES, prep: scenesGroup },
+  { name: "scenes-picker", url: "/", boxes: SCENE_BOXES, prep: scenesPicker },
+  { name: "scenes-devices", url: "/", boxes: SCENE_BOXES, prep: scenesAddDevices },
   { name: "effects", url: "/effects/", boxes: ".effect-toolbar, .effect-card" },
   { name: "effects-editor", url: "/effects/?state=html", before: ".effect-card", prep: effectEditor },
   {
