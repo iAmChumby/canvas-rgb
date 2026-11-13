@@ -23,6 +23,9 @@
 //!
 //! The sampling is area average over a strip of 60 LEDs, the most expensive of the
 //! three sampling modes, so the numbers are an upper bound on the sampling cost.
+//!
+//! A second test measures the mixed compositions the scene limit has to cover: 20
+//! groups with one HTML group in them, and with two.
 
 use std::time::{Duration, Instant};
 
@@ -50,7 +53,10 @@ const DT_30: f32 = 1.0 / 30.0;
 const DT_60: f32 = 1.0 / 60.0;
 
 /// The group counts measured.
-const GROUP_COUNTS: [usize; 3] = [1, 8, 20];
+const GROUP_COUNTS: [usize; 3] = [1, 8, MAX_GROUPS];
+
+/// The largest group count measured: the number of groups one scene promises to hold.
+const MAX_GROUPS: usize = 20;
 
 /// The built-in effect measured.
 const BUILTIN_ID: &str = "aurora";
@@ -78,7 +84,8 @@ enum Set {
     AllBuiltin,
     /// Every group runs the HTML effect.
     AllHtml,
-    /// The groups alternate, starting with the built-in one.
+    /// The groups alternate, starting with the built-in one. With one group this set
+    /// is the all-built-in one.
     Half,
 }
 
@@ -97,13 +104,10 @@ impl Set {
         match self {
             Set::AllBuiltin => Kind::Builtin,
             Set::AllHtml => Kind::Html,
-            Set::Half => {
-                if index % 2 == 0 {
-                    Kind::Builtin
-                } else {
-                    Kind::Html
-                }
-            }
+            Set::Half => match index % 2 {
+                0 => Kind::Builtin,
+                _ => Kind::Html,
+            },
         }
     }
 }
@@ -184,7 +188,14 @@ fn percentile(sorted: &[Duration], p: f64) -> f64 {
 /// Measures one set of groups and returns the mean and the p95 in milliseconds per
 /// whole frame (every group).
 fn measure(set: Set, count: usize, dt: f32) -> (f64, f64) {
-    let mut groups: Vec<Group> = (0..count).map(|i| Group::new(set.kind(i))).collect();
+    let kinds: Vec<Kind> = (0..count).map(|i| set.kind(i)).collect();
+    measure_kinds(&kinds, dt)
+}
+
+/// Measures the given groups and returns the mean and the p95 in milliseconds per
+/// whole frame (every group).
+fn measure_kinds(kinds: &[Kind], dt: f32) -> (f64, f64) {
+    let mut groups: Vec<Group> = kinds.iter().map(|kind| Group::new(*kind)).collect();
     let inputs = Inputs::default();
 
     // Warm up, so the first timed frame is not the one that faults the pages in.
@@ -220,6 +231,32 @@ fn bench_scene_groups() {
                     set.name()
                 );
             }
+        }
+    }
+    println!();
+}
+
+/// The mixed compositions the scene limit has to cover: the largest scene, with the
+/// most HTML groups the limit allows in it, and with one more than that.
+///
+/// The built-in effect is cheap and the HTML one is a QuickJS runtime each, so the
+/// limit on HTML groups per scene is what decides whether a scene of 20 groups fits
+/// in a 30 fps frame. These numbers are measured, not extrapolated from the per-group
+/// costs above.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_groups_mixed() {
+    for (label, dt) in [("30 fps", DT_30), ("60 fps", DT_60)] {
+        println!();
+        println!("scenes benchmark, mixed compositions at {label} (dt {dt:.4} s):");
+        for html in [1usize, 2] {
+            let mut kinds: Vec<Kind> = vec![Kind::Html; html];
+            kinds.resize(MAX_GROUPS, Kind::Builtin);
+            let (mean, p95) = measure_kinds(&kinds, dt);
+            println!(
+                "{MAX_GROUPS:>2} groups, {html} HTML + {} built-in  : {FRAMES} frames -> mean {mean:.3} ms/frame, p95 {p95:.3} ms/frame",
+                MAX_GROUPS - html
+            );
         }
     }
     println!();
