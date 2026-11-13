@@ -346,8 +346,9 @@ export async function refreshLayouts(n?: number): Promise<void> {
 }
 
 export async function refreshScenes(n?: number): Promise<void> {
-  // A daemon without the scene routes is not asked again until its version changes.
-  if (scenesUnsupported) return;
+  // A daemon without the scene routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (scenesUnsupported && n === undefined) return;
   const req = n ?? beginRequest("scenes");
   try {
     const scenes = await api.scenes.list();
@@ -363,8 +364,9 @@ export async function refreshScenes(n?: number): Promise<void> {
 }
 
 export async function refreshLights(n?: number): Promise<void> {
-  // A daemon without the light routes is not asked again until its version changes.
-  if (lightsUnsupported) return;
+  // A daemon without the light routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (lightsUnsupported && n === undefined) return;
   const req = n ?? beginRequest("lights");
   try {
     const lights = (await api.lights.list()).lights;
@@ -434,7 +436,7 @@ export const retryDevices = (): Promise<void> =>
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
 export const retryScenes = (): Promise<void> =>
   retryArea("scenes", async (n) => {
-    await Promise.all([refreshScenes(n), refreshLights()]);
+    await Promise.all([refreshScenes(n), refreshLights(beginRequest("lights"))]);
   });
 export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);

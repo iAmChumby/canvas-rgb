@@ -330,6 +330,101 @@ describe("useScene", () => {
     expect(props.amount).toEqual({ type: "number", value: 7 });
   });
 
+  it("a live write that is answered keeps the edit the draft carries", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // The live write stays out until the test lets it land.
+    let release!: () => void;
+    api.scenes.putGroupBrightness.mockImplementationOnce(
+      () =>
+        new Promise<Scene>((resolve) => {
+          release = () => resolve(liveAnswer(gaming(), groupId, undefined, 42));
+        }),
+    );
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setBrightness(groupId, 42);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(1);
+
+    // The user renames the group while the live write is out.
+    act(() => {
+      result.current.edit((draft) => {
+        const group = draft.groups[0];
+        if (group) group.name = "Renamed";
+      }, "Rename group");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    // The save waits for the live write: it goes out after it.
+    expect(api.scenes.put).not.toHaveBeenCalled();
+
+    // The live write answers with the scene and its new rev.
+    await act(async () => {
+      release();
+      await vi.advanceTimersByTimeAsync(20);
+    });
+
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+    const [, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
+    // The rename the user made while the live write was out is still there.
+    expect(body.scene.groups[0]?.name).toBe("Renamed");
+    // The live value goes with it, and the rev is the one the live write answered.
+    expect(body.scene.groups[0]?.brightness).toBe(42);
+    expect(body.expected_rev).toBe(8);
+    expect(body.scene.rev).toBe(8);
+  });
+
+  it("a live write that fails does not take the value that came while it was out with it", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // The first write stays out until the test lets it be refused.
+    let refuse!: (e: unknown) => void;
+    api.scenes.patchGroupProps.mockImplementationOnce(
+      () =>
+        new Promise<Scene>((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(1));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+
+    // The value that comes while the first is out waits for it.
+    act(() => {
+      result.current.setProps(groupId, number(2));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+
+    // The first write is refused.
+    await act(async () => {
+      refuse(new ApiFailure(500, "http", "the daemon said no"));
+      await vi.advanceTimersByTimeAsync(200);
+    });
+    expect(result.current.error).toBe("the daemon said no");
+    // The value that came while it was out still goes.
+    const last = api.scenes.patchGroupProps.mock.calls.at(-1) as [string, string, Props];
+    expect(last[2].amount).toEqual({ type: "number", value: 2 });
+  });
+
   it("an edit that lands while a write is in flight carries the answered rev", async () => {
     let release!: () => void;
     api.scenes.put.mockImplementationOnce(

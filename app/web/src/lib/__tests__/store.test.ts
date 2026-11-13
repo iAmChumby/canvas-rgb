@@ -33,6 +33,7 @@ import {
   refreshSettings,
   refreshStatus,
   retryEffects,
+  retryScenes,
 } from "@/lib/store";
 import { ApiFailure } from "@/lib/errors";
 
@@ -121,13 +122,18 @@ describe("the store's answers", () => {
     expect(api.scenes.list).toHaveBeenCalledTimes(1);
     expect(api.lights.list).toHaveBeenCalledTimes(1);
 
+    // A Try again asks again: the user says so.
+    await retryScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+    expect(api.lights.list).toHaveBeenCalledTimes(2);
+
     // A daemon that changed may have the routes.
     api.status.mockResolvedValue({ ...STATUS, version: "0.14.0" });
     await refreshStatus();
     await refreshScenes();
     await refreshLights();
-    expect(api.scenes.list).toHaveBeenCalledTimes(2);
-    expect(api.lights.list).toHaveBeenCalledTimes(2);
+    expect(api.scenes.list).toHaveBeenCalledTimes(3);
+    expect(api.lights.list).toHaveBeenCalledTimes(3);
   });
 });
 
