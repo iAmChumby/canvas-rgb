@@ -108,10 +108,15 @@ export function playing(
   effects: EffectSummary[] | null,
 ): { name: string; detail: string; count: boolean } {
   if (!status) return { name: "—", detail: "", count: false };
-  if (!status.active_layout) return { name: "No layout yet", detail: "", count: false };
-  const effectName = status.active_effect
-    ? (effects?.find((e) => e.id === status.active_effect)?.name ?? status.active_effect)
-    : "";
+  // A daemon with scenes names the effects every group of the active scene plays; one without
+  // names the layout's single effect.
+  if (!status.active_layout && !status.active_scene) return { name: "No layout yet", detail: "", count: false };
+  const nameOf = (id: string) => effects?.find((e) => e.id === id)?.name ?? id;
+  const effectName = status.active_scene
+    ? (status.active_effects ?? []).map(nameOf).join(", ")
+    : status.active_effect
+      ? nameOf(status.active_effect)
+      : "";
   if (!effectName) return { name: "Nothing is running", detail: "", count: false };
   if (status.power === "paused") return { name: effectName, detail: "paused", count: false };
   if (status.parked) return { name: effectName, detail: "idle", count: false };

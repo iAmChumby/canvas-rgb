@@ -34,6 +34,16 @@ import type { PeripheralRow } from "@/lib/peripherals";
 import type { LayoutsResponse } from "@/proto/LayoutsResponse";
 import type { Layout } from "@/proto/Layout";
 import type { SetActiveLayout } from "@/proto/SetActiveLayout";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { Scene } from "@/proto/Scene";
+import type { SceneCreate } from "@/proto/SceneCreate";
+import type { ScenePut } from "@/proto/ScenePut";
+import type { SceneActivePut } from "@/proto/SceneActivePut";
+import type { GroupBrightnessPut } from "@/proto/GroupBrightnessPut";
+import type { LightsResponse } from "@/proto/LightsResponse";
+import type { LightView } from "@/proto/LightView";
+import type { LightPatch } from "@/proto/LightPatch";
+import type { FlashRequest } from "@/proto/FlashRequest";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
@@ -62,6 +72,26 @@ import type { AudioTestState } from "@/proto/AudioTestState";
 
 /** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
 const ONBOARDING_SESSION = "/api/v1/onboarding/session";
+
+/**
+ * The scene and light routes (canvas-proto `routes::SCENES` and the rest of 0.14.0). The
+ * generated `routes.ts` is a spine file and does not carry them yet, so they live here, the way
+ * `ONBOARDING_SESSION` does, until the spine owner mirrors them.
+ */
+export const sceneRoutes = {
+  scenes: "/api/v1/scenes",
+  scene: (id: string) => `/api/v1/scenes/${encodeURIComponent(id)}`,
+  sceneActive: "/api/v1/scenes/active",
+  groupProps: (scene: string, group: string) =>
+    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/props`,
+  groupBrightness: (scene: string, group: string) =>
+    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/brightness`,
+  lights: "/api/v1/lights",
+  light: (id: string) => `/api/v1/lights/${encodeURIComponent(id)}`,
+  lightsFlash: "/api/v1/lights/flash",
+  /** WebSocket: the per-light feed (`useLightFeed`). */
+  previewLights: "/api/v1/preview/lights",
+};
 
 export const api = {
   status: () => request<Status>("GET", routes.status),
@@ -170,6 +200,33 @@ export const api = {
   putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),
   putActiveLayout: (body: SetActiveLayout) =>
     request<LayoutsResponse>("PUT", routes.layoutActive, body),
+
+  scenes: {
+    /** Every scene, the active one's id and how its groups are doing. */
+    list: () => request<ScenesResponse>("GET", sceneRoutes.scenes),
+    /** A new scene: a copy of `copy_of`, or one group of every light set to Off. */
+    create: (body: SceneCreate) => request<Scene>("POST", sceneRoutes.scenes, body),
+    /** Replaces a scene whole. 409 (the current scene in the body) when `expected_rev` is stale. */
+    put: (id: string, body: ScenePut) => request<Scene>("PUT", sceneRoutes.scene(id), body),
+    /** 409 for the last scene. */
+    remove: (id: string) => request<unknown>("DELETE", sceneRoutes.scene(id)),
+    /** Sets a scene, with a fade. */
+    setActive: (id: string) =>
+      request<ScenesResponse>("PUT", sceneRoutes.sceneActive, { id } satisfies SceneActivePut),
+    /** New values for one group's effect, no rebuild. */
+    patchGroupProps: (sceneId: string, groupId: string, props: Props) =>
+      request<unknown>("PATCH", sceneRoutes.groupProps(sceneId, groupId), props),
+    putGroupBrightness: (sceneId: string, groupId: string, brightness: number) =>
+      request<unknown>("PUT", sceneRoutes.groupBrightness(sceneId, groupId), {
+        brightness,
+      } satisfies GroupBrightnessPut),
+  },
+  lights: {
+    list: () => request<LightsResponse>("GET", sceneRoutes.lights),
+    patch: (id: string, body: LightPatch) => request<LightView>("PATCH", sceneRoutes.light(id), body),
+    /** The named lights white and every other LED black; `stop` ends it. */
+    flash: (body: FlashRequest) => request<unknown>("POST", sceneRoutes.lightsFlash, body),
+  },
 
   fans: () => request<FansStatus>("GET", routes.fans),
   /** The user's "don't exceed" temperatures, one per kind of source (`null` = automatic). */

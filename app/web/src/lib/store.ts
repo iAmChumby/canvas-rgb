@@ -14,6 +14,8 @@ import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { FailedEffect } from "@/proto/FailedEffect";
 import type { Layout } from "@/proto/Layout";
+import type { LightView } from "@/proto/LightView";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { RenderState } from "@/proto/RenderState";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -62,6 +64,12 @@ export interface Snap {
   layouts: Layout[] | null;
   activeLayout: string | null;
   layoutsError: string | null;
+  /** Every scene, the active one's id and how its groups are doing (0.14.0). */
+  scenes: ScenesResponse | null;
+  scenesError: string | null;
+  /** Every light the daemon keeps, with what the editor shows beside it. */
+  lights: LightView[] | null;
+  lightsError: string | null;
   render: RenderState | null;
   settings: Settings | null;
   settingsError: string | null;
@@ -92,6 +100,10 @@ let snap: Snap = {
   layouts: null,
   activeLayout: null,
   layoutsError: null,
+  scenes: null,
+  scenesError: null,
+  lights: null,
+  lightsError: null,
   render: null,
   settings: null,
   settingsError: null,
@@ -314,6 +326,34 @@ export async function refreshLayouts(n?: number): Promise<void> {
   }
 }
 
+export async function refreshScenes(n?: number): Promise<void> {
+  const req = n ?? beginRequest("scenes");
+  try {
+    const scenes = await api.scenes.list();
+    if (!isNewest("scenes", req)) return;
+    markAnswered("scenes", req);
+    patchSnap({ scenes, scenesError: null });
+  } catch (e) {
+    if (!isNewest("scenes", req)) return;
+    markAnswered("scenes", req);
+    patchSnap({ scenesError: messageOf(e) });
+  }
+}
+
+export async function refreshLights(n?: number): Promise<void> {
+  const req = n ?? beginRequest("lights");
+  try {
+    const lights = (await api.lights.list()).lights;
+    if (!isNewest("lights", req)) return;
+    markAnswered("lights", req);
+    patchSnap({ lights, lightsError: null });
+  } catch (e) {
+    if (!isNewest("lights", req)) return;
+    markAnswered("lights", req);
+    patchSnap({ lightsError: messageOf(e) });
+  }
+}
+
 export async function refreshRender(n?: number): Promise<void> {
   const req = n ?? beginRequest("render");
   try {
@@ -367,6 +407,10 @@ export const retryFans = (): Promise<void> => retryArea("fans", refreshFans);
 export const retryDevices = (): Promise<void> =>
   retryArea("devices", (n) => refreshDevices(n, { rescan: true }));
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
+export const retryScenes = (): Promise<void> =>
+  retryArea("scenes", async (n) => {
+    await Promise.all([refreshScenes(n), refreshLights()]);
+  });
 export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);
 export const retryDisplays = (): Promise<void> => retryArea("displays", refreshDisplays);
@@ -396,6 +440,8 @@ export async function refreshAll(): Promise<void> {
     refreshDevices(),
     refreshEffects(),
     refreshLayouts(),
+    refreshScenes(),
+    refreshLights(),
     refreshRender(),
     refreshSettings(),
     refreshDisplays(),
@@ -432,6 +478,10 @@ export function startSync(): () => void {
     // The layout can change outside the editor (the CLI, the daemon's own defaults), and a
     // stale desk canvas is worse than one extra request every four seconds.
     void refreshLayouts();
+    // Scenes and lights change outside the editor too (another window, the CLI, a device that
+    // came back), and the group rows say which group failed.
+    void refreshScenes();
+    void refreshLights();
     void refreshSettings();
     void refreshDisplays();
   };
