@@ -181,6 +181,13 @@ async function effectEditor(page) {
   await page.waitForSelector(".eff-editor", { timeout: T });
 }
 
+/** Effects: the HTML effect's Play on popover, or the sheet's on a phone. */
+async function playOn(page) {
+  await page.getByRole("button", { name: "Open Sample HTML", exact: true }).click();
+  await page.getByRole("button", { name: /^Play on/ }).first().click();
+  await page.waitForSelector(".play-on-list", { timeout: T });
+}
+
 /**
  * Fans: the CPU fan's temperature source list (a Select's listbox, drawn into body) open, in Curve
  * mode. (Peripherals' LED mode select is disabled until the demo allows writes, so it cannot open.)
@@ -250,7 +257,19 @@ const VIEWS = [
   { name: "scenes-devices", url: "/", boxes: SCENE_BOXES, prep: scenesAddDevices },
   { name: "effects", url: "/effects/", boxes: ".effect-toolbar, .effect-card" },
   { name: "effects-editor", url: "/effects/?state=html", before: ".effect-card", prep: effectEditor },
+  {
+    name: "effects-playon",
+    url: "/effects/?state=complete,html",
+    before: ".effect-card",
+    prep: playOn,
+    overlay: true,
+  },
+  { name: "effects-from-group", url: "/effects/?effect=aurora&group=g-case&state=complete" },
   { name: "effects-stack", url: "/effects/?stack=Sunset%20glow&state=complete,stack" },
+  {
+    name: "effects-stack-group",
+    url: "/effects/?stack=Sunset%20glow&state=complete,stack&group=g-case",
+  },
   { name: "devices", url: "/devices/", boxes: ".rd-dev" },
   { name: "displays", url: "/displays/" },
   { name: "peripherals", url: "/peripherals/" },

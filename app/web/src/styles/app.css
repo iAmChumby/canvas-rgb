@@ -2645,6 +2645,14 @@ button.chip:hover {
   min-width: 0;
 }
 
+/* The name and the chips share the row and wrap when they must; a long name wraps inside its
+   own column rather than running under the favourite key. */
+.rd-effects .rd-eff-name-row .effect-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .rd-effects .rd-eff-head-row .rd-eff-fav {
   grid-area: fav;
   align-self: start;
@@ -2741,6 +2749,8 @@ button.chip:hover {
       padding: var(--s2);
     }
 
+    /* The starting-values line is one more row than the inspector had at this size; the property
+       rows give it the room back, so nothing scrolls at 1280x860. */
     .rd-effects .rd-eff-inspector .panel-head {
       margin-bottom: var(--s2);
     }
@@ -2756,6 +2766,22 @@ button.chip:hover {
 
     .rd-effects .preset-note {
       margin-top: 0;
+    }
+  }
+
+  /* A short window (1024x768): one more notch, so the Properties panel ends inside the
+     inspector's height and the starting-values line costs no scroll. */
+  @container page (max-height: 700px) {
+    .rd-effects .rd-eff-inspector {
+      gap: var(--s1);
+    }
+
+    .rd-effects .rd-eff-inspector .panel {
+      padding: var(--s1) var(--s2);
+    }
+
+    .rd-effects .rd-eff-inspector .prop-item {
+      min-height: 32px;
     }
   }
 }
@@ -3258,6 +3284,92 @@ button.chip:hover {
   line-height: 1.4;
 }
 
+/* Play on …: the groups of the active scene, and every group as one choice. */.play-on-anchor {
+  display: inline-flex;
+  min-width: 0;
+  max-width: 100%;
+}
+
+/* The key's words shorten with an ellipsis when the inspector is narrow: the popover still names
+   every group, and the count in the label still says how many are playing. */
+.play-on-anchor .btn {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.play-on-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The phone sheet's way back to the group it came from. */
+.effect-sheet-group {
+  margin-left: auto;
+}
+
+.play-on {
+  gap: var(--s2);
+  min-width: 232px;
+}
+
+.play-on-head {
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+.play-on-note {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.play-on-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.play-on-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 32px;
+  padding: 0 var(--s1);
+  border-radius: var(--r-sm);
+  font-size: var(--t14);
+}
+
+.play-on-row:hover {
+  background: var(--hover);
+}
+
+.play-on-count {
+  margin-left: auto;
+  font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t14);
+}
+
+/* A group that already plays the effect: marked, and its box cannot be unticked here. */
+.play-on-playing {
+  color: var(--ok);
+  font-size: var(--t14);
+}
+
+/* The one line under an effect's controls: they are starting values, not a group's own. */
+.eff-starting-values {
+  margin: 6px 0 0;
+  font-size: var(--t14);
+  line-height: 1.3;
+}
+
 /* New effect: a copy first, a blank second (D2.3). */
 .eff-choose {
   display: flex;
@@ -3695,6 +3807,68 @@ button.chip:hover {
 /* The shape of the zone (linear, single, matrix) under its name, as the list showed it before. */
 .rd-devices .rd-zone .rd-zone-shape {
   font-size: var(--t14);
+}
+
+/* A light's row: its name, strip or ring, and the other way round. It sits under the device
+   row or under the zone row the light belongs to, indented the same. */
+.rd-devices .rd-light-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-height: 40px;
+  padding: var(--s1) var(--s4) var(--s1) calc(var(--s4) + var(--s8) + var(--s3));
+  border-top: 1px dashed var(--line);
+}
+
+.rd-light-key {
+  flex: none;
+  font-size: var(--t14);
+}
+
+.rd-devices .rd-light-name {
+  min-width: 0;
+  max-width: 34ch;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.rd-light-turn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: auto;
+  font-size: var(--t14);
+}
+
+.rd-light-error {
+  flex-basis: 100%;
+}
+
+.rd-devices .rd-dev-row + .rd-light-row {
+  padding-left: var(--s4);
+}
+
+/* A phone: the light's own row is two lines, not three. The device and zone above already say
+   which light this is, so the "Light" word goes and the name takes the first line; the shape and
+   the way round share the second. */
+@media (max-width: 720px) {
+  .rd-devices .rd-light-row {
+    padding-left: var(--s4);
+  }
+
+  .rd-devices .rd-light-key {
+    display: none;
+  }
+
+  .rd-light-name {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+
+  .rd-light-turn {
+    margin-left: 0;
+  }
 }
 
 /* A device that reports no zones: its message and Try again under the row. */
@@ -7471,19 +7645,55 @@ button.chip:hover {
   gap: var(--s4);
 }
 
+/* A short window in the tray layout (1024 x 768, say) has no height to give the stage: the
+   library tray and the layers together took all of it, and the stage letterboxed to 180 px.
+   The main column scrolls instead, so the stage keeps a usable size and the lists below it
+   scroll into view. The rail layout (1280 and up) already gives the stage the full height. */
+@container page (max-height: 820px) {
+  .rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main,
+  .rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main {
+    overflow-y: auto;
+  }
+
+  .rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main .rd-stack-stage,
+  .rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main .rd-stack-stage {
+    flex: 0 0 auto;
+    height: 320px;
+  }
+}
+
 .rd-stack-side {
   gap: var(--s3);
   overflow: hidden;
 }
 
+/* The picked layer's panel takes the height that is left and scrolls its own body; the presets
+   below it keep their height. At 1440x900 the presets used to be pushed past the bottom of the
+   window by the inspector's full length. */
+.rd-stacks .rd-stack-side > .rd-layer-edit {
+  flex: 1 1 auto;
+  min-height: 180px;
+}
+
+.rd-stacks .rd-stack-side > .panel:not(.rd-layer-edit) {
+  flex: 0 0 auto;
+}
+
 /* The live picture: the panel keeps its head and foot, the canvas takes the rest. */
-.rd-stack-stage {
+.rd-stacks .rd-stack-stage {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: var(--s3);
   min-height: 0;
   padding: var(--s3);
+}
+
+/* The builder's leading pair on a phone: back to Effects, and back to the group in Scenes. */
+.rd-stacks-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
 }
 
 .rd-stack-stage .panel-head {
@@ -7773,7 +7983,7 @@ button.chip:hover {
 .rd-part-outline em {
   position: absolute;
   left: 3px;
-  top: 1px;
+  bottom: 1px;
   max-width: calc(100% - 6px);
   box-sizing: border-box;
   overflow: hidden;
@@ -9130,14 +9340,14 @@ button.chip:hover {
     gap: var(--s2);
   }
 
-  /* The mockup's phone head carries the size and the rate; the desk's outlines are a desktop
-     control, and without the switch they would only crowd a 358 px stage. */
-  .rd-stacks-phone .rd-stage-parts {
+  /* The phone head keeps the LEDs switch: the stage draws the group's arrangement there too,
+     and the size and rate note is the part that goes to make room. */
+  .rd-stacks-phone .rd-stage-meta > .fig {
     display: none;
   }
 
   .rd-stacks-phone .rd-parts {
-    display: none;
+    display: block;
   }
 
   .rd-stacks-phone .rd-stage-foot {

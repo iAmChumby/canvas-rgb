@@ -17,6 +17,7 @@ import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
 import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { links, playingLine } from "@/lib/status";
+import { sceneCommands } from "@/shell/commands";
 import { useTakeover } from "@/views/editor/takeover";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 import { PAGE_PATHS } from "@/shell/pagePaths";
@@ -40,6 +41,7 @@ function Frame({ children }: { children: ReactNode }) {
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
+  const scenes = useSnap((s) => s.scenes);
   /** The onboarding has the whole window: the rail, the strip and the banners are hidden. */
   const takeover = useTakeover();
   const [paletteOpen, setPaletteOpen] = useState(false);
@@ -125,6 +127,15 @@ function Frame({ children }: { children: ReactNode }) {
     [],
   );
 
+  const runScene = useCallback(async (id: string) => {
+    try {
+      await api.scenes.setActive(id);
+      await refreshAll();
+    } catch (e) {
+      notify(messageOf(e), "down");
+    }
+  }, []);
+
   const commands = useMemo<Command[]>(() => {
     const list: Command[] = [];
     // The status comes first: the palette says what is going on before it offers anything to
@@ -163,6 +174,7 @@ function Frame({ children }: { children: ReactNode }) {
         run: () => requestNavigation(() => router.push(item.href)),
       });
     }
+    list.push(...sceneCommands(scenes, (id) => void runScene(id)));
     list.push({
       id: "theme",
       group: "Appearance",
@@ -199,7 +211,7 @@ function Frame({ children }: { children: ReactNode }) {
       });
     }
     return list;
-  }, [router, status, statusError, effects, togglePower, runEffect]);
+  }, [router, status, statusError, effects, scenes, togglePower, runEffect, runScene]);
 
   // A phone opens the palette with what is going on, the pages, the lights and the effects
   // you would switch to. The palette shows this list below the phone breakpoint; a desktop

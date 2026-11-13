@@ -22,9 +22,9 @@ import { Toggle } from "@/components/Toggle";
 import { useCanvasWait } from "@/components/Skeleton";
 import { FrameHandles } from "@/views/effects/Handles";
 import { onStackFrame, setStackPreviewStack, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
+import { areaBox, type CanvasLight, type GroupCanvas } from "@/lib/groupCanvas";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
@@ -44,7 +44,7 @@ import {
   type Bounds,
 } from "@/views/effects/stackDraft";
 
-const zoneKey = (zone: Layout["zones"][number]) => `${zone.device_id}:${zone.zone_index}:${zone.part?.kind ?? ""}`;
+const ledKey = (light: CanvasLight) => `${light.device_id}:${light.zone_index}:${light.id}`;
 
 /** The one part the hit-test sees: the picked layer's rectangle. */
 const AREA_REF: PartRef = { kind: "zone", index: 0 };
@@ -63,7 +63,10 @@ function labelRoom(b: LabelBox, stageW: number): number {
   if (stageW <= 0) return 260; // not measured yet: the cap alone
   const unit = stageW / CANVAS_W;
   const room = labelEnd(b) ? (b.x + b.width) * unit : (CANVAS_W - b.x) * unit;
-  return Math.max(48, Math.min(260, Math.floor(room - 4)));
+  // A whole-canvas frame's label sits at the stage's top-left, under the Make rectangle key:
+  // it stops before the key instead of running beneath it (a 390 stage is 340 px wide).
+  const cap = labelInside(b) ? Math.max(80, stageW - 150) : 260;
+  return Math.max(48, Math.min(cap, Math.floor(room - 4)));
 }
 
 /** A finger's reach from a handle's centre: half the 44px hit box (the knob stays 12px). */
@@ -128,8 +131,8 @@ export function StageTools({
         />
       </span>
       <span className="rd-stage-parts">
-        <span className="mute">Parts</span>
-        <Toggle label="Show the desk's device and zone outlines" checked={parts} onChange={onParts} />
+        <span className="mute">LEDs</span>
+        <Toggle label="Show each light's LEDs" checked={parts} onChange={onParts} />
       </span>
       <span className="fig mute">320 × 200 · 15 fps</span>
     </span>
@@ -138,7 +141,7 @@ export function StageTools({
 
 export function Stage({
   stack,
-  layout,
+  canvas,
   devices,
   picked,
   parts,
@@ -157,10 +160,10 @@ export function Stage({
   feedFailed = false,
 }: {
   stack: Stack;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   picked: StackLayer | null;
-  /** Show the desk's device and zone outlines under the frames (the Parts switch). */
+  /** Show each light's slot and its LEDs under the frames (the LEDs switch). */
   parts: boolean;
   onSelect: (id: string | null) => void;
   /**
@@ -191,6 +194,7 @@ export function Stage({
   feedFailed?: boolean;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const ledsRef = useRef<HTMLCanvasElement>(null);
   const stageRef = useRef<HTMLDivElement>(null);
   const drag = useRef<Drag | null>(null);
   /** One number per gesture, so a drag's changes all name the same undo run. */
@@ -234,8 +238,8 @@ export function Stage({
   }, []);
 
   useEffect(() => {
-    setStackPreviewStack(empty ? null : stack, layout);
-  }, [stack, layout, empty]);
+    setStackPreviewStack(empty ? null : stack, canvas);
+  }, [stack, canvas, empty]);
 
   useEffect(
     () =>
@@ -262,58 +266,55 @@ export function Stage({
     [],
   );
 
-  const frames = useMemo(() => stageFrames(stack.layers, layout), [stack.layers, layout]);
-  const visibleZones = useMemo(() => (layout?.zones ?? []).filter((zone) => zone.visible), [layout]);
+  const frames = useMemo(() => stageFrames(stack.layers, canvas), [stack.layers, canvas]);
+  const groupLights = useMemo(() => canvas?.lights ?? [], [canvas]);
+  // The LED points, painted on one canvas: a light can have thousands, and one element each would
+  // make the stage heavy. The slot outlines stay DOM so their labels can be placed.
+  useEffect(() => {
+    const el = ledsRef.current;
+    if (!el) return;
+    const ctx = el.getContext("2d");
+    if (!ctx) return;
+    ctx.clearRect(0, 0, CANVAS_W, CANVAS_H);
+    if (!(parts || dragging)) return;
+    const ink = typeof window === "undefined"
+      ? "#ffffff"
+      : getComputedStyle(document.documentElement).getPropertyValue("--ink").trim() || "#ffffff";
+    ctx.fillStyle = ink;
+    ctx.globalAlpha = 0.5;
+    for (const light of groupLights) {
+      for (const led of light.leds) ctx.fillRect(led.x - 0.9, led.y - 0.9, 1.8, 1.8);
+    }
+    ctx.globalAlpha = 1;
+  }, [groupLights, parts, dragging]);
   // Which outlines carry their name: none that would not fit or would land on another name.
   // Until the picture is measured every name shows.
   const labelPlan = useMemo(
     () =>
       stageW > 0
         ? partLabelPlan(
-            visibleZones.map((zone) => ({
-              key: zoneKey(zone),
-              label: zone.label ?? "",
-              x: zone.x,
-              y: zone.y,
-              width: zone.width,
-              height: zone.height,
+            groupLights.map((light) => ({
+              key: ledKey(light),
+              label: light.label,
+              x: light.box.x,
+              y: light.box.y,
+              width: light.box.width,
+              height: light.box.height,
             })),
             stageW / CANVAS_W,
           )
         : null,
-    [visibleZones, stageW],
+    [groupLights, stageW],
   );
   const pxPerUnit = stageW > 0 ? stageW / CANVAS_W : 0;
-  /** The outlines that would take a drop: every placement of a device, or one zone. */
-  const dropZones = useMemo(() => {
-    const target = drop?.target ?? null;
-    if (!target || !layout) return null;
-    if (target.kind !== "device" && target.kind !== "zone") return null;
-    return new Set(
-      layout.zones
-        .filter(
-          (zone) =>
-            zone.device_id === target.device &&
-            (target.kind === "device" || zone.zone_index === target.zone),
-        )
-        .map(zoneKey),
-    );
-  }, [drop, layout]);
-
-  /**
-   * The box a device or a zone drop would take: every visible placement of it, as one rectangle in
-   * canvas units, drawn with the same dashed accent as the rectangle a drop on empty picture makes.
-   */
+  /** The box a device or a zone drop would take: every light of it in this group. */
   const dropBox = useMemo(() => {
-    if (!dropZones) return null;
-    const zones = visibleZones.filter((zone) => dropZones.has(zoneKey(zone)) && zone.width > 0 && zone.height > 0);
-    if (zones.length === 0) return null;
-    const x0 = Math.min(...zones.map((zone) => zone.x));
-    const y0 = Math.min(...zones.map((zone) => zone.y));
-    const x1 = Math.max(...zones.map((zone) => zone.x + zone.width));
-    const y1 = Math.max(...zones.map((zone) => zone.y + zone.height));
-    return { x0, y0, x1, y1 };
-  }, [dropZones, visibleZones]);
+    const target = drop?.target ?? null;
+    if (!target || (target.kind !== "device" && target.kind !== "zone")) return null;
+    const box = areaBox(canvas, target);
+    if (!box) return null;
+    return { x0: box.x, y0: box.y, x1: box.x + box.width, y1: box.y + box.height };
+  }, [drop, canvas]);
   /**
    * Where the target's name sits: beside the box, inside the picture, over no control. Below it
    * when there is room, above it otherwise, inside its top edge when there is neither; across, it
@@ -338,7 +339,7 @@ export function Stage({
   // stray drag never does it.
   const editable = !!onAreaChange && picked?.area.kind === "rect";
   /** The rectangle the picked area covers, when the chip may offer to make it one. */
-  const asRect = picked ? areaAsRect(picked.area, layout) : null;
+  const asRect = picked ? areaAsRect(picked.area, canvas) : null;
 
   /** Where a press lands on the picked rectangle, by the Layout page's own hit-test. */
   const hitAt = (e: PointerEvent<HTMLDivElement>, area: Bounds) => {
@@ -459,7 +460,7 @@ export function Stage({
     const box = stageRef.current?.getBoundingClientRect();
     if (!box) return;
     const point = pointerToStage(e.clientX, e.clientY, box);
-    const hit = layerAtPoint(stack.layers, layout, point);
+    const hit = layerAtPoint(stack.layers, canvas, point);
     cancelPress(e, { focus: true });
     if (hit !== (picked?.id ?? null)) onSelect(hit);
   };
@@ -560,25 +561,38 @@ export function Stage({
             <span>Or start with a stack below.</span>
           </div>
         )}
-        {!empty && (parts || dragging || (drop && drop.target?.kind !== "maskLayer")) && layout && (
+        {!empty && (parts || dragging || (drop && drop.target?.kind !== "maskLayer")) && canvas && (
           <div className="rd-parts" aria-hidden="true">
-            {visibleZones.map((zone) => {
-              const key = zoneKey(zone);
+            <canvas
+              ref={ledsRef}
+              className="rd-leds"
+              width={CANVAS_W}
+              height={CANVAS_H}
+              data-shown={parts || dragging ? "true" : "false"}
+            />
+            {groupLights.map((light) => {
+              const key = ledKey(light);
+              const target = drop?.target ?? null;
+              const lit =
+                target !== null &&
+                (target.kind === "device" || target.kind === "zone") &&
+                target.device === light.device_id &&
+                (target.kind === "device" || target.zone === light.zone_index);
               return (
                 <span
                   key={key}
                   className="rd-part-outline"
-                  data-drop={dropZones?.has(key) ? "true" : undefined}
+                  data-drop={lit ? "true" : undefined}
                   style={{
-                    left: `${(zone.x / CANVAS_W) * 100}%`,
-                    top: `${(zone.y / CANVAS_H) * 100}%`,
-                    width: `${(zone.width / CANVAS_W) * 100}%`,
-                    height: `${(zone.height / CANVAS_H) * 100}%`,
+                    left: `${(light.box.x / CANVAS_W) * 100}%`,
+                    top: `${(light.box.y / CANVAS_H) * 100}%`,
+                    width: `${(light.box.width / CANVAS_W) * 100}%`,
+                    height: `${(light.box.height / CANVAS_H) * 100}%`,
                   }}
                 >
-                  {zone.label &&
+                  {light.label &&
                     (!labelPlan || labelPlan.has(key)) &&
-                    !(drop && stageW > 0 && zone.y * pxPerUnit < STRIP_PX) && <em>{zone.label}</em>}
+                    !(drop && stageW > 0 && light.box.y * pxPerUnit < STRIP_PX) && <em>{light.label}</em>}
                 </span>
               );
             })}
@@ -631,7 +645,7 @@ export function Stage({
                     data-inside={labelInside(frame.bounds) ? "true" : undefined}
                     style={{ maxWidth: `${labelRoom(frame.bounds, stageW)}px` }}
                   >
-                    {layer.name} · {areaName(layer.area, layout, devices)}
+                    {layer.name} · {areaName(layer.area, canvas, devices)}
                   </span>
                 )}
                 {draggable && (

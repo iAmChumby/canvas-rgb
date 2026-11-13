@@ -197,6 +197,7 @@ export function ButtonLink({
   children,
   className,
   prefetch = false,
+  label,
   onClick,
 }: {
   href: string;
@@ -206,6 +207,8 @@ export function ButtonLink({
   children: ReactNode;
   className?: string;
   prefetch?: boolean;
+  /** The link's accessible name, for a link whose words are hidden at some widths. */
+  label?: string;
   onClick?: () => void;
 }) {
   const router = useRouter();
@@ -214,6 +217,7 @@ export function ButtonLink({
       href={href}
       className={buttonClass(variant, size, className)}
       prefetch={prefetch}
+      aria-label={label}
       onClick={(e) => {
         onClick?.();
         // An editor with unsaved code asks before any link leaves the page, like the rail.

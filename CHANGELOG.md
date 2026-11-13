@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+- Effects: Play on chooses the groups; the builder shows the group you are tuning. (#310)
 - The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
 - Scenes: tune an effect inside its group, and make groups and scenes from your own devices. (#310)
 - Command line: `canvas-rgb scenes list` shows the scenes with the active one marked, `canvas-rgb scenes set <name>` sets one by name (case does not matter), and `canvas-rgb status` names the active scene (#310)

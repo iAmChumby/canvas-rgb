@@ -9,7 +9,6 @@ import {
   MagnifyingGlass,
   MonitorPlay,
   PencilSimple,
-  Play,
   Plus,
   SquaresFour,
   Star,
@@ -18,7 +17,7 @@ import {
   Warning,
   Waveform,
 } from "@phosphor-icons/react";
-import { Button, ButtonLink, FileButton, IconButton, Swap } from "@/components/Button";
+import { Button, ButtonLink, FileButton, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { Panel } from "@/components/Panel";
@@ -37,6 +36,7 @@ import { PresetStrip } from "@/views/PresetStrip";
 import { EffectEditor, type EffectEditorHandle, type EditorTarget, type SavedEffect } from "@/views/effects/EffectEditor";
 import { NewEffectChooser } from "@/views/effects/NewEffectChooser";
 import { StackBuilder } from "@/views/effects/StackBuilder";
+import { PlayOn } from "@/views/effects/PlayOn";
 import { useStackParam } from "@/lib/stackRoute";
 import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
@@ -67,18 +67,80 @@ export function EffectsView() {
   const effectsError = useSnap((s) => s.effectsError);
   const failed = useSnap((s) => s.effectsFailed);
   const status = useSnap((s) => s.status);
-  const activeId = useSnap((s) => s.status?.active_effect ?? null);
+  // With scenes every group plays its own effect, so "running" is any group of the active scene.
+  const activeEffects = useMemo(
+    () =>
+      status?.active_effects ??
+      (status?.active_effect ? [status.active_effect] : []),
+    [status],
+  );
+  // The groups "Play on …" offers: the active scene's, in its order.
+  const scenesAnswer = useSnap((s) => s.scenes);
+  const scenesError = useSnap((s) => s.scenesError);
+  const groupsKnown = scenesAnswer !== null || scenesError !== null;
+  const activeScene = useMemo(
+    () => scenesAnswer?.scenes.find((s) => s.id === scenesAnswer.active) ?? null,
+    [scenesAnswer],
+  );
+  const groups = activeScene?.groups ?? [];
+  const playedGroups = useMemo(
+    () => groups.filter((g) => g.plays.type === "effect"),
+    [groups],
+  );
+  const playingIds = useMemo(
+    () => new Set(playedGroups.flatMap((g) => (g.plays.type === "effect" ? [g.plays.effect] : []))),
+    [playedGroups],
+  );
+  const firstPlaying = playedGroups[0]?.plays.type === "effect" ? playedGroups[0].plays.effect : null;
+  const activeId = firstPlaying ?? activeEffects[0] ?? null;
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("effects"));
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<string | null>(null);
+  // `?effect=<id>&group=<id>` is how an open group's "Edit effect" arrives: the effect opens,
+  // and the way back to the Scenes page names the group.
+  const [params] = useState(() =>
+    typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search),
+  );
+  const effectParam = params.get("effect");
+  const groupParam = params.get("group");
+  const groupName = groups.find((g) => g.id === groupParam)?.name ?? null;
+  const groupHref = groupParam ? `/?group=${encodeURIComponent(groupParam)}` : null;
+  const [picked, setPicked] = useState<string | null>(() =>
+    effectParam && !effectParam.startsWith("stack:") ? effectParam : null,
+  );
   // The running effect is the default; a click on the list overrides it.
   const selectedId = picked ?? activeId ?? effects?.[0]?.id ?? null;
   const setSelectedId = setPicked;
   const [loaded, setLoaded] = useState<{ id: string; detail: EffectDetail } | null>(null);
   const [values, setValues] = useState<Values>({});
+  // A stack counts as an HTML effect when one of its layers is one (the daemon's
+  // `stack_has_html`): Play on then offers one group at a time.
+  const [htmlStack, setHtmlStack] = useState<{ name: string; html: boolean } | null>(null);
+  const stackName = selectedId?.startsWith("stack:") ? selectedId.slice("stack:".length) : null;
+  const stackHtml = stackName !== null && htmlStack?.name === stackName ? htmlStack.html : false;
+  useEffect(() => {
+    if (!stackName) return;
+    let stop = false;
+    api
+      .stack(stackName)
+      .then((detail) => {
+        if (stop) return;
+        setHtmlStack({
+          name: stackName,
+          html: detail.stack.layers.some((layer) => layer.effect.startsWith("html:")),
+        });
+      })
+      .catch(() => {
+        // The stack builder says why its own read failed; here the stack is played like one
+        // effect and the daemon refuses a second HTML group if it must.
+        if (!stop) setHtmlStack({ name: stackName, html: false });
+      });
+    return () => {
+      stop = true;
+    };
+  }, [stackName]);
   // The detail read's error and a write's error are separate: a successful read clears
   // only the read error, so it cannot hide a failed write's message (#156).
   const [readError, setReadError] = useState<string | null>(null);
@@ -128,16 +190,35 @@ export function EffectsView() {
   // Build mode is `?stack=<name>` on this route (D95.5.1).
   const [stackParam, goStack] = useStackParam();
   const openStack = (name: string) => goStack(name);
+  // A group whose effect is a stack opens its builder, with the group it was tuned in.
+  const openedFromGroup = useRef(false);
+  useEffect(() => {
+    if (openedFromGroup.current || !effectParam?.startsWith("stack:")) return;
+    openedFromGroup.current = true;
+    goStack(effectParam.slice("stack:".length));
+    // The URL is read once at mount; `goStack` is the route's own setter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectParam]);
   // The sheet's Back reaches the editor's unsaved prompt through this.
   const editorRef = useRef<EffectEditorHandle | null>(null);
   // On a phone the detail is pushed over the gallery.
   const narrow = useMediaQuery("(max-width: 720px)");
-  const [pushed, setPushed] = useState(false);
+  // A phone opens the sheet when the page was asked for one effect by name ("Edit effect" from
+  // a group): the effect must not sit behind the library. Read once, at mount.
+  const opensEffect = effectParam !== null && !effectParam.startsWith("stack:");
+  const [pushed, setPushed] = useState(
+    () =>
+      opensEffect &&
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 720px)").matches,
+  );
   const [closing, setClosing] = useState(false);
   // Set when the push has settled: the gallery is then out of the way and out of the tab order.
-  const [settled, setSettled] = useState(false);
+  const [settled, setSettled] = useState(pushed);
   // The height of the status strip when the sheet opened.
-  const [sheetTop, setSheetTop] = useState<string | null>(null);
+  const [sheetTop, setSheetTop] = useState<string | null>(() =>
+    pushed ? currentStripHeight() : null,
+  );
 
   const pending = useRef<Values>({});
   /** The effect the waiting values were edited on. */
@@ -171,20 +252,9 @@ export function EffectsView() {
     pendingFor.current = null;
     if (!id || Object.keys(batch).length === 0) return;
     try {
-      if (getSnap().status?.active_effect === id) {
-        await api.patchActiveProps(batch);
-      } else {
-        // The first edit to a stopped effect starts it, with the edited values on top. The
-        // Activate button is the control that starts the effect, so it shows the wait for the
-        // activation this edit asked for.
-        startActivating();
-        try {
-          await api.activateEffect(id, { props: batch, preset: null });
-          await refreshAll();
-        } finally {
-          endActivating();
-        }
-      }
+      // The Effects page's controls are the effect's starting values: what the next group to
+      // play it starts from. A group that already plays it keeps its own values.
+      await api.patchEffectDefaults(id, batch);
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
       clearWrite(id);
     } catch (e) {
@@ -245,13 +315,18 @@ export function EffectsView() {
   const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
   const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
 
-  const activate = async (preset: string | null) => {
+  const activate = async (onGroups: string[] | null = null, preset: string | null = null) => {
     if (!selectedId) return;
     const id = selectedId;
     clearWrite(id);
     startActivating();
     try {
-      await api.activateEffect(id, { props: {}, preset });
+      await api.activateEffect(id, {
+        props: {},
+        preset,
+        // No group named is every group: a daemon from before scenes has no groups to name.
+        ...(onGroups && onGroups.length > 0 ? { groups: onGroups } : {}),
+      });
       await refreshAll();
       // One pulse once the effect is on the lights (issue #187, rule 6): it
       // fires only here, after the daemon confirmed — never from `running`,
@@ -477,6 +552,10 @@ export function EffectsView() {
     setTimeout(() => setSettled(true), 240);
   };
 
+  // "Edit effect" from a group (`?effect=<id>`) opens that effect: on a phone the sheet it
+  // lives in opens too (its initial state above), so the page does not land on the library
+  // with the effect behind it.
+
   /**
    * Switches the inspector into the code editor for one effect (D2.2). The detail is optional:
    * Try again after a failed read asks for the effect itself, so it retries what failed even
@@ -610,10 +689,23 @@ export function EffectsView() {
   // is never blank; the Activate button waits for the real one.
   const detail = loaded ? loaded.detail : null;
   const stale = loaded !== null && loaded.id !== selectedId;
-  const running = selectedId !== null && selectedId === activeId;
+  /** The groups of the active scene that play this effect, by name. */
+  const playingHere =
+    selectedId === null
+      ? []
+      : playedGroups.flatMap((g) =>
+          g.plays.type === "effect" && g.plays.effect === selectedId ? [g.name] : [],
+        );
+  // A daemon without scenes has no groups to read: its one active effect is the running one.
+  const running =
+    selectedId !== null &&
+    (playingHere.length > 0 ||
+      (scenesAnswer === null && activeEffects.includes(selectedId)));
+  const isPlaying = (id: string) =>
+    playingIds.has(id) || (scenesAnswer === null && activeEffects.includes(id));
   const needsInput = detail ? detail.schema.needs.screen || detail.schema.needs.audio : false;
-  // Nothing can run until there is a layout.
-  const noLayout = status !== null && !status.active_layout;
+  // Nothing can run until there is a scene with a group to play on.
+  const noScene = status !== null && !status.active_scene;
 
   // Which preset the values on screen mean, and whether they have moved off it. The rail and the
   // strip read it from the same place.
@@ -758,7 +850,7 @@ export function EffectsView() {
                   </span>
                   {html && <Chip html>HTML</Chip>}
                   {stackEffect && <Chip className="chip-stack">Stack</Chip>}
-                  {e.id === activeId && (
+                  {isPlaying(e.id) && (
                     <span className="effect-card-badge">
                       <span className="effect-card-badge-dot" aria-hidden="true" />
                       running
@@ -787,20 +879,20 @@ export function EffectsView() {
 
   const detailNormal = (
     <div className="stack">
-      {noLayout && (
+      {noScene && (
         <EmptyState
           icon={<SquaresFour size={24} />}
-          title="No layout to run on yet"
+          title="No scene to run on yet"
           action={
             <ButtonLink href="/" variant="primary" size="sm">
-              Open the Layout
+              Open Scenes
             </ButtonLink>
           }
         >
           The effects are still here, ready for one.
         </EmptyState>
       )}
-      {!(noLayout && !detail) && (
+      {!(noScene && !detail) && (
       <LoadFrame
         className="stack"
         state={detail ? "ready" : readError ? "error" : "loading"}
@@ -842,16 +934,17 @@ export function EffectsView() {
                     <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
                   </div>
                 </div>
-                <Button
-                  ref={applyPulseEl}
-                  variant={running ? "default" : "primary"}
+                <PlayOn
+                  effect={detail.schema.id}
+                  groups={groups}
+                  playing={playingHere}
+                  groupsKnown={groupsKnown}
+                  html={(selectedId?.startsWith("html:") ?? false) || stackHtml}
                   busy={activating}
-                  disabled={running || stale}
-                  onClick={() => void activate(null)}
-                  icon={<Play size={14} weight="fill" />}
-                >
-                  <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
-                </Button>
+                  disabled={stale}
+                  pulseRef={applyPulseEl}
+                  onPlay={(names) => void activate(names)}
+                />
               </div>
               <Chip
                 className="rd-eff-fav"
@@ -970,17 +1063,18 @@ export function EffectsView() {
                   >
                     Edit stack
                   </Button>
-                  <Button
-                    ref={applyPulseSheetEl}
-                    variant="default"
-                    size="sm"
+                  <PlayOn
+                    effect={detail.schema.id}
+                    groups={groups}
+                    playing={playingHere}
+                    groupsKnown={groupsKnown}
+                    html={stackHtml}
                     busy={activating}
-                    disabled={running || stale}
-                    onClick={() => void activate(null)}
-                    icon={<Play size={14} weight="fill" />}
-                  >
-                    <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
-                  </Button>
+                    disabled={stale}
+                    size="sm"
+                    pulseRef={applyPulseSheetEl}
+                    onPlay={(names) => void activate(names)}
+                  />
                 </div>
               </div>
             ) : (
@@ -989,6 +1083,9 @@ export function EffectsView() {
                 values={values}
                 onChange={onChange}
               />
+            )}
+            {!isStack && (
+              <p className="mute eff-starting-values">Starting values. A group keeps its own.</p>
             )}
             {(shownWriteError ?? readError) && (
               <p className="error-line" style={{ marginTop: 8 }}>{shownWriteError ?? readError}</p>
@@ -1044,6 +1141,8 @@ export function EffectsView() {
     return (
       <StackBuilder
         initialName={stackParam}
+        groupHref={groupHref}
+        groupName={groupName}
         onClose={() => goStack(null, { replace: true })}
         onName={(name) => goStack(name, { replace: true })}
         onWriteCode={() => {
@@ -1082,6 +1181,17 @@ export function EffectsView() {
         }
       />
       <PageActions>
+        {groupHref && (
+          <ButtonLink
+            href={groupHref}
+            variant="ghost"
+            size="sm"
+            icon={<CaretLeft size={15} />}
+            label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+          >
+            <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+          </ButtonLink>
+        )}
         <Button
           size="sm"
           variant="primary"
@@ -1275,6 +1385,17 @@ export function EffectsView() {
                   }}
                 />
                 <span>Effects</span>
+                {groupHref && (
+                  <ButtonLink
+                    href={groupHref}
+                    variant="ghost"
+                    size="sm"
+                    className="effect-sheet-group"
+                    label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+                  >
+                    {groupName ? `Back to ${groupName}` : "Back to the scene"}
+                  </ButtonLink>
+                )}
               </div>
               {detailPane}
             </div>

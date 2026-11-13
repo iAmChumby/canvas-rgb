@@ -157,7 +157,7 @@ export function playing(
   effects: EffectSummary[] | null,
 ): { name: string; detail: string; count: boolean } {
   if (!status) return { name: "—", detail: "", count: false };
-  if (!status.active_layout && !status.active_scene) return { name: "No scene yet", detail: "", count: false };
+  if (!status.active_scene && !status.active_effect) return { name: "No scene yet", detail: "", count: false };
   const scene = status.active_scene?.name ?? null;
   const effectName = status.active_scene
     ? (status.active_effects ?? []).map((id) => effectNameOf(effects, id)).join(", ")

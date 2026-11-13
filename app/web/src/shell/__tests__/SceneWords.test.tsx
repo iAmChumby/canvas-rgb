@@ -96,9 +96,14 @@ describe("what is playing", () => {
   });
 
   it("says 'No scene yet', not 'No layout yet', when there is neither a scene nor a layout", () => {
-    const none = playing(status({ active_scene: null, active_layout: null }), EFFECTS);
+    const none = playing(status({ active_scene: null, active_layout: null, active_effect: null }), EFFECTS);
     expect(none.name).toBe("No scene yet");
     expect(none.name).not.toMatch(/layout/i);
+  });
+
+  it("says 'No scene yet' when a layout has no effect, because scenes are the only key", () => {
+    const old = status({ active_scene: null, active_layout: "desk", active_effect: null });
+    expect(playing(old, EFFECTS).name).toBe("No scene yet");
   });
 
   it("names the effect for a daemon without scenes", () => {
