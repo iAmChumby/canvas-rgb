@@ -884,6 +884,10 @@ pub fn scenes_for_export(store: &Store) -> (Option<LightsFile>, Option<ScenesFil
         None
     } else if let Some(pending) = &store.scenes_pending {
         (!pending.held_lights.lights.is_empty()).then(|| pending.held_lights.clone())
+    } else if store.lights.lights.is_empty() {
+        // An empty in-memory file is the default made when `lights.json` was absent: exporting it
+        // would replace the target's real lights with nothing.
+        None
     } else {
         Some(store.lights.clone())
     };
@@ -999,7 +1003,33 @@ fn validate_bundle_scenes(bundle: &ExportBundle, devices: &[DeviceInfo]) -> Resu
     let Some(scenes) = &bundle.scenes else {
         return Ok(());
     };
+    let before = scenes;
     let (lights, scenes, _) = prepared_scenes(bundle.lights.as_ref(), scenes, devices);
+    // A member the repair had to drop on a device that IS known (a split light of a bundle exported
+    // without its lights file) would be lost without a word: refuse and name it instead, so the owner
+    // can export again with the lights. A member naming no known device is debris; repair drops it.
+    let known_devices: std::collections::HashSet<&str> =
+        lights.lights.iter().map(|l| l.device_id.0.as_str()).collect();
+    let kept: std::collections::HashSet<&str> = scenes
+        .scenes
+        .iter()
+        .flat_map(|s| s.groups.iter().flat_map(|g| g.members.iter().map(String::as_str)))
+        .collect();
+    let mut lost: Vec<&str> = before
+        .scenes
+        .iter()
+        .flat_map(|s| s.groups.iter().flat_map(|g| g.members.iter().map(String::as_str)))
+        .filter(|m| !kept.contains(m))
+        .filter(|m| m.split_once('#').is_some_and(|(device, _)| known_devices.contains(device)))
+        .collect();
+    lost.sort_unstable();
+    lost.dedup();
+    if !lost.is_empty() {
+        return Err(ImportError::Scenes(format!(
+            "the bundle's scenes name lights of known devices that it does not carry and this machine does not have: {}",
+            lost.join(", ")
+        )));
+    }
     for scene in &scenes.scenes {
         canvas_proto::scene::validate_scene(scene, &lights.lights)
             .map_err(|e| ImportError::Scenes(format!("scene {}: {e}", scene.id)))?;
@@ -1039,8 +1069,22 @@ fn prepared_scenes(
 /// both. The check reads nothing and moves nothing; it only asks whether the file can be read.
 fn refuse_unreadable_scenes_files(home: &Path) -> Result<(), ImportError> {
     for name in [LIGHTS_FILE, SCENES_FILE] {
-        if let Err(e) = paths::read_checked(&home.join(name)) {
-            return Err(ImportError::Blocked(format!("{name} could not be read ({e})")));
+        match paths::read_checked(&home.join(name)) {
+            Err(e) => return Err(ImportError::Blocked(format!("{name} could not be read ({e})"))),
+            // A file that is there but does not parse is one the load could not move aside
+            // (`Loaded::Unreadable`): the store holds it as blocked, so the import must not write
+            // over it either.
+            Ok(Some(text)) => {
+                let parses = if name == LIGHTS_FILE {
+                    serde_json::from_slice::<LightsFile>(&text).is_ok()
+                } else {
+                    serde_json::from_slice::<ScenesFile>(&text).is_ok()
+                };
+                if !parses {
+                    return Err(ImportError::Blocked(format!("{name} is there but could not be read as a {name}")));
+                }
+            }
+            Ok(None) => {}
         }
     }
     Ok(())
@@ -1987,6 +2031,58 @@ power = "running"
         let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
         assert_eq!(bundle.lights, Some(lights), "the lights.json held on disk is exported");
         assert_eq!(bundle.scenes, None, "there is no scenes.json to export");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verify round (review 323): a scenes file that is there but does not parse is one the load
+    /// could not move aside; the store holds it as blocked, so the import refuses it too.
+    #[test]
+    fn an_import_refuses_a_scenes_file_that_does_not_parse() {
+        for name in [SCENES_FILE, LIGHTS_FILE] {
+            let dir = temp_home("unparsed-import");
+            std::fs::write(dir.join(name), b"{ not json").unwrap();
+            let bundle = bundle_of(default_layouts(), None, None);
+            let err = import_bundle(&dir, &bundle, &[bundle_board()]).expect_err("the import is refused");
+            assert!(err.to_string().contains(name), "the refusal names {name}: {err}");
+            assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"{ not json", "the file is untouched");
+            assert!(!dir.join(LAYOUTS_FILE).exists(), "nothing was written before the refusal");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Verify round (review 323): with no lights.json the store holds an empty default; the export
+    /// leaves it out instead of carrying an empty lights file over the target's real one.
+    #[test]
+    fn the_export_never_carries_the_empty_default_lights() {
+        let dir = temp_home("export-no-lights-file");
+        std::fs::create_dir_all(dir.join(SCENES_FILE)).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.lights.lights.is_empty() && !store.lights_blocked, "the default, not a blocked file");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights, None, "an empty default is not exported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verify round (review 323): a bundle whose scenes name a light neither the bundle nor this
+    /// machine has is refused with the light named, never imported with the member dropped.
+    #[test]
+    fn an_import_that_would_drop_a_member_is_refused_and_names_it() {
+        use canvas_proto::scene::Scene;
+        let scenes = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "s".into(),
+            scenes: vec![Scene {
+                id: "s".into(),
+                name: "S".into(),
+                rev: 1,
+                groups: vec![bundle_group("a", &["openrgb:board#z0", "openrgb:board#z0p2"])],
+            }],
+        };
+        let bundle = bundle_of(default_layouts(), None, Some(scenes));
+        let dir = temp_home("drop-member");
+        let err = import_bundle(&dir, &bundle, &[bundle_board()]).expect_err("refused");
+        assert!(err.to_string().contains("openrgb:board#z0p2"), "the lost light is named: {err}");
+        assert!(!dir.join(SCENES_FILE).exists(), "nothing was written");
         let _ = std::fs::remove_dir_all(&dir);
     }
 
