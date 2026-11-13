@@ -213,15 +213,20 @@ pub async fn put_layout(
         // The layout's effect is what runs now: a draft on the lights ends, and the guard
         // holds a beat off until this layout's effect is on.
         //
-        // The scene is on the lights: `App::set_layout` leaves the engine alone then, and
-        // `Engine::set_effect` does not end the scene mode (`canvas-core/src/engine.rs`: the
-        // render loop keeps running the scene). So the engine still holds the scene's groups and
-        // `SceneRuntime::held` is still right; the layout's effect does not play, and the scene
-        // does, until the layout is gone (Task 12).
+        // The scene order, then the draft gate: the order every route takes.
+        let lock = app.scene.lock().await;
         let replace = crate::draft::hold_for_replace(&app).await;
         app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
-        if let Some(effect) = &layout.effect {
+        if app.scene.is_on() {
+            // The scene is on the lights: the layout's one effect does not play, and it must not
+            // take the captures the scene's groups need. A draft that held the lights ends here:
+            // the whole scene goes on again, so the group the draft was on plays the scene's
+            // effect and not the draft's.
+            if replace.ended_takeover() {
+                crate::scenes::apply_with(&app, &lock, false).await;
+            }
+        } else if let Some(effect) = &layout.effect {
             if let Err(error) = crate::apply_effect(&app, &effect.id, &effect.props).await {
                 tracing::warn!(
                     effect = %effect.id,
@@ -278,10 +283,20 @@ pub async fn put_active_layout(
     // The layout's effect is what runs now: a draft on the lights ends, and the guard holds a
     // beat off until this layout's effect is on. The guard goes before the answer moves `app`.
     {
+        // The scene order, then the draft gate: the order every route takes.
+        let lock = app.scene.lock().await;
         let replace = crate::draft::hold_for_replace(&app).await;
         app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
-        if let Some(effect) = &layout.effect {
+        if app.scene.is_on() {
+            // The scene is on the lights: the layout's one effect does not play, and it must not
+            // take the captures the scene's groups need. A draft that held the lights ends here:
+            // the whole scene goes on again, so the group the draft was on plays the scene's
+            // effect and not the draft's.
+            if replace.ended_takeover() {
+                crate::scenes::apply_with(&app, &lock, false).await;
+            }
+        } else if let Some(effect) = &layout.effect {
             if let Err(error) = crate::apply_effect(&app, &effect.id, &effect.props).await {
                 tracing::warn!(
                     effect = %effect.id,

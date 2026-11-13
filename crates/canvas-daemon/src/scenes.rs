@@ -493,8 +493,11 @@ fn build_effect(app: &App, id: &str, group: Option<&str>) -> Result<(Box<dyn Eff
     Ok((built, schema.needs))
 }
 
-/// What a scene's groups need from the screen and the audio capture.
-fn needs_of(app: &App, scene: &Scene) -> InputNeeds {
+/// What every group of the scene needs from the screen and the audio capture.
+///
+/// `apply_needs` sets what the captures do, it does not merge: the needs of every group the
+/// engine holds have to be in it, or the capture another group needs stops.
+pub fn needs_of(app: &App, scene: &Scene) -> InputNeeds {
     let mut needs = InputNeeds::default();
     for group in &scene.groups {
         if let Plays::Effect { effect, .. } = &group.plays {
@@ -505,6 +508,30 @@ fn needs_of(app: &App, scene: &Scene) -> InputNeeds {
         }
     }
     needs
+}
+
+/// The effect that is running in a scene, and the props it runs with.
+///
+/// The layout's one effect does not play in scene mode, so it names the effect only when a
+/// group of the scene plays it. Otherwise the first group that plays an effect is the one
+/// that is running, and the props of that group are the ones it runs with.
+///
+/// `None` when no group of the scene plays an effect.
+pub fn running_effect(scene: &Scene, layout_effect: Option<&str>) -> Option<(String, Props)> {
+    let playing: Vec<(&str, &Props)> = scene
+        .groups
+        .iter()
+        .filter_map(|group| match &group.plays {
+            Plays::Effect { effect, props } => Some((effect.as_str(), props)),
+            _ => None,
+        })
+        .collect();
+    if let Some(id) = layout_effect {
+        if let Some((_, props)) = playing.iter().find(|(effect, _)| *effect == id) {
+            return Some((id.to_string(), (*props).clone()));
+        }
+    }
+    playing.first().map(|(effect, props)| (effect.to_string(), (*props).clone()))
 }
 
 /// Builds every group's effect and hands the scene to the engine. A group whose effect cannot be
@@ -1072,8 +1099,9 @@ pub async fn apply_takeover(
             Ok(target)
         }
         Ok((Err(why), failures)) => {
-            // The build failed: nothing landed, so the engine holds what it held.
-            *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
+            // The build failed: nothing landed, so the engine holds what it held, and the
+            // failures are the ones it had. The partial map is not written over them.
+            tracing::warn!(error = %why, failures = ?failures, "the takeover's build failed; the engine holds what it held");
             Err(why)
         }
         Err(e) => Err(format!("the takeover's build task failed: {e}")),
@@ -1094,9 +1122,6 @@ fn build_and_set_with(
     takeover: &mut Takeover<'_>,
     failures: &mut BTreeMap<String, String>,
 ) -> Result<(), String> {
-    // Anything that is not a stack means no stack is on the engine: whatever was running is
-    // gone, and a later activation of it must build again.
-    app.stacks.clear_running();
     let mut needs = InputNeeds::default();
     let mut groups = Vec::with_capacity(scene.groups.len());
     for group in &scene.groups {
@@ -1132,6 +1157,9 @@ fn build_and_set_with(
             props: group_props,
         });
     }
+    // Every group is built: anything that is not a stack means no stack is on the engine now
+    // (whatever was running is gone, and a later activation of it must build again).
+    app.stacks.clear_running();
     app.inputs.apply_needs(needs);
     app.engine.set_scene(lights.to_vec(), devices.to_vec(), groups, false);
     Ok(())

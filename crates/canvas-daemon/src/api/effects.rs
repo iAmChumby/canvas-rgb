@@ -236,7 +236,7 @@ pub async fn activate(
     app.transient.cancel();
     // The owner chose a saved effect: a draft on the lights ends, and the guard keeps a beat
     // from starting a new one until this effect is on the lights.
-    let _replace = crate::draft::hold_for_replace(&app).await;
+    let replace = crate::draft::hold_for_replace(&app).await;
     // Activating a stack whose structure is the one already on the engine reuses the running
     // effect: the live map is updated from the file and the props go through `set_props`, so
     // pressing Save twice never reloads an HTML layer (D95.4.3, D95.4.6).
@@ -259,8 +259,16 @@ pub async fn activate(
         None => false,
     };
     // Once the engine runs a scene the layout's single effect is not what plays: the groups are.
-    if let Some(planned) = planned {
-        crate::api::scenes::commit_activation(&app, &scene_lock, planned).await?;
+    if replace.ended_takeover() {
+        // The draft held the lights: the whole scene goes on again, so the group the draft was
+        // on plays the scene's effect and not the draft's.
+        if let Some(planned) = planned {
+            crate::api::scenes::commit_activation(&app, &scene_lock, planned, true).await?;
+        } else {
+            crate::scenes::apply_with(&app, &scene_lock, false).await;
+        }
+    } else if let Some(planned) = planned {
+        crate::api::scenes::commit_activation(&app, &scene_lock, planned, false).await?;
     }
     if transient {
         // The onboarding effect takes over the lights: it plays on the groups of the active
@@ -291,10 +299,23 @@ pub async fn activate(
 /// `PATCH /api/v1/effects/active/props`.
 ///
 /// Changes the props of the effect that is running.
+///
+/// In scene mode the groups are what play: the props go to the groups that play that effect,
+/// and the captures are the ones every group of the scene needs. The layout's one effect
+/// does not play and is not handed to the engine. A draft that holds the lights ends here,
+/// and the whole scene goes on again.
 pub async fn patch_active_props(
     State(app): State<Arc<App>>,
     Json(props): Json<Props>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // The scene order, then the draft gate: the order every route takes.
+    let lock = app.scene.lock().await;
+    if app.scene.is_on() {
+        // The draft ends here: the whole scene goes on again, so the group the draft was on
+        // plays the scene's effect and not the draft's.
+        let replace = crate::draft::hold_for_replace(&app).await;
+        return patch_active_props_in_scene(&app, &lock, props, replace).await;
+    }
     // A draft holds the lights; the layout's effect is not what is running. The props of a
     // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
     // overwrite of the draft with the saved effect. The draft gate is held across the check
@@ -349,6 +370,76 @@ pub async fn patch_active_props(
     crate::apply_effect(&app, &schema.id, &merged)
         .await
         .map_err(|e| ApiFailure::internal(format!("could not change the props: {e}")))?;
+
+    Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
+}
+
+/// `PATCH /api/v1/effects/active/props` with a scene on the lights.
+///
+/// The groups are what play: the props go to the groups that play the effect, and the
+/// captures are the ones every group of the scene needs. The layout's one effect does not
+/// play, so it is not handed to the engine and it does not take the captures.
+///
+/// A draft that held the lights ends here, and the whole scene goes on again: ending a
+/// takeover always ends it on the engine.
+async fn patch_active_props_in_scene(
+    app: &Arc<App>,
+    lock: &crate::scenes::SceneLock<'_>,
+    props: Props,
+    replace: crate::draft::ReplaceGuard<'_>,
+) -> ApiResult<Json<serde_json::Value>> {
+    let scene = {
+        let store = app.store.read().await;
+        crate::scenes::active_scene(&store.scenes).clone()
+    };
+    let layout_effect = {
+        let store = app.store.read().await;
+        store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()))
+    };
+    let (effect, base) = crate::scenes::running_effect(&scene, layout_effect.as_deref())
+        .ok_or_else(|| ApiFailure::not_found("no effect is active"))?;
+    let schema = find_schema(&app.user_effects, &app.stacks, &effect)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {effect}")))?;
+    if effect.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+        return Err(ApiFailure::conflict(format!(
+            "{effect} is a stack; change its values in the stack builder, not with this route"
+        )));
+    }
+    let mut merged = base;
+    merged.extend(props);
+
+    // The scene is saved with the new values, so what the engine runs and what the store holds
+    // are one thing. The layout's effect and the effect's starting values are left alone: in
+    // scene mode the groups carry the values.
+    let mut new = scene.clone();
+    new.rev = scene.rev + 1;
+    for group in new.groups.iter_mut() {
+        if let canvas_proto::scene::Plays::Effect { effect: plays, props } = &mut group.plays {
+            if plays == &effect {
+                *props = merged.clone();
+            }
+        }
+    }
+    crate::api::scenes::replace_saved(app, new).await?;
+
+    // The props go to the groups that play that effect, and the captures are the ones every
+    // group of the scene needs.
+    for group in &scene.groups {
+        let canvas_proto::scene::Plays::Effect { effect: plays, .. } = &group.plays else {
+            continue;
+        };
+        if plays == &effect {
+            app.engine.set_group_props(&group.id, &merged);
+        }
+    }
+    app.inputs.apply_needs(crate::scenes::needs_of(app, &scene));
+
+    // A draft held the lights: the whole scene goes on again, so the group the draft was on
+    // plays the scene's effect and not the draft's.
+    if replace.ended_takeover() {
+        crate::scenes::apply_with(app, lock, false).await;
+    }
+    app.scene.notify();
 
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
 }

@@ -83,7 +83,7 @@ async fn response(app: &App) -> ScenesResponse {
 
 /// Replaces the scene with `new`'s id and saves. On a failed save the old scene is back and the
 /// error says why. Returns the scene it replaced.
-async fn replace_saved(app: &App, new: Scene) -> ApiResult<Scene> {
+pub(crate) async fn replace_saved(app: &App, new: Scene) -> ApiResult<Scene> {
     let mut store = app.store.write().await;
     let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == new.id) else {
         return Err(ApiFailure::not_found(format!("no scene with the id {}", new.id)));
@@ -193,8 +193,14 @@ pub async fn put_scene(
     fit_group_props(&app, &mut new)?;
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
-        let _replace = crate::draft::hold_for_replace(&app).await;
-        scenes::apply_group_change(&app, &lock, &old, &new).await;
+        let replace = crate::draft::hold_for_replace(&app).await;
+        if replace.ended_takeover() {
+            // The draft held the lights: the whole scene goes on again, so the group the draft
+            // was on plays the scene's effect and not the draft's.
+            scenes::apply_with(&app, &lock, true).await;
+        } else {
+            scenes::apply_group_change(&app, &lock, &old, &new).await;
+        }
     }
     Ok(Json(new))
 }
@@ -425,14 +431,22 @@ pub async fn plan_activation(
 }
 
 /// Saves and applies what [`plan_activation`] planned.
+///
+/// `full` puts the whole scene on again instead of the groups that changed: the caller uses it
+/// when a draft held the lights, so the group the draft was on plays the scene's effect.
 pub async fn commit_activation(
     app: &Arc<App>,
     lock: &SceneLock<'_>,
     planned: (Scene, Scene),
+    full: bool,
 ) -> ApiResult<()> {
     let (old, new) = planned;
     replace_saved(app, new.clone()).await?;
-    scenes::apply_group_change(app, lock, &old, &new).await;
+    if full {
+        scenes::apply_with(app, lock, false).await;
+    } else {
+        scenes::apply_group_change(app, lock, &old, &new).await;
+    }
     Ok(())
 }
 
