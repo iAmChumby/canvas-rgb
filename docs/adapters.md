@@ -391,8 +391,8 @@ table for another board.
   report) to flash is not stated by any source: UNKNOWN. If it does, the entries are the ones that matter, and they
   are capped.
 - **The whole-board colour keeps streaming through the pages**, and stops when light mode 13 goes out about
-  3 s later. **What the board shows during those pages is UNKNOWN**: the `0x0E` stream should keep it lit,
-  but no device check has watched one. The check below settles it.
+  3 s later. During the pages the board stays lit with the streamed colour (`checked on the device`,
+  2026-11-13, below).
 - The `0x0E` whole-board colour is not an upload. `royuan_probe` sends it about 30 times a second (a 33 ms
   sleep, `crates/canvas-adapters/examples/royuan_probe.rs`); the adapter resends it at least once a second
   (`KEEPALIVE` in `royuan.rs`). The sources give no rate for it.
@@ -431,6 +431,14 @@ paused, Luke watching the keyboard.
   direct-mode report was not shown (the board stayed dark); the same report sent every 33 ms for 2 s was (white,
   then black). The adapter streams at the engine's rate and resends at least every second, so canvas-rgb
   should be unaffected (UNKNOWN: not run on the device with the adapter itself); a one-shot tool must stream.
+- **The adapter itself, end to end** (`checked on the device`, 2026-11-13, PR #326's `RoyuanAdapter` driven by a
+  scratch example at 30 fps, still counter in a throwaway file): a still horizontal rainbow streamed as one colour,
+  one upload went out after the still window (all seven pages acknowledged, the picture hash stored), the board
+  stayed lit through the pages, and light mode 13 then showed the rainbow left to right (Luke, yes). When the frame
+  changed (solid red, green, blue, one second each) the board left the picture and followed the colour (Luke, yes);
+  the light mode read after a run that ended mid-movement was `0x15` (direct). Green then blue as whole-board
+  colours showed green then blue (Luke, yes), so `0x0E` takes R, G, B in that order. A moving rainbow shows as one
+  nearly constant colour in direct mode (its mean barely changes), which is easy to mistake for the picture.
 - **Restore** (`checked on the device`): direct mode, then the streamed whole-board colour: the board followed
   white then black (Luke, yes). The mode read after the restore was taken after the first (single-report)
   restore, not after the streamed one.
