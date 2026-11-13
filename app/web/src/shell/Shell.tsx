@@ -218,7 +218,8 @@ function Frame({ children }: { children: ReactNode }) {
   // window shows every command. Typing still searches the whole list.
   const shortCommands = useMemo<Command[]>(() => {
     const list = commands.filter((c) => c.group === "Pages" || c.group === "Lights");
-    const running = (effects ?? []).find((e) => e.id === status?.active_effect);
+    const runningId = status?.active_effects?.[0] ?? null;
+    const running = (effects ?? []).find((e) => e.id === runningId);
     const wanted = [running, ...(effects ?? []).filter((e) => e.favorite)].filter(
       (e): e is NonNullable<typeof e> => e !== undefined,
     );

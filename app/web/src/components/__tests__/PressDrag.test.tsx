@@ -10,7 +10,6 @@ import { Slider } from "@/components/Slider";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { StackLayer } from "@/proto/StackLayer";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
-import { PreviewStage } from "@/views/PreviewStage";
 import { Stage } from "@/views/effects/Stage";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 
@@ -190,36 +189,6 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     fireEvent.pointerUp(el, { pointerId: 1 });
     expect(commit).toHaveBeenCalledWith(45);
     expect(document.activeElement).toBe(el);
-  });
-
-  it("the layout stage's empty-desk press is prevented and still blurs a focused field", () => {
-    const onBlur: Mock = vi.fn();
-    const { container } = render(
-      <>
-        <input aria-label="Field" onBlur={onBlur} />
-        <PreviewStage
-          zones={[]}
-          landmarks={[]}
-          devices={null}
-          selection={[]}
-          onSelect={vi.fn()}
-          onChangeZones={vi.fn()}
-          onChangeLandmark={vi.fn()}
-          onChangeParts={vi.fn()}
-          onDrop={vi.fn()}
-          dropPayloadType="layout-zone"
-          layoutId="t1"
-          mode="lights"
-          onMode={vi.fn()}
-          unit="cm"
-        />
-      </>,
-    );
-    const input = container.querySelector("input") as HTMLInputElement;
-    act(() => input.focus());
-    const el = container.querySelector(".stage") as HTMLDivElement;
-    expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, button: 0, pointerId: 1 })).toBe(false);
-    expect(onBlur).toHaveBeenCalled();
   });
 
   it("the area picker's desk press is prevented and still blurs a focused field", () => {

@@ -38,26 +38,3 @@ export function rubberBand(value: number, min: number, max: number, c: number = 
 export function settleToLimit(value: number, min: number, max: number): number {
   return Math.min(max, Math.max(min, value));
 }
-
-/**
- * The release of a dragged part (issue #187): size first, then position
- * against the settled size, so the saved rect is always fully inside the
- * canvas (the daemon refuses out-of-canvas areas, #118). Settling position
- * against the pre-settle size could save a rect the canvas could not hold
- * (e.g. x=420 with w=2 on a 320 canvas). Non-finite values settle to the
- * minimum size at the canvas origin. The middle of the drag may ride past
- * the canvas by design (rubber-band); the settle brings the whole rect back
- * inside.
- */
-export function settleRect(
-  rect: { x: number; y: number; width: number; height: number },
-  canvasW: number,
-  canvasH: number,
-  minSize: number,
-): { x: number; y: number; width: number; height: number } {
-  const w = settleToLimit(Number.isFinite(rect.width) ? rect.width : minSize, minSize, canvasW);
-  const h = settleToLimit(Number.isFinite(rect.height) ? rect.height : minSize, minSize, canvasH);
-  const x = settleToLimit(Number.isFinite(rect.x) ? rect.x : 0, 0, Math.max(0, canvasW - w));
-  const y = settleToLimit(Number.isFinite(rect.y) ? rect.y : 0, 0, Math.max(0, canvasH - h));
-  return { x, y, width: w, height: h };
-}

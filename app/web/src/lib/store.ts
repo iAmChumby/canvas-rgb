@@ -1,5 +1,5 @@
-// The editor's one shared snapshot: daemon status, fans, devices, effects, layouts, render
-// and settings, plus the last 60 one-second RPM samples per fan header. Polling runs only while
+// The editor's one shared snapshot: daemon status, fans, devices, effects, scenes and settings,
+// plus the last 60 one-second RPM samples per fan header. Polling runs only while
 // the document is visible (status and fans every 1 s; the rest every 4 s), and an
 // `canvas://state-changed` event refetches everything.
 
@@ -13,10 +13,8 @@ import type { FansStatus } from "@/proto/FansStatus";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { FailedEffect } from "@/proto/FailedEffect";
-import type { Layout } from "@/proto/Layout";
 import type { LightView } from "@/proto/LightView";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
-import type { RenderState } from "@/proto/RenderState";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
 import type { UpdateState } from "@/proto/UpdateState";
@@ -81,21 +79,16 @@ export interface Snap {
   effectsError: string | null;
   /** The user effect files that did not parse. */
   effectsFailed: FailedEffect[];
-  layouts: Layout[] | null;
-  activeLayout: string | null;
-  layoutsError: string | null;
   /** Every scene, the active one's id and how its groups are doing (0.14.0). */
   scenes: ScenesResponse | null;
   scenesError: string | null;
   /** Every light the daemon keeps, with what the editor shows beside it. */
   lights: LightView[] | null;
   lightsError: string | null;
-  render: RenderState | null;
   settings: Settings | null;
   settingsError: string | null;
   displays: DisplayStatus[] | null;
   displaysError: string | null;
-  /** The daemon is older than the display routes: it answered 404, so it is not an error. */
   displaysUnsupported: boolean;
   /** Per header, one slot per poll: the RPM, or null where the chip gave no reading. */
   rpm: Record<string, (number | null)[]>;
@@ -117,14 +110,10 @@ let snap: Snap = {
   effects: null,
   effectsError: null,
   effectsFailed: [],
-  layouts: null,
-  activeLayout: null,
-  layoutsError: null,
   scenes: null,
   scenesError: null,
   lights: null,
   lightsError: null,
-  render: null,
   settings: null,
   settingsError: null,
   displays: null,
@@ -346,20 +335,6 @@ export async function refreshEffects(n?: number): Promise<void> {
   }
 }
 
-export async function refreshLayouts(n?: number): Promise<void> {
-  const req = n ?? beginRequest("layouts");
-  try {
-    const r = await api.layouts();
-    if (!isNewest("layouts", req)) return;
-    markAnswered("layouts", req);
-    patchSnap({ layouts: r.layouts, activeLayout: r.active, layoutsError: null });
-  } catch (e) {
-    if (!isNewest("layouts", req)) return;
-    markAnswered("layouts", req);
-    patchSnap({ layoutsError: messageOf(e) });
-  }
-}
-
 export async function refreshScenes(n?: number): Promise<void> {
   // A daemon without the scene routes is not asked again until its version changes. A Try
   // again brings its own number: the user asked for it, so it goes out.
@@ -393,18 +368,6 @@ export async function refreshLights(n?: number): Promise<void> {
     markAnswered("lights", req);
     if (e instanceof ApiFailure && e.status === 404) lightsUnsupported = true;
     patchSnap({ lightsError: messageOf(e) });
-  }
-}
-
-export async function refreshRender(n?: number): Promise<void> {
-  const req = n ?? beginRequest("render");
-  try {
-    const render = await api.render();
-    if (!isNewest("render", req)) return;
-    markAnswered("render", req);
-    patchSnap({ render });
-  } catch {
-    // The status error already says whether the daemon answers.
   }
 }
 
@@ -453,7 +416,7 @@ export const retryScenes = (): Promise<void> =>
   retryArea("scenes", async (n) => {
     await Promise.all([refreshScenes(n), refreshLights(beginRequest("lights"))]);
   });
-export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
+/** Try again on the Settings page. */
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);
 export const retryDisplays = (): Promise<void> => retryArea("displays", refreshDisplays);
 
@@ -481,10 +444,8 @@ export async function refreshAll(): Promise<void> {
     refreshFans(),
     refreshDevices(),
     refreshEffects(),
-    refreshLayouts(),
     refreshScenes(),
     refreshLights(),
-    refreshRender(),
     refreshSettings(),
     refreshDisplays(),
   ]);
@@ -516,12 +477,6 @@ export function startSync(): () => void {
     if (lastStatusFailureAt && Date.now() < lastStatusFailureAt + DOWN_RETRY_MS) return;
     void refreshDevices();
     void refreshEffects();
-    void refreshRender();
-    // The layout can change outside the editor (the CLI, the daemon's own defaults), and a
-    // stale desk canvas is worse than one extra request every four seconds.
-    void refreshLayouts();
-    // Scenes and lights change outside the editor too (another window, the CLI, a device that
-    // came back), and the group rows say which group failed.
     void refreshScenes();
     void refreshLights();
     void refreshSettings();

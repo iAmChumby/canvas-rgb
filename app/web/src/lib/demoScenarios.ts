@@ -7,14 +7,11 @@
 // To wire this in, the demo backend needs these lines (and the import):
 //
 //   import {
-//     answerDelayMs, applyDeviceScenarios, applyFanScenarios, applyLayoutScenarios,
+//     answerDelayMs, applyDeviceScenarios, applyFanScenarios,
 //     applyStatusScenarios, daemonDown, saveError,
 //   } from "@/lib/demoScenarios";
 //
 //   // in initialState():
-//   devices: applyDeviceScenarios(DEVICES),
-//   layouts: noLayout() ? [] : [{ ...LAYOUT_DESK }],
-//   activeLayout: noLayout() ? "" : LAYOUT_DESK.id,
 //
 //   // in statusNow():
 //   openrgb: openRgbDown() ? "disconnected" : "connected",
@@ -29,7 +26,6 @@
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { FansStatus } from "@/proto/FansStatus";
-import type { Layout } from "@/proto/Layout";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
@@ -43,7 +39,6 @@ export const HANDBACK_REASON = "the daemon's safety handback: the chip was too h
 /** The scenario tokens this file understands, next to the demo's own ones. */
 export const DAEMON_DOWN = "daemon-down";
 export const OPENRGB_DOWN = "openrgb-down";
-export const NO_LAYOUT = "no-layout";
 export const DEVICE_EMPTY = "device-empty";
 export const SLOW = "slow";
 export const SLOW_FPS = "slow-fps";
@@ -84,11 +79,6 @@ export function openRgbDown(): boolean {
 }
 
 /** There is no layout yet: nothing can run. */
-export function noLayout(): boolean {
-  return has(NO_LAYOUT);
-}
-
-/** One device reports no zones. */
 export function deviceEmpty(): boolean {
   return has(DEVICE_EMPTY);
 }
@@ -283,12 +273,6 @@ export function applyDeviceScenarios(devices: DeviceInfo[]): DeviceInfo[] {
   if (noDevices()) return [];
   if (!deviceEmpty()) return devices;
   return devices.map((d, i) => (i === 0 ? { ...d, zones: [] } : d));
-}
-
-/** Applies the layout scenarios: there is no layout yet. */
-export function applyLayoutScenarios(layouts: Layout[], active: string): { layouts: Layout[]; active: string } {
-  if (!noLayout()) return { layouts, active };
-  return { layouts: [], active: "" };
 }
 
 // ---- scenes (0.14.0) ----

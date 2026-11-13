@@ -31,8 +31,6 @@ const status: Status = {
   devices_connected: 3,
   devices_total: 4,
   preview_subscribers: 0,
-  active_layout: "desk",
-  active_effect: null,
   active_effects: [],
   openrgb: "connected",
   service: "down",

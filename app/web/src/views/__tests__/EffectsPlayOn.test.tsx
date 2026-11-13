@@ -83,7 +83,6 @@ async function mount(active: string) {
       ...getSnap().status!,
       active_scene: { id: "s", name: "Scene" },
       // Another effect is playing: the one under test is idle, so its action is Play.
-      active_effect: "white",
       active_effects: ["white"],
     },
   });
@@ -114,7 +113,6 @@ describe("Play on …", () => {
       status: {
         ...getSnap().status!,
         active_scene: { id: "s", name: "Scene" },
-        active_effect: "white",
         active_effects: ["white"],
       },
       scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]),
@@ -251,7 +249,6 @@ describe("Play on …", () => {
       status: {
         ...getSnap().status!,
         active_scene: { id: "s", name: "Scene" },
-        active_effect: "stack:Sunset glow",
         active_effects: ["stack:Sunset glow"],
       },
       scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]),
@@ -286,7 +283,6 @@ describe("Play on …", () => {
       status: {
         ...getSnap().status!,
         active_scene: null,
-        active_effect: "aurora",
         active_effects: ["aurora"],
       },
     });
@@ -333,7 +329,6 @@ describe("Play on …", () => {
     patchSnap({ scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]) });
     const speed = await screen.findByLabelText("Speed value");
     const defaults = vi.spyOn(api, "patchEffectDefaults").mockResolvedValue({ ok: true });
-    const active = vi.spyOn(api, "patchActiveProps").mockResolvedValue({ ok: true });
     const activate = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
     fireEvent.focus(speed);
     fireEvent.change(speed, { target: { value: "55" } });
@@ -342,7 +337,6 @@ describe("Play on …", () => {
       () => expect(defaults).toHaveBeenCalledWith("aurora", { speed: { type: "number", value: 55 } }),
       { timeout: 3_000 },
     );
-    expect(active).not.toHaveBeenCalled();
     expect(activate).not.toHaveBeenCalled();
     expect(screen.getByText("Starting values. A group keeps its own.")).toBeTruthy();
   });

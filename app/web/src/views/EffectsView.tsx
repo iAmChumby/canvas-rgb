@@ -70,8 +70,7 @@ export function EffectsView() {
   // With scenes every group plays its own effect, so "running" is any group of the active scene.
   const activeEffects = useMemo(
     () =>
-      status?.active_effects ??
-      (status?.active_effect ? [status.active_effect] : []),
+      status?.active_effects ?? [],
     [status],
   );
   // The groups "Play on …" offers: the active scene's, in its order.

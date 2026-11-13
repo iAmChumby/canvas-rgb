@@ -109,7 +109,6 @@ beforeEach(() => {
     effectsError: null,
     effectsFailed: [],
     status: {
-      active_effect: "aurora",
       active_effects: ["aurora"],
       active_scene: { id: "s", name: "Scene" },
     } as unknown as Status,
@@ -284,7 +283,6 @@ describe("an edit to an effect", () => {
     // The effect is stopped: an edit changes what the next group starts from, nothing more.
     patchSnap({
       status: {
-        active_effect: null,
         active_effects: [],
         active_scene: { id: "s", name: "Scene" },
       } as unknown as Status,

@@ -120,10 +120,6 @@ pub async fn patch_zone(
         let mut list = app.devices.write().await;
         *list = devices.clone();
     }
-    if let Some(layout) = app.active_layout().await {
-        app.set_layout(&layout, &devices);
-        app.stacks.publish_areas(&layout, &devices);
-    }
     // The scene's plans are built from the zone sizes: the groups follow the new count.
     crate::scenes::apply_for_devices(&app).await;
 

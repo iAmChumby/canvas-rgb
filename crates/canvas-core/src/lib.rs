@@ -1,28 +1,27 @@
-//! canvas-rgb engine: the canvas, the layout → per-LED sample regions, the scenes'
-//! arrangement planner, the sampling, the render loop, parking, pause, brightness and the
-//! preview downscale.
+//! canvas-rgb engine: the canvas, the scenes' arrangement planner, the sampling, the render
+//! loop, parking, pause, brightness and the preview downscale.
 //!
 //! The engine owns one thread. It renders at a fixed step (10..=60 fps), parks when
 //! nothing consumes frames, and writes one black frame when it is paused.
 //!
+//! The engine runs scenes only (#310): one canvas per group, one effect per group. Layout,
+//! its single active effect and its render plan are gone; `geometry` keeps only [`LedSample`].
+//!
 //! The public surface is [`spawn`], which returns the [`canvas_proto::Engine`] handle
 //! the daemon drives. [`geometry`], [`arrangement`] and [`sampling`] are public because
-//! the daemon's stack compositor resolves a layer's area from the same sample plan the
+//! the daemon's stack compositor resolves a layer's area from the same samples the
 //! engine samples with (`canvas-daemon`'s `stack` module); nothing else is.
 
 pub mod arrangement;
 mod engine;
 pub mod effect_guard;
 pub mod geometry;
-mod preview;
 pub mod sampling;
 pub(crate) mod scene_engine;
 /// The scene canvas's scale and sampling, which the daemon's stack masks must match.
 pub use scene_engine::{SCENE_RENDER_SCALE, SCENE_SAMPLING};
 mod timer;
 
-#[cfg(test)]
-mod bench;
 #[cfg(all(test, windows))]
 mod cpu;
 #[cfg(test)]

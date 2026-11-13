@@ -87,8 +87,8 @@ export function StatusStrip({
 
   // What is playing.
   const now = playing(status, effects);
-  // With scenes the strip names the scene, so no one effect's preset belongs after it.
-  const presetId = status?.active_scene ? null : (status?.active_effect ?? null);
+  // The strip names the scene, so no one effect's preset belongs after it.
+  const presetId: string | null = null;
   useTrackRunningPreset(presetId);
   // A group that cannot light and a scene list that could not be read are said in the mark, at
   // every width, so the row never claims "All connected" over a dark group.

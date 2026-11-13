@@ -11,7 +11,7 @@ import { NameField } from "@/components/NameField";
 import { Popover } from "@/components/Popover";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { effectMissing, effectNameOf } from "@/lib/status";
-import { retryScenes, useSnap } from "@/lib/store";
+import { getSnap, retryScenes, useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
 import { GroupRow, UnassignedRow, type LightsState } from "@/views/scenes/GroupRow";
 import { GroupSheet, Sheet } from "@/views/scenes/GroupSheet";
@@ -23,6 +23,8 @@ import { useNewLights } from "@/views/scenes/newLights";
 import { useLightFeed } from "@/views/scenes/useLightFeed";
 import { useScene } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
+import { Onboarding } from "@/views/editor/Onboarding";
+import { shouldOpen } from "@/views/editor/flow";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
 
@@ -63,6 +65,8 @@ export function ScenesView() {
   const scenesError = useSnap((st) => st.scenesError);
   const retrying = useSnap((st) => st.pending.includes("scenes"));
   const [openId, setOpenId] = useState<string | null>(null);
+  // The first run's hello (#310): the page behind it is Scenes, so the greeting lives here.
+  const [hello, setHello] = useState(() => shouldOpen(getSnap().status));
   const [sheetStep, setSheetStep] = useState<"group" | "name" | "effect">("group");
   const [making, setMaking] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -247,6 +251,15 @@ export function ScenesView() {
     0,
   );
   const groups = scene?.groups ?? [];
+
+  // The first run's hello takes the whole window (#310): the page behind it is this one.
+  if (hello) {
+    return (
+      <div className="onboarding-page">
+        <Onboarding onDone={() => setHello(false)} />
+      </div>
+    );
+  }
 
   return (
     <div className={`rd-page ${s.page}`}>

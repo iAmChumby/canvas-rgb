@@ -164,7 +164,7 @@ describe("the draft on the lights", () => {
 
   it("sends a preset's values to the draft, never to activate", async () => {
     await openEditor();
-    const before = getSnap().status?.active_effect;
+    const before = getSnap().status?.active_effects?.[0];
     fireEvent.click(screen.getByRole("button", { name: "Try on the lights" }));
     await screen.findByText("Draft on the lights.");
     draftCalls().length = 0;
@@ -182,7 +182,7 @@ describe("the draft on the lights", () => {
     await act(async () => {
       await refreshAll();
     });
-    expect(getSnap().status?.active_effect).toBe(before);
+    expect(getSnap().status?.active_effects?.[0]).toBe(before);
   });
 
   it("shows the banner a reload opens with", async () => {
@@ -318,7 +318,7 @@ describe("the draft on the lights", () => {
     expect(imports.map((call) => call.replace)).toEqual([true]);
     expect(imports[0]?.file_name).toBe("fixture-sample.html");
     // The import replaced the file, and the activate put it on the lights.
-    expect(getSnap().status?.active_effect).toBe("html:fixture-sample");
+    expect(getSnap().status?.active_effects?.[0]).toBe("html:fixture-sample");
     // The activate ended the draft, so nothing is left on the lights but the saved effect.
     await act(async () => {
       const status = await api.draft();

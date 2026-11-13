@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The Scenes page: one row per group of the active scene, the scene strip, the Unassigned row and
@@ -18,6 +18,9 @@ const { api } = vi.hoisted(() => ({
   api: {
     effect: vi.fn(),
     createPreset: vi.fn(),
+    activateEffect: vi.fn(),
+    completeOnboarding: vi.fn(),
+    status: vi.fn(),
     lights: { flash: vi.fn(), list: vi.fn(), patch: vi.fn() },
   },
 }));
@@ -35,6 +38,7 @@ import { SEEN_LIGHTS_KEY } from "@/views/scenes/newLights";
 import { ScenesView } from "@/views/scenes/ScenesView";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Scene } from "@/proto/Scene";
+import type { Status } from "@/proto/Status";
 import type { LightView } from "@/proto/LightView";
 import type { GroupState } from "@/proto/GroupState";
 import type { UseScene } from "@/views/scenes/useScene";
@@ -419,5 +423,56 @@ describe("the Scenes page", () => {
     mount(fake());
     await waitFor(() => expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0));
     expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // Plan Step 2 (Task 12): the first run's hello leads to Scenes, and nothing else. The hello is
+  // the whole window until "Continue" finishes the onboarding (Onboarding.finish ->
+  // api.completeOnboarding -> refreshStatus -> onDone), and the page behind it is this one.
+  it("the first run opens Scenes after the hello step", async () => {
+    const firstRun = {
+      onboarding_complete: false,
+      openrgb: "connected",
+      conflicts: [],
+    } as unknown as Status;
+    api.status.mockResolvedValue({ ...firstRun, onboarding_complete: true });
+    api.completeOnboarding.mockResolvedValue(undefined);
+    api.activateEffect.mockResolvedValue(undefined);
+    patchSnap({
+      status: firstRun,
+      // One device is enough for the greeting (not the "no lights found" ladder).
+      devices: [
+        {
+          id: "openrgb:desk-lamp",
+          name: "Desk lamp",
+          vendor: "fake",
+          kind: "led_strip",
+          adapter: "openrgb",
+          adapter_index: 0,
+          serial: "",
+          location: "",
+          connected: true,
+          zones: [],
+        },
+      ],
+      devicesTotal: 1,
+      devicesError: null,
+    });
+
+    mount(fake());
+
+    // The hello alone: the window is the greeting, not the page.
+    expect(screen.getByRole("region", { name: "Hello" })).toBeTruthy();
+    expect(screen.queryByTestId("unassigned-row")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    });
+
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    expect(api.status).toHaveBeenCalled();
+    // The greeting is gone and the page behind it is Scenes: its rows are what it leads to.
+    expect(screen.queryByRole("region", { name: "Hello" })).toBeNull();
+    expect(screen.getByTestId("unassigned-row")).toBeTruthy();
+    expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0);
   });
 });

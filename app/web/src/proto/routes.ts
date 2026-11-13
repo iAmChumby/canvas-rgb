@@ -17,7 +17,6 @@ export const routes = {
   effectPresets: (id: string) => `/api/v1/effects/${id}/presets`,
   // PUT a PresetReplace (overwrite and/or rename; 409 when `expected` is stale); DELETE removes it.
   effectPreset: (id: string, name: string) => `/api/v1/effects/${id}/presets/${encodeURIComponent(name)}`,
-  effectActiveProps: "/api/v1/effects/active/props",
   // POST an ImportEffect: a SignalRGB-format HTML effect to add to the effects folder.
   // 409 when the name is taken and no replace is asked for; 422 when the file does not parse.
   effectsImport: "/api/v1/effects/import",
@@ -47,9 +46,6 @@ export const routes = {
   stack: (id: string) => `/api/v1/stacks/${encodeURIComponent(id)}`,
   // PUT a StackPreviewRequest (the draft, its epoch and seq); DELETE drops the preview.
   stackPreview: "/api/v1/stacks/preview",
-  layouts: "/api/v1/layouts",
-  layout: (id: string) => `/api/v1/layouts/${encodeURIComponent(id)}`,
-  layoutActive: "/api/v1/layouts/active",
   fans: "/api/v1/fans",
   // PUT a HotLimits: the user's "don't exceed" temperatures, one per kind of source.
   fanHot: "/api/v1/fans/hot",

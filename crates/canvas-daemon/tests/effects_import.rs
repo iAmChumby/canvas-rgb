@@ -664,16 +664,19 @@ async fn deleting_the_active_effect_falls_back_like_a_missing_file() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
 
-    // The effect is the one on the active layout.
+    // The effect is the one the active scene's group plays.
     {
         let mut store = app.store.write().await;
-        if let Some(layout) = store.active_layout_mut() {
-            layout.effect = Some(canvas_proto::layout::ActiveEffect {
-                id: "html:spark".to_string(),
-                props: Props::new(),
-            });
+        let active = store.scenes.active.clone();
+        if let Some(scene) = store.scenes.scenes.iter_mut().find(|s| s.id == active) {
+            if let Some(group) = scene.groups.first_mut() {
+                group.plays = canvas_proto::scene::Plays::Effect {
+                    effect: "html:spark".to_string(),
+                    props: Props::new(),
+                };
+            }
         }
-        store.save_layouts().expect("the layouts are saved");
+        store.save_scenes().expect("the scenes are saved");
     }
 
     let response = router

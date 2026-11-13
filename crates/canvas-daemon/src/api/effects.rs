@@ -95,7 +95,10 @@ pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> 
             needs: s.needs,
         })
         .collect();
-    let active = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
+    // The first effect the active scene plays, in the scene's order: what the library marks as
+    // running. Every group plays its own, so this is a summary and not one engine effect.
+    let scene = crate::scenes::active_scene(&store.scenes);
+    let active = crate::scenes::running_effect(scene).map(|(id, _)| id);
     let failed = failed_effects(&app.user_effects);
     Json(EffectsResponse { effects, active, failed })
 }
@@ -114,15 +117,9 @@ pub async fn get_effect(
     Ok(Json(EffectDetail { schema, favorite, user_presets, props }))
 }
 
-/// The values in force for an effect: the active layout's when it is the active effect,
-/// otherwise the saved ones, otherwise the schema defaults.
+/// The values in force for an effect: the saved ones, with the schema defaults filled in for
+/// anything the owner never set.
 fn current_props(store: &crate::storage::Store, schema: &PropertySchema) -> Props {
-    let active = store.active_layout().and_then(|l| l.effect.clone());
-    if let Some(active) = active {
-        if active.id == schema.id {
-            return active.props;
-        }
-    }
     let mut props = store.effects.saved.get(&schema.id).cloned().unwrap_or_default();
     // Fill in the schema defaults for anything the user never set.
     for (key, def) in schema.defaults() {
@@ -204,33 +201,10 @@ pub async fn activate(
     };
 
     // Save the props for next time, then apply the effect. A stack is never in `effects.saved`
-    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot. In scene mode
-    // activating only changes groups: an effect's starting values are written by
-    // `PATCH /effects/{id}/defaults` and nothing else, so playing it on one group never changes
-    // what another group starts from.
-    let is_stack = stack.is_some();
-    if !transient {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        if !is_stack && !app.scene.is_on() {
-            store.effects.saved.insert(schema.id.clone(), props.clone());
-            store
-                .save_effects()
-                .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-        }
-
-        if let Some(layout) = store.active_layout_mut() {
-            layout.effect = Some(canvas_proto::layout::ActiveEffect {
-                id: schema.id.clone(),
-                props: props.clone(),
-            });
-        }
-        store
-            .save_layouts()
-            .map_err(|e| ApiFailure::internal(format!("could not save the layouts: {e}")))?;
-    }
+    // (D95.4.3): its values live in `stacks.json`. Activating only changes groups: an effect's
+    // starting values are written by `PATCH /effects/{id}/defaults` and nothing else, so playing
+    // it on one group never changes what another group starts from.
+    let _is_stack = stack.is_some();
 
     // Any activation ends an earlier timer; an onboarding effect arms a new one below.
     app.transient.cancel();
@@ -241,9 +215,9 @@ pub async fn activate(
     // lights: a takeover that nothing owns any more must not stay there.
     let answer = async {
         // Activating a stack whose structure is the one already on the engine reuses the running
-        // effect: the live map is updated from the file and the props go through `set_props`, so
-        // pressing Save twice never reloads an HTML layer (D95.4.3, D95.4.6).
-        let reused = match &stack {
+        // effect: the live map is updated from the file, so pressing Save twice never reloads an
+        // HTML layer (D95.4.3, D95.4.6).
+        let _reused = match &stack {
             Some(stack) => {
                 let structure = crate::stack::structure_hash(&crate::stack::structure(stack, &|id| {
                     app.user_effects
@@ -252,14 +226,9 @@ pub async fn activate(
                 }));
                 if app.stacks.running_is(&stack.id, &structure) {
                     app.stacks.update_live(stack);
-                    if !app.scene.is_on() {
-                        // The legacy path: the engine runs one effect, and its props are the
-                        // stack's.
-                        app.engine.set_props(&props);
-                    }
                     // While a scene runs, the groups are what play: the values are put on the
-                    // groups the activation names by the plan and the apply below, and the
-                    // legacy path's one effect is never touched.
+                    // groups the activation names by the plan and the apply below. A running
+                    // stack is never reloaded, so pressing Save twice keeps its layers.
                     tracing::info!(effect = %schema.id, "the running stack was reused: no layer was rebuilt");
                     true
                 } else {
@@ -293,22 +262,6 @@ pub async fn activate(
             )
             .await
             .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
-        } else if !reused && !app.scene.is_on() {
-            if let Err(error) = crate::apply_effect(&app, &schema.id, &props).await {
-                tracing::warn!(
-                    effect = %schema.id,
-                    %error,
-                    "the effect was activated but it did not start"
-                );
-                // The dropped draft's prior effect goes back, so the engine is never left
-                // showing a draft nothing owns (D95.4.5).
-                if let Some(ended) = replace.restore_dropped(&app).await {
-                    if let Some(note) = ended.note {
-                        tracing::warn!(%note, "the draft's prior effect could not be restored");
-                    }
-                }
-                return Err(ApiFailure::internal(format!("could not activate the effect: {error}")));
-            }
         }
         if transient {
             crate::transient::arm(&app, &schema.id);
@@ -322,180 +275,6 @@ pub async fn activate(
         replace.fail(&app).await;
     }
     answer
-}
-
-/// `PATCH /api/v1/effects/active/props`.
-///
-/// Changes the props of the effect that is running.
-///
-/// In scene mode the groups are what play: the props go to the groups that play that effect,
-/// and the captures are the ones every group of the scene needs. The layout's one effect
-/// does not play and is not handed to the engine.
-///
-/// The editor's draft holds the lights while it is open, and its props are changed with PUT
-/// /effects/draft: this route answers a conflict and writes nothing. A greeting (the
-/// onboarding effect) is not the editor's work: it ends here, and the whole scene goes on
-/// again.
-pub async fn patch_active_props(
-    State(app): State<Arc<App>>,
-    Json(props): Json<Props>,
-) -> ApiResult<Json<serde_json::Value>> {
-    // The scene order, then the draft gate: the order every route takes.
-    let lock = app.scene.lock().await;
-    if app.scene.is_on() {
-        // The draft gate is held across the check and the apply: a draft that is building is
-        // seen here, and one that arrives during the apply waits until the change is on.
-        let _gate = app.draft.gate().lock().await;
-        // The editor's draft holds the lights: its props are changed with PUT /effects/draft,
-        // not with this route. The route answers a conflict and writes nothing.
-        if app.draft.is_active() {
-            return Err(ApiFailure::conflict(
-                "a draft is on the lights; change its props with PUT /api/v1/effects/draft",
-            ));
-        }
-        // What the route changes is worked out first: a route that cannot change anything
-        // answers without ending anything.
-        let (effect, base) = {
-            let store = app.store.read().await;
-            let layout_effect = store
-                .active_layout()
-                .and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-            crate::scenes::running_effect(crate::scenes::active_scene(&store.scenes), layout_effect.as_deref())
-                .ok_or_else(|| ApiFailure::not_found("no effect is active"))?
-        };
-        let schema = find_schema(&app.user_effects, &app.stacks, &effect)
-            .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {effect}")))?;
-        if effect.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-            return Err(ApiFailure::conflict(format!(
-                "{effect} is a stack; change its values in the stack builder, not with this route"
-            )));
-        }
-        // A greeting may hold the lights: it ends here, and the whole scene goes on again.
-        let replace = crate::draft::hold_for_takeover(&app);
-        let answer =
-            patch_active_props_in_scene(&app, &lock, &schema, effect, base, props, &replace).await;
-        if answer.is_err() {
-            // The route failed: the takeover must not stay on the lights with nothing owning it.
-            replace.fail(&app).await;
-        }
-        return answer;
-    }
-    // A draft holds the lights; the layout's effect is not what is running. The props of a
-    // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
-    // overwrite of the draft with the saved effect. The draft gate is held across the check
-    // and the apply, so a PUT that is already building is seen here and one that arrives
-    // during the apply waits until the saved effect is on (its PUT then starts a new draft).
-    let _draft_gate = app.draft.gate().lock().await;
-    if app.draft.is_active() {
-        return Err(ApiFailure::not_found(
-            "a draft is on the lights; change its props with PUT /api/v1/effects/draft",
-        ));
-    }
-    let (schema, merged) = {
-        let store = app.store.read().await;
-        let active = store
-            .active_layout()
-            .and_then(|l| l.effect.clone())
-            .ok_or_else(|| ApiFailure::not_found("no effect is active"))?;
-        // A stack's property values are edited in its builder, not with this route: a preset is
-        // a merged-props map, and the builder owns the draft (D95.4.3).
-        if active.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-            return Err(ApiFailure::conflict(format!(
-                "{} is a stack; change its values in the stack builder, not with this route",
-                active.id
-            )));
-        }
-        let schema = find_schema(&app.user_effects, &app.stacks, &active.id)
-            .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {}", active.id)))?;
-        let mut merged = active.props;
-        merged.extend(props.clone());
-        (schema, merged)
-    };
-
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.effects.saved.insert(schema.id.clone(), merged.clone());
-        store
-            .save_effects()
-            .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-        if let Some(layout) = store.active_layout_mut() {
-            if let Some(effect) = layout.effect.as_mut() {
-                effect.props = merged.clone();
-            }
-        }
-        store
-            .save_layouts()
-            .map_err(|e| ApiFailure::internal(format!("could not save the layouts: {e}")))?;
-    }
-
-    crate::apply_effect(&app, &schema.id, &merged)
-        .await
-        .map_err(|e| ApiFailure::internal(format!("could not change the props: {e}")))?;
-
-    Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
-}
-
-/// `PATCH /api/v1/effects/active/props` with a scene on the lights.
-///
-/// The groups are what play: the props go to the groups that play the effect, and the
-/// captures are the ones every group of the scene needs. The layout's one effect does not
-/// play, so it is not handed to the engine and it does not take the captures.
-///
-/// A draft that held the lights ends here, and the whole scene goes on again: ending a
-/// takeover always ends it on the engine.
-async fn patch_active_props_in_scene(
-    app: &Arc<App>,
-    lock: &crate::scenes::SceneLock<'_>,
-    schema: &PropertySchema,
-    effect: String,
-    base: Props,
-    props: Props,
-    replace: &crate::draft::ReplaceGuard<'_>,
-) -> ApiResult<Json<serde_json::Value>> {
-    let scene = {
-        let store = app.store.read().await;
-        crate::scenes::active_scene(&store.scenes).clone()
-    };
-    let mut merged = base;
-    merged.extend(props);
-
-    // The scene is saved with the new values, so what the engine runs and what the store holds
-    // are one thing. The layout's effect and the effect's starting values are left alone: in
-    // scene mode the groups carry the values.
-    let mut new = scene.clone();
-    new.rev = scene.rev + 1;
-    for group in new.groups.iter_mut() {
-        if let canvas_proto::scene::Plays::Effect { effect: plays, props } = &mut group.plays {
-            if plays == &effect {
-                *props = merged.clone();
-            }
-        }
-    }
-    crate::api::scenes::replace_saved(app, new).await?;
-
-    // The props go to the groups that play that effect, and the captures are the ones every
-    // group of the scene needs.
-    for group in &scene.groups {
-        let canvas_proto::scene::Plays::Effect { effect: plays, .. } = &group.plays else {
-            continue;
-        };
-        if plays == &effect {
-            app.engine.set_group_props(&group.id, &merged);
-        }
-    }
-    app.inputs.apply_needs(crate::scenes::needs_of(app, &scene));
-
-    // A draft held the lights: the whole scene goes on again, so the group the draft was on
-    // plays the scene's effect and not the draft's.
-    if replace.ended_takeover() {
-        crate::scenes::apply_with(app, lock, false).await;
-    }
-    app.scene.notify();
-
-    Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
 }
 
 /// `PATCH /api/v1/effects/{id}/defaults`.
