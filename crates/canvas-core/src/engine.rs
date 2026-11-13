@@ -18,14 +18,17 @@ use canvas_proto::color::{warmth_gains, Rgb8, WhiteBalance};
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::layout::{Layout, SamplingMode};
 use canvas_proto::props::{InputNeeds, Props};
+use canvas_proto::scene::Light;
 use canvas_proto::traits::{
-    Canvas, Effect, Engine, EngineSettings, FrameSink, InputSource, PreviewSink, RenderStats,
+    Canvas, Effect, Engine, EngineGroup, EngineSettings, FrameSink, GroupState, InputSource,
+    LightPreviewSink, PreviewSink, RenderStats,
 };
 use tracing::{info, warn};
 
 use crate::geometry::{self, LayoutPlan};
 use crate::preview;
 use crate::sampling;
+use crate::scene_engine::{FrameParams, GroupSlot, SceneRunner, SceneState};
 use crate::timer::FrameTimer;
 
 use crate::effect_guard;
@@ -33,7 +36,7 @@ use crate::effect_guard;
 /// Runs effect code behind the guard: `catch_unwind` with the marker set, so the
 /// daemon's panic hook knows a panic here is a caught effect panic, never the
 /// daemon's own fatal panic (#99, finding 1).
-fn guarded_call<R>(f: impl FnOnce() -> R) -> Result<R, Box<dyn std::any::Any + Send>> {
+pub(crate) fn guarded_call<R>(f: impl FnOnce() -> R) -> Result<R, Box<dyn std::any::Any + Send>> {
     catch_unwind(AssertUnwindSafe(|| effect_guard::run_guarded(f)))
 }
 
@@ -75,6 +78,16 @@ struct State {
     /// Sinks, in the order their devices appear in the plan.
     sinks: Vec<SinkEntry>,
     preview: Option<Arc<dyn PreviewSink>>,
+    /// Scenes: where the editor's live LEDs go.
+    light_preview: Option<Arc<dyn LightPreviewSink>>,
+    /// Scenes: the running scene. `Some` is scene mode (after `set_scene`); `set_layout` makes
+    /// it `None` again and the layout path runs.
+    scene: Option<SceneState>,
+    /// Scenes: the next generation to give an effect. Unique for the engine's whole life, so
+    /// an effect that was in flight when its slot was replaced can never be put back.
+    scene_effect_counter: u64,
+    /// Scenes: the next scene generation.
+    scene_counter: u64,
     input_source: Option<Arc<dyn InputSource>>,
     /// The active effect. `None` means "paint nothing" (a black canvas).
     effect: Option<Box<dyn Effect>>,
@@ -142,6 +155,10 @@ impl State {
             devices: Vec::new(),
             sinks: Vec::new(),
             preview: None,
+            light_preview: None,
+            scene: None,
+            scene_effect_counter: 0,
+            scene_counter: 0,
             input_source: None,
             effect: None,
             effect_panicked: false,
@@ -165,7 +182,7 @@ impl State {
 
     /// Whether anything consumes frames.
     fn has_consumers(&self) -> bool {
-        !self.sinks.is_empty() || self.preview.is_some()
+        !self.sinks.is_empty() || self.preview.is_some() || self.light_preview.is_some()
     }
 
     /// The measured fps over the last second.
@@ -228,6 +245,10 @@ impl State {
     }
 }
 
+/// A test's hook that sees each frame's measured time in ms.
+#[cfg(test)]
+pub(crate) type FrameTimeHook = Arc<dyn Fn(f32) + Send + Sync>;
+
 /// The public handle.
 pub struct CoreEngine {
     state: Mutex<State>,
@@ -246,6 +267,10 @@ pub struct CoreEngine {
     /// the park wait (#250). Set before the thread starts, so it sees every iteration.
     #[cfg(test)]
     decided_hook: Mutex<Option<Arc<dyn Fn() + Send + Sync>>>,
+    /// A test's hook, called with every frame's measured time in ms: the same number `stats()`
+    /// reports as `frame_time_ms`, for every frame instead of the last one.
+    #[cfg(test)]
+    frame_time_hook: Mutex<Option<FrameTimeHook>>,
 }
 
 impl CoreEngine {
@@ -271,6 +296,59 @@ impl CoreEngine {
             state.wake_generation = state.wake_generation.wrapping_add(1);
         }
         self.wake();
+    }
+
+    /// A group as the state holds it: its effect initialised behind the guard, its needs read
+    /// once. An effect that panics in `init` or `schema` is installed as failed, with the text
+    /// of the panic, and is not called again until it is replaced. The caller assigns the
+    /// generation under the lock.
+    fn group_slot(&self, group: EngineGroup) -> GroupSlot {
+        let mut effect = group.effect;
+        let mut failed = None;
+        let mut needs = canvas_proto::props::InputNeeds::default();
+        if let Some(e) = effect.as_mut() {
+            let outcome = guarded_call(|| {
+                e.init(&group.props);
+                e.schema().needs
+            });
+            match outcome {
+                Ok(n) => needs = n,
+                Err(payload) => {
+                    report_effect_panic(e.as_ref(), "init", &payload);
+                    self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    failed = Some(panic_text(&payload));
+                }
+            }
+        }
+        GroupSlot {
+            id: group.id,
+            members: group.members,
+            mode: group.mode,
+            brightness: group.brightness.min(100),
+            effect,
+            needs,
+            effect_generation: 0,
+            started: Instant::now(),
+            pending_props: None,
+            failed,
+        }
+    }
+
+    /// Drops replaced effects behind the guard, outside the state lock: an effect's `Drop` is
+    /// effect code, and a panic in it must not take the caller or the lock down.
+    fn drop_effects(&self, effects: impl IntoIterator<Item = Box<dyn Effect>>) {
+        for effect in effects {
+            if guarded_call(|| drop(effect)).is_err() {
+                self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                warn!("a replaced effect panicked in Drop; it was already superseded");
+            }
+        }
+    }
+
+    /// Sets the test hook that sees every frame's measured time in ms.
+    #[cfg(test)]
+    pub(crate) fn set_frame_time_hook(&self, hook: Option<FrameTimeHook>) {
+        *self.frame_time_hook.lock().unwrap_or_else(|e| e.into_inner()) = hook;
     }
 
     /// The render thread's operating-system thread id, if the thread has started.
@@ -315,7 +393,7 @@ impl CoreEngine {
 /// A caught panic's payload as text. Same rule as the daemon's `panic_message`
 /// (`crates/canvas-daemon/src/exit_log.rs`): `panic!("x")` carries a `&str`,
 /// `panic!("{x}")` a `String`.
-fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
+pub(crate) fn panic_text(payload: &Box<dyn std::any::Any + Send>) -> String {
     if let Some(text) = payload.downcast_ref::<&str>() {
         (*text).to_string()
     } else if let Some(text) = payload.downcast_ref::<String>() {
@@ -337,7 +415,7 @@ fn effect_id_guarded(effect: &dyn Effect) -> String {
 /// Logs one caught effect panic: the effect id and the panic message, once per effect
 /// instance. The caller marks the effect stopped, so this is the only line that effect
 /// gives until it is replaced.
-fn report_effect_panic(effect: &dyn Effect, phase: &str, payload: &Box<dyn std::any::Any + Send>) {
+pub(crate) fn report_effect_panic(effect: &dyn Effect, phase: &str, payload: &Box<dyn std::any::Any + Send>) {
     let effect_id = effect_id_guarded(effect);
     let message = panic_text(payload);
     tracing::error!(effect_id = %effect_id, phase, message = %message, "an effect panicked; it will not be called again until a new effect is set");
@@ -350,7 +428,14 @@ impl Engine for CoreEngine {
         let plan = geometry::build_plan(&layout, &devices);
         let summary = plan.summary();
         let device_count = plan.device_count();
-        self.mutate(|state| {
+        // The scene ends here, and its effects are dropped behind the guard, outside the
+        // lock, exactly like `set_scene` drops the scene it replaces: an effect's `Drop` is
+        // effect code, and a panic in it must not take the caller or the lock down.
+        let old = {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = &mut *guard;
+            // The layout path runs again: scene mode ends.
+            let old = state.scene.take();
             state.devices = devices;
             state.plan = Some(plan);
             state.plan_generation = state.plan_generation.wrapping_add(1);
@@ -364,7 +449,13 @@ impl Engine for CoreEngine {
                     .map(|d| d.led_count())
                     .unwrap_or(sink.led_count);
             }
-        });
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            old
+        };
+        self.wake();
+        if let Some(old) = old {
+            self.drop_effects(old.groups.into_iter().filter_map(|g| g.effect));
+        }
         info!(
             devices = device_count,
             ?sampling,
@@ -540,21 +631,139 @@ impl Engine for CoreEngine {
         }
     }
 
-    // Scenes (0.14.0): stubs until the scene engine lands (Scenes plan, Task 4).
+    // Scenes (0.14.0, #310): one effect per group. The per-frame work is in `scene_engine`.
     fn set_scene(
         &self,
-        _lights: Vec<canvas_proto::scene::Light>,
-        _devices: Vec<DeviceInfo>,
-        _groups: Vec<canvas_proto::EngineGroup>,
-        _fade: bool,
+        lights: Vec<Light>,
+        devices: Vec<DeviceInfo>,
+        groups: Vec<EngineGroup>,
+        fade: bool,
     ) {
+        // Every effect is initialised here, on the caller's thread and behind the guard, like
+        // `set_effect`: an initialising panic marks that group failed and nothing else.
+        let mut slots: Vec<GroupSlot> = groups.into_iter().map(|g| self.group_slot(g)).collect();
+        let (group_count, device_count) = (slots.len(), devices.len());
+        let old = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            for slot in slots.iter_mut() {
+                state.scene_effect_counter += 1;
+                slot.effect_generation = state.scene_effect_counter;
+            }
+            state.scene_counter += 1;
+            let generation = state.scene_counter;
+            let old = state.scene.replace(SceneState {
+                generation,
+                lights,
+                groups: slots,
+                fade_pending: fade,
+            });
+            state.devices = devices;
+            // Sinks may have arrived before the scene did; a sink's LED count follows the
+            // topology, so a frame built for the old size of a zone is dropped at delivery.
+            let known: Vec<(DeviceId, u32)> =
+                state.devices.iter().map(|d| (d.id.clone(), d.led_count())).collect();
+            for sink in state.sinks.iter_mut() {
+                if let Some((_, count)) = known.iter().find(|(id, _)| *id == sink.device_id) {
+                    sink.led_count = *count;
+                }
+            }
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            old
+        };
+        self.wake();
+        // The replaced scene's effects drop behind the guard, outside the lock.
+        if let Some(old) = old {
+            self.drop_effects(old.groups.into_iter().filter_map(|g| g.effect));
+        }
+        info!(groups = group_count, devices = device_count, fade, "scene applied");
     }
-    fn set_group_effect(&self, _group: &str, _effect: Option<Box<dyn Effect>>, _props: &Props) {}
-    fn set_group_props(&self, _group: &str, _props: &Props) {}
-    fn set_group_brightness(&self, _group: &str, _brightness: u8) {}
-    fn set_light_preview(&self, _sink: Option<std::sync::Arc<dyn canvas_proto::LightPreviewSink>>) {}
-    fn group_states(&self) -> Vec<canvas_proto::GroupState> {
-        Vec::new()
+
+    fn set_group_effect(&self, group: &str, effect: Option<Box<dyn Effect>>, props: &Props) {
+        let mut replacement = self.group_slot(EngineGroup {
+            id: group.to_string(),
+            members: Vec::new(),
+            mode: canvas_proto::scene::GroupMode::FlowAcross,
+            brightness: 100,
+            effect,
+            props: props.clone(),
+        });
+        let superseded = {
+            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            state.scene_effect_counter += 1;
+            let generation = state.scene_effect_counter;
+            let slot = state
+                .scene
+                .as_mut()
+                .and_then(|scene| scene.groups.iter_mut().find(|g| g.id == group));
+            let superseded = match slot {
+                Some(slot) => {
+                    let old = slot.effect.take();
+                    slot.effect = replacement.effect.take();
+                    slot.needs = replacement.needs;
+                    slot.effect_generation = generation;
+                    slot.started = Instant::now();
+                    slot.pending_props = None;
+                    slot.failed = replacement.failed.take();
+                    old
+                }
+                None => {
+                    warn!(group, "set_group_effect: no such group in the running scene");
+                    replacement.effect.take()
+                }
+            };
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            superseded
+        };
+        self.wake();
+        self.drop_effects(superseded);
+    }
+
+    fn set_group_props(&self, group: &str, props: &Props) {
+        // The effect may be in the render thread's hands, so the props are queued and applied
+        // at the start of the group's next frame.
+        self.mutate(|state| {
+            if let Some(slot) = state
+                .scene
+                .as_mut()
+                .and_then(|scene| scene.groups.iter_mut().find(|g| g.id == group))
+            {
+                slot.pending_props = Some(props.clone());
+            }
+        });
+    }
+
+    fn set_group_brightness(&self, group: &str, brightness: u8) {
+        let clamped = brightness.min(100);
+        self.mutate(|state| {
+            if let Some(slot) = state
+                .scene
+                .as_mut()
+                .and_then(|scene| scene.groups.iter_mut().find(|g| g.id == group))
+            {
+                slot.brightness = clamped;
+            }
+        });
+    }
+
+    fn set_light_preview(&self, sink: Option<Arc<dyn LightPreviewSink>>) {
+        let enabled = sink.is_some();
+        self.mutate(|state| state.light_preview = sink);
+        info!(enabled, "light preview changed");
+    }
+
+    fn group_states(&self) -> Vec<GroupState> {
+        let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
+        state
+            .scene
+            .as_ref()
+            .map(|scene| {
+                scene
+                    .groups
+                    .iter()
+                    .map(|g| GroupState { id: g.id.clone(), failed: g.failed.clone() })
+                    .collect()
+            })
+            .unwrap_or_default()
     }
 
     fn shutdown(&self) {
@@ -599,6 +808,8 @@ fn new_core(settings: &EngineSettings) -> Arc<CoreEngine> {
         effect_panics: std::sync::atomic::AtomicU64::new(0),
         #[cfg(test)]
         decided_hook: Mutex::new(None),
+        #[cfg(test)]
+        frame_time_hook: Mutex::new(None),
     })
 }
 
@@ -716,6 +927,8 @@ fn render_loop(engine: Arc<CoreEngine>) {
     // plan, so a plan that lists the same devices in another order keeps every
     // device's own frame.
     let mut last_good_ids: Vec<DeviceId> = Vec::new();
+    // Scene mode (Scenes, #310): the render thread's canvases, plans and buffers.
+    let mut scene_runner = SceneRunner::new();
 
     loop {
         // ---- read the state --------------------------------------------------
@@ -769,7 +982,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
             // The black frame on the pause transition is written once, here.
             if state.pending_black {
                 state.pending_black = false;
-                write_black(&state);
+                write_black(&mut state, &mut scene_runner);
                 info!("paused: wrote one black frame to every sink");
             }
             // Wait until the state changes. The generation counter closes the race
@@ -803,6 +1016,12 @@ fn render_loop(engine: Arc<CoreEngine>) {
             // were missed while parked.
             timer.reset_schedule(Instant::now());
             last_frame_at = Instant::now();
+        }
+
+        // Scene mode: one effect per group. The layout path below does not run.
+        if render_scene_frame(&engine, &mut scene_runner, &mut last_frame_at) {
+            timer.sleep_until_next(fps);
+            continue;
         }
 
         // Take the effect out of the state for the duration of the frame, so the API
@@ -1029,7 +1248,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
             // Skip to bookkeeping: no sink submit, no preview submit.
             if redeliver {
                 let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-                redeliver_last_good(&state, &last_good, &device_index);
+                redeliver_last_good(&mut state, &last_good, &device_index, &mut scene_runner);
                 state.pending_sink = false;
                 state.pending_resume = false;
             }
@@ -1037,7 +1256,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
         // ---- deliver ---------------------------------------------------------
         {
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            for sink in &state.sinks {
+            for sink in state.sinks.iter_mut() {
                 // The sink takes ownership of the colors, so the buffer is moved out
                 // rather than copied. `FrameSink::submit` takes a `Vec`, so one
                 // allocation per device per frame is inherent to the trait.
@@ -1048,13 +1267,17 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     ),
                     // A sink can arrive a frame before the plan that knows its device:
                     // it gets black, at its full length, never an empty frame.
-                    None => vec![Rgb8::BLACK; sink.led_count as usize],
+                    None => black_frame(sink),
                 };
                 // A device with no known LEDs (its layout has not arrived) gets nothing: an empty
                 // frame is rejected by every adapter and only fills the log.
                 if colors.is_empty() {
                     continue;
                 }
+                // The frame the device is sent now is the frame a fade starts from, in
+                // layout mode too: a fade that follows layout mode blends from what the
+                // strip is showing, not from the scene that ended before it.
+                scene_runner.record_sent(&sink.device_id, &colors);
                 sink.sink.submit(colors);
             }
             // Every sink has this frame now, the new ones included.
@@ -1088,18 +1311,125 @@ fn render_loop(engine: Arc<CoreEngine>) {
         }
 
         // ---- bookkeeping -----------------------------------------------------
-        {
-            let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            state.frames_rendered += 1;
-            state.frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
-            state.record_frame(frame_start);
-        }
+        finish_frame(&engine, frame_start);
 
         // ---- sleep to the next tick ------------------------------------------
         timer.sleep_until_next(fps);
     }
 
     info!("render thread exiting");
+}
+
+/// The bookkeeping that ends every frame, layout mode and scene mode alike.
+fn finish_frame(engine: &CoreEngine, frame_start: Instant) {
+    let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
+    {
+        let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
+        state.frames_rendered += 1;
+        state.frame_time_ms = frame_time_ms;
+        state.record_frame(frame_start);
+    }
+    #[cfg(test)]
+    {
+        let hook = engine.frame_time_hook.lock().unwrap_or_else(|e| e.into_inner()).clone();
+        if let Some(hook) = hook {
+            hook(frame_time_ms);
+        }
+    }
+}
+
+/// One frame of scene mode (Scenes, #310). Returns false, having done nothing, when the engine
+/// is in layout mode.
+///
+/// The lock is held to take each group's effect out and to put it back, never while an effect
+/// runs: the API threads (`set_group_props`, `set_group_effect`) are never blocked by a long
+/// update. The per-group work is in `scene_engine`.
+fn render_scene_frame(
+    engine: &CoreEngine,
+    runner: &mut SceneRunner,
+    last_frame_at: &mut Instant,
+) -> bool {
+    let frame_start = Instant::now();
+    let (input, params) = {
+        let mut guard = engine.state.lock().unwrap_or_else(|e| e.into_inner());
+        let state = &mut *guard;
+        let Some(scene) = state.scene.as_mut() else {
+            return false;
+        };
+        // The runner's group buffer goes into the frame and comes back with it.
+        let generation = runner.generation();
+        let works = runner.take_works();
+        let input = scene.take_input(&state.devices, generation, works);
+        let dt = frame_start.duration_since(*last_frame_at).as_secs_f32();
+        *last_frame_at = frame_start;
+        let params = FrameParams {
+            dt,
+            now: frame_start,
+            brightness: f32::from(state.brightness) / 100.0,
+            warmth: state.warmth,
+            white_balance: Arc::clone(&state.white_balance),
+            input_source: state.input_source.clone(),
+            want_light_preview: state.light_preview.is_some(),
+        };
+        (input, params)
+    };
+
+    // The groups run, one after the other, with no lock held.
+    let output = runner.render(input, &params);
+    if output.panics > 0 {
+        engine.effect_panics.fetch_add(output.panics, std::sync::atomic::Ordering::Relaxed);
+    }
+
+    // The effects go back, the frames go out.
+    let (superseded, light_sink) = {
+        let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
+        let superseded = match state.scene.as_mut() {
+            Some(scene) => scene.put_back(runner.done()),
+            // The scene ended while the frame ran (`set_layout`): the effects have nowhere
+            // to go back to. They are dropped behind the guard, outside the lock, like
+            // every other replaced effect: an effect's `Drop` is effect code.
+            None => runner.done().drain(..).filter_map(|item| item.effect).collect(),
+        };
+        // `set_layout` ended scene mode during the frame: the frame is stale, nothing is sent.
+        if state.scene.is_some() {
+            for sink in state.sinks.iter_mut() {
+                // A frame the runner built for another LED count than the sink has now is
+                // dropped, never sent: a resize lands between two frames, not inside one.
+                let Some(colors) = runner.take_frame(&sink.device_id, sink.led_count as usize)
+                else {
+                    // The device is not in the scene at all: the sink gets a black frame of
+                    // its own length, never nothing, so a strip whose device dropped goes
+                    // dark instead of holding the colours it was last sent. Layout mode
+                    // does the same for a sink whose device the plan does not know.
+                    if !runner.knows_device(&sink.device_id) && sink.led_count > 0 {
+                        // The black frame is recorded as the frame the sink was sent: the
+                        // strip is dark, so a fade that follows blends from black and not
+                        // from the colours the device had before it left the scene.
+                        let frame = black_frame(sink);
+                        runner.record_sent(&sink.device_id, &frame);
+                        sink.sink.submit(frame);
+                    }
+                    continue;
+                };
+                if !colors.is_empty() {
+                    // The frame the device is sent now is the frame a fade starts from.
+                    runner.record_sent(&sink.device_id, &colors);
+                    sink.sink.submit(colors);
+                }
+            }
+            // Every sink has had a frame of the scene, the new ones included.
+            state.pending_sink = false;
+            state.pending_resume = false;
+        }
+        (superseded, state.light_preview.clone())
+    };
+    engine.drop_effects(superseded);
+    if let (Some(sink), Some(frame)) = (light_sink, output.light_frame) {
+        sink.submit(frame);
+    }
+
+    finish_frame(engine, frame_start);
+    true
 }
 
 /// Moves the saved frames onto the new plan (#145).
@@ -1136,10 +1466,22 @@ fn remap_last_good(
 }
 
 /// Writes one black frame to every sink.
-fn write_black(state: &State) {
-    for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
-        sink.sink.submit(vec![Rgb8::BLACK; sink.led_count as usize]);
+///
+/// The black frame is recorded as the frame the sink was sent: the strip is dark after
+/// this, so a fade that follows blends from black and not from the colours the scene
+/// had before the pause.
+fn write_black(state: &mut State, runner: &mut SceneRunner) {
+    for sink in state.sinks.iter_mut().filter(|s| s.led_count > 0) {
+        let frame = black_frame(sink);
+        runner.record_sent(&sink.device_id, &frame);
+        sink.sink.submit(frame);
     }
+}
+
+/// The black frame a sink is sent, at the sink's own LED count. [`FrameSink::submit`] takes
+/// the frame by value, so this is one allocation per send, like every other frame.
+fn black_frame(sink: &SinkEntry) -> Vec<Rgb8> {
+    vec![Rgb8::BLACK; sink.led_count as usize]
 }
 
 /// Sends the last good frame to every sink again (#145).
@@ -1149,13 +1491,16 @@ fn write_black(state: &State) {
 /// it was last sent, or the black frame the pause wrote, until another effect is picked.
 /// The last good colours go out instead; black when the effect never drew one.
 ///
-/// The frame is copied here, not moved: the saved copy stays for the next time.
+/// The frame is copied here, not moved: the saved copy stays for the next time. It is
+/// recorded as the frame the sink was sent, so a fade that follows blends from what the
+/// strip is showing.
 fn redeliver_last_good(
-    state: &State,
+    state: &mut State,
     last_good: &[Vec<Rgb8>],
     device_index: &std::collections::HashMap<DeviceId, usize>,
+    runner: &mut SceneRunner,
 ) {
-    for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
+    for sink in state.sinks.iter_mut().filter(|s| s.led_count > 0) {
         let led_count = sink.led_count as usize;
         let saved = device_index
             .get(&sink.device_id)
@@ -1166,8 +1511,9 @@ fn redeliver_last_good(
             Some(frame) => frame.clone(),
             // The effect never drew a frame for this device, or the plan changed under
             // it: black, at the device's full length, never an empty frame.
-            None => vec![Rgb8::BLACK; led_count],
+            None => black_frame(sink),
         };
+        runner.record_sent(&sink.device_id, &colors);
         sink.sink.submit(colors);
     }
 }

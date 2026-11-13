@@ -6,6 +6,11 @@
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Layout } from "@/proto/Layout";
+import type { Arrangement } from "@/proto/Arrangement";
+import type { Group } from "@/proto/Group";
+import type { LightView } from "@/proto/LightView";
+import type { Scene } from "@/proto/Scene";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayInfo } from "@/proto/DisplayInfo";
@@ -708,3 +713,121 @@ export const DISPLAY_DEFAULT: DisplayConfig = {
   decimals: 1,
   blink_above: null,
 };
+
+// ---- scenes (0.14.0) ----
+
+/** A light's id: the device and the zone, never an adapter index (canvas-proto `zone_light_id`). */
+export const zoneLightId = (deviceId: string, zone: number): string => `${deviceId}#z${zone}`;
+
+/** The demo's lights: one per zone of every device, as the daemon's first scenes sync makes them. */
+export const DEMO_LIGHTS: LightView[] = DEVICES.flatMap((device) =>
+  device.zones.map((zone): LightView => {
+    // A fan is a ring: the owner's choice, set on the Devices row (a migrated zone keeps its shape).
+    const arrangement: Arrangement = device.id.startsWith("openrgb:fan-hub-")
+      ? "ring"
+      : zone.kind.type === "single"
+        ? "single"
+        : zone.kind.type === "matrix"
+          ? "grid"
+          : "strip";
+    return {
+      light: {
+        id: zoneLightId(device.id, zone.index),
+        device_id: device.id,
+        zone_index: zone.index,
+        arrangement,
+        reversed: false,
+      },
+      led_count: zone.led_count,
+      connected: device.connected,
+      label: `${device.name} · ${zone.name}`,
+    };
+  }),
+);
+
+/** The ids of the demo lights that belong to the devices whose id starts with one of `prefixes`. */
+function demoLightIds(...prefixes: string[]): string[] {
+  return DEMO_LIGHTS.filter((l) => prefixes.some((p) => l.light.device_id.startsWith(p))).map((l) => l.light.id);
+}
+
+const demoGroup = (
+  id: string,
+  name: string,
+  members: string[],
+  effect: string | null,
+  mode: Group["mode"] = "flow_across",
+  brightness = 100,
+): Group => ({
+  id,
+  name,
+  members,
+  plays: effect ? { type: "effect", effect, props: {} } : { type: "off" },
+  mode,
+  brightness,
+});
+
+/**
+ * The demo's three scenes. "Gaming" is the active one: four groups and one light left over (the
+ * mouse). "Focus" is one group. "Evening" has a group whose effect file is gone, so the daemon
+ * reports that group failed. Every one passes {@link demoSceneProblem}.
+ */
+export const DEMO_SCENES: ScenesResponse = (() => {
+  const mouse = demoLightIds("openrgb:mouse-1");
+  const everything = DEMO_LIGHTS.map((l) => l.light.id);
+  const gaming: Scene = {
+    id: "gaming",
+    name: "Gaming",
+    rev: 7,
+    groups: [
+      demoGroup("g-case", "Case fans", demoLightIds("openrgb:fan-hub-"), "aurora"),
+      demoGroup("g-ram", "Memory", demoLightIds("openrgb:I2C: PawnIO SMBus PIIX4 0"), "rainbow_wave", "each_its_own", 80),
+      demoGroup("g-gpu", "Graphics card", demoLightIds("openrgb:gpu-1"), "breathing"),
+      demoGroup(
+        "g-desk",
+        "Cooler and desk",
+        everything.filter((id) => !mouse.includes(id) && !demoLightIds("openrgb:fan-hub-", "openrgb:I2C: PawnIO SMBus PIIX4 0", "openrgb:gpu-1").includes(id)),
+        "spiral",
+      ),
+    ],
+  };
+  const focus: Scene = {
+    id: "focus",
+    name: "Focus",
+    rev: 3,
+    groups: [demoGroup("g-all", "Everything", everything, "white", "flow_across", 60)],
+  };
+  const evening: Scene = {
+    id: "evening",
+    name: "Evening",
+    rev: 2,
+    groups: [
+      demoGroup("g-warm", "Case", demoLightIds("openrgb:fan-hub-", "openrgb:strip-"), "fire"),
+      demoGroup("g-lost", "Everything else", everything.filter((id) => !demoLightIds("openrgb:fan-hub-", "openrgb:strip-").includes(id)), "html:glow-removed"),
+    ],
+  };
+  return {
+    active: gaming.id,
+    scenes: [gaming, focus, evening],
+    group_states: gaming.groups.map((g) => ({ id: g.id, failed: null })),
+  };
+})();
+
+/**
+ * A TS port of canvas-proto's `validate_scene` membership rules: a light is in one group at
+ * most, and a group has at least one member. Returns the first broken rule in words, or null.
+ */
+export function demoSceneProblem(scene: Scene): string | null {
+  const held = new Map<string, string>();
+  const ids = new Set<string>();
+  for (const group of scene.groups) {
+    if (ids.has(group.id)) return `two groups have the id ${group.id}`;
+    ids.add(group.id);
+    if (group.members.length === 0) return `group ${group.name} has no members`;
+    for (const light of group.members) {
+      const other = held.get(light);
+      if (other !== undefined) return `light ${light} is in two groups (${other} and ${group.id})`;
+      held.set(light, group.id);
+    }
+  }
+  return null;
+}

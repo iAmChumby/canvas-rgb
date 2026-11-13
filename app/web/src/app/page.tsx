@@ -1,5 +1,5 @@
-import { LayoutView } from "@/views/LayoutView";
+import { ScenesView } from "@/views/scenes/ScenesView";
 
 export default function Page() {
-  return <LayoutView />;
+  return <ScenesView />;
 }

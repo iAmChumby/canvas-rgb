@@ -181,24 +181,6 @@ async function effectEditor(page) {
   await page.waitForSelector(".eff-editor", { timeout: T });
 }
 
-/** Layout: a zone selected in the Parts list, so the panel is the zone's inspector. */
-async function layoutZone(page) {
-  await page.getByRole("button", { name: "Select Front fan 1", exact: true }).click();
-  await page.waitForSelector(".rd-lay-parts-body > div:not(.stack)", { timeout: T });
-}
-
-/** Layout: a landmark (the keyboard) selected, so the panel is that part's inspector. */
-async function layoutPart(page) {
-  await page.getByRole("button", { name: "Select Keyboard", exact: true }).click();
-  await page.waitForSelector(".rd-lay-parts-body > div:not(.stack)", { timeout: T });
-}
-
-/** Layout: the Add part popover (a Popover, drawn into body) open. */
-async function layoutAdd(page) {
-  await page.getByRole("button", { name: "Add part", exact: true }).click();
-  await page.waitForSelector(".popover", { timeout: T });
-}
-
 /**
  * Fans: the CPU fan's temperature source list (a Select's listbox, drawn into body) open, in Curve
  * mode. (Peripherals' LED mode select is disabled until the demo allows writes, so it cannot open.)
@@ -224,16 +206,25 @@ async function settingsListen(page) {
   await page.waitForSelector('[role="status"]:not([data-note="true"])', { timeout: T });
 }
 
+/** The Scenes page draws rows, not panels: the rows are its boxes. */
+const SCENE_BOXES = "[data-testid=group-row], [data-testid=unassigned-row]";
+
 /**
  * Every view of the demo, and the states of it that draw more than the first paint does.
  * `boxes` adds row containers to measure besides `.panel` and `.rule`. `prep` clicks the row into
  * its state (`before` is what to wait for first, when that is not a panel). `overlay` marks a row with a popup open: `--hover-tips` skips it.
  */
 const VIEWS = [
-  { name: "layout", url: "/" },
-  { name: "layout-zone", url: "/", prep: layoutZone },
-  { name: "layout-part", url: "/", prep: layoutPart },
-  { name: "layout-add", url: "/", prep: layoutAdd, overlay: true },
+  // Scenes: the default (four groups and an unassigned light, one group with a device away), and
+  // the states that change a row's height or width: a failed group, 40-character names, twenty
+  // groups (the list scrolls), the notice for a new light, one group, no group.
+  { name: "scenes", url: "/", boxes: SCENE_BOXES },
+  { name: "scenes-failed", url: "/?state=scene:evening", boxes: SCENE_BOXES },
+  { name: "scenes-long", url: "/?state=long-names", boxes: SCENE_BOXES },
+  { name: "scenes-many", url: "/?state=groups-20", boxes: SCENE_BOXES },
+  { name: "scenes-new", url: "/?state=new-light", boxes: SCENE_BOXES },
+  { name: "scenes-one", url: "/?state=scene:focus", boxes: SCENE_BOXES },
+  { name: "scenes-empty", url: "/?state=groups-0", boxes: SCENE_BOXES },
   { name: "effects", url: "/effects/", boxes: ".effect-toolbar, .effect-card" },
   { name: "effects-editor", url: "/effects/?state=html", before: ".effect-card", prep: effectEditor },
   { name: "effects-stack", url: "/effects/?stack=Sunset%20glow&state=complete,stack" },
@@ -265,7 +256,7 @@ const VIEWS = [
  * gallery). They are measured through their `boxes` instead, and the check fails if those are
  * missing too. Any other view without a panel is a failure, not a pass.
  */
-const NO_PANEL = (row, width) => row === "devices" || (row === "effects" && width <= PHONE_MAX);
+const NO_PANEL = (row, width) => row === "devices" || row.startsWith("scenes") || (row === "effects" && width <= PHONE_MAX);
 
 const only = flag("--views")?.split(",");
 const rows = VIEWS.filter((v) => (!only || only.some((o) => v.name === o || v.name.startsWith(`${o}-`))) && !(hoverTips && v.overlay));

@@ -14,6 +14,8 @@ import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { FailedEffect } from "@/proto/FailedEffect";
 import type { Layout } from "@/proto/Layout";
+import type { LightView } from "@/proto/LightView";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { RenderState } from "@/proto/RenderState";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -32,6 +34,26 @@ let lastStatusFailureAt = 0;
 
 /** Failed status reads in a row. One blip keeps the last status on screen; a second one drops it. */
 let statusFailures = 0;
+
+/**
+ * The daemon answered 404 for the scene routes: it is older than the scenes. Asking again
+ * every four seconds would only get the same answer, so the poll stops until the daemon's
+ * version changes (the daemon was replaced or updated) or it answers a status read again after
+ * a failed one (it was restarted).
+ */
+let scenesUnsupported = false;
+
+/** The daemon answered 404 for the light routes: it is older than the lights. Same rule. */
+let lightsUnsupported = false;
+
+/** The daemon's version the last time it answered. */
+let daemonVersion = "";
+
+/**
+ * The frame count the daemon last reported. It counts frames since start and never goes back
+ * within one process (it stops while parked), so a smaller count is a daemon that restarted.
+ */
+let lastFrames: number | null = null;
 
 /**
  * When the daemon was last tried and when the next try is due. The daemon-down page shows it,
@@ -62,6 +84,12 @@ export interface Snap {
   layouts: Layout[] | null;
   activeLayout: string | null;
   layoutsError: string | null;
+  /** Every scene, the active one's id and how its groups are doing (0.14.0). */
+  scenes: ScenesResponse | null;
+  scenesError: string | null;
+  /** Every light the daemon keeps, with what the editor shows beside it. */
+  lights: LightView[] | null;
+  lightsError: string | null;
   render: RenderState | null;
   settings: Settings | null;
   settingsError: string | null;
@@ -92,6 +120,10 @@ let snap: Snap = {
   layouts: null,
   activeLayout: null,
   layoutsError: null,
+  scenes: null,
+  scenesError: null,
+  lights: null,
+  lightsError: null,
   render: null,
   settings: null,
   settingsError: null,
@@ -220,8 +252,22 @@ export async function refreshStatus(n?: number): Promise<void> {
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
     patchSnap({ status, statusError: null });
+    // A read that answers after a failed one is a daemon that came back. A rebuilt dev daemon keeps
+    // its version, so the version alone would leave it dark until a Try again.
+    const cameBack = statusFailures > 0;
     lastStatusFailureAt = 0;
     statusFailures = 0;
+    // A daemon restarted inside one poll gap answers every read and keeps its version, so neither
+    // the version nor a failed read shows it: its frame count starts again from zero.
+    const frames = typeof status.frames_rendered === "number" ? status.frames_rendered : null;
+    const restarted = frames !== null && lastFrames !== null && frames < lastFrames;
+    if (frames !== null) lastFrames = frames;
+    // A daemon that changed, came back or restarted is a daemon that may have the scene routes now.
+    if (cameBack || restarted || status.version !== daemonVersion) {
+      daemonVersion = status.version;
+      scenesUnsupported = false;
+      lightsUnsupported = false;
+    }
   } catch (e) {
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
@@ -314,6 +360,42 @@ export async function refreshLayouts(n?: number): Promise<void> {
   }
 }
 
+export async function refreshScenes(n?: number): Promise<void> {
+  // A daemon without the scene routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (scenesUnsupported && n === undefined) return;
+  const req = n ?? beginRequest("scenes");
+  try {
+    const scenes = await api.scenes.list();
+    if (!isNewest("scenes", req)) return;
+    markAnswered("scenes", req);
+    patchSnap({ scenes, scenesError: null });
+  } catch (e) {
+    if (!isNewest("scenes", req)) return;
+    markAnswered("scenes", req);
+    if (e instanceof ApiFailure && e.status === 404) scenesUnsupported = true;
+    patchSnap({ scenesError: messageOf(e) });
+  }
+}
+
+export async function refreshLights(n?: number): Promise<void> {
+  // A daemon without the light routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (lightsUnsupported && n === undefined) return;
+  const req = n ?? beginRequest("lights");
+  try {
+    const lights = (await api.lights.list()).lights;
+    if (!isNewest("lights", req)) return;
+    markAnswered("lights", req);
+    patchSnap({ lights, lightsError: null });
+  } catch (e) {
+    if (!isNewest("lights", req)) return;
+    markAnswered("lights", req);
+    if (e instanceof ApiFailure && e.status === 404) lightsUnsupported = true;
+    patchSnap({ lightsError: messageOf(e) });
+  }
+}
+
 export async function refreshRender(n?: number): Promise<void> {
   const req = n ?? beginRequest("render");
   try {
@@ -367,6 +449,10 @@ export const retryFans = (): Promise<void> => retryArea("fans", refreshFans);
 export const retryDevices = (): Promise<void> =>
   retryArea("devices", (n) => refreshDevices(n, { rescan: true }));
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
+export const retryScenes = (): Promise<void> =>
+  retryArea("scenes", async (n) => {
+    await Promise.all([refreshScenes(n), refreshLights(beginRequest("lights"))]);
+  });
 export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);
 export const retryDisplays = (): Promise<void> => retryArea("displays", refreshDisplays);
@@ -396,6 +482,8 @@ export async function refreshAll(): Promise<void> {
     refreshDevices(),
     refreshEffects(),
     refreshLayouts(),
+    refreshScenes(),
+    refreshLights(),
     refreshRender(),
     refreshSettings(),
     refreshDisplays(),
@@ -432,6 +520,10 @@ export function startSync(): () => void {
     // The layout can change outside the editor (the CLI, the daemon's own defaults), and a
     // stale desk canvas is worse than one extra request every four seconds.
     void refreshLayouts();
+    // Scenes and lights change outside the editor too (another window, the CLI, a device that
+    // came back), and the group rows say which group failed.
+    void refreshScenes();
+    void refreshLights();
     void refreshSettings();
     void refreshDisplays();
   };

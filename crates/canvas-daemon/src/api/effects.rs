@@ -193,15 +193,28 @@ pub async fn activate(
     // own effect, and a timer puts that effect back (see `crate::transient`).
     let transient = canvas_effects::onboard::is_onboard_id(&schema.id);
 
+    // Scenes: the effect plays on the groups asked for (every group when none is named), with the
+    // values just worked out. Planned first, so a refusal (an unknown group, too many HTML
+    // groups) changes nothing, not even the legacy layout below.
+    let scene_lock = app.scene.lock().await;
+    let planned = if transient {
+        None
+    } else {
+        crate::api::scenes::plan_activation(&app, &schema.id, &props, request.groups.as_deref()).await?
+    };
+
     // Save the props for next time, then apply the effect. A stack is never in `effects.saved`
-    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot.
+    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot. In scene mode
+    // activating only changes groups: an effect's starting values are written by
+    // `PATCH /effects/{id}/defaults` and nothing else, so playing it on one group never changes
+    // what another group starts from.
     let is_stack = stack.is_some();
     if !transient {
         let mut store = app
             .store
             .write()
             .await;
-        if !is_stack {
+        if !is_stack && !app.scene.is_on() {
             store.effects.saved.insert(schema.id.clone(), props.clone());
             store
                 .save_effects()
@@ -245,7 +258,12 @@ pub async fn activate(
         }
         None => false,
     };
-    if !reused {
+    // Once the engine runs a scene the layout's single effect is not what plays: the groups are.
+    // The onboarding effects are the exception until the takeovers move to scenes.
+    if let Some(planned) = planned {
+        crate::api::scenes::commit_activation(&app, &scene_lock, planned).await?;
+    }
+    if !reused && (transient || !app.scene.is_on()) {
         crate::apply_effect(&app, &schema.id, &props)
             .await
             .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
@@ -320,6 +338,35 @@ pub async fn patch_active_props(
         .await
         .map_err(|e| ApiFailure::internal(format!("could not change the props: {e}")))?;
 
+    Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
+}
+
+/// `PATCH /api/v1/effects/{id}/defaults`.
+///
+/// An effect's starting values (`EffectsFile.saved`): what the next group to play it starts from.
+/// A group that already plays the effect keeps its own values; no scene changes.
+pub async fn patch_defaults(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Json(props): Json<Props>,
+) -> ApiResult<Json<serde_json::Value>> {
+    check_preset_caps(&props)?;
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    if schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+        return Err(ApiFailure::conflict(format!(
+            "{} is a stack; its values live in the stack builder, not in the starting values",
+            schema.id
+        )));
+    }
+    let fitted = fit_props_to_schema(&schema, props, "the starting values");
+    let mut store = app.store.write().await;
+    let mut merged = store.effects.saved.get(&schema.id).cloned().unwrap_or_default();
+    merged.extend(fitted);
+    store.effects.saved.insert(schema.id.clone(), merged.clone());
+    store
+        .save_effects()
+        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
 }
 
@@ -424,6 +471,11 @@ fn clean_preset_name(name: &str) -> Result<String, ApiFailure> {
         ));
     }
     Ok(name.to_string())
+}
+
+/// The props of a request, within the caps.
+pub fn check_props_caps(props: &Props) -> Result<(), ApiFailure> {
+    check_preset_caps(props)
 }
 
 /// The props of a request, within the caps.
