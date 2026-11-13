@@ -1,8 +1,8 @@
-//! Scene store operations: the lights the devices bring, the repair of a damaged
+﻿//! Scene store operations: the lights the devices bring, the repair of a damaged
 //! `scenes.json`, and the default scene.
 //!
 //! Ids are plain and deterministic, like the layout ids before them (`default`, then the owner's
-//! own names): a slug of a name, with `-2`, `-3` … when it is taken. Nothing here draws a random
+//! own names): a slug of a name, with `-2`, `-3` â€¦ when it is taken. Nothing here draws a random
 //! number, so a test can name the id it expects.
 
 use std::collections::HashSet;
@@ -37,7 +37,7 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// `base`, or `base-2`, `base-3` … the first one `taken` does not hold. Deterministic.
+/// `base`, or `base-2`, `base-3` â€¦ the first one `taken` does not hold. Deterministic.
 pub fn fresh_id<'a>(base: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
     let taken: HashSet<&str> = taken.into_iter().collect();
     if !taken.contains(base) {
@@ -102,7 +102,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
 /// A zone has a light when any light names its device and zone index, whole or a slice of it, so
 /// a zone the owner split into parts is never given a second whole-zone light.
 ///
-/// Only whole-zone lights are made here. A split-zone light (`…p{n}`) is not recreated: if
+/// Only whole-zone lights are made here. A split-zone light (`â€¦p{n}`) is not recreated: if
 /// `lights.json` is lost, a split zone comes back as one whole-zone light, and the slices'
 /// labels, arrangements and `reversed` flags are gone (the files hold the only copy).
 pub fn sync_lights(lights: &mut LightsFile, devices: &[DeviceInfo]) -> Vec<LightId> {
@@ -339,8 +339,8 @@ impl Default for SceneRuntime {
 pub struct SceneLock<'a>(#[allow(dead_code)] tokio::sync::MutexGuard<'a, ()>);
 
 impl SceneRuntime {
-    /// True once the engine has been handed a scene. The legacy layout path then stays out of the
-    /// engine (`App::set_layout`), because a layout call would end scene mode.
+    /// True once the engine has been handed a scene: the only render path (#310). The device list
+    /// and every route follow this scene, never a layout.
     pub fn is_on(&self) -> bool {
         self.on.load(Ordering::SeqCst)
     }
@@ -533,26 +533,16 @@ pub fn needs_of(app: &App, scene: &Scene) -> InputNeeds {
 
 /// The effect that is running in a scene, and the props it runs with.
 ///
-/// The layout's one effect does not play in scene mode, so it names the effect only when a
-/// group of the scene plays it. Otherwise the first group that plays an effect is the one
-/// that is running, and the props of that group are the ones it runs with.
-///
-/// `None` when no group of the scene plays an effect.
-pub fn running_effect(scene: &Scene, layout_effect: Option<&str>) -> Option<(String, Props)> {
-    let playing: Vec<(&str, &Props)> = scene
+/// The first group that plays an effect is the one that is running, and the props of that group
+/// are the ones it runs with. `None` when no group of the scene plays an effect.
+pub fn running_effect(scene: &Scene) -> Option<(String, Props)> {
+    scene
         .groups
         .iter()
-        .filter_map(|group| match &group.plays {
-            Plays::Effect { effect, props } => Some((effect.as_str(), props)),
+        .find_map(|group| match &group.plays {
+            Plays::Effect { effect, props } => Some((effect.clone(), props.clone())),
             _ => None,
         })
-        .collect();
-    if let Some(id) = layout_effect {
-        if let Some((_, props)) = playing.iter().find(|(effect, _)| *effect == id) {
-            return Some((id.to_string(), (*props).clone()));
-        }
-    }
-    playing.first().map(|(effect, props)| (effect.to_string(), (*props).clone()))
 }
 
 /// Builds every group's effect and hands the scene to the engine. A group whose effect cannot be
@@ -1698,10 +1688,10 @@ pub(crate) mod tests {
         use canvas_proto::scene::{GROUP_NAME_MAX, SCENE_NAME_MAX};
         let lights = two_lights();
         let mut g = group("a", &["b#z0"]);
-        g.name = "é".repeat(GROUP_NAME_MAX + 9);
+        g.name = "Ã©".repeat(GROUP_NAME_MAX + 9);
         g.brightness = 255;
         let mut scenes = scene_with(vec![g]);
-        scenes.scenes[0].name = "ü".repeat(SCENE_NAME_MAX + 5);
+        scenes.scenes[0].name = "Ã¼".repeat(SCENE_NAME_MAX + 5);
         repair(&mut scenes, &lights);
         assert_eq!(scenes.scenes[0].name.chars().count(), SCENE_NAME_MAX);
         assert_eq!(scenes.scenes[0].groups[0].name.chars().count(), GROUP_NAME_MAX);
@@ -1854,3 +1844,4 @@ pub(crate) mod tests {
         assert_eq!(fresh_id("a", ["a", "a-2"]), "a-3");
     }
 }
+

@@ -1,9 +1,8 @@
-//! The draft on the lights (#2, D2.5): try an editor draft without saving anything.
+﻿//! The draft on the lights (#2, D2.5): try an editor draft without saving anything.
 //!
-//! A draft is built with the user-effect builder and handed to the engine the same way a saved
-//! effect is (`crate::apply_built`), but it is never written: `save_effects`, `save_layouts` and
-//! `layout.effect` are not touched. The slot lives in memory only, so a daemon restart loses it
-//! and the layout's saved effect runs again.
+//! A draft is a takeover on the engine (Scenes, #310): its effect is built with the user-effect
+//! builder and put on the groups it names, and it is never written. The slot lives in memory
+//! only, so a daemon restart loses it and the active scene plays again.
 //!
 //! #93's draft is one HTML file. #95 (D95.4.5) adds a whole stack as a draft, built against the
 //! main engine with its layer settings from the request. A stack draft carries a session epoch
@@ -23,7 +22,7 @@
 //! reaches the lights, not when its build started. Every accepted PUT renews it, including one
 //! that joins a build in flight, and the lease does not run out while a build the owning page
 //! started is still loading. Stop and expiry put the effect the draft took over from back on the
-//! lights; an activate or a layout switch drops the slot without restoring, because the owner
+//! lights; an activate or a scene switch drops the slot without restoring, because the owner
 //! chose something else.
 //!
 //! The gate orders transitions, not builds: a build runs outside it, so Stop and expiry answer
@@ -999,7 +998,7 @@ async fn expire_locked(app: &Arc<App>) -> Option<Ended> {
 
 /// Holds the draft gate while a saved effect is put on the lights, after ending a draft.
 ///
-/// A caller that replaces the effect (activate, a layout switch, the first run) keeps this
+/// A caller that replaces the effect (activate, a scene switch, the first run) keeps this
 /// guard across its apply: `put` waits on the gate, so a beat cannot start a draft in the gap
 /// between "the draft is gone" and "the saved effect is on", which the apply would then
 /// overwrite while the slot said the draft was running. Dropping a draft here restores nothing.
@@ -1174,7 +1173,7 @@ fn take_guard<'a>(
         // The replacement outranks any build still running, landed or not.
         app.draft.supersede_build();
         // The live sequence goes, the epoch order stays, so an older tab cannot re-take the
-        // slot after a layout switch or an activation.
+        // slot after a scene switch or an activation.
         app.draft.epochs.clear_live();
         if let Some(slot) = &dropped {
             tracing::info!(draft = %slot.id, "the draft ended: a saved effect is being put on");
@@ -1381,3 +1380,5 @@ mod tests {
         );
     }
 }
+
+

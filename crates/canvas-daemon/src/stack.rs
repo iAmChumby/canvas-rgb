@@ -8,8 +8,8 @@
 //! The three pieces:
 //!
 //! - [`AreaMap`] (the *area book*): every device's and zone's per-LED pixel mask, built from the
-//!   same sample plan the engine samples with. It is rebuilt when the layout, the render scale or
-//!   the sampling mode changes, never per frame. A device area lights the pixels its own LEDs
+//!   same sample plan the engine samples with. It is rebuilt when the scene's plan or the
+//!   sampling changes, never per frame. A device area lights the pixels its own LEDs
 //!   read, and a second device drawn over those same pixels reads them too: the canvas has no
 //!   z-order, so two overlapping footprints share the pixels they share.
 //! - [`LiveMap`]: each layer's blend, opacity, visibility and area, read once per frame, so a
@@ -154,8 +154,8 @@ pub fn replace_live(live: &LiveStack, stack: &Stack) {
     *map = next;
 }
 
-/// The area book every `StackEffect` resolves its layers against: the masks of every group,
-/// and the legacy layout's.
+/// The area book every `StackEffect` resolves its layers against: the masks of every group of
+/// the active scene, by group id.
 pub type AreaBook = Arc<RwLock<AreaMaps>>;
 
 // ---------------------------------------------------------------- the area book
@@ -1978,6 +1978,8 @@ mod tests {
         assert_eq!(layer.len(), 2, "another layer's keys do not leak in");
     }
 }
+
+
 
 
 

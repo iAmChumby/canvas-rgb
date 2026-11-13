@@ -95,13 +95,10 @@ pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> 
             needs: s.needs,
         })
         .collect();
-    let scene = crate::scenes::active_scene(&store.scenes);
     // The first effect the active scene plays, in the scene's order: what the library marks as
     // running. Every group plays its own, so this is a summary and not one engine effect.
-    let active = scene.groups.iter().find_map(|group| match &group.plays {
-        canvas_proto::scene::Plays::Effect { effect, .. } => Some(effect.clone()),
-        _ => None,
-    });
+    let scene = crate::scenes::active_scene(&store.scenes);
+    let active = crate::scenes::running_effect(scene).map(|(id, _)| id);
     let failed = failed_effects(&app.user_effects);
     Json(EffectsResponse { effects, active, failed })
 }
@@ -1063,4 +1060,5 @@ mod tests {
         assert!(fit_props_to_schema(&schema, bad, "saved").is_empty());
     }
 }
+
 

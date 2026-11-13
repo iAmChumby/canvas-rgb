@@ -2,7 +2,7 @@
 //!
 //! The builder tunes a stack continuously, so the preview is not a render loop of its own: a
 //! second engine runs the stack at [`canvas_proto::consts::PREVIEW_MAX_FPS`], gets the same
-//! layout and input source as the lights' engine at the same call sites, and never has a device
+//! group and input source as the lights' engine at the same call sites, and never has a device
 //! sink, so a preview cannot touch a light. The engine is made the first time the builder opens
 //! a preview or its WebSocket, and parks while nothing watches it.
 //!
@@ -110,7 +110,7 @@ struct Builds {
 pub struct StackPreview {
     /// The engine, once something has asked for it. `None` while the builder is closed.
     ///
-    /// A std lock: a layout or input-source change is answered from a synchronous call site and
+    /// A std lock: a group or input-source change is answered from a synchronous call site and
     /// must reach the engine, not be dropped because a tokio lock was busy at that instant.
     engine: Mutex<Option<Arc<dyn Engine>>>,
     /// How the daemon makes the engine. The tests install a fake instead.
@@ -166,9 +166,9 @@ impl StackPreview {
 
     /// The engine, made and configured on first use.
     ///
-    /// It is given the active layout and the input source the lights' engine has *now*, not the
+    /// It is given the active group and the input source the lights' engine has *now*, not the
     /// ones the daemon started with: the engine is made when the builder first opens, which can
-    /// be long after a layout change or the capture wiring (D95.4.4, item 6).
+    /// be long after a group change or the capture wiring (D95.4.4, item 6).
     pub async fn engine(&self, app: &App) -> Arc<dyn Engine> {
         let engine = {
             let mut guard = self.engine_guard();
@@ -184,8 +184,8 @@ impl StackPreview {
         if self.configured.load(Ordering::SeqCst) {
             return engine;
         }
-        // The flag is set last, after the engine has its rate, layout and source: a caller that
-        // goes away between the read of the layout and the configuration leaves the flag false,
+        // The flag is set last, after the engine has its rate, group and source: a caller that
+        // goes away between the read of the group and the configuration leaves the flag false,
         // so the next open configures the engine instead of trusting a flag that is not true
         // yet. Two callers that overlap both configure it with the same values.
         let latest = self
@@ -740,4 +740,5 @@ mod tests {
         assert_eq!(settings.power, canvas_proto::api::Power::Running);
     }
 }
+
 
