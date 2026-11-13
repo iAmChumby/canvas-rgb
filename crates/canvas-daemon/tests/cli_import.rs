@@ -14,7 +14,9 @@
 //! Every process this file starts is bounded, so a test here can never hold a build slot
 //! for minutes: one did, for the full 20 minutes of the lock. The fake API ends itself
 //! after [`FAKE_LIFETIME`] if the test dies first, a CLI run is killed at [`CLI_LIMIT`],
-//! and the wait for the fake's port gives up at [`FAKE_START_LIMIT`].
+//! and the wait for the fake's port gives up at [`FAKE_START_LIMIT`]. [`CLI_LIMIT`] is
+//! larger than the CLI's own request limit, so a stuck run ends at the CLI's bound first and
+//! the kill here is the backstop.
 //!
 //! The bounds are generous because a loaded PC is slow in two measured ways, both worse
 //! than the work:
@@ -25,16 +27,13 @@
 //!   in a 30-run loop spent 21.06 s in the connect and then failed with the operating
 //!   system's own timeout (`timeout: connect`, WSAETIMEDOUT) while the fake was up and
 //!   listening; another run of the same loop took 65.9 s to be answered and succeeded.
-//!   The CLI bounds a request now (5 s to connect, 120 s in all) and reports a failed
-//!   request as "nothing answers on", so a dropped connect is exactly that message.
 //!
-//! A run that ends that way, and ends inside [`DROPPED_CONNECT_WINDOW`], is repeated up to
-//! [`CLI_ATTEMPTS`] times, with each repeat written to stderr. That window matters: a run
-//! that reached the fake and waited out the CLI's whole 120 s limit is a different fault,
-//! and repeating it is the twenty-minute hang again. It is the machine's network stack, not
-//! the daemon and not a wrong port: the CLI's own port check passed (a dead or foreign
-//! listener would have been refused before the request), the fake is still listening, and a
-//! repeat sends the same file, which the daemon imports under the same name.
+//! The CLI bounds a request now (5 s to connect, 120 s in all) and tries a connect that
+//! failed 3 times, since nothing was sent by a failed connect. This test does not decide on
+//! how long a run took: it runs the command once and reads its verdict. It is the machine's
+//! network stack, not the daemon and not a wrong port -- the CLI's own port check passed (a
+//! dead or foreign listener is refused before the request), and the fake is still the one
+//! listening on the port the child published.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -50,9 +49,11 @@ const LOG_ENV: &str = "CANVAS_RGB_TEST_FAKE_API_LOG";
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// The name of the test that becomes the fake API in the child process.
 const SERVER_TEST: &str = "the_fake_api_answers_the_import_route";
-/// The most one CLI run may take. A run takes about 1.4 s; the slowest seen on a loaded PC
-/// was 65.9 s, and it succeeded. This is a hang guard, not a performance bar.
-const CLI_LIMIT: Duration = Duration::from_secs(120);
+/// The most one CLI run may take, which is more than the CLI's own request limit (120 s plus
+/// its connect attempts), so the CLI's own bound is what ends a stuck run and this kill is the
+/// backstop. A run takes about 1.4 s; the slowest seen on a loaded PC was 65.9 s, and it
+/// succeeded. This is a hang guard, not a performance bar.
+const CLI_LIMIT: Duration = Duration::from_secs(150);
 /// The most the fake API may take to publish its port and answer on it. Starting a copy of
 /// this test binary took 36 s on a loaded PC, so this is a hang guard too.
 const FAKE_START_LIMIT: Duration = Duration::from_secs(90);
@@ -60,16 +61,6 @@ const FAKE_START_LIMIT: Duration = Duration::from_secs(90);
 /// stop it. Comfortably longer than the slowest test here, and short enough that a leaked
 /// child cannot sit on a port for the session.
 const FAKE_LIFETIME: Duration = Duration::from_secs(600);
-/// How many times a CLI run is made when the machine drops its connection. The operating
-/// system gives up on a dropped connect after about 21 s, and the CLI gives up after 5 s, so
-/// eight attempts cover two such windows.
-const CLI_ATTEMPTS: u32 = 8;
-/// The window a failed run must end in to count as a dropped connect. A connect the CLI
-/// gave up on ends within its 5 s bound; a daemon that took the request and never answered
-/// ends at the CLI's 120 s bound, and repeating that would be the twenty-minute hang again.
-const DROPPED_CONNECT_WINDOW: Duration = Duration::from_secs(15);
-/// What the CLI prints, with exit code 2, when its request failed (`cli.rs`, `NotRunning`).
-const CONNECT_DROPPED: &str = "nothing answers on";
 
 /// A temporary directory that is removed when it is dropped.
 struct TempDir(PathBuf);
@@ -219,32 +210,11 @@ impl Drop for FakeApi {
 }
 
 /// Runs the CLI with `args` and a temporary home, and returns its exit code, stdout and
-/// stderr. A run that has not ended after [`CLI_LIMIT`] is killed and fails the test. A run
-/// that ends because the machine dropped its connection (see the file's header) is made
-/// again, up to [`CLI_ATTEMPTS`] times in all.
+/// stderr. A run that has not ended after [`CLI_LIMIT`] is killed and fails the test.
+///
+/// One run, one verdict: the CLI itself tries a connect that failed (nothing was sent, so it
+/// is safe) and this test does not decide anything on how long the run took (#328).
 fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
-    let mut attempt = 1;
-    loop {
-        let (code, stdout, stderr, took) = run_cli_once(home, args);
-        // Only a run that ended before the daemon could have taken the request is retried.
-        let dropped_connect = code == 2
-            && stderr.contains(CONNECT_DROPPED)
-            && took < DROPPED_CONNECT_WINDOW;
-        if dropped_connect && attempt < CLI_ATTEMPTS {
-            eprintln!(
-                "cli_import: attempt {attempt} of {CLI_ATTEMPTS}: the machine dropped the connect: {}",
-                stderr.trim()
-            );
-            attempt += 1;
-            continue;
-        }
-        return (code, stdout, stderr);
-    }
-}
-
-/// One CLI run, ended after [`CLI_LIMIT`] at the latest. The duration it returns is from the
-/// spawn to the exit, so a connect the machine dropped can be told from a slow answer.
-fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String, Duration) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
         .args(args)
         .env("CANVAS_RGB_HOME", home)
@@ -285,7 +255,6 @@ fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String,
         status.code().unwrap_or(-1),
         out.join().unwrap_or_default(),
         err.join().unwrap_or_default(),
-        started.elapsed(),
     )
 }
 

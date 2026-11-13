@@ -424,10 +424,13 @@ line. Three mechanisms, and one bug the timing only exposed.
   run was answered after 65.9 s and succeeded. The dropped loopback connect is #194's fault seen here
   directly, with the error kept. Fixed (`crates/canvas-daemon/tests/cli_import.rs`): the child binds `:0`
   itself and publishes its port through a file, so no port is ever picked and given up; every child is
-  bounded (a CLI run at 120 s, the fake's start at 90 s, and the fake ends itself after 600 s); and a run the
-  machine drops is repeated up to 8 times, each repeat written to stderr. The CLI bounds every request now
-  (5 s to connect, 120 s in all, `bounded_agent` in `crates/canvas-daemon/src/cli.rs`), so a dropped connect
-  fails in 5 s instead of 21 and a daemon that accepts and never answers cannot hang it. Siblings:
+  bounded (a CLI run at 150 s, above the CLI's own 120 s request limit, the fake's start at 90 s, and the
+  fake ends itself after 600 s); and the test runs the command once and reads its verdict, so it never
+  decides on how long a run took. The CLI (`crates/canvas-daemon/src/cli.rs`) bounds every request (5 s to
+  connect, 120 s in all, `bounded_agent`), says three different things about three different failures
+  (nothing answered / did not answer within the limit / the transport's own text), treats a body it cannot
+  read as a failed command instead of an empty answer, and tries a connect that failed up to 3 times, since
+  a failed connect sent nothing. Siblings:
   `crates/canvas-daemon/tests/quit.rs` picked a free port and let the daemon bind it later, and now tries a
   fresh port when the daemon ends before its API answers. Safe as they stand, and why: the tests that need a
   port to stay *closed* (`app/src-tauri/src/api.rs`, `app/src-tauri/src/update/tests.rs`) only have to keep
