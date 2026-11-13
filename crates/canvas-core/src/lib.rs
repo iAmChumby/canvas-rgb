@@ -21,6 +21,8 @@ mod bench;
 #[cfg(all(test, windows))]
 mod cpu;
 #[cfg(test)]
+mod scene_bench;
+#[cfg(test)]
 mod tests;
 
 use canvas_proto::{Engine, EngineSettings};
