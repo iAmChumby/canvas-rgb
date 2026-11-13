@@ -596,9 +596,12 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
     }
     let mut failures = app.scene.failures();
     for (before, after) in old.groups.iter().zip(&new.groups) {
-        if before.plays != after.plays {
+        // A group that is dark (its effect could not be built) is tried again on every save, even
+        // one that names the same effect: the file may be back.
+        let dark = failures.contains_key(&after.id);
+        if before.plays != after.plays || dark {
             match (&before.plays, &after.plays) {
-                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now => {
+                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && !dark => {
                     app.engine.set_group_props(&after.id, props);
                 }
                 (_, Plays::Off) => {
@@ -611,17 +614,20 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
                         let id = effect.clone();
                         tokio::task::spawn_blocking(move || build_effect(&app, &id)).await
                     };
+                    // The store keeps the effect the save named. When it cannot be built the group
+                    // is dark and the failure names why, so the store (what the group is meant to
+                    // play) and the engine (what it plays) never disagree about which it is.
+                    let built = built.unwrap_or_else(|e| Err(format!("the build task failed: {e}")));
                     match built {
-                        Ok(Ok((made, _))) => {
+                        Ok((made, _)) => {
                             failures.remove(&after.id);
                             app.engine.set_group_effect(&after.id, Some(made), props);
                         }
-                        Ok(Err(why)) => {
+                        Err(why) => {
                             tracing::warn!(group = %after.id, effect = %effect, error = %why, "a group's effect could not be built; the group is dark");
                             failures.insert(after.id.clone(), why);
                             app.engine.set_group_effect(&after.id, None, props);
                         }
-                        Err(e) => tracing::error!(error = %e, "the effect could not be built: the build task failed"),
                     }
                 }
             }

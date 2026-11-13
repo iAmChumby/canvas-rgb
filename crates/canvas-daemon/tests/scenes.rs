@@ -165,7 +165,17 @@ struct Rig {
 
 /// The daemon's state around a real engine and the two devices, with `scenes` active.
 async fn rig_with(scenes: ScenesFile) -> Rig {
+    rig_in(scenes, &[]).await
+}
+
+/// [`rig_with`] with HTML effect files in the daemon's effects folder.
+async fn rig_in(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
     let home = TempHome::new();
+    let effects = home.path.join("effects");
+    std::fs::create_dir_all(&effects).expect("the effects folder is created");
+    for (name, source) in html {
+        std::fs::write(effects.join(name), source).expect("the effect file is written");
+    }
     let mut store = canvas_daemon::storage::Store::at(&home.path);
     store.lights = LightsFile { schema_version: LIGHTS_SCHEMA, lights: vec![light(A), light(B)] };
     store.scenes = scenes;
@@ -176,14 +186,17 @@ async fn rig_with(scenes: ScenesFile) -> Rig {
         warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let app = Arc::new(App::new(
+    let mut app = App::new(
         store,
         Arc::clone(&engine),
         Box::new(FakeAdapter::default()),
         TOKEN.to_string(),
         "0.0.0-test".to_string(),
         tx,
-    ));
+    );
+    app.effects_dir = effects.clone();
+    app.user_effects.rescan(&effects);
+    let app = Arc::new(app);
     *app.devices.write().await = vec![device(A), device(B)];
     let (a, b) = (Arc::new(Rec::default()), Arc::new(Rec::default()));
     engine.add_sink(DeviceId(A.into()), a.clone());
@@ -1201,4 +1214,172 @@ async fn activate_with_no_props_starts_from_the_saved_values() {
     shows(&rig.a, rgb((0, 90, 200)), "A starts from the saved values").await;
     shows(&rig.b, rgb((0, 90, 200)), "B starts from the saved values").await;
     assert!(stored(&rig, "main").await.groups.iter().all(|g| matches!(&g.plays, Plays::Effect { props, .. } if *props == color((0, 90, 200)))));
+}
+
+// ---------------------------------------------------------------- HTML effects, names, caps (fix pass)
+
+/// An HTML effect that draws a moving square on a dark ground: never all black once it runs.
+const SPARK: &str = r##"<head>
+  <title>Spark</title>
+  <meta description="A test effect." />
+  <meta property="speed" label="Speed" type="number" min="0" max="100" default="10" />
+</head>
+<body><canvas id="stage" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("stage");
+  var ctx = c.getContext("2d");
+  var x = 0;
+  function draw() {
+    ctx.fillStyle = "#101020";
+    ctx.fillRect(0, 0, 320, 200);
+    ctx.fillStyle = "#ffcc00";
+    ctx.fillRect(x, 0, 320, 200);
+    x = (x + 3) % 300;
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+async fn save_stack(rig: &Rig, name: &str, effect: &str) {
+    let body = serde_json::json!({
+        "id": format!("stack:{name}"),
+        "layers": [{ "id": "l1", "name": "One", "effect": effect }],
+    });
+    let (status, answer) = send(rig, "PUT", &format!("/api/v1/stacks/stack:{name}"), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+}
+
+fn plays(effect: &str) -> Plays {
+    Plays::Effect { effect: effect.into(), props: Props::new() }
+}
+
+/// S6: a stack with an HTML layer is an HTML group, on a whole-scene write and on activate.
+#[tokio::test]
+async fn a_stack_with_an_html_layer_counts_toward_the_html_limit() {
+    let rig = rig_in(scenes_file(), &[("spark.html", SPARK)]).await;
+    save_stack(&rig, "Glow", "html:spark").await;
+    save_stack(&rig, "Plain", "solid").await;
+    let path = route(routes::SCENE, &[("id", "main")]);
+    let before = stored(&rig, "main").await;
+
+    // PUT: an HTML stack and an HTML effect are two HTML groups.
+    let mut scene = before.clone();
+    scene.groups[0].plays = plays("stack:Glow");
+    scene.groups[1].plays = plays("html:spark");
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(answer["message"].as_str().is_some_and(|m| m.contains("HTML")), "{answer}");
+    assert_eq!(stored(&rig, "main").await, before, "refused: nothing changed");
+
+    // A stack without an HTML layer is not one: two of them pass.
+    let mut scene = before.clone();
+    scene.groups[0].plays = plays("stack:Plain");
+    scene.groups[1].plays = plays("stack:Plain");
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // Activate on every group: two groups playing one HTML effect, or one HTML stack, is over the
+    // limit; so is naming a second group for an HTML effect while the first already plays one.
+    let before = stored(&rig, "main").await;
+    for effect in ["html:spark", "stack:Glow"] {
+        let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", effect)]), Some(serde_json::json!({}))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{effect}: {answer}");
+    }
+    assert_eq!(stored(&rig, "main").await, before, "refused: the scene is as it was");
+}
+
+/// A whole-scene write refuses an empty scene or group name, as create does, and an over-long one.
+#[tokio::test]
+async fn put_scene_refuses_empty_names() {
+    use canvas_proto::scene::{GROUP_NAME_MAX, SCENE_NAME_MAX};
+    let rig = rig().await;
+    let path = route(routes::SCENE, &[("id", "main")]);
+    let before = stored(&rig, "main").await;
+    let cases: [(&str, Box<dyn Fn(&mut Scene)>); 4] = [
+        ("an empty scene name", Box::new(|s| s.name = "   ".into())),
+        ("an empty group name", Box::new(|s| s.groups[0].name = String::new())),
+        ("a long scene name", Box::new(|s| s.name = "n".repeat(SCENE_NAME_MAX + 1))),
+        ("a long group name", Box::new(|s| s.groups[1].name = "n".repeat(GROUP_NAME_MAX + 1))),
+    ];
+    for (what, change) in cases {
+        let mut scene = before.clone();
+        change(&mut scene);
+        let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+        let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{what}: {answer}");
+    }
+    assert_eq!(stored(&rig, "main").await, before, "every refusal left the scene as it was");
+}
+
+/// The flash takes a bounded list: a longer one is refused before any light is looked up.
+#[tokio::test]
+async fn flash_lights_takes_a_bounded_list() {
+    let rig = rig().await;
+    let cap = canvas_daemon::api::scenes::FLASH_LIGHTS_MAX;
+    let lights: Vec<&str> = vec!["fake:a#z0"; cap + 1];
+    let (status, answer) = send(&rig, "POST", routes::LIGHTS_FLASH, Some(serde_json::json!({ "lights": lights }))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(!rig.app.identify.is_active(), "nothing flashed");
+    let lights: Vec<&str> = vec!["fake:a#z0"; cap];
+    let (status, _) = send(&rig, "POST", routes::LIGHTS_FLASH, Some(serde_json::json!({ "lights": lights }))).await;
+    assert_eq!(status, StatusCode::OK, "a list at the cap is taken");
+}
+
+/// Whether `sink`'s newest frame has a lit LED.
+fn is_lit(sink: &Rec) -> bool {
+    sink.last().is_some_and(|f| f.iter().any(|c| *c != Rgb8::BLACK))
+}
+
+async fn wait_lit(sink: &Rec, what: &str) {
+    let start = Instant::now();
+    while !is_lit(sink) {
+        assert!(start.elapsed() < Duration::from_secs(20), "{what}: never lit");
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+/// A group dark because its effect file was gone comes back when a save names the same effect once
+/// the file is there again.
+#[tokio::test]
+async fn a_dark_group_is_rebuilt_when_its_file_returns_and_a_save_names_it() {
+    let mut scenes = scenes_file();
+    scenes.scenes[0].groups[0].plays = plays("html:spark");
+    let rig = rig_in(scenes, &[]).await;
+    shows(&rig.a, Rgb8::BLACK, "no file: dark").await;
+    let state = |rig: &Rig| rig.app.scene.failures().get("left").cloned();
+    assert!(state(&rig).is_some_and(|why| why.contains("spark")), "named: {:?}", state(&rig));
+
+    // The file returns. A save that names the same effect (and changes only a value) lights it.
+    std::fs::write(rig.home.path.join("effects").join("spark.html"), SPARK).unwrap();
+    rig.app.user_effects.rescan(&rig.home.path.join("effects"));
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "html:spark".into(), props: color(GREEN) };
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(state(&rig), None, "no longer named as failed");
+    wait_lit(&rig.a, "the rebuilt group").await;
+    shows(&rig.b, rgb(BLUE), "the other group is untouched").await;
+}
+
+/// A save names an effect that cannot be built: the store keeps what was saved, the group is dark
+/// and named, the other group runs. Store and engine agree: the store says what the group is meant
+/// to play, the engine says why it is dark.
+#[tokio::test]
+async fn a_save_that_cannot_build_leaves_the_store_and_the_engine_agreeing() {
+    let rig = rig().await;
+    shows(&rig.a, rgb(RED), "before").await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = plays("html:not-there");
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(stored(&rig, "main").await.groups[0].plays, plays("html:not-there"), "the store keeps what was saved");
+    shows(&rig.a, Rgb8::BLACK, "the group is dark, not still red").await;
+    shows(&rig.b, rgb(BLUE), "the other group runs").await;
+    let list: ScenesResponse = serde_json::from_value(send(&rig, "GET", routes::SCENES, None).await.1).unwrap();
+    let left = list.group_states.iter().find(|g| g.id == "left").unwrap();
+    assert!(left.failed.as_deref().is_some_and(|why| why.contains("not-there")), "named: {left:?}");
 }

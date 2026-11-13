@@ -14,7 +14,7 @@ use canvas_proto::api::{
 };
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
-    validate_scene, Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, SCENE_NAME_MAX,
+    validate_scene, Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX, SCENE_NAME_MAX,
 };
 use canvas_proto::stack::STACK_ID_PREFIX;
 use std::sync::Arc;
@@ -26,6 +26,10 @@ use crate::state::App;
 /// The id no scene may take: `PUT /scenes/active` sets the active scene, so a scene with that id
 /// could never be reached by `PUT /scenes/{id}`.
 const RESERVED_SCENE_ID: &str = "active";
+
+/// The most lights one flash request may name. A house has tens of lights; a list past this is a
+/// mistake (or an attack on the lookup below), so it is refused before any light is looked up.
+pub const FLASH_LIGHTS_MAX: usize = 256;
 
 /// A route's failure: the API's usual error, or a `409` that carries the scene as it is now.
 pub enum SceneFailure {
@@ -180,6 +184,7 @@ pub async fn put_scene(
     }
     let mut new = put.scene;
     new.rev = old.rev + 1;
+    check_names(&new)?;
     {
         let store = app.store.read().await;
         validate_scene(&new, &store.lights.lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
@@ -192,6 +197,25 @@ pub async fn put_scene(
         scenes::apply_group_change(&app, &lock, &old, &new).await;
     }
     Ok(Json(new))
+}
+
+/// A scene and its groups have a name, within the length the create route keeps.
+fn check_names(scene: &Scene) -> ApiResult<()> {
+    if scene.name.trim().is_empty() {
+        return Err(ApiFailure::validation("a scene needs a name"));
+    }
+    if scene.name.chars().count() > SCENE_NAME_MAX {
+        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
+    }
+    for group in &scene.groups {
+        if group.name.trim().is_empty() {
+            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
+        }
+        if group.name.chars().count() > GROUP_NAME_MAX {
+            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
+        }
+    }
+    Ok(())
 }
 
 /// The caps and the schema fit a props patch applies, for every group of a whole scene. A stack
@@ -413,6 +437,9 @@ pub async fn flash_lights(
     }
     if request.lights.is_empty() {
         return Err(ApiFailure::validation("name at least one light to flash"));
+    }
+    if request.lights.len() > FLASH_LIGHTS_MAX {
+        return Err(ApiFailure::validation(format!("a flash names at most {FLASH_LIGHTS_MAX} lights")));
     }
     let devices = app.devices.read().await.clone();
     let mut runs = Vec::new();
