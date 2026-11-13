@@ -638,3 +638,16 @@
     display: none;
   }
 }
+
+/* A phone's strip drops the mark's words to one tick or icon. On this page a fault keeps its words
+   ("1 group dark", "Scenes not read") beside the icon: the row has the room, and a bare warning
+   mark names nothing. The strip's own rule keeps the all-clear to a tick. */
+@media (max-width: 720px) {
+  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-mark):not([data-tone="ok"]) :global(.strip-mark-text) {
+    display: inline;
+    max-width: 9ch;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+}

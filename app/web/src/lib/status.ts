@@ -99,10 +99,10 @@ export function problems(status: Status | null, offline: boolean, scenes: SceneF
     out.push({
       tone: "warn",
       text: scenes.dark === 1 ? "1 group dark" : `${scenes.dark} groups dark`,
-      short: scenes.dark === 1 ? "Group dark" : `${scenes.dark} dark`,
+      short: scenes.dark === 1 ? "Dark" : `${scenes.dark} dark`,
     });
   }
-  if (scenes.unread) out.push({ tone: "warn", text: "Scenes not read", short: "Scenes" });
+  if (scenes.unread) out.push({ tone: "warn", text: "Scenes not read", short: "Not read" });
   // The lights are running, but not at the rate they were asked for.
   if (status.power === "running" && !status.parked && status.fps_measured < status.fps_target - 1) {
     out.push({ tone: "warn", text: "Running slow" });
