@@ -44,7 +44,7 @@ const WIDTHS = (flag("--widths") ?? "360,390,430").split(",").map(Number);
 const SCHEMES = ["dark", "light"];
 const mutateLabels = args.includes("--mutate-labels");
 const PAGES = [
-  { name: "layout", url: "/", label: "Layout" },
+  { name: "scenes", url: "/", label: "Scenes" },
   { name: "effects", url: "/effects/", label: "Effects" },
   { name: "devices", url: "/devices/", label: "Devices" },
   { name: "displays", url: "/displays/", label: "Displays" },
