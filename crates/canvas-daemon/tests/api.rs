@@ -1,4 +1,4 @@
-//! The API's behaviour, tested against the in-test fakes.
+﻿//! The API's behaviour, tested against the in-test fakes.
 //!
 //! These tests never touch the real hardware and never call the real engine, effects or
 //! adapters: the daemon's state is built from the fakes in `common`.
