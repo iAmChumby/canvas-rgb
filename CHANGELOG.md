@@ -11,6 +11,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
 - Scenes: several effects at once, one per group of devices (#310)
 - Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+- Effects: Play on chooses the groups; the builder shows the group you are tuning. (#310)
 ### Fixed
 
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)

@@ -23,12 +23,12 @@ export function useStackParam(): StackRoute {
   }, []);
 
   const go = (next: string | null, options?: { replace?: boolean }) => {
-    // The other query values stay: `group` names the group the builder draws, and the demo's
-    // `state` picks the backend's fixture.
-    const params = new URLSearchParams(typeof window === "undefined" ? "" : window.location.search);
-    if (next === null) params.delete("stack");
-    else params.set("stack", next);
-    const query = params.toString();
+    // The group the builder draws stays in the URL: `?stack=<name>&group=<id>` is one place.
+    const group = typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("group");
+    const parts: string[] = [];
+    if (next !== null) parts.push(`stack=${encodeURIComponent(next)}`);
+    if (group) parts.push(`group=${encodeURIComponent(group)}`);
+    const query = parts.join("&");
     const url = query ? `/effects/?${query}` : "/effects/";
     const state = { canvasRgbStack: next };
     if (options?.replace) window.history.replaceState(state, "", url);

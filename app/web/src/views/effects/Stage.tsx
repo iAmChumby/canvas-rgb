@@ -63,7 +63,10 @@ function labelRoom(b: LabelBox, stageW: number): number {
   if (stageW <= 0) return 260; // not measured yet: the cap alone
   const unit = stageW / CANVAS_W;
   const room = labelEnd(b) ? (b.x + b.width) * unit : (CANVAS_W - b.x) * unit;
-  return Math.max(48, Math.min(260, Math.floor(room - 4)));
+  // A whole-canvas frame's label sits at the stage's top-left, under the Make rectangle key:
+  // it stops before the key instead of running beneath it (a 390 stage is 340 px wide).
+  const cap = labelInside(b) ? Math.max(80, stageW - 118) : 260;
+  return Math.max(48, Math.min(cap, Math.floor(room - 4)));
 }
 
 /** A finger's reach from a handle's centre: half the 44px hit box (the knob stays 12px). */

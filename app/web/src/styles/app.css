@@ -2645,6 +2645,14 @@ button.chip:hover {
   min-width: 0;
 }
 
+/* The name and the chips share the row and wrap when they must; a long name wraps inside its
+   own column rather than running under the favourite key. */
+.rd-effects .rd-eff-name-row .effect-title {
+  flex: 1 1 auto;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
 .rd-effects .rd-eff-head-row .rd-eff-fav {
   grid-area: fav;
   align-self: start;
@@ -3774,9 +3782,11 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
-.rd-light-name {
+.rd-devices .rd-light-name {
   min-width: 0;
   max-width: 34ch;
+  justify-content: flex-start;
+  text-align: left;
 }
 
 .rd-light-turn {
@@ -3793,6 +3803,28 @@ button.chip:hover {
 
 .rd-devices .rd-dev-row + .rd-light-row {
   padding-left: var(--s4);
+}
+
+/* A phone: the light's own row is two lines, not three. The device and zone above already say
+   which light this is, so the "Light" word goes and the name takes the first line; the shape and
+   the way round share the second. */
+@media (max-width: 720px) {
+  .rd-devices .rd-light-row {
+    padding-left: var(--s4);
+  }
+
+  .rd-devices .rd-light-key {
+    display: none;
+  }
+
+  .rd-light-name {
+    flex: 1 1 100%;
+    max-width: none;
+  }
+
+  .rd-light-turn {
+    margin-left: 0;
+  }
 }
 
 /* A device that reports no zones: its message and Try again under the row. */
@@ -7569,6 +7601,23 @@ button.chip:hover {
   gap: var(--s4);
 }
 
+/* A short window in the tray layout (1024 x 768, say) has no height to give the stage: the
+   library tray and the layers together took all of it, and the stage letterboxed to 180 px.
+   The main column scrolls instead, so the stage keeps a usable size and the lists below it
+   scroll into view. The rail layout (1280 and up) already gives the stage the full height. */
+@container page (max-height: 820px) {
+  .rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main,
+  .rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main {
+    overflow-y: auto;
+  }
+
+  .rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main .rd-stack-stage,
+  .rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main .rd-stack-stage {
+    flex: 0 0 auto;
+    height: 320px;
+  }
+}
+
 .rd-stack-side {
   gap: var(--s3);
   overflow: hidden;
@@ -7871,7 +7920,7 @@ button.chip:hover {
 .rd-part-outline em {
   position: absolute;
   left: 3px;
-  top: 1px;
+  bottom: 1px;
   max-width: calc(100% - 6px);
   box-sizing: border-box;
   overflow: hidden;
@@ -9228,14 +9277,14 @@ button.chip:hover {
     gap: var(--s2);
   }
 
-  /* The mockup's phone head carries the size and the rate; the desk's outlines are a desktop
-     control, and without the switch they would only crowd a 358 px stage. */
-  .rd-stacks-phone .rd-stage-parts {
+  /* The phone head keeps the LEDs switch: the stage draws the group's arrangement there too,
+     and the size and rate note is the part that goes to make room. */
+  .rd-stacks-phone .rd-stage-meta > .fig {
     display: none;
   }
 
   .rd-stacks-phone .rd-parts {
-    display: none;
+    display: block;
   }
 
   .rd-stacks-phone .rd-stage-foot {

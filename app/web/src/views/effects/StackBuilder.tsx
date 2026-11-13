@@ -103,8 +103,8 @@ export function StackBuilder({
 
   const [nameDraft, setNameDraft] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
-  // Parts (the desk's outlines) starts off; a drag shows them anyway (spec §3).
-  const [parts, setParts] = useState(false);
+  // The LEDs start on: the stage draws the group's arrangement without anyone asking for it.
+  const [parts, setParts] = useState(true);
   /** The live region's line: every lift, target and drop is said here. */
   const [announce, setAnnounce] = useState("");
   /** The phone's tab under the stage: the layer list, or the library. */

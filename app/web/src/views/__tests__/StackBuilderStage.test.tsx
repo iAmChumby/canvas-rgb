@@ -3,7 +3,7 @@
 // layer, Ctrl+D copies it, the Make-rectangle key converts an area by name, and undo and redo
 // take a whole drag back in one press.
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
@@ -117,6 +117,39 @@ function dragOn(el: HTMLElement, from: [number, number], to: [number, number]) {
 }
 
 describe("the stage", () => {
+  it("draws the group it is tuning and names it", async () => {
+    await refreshAll();
+    window.history.replaceState(
+      {},
+      "",
+      "/effects/?stack=Sunset%20glow&state=complete,stack&group=g-case",
+    );
+    render(
+      <StripSlotsProvider>
+        <div className="strip-slots">
+          <StripSlot kind="title" />
+          <StripSlot kind="actions" />
+        </div>
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    await screen.findByTestId("stack-builder");
+    // The panel says which group the picture is for.
+    expect(await screen.findByText(/Preview · Case fans/i)).toBeTruthy();
+    // And the group's lights are drawn on it: a slot outline for each of its three fans.
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(3));
+    expect(screen.getByRole("switch", { name: "Show each light's LEDs" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("offers the canvas, a device in the group and a rectangle, and no zone", async () => {
+    await openBuilder();
+    fireEvent.click(screen.getByRole("button", { name: "Change area" }));
+    const picker = await screen.findByRole("dialog", { name: "Area for Sparkles" });
+    const modes = within(picker).getAllByRole("radio").map((el) => el.textContent);
+    expect(modes).toEqual(["Whole canvas", "Device", "Rectangle"]);
+    expect(within(picker).queryByRole("radio", { name: "Zone" })).toBeNull();
+  });
+
   it("draws a frame for every visible layer, and only the picked one is the solid frame", async () => {
     await openBuilder();
     expect(frameOf("l1")).toBeTruthy();
@@ -225,15 +258,15 @@ describe("the stage", () => {
     expect(screen.getByRole("button", { name: "Make Sparkles a rectangle" })).toBeTruthy();
   });
 
-  it("starts with the LEDs off, and shows and hides each light's outlines with it", async () => {
+  it("starts with the LEDs on, and shows and hides each light's outlines with the switch", async () => {
     await openBuilder();
     const toggle = screen.getByRole("switch", { name: "Show each light's LEDs" });
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
-    expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
-    fireEvent.click(toggle);
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
     await waitFor(() => expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0));
     fireEvent.click(toggle);
     await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0));
   });
 
   it("removes a layer from its row's Delete key too", async () => {
@@ -301,7 +334,8 @@ describe("a drag is one undo step", () => {
 
   it("shows the group's outlines while it lasts, even with the LEDs off", async () => {
     const { frame } = await pickHeat();
-    expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("switch", { name: "Show each light's LEDs" }));
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0));
     act(() => {
       fireEvent.pointerDown(frame, { ...mouse, clientX: px(71), clientY: px(173) });
     });
