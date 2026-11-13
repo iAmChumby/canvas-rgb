@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The Scenes page: one row per group of the active scene, the scene strip, the Unassigned row and
@@ -13,6 +13,15 @@ vi.mock("next/navigation", () => ({
 vi.mock("next/link", () => ({
   default: ({ href, children }: { href: string; children?: React.ReactNode }) => <a href={href}>{children}</a>,
 }));
+
+const { api } = vi.hoisted(() => ({
+  api: {
+    effect: vi.fn(),
+    createPreset: vi.fn(),
+    lights: { flash: vi.fn(), list: vi.fn(), patch: vi.fn() },
+  },
+}));
+vi.mock("@/lib/endpoints", () => ({ api }));
 
 const scene = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock("@/views/scenes/useScene", () => ({ useScene: () => scene.current }));
@@ -44,6 +53,14 @@ beforeAll(() => {
     unobserve() {}
     disconnect() {}
   } as unknown as typeof ResizeObserver;
+  globalThis.IntersectionObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
 });
 
 const clone = <T,>(value: T): T => structuredClone(value);
@@ -119,6 +136,21 @@ function mount(use: UseScene) {
 
 beforeEach(() => {
   window.localStorage.clear();
+  window.history.replaceState({}, "", "/");
+  api.effect.mockReset();
+  api.effect.mockResolvedValue({
+    schema: {
+      id: "fire",
+      name: "Fire",
+      description: "",
+      needs: { screen: false, audio: false },
+      properties: [],
+      presets: [],
+    },
+    favorite: false,
+    user_presets: [],
+    props: {},
+  });
   // Every demo light has been seen, so only a light that appears later is "new".
   window.localStorage.setItem(SEEN_LIGHTS_KEY, JSON.stringify(DEMO_LIGHTS.map((l) => l.light.id)));
   patchSnap({
@@ -359,5 +391,33 @@ describe("the Scenes page", () => {
     const labels = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label"));
     expect(labels).not.toContain("Save");
     expect(labels).not.toContain("Revert");
+  });
+
+  it("the row's picker puts the preview back when it closes", async () => {
+    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByRole("button", { name: /plays Aurora/ }));
+    await screen.findByTestId("effect-picker");
+    fireEvent.pointerEnter(screen.getByRole("button", { name: /Fire/ }));
+    await waitFor(() => expect((use.calls.edit ?? []).length).toBeGreaterThan(0));
+    const shown = (use.calls.edit ?? []).at(-1) as [Scene];
+    expect(shown[0].groups[0]?.plays).toEqual({ type: "effect", effect: "fire", props: {} });
+    // The popover closes with the Escape key: the preview goes with it.
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => {
+      const back = (use.calls.edit ?? []).at(-1) as [Scene];
+      expect(back[0].groups[0]?.plays).toEqual({ type: "effect", effect: "aurora", props: {} });
+    });
+  });
+
+  it("the page opens the group the URL names, and nothing for an id it does not have", async () => {
+    window.history.replaceState({}, "", "/?group=g-case");
+    mount(fake());
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+    cleanup();
+    window.history.replaceState({}, "", "/?group=no-such-group");
+    mount(fake());
+    await waitFor(() => expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

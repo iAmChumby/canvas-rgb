@@ -5,13 +5,16 @@
 // The sheet is drawn over the page, so opening it moves nothing under the pointer. On a phone it
 // is the whole window, with a back key; on a wide window it is a panel at the right edge.
 //
-// Inside it: the group's live lights, the effect it plays (and the effect's own controls, the
-// same component the Effects page uses), the way its lights share the effect, its brightness, its
-// presets, and the devices in it. Every change reaches the lights at once and is on the undo
-// stack; there is no Save and no Revert.
+// It has four steps. The group itself: the live lights, the effect it plays (and the effect's
+// own controls, the same component the Effects page uses), the mode, the brightness, its presets
+// and its devices. The name: what a group that was just made is called. The effect: the picker.
+// The devices: every light the editor knows, grouped by where it is now.
+//
+// Every change reaches the lights at once and is on the undo stack; there is no Save and no
+// Revert.
 
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, DotsThree, Moon, PencilSimple, Sparkle, Trash, X } from "@phosphor-icons/react";
+import { ArrowLeft, DotsThree, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { useMediaQuery } from "@/components/MediaQuery";
@@ -28,7 +31,9 @@ import { AddDevices } from "@/views/scenes/AddDevices";
 import { EffectPicker, useEffectDetail } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import { MemberList } from "@/views/scenes/MemberList";
+import { groupGoneMessage } from "@/views/scenes/groupEdit";
 import { PropertyControls } from "@/views/PropertyControls";
+import { notify } from "@/components/Notify";
 import type { GroupMode } from "@/proto/GroupMode";
 import type { LightView } from "@/proto/LightView";
 import type { Preset } from "@/proto/Preset";
@@ -50,8 +55,8 @@ export interface GroupSheetProps {
   lights: LightView[];
   /** The sheet closed. */
   onClose: () => void;
-  /** The sheet opens on this step: the group, its name, or the effect picker. */
-  initial?: "group" | "name" | "effect";
+  /** The sheet opens on this step: the group, its name, the effect or the devices. */
+  initial?: "group" | "name" | "effect" | "devices";
 }
 
 /**
@@ -72,7 +77,7 @@ export function Sheet({
   useFocusTrap({ panelRef: panel, capture: false, onEscape: onClose });
   return (
     <div className={s.sheetRoot}>
-      <div className={s.sheetScrim} onClick={onClose} aria-hidden="true" />
+      <div className={s.sheetScrim} data-testid="sheet-scrim" onClick={onClose} aria-hidden="true" />
       <section
         className={s.sheet}
         role="dialog"
@@ -94,11 +99,11 @@ export function Sheet({
   );
 }
 
-/** The sheet's own step: the group, its name, or the effect picker. */
-type Step = "group" | "name" | "effect";
+/** The sheet's own step: the group, its name, the effect or the devices. */
+type Step = "group" | "name" | "effect" | "devices";
 
 export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupSheetProps) {
-  const { edit, setProps, setBrightness } = use;
+  const { edit, setProps, setBrightness, undo } = use;
   const effects = useSnap((st) => st.effects);
   const phone = useMediaQuery("(max-width: 720px)");
   const scene = use.scene;
@@ -107,23 +112,16 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(group?.name ?? "");
   const [menu, setMenu] = useState(false);
-  const [adding, setAdding] = useState(false);
   const menuAnchor = useRef<HTMLButtonElement>(null);
-  const addAnchor = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
 
-  // Escape closes the sheet, one step at a time: a list that drops from one of its own keys
-  // first, then the step, then the sheet itself.
+  // Escape closes the sheet, one step at a time: a step of its own first, then the sheet.
   useFocusTrap({
     panelRef: panel,
     capture: false,
     onEscape: () => {
       if (menu) {
         setMenu(false);
-        return;
-      }
-      if (adding) {
-        setAdding(false);
         return;
       }
       if (step !== "group") {
@@ -167,19 +165,35 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
     onClose();
   }, [edit, groupId, onClose]);
 
+  /** A group that was left with no devices: the page says so and offers the Undo. */
+  const emptied = useCallback(
+    (names: string[]) => {
+      notify(groupGoneMessage(names), "warn", { label: "Undo", onClick: () => undo() });
+    },
+    [undo],
+  );
+
   if (!group) return null;
 
   const effectName = effectId ? effectNameOf(effects, effectId) : "Off";
+  const title = step === "effect" ? "What it plays" : step === "devices" ? "Add devices" : group.name;
 
   return (
     <div className={s.sheetRoot}>
-      <div className={s.sheetScrim} onClick={onClose} aria-hidden="true" />
-      <section className={s.sheet} role="dialog" aria-label={group.name} data-testid="group-sheet" data-step={step} ref={panel}>
+      <div className={s.sheetScrim} data-testid="sheet-scrim" onClick={onClose} aria-hidden="true" />
+      <section
+        className={s.sheet}
+        role="dialog"
+        aria-label={title}
+        data-testid="group-sheet"
+        data-step={step}
+        ref={panel}
+      >
         <header className={s.sheetHead}>
           <IconButton
-            label={phone ? "Back" : "Close"}
-            icon={phone ? <ArrowLeft size={18} /> : <X size={18} />}
-            onClick={onClose}
+            label={step === "group" ? (phone ? "Back" : "Close") : "Back"}
+            icon={step === "group" && !phone ? <X size={18} /> : <ArrowLeft size={18} />}
+            onClick={() => (step === "group" ? onClose() : setStep("group"))}
           />
           {renaming ? (
             <NameField
@@ -191,7 +205,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
               onEscape={() => setRenaming(false)}
             />
           ) : (
-            <h2 className={s.sheetTitle}>{group.name}</h2>
+            <h2 className={s.sheetTitle}>{title}</h2>
           )}
           <Button
             ref={menuAnchor}
@@ -223,10 +237,11 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
             </Button>
             {effectId && (
               <ButtonLink
-                href={`/effects/?effect=${encodeURIComponent(effectId)}`}
+                href={`/effects/?effect=${encodeURIComponent(effectId)}&group=${encodeURIComponent(groupId)}`}
                 variant="ghost"
                 size="sm"
                 icon={<Sparkle size={16} />}
+                onClick={() => setMenu(false)}
               >
                 Edit effect
               </ButtonLink>
@@ -248,6 +263,9 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
         <div className={s.sheetBody}>
           {step === "name" && (
             <div className={s.sheetStep}>
+              <div className={s.sheetRun}>
+                <LedRun lights={members} label={runLabel(group.name, members)} />
+              </div>
               <p className={s.sheetLead}>What is this group called?</p>
               <NameField
                 value={name}
@@ -277,6 +295,18 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
           {step === "effect" && (
             <div className={s.sheetStep}>
               <EffectPicker groupId={groupId} use={use} onClose={() => setStep("group")} />
+            </div>
+          )}
+
+          {step === "devices" && (
+            <div className={s.sheetStep}>
+              <AddDevices
+                groupId={groupId}
+                lights={lights}
+                use={use}
+                onClose={() => setStep("group")}
+                onEmptied={emptied}
+              />
             </div>
           )}
 
@@ -348,32 +378,15 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                 <div className={s.sheetBlockHead}>
                   <h3 className={s.sheetBlockTitle}>The devices</h3>
                   <Button
-                    ref={addAnchor}
                     size="sm"
                     data-testid="sheet-add-devices"
-                    icon={<Sparkle size={14} />}
-                    aria-haspopup="true"
-                    aria-expanded={adding}
-                    onClick={() => setAdding((v) => !v)}
+                    icon={<Plus size={14} />}
+                    onClick={() => setStep("devices")}
                   >
                     Add devices
                   </Button>
                 </div>
                 <MemberList groupId={groupId} lights={lights} use={use} />
-                <Popover
-                  anchor={addAnchor}
-                  open={adding}
-                  onClose={() => setAdding(false)}
-                  label="Add a device to this group"
-                  className={s.addPopover}
-                >
-                  <AddDevices
-                    groupId={groupId}
-                    lights={lights}
-                    use={use}
-                    onClose={() => setAdding(false)}
-                  />
-                </Popover>
               </section>
             </>
           )}

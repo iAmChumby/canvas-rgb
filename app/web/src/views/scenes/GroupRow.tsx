@@ -2,9 +2,9 @@
 
 import type { CSSProperties } from "react";
 import { useRef, useState } from "react";
-import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle } from "@phosphor-icons/react";
+import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
-import { Button } from "@/components/Button";
+import { Button, IconButton } from "@/components/Button";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Popover } from "@/components/Popover";
 import { Slider } from "@/components/Slider";
@@ -177,6 +177,15 @@ export function GroupRow({
         label={`What ${group.name} plays`}
         className={s.pickerPopover}
       >
+        <div className={s.pickerHead}>
+          <span className={s.pickerHeadText}>What this group plays</span>
+          <IconButton
+            label="Close"
+            size="sm"
+            icon={<X size={14} />}
+            onClick={() => setPicking(false)}
+          />
+        </div>
         <EffectPicker groupId={group.id} use={use} onClose={() => setPicking(false)} />
       </Popover>
       {failed && (

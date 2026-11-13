@@ -1,5 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
-import { useEffect } from "react";
+import { useEffect, useState } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The open group: the effect's own controls, its presets and the devices in it.
@@ -189,14 +189,34 @@ const take = (use: UseScene) => {
 
 function Harness({ groupId }: { groupId: string }) {
   const use = useScene();
+  const [closed, setClosed] = useState(false);
   useEffect(() => {
     take(use);
   }, [use]);
-  return <GroupSheet groupId={groupId} use={use} lights={clone(DEMO_LIGHTS)} onClose={() => {}} />;
+  if (closed) return null;
+  return (
+    <GroupSheet
+      groupId={groupId}
+      use={use}
+      lights={clone(DEMO_LIGHTS)}
+      onClose={() => setClosed(true)}
+    />
+  );
 }
 
 function open(groupId = "g-one") {
   render(<Harness groupId={groupId} />);
+}
+
+/** What the last whole-scene write carried for the group. */
+function lastPlays(): { type: string; effect?: string } | null {
+  const call = api.scenes.put.mock.calls.at(-1);
+  if (!call) return null;
+  const body = call[1] as { scene: Scene };
+  const group = body.scene.groups.find((g) => g.id === "g-one");
+  return group?.plays.type === "effect"
+    ? { type: "effect", effect: group.plays.effect }
+    : { type: "off" };
 }
 
 describe("the open group", () => {
@@ -240,7 +260,12 @@ describe("the open group", () => {
     expect(sent.scene.groups.map((g) => g.id)).toEqual(["g-two"]);
     // The undo toast offers the undo.
     expect(notifySpy).toHaveBeenCalled();
-    const action = notifySpy.mock.calls.at(-1)?.[2] as { label: string; onClick: () => void };
+    const [message, , action] = notifySpy.mock.calls.at(-1) as [
+      string,
+      string,
+      { label: string; onClick: () => void },
+    ];
+    expect(message).toBe("One device had no devices left and was removed");
     expect(action.label).toBe("Undo");
     // The change is on the undo stack: the owner can take it back.
     expect(latest?.canUndo).toBe(true);
@@ -268,5 +293,26 @@ describe("the open group", () => {
     expect(labels).not.toContain("Save");
     expect(labels).not.toContain("Revert");
     expect(within(screen.getByRole("dialog")).getByText("Presets")).toBeTruthy();
+  });
+
+  it("every way out of the group puts the preview back", async () => {
+    // The Escape key, the scrim and the back key all close the group, and the picker that was
+    // showing an effect puts the old one back: the lights never keep a picture the owner did
+    // not choose, and the undo stack never held it.
+    for (const way of ["escape", "scrim", "back"]) {
+      api.scenes.put.mockClear();
+      open("g-one");
+      await screen.findByRole("dialog");
+      fireEvent.click(screen.getByTestId("sheet-effect"));
+      await screen.findByTestId("effect-picker");
+      const tile = screen.getByRole("button", { name: /Fire/ });
+      fireEvent.pointerEnter(tile);
+      await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "fire" }));
+      if (way === "escape") fireEvent.keyDown(document, { key: "Escape" });
+      if (way === "scrim") fireEvent.click(screen.getByTestId("sheet-scrim"));
+      if (way === "back") fireEvent.click(screen.getByRole("button", { name: "Back" }));
+      await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "aurora" }));
+      cleanup();
+    }
   });
 });

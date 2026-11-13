@@ -181,14 +181,43 @@ interface GroupLive {
   hurry: boolean;
 }
 
+/**
+ * A change to the scenes themselves rather than to the scene that plays: a scene was renamed,
+ * made, duplicated or deleted. It is put back by its own command, because the daemon has no
+ * route that undoes it.
+ */
+export interface Command {
+  /** What the change was called. */
+  label: string;
+  /** Puts the world back the way it was. */
+  undo: () => Promise<void>;
+  /** Does it again. */
+  redo: () => Promise<void>;
+}
+
 /** One step of the undo history. */
 interface Entry {
-  /** The scene before the change. */
-  scene: Scene;
+  /** The scene before the change, when the change was inside a scene. */
+  scene?: Scene;
+  /** The change to put back, when the change was to the scenes themselves. */
+  command?: Command;
   /** What the change was called. */
   label: string;
   /** The change this step undoes, when it was one this window made. */
   changeId?: number;
+}
+
+/** The undo history: the changes of the scene that plays, and the changes to the scenes. */
+interface History {
+  /** The scene the content changes belong to. */
+  sceneId: string;
+  past: Entry[];
+  future: Entry[];
+  /**
+   * The next change of the active scene is one this window made (a scene was deleted, made or
+   * duplicated): the history keeps its steps, so the change can be put back.
+   */
+  keep?: boolean;
 }
 
 /** What a render shows of this window's own bookkeeping. */
@@ -350,7 +379,7 @@ export function useScene(): UseScene {
   const saved = useRef<Scene | null>(null);
   /** Numbers the changes, so a failed write can take its own off the undo stack. */
   const changeSeq = useRef(0);
-  const history = useRef({ sceneId: "", past: [] as Entry[], future: [] as Entry[] });
+  const history = useRef<History>({ sceneId: "", past: [], future: [] });
   /** The write loop is on its way. */
   const flushing = useRef(false);
   /** A whole-scene write is on its way, so no live write may start. */
@@ -459,15 +488,24 @@ export function useScene(): UseScene {
 
   useEffect(() => {
     known.current = { server, activeId };
-    // One scene's history never outlives a switch to another scene.
     if (history.current.sceneId !== (activeId ?? "")) {
       // The live values of the scene that goes go to that scene, not to the new one.
       // The entries stay until their queue has drained: they are keyed by their scene, so they
       // never show on or ride on the scene that comes.
       for (const g of [...live.current.values()]) flushLive(g);
-      // A write that has not gone out yet stays in the queue: it belongs to the scene that is
-      // going, and it goes out there.
-      history.current = { sceneId: activeId ?? "", past: [], future: [] };
+      const h = history.current;
+      if (h.keep) {
+        // The change that brought this scene about is on the undo stack: it is put back with an
+        // Undo, so the stack keeps its steps. The steps of the scene that is gone cannot be
+        // applied to the new one, so they go.
+        h.past = h.past.filter((e) => e.command);
+        h.future = h.future.filter((e) => e.command);
+        h.sceneId = activeId ?? "";
+        h.keep = false;
+      } else {
+        // One scene's history never outlives a switch to another scene.
+        history.current = { sceneId: activeId ?? "", past: [], future: [] };
+      }
       publish();
     }
   }, [server, activeId, publish, flushLive]);
@@ -589,22 +627,50 @@ export function useScene(): UseScene {
     [base, flush, publish],
   );
 
+  /**
+   * Puts a change to the scenes themselves on the undo stack: a scene was renamed, made,
+   * duplicated or deleted. The change is put back by its own command, because the daemon has no
+   * route that undoes it.
+   */
+  const pushCommand = useCallback(
+    (command: Command, changesTheActive: boolean) => {
+      const h = history.current;
+      h.past.push({ label: command.label, command });
+      if (h.past.length > HISTORY_DEPTH) h.past.shift();
+      h.future = [];
+      // The change may make another scene play: the history keeps its steps, so the change can be
+      // put back.
+      if (changesTheActive) h.keep = true;
+      publish();
+    },
+    [publish],
+  );
+
   const undo = useCallback(() => {
     const h = history.current;
     const active = known.current.activeId;
     if (!active) return;
+    const previous = h.past.pop();
+    if (!previous) return;
+    h.future.push(previous);
+    if (previous.command) {
+      // A change to the scenes themselves: it is put back by its own command. The active scene
+      // may change under it, so the history keeps its steps.
+      h.keep = true;
+      void previous.command.undo();
+      publish();
+      return;
+    }
     const pending = outgoing.current.get(active);
     const current = pending?.scene ?? base();
-    const previous = h.past.pop();
-    if (!current || !previous) return;
-    h.future.push({ scene: clone(current), label: previous.label });
+    if (!current || !previous.scene) return;
     // The undo is a change of its own: it puts the older scene back.
     const id = ++changeSeq.current;
     const entry: Change = {
       id,
       label: previous.label,
       apply: (d) => {
-        Object.assign(d, clone(previous.scene), { rev: d.rev });
+        Object.assign(d, clone(previous.scene!), { rev: d.rev });
       },
     };
     outgoing.current.set(active, {
@@ -619,19 +685,27 @@ export function useScene(): UseScene {
     const h = history.current;
     const active = known.current.activeId;
     if (!active) return;
+    const next = h.future.pop();
+    if (!next) return;
+    h.past.push(next);
+    if (next.command) {
+      // A change to the scenes themselves: it is done again by its own command.
+      h.keep = true;
+      void next.command.redo();
+      publish();
+      return;
+    }
     const pending = outgoing.current.get(active);
     const current = pending?.scene ?? base();
-    const next = h.future.pop();
-    if (!current || !next) return;
+    if (!current || !next.scene) return;
     const id = ++changeSeq.current;
     const entry: Change = {
       id,
       label: next.label,
       apply: (d) => {
-        Object.assign(d, clone(next.scene), { rev: d.rev });
+        Object.assign(d, clone(next.scene!), { rev: d.rev });
       },
     };
-    h.past.push({ scene: clone(current), label: next.label, changeId: id });
     outgoing.current.set(active, {
       scene: withChanges(current, [entry]),
       changes: [...(pending?.changes ?? []), entry],
@@ -974,37 +1048,118 @@ export function useScene(): UseScene {
     [fail],
   );
 
+  /** The same, for a call whose answer is waited for: a command's undo and redo. */
+  const runAsync = useCallback(
+    async (call: () => Promise<unknown>) => {
+      try {
+        await call();
+        fail(null);
+      } catch (e) {
+        fail(messageOf(e));
+      }
+      await refreshScenes();
+    },
+    [fail],
+  );
+
   const setActive = useCallback((id: string) => run(() => api.scenes.setActive(id)), [run]);
+
+  /** Puts a name on a scene. The scene's revision is read again, so the write is never stale. */
+  const putName = useCallback(async (id: string, name: string) => {
+    const answer = await api.scenes.list();
+    const scene = answer.scenes.find((s) => s.id === id);
+    if (!scene) throw new ApiFailure(404, "not_found", `there is no scene with the id ${id}`);
+    await api.scenes.put(id, { scene: { ...scene, name }, expected_rev: scene.rev });
+  }, []);
+
   /**
    * A new scene, and it plays: the owner made it to use it, not to keep it on a shelf. The daemon
-   * makes the scene but leaves the old one playing, so the new one is set here.
+   * makes the scene but leaves the old one playing, so the new one is set here. The change is on
+   * the undo stack: an Undo takes the new scene away.
    */
   const create = useCallback(
-    (name: string, copyOf?: string) =>
-      run(async () => {
+    (name: string, copyOf?: string) => {
+      let madeId: string | null = null;
+      const make = async () => {
         const made = await api.scenes.create(copyOf ? { name, copy_of: copyOf } : { name });
+        madeId = made.id;
         await api.scenes.setActive(made.id);
-      }),
-    [run],
+      };
+      pushCommand(
+        {
+          label: copyOf ? "Duplicate the scene" : "Make a scene",
+          undo: () =>
+            runAsync(async () => {
+              if (madeId) await api.scenes.remove(madeId);
+            }),
+          redo: () => runAsync(make),
+        },
+        true,
+      );
+      run(make);
+    },
+    [pushCommand, run, runAsync],
   );
-  const remove = useCallback((id: string) => run(() => api.scenes.remove(id)), [run]);
+
+  /**
+   * A scene goes. The change is on the undo stack: an Undo makes the scene again, with its
+   * groups, and plays it again if it was the one that played.
+   */
+  const remove = useCallback(
+    (id: string) => {
+      const answer = getSnap().scenes;
+      const scene = answer?.scenes.find((s) => s.id === id);
+      if (!scene) return;
+      const wasActive = answer?.active === id;
+      let currentId = id;
+      const restore = async () => {
+        // The daemon has no route that makes a scene with these groups: a new scene is made with
+        // the name, and the groups are put into it.
+        const made = await api.scenes.create({ name: scene.name });
+        const saved = await api.scenes.put(made.id, {
+          scene: { ...scene, id: made.id },
+          expected_rev: made.rev,
+        });
+        currentId = saved.id;
+        if (wasActive) await api.scenes.setActive(saved.id);
+      };
+      pushCommand(
+        {
+          label: "Delete the scene",
+          undo: () => runAsync(restore),
+          redo: () =>
+            runAsync(async () => {
+              await api.scenes.remove(currentId);
+            }),
+        },
+        true,
+      );
+      run(() => api.scenes.remove(id));
+    },
+    [pushCommand, run, runAsync],
+  );
   /**
    * A scene's own name. The scene need not be the active one, so this goes to the scene's own
    * route with the revision it was read at; a scene another window changed in between is refused
-   * and the name stays as it was.
+   * and the name stays as it was. The change is on the undo stack: an Undo puts the old name back.
    */
   const renameScene = useCallback(
     (id: string, name: string) => {
       const clean = name.trim();
       if (!clean) return;
-      run(async () => {
-        const answer = await api.scenes.list();
-        const scene = answer.scenes.find((s) => s.id === id);
-        if (!scene) throw new ApiFailure(404, "not_found", `there is no scene with the id ${id}`);
-        await api.scenes.put(id, { scene: { ...scene, name: clean }, expected_rev: scene.rev });
-      });
+      const scene = getSnap().scenes?.scenes.find((s) => s.id === id);
+      if (!scene || scene.name === clean) return;
+      pushCommand(
+        {
+          label: "Rename the scene",
+          undo: () => runAsync(() => putName(id, scene.name)),
+          redo: () => runAsync(() => putName(id, clean)),
+        },
+        false,
+      );
+      run(() => putName(id, clean));
     },
-    [run],
+    [pushCommand, putName, run, runAsync],
   );
 
   // The scene on screen: what this window changed, else the newest the daemon has, with the

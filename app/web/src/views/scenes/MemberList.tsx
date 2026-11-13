@@ -11,6 +11,7 @@ import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPoint
 import { DotsSixVertical, X } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { notify } from "@/components/Notify";
+import { groupGoneMessage, takeLightOut } from "@/views/scenes/groupEdit";
 import type { LightView } from "@/proto/LightView";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
@@ -21,9 +22,6 @@ export interface MemberListProps {
   lights: LightView[];
   use: UseScene;
 }
-
-/** What the undo toast says when the last device left the group. */
-export const GROUP_GONE = "The group had no devices left";
 
 export function MemberList({ groupId, lights, use }: MemberListProps) {
   const { edit, undo } = use;
@@ -107,21 +105,15 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
   /** Takes a device out of the group. The last one out takes the group with it. */
   const remove = useCallback(
     (id: string) => {
-      const last = members.length <= 1;
+      let gone: string[] = [];
       edit((draft) => {
-        const g = draft.groups.find((x) => x.id === groupId);
-        if (!g) return;
-        if (g.members.length <= 1) {
-          draft.groups = draft.groups.filter((x) => x.id !== groupId);
-          return;
-        }
-        g.members = g.members.filter((m) => m !== id);
-      }, last ? "Take the last device out of the group" : "Take a device out of the group");
-      if (last) {
-        notify(GROUP_GONE, "warn", { label: "Undo", onClick: () => undo() });
+        gone = takeLightOut(draft, groupId, id);
+      }, "Take a device out of the group");
+      if (gone.length > 0) {
+        notify(groupGoneMessage(gone), "warn", { label: "Undo", onClick: () => undo() });
       }
     },
-    [edit, groupId, members.length, undo],
+    [edit, groupId, undo],
   );
 
   if (!group) return null;

@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowClockwise, ArrowCounterClockwise, DotsThree, Plus, SquaresFour } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, CopySimple, DotsThree, PencilSimple, Plus, SquaresFour, Trash } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
@@ -18,6 +18,7 @@ import { GroupSheet, Sheet } from "@/views/scenes/GroupSheet";
 import { LightFeedContext } from "@/views/scenes/LedRun";
 import { NewLightNotice } from "@/views/scenes/NewLightNotice";
 import { SceneStrip } from "@/views/scenes/SceneStrip";
+import { groupGoneMessage, moveLight } from "@/views/scenes/groupEdit";
 import { useNewLights } from "@/views/scenes/newLights";
 import { useLightFeed } from "@/views/scenes/useLightFeed";
 import { useScene } from "@/views/scenes/useScene";
@@ -198,9 +199,11 @@ export function ScenesView() {
   const onPicked = (lightId: string) => {
     const id = freshGroupId();
     const name = `Group ${(scene?.groups.length ?? 0) + 1}`;
+    let emptied: string[] = [];
     use.edit((draft) => {
-      // A light is in one group: the group it was in lets it go.
-      for (const g of draft.groups) g.members = g.members.filter((m) => m !== lightId);
+      // A light is in one group: the group it was in lets it go, and goes with it when it was
+      // the last device.
+      emptied = moveLight(draft, lightId, null);
       draft.groups.push({
         id,
         name,
@@ -210,10 +213,28 @@ export function ScenesView() {
         brightness: 100,
       });
     }, "Make a group");
+    if (emptied.length > 0) {
+      notify(groupGoneMessage(emptied), "warn", { label: "Undo", onClick: () => use.undo() });
+    }
     setMaking(false);
     setSheetStep("name");
     setOpenId(id);
   };
+
+  // The scene on the page may be named in the URL: the builder's "Edit effect" links back with
+  // the group it came from. An id no group has opens nothing.
+  const [wantedGroup] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("group"),
+  );
+  const wantedHandled = useRef(false);
+  useEffect(() => {
+    if (wantedHandled.current || !wantedGroup || !scene) return;
+    if (!scene.groups.some((g) => g.id === wantedGroup)) return;
+    wantedHandled.current = true;
+    // A one-time decision when the scene first arrives, so it is made in this effect.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setOpenId(wantedGroup);
+  }, [wantedGroup, scene]);
 
   const state = scene
     ? "ready"
@@ -303,6 +324,7 @@ export function ScenesView() {
           <Button
             variant="ghost"
             size="sm"
+            icon={<PencilSimple size={16} />}
             disabled={!scene}
             onClick={() => {
               setSceneMenu(false);
@@ -316,6 +338,7 @@ export function ScenesView() {
           <Button
             variant="ghost"
             size="sm"
+            icon={<CopySimple size={16} />}
             disabled={!scene}
             onClick={() => {
               setSceneMenu(false);
@@ -327,6 +350,7 @@ export function ScenesView() {
           <Button
             variant="ghost"
             size="sm"
+            icon={<Plus size={16} />}
             disabled={!scene}
             onClick={() => {
               setSceneMenu(false);
@@ -338,6 +362,7 @@ export function ScenesView() {
           <Button
             variant="ghost"
             size="sm"
+            icon={<Trash size={16} />}
             disabled={!scene || use.scenes.length <= 1}
             onClick={() => {
               setSceneMenu(false);

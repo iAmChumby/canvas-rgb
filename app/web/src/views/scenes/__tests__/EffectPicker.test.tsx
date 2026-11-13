@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { useEffect } from "react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -83,9 +83,7 @@ function scene(html: boolean): Scene {
         id: "g-two",
         name: "Other",
         members: [],
-        plays: html
-          ? { type: "effect", effect: "html:sample", props: {} }
-          : { type: "off" },
+        plays: html ? { type: "effect", effect: "html:sample", props: {} } : { type: "off" },
         mode: "flow_across",
         brightness: 100,
       },
@@ -120,6 +118,7 @@ const EFFECTS: EffectSummary[] = [
   { id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false },
   { id: "fire", name: "Fire", description: "", needs: { screen: false, audio: false }, favorite: false },
   { id: "html:sample", name: "Sample", description: "", needs: { screen: false, audio: false }, favorite: false },
+  { id: "late-effect", name: "Late", description: "", needs: { screen: false, audio: false }, favorite: false },
 ];
 
 let serverRev = 7;
@@ -151,19 +150,19 @@ afterEach(() => {
   cleanup();
 });
 
-function Harness({ onUse }: { onUse: (use: ReturnType<typeof useScene>) => void }) {
-  const use = useScene();
-  useEffect(() => {
-    onUse(use);
-  }, [use, onUse]);
-  return <EffectPicker groupId="g-one" use={use} onClose={() => {}} />;
-}
-
 /** The hook the picker is given, and the last of it, so a test can look at the undo stack. */
 let latest: ReturnType<typeof useScene> | null = null;
 const take = (use: ReturnType<typeof useScene>) => {
   latest = use;
 };
+
+function Harness() {
+  const use = useScene();
+  useEffect(() => {
+    take(use);
+  }, [use]);
+  return <EffectPicker groupId="g-one" use={use} onClose={() => {}} />;
+}
 
 /** What the last whole-scene write carried for the group. */
 function lastPlays(): { type: string; effect?: string } | null {
@@ -178,17 +177,19 @@ function lastPlays(): { type: string; effect?: string } | null {
 
 describe("the effect picker", () => {
   it("highlighting an effect previews it and closing restores the old one", async () => {
-    render(<Harness onUse={take} />);
+    const view = render(<Harness />);
     const tile = await screen.findByRole("button", { name: /Fire/ });
     fireEvent.pointerEnter(tile);
-    await waitFor(() => expect(api.scenes.put).toHaveBeenCalled());
     await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "fire" }));
-    fireEvent.click(screen.getByRole("button", { name: "Close" }));
+    // The picker goes: the way out is the sheet's own (Escape, the scrim, the back key) or the
+    // popover's (Escape, a click outside). Every one of them unmounts the picker, and the picker
+    // puts the old effect back when it goes.
+    view.unmount();
     await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "aurora" }));
   });
 
   it("a preview is not on the undo stack: the owner's own choice is", async () => {
-    render(<Harness onUse={take} />);
+    render(<Harness />);
     const tile = await screen.findByRole("button", { name: /Fire/ });
     fireEvent.pointerEnter(tile);
     await waitFor(() => expect(api.scenes.put).toHaveBeenCalled());
@@ -199,16 +200,38 @@ describe("the effect picker", () => {
     expect(lastPlays()).toEqual({ type: "effect", effect: "fire" });
   });
 
+  it("a preview that lands after the picker closed writes nothing", async () => {
+    // The effect's detail is on its way; the picker closes before it comes back.
+    let answerDetail: (detail: EffectDetail) => void = () => undefined;
+    api.effect.mockImplementation(
+      () =>
+        new Promise<EffectDetail>((resolve) => {
+          answerDetail = resolve;
+        }),
+    );
+    const view = render(<Harness />);
+    const tile = await screen.findByRole("button", { name: /Late/ });
+    fireEvent.pointerEnter(tile);
+    view.unmount();
+    await act(async () => {
+      answerDetail(clone(DETAIL));
+      await Promise.resolve();
+    });
+    // The late preview belongs to a picture nobody wants: nothing was written.
+    expect(api.scenes.put).not.toHaveBeenCalled();
+  });
+
   it("an HTML effect another group plays cannot be chosen, and says why", async () => {
     patchSnap({ scenes: answer(true) });
     api.scenes.list.mockResolvedValue(answer(true));
-    render(<Harness onUse={take} />);
+    render(<Harness />);
     const html = await screen.findByRole("button", { name: /Sample/ });
     expect(html.getAttribute("aria-disabled")).toBe("true");
     expect(screen.getByText(new RegExp(HTML_ONE_AT_A_TIME))).toBeTruthy();
-    // Pointing at it does not preview it either.
+    // Clicking it does nothing at all: no preview and no choice.
+    fireEvent.click(html);
     fireEvent.pointerEnter(html);
     await new Promise((r) => setTimeout(r, 30));
-    expect(lastPlays()).toBeNull();
+    expect(api.scenes.put).not.toHaveBeenCalled();
   });
 });

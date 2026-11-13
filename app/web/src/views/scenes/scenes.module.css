@@ -756,6 +756,8 @@
   display: flex;
   flex-direction: column;
   gap: var(--s3);
+  flex: 1 1 auto;
+  min-height: 0;
 }
 
 .sheetStep > :global(.name-field),
@@ -861,101 +863,129 @@
 
 /* ---------- the effect picker ---------- */
 
+/* The picker is a list, not a wall of cards: every effect is a row with its picture as a wide
+   strip and its whole name beside it. The list fills the height it is given and scrolls in the
+   sheet's own pane. */
 .picker {
   display: flex;
   flex-direction: column;
-  gap: var(--s3);
+  gap: var(--s4);
+  min-width: 0;
+  flex: 1 1 auto;
+}
+
+.pickerSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
   min-width: 0;
 }
 
-.pickerNote {
+.pickerHeading {
   margin: 0;
-  padding: var(--s2) var(--s3);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
-  background: var(--warn-wash);
-  color: var(--dim);
-  font-size: var(--t14);
-  line-height: 1.3;
+  color: var(--mute);
+  font: 500 13px / 1 var(--fm);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
 }
 
-.pickerGrid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(104px, 1fr));
-  gap: var(--s2);
-}
-
-/* One effect: its picture and its name. The picture is what the owner recognises. */
-.effTile {
+.pickerRows {
   display: flex;
   flex-direction: column;
-  align-items: stretch;
-  gap: var(--s1);
-  padding: var(--s2);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
-  background: var(--raised);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+/* One effect: its picture as a strip, its whole name beside it, and what it is. */
+.pickRow {
+  display: grid;
+  grid-template-columns: 132px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  padding: var(--s2) var(--s2) var(--s2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  background: transparent;
   color: var(--ink);
   font: inherit;
-  font-size: var(--t14);
   text-align: left;
   cursor: pointer;
-  transition:
-    border-color var(--dur) var(--ease),
-    background-color var(--dur) var(--ease),
-    opacity var(--dur) var(--ease);
+  transition: background-color var(--dur) var(--ease);
 }
 
-.effTile:hover {
-  background: color-mix(in oklab, var(--raised) 90%, var(--ink));
+.pickRow:hover:not(:disabled) {
+  background: var(--hover);
 }
 
-.effTile:focus-visible {
+.pickRow:focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 2px;
+  outline-offset: -2px;
 }
 
-.effTile[aria-pressed="true"] {
-  border-color: var(--live);
+.pickRow[aria-pressed="true"] {
+  background: var(--live-soft);
 }
 
-.effTile[data-blocked="true"] {
+.pickRow[data-blocked="true"] {
   cursor: not-allowed;
   opacity: 0.55;
 }
 
-.effTileThumb {
+/* The picture: the effect's own frame, as a wide strip. */
+.pickStrip {
   display: flex;
   align-items: center;
   justify-content: center;
   height: 44px;
   overflow: hidden;
+  border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--sunk);
   color: var(--mute);
 }
 
-.effTileThumb :global(.thumb) {
+.pickStrip :global(.thumb) {
   width: 100%;
   height: 100%;
   border: 0;
   border-radius: 0;
 }
 
-.effTileName {
+.pickText {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
+.pickName {
   display: block;
   min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--dim);
-}
-
-.effTile[aria-pressed="true"] .effTileName {
   color: var(--ink);
+  font-size: var(--t15);
+  line-height: 1.25;
+  overflow-wrap: anywhere;
 }
 
-/* One line under the grid: what the lights are showing now. It never changes height. */
+/* Why an effect cannot be chosen, on the row it applies to. */
+.pickNote {
+  color: var(--warn);
+  font-size: var(--t14);
+  line-height: 1.25;
+}
+
+/* The effect the group plays now. */
+.pickLive {
+  color: var(--mute);
+  font: 500 13px / 1 var(--fm);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+/* One line under the list: what the lights are showing now. It never changes height. */
 .pickerHint {
   min-height: 2.6em;
   margin: 0;
@@ -964,9 +994,19 @@
   line-height: 1.3;
 }
 
-/* The picker's own way out: a key, not a line of text. */
-.pickerClose {
-  align-self: flex-start;
+/* The head of the picker when it hangs under a row's key: what it is, and the way out. */
+.pickerHead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s3);
+  padding-bottom: var(--s2);
+  border-bottom: 1px solid var(--line);
+}
+
+.pickerHeadText {
+  color: var(--ink);
+  font: 600 var(--t15) / 1.2 var(--fu);
 }
 
 /* The picker in a popover under a row's effect key: wider than the usual list. */
@@ -1042,19 +1082,29 @@
 .addList {
   display: flex;
   flex-direction: column;
-  gap: var(--s3);
+  gap: var(--s4);
+  min-width: 0;
+}
+
+.addSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s1);
   min-width: 0;
 }
 
 .addRows {
   display: flex;
   flex-direction: column;
-  gap: 2px;
   margin: 0;
   padding: 0;
-  max-height: 320px;
-  overflow-y: auto;
   list-style: none;
+}
+
+.addEmpty {
+  padding: var(--s2) 0;
+  color: var(--mute);
+  font-size: var(--t14);
 }
 
 .addRow {
@@ -1067,27 +1117,25 @@
   justify-content: space-between;
   gap: var(--s3);
   width: 100%;
-  padding: var(--s2);
-  border: 1px solid transparent;
-  border-radius: var(--r-sm);
+  padding: var(--s2) var(--s2) var(--s2) 0;
+  border: 0;
+  border-bottom: 1px solid var(--line);
+  border-radius: 0;
   background: transparent;
   color: var(--ink);
   font: inherit;
   text-align: left;
   cursor: pointer;
-  transition:
-    background-color var(--dur) var(--ease),
-    border-color var(--dur) var(--ease);
+  transition: background-color var(--dur) var(--ease);
 }
 
 .addPick:hover:not(:disabled) {
   background: var(--hover);
-  border-color: var(--line);
 }
 
 .addPick:focus-visible {
   outline: 2px solid var(--focus);
-  outline-offset: 1px;
+  outline-offset: -2px;
 }
 
 .addPick:disabled {
@@ -1177,8 +1225,13 @@
     height: 56px;
   }
 
-  .pickerGrid {
-    grid-template-columns: repeat(auto-fill, minmax(88px, 1fr));
+  /* The picture of an effect is a strip on a phone too, but a shorter one. */
+  .pickRow {
+    grid-template-columns: 104px minmax(0, 1fr) auto;
+  }
+
+  .pickStrip {
+    height: 38px;
   }
 }
 
