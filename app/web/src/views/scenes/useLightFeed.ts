@@ -10,7 +10,7 @@
 
 import { useEffect, useState } from "react";
 import { apiConfig, dropApiConfig } from "@/lib/api";
-import { sceneRoutes } from "@/lib/endpoints";
+import { routes } from "@/proto/routes";
 import { isDemo } from "@/lib/host";
 import { getSnap } from "@/lib/store";
 
@@ -153,7 +153,7 @@ export function useLightFeed(): LightColours {
       let url: string;
       try {
         const cfg = await apiConfig();
-        url = `${cfg.base_url.replace(/^http/, "ws")}${sceneRoutes.previewLights}?token=${encodeURIComponent(cfg.token)}`;
+        url = `${cfg.base_url.replace(/^http/, "ws")}${routes.previewLights}?token=${encodeURIComponent(cfg.token)}`;
       } catch {
         schedule();
         return;

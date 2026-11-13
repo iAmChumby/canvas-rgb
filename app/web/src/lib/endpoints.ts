@@ -73,26 +73,6 @@ import type { AudioTestState } from "@/proto/AudioTestState";
 /** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
 const ONBOARDING_SESSION = "/api/v1/onboarding/session";
 
-/**
- * The scene and light routes (canvas-proto `routes::SCENES` and the rest of 0.14.0). The
- * generated `routes.ts` is a spine file and does not carry them yet, so they live here, the way
- * `ONBOARDING_SESSION` does, until the spine owner mirrors them.
- */
-export const sceneRoutes = {
-  scenes: "/api/v1/scenes",
-  scene: (id: string) => `/api/v1/scenes/${encodeURIComponent(id)}`,
-  sceneActive: "/api/v1/scenes/active",
-  groupProps: (scene: string, group: string) =>
-    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/props`,
-  groupBrightness: (scene: string, group: string) =>
-    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/brightness`,
-  lights: "/api/v1/lights",
-  light: (id: string) => `/api/v1/lights/${encodeURIComponent(id)}`,
-  lightsFlash: "/api/v1/lights/flash",
-  /** WebSocket: the per-light feed (`useLightFeed`). */
-  previewLights: "/api/v1/preview/lights",
-};
-
 export const api = {
   status: () => request<Status>("GET", routes.status),
 
@@ -203,29 +183,29 @@ export const api = {
 
   scenes: {
     /** Every scene, the active one's id and how its groups are doing. */
-    list: () => request<ScenesResponse>("GET", sceneRoutes.scenes),
+    list: () => request<ScenesResponse>("GET", routes.scenes),
     /** A new scene: a copy of `copy_of`, or one group of every light set to Off. */
-    create: (body: SceneCreate) => request<Scene>("POST", sceneRoutes.scenes, body),
+    create: (body: SceneCreate) => request<Scene>("POST", routes.scenes, body),
     /** Replaces a scene whole. 409 (the current scene in the body) when `expected_rev` is stale. */
-    put: (id: string, body: ScenePut) => request<Scene>("PUT", sceneRoutes.scene(id), body),
+    put: (id: string, body: ScenePut) => request<Scene>("PUT", routes.scene(id), body),
     /** 409 for the last scene. */
-    remove: (id: string) => request<unknown>("DELETE", sceneRoutes.scene(id)),
+    remove: (id: string) => request<unknown>("DELETE", routes.scene(id)),
     /** Sets a scene, with a fade. */
     setActive: (id: string) =>
-      request<ScenesResponse>("PUT", sceneRoutes.sceneActive, { id } satisfies SceneActivePut),
+      request<ScenesResponse>("PUT", routes.sceneActive, { id } satisfies SceneActivePut),
     /** New values for one group's effect, no rebuild. */
     patchGroupProps: (sceneId: string, groupId: string, props: Props) =>
-      request<unknown>("PATCH", sceneRoutes.groupProps(sceneId, groupId), props),
+      request<unknown>("PATCH", routes.groupProps(sceneId, groupId), props),
     putGroupBrightness: (sceneId: string, groupId: string, brightness: number) =>
-      request<unknown>("PUT", sceneRoutes.groupBrightness(sceneId, groupId), {
+      request<unknown>("PUT", routes.groupBrightness(sceneId, groupId), {
         brightness,
       } satisfies GroupBrightnessPut),
   },
   lights: {
-    list: () => request<LightsResponse>("GET", sceneRoutes.lights),
-    patch: (id: string, body: LightPatch) => request<LightView>("PATCH", sceneRoutes.light(id), body),
+    list: () => request<LightsResponse>("GET", routes.lights),
+    patch: (id: string, body: LightPatch) => request<LightView>("PATCH", routes.light(id), body),
     /** The named lights white and every other LED black; `stop` ends it. */
-    flash: (body: FlashRequest) => request<unknown>("POST", sceneRoutes.lightsFlash, body),
+    flash: (body: FlashRequest) => request<unknown>("POST", routes.lightsFlash, body),
   },
 
   fans: () => request<FansStatus>("GET", routes.fans),
