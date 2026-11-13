@@ -192,8 +192,9 @@ From `CLAUDE.md` in the repo root:
 Researched for #311, then checked on Luke's keyboard on 2026-11-13 ("Checked on the device", below). **Only the lines tagged `checked on the device` were run on it.** Every line is tagged
 `checked on the device` or `source: <URL>`. A source's claim is the source's, not ours. The reports
 are built by `per_key_report`, `per_key_reports` and `user_picture_mode_report` in
-`crates/canvas-adapters/src/royuan.rs`, and the fake keyboard in that file's tests decodes them. `write_frame`
-does not send them yet (#312).
+`crates/canvas-adapters/src/royuan.rs`, and the fake keyboard in that file's tests decodes them.
+`write_frame` sends them for a still, when the effect holds still and the flash's budget allows
+(#312).
 
 ### What the keyboard can do
 
@@ -356,6 +357,19 @@ table for another board.
 - **If a driver ever uploads:** pages at least 100 ms apart and uploads at least 10 s apart, one picture per
   change a person made, never one per animation frame. These are the cadences that survived, not a measured
   limit; the limit is UNKNOWN.
+- **What the adapter does (#312, `crates/canvas-adapters/src/royuan.rs`).** A frame that holds within one
+  step per channel for the still window is uploaded; the window is 2 s at first, doubles each time a shown
+  picture is abandoned sooner than 30 s after it appeared (up to 10 min), and goes back to 2 s after a
+  picture that stayed a minute. The picture already in the flash is shown again with light mode 13 and not
+  written again when the new still is within a step of it. At most 12 uploads go out in any rolling hour,
+  and past that a still keeps the whole-board colour until the oldest upload leaves the hour: a picture is
+  384 bytes, so 12 an hour is about 3.5 kB, and the 10-minute window alone allows six. The upload gap, the
+  hour's count and the still window belong to the flash, so a reconnect does not reset them, and what the
+  flash holds is remembered across one. An upload abandoned before its last page leaves a torn picture, so
+  the next still writes all seven pages and light mode 13 is never sent for a torn one.
+- **The whole-board colour keeps streaming through the pages**, and stops when light mode 13 goes out about
+  3 s later. **What the board shows during those pages is UNKNOWN**: the `0x0E` stream should keep it lit,
+  but no device check has watched one. The check below settles it.
 - The `0x0E` whole-board colour is not an upload. `royuan_probe` sends it about 30 times a second (a 33 ms
   sleep, `crates/canvas-adapters/examples/royuan_probe.rs`); the adapter resends it at least once a second
   (`KEEPALIVE` in `royuan.rs`). The sources give no rate for it.
@@ -432,6 +446,14 @@ the probe's, no source guarantees them):
 
 **Do not test frame rate.** In sharkfin's test a fast upload loop killed a keyboard's control endpoint until a
 re-plug.
+
+**The upload window (#312).** No agent has watched a picture upload with the adapter running, so what the board
+shows during the ~3 s of pages is UNKNOWN. With canvas-rgb running and an effect that holds still, change
+something so a new picture is written (switch to a still effect, or move the layout), then leave the frame
+alone: the adapter writes the seven pages about three seconds after the effect settles. One yes/no for Luke,
+who sees the keys: **while the new picture is being written, does the keyboard stay lit with the moving
+colours instead of going dark or flickering?** Yes: the whole-board colour does cover the window. No: report
+what it did, because the adapter may have to hold the last colour instead.
 
 ## Checklist
 

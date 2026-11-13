@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
-- The MonsGeek keyboard shows per-key colour when an effect holds still; moving effects keep the whole-board colour. (#312)
+- The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds; moving effects stay one colour. (#312)
 
 ## [0.13.1] - 2026-11-11
 
