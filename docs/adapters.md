@@ -371,18 +371,23 @@ table for another board.
   hash is cleared before page 0 and set again once page 6 lands, so a crash half way through the pages never
   shows the old picture on the next start. The attempts (wall-clock Unix milliseconds) and the hash are kept
   in `royuan-stills.json` under the daemon's user directory, so a restart neither resets the caps nor
-  rewrites a picture the flash holds; a missing, unparsable or incomplete file, or one whose newest stamp is
-  more than a day ahead, counts as unknown picture and spends the caps for ten minutes (closed, not open),
-  and a stamp from the past-the-clock future counts as now. An upload abandoned before its last page (a
-  disconnect, a resume, an identify) leaves the flash unknown, so the next still writes all seven pages and
-  light mode 13 is never sent for a torn one.
-- **Mode reports are bounded (#312 review pass 3).** A report is skipped when the board is already in that
-  mode on this connection; light mode 13 is entered at most 12 times in a rolling hour, and all mode reports
-  together at most 30. Past either the board keeps the mode it has and the whole-board colour streams. The
-  composite reopens a keyboard that keeps dropping on a wait that doubles from 5 s to 5 min while it drops
-  within 30 s of connecting, and starts again from 5 s once it stays up five minutes. Whether the firmware
-  persists `SET_LEDPARAM` reports (light mode 13 and the direct-mode report) to flash is not stated by any
-  source: UNKNOWN. If it does, those writes are not counted by the picture caps.
+  rewrites a picture the flash holds. A file that is not there at all (a first run, or one someone deleted)
+  counts as unknown picture and waits ten minutes; a file that is there but unparsable, incomplete or
+  clock-skewed has lost its history, so no picture is written for a day (closed, not open), and a stamp from
+  the past-the-clock future counts as now. An upload abandoned before its last page (a disconnect, a resume,
+  an identify) leaves the flash unknown, so the next still writes all seven pages and light mode 13 is never
+  sent for a torn one.
+- **Mode reports are bounded (#312 review passes 3 and 4).** A report is skipped when the board is already in that
+  mode on this connection. Entering light mode 13 is capped at 12 entries in a rolling hour (the stamps are kept in
+  the file, so a crash loop cannot exceed it), and that cap is the *only* report a budget refuses: the report that
+  takes a picture off the board and the direct report on a (re)connect are always sent, because refusing them is
+  what would leave a wrong picture on the board. Past the cap the board stays in direct mode and the whole-board
+  colour streams, and no upload starts unless the board is confirmed in direct mode on this connection. A wake's own
+  direct report is deduped within 2.5 minutes, so a storm of resume notifications cannot run away; the composite
+  reopens a keyboard that keeps dropping on a wait that doubles from 5 s to 5 min while it drops within 30 s of
+  connecting, and starts again from 5 s once it stays up five minutes. Whether the firmware persists `SET_LEDPARAM`
+  reports (light mode 13 and the direct-mode report) to flash is not stated by any source: UNKNOWN. If it does, the
+  entries are the ones that matter, and they are capped.
 - **The whole-board colour keeps streaming through the pages**, and stops when light mode 13 goes out about
   3 s later. **What the board shows during those pages is UNKNOWN**: the `0x0E` stream should keep it lit,
   but no device check has watched one. The check below settles it.
