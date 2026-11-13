@@ -1,4 +1,4 @@
-﻿import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The store's one way to the daemon. The tests here answer it themselves, so an answer can be
 // slow, late or never.
@@ -222,4 +222,3 @@ describe("the store's late failures", () => {
     expect(getSnap()[area.field]).toBeNull();
   });
 });
-

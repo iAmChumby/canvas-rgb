@@ -1,4 +1,4 @@
-﻿// Issue #187: the stylesheet side of the nine motion rules. jsdom does no
+// Issue #187: the stylesheet side of the nine motion rules. jsdom does no
 // layout, so — like the scrollbar test (#92) — this reads the stylesheets and
 // checks the rules name the tokens, never raw durations or curves.
 import { readFileSync } from "node:fs";
@@ -205,5 +205,3 @@ describe("rule 6 wiring: the pulse fires on the success path only (#187)", () =>
     expect(swap).not.toContain("label=");
   });
 });
-
-

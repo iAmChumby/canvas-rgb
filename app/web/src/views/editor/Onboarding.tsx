@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect } from "react";
 import { api } from "@/lib/endpoints";
@@ -58,4 +58,3 @@ export function Onboarding({
     </div>
   );
 }
-

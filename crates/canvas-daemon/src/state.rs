@@ -1,4 +1,4 @@
-﻿//! The daemon's shared state.
+//! The daemon's shared state.
 //!
 //! One `App` holds everything the API handlers, the render loop and the background
 //! tasks share: the on-disk store, the engine handle, the OpenRGB adapter, the device
@@ -533,4 +533,3 @@ mod tests {
         assert!(matches!(app_conflicts[0], Conflict::SignalRgb { process: true, .. }));
     }
 }
-

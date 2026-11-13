@@ -1,4 +1,4 @@
-﻿// Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
+// Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
 // shapes from the generated proto types; nothing here re-declares an API type.
 
 import { request, requestBinary, type RequestOptions } from "@/lib/api";
@@ -252,4 +252,3 @@ export const api = {
   configExport: () => request<ExportBundle>("GET", routes.configExport),
   configImport: (bundle: ExportBundle) => request<unknown>("POST", routes.configImport, bundle),
 };
-

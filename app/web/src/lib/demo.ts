@@ -1,4 +1,4 @@
-﻿// The demo backend: answers the same routes as the daemon, from in-memory state, when the page
+// The demo backend: answers the same routes as the daemon, from in-memory state, when the page
 // runs outside the Tauri host (a plain browser or the screenshot server). It mirrors the
 // daemon's validation messages (crates/canvas-proto/src/fans.rs) so the inline 422 and 503 paths
 // can be seen. `?state=conflict|service-down|first-run|html` changes what the status reports.
@@ -2069,8 +2069,3 @@ export async function demoRequest(method: string, path: string, body: unknown): 
 
   return bad();
 }
-
-
-
-
-

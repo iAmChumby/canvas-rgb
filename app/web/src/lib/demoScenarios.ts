@@ -1,4 +1,4 @@
-﻿// Demo scenarios the editor's own pages need. The demo backend reads this file; no view ever
+// Demo scenarios the editor's own pages need. The demo backend reads this file; no view ever
 // reads it, so the editor's pages cannot tell a scenario from a real answer.
 //
 // The daemon sends the same shapes the scenarios produce, so a view that renders a state needs
@@ -360,4 +360,3 @@ export function applySceneScenarios(
   }
   return { scenes, active, lights: all };
 }
-

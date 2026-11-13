@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useMemo } from "react";
 import { effectNameOf } from "@/lib/status";
@@ -78,5 +78,3 @@ export function useRailData(): RailValues {
     };
   }, [status, effects, devices, displays, scenes, fans, peripherals]);
 }
-
-

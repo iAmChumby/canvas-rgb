@@ -1,4 +1,4 @@
-﻿//! The stack preview engine and its slot (D95.4.4).
+//! The stack preview engine and its slot (D95.4.4).
 //!
 //! The builder tunes a stack continuously, so the preview is not a render loop of its own: a
 //! second engine runs the stack at [`canvas_proto::consts::PREVIEW_MAX_FPS`], gets the same
@@ -740,5 +740,3 @@ mod tests {
         assert_eq!(settings.power, canvas_proto::api::Power::Running);
     }
 }
-
-

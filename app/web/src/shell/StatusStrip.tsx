@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, WarningOctagon } from "@phosphor-icons/react";
@@ -266,4 +266,3 @@ function Detail({ label, value }: { label: string; value: ReactNode }) {
     </>
   );
 }
-

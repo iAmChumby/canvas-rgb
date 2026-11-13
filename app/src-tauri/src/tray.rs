@@ -1,4 +1,4 @@
-﻿//! The tray icon, its menu, tooltip and warning icon, and the poll that keeps them current.
+//! The tray icon, its menu, tooltip and warning icon, and the poll that keeps them current.
 //!
 //! One background thread polls the daemon every `POLL_INTERVAL`, and every action calls
 //! `refresh` too. A refresh rebuilds the menu only when the snapshot changed, so an open menu
@@ -718,5 +718,3 @@ mod tests {
         assert_ne!(snap(), b);
     }
 }
-
-

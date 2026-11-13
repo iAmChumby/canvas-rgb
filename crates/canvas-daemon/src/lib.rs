@@ -1,4 +1,4 @@
-﻿//! canvas-rgbd internals, shared by the daemon and CLI binaries.
+//! canvas-rgbd internals, shared by the daemon and CLI binaries.
 
 pub mod api;
 pub mod auth;
@@ -254,4 +254,3 @@ mod tests {
         assert_eq!(super::solid_write_targets(&[device("openrgb:empty-header", 0, true)]), 0);
     }
 }
-

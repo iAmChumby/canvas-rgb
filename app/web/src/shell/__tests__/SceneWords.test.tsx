@@ -1,4 +1,4 @@
-﻿import { cleanup, render, screen, within } from "@testing-library/react";
+import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { effectMissing, effectNameOf, playing, readableEffectId } from "@/lib/status";
 import { patchSnap } from "@/lib/store";
@@ -192,4 +192,3 @@ describe("the status strip", () => {
     expect(mark().getAttribute("data-tone")).toBe("ok");
   });
 });
-

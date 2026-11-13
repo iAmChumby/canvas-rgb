@@ -1,4 +1,4 @@
-﻿//! #145: a resume from sleep sends a frame again, so the strip comes back and the OpenRGB
+//! #145: a resume from sleep sends a frame again, so the strip comes back and the OpenRGB
 //! controller re-enters custom mode.
 //!
 //! The daemon's power path pauses the engine on a suspend and resumes it on a wake

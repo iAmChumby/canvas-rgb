@@ -1,4 +1,4 @@
-﻿import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
@@ -326,4 +326,3 @@ describe("the draft on the lights", () => {
     });
   });
 });
-

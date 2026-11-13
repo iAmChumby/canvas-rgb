@@ -1,4 +1,4 @@
-﻿//! The `cause:timing-test` class check (docs/bug-classes.md; #36 #39 #45 #47 #51 #55 #59 #66).
+//! The `cause:timing-test` class check (docs/bug-classes.md; #36 #39 #45 #47 #51 #55 #59 #66).
 //!
 //! A test that reads its verdict off a real clock fails when a busy machine delays it. This scan
 //! runs over the repo's own test code on every `cargo test --workspace` (so in CI) and flags two

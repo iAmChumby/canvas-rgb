@@ -1,4 +1,4 @@
-﻿// The editor's one shared snapshot: daemon status, fans, devices, effects, scenes and settings,
+// The editor's one shared snapshot: daemon status, fans, devices, effects, scenes and settings,
 // plus the last 60 one-second RPM samples per fan header. Polling runs only while
 // the document is visible (status and fans every 1 s; the rest every 4 s), and an
 // `canvas://state-changed` event refetches everything.
@@ -514,4 +514,3 @@ export function startSync(): () => void {
     setDemoUpdateListener(null);
   };
 }
-

@@ -1,4 +1,4 @@
-﻿//! Class `cause:unchecked-state` (#19): a step whose failure the code used to drop must now say
+//! Class `cause:unchecked-state` (#19): a step whose failure the code used to drop must now say
 //! so, in the log or in the reply.
 
 mod common;
@@ -140,5 +140,3 @@ async fn a_scene_group_whose_effect_cannot_be_built_is_named_in_the_failures() {
         .await
         .expect("the router answers");
 }
-
-

@@ -1,4 +1,4 @@
-﻿//! The White effect, the warmth stage and the white balance reach every device (#50).
+//! The White effect, the warmth stage and the white balance reach every device (#50).
 //!
 //! A real engine with two fake devices: the White effect from the registry must write
 //! the white of the chosen temperature to every LED of every sink, the warmth stage must
@@ -192,5 +192,3 @@ fn the_warmth_stage_and_white_balance_scale_what_every_sink_gets() {
     shows([strip, strip], "balance cleared");
     engine.shutdown();
 }
-
-

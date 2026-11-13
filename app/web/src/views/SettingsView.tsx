@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useState } from "react";
 import { DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
@@ -322,5 +322,3 @@ export function SettingsView() {
     </div>
   );
 }
-
-

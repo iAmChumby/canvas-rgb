@@ -1,4 +1,4 @@
-﻿//! The stack compositor: one `Effect` that draws each layer of a saved stack.
+//! The stack compositor: one `Effect` that draws each layer of a saved stack.
 //!
 //! A stack is a spine type ([`canvas_proto::stack`]); this module is what runs it. It lives in
 //! the daemon because building a layer needs both the effect registry (`canvas_effects::create`)
@@ -1978,8 +1978,3 @@ mod tests {
         assert_eq!(layer.len(), 2, "another layer's keys do not leak in");
     }
 }
-
-
-
-
-

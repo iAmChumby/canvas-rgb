@@ -1,4 +1,4 @@
-﻿//! Effect stacks (D95.6, tests 1–9 and 12–14).
+//! Effect stacks (D95.6, tests 1–9 and 12–14).
 //!
 //! Everything here runs on the fakes: the daemon's state is built from `common`, no test binds
 //! the API's port, and the compositor is driven by hand with an injected clock and fake effects,
@@ -4896,11 +4896,3 @@ async fn a_joining_page_keeps_the_draft_out_of_the_sweepers_hands() {
     let answer = answered("the joined build did not finish", rebuild).await;
     assert_eq!(json(answer).await["applied"], true);
 }
-
-
-
-
-
-
-
-

@@ -1,4 +1,4 @@
-﻿//! The one-time migration from the built-in Poison to the user HTML effect that
+//! The one-time migration from the built-in Poison to the user HTML effect that
 //! replaces it.
 //!
 //! Poison is SignalRGB's own effect, so the repo ships no copy of it. It lives on the
@@ -226,4 +226,3 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-

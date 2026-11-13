@@ -1,4 +1,4 @@
-﻿import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { REQUEST_TIMEOUT_MS } from "@/lib/api";
 import { patchSnap } from "@/lib/store";
@@ -159,5 +159,3 @@ describe("a refresh that fails after the content is on screen", () => {
   });
 
 });
-
-

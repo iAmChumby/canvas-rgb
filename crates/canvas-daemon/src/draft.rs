@@ -1,4 +1,4 @@
-﻿//! The draft on the lights (#2, D2.5): try an editor draft without saving anything.
+//! The draft on the lights (#2, D2.5): try an editor draft without saving anything.
 //!
 //! A draft is a takeover on the engine (Scenes, #310): its effect is built with the user-effect
 //! builder and put on the groups it names, and it is never written. The slot lives in memory
@@ -1380,5 +1380,3 @@ mod tests {
         );
     }
 }
-
-

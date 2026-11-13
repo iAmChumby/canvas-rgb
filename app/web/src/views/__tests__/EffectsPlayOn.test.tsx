@@ -1,4 +1,4 @@
-﻿// Task 11: the Effects page's Play action is "Play on …", and its controls set the effect's
+// Task 11: the Effects page's Play action is "Play on …", and its controls set the effect's
 // starting values. The page reads the active scene's groups from the snapshot, so each test
 // puts the scene it needs there.
 
@@ -347,5 +347,3 @@ void (() => {
   const groups = [group("g", "G")];
   return scenesWith(groups);
 });
-
-

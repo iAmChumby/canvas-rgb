@@ -1,4 +1,4 @@
-﻿import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Status } from "@/proto/Status";
 import type { StackLayer } from "@/proto/StackLayer";
@@ -312,4 +312,3 @@ describe("an edit to an effect", () => {
     expect(play.getAttribute("aria-busy")).toBeNull();
   });
 });
-

@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useRef, useState } from "react";
 import { useDocumentVisible } from "@/lib/motion";
@@ -128,4 +128,3 @@ export function EffectPreview({ id, className, label = "Effect preview", note = 
     </>
   );
 }
-

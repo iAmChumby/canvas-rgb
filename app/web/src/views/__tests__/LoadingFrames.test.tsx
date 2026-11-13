@@ -1,4 +1,4 @@
-﻿import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
 import { DevicesView } from "@/views/DevicesView";
@@ -390,4 +390,3 @@ describe("the updates page", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
-

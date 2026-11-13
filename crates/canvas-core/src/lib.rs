@@ -1,4 +1,4 @@
-﻿//! canvas-rgb engine: the canvas, the scenes' arrangement planner, the sampling, the render
+//! canvas-rgb engine: the canvas, the scenes' arrangement planner, the sampling, the render
 //! loop, parking, pause, brightness and the preview downscale.
 //!
 //! The engine owns one thread. It renders at a fixed step (10..=60 fps), parks when
@@ -42,4 +42,3 @@ use std::sync::Arc;
 pub fn spawn(settings: EngineSettings) -> Arc<dyn Engine> {
     engine::spawn(settings)
 }
-

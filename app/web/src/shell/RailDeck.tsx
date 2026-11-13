@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useCallback, useMemo, useState, type CSSProperties } from "react";
 import { SkipBack, SkipForward, Sun } from "@phosphor-icons/react";
@@ -305,6 +305,3 @@ function MeterCell({ meter }: { meter: Meter }) {
     </div>
   );
 }
-
-
-

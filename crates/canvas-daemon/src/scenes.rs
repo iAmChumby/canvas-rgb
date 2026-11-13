@@ -1,4 +1,4 @@
-﻿//! Scene store operations: the lights the devices bring, the repair of a damaged
+//! Scene store operations: the lights the devices bring, the repair of a damaged
 //! `scenes.json`, and the default scene.
 //!
 //! Ids are plain and deterministic, like the layout ids before them (`default`, then the owner's
@@ -1844,4 +1844,3 @@ pub(crate) mod tests {
         assert_eq!(fresh_id("a", ["a", "a-2"]), "a-3");
     }
 }
-

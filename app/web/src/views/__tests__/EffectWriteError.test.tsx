@@ -1,4 +1,4 @@
-﻿import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { EffectsView } from "@/views/EffectsView";
 import { patchSnap } from "@/lib/store";
@@ -215,5 +215,4 @@ describe("other ways a failure is left behind", () => {
     expect(screen.queryByText("the favourite was not saved")).toBeNull();
   });
 });
-
 

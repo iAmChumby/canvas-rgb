@@ -1,4 +1,4 @@
-﻿// One scrollbar for every scrolling pane (#92).
+// One scrollbar for every scrolling pane (#92).
 //
 // jsdom does no layout, so this test reads the stylesheets and asks two questions: does every
 // pane that scrolls get the shared scrollbar, and does every bar that hides itself do so on
@@ -248,4 +248,3 @@ describe("one scrollbar for every scrolling pane (#92)", () => {
     expect(editor).toContain(`scrollbarColor: "${THUMB_HOVER}"`);
   });
 });
-

@@ -1,4 +1,4 @@
-﻿import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonDown } from "@/components/DaemonDown";
 import { GlobalBanners } from "@/shell/GlobalBanners";
@@ -57,4 +57,3 @@ describe("the words on the page", () => {
     expect(banner.textContent ?? "").toMatch(/canvas-rgb/);
   });
 });
-

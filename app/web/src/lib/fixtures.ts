@@ -1,4 +1,4 @@
-﻿// Demo-mode fixtures, used only when there is no Tauri host (a plain browser, or the
+// Demo-mode fixtures, used only when there is no Tauri host (a plain browser, or the
 // screenshot server). They copy the shapes of the Rust side: the 12 effect schemas from
 // crates/canvas-effects/src/*.rs, the devices from the spec's hardware list, and the fan
 // headers from the spine. The production path never reads this file.
@@ -639,4 +639,3 @@ export function demoSceneProblem(scene: Scene): string | null {
   }
   return null;
 }
-

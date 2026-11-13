@@ -1,4 +1,4 @@
-﻿//! G7: the first run.
+//! G7: the first run.
 //!
 //! On a clean profile the daemon lights everything up with no clicks: it sizes the JARGB
 //! headers from SignalRGB's own configuration (read-only), places every device on the
@@ -549,5 +549,3 @@ mod tests {
         }
     }
 }
-
-

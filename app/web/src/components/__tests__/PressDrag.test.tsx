@@ -1,4 +1,4 @@
-﻿import { cleanup, fireEvent, render } from "@testing-library/react";
+import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi, type Mock } from "vitest";
 import { act, useState } from "react";
 import { AngleDial } from "@/components/AngleDial";
@@ -285,4 +285,3 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     expect(el.getAttribute("draggable")).toBe("false");
   });
 });
-

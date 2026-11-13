@@ -1,4 +1,4 @@
-﻿// Rubber-band drag limits (issue #187, rule 3) and the settle back (rule 4).
+// Rubber-band drag limits (issue #187, rule 3) and the settle back (rule 4).
 //
 // Past a limit a part does not stop dead: it follows the pointer with diminishing
 // resistance, on iOS's resistance curve. An overshoot `o` (how far past the limit

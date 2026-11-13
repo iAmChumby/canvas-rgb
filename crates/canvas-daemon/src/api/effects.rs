@@ -1,4 +1,4 @@
-﻿//! The effect routes: list, detail, activate, props and favourites.
+//! The effect routes: list, detail, activate, props and favourites.
 
 use axum::extract::{Path, Query, State};
 use axum::response::IntoResponse;
@@ -1060,5 +1060,3 @@ mod tests {
         assert!(fit_props_to_schema(&schema, bad, "saved").is_empty());
     }
 }
-
-

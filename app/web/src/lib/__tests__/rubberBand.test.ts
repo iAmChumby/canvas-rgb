@@ -1,4 +1,4 @@
-﻿// Issue #187, rules 3 + 4: rubber-band past drag limits, and no easing while held.
+// Issue #187, rules 3 + 4: rubber-band past drag limits, and no easing while held.
 //
 // The formula is iOS's resistance curve: past a limit, an overshoot `o` in a span of
 // dimension `d` with constant `c` (0.55) moves only

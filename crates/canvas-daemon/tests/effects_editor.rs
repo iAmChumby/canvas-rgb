@@ -1,4 +1,4 @@
-﻿//! The effect editor's daemon routes: an effect's source, a draft's preview, and the draft on
+//! The effect editor's daemon routes: an effect's source, a draft's preview, and the draft on
 //! the lights.
 //!
 //! Every test runs against the in-test fake engine and adapter and a temporary data folder, so
@@ -1733,5 +1733,3 @@ fn bring_gradient_in_scenes(bundle: &mut serde_json::Value) {
         }
     }
 }
-
-

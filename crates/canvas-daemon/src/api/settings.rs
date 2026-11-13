@@ -1,4 +1,4 @@
-﻿//! The settings routes, the first-run panel and the config export/import (G10).
+//! The settings routes, the first-run panel and the config export/import (G10).
 
 use axum::extract::State;
 use axum::Json;
@@ -357,4 +357,3 @@ pub fn output_state(settings: &Settings) -> OutputState {
 pub fn default_config() -> ConfigFile {
     ConfigFile::default()
 }
-

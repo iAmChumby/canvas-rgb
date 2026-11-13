@@ -1,4 +1,4 @@
-﻿//! On-disk state: `config.toml`, `layouts.json`, `zones.json`, `effects.json`, plus
+//! On-disk state: `config.toml`, `layouts.json`, `zones.json`, `effects.json`, plus
 //! snapshots (G10) and the export/import bundle.
 //!
 //! Every write goes to a temp file in the same directory and is renamed over the target,
@@ -2211,7 +2211,3 @@ power = "running"
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
-
-
-
-

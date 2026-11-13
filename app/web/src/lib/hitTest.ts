@@ -1,4 +1,4 @@
-﻿// What is under the pointer on the layout desk, worked out from the parts' own geometry.
+// What is under the pointer on the layout desk, worked out from the parts' own geometry.
 //
 // The desk used to ask the browser (`document.elementsFromPoint`), which skips anything with
 // `pointer-events: none` and answers in DOM order. That is how an offline zone, a part added
@@ -305,4 +305,3 @@ export function marqueePick(band: DeskRect, parts: HitPart[]): PartRef[] {
   }
   return out;
 }
-

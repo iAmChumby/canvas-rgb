@@ -1,4 +1,4 @@
-﻿// The live preview feed. In the tray it is the daemon's WebSocket (binary frames: u16 LE width,
+// The live preview feed. In the tray it is the daemon's WebSocket (binary frames: u16 LE width,
 // u16 LE height, then width*height*3 RGB bytes). In a plain browser it is the running effect's
 // own look, drawn from the demo shades. The socket is open only while the window is visible. The
 // dominant hue of the frame is written to --live-h at no more than 2 Hz, so the chrome tints with
@@ -326,5 +326,4 @@ function readLiveHue(): number {
   const value = Number.parseFloat(raw);
   return Number.isFinite(value) ? value : 215;
 }
-
 

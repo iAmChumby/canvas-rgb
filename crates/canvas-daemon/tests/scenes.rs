@@ -1,4 +1,4 @@
-﻿//! The scenes API and the daemon running a scene (Scenes plan, Task 6).
+//! The scenes API and the daemon running a scene (Scenes plan, Task 6).
 //!
 //! A real engine with two fake devices and a recording sink on each: a route that changes what
 //! plays is proved by what the sinks are handed, not by what the handler says. No device, no
@@ -2492,4 +2492,3 @@ async fn start_up_applies_the_active_scene() {
     assert!(rig.app.scene.failures().get("right").is_some_and(|why| why.contains("deleted")));
     // No fade at start-up: no frame between the colours the engine has not shown.
 }
-

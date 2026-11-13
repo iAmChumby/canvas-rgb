@@ -1,4 +1,4 @@
-﻿<picture>
+<picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/banner-dark.png">
   <img alt="canvas-rgb: RGB software shouldn't take a gigabyte of RAM." src="docs/assets/banner-light.png">
 </picture>

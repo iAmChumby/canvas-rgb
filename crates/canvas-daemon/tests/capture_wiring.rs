@@ -1,4 +1,4 @@
-﻿//! The daemon's capture reaches the engines (#1).
+//! The daemon's capture reaches the engines (#1).
 //!
 //! The capture threads started, but nothing ever gave the capture to the engines, so
 //! Audio Spectrum and Screen Ambience drew black. These tests run on the fakes: no
@@ -393,4 +393,3 @@ async fn an_audio_effect_reads_the_source_and_lights_the_sink() {
     );
     engine.shutdown();
 }
-

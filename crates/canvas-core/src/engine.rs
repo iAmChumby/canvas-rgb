@@ -1,4 +1,4 @@
-﻿//! The render loop: one thread, a fixed-step timer, and the state the loop owns.
+//! The render loop: one thread, a fixed-step timer, and the state the loop owns.
 //!
 //! Threading model:
 //! - The public `Engine` handle owns a `Mutex<State>` and a `Condvar`.

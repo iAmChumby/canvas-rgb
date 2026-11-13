@@ -1,4 +1,4 @@
-﻿"use client";
+"use client";
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ArrowsClockwise, Check, Circle } from "@phosphor-icons/react";
@@ -219,5 +219,3 @@ function Ladder({
     </StepFrame>
   );
 }
-
-

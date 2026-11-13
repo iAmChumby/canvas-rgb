@@ -1,4 +1,4 @@
-﻿//! #233: `GET /api/v1/devices?rescan=1` asks OpenRGB again and answers with the new list; a plain
+//! #233: `GET /api/v1/devices?rescan=1` asks OpenRGB again and answers with the new list; a plain
 //! `GET` still answers from the list the daemon holds.
 //!
 //! The adapter is the real OpenRGB adapter talking to the fake OpenRGB server: no hardware. The
@@ -321,4 +321,3 @@ async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     server.stall_replies(false);
 }
-

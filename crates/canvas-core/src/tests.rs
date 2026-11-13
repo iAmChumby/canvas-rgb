@@ -1,4 +1,4 @@
-﻿//! Integration tests for the render loop.
+//! Integration tests for the render loop.
 //!
 //! These use their own tiny test effects (never the `canvas-effects` crate) and a
 //! fake sink, so they never touch hardware.
@@ -1255,4 +1255,3 @@ mod scene {
         engine.shutdown();
     }
 }
-

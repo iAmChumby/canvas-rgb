@@ -1,4 +1,4 @@
-﻿//! Checks that the parked and paused loops cost (almost) no CPU.
+//! Checks that the parked and paused loops cost (almost) no CPU.
 //!
 //! The spec budgets "Paused: daemon CPU mean â‰¤ 0.05%". The engine is one thread of
 //! the daemon, so it has to be cheaper than that.
@@ -305,4 +305,3 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
     );
     engine.shutdown();
 }
-

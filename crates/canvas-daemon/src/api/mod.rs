@@ -1,4 +1,4 @@
-﻿//! The loopback HTTP API on 127.0.0.1:9430.
+//! The loopback HTTP API on 127.0.0.1:9430.
 //!
 //! Every route is under `/api/v1`. The G9 guards (bearer token, Origin, Host) run as
 //! middleware on the whole router.
@@ -279,6 +279,3 @@ pub fn limited_body(
         other => ApiFailure::validation(format!("the request body could not be read: {other}")),
     })
 }
-
-
-

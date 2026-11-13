@@ -1,4 +1,4 @@
-﻿import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotifyHost, dismissNotifications } from "@/components/Notify";
 import { continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
@@ -428,4 +428,3 @@ describe("the updated-to toast", () => {
     expect(screen.getByText("Added")).toBeTruthy();
   });
 });
-
