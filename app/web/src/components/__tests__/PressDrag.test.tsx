@@ -237,7 +237,7 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     const { container } = render(
       <>
         <input aria-label="Field" onBlur={onBlur} />
-        <StackAreaPicker layer={layer} layout={null} devices={null} onUse={vi.fn()} onClose={vi.fn()} />
+        <StackAreaPicker layer={layer} canvas={null} devices={null} onUse={vi.fn()} onClose={vi.fn()} />
       </>,
     );
     const input = container.querySelector("input") as HTMLInputElement;
@@ -294,7 +294,7 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
         <input aria-label="Field" onBlur={onBlur} />
         <Stage
           stack={{ id: "stack:T", layers: [layer] }}
-          layout={null}
+          canvas={null}
           devices={null}
           picked={layer}
           parts

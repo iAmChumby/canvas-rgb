@@ -225,9 +225,9 @@ describe("the stage", () => {
     expect(screen.getByRole("button", { name: "Make Sparkles a rectangle" })).toBeTruthy();
   });
 
-  it("starts with Parts off, and shows and hides the desk's outlines with it", async () => {
+  it("starts with the LEDs off, and shows and hides each light's outlines with it", async () => {
     await openBuilder();
-    const toggle = screen.getByRole("switch", { name: "Show the desk's device and zone outlines" });
+    const toggle = screen.getByRole("switch", { name: "Show each light's LEDs" });
     expect(toggle.getAttribute("aria-checked")).toBe("false");
     expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
     fireEvent.click(toggle);
@@ -299,7 +299,7 @@ describe("a drag is one undo step", () => {
     await waitFor(() => expect(readout()).toContain(HEAT_AT));
   });
 
-  it("shows the desk's outlines while it lasts, even with Parts off", async () => {
+  it("shows the group's outlines while it lasts, even with the LEDs off", async () => {
     const { frame } = await pickHeat();
     expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
     act(() => {

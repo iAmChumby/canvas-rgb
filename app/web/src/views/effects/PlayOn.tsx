@@ -5,7 +5,7 @@
 // choice. An HTML effect may play in one group only (`SCENE_HTML_MAX` is 1), so with two or more
 // groups it offers single groups and says why.
 
-import { useEffect, useRef, useState, type Ref } from "react";
+import { useRef, useState, type Ref } from "react";
 import { CaretDown, Play } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
@@ -49,13 +49,15 @@ export function PlayOn({
   const [chosen, setChosen] = useState<string[]>([]);
 
   // Each opening starts from every group, except an HTML effect, which starts on the first.
-  useEffect(() => {
-    if (!open) return;
+  const toggleOpen = () => {
+    if (open) {
+      setOpen(false);
+      return;
+    }
     setEvery(!html);
     setChosen(html ? groups.slice(0, 1).map((g) => g.name) : []);
-    // Only an opening resets the choice: the groups themselves can change while it is open.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open]);
+    setOpen(true);
+  };
 
   const single = groups.length <= 1;
   const label = playLabel(groups.length, running);
@@ -106,7 +108,7 @@ export function PlayOn({
         disabled={disabled || running}
         aria-expanded={open}
         aria-haspopup="dialog"
-        onClick={() => setOpen((v) => !v)}
+        onClick={toggleOpen}
         icon={<Play size={14} weight="fill" />}
       >
         {label}

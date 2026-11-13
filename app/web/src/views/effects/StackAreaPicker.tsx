@@ -12,11 +12,11 @@ import { Segmented } from "@/components/Segmented";
 import { Select } from "@/components/Select";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
+import { canvasDevices, type GroupCanvas } from "@/lib/groupCanvas";
 import type { StackLayer } from "@/proto/StackLayer";
 import { cancelPress } from "@/lib/pressDrag";
 import {
-  areaIsOnDesk,
+  areaIsOnCanvas,
   areaReadout,
   CANVAS_H,
   CANVAS_W,
@@ -26,7 +26,7 @@ import {
   type PickerView,
 } from "@/views/effects/stackDraft";
 
-type Mode = "canvas" | "device" | "zone" | "rect";
+type Mode = "canvas" | "device" | "rect";
 
 /** What Tab reaches inside the picker, in document order. */
 const FOCUSABLE =
@@ -35,23 +35,24 @@ const FOCUSABLE =
 const MODES: { value: Mode; label: string }[] = [
   { value: "canvas", label: "Whole canvas" },
   { value: "device", label: "Device" },
-  { value: "zone", label: "Zone" },
   { value: "rect", label: "Rectangle" },
 ];
 
 function modeOf(area: LayerArea): Mode {
-  return area.kind;
+  if (area.kind === "rect") return "rect";
+  if (area.kind === "canvas") return "canvas";
+  return "device";
 }
 
 export function StackAreaPicker({
   layer,
-  layout,
+  canvas,
   devices,
   onUse,
   onClose,
 }: {
   layer: StackLayer;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   onUse: (area: LayerArea) => void;
   onClose: () => void;
@@ -63,10 +64,7 @@ export function StackAreaPicker({
   );
   const initialDevice = layer.area.kind === "device" || layer.area.kind === "zone" ? layer.area.device : undefined;
   const [device, setDevice] = useState<string>(
-    initialDevice ?? layout?.zones.find((zone) => zone.visible)?.device_id ?? "",
-  );
-  const [zoneIndex, setZoneIndex] = useState<number>(
-    layer.area.kind === "zone" ? layer.area.zone : layout?.zones.find((zone) => zone.visible)?.zone_index ?? 0,
+    initialDevice ?? canvas?.deviceIds[0] ?? "",
   );
   const svgRef = useRef<SVGSVGElement>(null);
   const dialogRef = useRef<HTMLDivElement>(null);
@@ -115,27 +113,7 @@ export function StackAreaPicker({
     return () => document.removeEventListener("keydown", onKey);
   }, []);
 
-  const deviceOptions = useMemo(() => {
-    const ids: string[] = [];
-    for (const zone of layout?.zones ?? []) {
-      if (zone.visible && !ids.includes(zone.device_id)) ids.push(zone.device_id);
-    }
-    return ids.map((id) => ({
-      id,
-      name: devices?.find((entry) => entry.id === id)?.name ?? id,
-    }));
-  }, [layout, devices]);
-
-  const zoneOptions = useMemo(
-    () =>
-      (layout?.zones ?? [])
-        .filter((zone) => zone.visible && zone.device_id === device)
-        .map((zone) => ({
-          zone: zone.zone_index,
-          label: zone.label ?? `Zone ${zone.zone_index + 1}`,
-        })),
-    [layout, device],
-  );
+  const deviceOptions = useMemo(() => canvasDevices(canvas, devices), [canvas, devices]);
 
   useEffect(() => {
     const svg = svgRef.current;
@@ -214,18 +192,15 @@ export function StackAreaPicker({
   const chosen: LayerArea | null = useMemo(() => {
     if (mode === "canvas") return { kind: "canvas" };
     if (mode === "device") return device ? { kind: "device", device } : null;
-    if (mode === "zone") return device ? { kind: "zone", device, zone: zoneIndex } : null;
     return rect ? { kind: "rect", ...rect } : null;
-  }, [mode, device, zoneIndex, rect]);
+  }, [mode, device, rect]);
 
-  const readout = chosen ? areaReadout(chosen, layout, devices) : null;
-  const litDevice = mode === "device" ? device : mode === "zone" ? device : null;
-  const litZone = mode === "zone" ? zoneIndex : null;
+  const readout = chosen ? areaReadout(chosen, canvas, devices) : null;
+  const litDevice = mode === "device" ? device : null;
 
-  const pickZone = (deviceId: string, zone: number) => {
-    if (mode !== "device" && mode !== "zone") return;
+  const pickZone = (deviceId: string) => {
+    if (mode !== "device") return;
     setDevice(deviceId);
-    if (mode === "zone") setZoneIndex(zone);
   };
 
   return (
@@ -234,14 +209,14 @@ export function StackAreaPicker({
         <div className="rd-picker-head">
           <div>
             <h2>Area for {layer.name}</h2>
-            <p>Drag on the desk to draw a rectangle, or pick a part.</p>
+            <p>Drag on the canvas to draw a rectangle, or pick a device in the group.</p>
           </div>
           <IconButton label="Close the area picker" icon={<X size={16} />} onClick={onClose} />
         </div>
 
         <Segmented<Mode> label="Where the layer paints" value={mode} options={MODES} onChange={setMode} />
 
-        {(mode === "device" || mode === "zone") && (
+        {mode === "device" && (
           <div className="rd-picker-choice">
             <div className="layer-field">
               <span>Device</span>
@@ -251,30 +226,11 @@ export function StackAreaPicker({
                 options={
                   deviceOptions.length > 0
                     ? deviceOptions.map((option) => ({ value: option.id, label: option.name }))
-                    : [{ value: "", label: "No device on the desk" }]
+                    : [{ value: "", label: "No device in this group" }]
                 }
-                onChange={(next) => {
-                  setDevice(next);
-                  const first = (layout?.zones ?? []).find((zone) => zone.visible && zone.device_id === next);
-                  setZoneIndex(first?.zone_index ?? 0);
-                }}
+                onChange={(next) => setDevice(next)}
               />
             </div>
-            {mode === "zone" && (
-              <div className="layer-field">
-                <span>Zone</span>
-                <Select
-                  label="Zone"
-                  value={String(zoneIndex)}
-                  options={
-                    zoneOptions.length > 0
-                      ? zoneOptions.map((option) => ({ value: String(option.zone), label: option.label }))
-                      : [{ value: "0", label: "No zone on this device" }]
-                  }
-                  onChange={(next) => setZoneIndex(Number(next))}
-                />
-              </div>
-            )}
           </div>
         )}
 
@@ -292,79 +248,45 @@ export function StackAreaPicker({
         >
           <g transform={`scale(${view.zoom}) translate(${view.panX} ${view.panY})`}>
             <line className="desk-line" x1={0} y1={190} x2={CANVAS_W} y2={190} />
-            {(layout?.landmarks ?? [])
-              .filter((landmark) => landmark.visible)
-              .map((landmark, i) => (
-                <rect
-                  key={`landmark-${i}`}
-                  className="case"
-                  x={landmark.x}
-                  y={landmark.y}
-                  width={landmark.width}
-                  height={landmark.height}
-                  rx={3}
-                  transform={landmark.rotation_deg ? `rotate(${landmark.rotation_deg} ${landmark.x + landmark.width / 2} ${landmark.y + landmark.height / 2})` : undefined}
-                />
-              ))}
-            {(layout?.zones ?? [])
-              .filter((zone) => zone.visible)
-              .map((zone, i) => {
-                const lit =
-                  litDevice !== null &&
-                  zone.device_id === litDevice &&
-                  (litZone === null || zone.zone_index === litZone);
-                const kind = zone.part?.kind;
-                const cx = zone.x + zone.width / 2;
-                const cy = zone.y + zone.height / 2;
-                const radius = Math.max(1, Math.min(zone.width, zone.height) / 2 - 1.5);
-                return (
-                  <g
-                    key={`zone-${i}`}
-                    transform={zone.rotation_deg ? `rotate(${zone.rotation_deg} ${cx} ${cy})` : undefined}
-                    onPointerDown={(event) => {
-                      if (mode === "device" || mode === "zone") {
-                        event.stopPropagation();
-                        pickZone(zone.device_id, zone.zone_index);
-                      }
-                    }}
-                  >
-                    <rect
-                      className="part"
-                      data-lit={lit ? "true" : "false"}
-                      x={zone.x}
-                      y={zone.y}
-                      width={zone.width}
-                      height={zone.height}
-                      rx={2}
-                    />
-                    {kind === "fan" && (
-                      <>
-                        <circle className="part-line" cx={cx} cy={cy} r={radius * 0.82} />
-                        <circle className="part-line" cx={cx} cy={cy} r={radius * 0.2} />
-                      </>
-                    )}
-                    {kind === "keyboard" && (
-                      <>
-                        {[0.2, 0.35, 0.5, 0.65, 0.8].map((at) => (
-                          <line
-                            key={at}
-                            className="part-line"
-                            x1={zone.x + zone.width * at}
-                            y1={zone.y + zone.height * 0.2}
-                            x2={zone.x + zone.width * at}
-                            y2={zone.y + zone.height * 0.8}
-                          />
-                        ))}
-                      </>
-                    )}
-                    {kind === "mouse" && <ellipse className="part-line" cx={cx} cy={cy} rx={zone.width * 0.3} ry={zone.height * 0.36} />}
-                    {(kind === "ram" || kind === "gpu" || kind === "strip") && (
-                      <line className="part-line" x1={zone.x + zone.width * 0.15} y1={cy} x2={zone.x + zone.width * 0.85} y2={cy} />
-                    )}
-                    {kind === "microphone" && <circle className="part-line" cx={cx} cy={zone.y + zone.height * 0.3} r={zone.width * 0.24} />}
-                  </g>
-                );
-              })}
+            {(canvas?.lights ?? []).map((light) => {
+              const lit = litDevice !== null && light.device_id === litDevice;
+              const cx = light.box.x + light.box.width / 2;
+              const cy = light.box.y + light.box.height / 2;
+              const radius = Math.max(1, Math.min(light.box.width, light.box.height) / 2 - 1.5);
+              return (
+                <g
+                  key={light.id}
+                  onPointerDown={(event) => {
+                    if (mode === "device") {
+                      event.stopPropagation();
+                      pickZone(light.device_id);
+                    }
+                  }}
+                >
+                  <rect
+                    className="part"
+                    data-lit={lit ? "true" : "false"}
+                    x={light.box.x}
+                    y={light.box.y}
+                    width={light.box.width}
+                    height={light.box.height}
+                    rx={2}
+                  />
+                  {light.arrangement === "ring" && (
+                    <>
+                      <circle className="part-line" cx={cx} cy={cy} r={radius * 0.82} />
+                      <circle className="part-line" cx={cx} cy={cy} r={radius * 0.2} />
+                    </>
+                  )}
+                  {light.arrangement === "strip" && (
+                    <line className="part-line" x1={light.box.x + light.box.width * 0.15} y1={cy} x2={light.box.x + light.box.width * 0.85} y2={cy} />
+                  )}
+                  {light.leds.map((led, i) => (
+                    <circle key={i} className="led-dot" cx={led.x} cy={led.y} r={0.9} />
+                  ))}
+                </g>
+              );
+            })}
             {mode === "rect" && rect && (
               <g>
                 <rect className="marquee-tint" x={rect.x} y={rect.y} width={rect.width} height={rect.height} />
@@ -401,7 +323,7 @@ export function StackAreaPicker({
             </>
           ) : (
             <span className="mute">
-              {mode === "rect" ? "Drag on the desk to draw a rectangle." : "Pick a part on the desk."}
+              {mode === "rect" ? "Drag on the canvas to draw a rectangle." : "Pick a device in the group."}
             </span>
           )}
         </div>
@@ -413,7 +335,7 @@ export function StackAreaPicker({
           <Button
             variant="primary"
             icon={<Check size={15} />}
-            disabled={!chosen || (chosen.kind !== "canvas" && chosen.kind !== "rect" && !areaIsOnDesk(chosen, layout))}
+            disabled={!chosen || !areaIsOnCanvas(chosen, canvas)}
             onClick={() => chosen && onUse(chosen)}
           >
             Use this area

@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+﻿import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { EffectsView } from "@/views/EffectsView";
 import { patchSnap } from "@/lib/store";
@@ -14,7 +14,7 @@ import type { Status } from "@/proto/Status";
 const { api } = vi.hoisted(() => ({
   api: {
     effect: vi.fn(),
-    patchActiveProps: vi.fn(),
+    patchEffectDefaults: vi.fn(),
     activateEffect: vi.fn(),
     setFavorite: vi.fn(),
     deleteEffect: vi.fn(),
@@ -89,7 +89,25 @@ beforeEach(() => {
     ],
     effectsError: null,
     effectsFailed: [],
-    status: { active_effect: "aurora", active_layout: "layout" } as unknown as Status,
+    status: {
+      active_effect: "aurora",
+      active_effects: ["aurora"],
+      active_scene: { id: "s", name: "Scene" },
+    } as unknown as Status,
+    scenes: {
+      active: "s",
+      scenes: [
+        {
+          id: "s",
+          name: "Scene",
+          rev: 1,
+          groups: [
+            { id: "g", name: "Everything", members: [], plays: { type: "off" }, mode: "flow_across", brightness: 100 },
+          ],
+        },
+      ],
+      group_states: [],
+    },
     pending: [],
   });
 });
@@ -105,7 +123,7 @@ function page() {
 
 describe("a read that lands after a failed write", () => {
   it("keeps the failed write's message on screen", async () => {
-    api.patchActiveProps.mockRejectedValue(new Error("the effect did not take the change"));
+    api.patchEffectDefaults.mockRejectedValue(new Error("the effect did not take the change"));
     page();
     // The detail read has landed: the slider is on screen.
     const speed = await screen.findByLabelText("Speed value");
@@ -114,7 +132,7 @@ describe("a read that lands after a failed write", () => {
     fireEvent.focus(speed);
     fireEvent.change(speed, { target: { value: "55" } });
     fireEvent.blur(speed);
-    await waitFor(() => expect(api.patchActiveProps).toHaveBeenCalledTimes(1));
+    await waitFor(() => expect(api.patchEffectDefaults).toHaveBeenCalledTimes(1));
     await screen.findByText("the effect did not take the change");
 
     // Another effect is opened: its detail read succeeds. Aurora's failure is not said on
@@ -153,9 +171,9 @@ describe("a failed favourite", () => {
 
 describe("an edit after a failed write", () => {
   it("clears that effect's failure: the edit replaces what the failed write asked for", async () => {
-    api.patchActiveProps.mockRejectedValueOnce(new Error("the effect did not take the change"));
+    api.patchEffectDefaults.mockRejectedValueOnce(new Error("the effect did not take the change"));
     // The retry stays out, so only the edit itself can have cleared the message.
-    api.patchActiveProps.mockReturnValue(new Promise(() => {}));
+    api.patchEffectDefaults.mockReturnValue(new Promise(() => {}));
     page();
     const speed = await screen.findByLabelText("Speed value");
     fireEvent.focus(speed);
@@ -172,7 +190,7 @@ describe("an edit after a failed write", () => {
 
 describe("other ways a failure is left behind", () => {
   it("a preset that goes on clears the effect's failed change", async () => {
-    api.patchActiveProps.mockRejectedValueOnce(new Error("the effect did not take the change"));
+    api.patchEffectDefaults.mockRejectedValueOnce(new Error("the effect did not take the change"));
     api.activateEffect.mockResolvedValue(undefined);
     page();
     const speed = await screen.findByLabelText("Speed value");
@@ -198,3 +216,4 @@ describe("other ways a failure is left behind", () => {
     expect(screen.queryByText("the favourite was not saved")).toBeNull();
   });
 });
+

@@ -104,6 +104,7 @@ import {
   stackSummary,
 } from "@/lib/demoStacks";
 import { stackThumbnailBytes } from "@/lib/stackFrame";
+import { wholeLightsCanvas } from "@/lib/groupCanvas";
 
 const BASE = "/api/v1";
 const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
@@ -1575,9 +1576,18 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 3 && seg[2] === "thumbnail" && method === "GET") {
       const stack = s.stacks[id];
-      if (stack) return stackThumbnailBytes(stack, activeLayout());
+      if (stack) return stackThumbnailBytes(stack, wholeLightsCanvas(s.lights, s.devices));
       effectOrNotFound(id);
       return demoThumbnail(id);
+    }
+    if (seg.length === 3 && seg[2] === "defaults" && method === "PATCH") {
+      // The effect's starting values: what the next group to play it starts from. A group that
+      // already plays it keeps its own values; no scene changes.
+      const e = effectOrNotFound(id);
+      if (id.startsWith("stack:")) fail(409, "conflict", `${id} is a stack; its values live in the stack builder`);
+      const props = body as Props;
+      s.saved[id] = { ...(s.saved[id] ?? {}), ...props };
+      return { ok: true, id, props: { ...e.defaults, ...s.saved[id] } };
     }
     if (seg.length === 3 && seg[2] === "activate" && method === "POST") {
       const e = effectOrNotFound(id);
@@ -1586,7 +1596,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (scenario().has("activate-fail")) {
         fail(503, "service_unavailable", "the effect could not start: the engine is busy");
       }
-      const req = body as { props?: Props; preset?: string | null };
+      const req = body as { props?: Props; preset?: string | null; groups?: string[] };
       const isStack = id.startsWith("stack:");
       // A stack's values are its layers' own (D95.4.3): there is no `effects.saved` entry.
       let base: Props = isStack ? { ...e.defaults } : { ...e.defaults, ...(s.saved[id] ?? {}) };
@@ -1603,7 +1613,31 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       s.activeEffect = id;
       const layout = activeLayout();
       layout.effect = { id, props: next };
-      if (!isStack) s.saved[id] = next;
+      // Scenes: the effect plays on the groups asked for (every group when none is named). The
+      // starting values are written by PATCH /effects/{id}/defaults and nothing else.
+      const scene = activeSceneOf(s);
+      if (scene) {
+        const at =
+          req.groups && req.groups.length > 0
+            ? req.groups.map((name) => {
+                const found = scene.groups.find(
+                  (g) => g.name.toLowerCase() === name.toLowerCase() || g.id === name,
+                );
+                if (!found) fail(404, "not_found", `scene ${scene.name} has no group named ${name}`);
+                return found;
+              })
+            : scene.groups;
+        for (const group of at) group.plays = { type: "effect", effect: id, props: next };
+        const html = scene.groups.filter((g) => {
+          if (g.plays.type !== "effect") return false;
+          if (g.plays.effect.startsWith("html:")) return true;
+          const stack = s.stacks[g.plays.effect];
+          return stack ? stack.layers.some((layer) => layer.effect.startsWith("html:")) : false;
+        }).length;
+        if (html > 1) {
+          fail(422, "validation", "at most 1 group of a scene may play an HTML effect (a stack with an HTML layer counts); " + html + " do");
+        }
+      }
       return { ok: true };
     }
     if (seg.length === 3 && seg[2] === "favorite" && method === "PUT") {
