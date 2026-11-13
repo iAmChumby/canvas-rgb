@@ -67,6 +67,9 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         app.stacks.publish_areas(&layout, &devices);
     }
     sync_device_sinks(app, &devices).await;
+    // The scene follows the devices: a zone that came or went, a count that changed. A list that
+    // changes nothing the engine was handed rebuilds nothing.
+    crate::scenes::apply_for_devices(app).await;
     // The first run waits for the devices. It can take a while, so it runs on its own task and
     // the supervisor goes on reading.
     let first_run = Arc::clone(app);
