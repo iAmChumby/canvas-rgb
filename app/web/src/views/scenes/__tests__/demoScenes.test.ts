@@ -50,4 +50,33 @@ describe("the demo's scene routes", () => {
     })) as Scene;
     expect(saved.rev).toBe(scene.rev + 1);
   });
+
+  it("answers a group write with the whole scene and a new rev", async () => {
+    const { scene } = await active();
+    const group = scene.groups[0];
+    if (!group) throw new Error("the demo scene has no groups");
+    // The demo answers with the scene it holds, so the rev is read before the write.
+    const startRev = scene.rev;
+
+    const props = (await demoRequest("PATCH", `/api/v1/scenes/${scene.id}/groups/${group.id}/props`, {
+      amount: { type: "number", value: 3 },
+    })) as Scene;
+    expect(props.rev).toBe(startRev + 1);
+    expect(props.groups).toHaveLength(scene.groups.length);
+    expect(props.id).toBe(scene.id);
+
+    const brightness = (await demoRequest("PUT", `/api/v1/scenes/${scene.id}/groups/${group.id}/brightness`, {
+      brightness: 42,
+    })) as Scene;
+    expect(brightness.rev).toBe(startRev + 2);
+    expect(brightness.groups.find((g) => g.id === group.id)?.brightness).toBe(42);
+  });
+
+  it("refuses a new scene whose name is over 40 characters", async () => {
+    const refused = await demoRequest("POST", "/api/v1/scenes", { name: "x".repeat(41) }).catch(
+      (e: unknown) => e,
+    );
+    expect(refused).toBeInstanceOf(ApiFailure);
+    expect((refused as ApiFailure).status).toBe(422);
+  });
 });

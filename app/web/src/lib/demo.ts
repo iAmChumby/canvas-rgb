@@ -840,6 +840,8 @@ function createScene(s: DemoState, body: SceneCreate): Scene {
           },
         ],
   };
+  // The daemon's rules hold for a new scene too: a name over 40 characters is refused.
+  checkScene(s, scene);
   s.scenes.push(scene);
   return scene;
 }
@@ -886,13 +888,17 @@ function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown)
     if (seg[4] === "props" && method === "PATCH") {
       if (group.plays.type !== "effect") fail(422, "validation", `group ${group.name} plays nothing`);
       group.plays = { ...group.plays, props: { ...group.plays.props, ...(body as Props) } };
-      return { ok: true };
+      // The daemon saves the write, bumps the scene's rev and answers the whole scene.
+      scene.rev += 1;
+      return structuredClone(scene);
     }
     if (seg[4] === "brightness" && method === "PUT") {
       const brightness = (body as { brightness: number }).brightness;
       if (!(brightness >= 0 && brightness <= 100)) fail(422, "validation", "brightness must be 0..=100");
       group.brightness = Math.round(brightness);
-      return { ok: true };
+      // The daemon saves the write, bumps the scene's rev and answers the whole scene.
+      scene.rev += 1;
+      return structuredClone(scene);
     }
   }
   return bad();

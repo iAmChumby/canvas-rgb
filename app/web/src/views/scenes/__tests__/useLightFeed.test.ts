@@ -1,11 +1,11 @@
-import { act, renderHook } from "@testing-library/react";
+import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TauriGlobal } from "@/lib/host";
 import { useLightFeed } from "@/views/scenes/useLightFeed";
 
 // The per-light feed: `GET /api/v1/preview/lights` (a WebSocket whose first message maps a u16
-// index to a light id, then binary frames: per light a u16 LE index, a u16 LE LED count, then
-// that many RGB triples).
+// index to a light id, then binary frames: per light a u16 LE LED index, a u16 LE LED count,
+// then that many RGB triples).
 
 class FakeSocket {
   static opened: FakeSocket[] = [];
@@ -21,11 +21,6 @@ class FakeSocket {
   close(): void {
     this.closed = true;
   }
-}
-
-/** Lets the config lookup and the connect path settle. */
-async function settle(): Promise<void> {
-  for (let i = 0; i < 8; i += 1) await Promise.resolve();
 }
 
 /** One binary frame: each light's index, its LED count, then its RGB triples. */
@@ -61,8 +56,7 @@ afterEach(() => {
 describe("useLightFeed", () => {
   it("decodes the index message then frames", async () => {
     const { result, unmount } = renderHook(() => useLightFeed());
-    await settle();
-    expect(FakeSocket.opened).toHaveLength(1);
+    await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
     const socket = FakeSocket.opened[0]!;
     expect(socket.url).toContain("/api/v1/preview/lights");
     expect(socket.binaryType).toBe("arraybuffer");
@@ -93,8 +87,54 @@ describe("useLightFeed", () => {
       } as MessageEvent);
     });
     expect(Array.from(result.current("openrgb:strip-1#z0") ?? [])).toEqual([1, 2, 3]);
+    // A light the newest frame does not name keeps the run it had: a frame is not a picture of
+    // the whole canvas.
+    expect(Array.from(result.current("lite-b") ?? [])).toEqual([0, 0, 255]);
 
     unmount();
     expect(socket.closed).toBe(true);
+  });
+
+  it("forgets the colours and the index when the socket closes", async () => {
+    const { result } = renderHook(() => useLightFeed());
+    await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
+    const socket = FakeSocket.opened[0]!;
+
+    act(() => {
+      socket.onmessage?.({ data: JSON.stringify({ "0": "lite-a", "1": "lite-b" }) } as MessageEvent);
+    });
+    act(() => {
+      socket.onmessage?.({ data: frame([{ index: 0, rgb: [255, 0, 0] }]) } as MessageEvent);
+    });
+    expect(Array.from(result.current("lite-a") ?? [])).toEqual([255, 0, 0]);
+
+    // The daemon goes away.
+    vi.useFakeTimers();
+    act(() => {
+      socket.onclose?.({} as CloseEvent);
+    });
+    // The canvas shows no colours of a socket that is gone.
+    expect(result.current("lite-a")).toBeNull();
+
+    // The feed comes back.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1300);
+    });
+    expect(FakeSocket.opened).toHaveLength(2);
+    const again = FakeSocket.opened[1]!;
+    // A frame before the new index names no light: the old index is gone, so it goes nowhere.
+    act(() => {
+      again.onmessage?.({ data: frame([{ index: 0, rgb: [0, 255, 0] }]) } as MessageEvent);
+    });
+    expect(result.current("lite-a")).toBeNull();
+
+    // The new index names the lights again, and the frames land.
+    act(() => {
+      again.onmessage?.({ data: JSON.stringify({ "0": "lite-a" }) } as MessageEvent);
+    });
+    act(() => {
+      again.onmessage?.({ data: frame([{ index: 0, rgb: [0, 255, 0] }]) } as MessageEvent);
+    });
+    expect(Array.from(result.current("lite-a") ?? [])).toEqual([0, 255, 0]);
   });
 });
