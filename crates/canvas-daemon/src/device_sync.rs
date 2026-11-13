@@ -40,13 +40,7 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         if store.finish_scenes(&devices) {
             tracing::info!("scenes.json and lights.json were written from the first device list");
         }
-        let new_lights = crate::scenes::sync_lights(&mut store.lights, &devices);
-        if !new_lights.is_empty() {
-            tracing::info!(added = new_lights.len(), "new lights were added");
-            if let Err(e) = store.save_lights() {
-                tracing::warn!(error = %e, "could not save the lights");
-            }
-        }
+        store.sync_lights_from(&devices);
         if store.config.first_run_done {
             let added = store
                 .active_layout_mut()

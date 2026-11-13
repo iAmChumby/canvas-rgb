@@ -185,7 +185,8 @@ pub fn migrate(layouts: Option<&LayoutsFile>, devices: &[DeviceInfo]) -> (Lights
 mod tests {
     use super::*;
     use crate::scenes::tests::{device, zone};
-    use crate::storage::Store;
+    use crate::storage::{Store, SCENES_DEVICE_WAIT};
+    use std::time::{Duration, Instant};
     use canvas_proto::device::{DeviceId, ZoneKind};
     use canvas_proto::scene::LightsFile;
     use canvas_proto::layout::{ActiveEffect, CaseForm, LedSlice};
@@ -741,6 +742,188 @@ mod tests {
         assert_eq!(snapshot_count(&dir), 1, "no new snapshot");
         assert_eq!(std::fs::read(dir.join(canvas_proto::scene::SCENES_FILE)).unwrap(), scenes_bytes);
         assert!(!layouts_path.exists(), "layouts.json was never made");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn kb() -> DeviceInfo {
+        device(
+            "openrgb:kb",
+            1,
+            vec![zone(0, ZoneKind::Matrix { width: 2, height: 1, map: vec![Some(0), Some(1)] }, 2)],
+        )
+    }
+
+    /// Layouts placing the board (a single zone, Auto), the keyboard (a matrix zone, Auto) and a
+    /// fan ring on a device that may never show up (a label, `Ring`, reversed).
+    fn layouts_with_a_late_device() -> LayoutsFile {
+        let mut fan = placed("openrgb:fan", 0);
+        fan.shape = ZoneShape::Ring;
+        fan.label = Some("Front fan".into());
+        fan.reversed = true;
+        file("a", vec![layout("a", "A", vec![placed("openrgb:board", 2), placed("openrgb:kb", 0), fan], None)])
+    }
+
+    /// B1 (second round): a first list that lacks a placed device does not settle the migration,
+    /// because the absent device's zones would be guessed (a matrix becomes a strip, for good).
+    #[test]
+    fn a_first_list_missing_a_placed_device_does_not_migrate() {
+        let dir = home_with_layouts("partial-list", &layouts_with_a_late_device());
+        let mut store = Store::load_from(&dir);
+        let t0 = Instant::now();
+        assert!(!store.finish_scenes_at(&[board()], t0), "the keyboard is placed but absent");
+        assert!(store.scenes_pending.is_some(), "still held");
+        assert!(!dir.join(canvas_proto::scene::SCENES_FILE).exists(), "nothing written");
+        assert!(!store.finish_scenes_at(&[board()], t0 + Duration::from_secs(5)), "a second partial list waits too");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The device arrives within the wait: the migration runs with the real zones.
+    #[test]
+    fn the_missing_device_arriving_migrates_with_its_arrangements() {
+        let mut layouts = layouts_with_a_late_device();
+        layouts.layouts[0].zones.retain(|p| p.device_id.0 != "openrgb:fan");
+        let dir = home_with_layouts("partial-then-whole", &layouts);
+        let mut store = Store::load_from(&dir);
+        let t0 = Instant::now();
+        assert!(!store.finish_scenes_at(&[board()], t0));
+        assert!(store.finish_scenes_at(&[board(), kb()], t0 + Duration::from_secs(5)));
+        let by = |id: &str| store.lights.lights.iter().find(|l| l.id == id).unwrap_or_else(|| panic!("no light {id}"));
+        assert_eq!(by("openrgb:board#z2").arrangement, Arrangement::Single);
+        assert_eq!(by("openrgb:kb#z0").arrangement, Arrangement::Grid);
+        assert!(store.scenes_pending.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A device that never comes back does not hold the scenes forever: SCENES_DEVICE_WAIT after
+    /// the first non-empty list the migration runs, and the absent device's zone is a light made
+    /// from the layout's own data.
+    #[test]
+    fn after_the_wait_an_absent_devices_zones_come_from_the_layout() {
+        let dir = home_with_layouts("timeout", &layouts_with_a_late_device());
+        let mut store = Store::load_from(&dir);
+        let t0 = Instant::now();
+        assert!(!store.finish_scenes_at(&[], t0), "an empty list starts no clock");
+        let t1 = t0 + Duration::from_secs(1000);
+        assert!(!store.finish_scenes_at(&[board()], t1), "the clock starts at the first non-empty list");
+        assert!(!store.finish_scenes_at(&[board()], t1 + SCENES_DEVICE_WAIT - Duration::from_secs(1)));
+        assert!(store.finish_scenes_at(&[board()], t1 + SCENES_DEVICE_WAIT), "the wait is over");
+
+        let by = |id: &str| store.lights.lights.iter().find(|l| l.id == id).unwrap_or_else(|| panic!("no light {id}"));
+        let fan = by("openrgb:fan#z0");
+        assert_eq!(fan.name.as_deref(), Some("Front fan"));
+        assert_eq!(fan.arrangement, Arrangement::Ring);
+        assert!(fan.reversed);
+        assert_eq!(by("openrgb:board#z2").arrangement, Arrangement::Single, "present devices use the list");
+        assert!(store.scenes_pending.is_none());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// An absent device's zone with a slice of no LEDs is still no light; one with a slice of LEDs is.
+    #[test]
+    fn an_absent_devices_slices_count_only_with_leds() {
+        let slice = |zone, count| {
+            let mut p = placed("openrgb:gone", zone);
+            p.leds = Some(LedSlice { start: 0, count });
+            p
+        };
+        let layouts = file("a", vec![layout("a", "A", vec![slice(0, 8), slice(1, 0)], None)]);
+        let (lights, _) = migrate(Some(&layouts), &[]);
+        assert_eq!(lights.lights.iter().map(|l| l.id.as_str()).collect::<Vec<_>>(), vec!["openrgb:gone#z0p1"]);
+    }
+
+    /// Should-fix 3: a light `sync_lights` made earlier (a default, on disk) does not hide the
+    /// migrated one's label, arrangement and `reversed`.
+    #[test]
+    fn a_held_placeholder_light_loses_to_the_migrated_one() {
+        let mut ring = placed("openrgb:board", 0);
+        ring.shape = ZoneShape::Ring;
+        ring.label = Some("Front fan".into());
+        ring.reversed = true;
+        let dir = home_with_layouts("placeholder", &file("a", vec![layout("a", "A", vec![ring], None)]));
+        let mut held = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut held, &[board()]);
+        crate::storage::write_json(&dir.join(canvas_proto::scene::LIGHTS_FILE), &held).unwrap();
+
+        let mut store = Store::load_from(&dir);
+        assert!(store.finish_scenes(&[board()]));
+
+        let by = |id: &str| store.lights.lights.iter().find(|l| l.id == id).unwrap_or_else(|| panic!("no light {id}"));
+        let light = by("openrgb:board#z0");
+        assert_eq!((light.name.as_deref(), light.arrangement, light.reversed), (Some("Front fan"), Arrangement::Ring, true));
+        assert_eq!(
+            store.lights.lights.iter().filter(|l| l.id == "openrgb:board#z0").count(),
+            1,
+            "one light of that id, not two"
+        );
+        assert!(store.lights.lights.iter().any(|l| l.id == "openrgb:board#z1"), "the other held lights stay");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Blocker 2 (should-fix): a layouts.json that did not parse is moved aside, the migration
+    /// starts from the first-run scene, and the log says so.
+    #[test]
+    fn a_quarantined_layouts_file_starts_the_scenes_fresh_and_says_so() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-scene-migration-bad-layouts-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join(canvas_proto::config::LAYOUTS_FILE), b"{ not json").unwrap();
+
+        let (mut store, text) = crate::test_logs::captured(|| Store::load_from(&dir));
+        assert!(store.finish_scenes(&[board()]));
+
+        assert_eq!(store.scenes.scenes.len(), 1);
+        assert_eq!(store.scenes.scenes[0].name, "Everything", "the first-run scene");
+        assert_eq!(store.scenes.scenes[0].groups[0].members.len(), 3);
+        assert_eq!(files_starting(&dir, "layouts.json.") - files_starting(&dir, "layouts.json.tmp"), 1, "the quarantined file is still there");
+        assert!(
+            text.contains("layouts.json.") && text.contains("corrupt") && text.contains("scenes start fresh"),
+            "the warning names the quarantined file and says the scenes start fresh: {text}"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should-fix 4: while the scenes could not be read, lights.json is not written either.
+    #[test]
+    fn save_lights_refuses_while_the_scenes_are_blocked() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-scene-migration-save-lights-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut store = Store::at(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        store.scenes_blocked = true;
+        assert!(store.save_lights().is_err(), "a blocked session could drop split members");
+        assert!(!dir.join(canvas_proto::scene::LIGHTS_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should-fix 5: `finish_scenes` checks the blocked flags itself.
+    #[test]
+    fn finish_scenes_refuses_while_either_file_is_blocked() {
+        for (lights_blocked, scenes_blocked) in [(true, false), (false, true), (true, true)] {
+            let dir = home_with_layouts("finish-blocked", &sample_layouts());
+            let mut store = Store::load_from(&dir);
+            assert!(store.scenes_pending.is_some());
+            store.lights_blocked = lights_blocked;
+            store.scenes_blocked = scenes_blocked;
+            assert!(!store.finish_scenes(&[board()]), "lights {lights_blocked} scenes {scenes_blocked}");
+            assert!(!dir.join(canvas_proto::scene::SCENES_FILE).exists());
+            assert!(!dir.join(canvas_proto::scene::LIGHTS_FILE).exists());
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Nit: new lights found while the migration is pending cannot be saved; that is logged once,
+    /// not on every device list.
+    #[test]
+    fn a_pending_save_is_logged_once() {
+        let dir = home_with_layouts("log-once", &sample_layouts());
+        let mut store = Store::load_from(&dir);
+        let ((), text) = crate::test_logs::captured(|| {
+            for n in 0..3 {
+                let more = device(&format!("openrgb:extra{n}"), 5 + n, vec![zone(0, ZoneKind::Linear, 4)]);
+                store.sync_lights_from(&[board(), more]);
+            }
+        });
+        assert_eq!(text.matches("could not save the lights").count(), 1, "{text}");
         let _ = std::fs::remove_dir_all(&dir);
     }
 

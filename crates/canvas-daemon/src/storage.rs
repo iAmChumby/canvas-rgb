@@ -19,7 +19,7 @@ use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use canvas_proto::device::DeviceInfo;
 
@@ -217,6 +217,20 @@ pub fn quarantine(path: &Path) -> std::io::Result<()> {
     std::fs::rename(path, target)
 }
 
+/// The newest `<name>.<stamp>.corrupt` in `home`, for a log line; the name itself when none is found.
+fn quarantined_name(home: &Path, name: &str) -> String {
+    let prefix = format!("{name}.");
+    let mut found: Vec<String> = std::fs::read_dir(home)
+        .into_iter()
+        .flatten()
+        .filter_map(|e| e.ok())
+        .map(|e| e.file_name().to_string_lossy().into_owned())
+        .filter(|n| n.starts_with(&prefix) && n.ends_with(".corrupt"))
+        .collect();
+    found.sort();
+    found.pop().unwrap_or_else(|| name.to_string())
+}
+
 /// A sortable timestamp for snapshot folder names: `20261026-141530`.
 pub fn timestamp() -> String {
     let secs = SystemTime::now()
@@ -307,6 +321,9 @@ pub struct Store {
     /// `scenes.json` (or the `layouts.json` it would migrate from) exists but could not be read at
     /// load. It is never written over.
     pub scenes_blocked: bool,
+    /// A failed save of `lights.json` after new lights were found is logged once (while the
+    /// migration is pending every list would otherwise repeat it); a success clears it.
+    pub lights_save_warned: bool,
     pub zones: ZonesFile,
     pub effects: EffectsFile,
     /// The numeric display configs (`displays.json`). A display is driven only while it has one.
@@ -319,6 +336,12 @@ pub struct Store {
     pub home: PathBuf,
 }
 
+/// How long a held migration waits, after the first non-empty device list, for every device the
+/// layouts place to show up. A keyboard whose HID discover fails is left out of the first list
+/// (`composite.rs`), and a zone of an absent device can only be guessed from the layout; the wait
+/// gives it a chance to arrive first. After it, the migration runs with the devices present.
+pub const SCENES_DEVICE_WAIT: Duration = Duration::from_secs(60);
+
 /// A scenes migration waiting for the first device list.
 #[derive(Debug, Clone)]
 pub struct PendingScenes {
@@ -329,6 +352,25 @@ pub struct PendingScenes {
     pub held_lights: LightsFile,
     /// The `before-scenes` snapshot is taken once, however many lists it takes to write.
     pub snapshotted: bool,
+    /// When the first non-empty device list arrived: the wait for the placed devices runs from it.
+    pub first_list_at: Option<Instant>,
+    /// The wait for a placed device is logged once, not on every list.
+    pub logged_waiting: bool,
+}
+
+impl PendingScenes {
+    /// The ids of the devices the layouts place, in first-seen order.
+    fn placed_devices(&self) -> Vec<&canvas_proto::DeviceId> {
+        let mut ids: Vec<&canvas_proto::DeviceId> = Vec::new();
+        for layout in self.layouts.iter().flat_map(|l| &l.layouts) {
+            for placed in &layout.zones {
+                if !ids.contains(&&placed.device_id) {
+                    ids.push(&placed.device_id);
+                }
+            }
+        }
+        ids
+    }
 }
 
 impl Default for Store {
@@ -341,6 +383,7 @@ impl Default for Store {
             scenes_pending: None,
             lights_blocked: false,
             scenes_blocked: false,
+            lights_save_warned: false,
             zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
             effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
             displays: DisplaysFile::default(),
@@ -403,6 +446,7 @@ impl Store {
                     clamp_settings(&mut c.settings);
                     c
                 });
+        let layouts_existed = layouts.exists();
         let layouts_value: Option<LayoutsFile> = read_parsed(&layouts, LAYOUTS_SCHEMA, "layouts.json")
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "layouts.json could not be read");
@@ -434,6 +478,8 @@ impl Store {
         // A layouts.json that is still there but gave nothing could not be read (a parse failure
         // moved it aside, so it is gone): the scenes are not migrated from a file we cannot see.
         let layouts_unreadable = layouts_value.is_none() && layouts.exists();
+        // One that was there, gave nothing and is gone now was moved aside by this load.
+        let layouts_quarantined = layouts_existed && layouts_value.is_none() && !layouts.exists();
 
         let mut store = Store {
             config: config_value.unwrap_or_default(),
@@ -442,6 +488,7 @@ impl Store {
             scenes_pending: None,
             lights_blocked: false,
             scenes_blocked: false,
+            lights_save_warned: false,
             layouts: layouts_value.clone().unwrap_or_else(default_layouts),
             zones: zones_value.unwrap_or_else(|| Store::default().zones),
             effects: effects_value.unwrap_or_else(|| Store::default().effects),
@@ -454,7 +501,7 @@ impl Store {
             store.config.schema_version = CONFIG_SCHEMA;
         }
         store.ensure_layouts();
-        store.load_scenes(lights_value, scenes_value, layouts_value.as_ref(), layouts_unreadable);
+        store.load_scenes(lights_value, scenes_value, layouts_value.as_ref(), layouts_unreadable, layouts_quarantined);
         store
     }
 
@@ -470,12 +517,15 @@ impl Store {
     ///   in memory ([`PendingScenes`]: from `layouts.json` when it was read, else the first-run
     ///   scene) and runs on the first device list, so the real devices decide arrangements and
     ///   zero-LED zones ([`Store::finish_scenes`]).
+    /// - `layouts.json` was quarantined by this load (it did not parse): the migration is the
+    ///   first-run one, and the log names the moved-aside file and says the scenes start fresh.
     fn load_scenes(
         &mut self,
         lights: Loaded<LightsFile>,
         scenes: Loaded<ScenesFile>,
         layouts: Option<&LayoutsFile>,
         layouts_unreadable: bool,
+        layouts_quarantined: bool,
     ) {
         match lights {
             Loaded::Parsed(lights) => self.lights = lights,
@@ -502,6 +552,12 @@ impl Store {
                 self.scenes = crate::scenes::default_scenes(&self.lights);
             }
             Loaded::Absent | Loaded::Quarantined => {
+                if layouts_quarantined {
+                    tracing::warn!(
+                        file = %quarantined_name(&self.home, LAYOUTS_FILE),
+                        "layouts.json was moved aside because it could not be used, so the scenes start fresh from the first-run default; the old file is kept"
+                    );
+                }
                 // A layouts file from before Poison became a user effect names it `poison`; the
                 // scenes are built from the ids the daemon uses today. Only the layouts half of
                 // `migrate_poison` matters here: `main` runs `migrate_store` on the real store,
@@ -516,13 +572,26 @@ impl Store {
                 let (lights, scenes) = Self::build_scenes(&held_lights, layouts.as_ref(), &[]);
                 self.lights = lights;
                 self.scenes = scenes;
-                self.scenes_pending = Some(PendingScenes { layouts, held_lights, snapshotted: false });
+                self.scenes_pending = Some(PendingScenes {
+                    layouts,
+                    held_lights,
+                    snapshotted: false,
+                    first_list_at: None,
+                    logged_waiting: false,
+                });
             }
         }
     }
 
     /// The lights and scenes a migration makes: the lights already held, plus the ones the
-    /// layouts (or, on a first run, the devices) bring. A light already held keeps its settings.
+    /// layouts (or, on a first run, the devices) bring.
+    ///
+    /// A migrated light replaces a held one of the same id (in the held one's place). While the
+    /// migration is pending a held light is a placeholder: `lights.json` as `sync_lights` left it,
+    /// with a default arrangement and no label, so the layout's label, arrangement and `reversed`
+    /// win. A light the OWNER changed cannot exist yet: there is no scene API until Task 6, so
+    /// nothing edits a light before the files are written. (Task 6 must revisit this if a pending
+    /// store can ever hold an edit.)
     fn build_scenes(
         held: &LightsFile,
         layouts: Option<&LayoutsFile>,
@@ -531,8 +600,9 @@ impl Store {
         let (migrated, scenes) = crate::scene_migration::migrate(layouts, devices);
         let mut lights = held.clone();
         for light in migrated.lights {
-            if !lights.lights.iter().any(|l| l.id == light.id) {
-                lights.lights.push(light);
+            match lights.lights.iter_mut().find(|l| l.id == light.id) {
+                Some(held) => *held = light,
+                None => lights.lights.push(light),
             }
         }
         let scenes = match layouts {
@@ -550,13 +620,54 @@ impl Store {
     /// An empty list waits for the next one: with no devices there are no lights to group, and a
     /// first-run `Everything` made now would hold none. A failed write keeps the migration
     /// pending, so the next list tries again.
+    ///
+    /// It also waits until every device the layouts place has appeared in a list, or until
+    /// [`SCENES_DEVICE_WAIT`] has passed since the first non-empty list (the clock is the `now` of
+    /// [`Store::finish_scenes_at`]). After the wait it migrates with the devices present, and a zone
+    /// of an absent device becomes a light from the layout's own data: its label, its shape (as
+    /// `arrangement_of`: a ring stays a ring, a grid shape is a grid, a point is a single, anything
+    /// else a strip), `reversed` and slice. It has LEDs unless the layout gives it a slice of no
+    /// LEDs: the layouts only place a zone that had LEDs when it was placed (`first_run.rs`
+    /// skips `led_count == 0`), so a whole-zone placement is the evidence that it has some.
+    ///
+    /// Refuses while `lights.json` or `scenes.json` is blocked (could not be read at load).
     pub fn finish_scenes(&mut self, devices: &[DeviceInfo]) -> bool {
-        if devices.is_empty() {
+        self.finish_scenes_at(devices, Instant::now())
+    }
+
+    /// [`Store::finish_scenes`] with the clock passed in, so a test drives the wait.
+    pub fn finish_scenes_at(&mut self, devices: &[DeviceInfo], now: Instant) -> bool {
+        if self.lights_blocked || self.scenes_blocked || devices.is_empty() {
             return false;
         }
         let Some(pending) = self.scenes_pending.as_mut() else {
             return false;
         };
+        let first_list_at = *pending.first_list_at.get_or_insert(now);
+        let absent: Vec<String> = pending
+            .placed_devices()
+            .into_iter()
+            .filter(|id| !devices.iter().any(|d| &d.id == *id))
+            .map(|id| id.0.clone())
+            .collect();
+        if !absent.is_empty() {
+            let waited = now.saturating_duration_since(first_list_at);
+            if waited < SCENES_DEVICE_WAIT {
+                if !pending.logged_waiting {
+                    pending.logged_waiting = true;
+                    tracing::info!(
+                        absent = ?absent,
+                        wait_secs = SCENES_DEVICE_WAIT.as_secs(),
+                        "the scenes wait for the devices the layouts place before they migrate"
+                    );
+                }
+                return false;
+            }
+            tracing::warn!(
+                absent = ?absent,
+                "these devices never showed up; their zones are migrated from the layouts alone"
+            );
+        }
         if !pending.snapshotted {
             pending.snapshotted = true;
             crate::logging::warn_if_err(
@@ -591,6 +702,26 @@ impl Store {
     }
 
     /// Makes sure there is always an active layout to write scale and sampling into.
+    /// Adds a light for every zone with LEDs that has none, and saves when any was added. A save
+    /// that fails (the migration is pending, or a file is blocked) is logged once, not on every
+    /// device list.
+    pub fn sync_lights_from(&mut self, devices: &[DeviceInfo]) -> usize {
+        let new_lights = crate::scenes::sync_lights(&mut self.lights, devices);
+        if !new_lights.is_empty() {
+            tracing::info!(added = new_lights.len(), "new lights were added");
+            match self.save_lights() {
+                Ok(()) => self.lights_save_warned = false,
+                Err(e) if !self.lights_save_warned => {
+                    self.lights_save_warned = true;
+                    tracing::warn!(error = %e, "could not save the lights (said once until a save works)");
+                }
+                Err(_) => {}
+            }
+        }
+        new_lights.len()
+    }
+
+    /// Makes sure there is always an active layout to write scale and sampling into.
     pub fn ensure_layouts(&mut self) {
         if self.layouts.layouts.is_empty() {
             self.layouts.layouts = Store::default().layouts.layouts;
@@ -621,8 +752,11 @@ impl Store {
 
     /// Refuses while the file could not be read at load, or while the scenes are only in memory
     /// ([`Store::finish_scenes`] writes them first).
+    ///
+    /// Also refuses while `scenes.json` is blocked: a session that cannot read the scenes holds
+    /// whole-zone lights only, and writing them would drop split members on the next load.
     pub fn save_lights(&self) -> std::io::Result<()> {
-        self.may_write_scenes_files(LIGHTS_FILE, self.lights_blocked)?;
+        self.may_write_scenes_files(LIGHTS_FILE, self.lights_blocked || self.scenes_blocked)?;
         write_json(&self.home.join(LIGHTS_FILE), &self.lights)
     }
 
@@ -636,7 +770,7 @@ impl Store {
     fn may_write_scenes_files(&self, name: &str, blocked: bool) -> std::io::Result<()> {
         if blocked {
             return Err(std::io::Error::other(format!(
-                "{name} could not be read at start, so it is not written over"
+                "{name} (or the scenes it belongs with) could not be read at start, so it is not written"
             )));
         }
         if self.scenes_pending.is_some() {
