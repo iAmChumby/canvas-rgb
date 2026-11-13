@@ -189,12 +189,19 @@ jobs:
     # The editor's own tests (vitest, jsdom), in parallel with the editor's build. jsdom has no
     # layout and no OS of its own, so these do not need the Windows runner; the real-browser
     # measurement stays in the editor job. On windows-latest the suite took about five minutes
-    # (most of it importing modules and starting jsdom), after the build; on Linux it runs in
-    # about two, alongside the build, so it no longer sets the length of a run.
+    # after the build; on one ubuntu-latest runner it still took over four (most of it importing
+    # modules and starting jsdom, which is CPU-bound), so it is split by file across two runners
+    # that run alongside the build.
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.editor == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      # Both halves always finish, so a red run lists every failing file, not only the first half's.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    name: editor-tests (${{ matrix.shard }}/2)
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
@@ -210,7 +217,7 @@ jobs:
 
       - name: Test the editor
         working-directory: app/web
-        run: npm test # vitest, jsdom
+        run: npm test -- --shard=${{ matrix.shard }}/2 # vitest, jsdom
 
   clippy:
     # Clippy, in its own job so it runs alongside the tests instead of before them. A check build
