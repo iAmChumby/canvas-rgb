@@ -149,7 +149,7 @@ export function ScenesView() {
             </span>
           ) : (
             <span className="rd-scenes-context">
-              <b>Scenes not read</b>
+              <b>not read</b>
             </span>
           )
         }

@@ -206,14 +206,14 @@ async function settingsListen(page) {
   await page.waitForSelector('[role="status"]:not([data-note="true"])', { timeout: T });
 }
 
+/** The Scenes page draws rows, not panels: the rows are its boxes. */
+const SCENE_BOXES = "[data-testid=group-row], [data-testid=unassigned-row]";
+
 /**
  * Every view of the demo, and the states of it that draw more than the first paint does.
  * `boxes` adds row containers to measure besides `.panel` and `.rule`. `prep` clicks the row into
  * its state (`before` is what to wait for first, when that is not a panel). `overlay` marks a row with a popup open: `--hover-tips` skips it.
  */
-/** The Scenes page draws rows, not panels: the rows are its boxes. */
-const SCENE_BOXES = "[data-testid=group-row], [data-testid=unassigned-row]";
-
 const VIEWS = [
   // Scenes: the default (four groups and an unassigned light, one group with a device away), and
   // the states that change a row's height or width: a failed group, 40-character names, twenty

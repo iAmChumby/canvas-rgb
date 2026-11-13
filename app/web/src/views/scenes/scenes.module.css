@@ -20,6 +20,23 @@
   margin-inline: auto;
 }
 
+/* On a light page a key's 2 px dark skirt reads as a bevel: here it is a hairline of the ink, and an
+   unlit LED is a shade darker, so a dark light is still a visible dot on the grey well. The dark
+   theme keeps the hardware look as it is. */
+:global(:root[data-theme="light"]) .page {
+  --skirt: color-mix(in srgb, var(--ink) 10%, transparent);
+  --skirt-h: 1px;
+  --led-off: color-mix(in srgb, var(--ink) 30%, transparent);
+}
+
+@media (prefers-color-scheme: light) {
+  :global(:root:not([data-theme="dark"])) .page {
+    --skirt: color-mix(in srgb, var(--ink) 10%, transparent);
+    --skirt-h: 1px;
+    --led-off: color-mix(in srgb, var(--ink) 30%, transparent);
+  }
+}
+
 /* ---------- the scene keys ---------- */
 
 /* The strip scrolls sideways when the keys outrun the window; a fade on each edge that has more
@@ -34,7 +51,7 @@
   position: absolute;
   top: 0;
   bottom: 0;
-  width: 36px;
+  width: 44px;
   pointer-events: none;
   opacity: 0;
   transition: opacity var(--dur) var(--ease);
@@ -350,17 +367,10 @@
   flex: none;
 }
 
-/* The keys wrap: every key is on screen at every width, none behind a hidden scroll. */
+/* The keys are the banner's own action items and wrap with them: every key is on screen at every
+   width, none behind a hidden scroll. */
 .noticeKeys {
-  display: inline-flex;
-  flex-wrap: wrap;
-  gap: var(--s2);
-  min-width: 0;
-  max-width: 100%;
-}
-
-.noticeKeys > button {
-  max-width: 100%;
+  display: contents;
 }
 
 /* The menu of the other groups: one key a row. */
