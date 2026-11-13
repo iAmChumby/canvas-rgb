@@ -1,4 +1,4 @@
-//! Class `cause:unchecked-state` (#19): a step whose failure the code used to drop must now say
+﻿//! Class `cause:unchecked-state` (#19): a step whose failure the code used to drop must now say
 //! so, in the log or in the reply.
 
 mod common;
@@ -8,7 +8,6 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::state::App;
 use canvas_proto::api::routes;
-use canvas_proto::layout::ActiveEffect;
 use common::{FakeAdapter, FakeEngine, LogBuf};
 use std::sync::Arc;
 use tower::ServiceExt;
@@ -51,6 +50,26 @@ fn build(tag: &str, keep_quit_rx: bool) -> Built {
     (api::router(app.clone()), app, home, keep_quit_rx.then_some(rx))
 }
 
+/// The router and state on fakes, with a store that holds one scene of one group over one
+/// light: the shape every scene route reads.
+fn build_with_a_scene(tag: &str) -> Built {
+    let home = TempHome::new(tag);
+    let mut store = canvas_daemon::storage::Store::at(&home.0);
+    let (lights, scenes) = common::a_scene("solid", &canvas_proto::props::Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
+    let (tx, rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(
+        store,
+        Arc::new(FakeEngine::default()),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    ));
+    (api::router(app.clone()), app, home, Some(rx))
+}
+
 fn request(method: &str, path: &str, body: Option<&str>) -> Request<Body> {
     Request::builder()
         .method(method)
@@ -91,31 +110,35 @@ async fn a_quit_that_reaches_the_main_task_still_says_quitting() {
     assert!(rx.try_recv().is_ok(), "the main task was asked to stop");
 }
 
-/// A `warn_if_err` call site end to end: the layout became active but its effect does not exist,
-/// so the effect fails to start. The step goes on (the layout is active), and the WARN line says
-/// the effect did not start instead of the log reading as a clean switch.
+/// A scene whose group plays an effect that does not exist keeps the failure in the state the
+/// scene list reports: the group is dark and named, instead of failing silently.
 #[tokio::test]
-async fn an_active_layout_whose_effect_cannot_start_leaves_a_warn_line() {
-    let logs = LogBuf::default();
-    let _log = logs.install();
-    let (router, app, _home, _rx) = build("effect-fails", true);
+async fn a_scene_group_whose_effect_cannot_be_built_is_named_in_the_failures() {
+    let (router, app, _home, _rx) = build_with_a_scene("effect-fails");
     {
         let mut store = app.store.write().await;
-        let mut second = store.layouts.layouts[0].clone();
-        second.id = "second".into();
-        second.name = "Second".into();
-        second.effect = Some(ActiveEffect { id: "no-such-effect".into(), props: Default::default() });
-        store.layouts.layouts.push(second);
+        let active = store.scenes.active.clone();
+        if let Some(scene) = store.scenes.scenes.iter_mut().find(|s| s.id == active) {
+            if let Some(group) = scene.groups.first_mut() {
+                group.plays = canvas_proto::scene::Plays::Effect {
+                    effect: "no-such-effect".into(),
+                    props: Default::default(),
+                };
+            }
+        }
+        store.save_scenes().expect("the scenes are saved");
     }
-    let response = router
-        .oneshot(request("PUT", routes::LAYOUT_ACTIVE, Some(r#"{"id":"second"}"#)))
+    // The scene the store now holds is applied to the engine.
+    canvas_daemon::scenes::apply_active_ungated(&app, false).await;
+    let failures = app.scene.failures();
+    assert!(
+        failures.values().any(|why| why.contains("no-such-effect")),
+        "the failed group is named in the scene's failures: {failures:?}"
+    );
+    router
+        .oneshot(request("GET", routes::STATUS, None))
         .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK, "the switch itself succeeded");
-    let text = logs.text();
-    let line = text
-        .lines()
-        .find(|l| l.contains("did not start"))
-        .unwrap_or_else(|| panic!("no warn line for the failed effect: {text}"));
-    assert!(line.contains("WARN") && line.contains("no-such-effect"), "{line}");
+        .expect("the router answers");
 }
+
+

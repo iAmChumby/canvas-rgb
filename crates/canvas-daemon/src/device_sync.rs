@@ -27,8 +27,8 @@ pub type DeviceSinks = tokio::sync::Mutex<HashMap<DeviceId, JoinHandle<()>>>;
 pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     *app.devices.write().await = devices.clone();
     *app.openrgb.write().await = LinkState::Connected;
-    // After the first run, a zone that appears (a late device, a header that got its LEDs) is
-    // placed instead of staying black.
+    // After the first run, a zone that appears (a late device, a header that got its LEDs) is a
+    // light of its own; no group holds it until the owner adds it.
     let scenes_deadline;
     {
         let mut store = app.store.write().await;
@@ -43,28 +43,12 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         }
         scenes_deadline = store.scenes_deadline_to_arm(crate::storage::clock());
         store.sync_lights_from(&devices);
-        if store.config.first_run_done {
-            let added = store
-                .active_layout_mut()
-                .map_or(0, |layout| crate::first_run::place_missing_zones(layout, &devices));
-            if added > 0 {
-                tracing::info!(added, "new zones were placed on the canvas");
-                if let Err(e) = store.save_layouts() {
-                    tracing::warn!(error = %e, "could not save the layouts");
-                }
-            }
-        }
     }
     // A placed device that never arrives sends no new list, so the wait is settled by a timer,
     // with the devices known when it ends.
     if let Some(wait) = scenes_deadline {
         let app = Arc::clone(app);
         tokio::spawn(settle_scenes_wait(app, wait));
-    }
-    // The engine needs the new devices and the zone sizes.
-    if let Some(layout) = app.active_layout().await {
-        app.set_layout(&layout, &devices);
-        app.stacks.publish_areas(&layout, &devices);
     }
     sync_device_sinks(app, &devices).await;
     // The scene follows the devices: a zone that came or went, a count that changed. A list that

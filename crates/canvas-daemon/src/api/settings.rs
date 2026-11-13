@@ -1,4 +1,4 @@
-//! The settings routes, the first-run panel and the config export/import (G10).
+﻿//! The settings routes, the first-run panel and the config export/import (G10).
 
 use axum::extract::State;
 use axum::Json;
@@ -127,7 +127,7 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
         exported_at: crate::storage::export_timestamp(),
         app_version: crate::version(),
         settings: store.config.settings.clone(),
-        layouts: store.layouts.clone(),
+        layouts: canvas_proto::config::LayoutsFile { schema_version: canvas_proto::config::LAYOUTS_SCHEMA, active: String::new(), layouts: Vec::new() },
         zones: store.zones.clone(),
         effects: store.effects.clone(),
         fans,
@@ -306,7 +306,15 @@ pub async fn config_import(
         }
 
         // Reload the store from disk and apply it.
-        let store = crate::storage::Store::load_from(&home);
+        let mut store = crate::storage::Store::load_from(&home);
+        // A 0.13 bundle imported before the first device list: its layouts are the migration the
+        // first list runs, and `layouts.json` is not written any more, so the bundle's layouts are
+        // put on the held migration here.
+        if bundle.scenes.is_none() && devices.is_empty() {
+            if let Some(pending) = store.scenes_pending.as_mut() {
+                pending.layouts = Some(bundle.layouts.clone());
+            }
+        }
         {
             let mut guard = app
                 .store
@@ -331,15 +339,8 @@ pub async fn config_import(
         let balances = crate::api::devices::white_balance_map(&app.store.read().await.config);
         app.engine.set_white_balance(balances);
         app.stacks.set_fps(settings.fps);
-        // The engine is not told about the imported scenes: the scene API and the engine's scene
-        // path arrive in Task 6, and until then only the layout is applied here, as before.
-        if let Some(layout) = app.active_layout().await {
-            let devices = app.devices.read().await.clone();
-            app.set_layout(&layout, &devices);
-            app.stacks.publish_areas(&layout, &devices);
-        }
         // The scene goes on again (Scenes, 0.14.0): the import brought a store of its own, and
-        // the active scene is what plays now, not the layout's one effect.
+        // the active scene is what plays now.
         crate::scenes::apply_active_ungated(&app, false).await;
     }
 
@@ -356,3 +357,4 @@ pub fn output_state(settings: &Settings) -> OutputState {
 pub fn default_config() -> ConfigFile {
     ConfigFile::default()
 }
+

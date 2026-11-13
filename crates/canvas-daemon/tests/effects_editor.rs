@@ -1,4 +1,4 @@
-//! The effect editor's daemon routes: an effect's source, a draft's preview, and the draft on
+﻿//! The effect editor's daemon routes: an effect's source, a draft's preview, and the draft on
 //! the lights.
 //!
 //! Every test runs against the in-test fake engine and adapter and a temporary data folder, so
@@ -495,12 +495,11 @@ fn color(hex: &str) -> canvas_proto::props::Props {
 
 /// Makes `id` the active scene's effect, and runs it: this is what a draft takes over from.
 ///
-/// The prior is the active scene now (Scenes, 0.14.0), so the scene's group plays the effect.
+/// The prior is the active scene now (Scenes, 0.14.0), so the scene's group plays the effect
+/// and the scene is applied to the engine.
 async fn prior_effect(app: &Arc<App>, id: &str, props: canvas_proto::props::Props) {
     {
         let mut store = app.store.write().await;
-        store.layouts.layouts[0].effect =
-            Some(canvas_proto::layout::ActiveEffect { id: id.to_string(), props: props.clone() });
         if let Some(scene) = store.scenes.scenes.first_mut() {
             if let Some(group) = scene.groups.first_mut() {
                 group.plays = canvas_proto::scene::Plays::Effect {
@@ -509,8 +508,15 @@ async fn prior_effect(app: &Arc<App>, id: &str, props: canvas_proto::props::Prop
                 };
             }
         }
+        store.save_scenes().expect("the scenes are saved");
     }
-    canvas_daemon::apply_effect(app, id, &props).await.expect("the prior effect runs");
+    canvas_daemon::scenes::apply_active_ungated(app, false).await;
+    let store = app.store.read().await;
+    let plays = store.scenes.scenes.iter().flat_map(|s| s.groups.iter()).any(|group| {
+        matches!(&group.plays,
+            canvas_proto::scene::Plays::Effect { effect, .. } if effect == id)
+    });
+    assert!(plays, "the prior effect is the scene's: {id}");
 }
 
 /// What the fake engine is running, and with which props.
@@ -663,94 +669,6 @@ async fn a_saved_activation_ends_the_draft_without_restoring_it() {
     );
 }
 
-#[tokio::test]
-async fn a_layout_switch_ends_the_draft_without_restoring_it() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock().await;
-    prior_effect(&app, "solid", color("#112233")).await;
-    // A second layout, with an effect of its own.
-    {
-        let mut store = app.store.write().await;
-        let mut other = store.layouts.layouts[0].clone();
-        other.id = "other".to_string();
-        other.name = "Other".to_string();
-        other.effect = Some(canvas_proto::layout::ActiveEffect {
-            id: "gradient".to_string(),
-            props: canvas_proto::props::Props::new(),
-        });
-        store.layouts.layouts.push(other);
-    }
-    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
-
-    let response = router
-        .clone()
-        .oneshot(request_with_body(
-            "PUT",
-            routes::LAYOUT_ACTIVE,
-            r#"{"id": "other"}"#,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    // The scene is on the lights: the layout's own effect does not go on the engine, and the
-    // scene's group keeps playing what it plays.
-    assert_eq!(running(&engine).0.as_deref(), Some("solid"), "the scene still plays");
-
-    assert!(!draft_state(router).await.active, "the switch ended the draft");
-    clock.advance(canvas_proto::consts::DRAFT_LEASE * 2);
-    assert_eq!(
-        running(&engine).0.as_deref(),
-        Some("solid"),
-        "nothing restored the draft's prior effect over the chosen layout"
-    );
-}
-
-/// The props route does not end the editor's draft: it answers a conflict and writes nothing.
-#[tokio::test]
-async fn the_active_props_route_is_refused_while_a_draft_runs() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
-    prior_effect(&app, "solid", color("#112233")).await;
-    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
-
-    let response = router
-        .clone()
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::EFFECT_ACTIVE_PROPS,
-            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::CONFLICT);
-    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.contains("draft"), "the message names the draft route: {message}");
-    assert_eq!(
-        running(&engine).0,
-        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
-        "the draft is still what runs"
-    );
-    assert!(app.draft.is_active(), "the draft is still the draft");
-
-    // After Stop, the route works again.
-    assert_eq!(
-        router
-            .clone()
-            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
-            .await
-            .expect("the router answers")
-            .status(),
-        StatusCode::OK
-    );
-    let response = router
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::EFFECT_ACTIVE_PROPS,
-            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
 /// A scene that cannot be built leaves the lights dark and the takeover over: the build task
 /// died, so nothing is left on the takeover.
 #[tokio::test]
@@ -785,32 +703,6 @@ async fn a_failed_scene_build_leaves_the_lights_dark_and_the_takeover_over() {
 }
 
 /// Without a scene on the lights the props route is refused while a draft runs: the draft's
-/// props are changed with PUT /effects/draft, not with this route.
-#[tokio::test]
-async fn the_active_props_route_is_refused_while_a_draft_runs_without_a_scene() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock_and_scene(false).await;
-    prior_effect(&app, "solid", color("#112233")).await;
-    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
-
-    let response = router
-        .clone()
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::EFFECT_ACTIVE_PROPS,
-            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.contains("draft"), "the message names the draft route: {message}");
-    assert_eq!(
-        running(&engine).0,
-        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
-        "the draft is still what runs"
-    );
-}
-
 #[tokio::test]
 async fn a_bad_draft_leaves_the_running_draft_alone() {
     let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
@@ -931,17 +823,17 @@ async fn a_draft_writes_nothing_to_the_saved_files_or_the_effects_folder() {
     {
         let store = app.store.read().await;
         store.save_effects().expect("effects.json is written");
-        store.save_layouts().expect("layouts.json is written");
+        store.save_scenes().expect("scenes.json is written");
     }
     let snapshot = || {
         let effects = std::fs::read(home.path.join("effects.json")).expect("effects.json");
-        let layouts = std::fs::read(home.path.join("layouts.json")).expect("layouts.json");
+        let scenes = std::fs::read(home.path.join("scenes.json")).expect("scenes.json");
         let files: Vec<String> = std::fs::read_dir(&folder)
             .expect("the effects folder")
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        (effects, layouts, files)
+        (effects, scenes, files)
     };
     let before = snapshot();
 
@@ -964,14 +856,13 @@ async fn a_draft_writes_nothing_to_the_saved_files_or_the_effects_folder() {
         StatusCode::OK
     );
 
-    assert_eq!(snapshot(), before, "a draft never writes the effects or layouts file");
+    assert_eq!(snapshot(), before, "a draft never writes the effects or scenes file");
     assert!(running(&engine).0.as_deref() == Some("solid"));
-    let active = app.active_layout().await.and_then(|layout| layout.effect);
-    assert_eq!(
-        active.map(|effect| effect.id),
-        Some("solid".to_string()),
-        "the draft never became the layout's effect"
+    let plays = app.store.read().await.scenes.scenes.iter().flat_map(|s| s.groups.iter()).any(
+        |group| matches!(&group.plays,
+            canvas_proto::scene::Plays::Effect { effect, .. } if effect == "solid"),
     );
+    assert!(plays, "the draft never became a group's effect");
 }
 
 #[tokio::test]
@@ -1499,8 +1390,6 @@ async fn an_import_ends_the_draft_on_the_lights() {
             .expect("the router answers"),
     )
     .await;
-    bundle["layouts"]["layouts"][0]["effect"] =
-        serde_json::json!({ "id": "gradient", "props": {} });
     // In scene mode the import plays the bundle's scenes, so the bundle's own effect goes there too.
     bring_gradient_in_scenes(&mut bundle);
     let response = router
@@ -1553,8 +1442,6 @@ async fn a_draft_put_in_the_gap_of_an_import_reads_the_imported_layout() {
             .expect("the router answers"),
     )
     .await;
-    bundle["layouts"]["layouts"][0]["effect"] =
-        serde_json::json!({ "id": "gradient", "props": {} });
     // In scene mode the import plays the bundle's scenes, so the bundle's own effect goes there too.
     bring_gradient_in_scenes(&mut bundle);
 
@@ -1791,10 +1678,12 @@ async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_eff
     // is armed. Waits run at zero, so the timer fires on the next poll, not after hello's
     // run plus the grace.
     app.transient.set_time_scale(0.0);
-    canvas_daemon::apply_effect(
+    canvas_daemon::scenes::apply_takeover(
         &app,
         canvas_effects::onboard::HELLO_ID,
         &canvas_proto::Props::new(),
+        None,
+        canvas_daemon::takeover_builder(&app, canvas_effects::onboard::HELLO_ID),
     )
     .await
     .expect("hello applies");
@@ -1809,10 +1698,12 @@ async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_eff
 
     // Meanwhile the owner activates the sweep, as the route does: the effect goes on the
     // lights and a fresh timer is armed.
-    canvas_daemon::apply_effect(
+    canvas_daemon::scenes::apply_takeover(
         &app,
         canvas_effects::onboard::SWEEP_ID,
         &canvas_proto::Props::new(),
+        None,
+        canvas_daemon::takeover_builder(&app, canvas_effects::onboard::SWEEP_ID),
     )
     .await
     .expect("sweep applies");
@@ -1842,3 +1733,5 @@ fn bring_gradient_in_scenes(bundle: &mut serde_json::Value) {
         }
     }
 }
+
+

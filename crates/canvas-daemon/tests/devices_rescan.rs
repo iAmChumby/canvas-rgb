@@ -1,4 +1,4 @@
-//! #233: `GET /api/v1/devices?rescan=1` asks OpenRGB again and answers with the new list; a plain
+﻿//! #233: `GET /api/v1/devices?rescan=1` asks OpenRGB again and answers with the new list; a plain
 //! `GET` still answers from the list the daemon holds.
 //!
 //! The adapter is the real OpenRGB adapter talking to the fake OpenRGB server: no hardware. The
@@ -190,10 +190,10 @@ async fn a_rescan_that_connects_a_down_link_updates_status_zones_and_sinks_at_on
     // Right after the answer: the link, the list, the zones and the sink.
     assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected, "the status follows the rescan");
     assert_eq!(rig.app.devices.read().await.len(), 1);
-    let placed = rig.app.active_layout().await.expect("a layout").zones;
+    let lights = rig.app.store.read().await.lights.lights.clone();
     assert!(
-        placed.iter().any(|zone| zone.device_id.0 == "openrgb:one"),
-        "the new device's zone is placed on the canvas: {placed:?}"
+        lights.iter().any(|light| light.device_id.0 == "openrgb:one"),
+        "the new device's zone is a light: {lights:?}"
     );
     assert_eq!(sink_ids(&rig), ["openrgb:one"], "the new device has a frame sink");
 }
@@ -208,8 +208,8 @@ async fn a_rescan_gives_a_new_device_its_zones_and_sink_at_once() {
 
     assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"]);
 
-    let placed = rig.app.active_layout().await.expect("a layout").zones;
-    assert!(placed.iter().any(|zone| zone.device_id.0 == "openrgb:two"), "{placed:?}");
+    let placed = rig.app.store.read().await.lights.lights.clone();
+    assert!(placed.iter().any(|light| light.device_id.0 == "openrgb:two"), "{placed:?}");
     assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"]);
 }
 
@@ -321,3 +321,4 @@ async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     server.stall_replies(false);
 }
+

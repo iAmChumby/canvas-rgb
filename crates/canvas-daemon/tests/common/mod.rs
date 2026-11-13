@@ -112,7 +112,6 @@ impl LogBuf {
 
 /// A test engine that records what it was told.
 pub struct FakeEngine {
-    pub layout: Mutex<Option<(canvas_proto::layout::Layout, Vec<DeviceInfo>)>>,
     pub effect_id: Mutex<Option<String>>,
     pub props: Mutex<Props>,
     pub fps: AtomicU32,
@@ -130,24 +129,15 @@ pub struct FakeEngine {
     /// The scene the engine was handed (Scenes, 0.14.0): every group, with the id of the
     /// effect it plays and the props it runs with.
     pub scene: Mutex<Vec<(String, Option<String>, Props)>>,
-    /// When this is not zero, `set_effect` panics instead of recording the effect: a test
-    /// that needs a panic in the middle of a route (#94).
-    pub panic_on_set_effect: AtomicU32,
-    /// How many times `set_effect` has panicked: a test waits on this, not on the slot (#282).
-    pub set_effect_panics: AtomicU32,
     /// When this is not zero, `set_scene` panics instead of recording the scene.
     pub panic_on_set_scene: AtomicU32,
     /// How many times `set_scene` has panicked: a test waits on this, not on the slot (#282).
     pub set_scene_panics: AtomicU32,
-    /// How many times `set_props` was called: the legacy path's one effect. A test counts it
-    /// to see that a route left the legacy effect alone.
-    pub set_props_calls: AtomicU32,
 }
 
 impl Default for FakeEngine {
     fn default() -> Self {
         Self {
-            layout: Mutex::new(None),
             effect_id: Mutex::new(None),
             props: Mutex::new(Props::new()),
             fps: AtomicU32::new(30),
@@ -163,34 +153,13 @@ impl Default for FakeEngine {
             shutdown: AtomicU32::new(0),
             stats: Mutex::new(RenderStats::default()),
             scene: Mutex::new(Vec::new()),
-            panic_on_set_effect: AtomicU32::new(0),
-            set_effect_panics: AtomicU32::new(0),
             panic_on_set_scene: AtomicU32::new(0),
             set_scene_panics: AtomicU32::new(0),
-            set_props_calls: AtomicU32::new(0),
         }
     }
 }
 
 impl Engine for FakeEngine {
-    fn set_layout(&self, layout: canvas_proto::layout::Layout, devices: Vec<DeviceInfo>) {
-        *self.layout.lock().unwrap() = Some((layout, devices));
-    }
-
-    fn set_effect(&self, effect: Box<dyn Effect>, props: &Props) {
-        if self.panic_on_set_effect.load(Ordering::SeqCst) != 0 {
-            self.set_effect_panics.fetch_add(1, Ordering::SeqCst);
-            panic!("the engine panicked on set_effect");
-        }
-        *self.effect_id.lock().unwrap() = Some(effect.schema().id);
-        *self.props.lock().unwrap() = props.clone();
-    }
-
-    fn set_props(&self, props: &Props) {
-        self.set_props_calls.fetch_add(1, Ordering::SeqCst);
-        *self.props.lock().unwrap() = props.clone();
-    }
-
     fn set_fps(&self, fps: u32) {
         self.fps.store(fps, Ordering::SeqCst);
     }

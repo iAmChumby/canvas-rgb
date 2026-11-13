@@ -254,66 +254,6 @@ async fn a_preflight_from_an_unknown_origin_is_refused() {
 }
 
 #[tokio::test]
-async fn the_fps_outside_the_range_is_refused_with_422() {
-    let (router, _app, _home) = build();
-    let response = router
-        .oneshot(request_with_body("PATCH", routes::RENDER, r#"{"fps":5}"#))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = json(response).await;
-    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
-    assert_eq!(error.error, canvas_proto::api::error_codes::VALIDATION);
-}
-
-#[tokio::test]
-async fn the_fps_changes_live() {
-    let (router, app, _home) = build();
-    let response = router
-        .oneshot(request_with_body("PATCH", routes::RENDER, r#"{"fps":20}"#))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    assert_eq!(body.get("fps").and_then(|v| v.as_u64()), Some(20));
-
-    // The engine was told, without a restart.
-    let engine = app.engine.clone();
-    assert_eq!(engine.stats().fps_measured, 0.0);
-    // The setting was persisted in the store.
-    let fps = app.store.read().await.config.settings.fps;
-    assert_eq!(fps, 20);
-}
-
-#[tokio::test]
-async fn the_scale_and_sampling_round_trip_through_the_active_layout() {
-    let (router, _app, _home) = build();
-    // Set the scale and the sampling.
-    let response = router
-        .clone()
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::RENDER,
-            r#"{"scale":50,"sampling":"bilinear"}"#,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    assert_eq!(body.get("scale").and_then(|v| v.as_u64()), Some(50));
-    assert_eq!(body.get("sampling").and_then(|v| v.as_str()), Some("bilinear"));
-
-    // Read them back.
-    let response = router
-        .oneshot(request("GET", routes::RENDER))
-        .await
-        .expect("the router answers");
-    let body = json(response).await;
-    assert_eq!(body.get("scale").and_then(|v| v.as_u64()), Some(50));
-    assert_eq!(body.get("sampling").and_then(|v| v.as_str()), Some("bilinear"));
-}
-
-#[tokio::test]
 async fn the_output_can_be_paused_and_resumed() {
     let (router, _app, _home) = build();
     let response = router
@@ -1876,17 +1816,21 @@ async fn an_unknown_effect_is_a_404() {
 }
 
 #[tokio::test]
-async fn the_layouts_are_listed_with_an_active_one() {
+async fn the_layout_routes_are_gone() {
     let (router, _app, _home) = build();
+    for path in ["/api/v1/layouts", "/api/v1/layouts/default"] {
+        let response = router
+            .clone()
+            .oneshot(request("GET", path))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} is gone (#310)");
+    }
     let response = router
-        .oneshot(request("GET", routes::LAYOUTS))
+        .oneshot(request_with_body("PUT", "/api/v1/layouts/active", r#"{"id":"x"}"#))
         .await
         .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    assert!(body.get("active").and_then(|v| v.as_str()).is_some());
-    let layouts = body.get("layouts").and_then(|v| v.as_array()).expect("the layout list");
-    assert!(!layouts.is_empty());
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "the active layout route is gone (#310)");
 }
 
 #[tokio::test]
@@ -2021,10 +1965,13 @@ async fn the_onboarding_effects_are_hidden_from_the_list_but_activate() {
             .await
             .expect("the router answers");
         assert_eq!(response.status(), StatusCode::OK, "{id} activates");
-        // The onboarding effects are transient: the layout keeps its own effect.
+        // The onboarding effects are transient: no scene group is left playing one.
         let store = app.store.read().await;
-        let active = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-        assert_eq!(active, None, "{id} is never saved as the layout's effect");
+        let plays = store.scenes.scenes.iter().flat_map(|s| s.groups.iter()).any(|g| {
+            matches!(&g.plays, canvas_proto::scene::Plays::Effect { effect, .. } if effect == id)
+        });
+        assert!(!plays, "{id} is never saved as a group's effect");
+        assert!(!store.effects.saved.contains_key(id), "{id} has no saved values");
     }
 }
 
@@ -2075,11 +2022,18 @@ async fn an_onboarding_effect_restores_the_previous_effect_and_is_never_saved() 
     assert!(app.transient.is_pending());
     {
         let store = app.store.read().await;
-        let saved = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-        assert_eq!(saved.as_deref(), Some("rainbow_wave"));
+        let saved = store.scenes.scenes.iter().flat_map(|s| s.groups.iter()).find_map(|g| {
+            match &g.plays {
+                canvas_proto::scene::Plays::Effect { effect, .. } if effect == "rainbow_wave" => {
+                    Some(effect.clone())
+                }
+                _ => None,
+            }
+        });
+        assert_eq!(saved.as_deref(), Some("rainbow_wave"), "the scene still plays rainbow-wave");
         assert!(!store.effects.saved.contains_key("onboard-hello"));
     }
-    let on_disk = std::fs::read_to_string(home.path.join("layouts.json")).unwrap_or_default()
+    let on_disk = std::fs::read_to_string(home.path.join("scenes.json")).unwrap_or_default()
         + &std::fs::read_to_string(home.path.join("effects.json")).unwrap_or_default();
     assert!(!on_disk.contains("onboard-"), "no onboard-* id reaches the files");
 
@@ -3382,14 +3336,15 @@ fn preset_names(body: &serde_json::Value) -> Vec<String> {
 #[tokio::test]
 async fn a_preset_is_applied_on_the_defaults_not_on_the_saved_values() {
     // D9.1. Before the fix the saved values (here speed 77, set by a patch) were laid over the
-    // preset, so applying a one-key preset kept the speed of the last session.
+    // preset, so applying a one-key preset kept the speed of the last session. The saved values
+    // are the effect's starting values now (`PATCH /effects/{id}/defaults`).
     let (router, _app, engine, _home) = build_with_engine();
     let (status, _) = send(&router, "POST", "/api/v1/effects/aurora/activate", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &router,
         "PATCH",
-        "/api/v1/effects/active/props",
+        "/api/v1/effects/aurora/defaults",
         serde_json::json!({ "speed": num(77.0), "bands": num(5.0) }),
     )
     .await;

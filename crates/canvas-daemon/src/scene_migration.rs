@@ -877,25 +877,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
-    /// Blocker 2 (should-fix): a layouts.json that did not parse is moved aside, the migration
-    /// starts from the first-run scene, and the log says so.
+    /// A layouts.json that did not parse is left exactly as it is (no rename, no write): the
+    /// migration starts from the first-run scene, and the log says so (#316 B3, Task 12).
     #[test]
-    fn a_quarantined_layouts_file_starts_the_scenes_fresh_and_says_so() {
+    fn an_unparseable_layouts_file_is_left_alone_and_the_scenes_start_fresh() {
         let dir = std::env::temp_dir().join(format!("canvas-rgb-scene-migration-bad-layouts-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        std::fs::write(dir.join(canvas_proto::config::LAYOUTS_FILE), b"{ not json").unwrap();
+        let layouts = dir.join(canvas_proto::config::LAYOUTS_FILE);
+        std::fs::write(&layouts, b"{ not json").unwrap();
+        let before = (std::fs::read(&layouts).unwrap(), std::fs::metadata(&layouts).unwrap().modified().unwrap());
 
         let (mut store, text) = crate::test_logs::captured(|| Store::load_from(&dir));
-        assert!(store.finish_scenes(&[board()]));
 
+        // Nothing is written over a set the daemon could not read: the scenes are blocked, and
+        // the first device list does not migrate.
+        assert!(store.scenes_blocked, "an unreadable layouts.json blocks the scenes");
+        assert!(!store.finish_scenes(&[board()]), "nothing is written while it is blocked");
+        assert!(!dir.join(canvas_proto::scene::SCENES_FILE).exists(), "no scenes file");
         assert_eq!(store.scenes.scenes.len(), 1);
-        assert_eq!(store.scenes.scenes[0].name, "Everything", "the first-run scene");
-        assert_eq!(store.scenes.scenes[0].groups[0].members.len(), 3);
-        assert_eq!(files_starting(&dir, "layouts.json.") - files_starting(&dir, "layouts.json.tmp"), 1, "the quarantined file is still there");
+        assert_eq!(store.scenes.scenes[0].name, "Everything", "the in-memory first-run scene");
+        // The file is where it was, with the same bytes and the same mtime: nothing renamed it,
+        // nothing wrote it.
+        assert_eq!(files_starting(&dir, "layouts.json.") - files_starting(&dir, "layouts.json.tmp"), 0, "nothing was moved aside");
+        let after = (std::fs::read(&layouts).unwrap(), std::fs::metadata(&layouts).unwrap().modified().unwrap());
+        assert_eq!(after, before, "layouts.json is untouched");
         assert!(
-            text.contains("layouts.json.") && text.contains("corrupt") && text.contains("scenes start fresh"),
-            "the warning names the quarantined file and says the scenes start fresh: {text}"
+            text.contains("layouts.json") && text.contains("did not parse") && text.contains("first-run default"),
+            "the warning names the file and says the scenes start fresh: {text}"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }

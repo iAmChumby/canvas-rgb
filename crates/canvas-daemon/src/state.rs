@@ -1,4 +1,4 @@
-//! The daemon's shared state.
+﻿//! The daemon's shared state.
 //!
 //! One `App` holds everything the API handlers, the render loop and the background
 //! tasks share: the on-disk store, the engine handle, the OpenRGB adapter, the device
@@ -9,7 +9,6 @@ use canvas_adapters::resume::ResumeBehavior;
 use canvas_proto::api::{LinkState, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::fans::FansStatus;
-use canvas_proto::layout::Layout;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, PreviewSink};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -226,7 +225,7 @@ impl App {
         stacks.set_fps(store.config.settings.fps);
         stacks.reload(&user_effects);
         // B1: the persisted audio-source pick applies at startup, so it
-        // survives a restart (silently — no capture is running yet).
+        // survives a restart (silently â€” no capture is running yet).
         let audio_source = store.config.audio_source.clone();
         let inputs = Arc::new(crate::capture::DaemonInputs::production());
         inputs.set_requested(audio_source);
@@ -313,10 +312,6 @@ impl App {
         self.rescan_inbox.lock().unwrap_or_else(|e| e.into_inner()).take()
     }
 
-    /// The active layout, if any.
-    pub async fn active_layout(&self) -> Option<Layout> {
-        self.store.read().await.active_layout().cloned()
-    }
 
     /// Sets the seam in the config import (tests only).
     ///
@@ -329,20 +324,6 @@ impl App {
     /// The seam in the config import, if a test set one.
     pub fn import_seam(&self) -> Option<Arc<crate::api::settings::ImportSeam>> {
         self.import_seam.lock().unwrap_or_else(|e| e.into_inner()).clone()
-    }
-
-    /// The layout reaches both engines at the same call sites: the lights' engine and, when
-    /// the builder has made it, the preview engine (D95.4.4).
-    ///
-    /// Once the engine runs a scene the layout stays out of it: a layout call would end scene mode
-    /// and leave the lights dark (the layout routes live on until Scenes Task 12, and the old page
-    /// still saves layouts). What the engine needs from a device change reaches it through
-    /// [`crate::scenes::apply_for_devices`].
-    pub fn set_layout(&self, layout: &Layout, devices: &[DeviceInfo]) {
-        if !self.scene.is_on() {
-            self.engine.set_layout(layout.clone(), devices.to_vec());
-        }
-        self.stack_preview.set_layout(layout, devices);
     }
 
     /// The input source reaches both engines at the same call sites. The daemon's startup
@@ -400,9 +381,6 @@ impl App {
         let power = store.config.settings.power;
         let brightness = store.config.settings.brightness;
         let fps_target = store.config.settings.fps;
-        let active_layout = Some(store.layouts.active.clone());
-        let active_effect =
-            store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
         let scene = crate::scenes::active_scene(&store.scenes);
         let active_scene = Some(canvas_proto::api::SceneRef { id: scene.id.clone(), name: scene.name.clone() });
         // One entry per distinct effect the active scene's groups play, in the scene's order.
@@ -436,8 +414,6 @@ impl App {
             preview_subscribers: self.preview_subs.subscribers()
                 + self.stack_subs.subscribers()
                 + self.scene.feed.watchers() as u32,
-            active_layout,
-            active_effect,
             active_scene,
             active_effects,
             openrgb,
@@ -557,3 +533,4 @@ mod tests {
         assert!(matches!(app_conflicts[0], Conflict::SignalRgb { process: true, .. }));
     }
 }
+

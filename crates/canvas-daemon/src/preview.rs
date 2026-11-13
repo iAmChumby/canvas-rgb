@@ -1,4 +1,4 @@
-//! The stack preview engine and its slot (D95.4.4).
+﻿//! The stack preview engine and its slot (D95.4.4).
 //!
 //! The builder tunes a stack continuously, so the preview is not a render loop of its own: a
 //! second engine runs the stack at [`canvas_proto::consts::PREVIEW_MAX_FPS`], gets the same
@@ -22,8 +22,6 @@
 use canvas_proto::api::{
     StackLayerState, StackLayerStatus, StackPreviewLayer, StackPreviewResponse,
 };
-use canvas_proto::device::DeviceInfo;
-use canvas_proto::layout::Layout;
 use canvas_proto::props::Props;
 use canvas_proto::stack::{Stack, STACK_ID_PREFIX};
 use canvas_proto::traits::{Effect, Engine, EngineSettings, InputSource};
@@ -219,10 +217,6 @@ impl StackPreview {
     pub fn set_group(&self, run: crate::scenes::GroupRun) {
         *self.latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(run);
     }
-
-    /// The legacy layout path does not reach the preview: it runs a group, and a layout call
-    /// would end the preview's scene mode.
-    pub fn set_layout(&self, _layout: &Layout, _devices: &[DeviceInfo]) {}
 
     /// An input-source change reaches the preview engine when it exists; otherwise the engine
     /// gets the app's current source when it is made.
@@ -746,3 +740,4 @@ mod tests {
         assert_eq!(settings.power, canvas_proto::api::Power::Running);
     }
 }
+

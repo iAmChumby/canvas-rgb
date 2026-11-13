@@ -127,16 +127,11 @@ async fn daemon_main(fakes: bool) -> Exit {
     let mut store = canvas_daemon::storage::Store::load();
 
     // Poison is not a built-in any more: it is a user HTML effect in
-    // `%APPDATA%\canvas-rgb\effects\`. The saved ids move to it, once, so the saved
-    // setup comes back exactly as it was. The old case forms move to a case
-    // landmark in the same pass.
-    if canvas_daemon::migration::migrate_store(&mut store) {
-        tracing::info!(
-            "the saved setup was migrated: the old effect ids and the old case forms moved to the new ones"
-        );
-        if let Err(e) = store.save_layouts() {
-            tracing::warn!(error = %e, "could not save the migrated layouts");
-        }
+    // `%APPDATA%\canvas-rgb\effects\`. The saved ids in `effects.json` move to it, once, so the
+    // saved setup comes back exactly as it was. (The saved layouts are not written: the scene
+    // migration reads them, and their own `poison` ids are renamed in memory there.)
+    if canvas_daemon::migration::migrate_effects(&mut store.effects) {
+        tracing::info!("the saved effect ids were migrated: the old effect moved to its user file");
         if let Err(e) = store.save_effects() {
             tracing::warn!(error = %e, "could not save the migrated effects");
         }

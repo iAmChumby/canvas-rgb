@@ -1,4 +1,4 @@
-//! The one-time migration from the built-in Poison to the user HTML effect that
+﻿//! The one-time migration from the built-in Poison to the user HTML effect that
 //! replaces it.
 //!
 //! Poison is SignalRGB's own effect, so the repo ships no copy of it. It lives on the
@@ -19,7 +19,6 @@
 //! that form's size, and the form is written back as `None`. The zones are not touched.
 
 use canvas_proto::config::{EffectsFile, LayoutsFile};
-use canvas_proto::layout::{CaseForm, PartKind};
 
 /// The id Poison had while it was a built-in. The effect library does not hold it any
 /// more (it is not one of ours), so the constant lives here, with the migration that
@@ -37,9 +36,15 @@ pub const USER_POISON_FILE: &str = "poison.html";
 /// Returns true when something changed. The property values are moved, never changed:
 /// the effect the owner's file declares is the same effect, so the values still fit.
 pub fn migrate_poison(layouts: &mut LayoutsFile, effects: &mut EffectsFile) -> bool {
-    let mut changed = false;
+    let in_layouts = migrate_layout_poison(layouts);
+    let in_effects = migrate_effects(effects);
+    in_layouts || in_effects
+}
 
-    // The effect on every layout, the active one and the others.
+/// The layouts half of [`migrate_poison`]: the effect on every saved layout, the active one and
+/// the others. Read only by the 0.14.0 migration, so this only shapes the scenes it makes.
+fn migrate_layout_poison(layouts: &mut LayoutsFile) -> bool {
+    let mut changed = false;
     for layout in &mut layouts.layouts {
         if let Some(active) = &mut layout.effect {
             if active.id == LEGACY_POISON_ID {
@@ -48,6 +53,13 @@ pub fn migrate_poison(layouts: &mut LayoutsFile, effects: &mut EffectsFile) -> b
             }
         }
     }
+    changed
+}
+
+/// The `effects.json` half of [`migrate_poison`]: the saved values, the owner's presets and the
+/// favourites. The daemon runs this on its own store at start.
+pub fn migrate_effects(effects: &mut EffectsFile) -> bool {
+    let mut changed = false;
 
     // The saved property values.
     if let Some(props) = effects.saved.remove(LEGACY_POISON_ID) {
@@ -74,47 +86,6 @@ pub fn migrate_poison(layouts: &mut LayoutsFile, effects: &mut EffectsFile) -> b
     changed
 }
 
-/// Moves every saved case form to a case landmark.
-///
-/// The editor's case picker is gone: the case is one box the owner sizes, so a layout
-/// saved with a form keeps that form's size as a case landmark and the form itself is
-/// written back as `None`. A layout that already has a case landmark keeps it, and a
-/// layout with no case form and no zones is not touched. A layout with zones and no case
-/// landmark at all gets the default mid-tower case. The zones are never touched.
-///
-/// Returns true when something changed.
-pub fn migrate_case_form(layouts: &mut LayoutsFile) -> bool {
-    let mut changed = false;
-    for layout in &mut layouts.layouts {
-        if layout.case_form == CaseForm::None {
-            // No form and no case box, but zones to place against one: give the layout the
-            // default mid-tower case so there is a box to size. An empty layout waits for
-            // first-run to make its own.
-            let has_case = layout.landmarks.iter().any(|l| l.kind == PartKind::Case);
-            if !has_case && !layout.zones.is_empty() {
-                layout.landmarks.push(crate::first_run::case_landmark());
-                changed = true;
-            }
-            continue;
-        }
-        let has_case = layout.landmarks.iter().any(|l| l.kind == PartKind::Case);
-        if !has_case {
-            if let Some(case) = crate::first_run::case_landmark_of(layout.case_form) {
-                layout.landmarks.push(case);
-            }
-        }
-        layout.case_form = CaseForm::None;
-        changed = true;
-    }
-    changed
-}
-
-/// The same migration, on the daemon's own store.
-pub fn migrate_store(store: &mut crate::storage::Store) -> bool {
-    let poison = migrate_poison(&mut store.layouts, &mut store.effects);
-    let cases = migrate_case_form(&mut store.layouts);
-    poison || cases
-}
 
 #[cfg(test)]
 mod tests {
@@ -202,110 +173,6 @@ mod tests {
         assert_eq!(effects.favorites, vec!["aurora".to_string()]);
     }
 
-    #[test]
-    fn a_mid_tower_layout_gets_a_case_landmark_and_no_form() {
-        let mut layouts = layouts_with("aurora");
-        layouts.layouts[0].case_form = CaseForm::MidTower;
-
-        assert!(migrate_case_form(&mut layouts));
-
-        let layout = &layouts.layouts[0];
-        assert_eq!(layout.case_form, CaseForm::None, "the picker is gone");
-        let case = layout
-            .landmarks
-            .iter()
-            .find(|l| l.kind == PartKind::Case)
-            .expect("the case is a landmark now");
-        // 488 mm deep and 480 mm tall, at 4 mm per unit: 122 x 120 units.
-        assert_eq!((case.width, case.height), (122.0, 120.0));
-        assert_eq!((case.x, case.y), (99.0, 29.0));
-        assert_eq!(case.rotation_deg, 0.0);
-    }
-
-    #[test]
-    fn the_case_migration_leaves_the_zones_alone() {
-        let mut layouts = layouts_with("aurora");
-        layouts.layouts[0].case_form = CaseForm::FullTower;
-        let zone = canvas_proto::layout::PlacedZone {
-            device_id: canvas_proto::DeviceId("d0".into()),
-            zone_index: 0,
-            x: 1.0,
-            y: 2.0,
-            width: 3.0,
-            height: 4.0,
-            rotation_deg: 5.0,
-            reversed: true,
-            visible: true,
-            shape: canvas_proto::layout::ZoneShape::Ring,
-            label: None,
-            leds: None,
-            part: None,
-            locked: false,
-        };
-        layouts.layouts[0].zones.push(zone.clone());
-
-        assert!(migrate_case_form(&mut layouts));
-
-        assert_eq!(layouts.layouts[0].zones, vec![zone], "the zones are not touched");
-        // A full tower is 576 mm deep and 584 mm tall: 144 x 146 units.
-        let case = layouts.layouts[0]
-            .landmarks
-            .iter()
-            .find(|l| l.kind == PartKind::Case)
-            .expect("the case is a landmark now");
-        assert_eq!((case.width, case.height), (144.0, 146.0));
-        assert_eq!((case.x, case.y), (88.0, 3.0));
-    }
-
-    #[test]
-    fn a_layout_with_no_case_form_is_not_touched() {
-        let mut layouts = layouts_with("aurora");
-        assert!(!migrate_case_form(&mut layouts));
-        assert!(layouts.layouts[0].landmarks.is_empty());
-        assert_eq!(layouts.layouts[0].case_form, CaseForm::None);
-    }
-
-    #[test]
-    fn a_layout_with_zones_and_no_case_gets_the_default_case_and_keeps_its_zones() {
-        let mut layouts = layouts_with("aurora");
-        let zone = canvas_proto::layout::PlacedZone {
-            device_id: canvas_proto::DeviceId("d0".into()),
-            zone_index: 0,
-            x: 11.0,
-            y: 22.0,
-            width: 33.0,
-            height: 44.0,
-            rotation_deg: 5.0,
-            reversed: false,
-            visible: true,
-            shape: canvas_proto::layout::ZoneShape::Ring,
-            label: None,
-            leds: None,
-            part: None,
-            locked: false,
-        };
-        layouts.layouts[0].zones.push(zone.clone());
-        assert_eq!(layouts.layouts[0].case_form, CaseForm::None);
-        assert!(layouts.layouts[0].landmarks.is_empty());
-
-        assert!(migrate_case_form(&mut layouts));
-
-        let layout = &layouts.layouts[0];
-        assert_eq!(layout.zones, vec![zone], "the zones are not moved");
-        assert_eq!(layout.landmarks.len(), 1);
-        assert_eq!(layout.landmarks[0], crate::first_run::case_landmark());
-        assert!(!migrate_case_form(&mut layouts), "the second run changes nothing");
-        assert_eq!(layouts.layouts[0].landmarks.len(), 1);
-    }
-
-    #[test]
-    fn the_case_migration_runs_only_once() {
-        let mut layouts = layouts_with("aurora");
-        layouts.layouts[0].case_form = CaseForm::MidTower;
-        assert!(migrate_case_form(&mut layouts));
-        assert!(!migrate_case_form(&mut layouts), "the second run changes nothing");
-        assert_eq!(layouts.layouts[0].landmarks.len(), 1, "one case landmark");
-    }
 
     /// A file named `poison.html` is the effect the migration points at.
     #[test]
@@ -359,3 +226,4 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+

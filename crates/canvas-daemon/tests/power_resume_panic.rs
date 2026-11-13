@@ -1,14 +1,15 @@
-//! #145: after an effect panics, a resume from sleep sends the last good frame again.
+﻿//! #145: a resume from sleep sends a frame again, so the strip comes back and the OpenRGB
+//! controller re-enters custom mode.
 //!
 //! The daemon's power path pauses the engine on a suspend and resumes it on a wake
-//! (`crates/canvas-daemon/src/power.rs`). A panicked effect stops the delivery (#99), so
-//! without the fix the lights stay black after the wake, the OpenRGB controllers never
-//! re-enter custom mode (the #5 shape) and the adapter's keepalive never runs: the
-//! frames that would carry them never go out.
+//! (`crates/canvas-daemon/src/power.rs`). The suspend writes one black frame; the wake must put
+//! the running scene back on the strip, and the frame that carries it must make the controller
+//! re-enter custom mode (the #5 shape), or the strip stays dark after the sleep.
 //!
-//! The fakes: the fake OpenRGB server (`canvas_adapters::fake`) and the real engine, so
-//! the whole path is walked: the engine, the sink, the writer task, the adapter and the
-//! server.
+//! Scenes are the only render path (#310): the engine delivers the scene's frame every tick, so
+//! there is no "delivery stopped" state to recover from. The fakes: the fake OpenRGB server
+//! (`canvas_adapters::fake`) and the real engine, so the whole path is walked: the engine, the
+//! sink, the writer task, the adapter and the server.
 
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
@@ -17,15 +18,13 @@ use canvas_daemon::power::{self, PowerEvent, PowerWatcher};
 use canvas_daemon::state::{App, DeviceSink};
 use canvas_proto::api::Power;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{CaseForm, Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::props::{InputNeeds, PropertySchema, Props};
-use canvas_proto::traits::{Canvas, DeviceAdapter, Effect, EngineSettings, Inputs};
+use canvas_proto::traits::{Canvas, DeviceAdapter, Effect, Engine, EngineSettings, Inputs};
 use canvas_proto::Rgb8;
-use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-/// The green of the good frame the effect paints.
+/// The green the scene's effect paints.
 const GOOD: Rgb8 = Rgb8 { r: 0, g: 255, b: 0 };
 
 fn stick() -> DeviceInfo {
@@ -51,49 +50,47 @@ fn stick() -> DeviceInfo {
     }
 }
 
-/// A layout that places the device's zone over the whole canvas.
-fn layout_for(device: &DeviceInfo) -> Layout {
-    Layout {
-        id: "test".into(),
-        name: "test".into(),
-        render_scale: RenderScale::P100,
-        sampling: SamplingMode::AreaAverage,
-        zones: vec![PlacedZone {
-            device_id: device.id.clone(),
-            zone_index: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 320.0,
-            height: 200.0,
-            rotation_deg: 0.0,
-            reversed: false,
-            visible: true,
-            shape: ZoneShape::Auto,
-            label: None,
-            leds: None,
-            part: None,
-            locked: false,
+/// Runs `effect` on the device's one zone, as one light in one group (#310).
+fn run_on(
+    engine: &Arc<dyn Engine>,
+    device: &DeviceInfo,
+    effect: Box<dyn canvas_proto::Effect>,
+    props: &Props,
+) {
+    use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
+    let light = Light {
+        id: zone_light_id(&device.id, 0),
+        device_id: device.id.clone(),
+        zone_index: 0,
+        leds: None,
+        name: None,
+        arrangement: Arrangement::Strip,
+        reversed: false,
+    };
+    engine.set_scene(
+        vec![light.clone()],
+        vec![device.clone()],
+        vec![canvas_proto::traits::EngineGroup {
+            id: "all".into(),
+            members: vec![light.id],
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+            effect: Some(effect),
+            props: props.clone(),
         }],
-        effect: None,
-        case_form: CaseForm::None,
-        landmarks: Vec::new(),
-    }
+        false,
+    );
 }
 
-/// An effect that paints one good frame and then panics (#145).
-///
-/// The first update paints the canvas, so the engine has a good frame to keep. The
-/// second one panics, and the engine stops delivering (#99).
-struct OneFrameThenPanic {
-    updates: Arc<AtomicU32>,
-}
+/// An effect that paints the whole canvas green.
+struct Green;
 
-impl Effect for OneFrameThenPanic {
+impl Effect for Green {
     fn schema(&self) -> PropertySchema {
         PropertySchema {
-            id: "test_one_frame_then_panic".into(),
-            name: "Test One Frame Then Panic".into(),
-            description: "Paints one frame, then panics (#145).".into(),
+            id: "test_green".into(),
+            name: "Test Green".into(),
+            description: "Paints the canvas green.".into(),
             needs: InputNeeds::default(),
             properties: vec![],
             presets: vec![],
@@ -104,10 +101,6 @@ impl Effect for OneFrameThenPanic {
     fn init(&mut self, _props: &Props) {}
 
     fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
-        let n = self.updates.fetch_add(1, Ordering::AcqRel);
-        if n >= 1 {
-            panic!("update boom after a good frame");
-        }
         canvas.fill([0.0, 1.0, 0.0]);
     }
 }
@@ -131,7 +124,7 @@ fn controller_is(server: &FakeOpenRgbServer, color: Rgb8) -> bool {
 }
 
 #[tokio::test]
-async fn a_resume_from_sleep_sends_the_last_good_frame_again_after_an_effect_panic() {
+async fn a_resume_from_sleep_puts_the_scene_back_and_re_enters_custom_mode() {
     let home = std::env::temp_dir().join(format!(
         "canvas-rgb-power-resume-panic-{}",
         std::process::id()
@@ -152,7 +145,6 @@ async fn a_resume_from_sleep_sends_the_last_good_frame_again_after_an_effect_pan
         brightness: 100,
         warmth: canvas_proto::consts::WARMTH_OFF,
     });
-    engine.set_layout(layout_for(&device), vec![device.clone()]);
 
     let (quit_tx, _quit_rx) = tokio::sync::mpsc::unbounded_channel();
     let app = Arc::new(App::new(
@@ -178,29 +170,19 @@ async fn a_resume_from_sleep_sends_the_last_good_frame_again_after_an_effect_pan
         Arc::new(DeviceSink::new(device.id.clone(), tx)),
     );
 
-    let updates = Arc::new(AtomicU32::new(0));
-    engine.set_effect(
-        Box::new(OneFrameThenPanic {
-            updates: updates.clone(),
-        }),
-        &Props::new(),
-    );
+    // The scene the engine runs: one group, one light, green.
+    run_on(&engine, &device, Box::new(Green), &Props::new());
 
-    // The good frame reaches the device.
+    // The scene's frame reaches the device.
     assert!(
         wait_for(|| controller_is(&server, GOOD)).await,
-        "the good frame reached the device; colors = {:?}",
+        "the scene's frame reached the device; colors = {:?}",
         server.colors(0)
     );
-    // The effect panics, and the delivery stops: the device keeps the good frame.
-    assert!(
-        wait_for(|| updates.load(Ordering::Acquire) >= 2).await,
-        "the effect panicked"
-    );
 
+    // The suspend writes black: the lights go dark for the sleep.
     let mut watcher = PowerWatcher::new();
     power::handle(&app, &mut watcher, PowerEvent::Suspend).await;
-    // The suspend writes black: the lights go dark for the sleep.
     assert!(
         wait_for(|| controller_is(&server, Rgb8::BLACK)).await,
         "the suspend wrote black; colors = {:?}",
@@ -210,14 +192,14 @@ async fn a_resume_from_sleep_sends_the_last_good_frame_again_after_an_effect_pan
     let mode_writes_before = server.custom_mode_writes(0);
     power::handle(&app, &mut watcher, PowerEvent::Resume).await;
 
-    // The resume sends the last good frame again: the colours come back...
+    // The resume puts the scene back on the strip...
     assert!(
         wait_for(|| controller_is(&server, GOOD)).await,
-        "the last good frame came back after the resume; colors = {:?}",
+        "the scene came back after the resume; colors = {:?}",
         server.colors(0)
     );
-    // ...and the controller re-enters custom mode, which the frame carried (the #5
-    // shape: the sticks would stay on their built-in rainbow without it).
+    // ...and the controller re-enters custom mode, which the frame carried (the #5 shape: the
+    // strip would stay on its built-in rainbow without it).
     assert!(
         wait_for(|| server.custom_mode_writes(0) > mode_writes_before).await,
         "the controller re-entered custom mode; writes = {}",

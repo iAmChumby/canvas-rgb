@@ -787,19 +787,6 @@ impl Stacks {
         Arc::clone(&self.areas)
     }
 
-    /// Publishes a new area book: the layout, the render scale or the sampling mode changed.
-    ///
-    /// The version moves, so every running stack re-resolves its layers on its next frame and
-    /// rebuilds nothing. The map is built outside the lock; the version is read and bumped under
-    /// one write guard, so two publishes cannot both start from the same number.
-    pub fn publish_areas(&self, layout: &canvas_proto::layout::Layout, devices: &[canvas_proto::DeviceInfo]) {
-        let mut map = AreaMap::build(layout, devices, 0);
-        let mut guard = write_recovering(&self.areas);
-        map.version = guard.version.wrapping_add(1);
-        guard.version = map.version;
-        guard.layout = Some(map);
-    }
-
     /// Publishes the masks of one group, when the book does not hold it yet.
     ///
     /// The stack preview shows a group of its own: its layers resolve in that group's canvas.
@@ -1192,18 +1179,9 @@ mod tests {
             "a stored area that is only partly off the canvas is kept as it is, not emptied"
         );
 
-        let layout = canvas_proto::layout::Layout {
-            id: "l".into(),
-            name: "l".into(),
-            render_scale: canvas_proto::layout::RenderScale::P100,
-            sampling: canvas_proto::layout::SamplingMode::Nearest,
-            zones: Vec::new(),
-            effect: None,
-            case_form: canvas_proto::layout::CaseForm::None,
-            landmarks: Vec::new(),
-        };
-        let map = crate::stack::AreaMap::build(&layout, &[], 1);
-        let book = crate::stack::AreaMaps { layout: Some(map), ..crate::stack::AreaMaps::default() };
+        // A tile (no group) still resolves the canvas and a rectangle: the area's own box is
+        // clipped to the logical canvas.
+        let book = crate::stack::AreaMaps::default();
         let resolved = book
             .resolve(None, &hands[0].layers[0].area)
             .expect("the clipped area covers the canvas edge, not nothing");
