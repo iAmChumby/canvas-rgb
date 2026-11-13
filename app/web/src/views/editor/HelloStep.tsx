@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect, useRef, useState } from "react";
 import { ArrowRight, ArrowsClockwise, Check, Circle } from "@phosphor-icons/react";
@@ -67,7 +67,7 @@ export function HelloStep({
     <StepFrame
       center
       title={<Greeting />}
-      primary={{ label: "Map my PC", icon: <ArrowRight size={16} weight="bold" />, onClick: onStart }}
+      primary={{ label: "Continue", icon: <ArrowRight size={16} weight="bold" />, onClick: onStart }}
       secondary={{ label: "Set up later", onClick: onLater }}
       tertiary={{ label: "Nothing lit up?", onClick: () => setLadder(true) }}
     >
@@ -131,7 +131,7 @@ function Waking({ onLater }: { onLater: () => void }) {
       center
       title="Waking up your lights"
       lead="This takes a moment."
-      primary={{ label: "Map my PC", icon: <ArrowRight size={16} weight="bold" />, disabled: true }}
+      primary={{ label: "Continue", icon: <ArrowRight size={16} weight="bold" />, disabled: true }}
       tertiary={{ label: "Set up later", onClick: onLater }}
     >
       <Waiting />
@@ -219,3 +219,5 @@ function Ladder({
     </StepFrame>
   );
 }
+
+

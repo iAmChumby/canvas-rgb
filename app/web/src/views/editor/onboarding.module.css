@@ -103,6 +103,17 @@
   min-height: 0;
 }
 
+/* One screen, no drawing (#310): the panel is the window, centred. */
+.main[data-solo="true"] {
+  grid-template-columns: minmax(0, 1fr);
+  justify-items: center;
+  align-content: center;
+}
+
+.main[data-solo="true"] .panel {
+  width: min(420px, 100%);
+}
+
 .stage {
   min-width: 0;
 }

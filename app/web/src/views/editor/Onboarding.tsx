@@ -48,8 +48,7 @@ export function Onboarding({
 
   return (
     <div className={s.root} data-step="hello">
-      <div className={s.main}>
-        <div className={s.stage} aria-hidden="true" />
+      <div className={s.main} data-solo="true">
         <section className={s.panel} aria-label="Hello">
           <div className={s.stepWrap}>
             <HelloStep onStart={() => void finish()} onLater={later} play={play} />

@@ -1,4 +1,4 @@
-// Screenshots the real React editor against the fake daemon (#200).
+﻿// Screenshots the real React editor against the fake daemon (#200).
 //
 // Serves `app/web/out` (the Next.js static export) on 127.0.0.1 and drives it
 // with headless Chromium (Playwright, same engine as WebView2). The page gets
@@ -45,7 +45,7 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
 }
 
 const VIEWS = [
-  { name: "layout", path: "/" },
+  { name: "scenes", path: "/" },
   { name: "effects", path: "/effects/" },
   { name: "devices", path: "/devices/" },
   { name: "fans", path: "/fans/" },
@@ -404,3 +404,4 @@ async function main() {
 }
 
 await main();
+
