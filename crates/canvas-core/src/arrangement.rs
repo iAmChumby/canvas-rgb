@@ -21,6 +21,39 @@
 //!
 //! The samples are in the group's canvas units (0..320 x 0..200), the same units the layout
 //! path's samples are in before a render scale is applied.
+//!
+//! # The cells
+//!
+//! Every sample carries the cell it averages over, clamped to the canvas:
+//! - a strip cell is `slot.w / n` wide and the slot's whole height,
+//! - a grid cell is the matrix's own cell,
+//! - a single light's cell is its whole slot,
+//! - a ring cell is the square of one LED's share of the circle, `2 * pi * r / n`.
+//!
+//! Three edge cases the cells meet:
+//! - **The one-unit minimum is logical.** A cell never falls below one canvas unit, but
+//!   the engine scales the plan by the render factor before it samples, so at quarter
+//!   scale that one unit is a quarter of a canvas pixel. Sampling falls back to the
+//!   nearest pixel, so nothing crashes; the guarantee just does not survive scaling.
+//! - **A ring in a slot narrower than twice the inset has no circle.** Its radius is 0
+//!   and every one of its LEDs lands on the slot's centre.
+//! - **A single light with more than one LED puts them all on one point**, the slot's
+//!   centre. The zone still has that many LEDs; they just all read the same pixel.
+//!
+//! # Where this and the layout path disagree
+//!
+//! A grid light on a matrix zone with a slice maps only the LEDs of that slice, so the
+//! LEDs outside the slice have no cell and stay black. The layout path
+//! (`geometry.rs`) ignores a slice on a matrix zone entirely, because the map owns every
+//! LED of the zone. The two paths answer "who owns these LEDs" differently; the builder
+//! calls this a 0.15 case.
+//!
+//! # Counts
+//!
+//! A zone reports its LED count, and a damaged device can report a number no real zone
+//! has. Every count is capped at `MAX_ZONE_LEDS`, and the group's total is summed in
+//! `u64`, so a broken count cannot overflow the sum or make the planner allocate more
+//! than the cap for one light.
 
 use canvas_proto::device::{DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
 use canvas_proto::layout::{CANVAS_HEIGHT, CANVAS_WIDTH};
@@ -32,6 +65,14 @@ use crate::geometry::LedSample;
 const RING_INSET: f32 = 4.0;
 
 /// The most LEDs one zone may plan for.
+///
+/// A zone reports its own LED count, and a damaged or misbehaving device can report a
+/// number no real zone has. The largest zone this repo knows of is an OpenRGB zone
+/// resized to its maximum of 512 LEDs (`crates/canvas-daemon/src/first_run.rs`), and the
+/// desk-shaped fake in `crates/canvas-core/src/cpu.rs` has 100 LEDs a zone. The cap is
+/// eight times the largest of those, so every real zone plans in full, while a broken
+/// count can never make the planner hold more than 4096 samples (about 80 KB) for one
+/// light.
 pub const MAX_ZONE_LEDS: u32 = 4096;
 
 /// One light's LEDs, as sample points on the group's canvas.
@@ -59,7 +100,9 @@ pub struct GroupPlan {
 impl GroupPlan {
     /// How many LEDs the plan covers.
     pub fn led_count(&self) -> u32 {
-        self.lights.iter().map(|l| l.leds.len() as u32).sum()
+        // The sum is in u64: a group of capped lights can hold more than a u32 count.
+        let total: u64 = self.lights.iter().map(|l| l.leds.len() as u64).sum();
+        total.min(u32::MAX as u64) as u32
     }
 
     /// The samples of one light, by its id.
@@ -72,7 +115,8 @@ impl GroupPlan {
 ///
 /// `members` is the group's member list, in the owner's order. A member that names no
 /// light, or a light whose device is not in `devices`, is skipped. A light whose device is
-/// there but whose zone has no LEDs left gets no slot and no samples.
+/// there but whose zone has no LEDs left gets no slot and no samples. A member named
+/// twice is one member: the first occurrence wins, and the light gets one slot.
 pub fn build_group_plan(
     members: &[LightId],
     mode: GroupMode,
@@ -82,6 +126,10 @@ pub fn build_group_plan(
     // The members that have LEDs, in the group's order.
     let mut placed: Vec<(&Light, u32)> = Vec::with_capacity(members.len());
     for member in members {
+        // A member named twice is one member: the first occurrence holds the slot.
+        if placed.iter().any(|(l, _)| l.id == *member) {
+            continue;
+        }
         let Some(light) = lights.iter().find(|l| l.id == *member) else {
             continue;
         };
@@ -92,18 +140,24 @@ pub fn build_group_plan(
         placed.push((light, count));
     }
 
-    // The group's LEDs: what the slots are shared out by.
-    let total: u32 = placed.iter().map(|(_, count)| *count).sum();
+    // The group's LEDs: what the slots are shared out by. The sum is in u64 so a group
+    // of capped zones cannot overflow it.
+    let total: u64 = placed.iter().map(|(_, count)| u64::from(*count)).sum();
     let mut plan = GroupPlan::default();
-    let mut before = 0u32;
+    let mut before = 0u64;
     for (light, count) in placed {
         plan.lights.push(LightSamples {
             light: light.id.clone(),
             device_id: light.device_id.clone(),
             frame_start: frame_start_of(light, devices),
-            leds: build_light_leds(light, count, &slot_for(mode, before, count, total), devices),
+            leds: build_light_leds(
+                light,
+                count,
+                &slot_for(mode, before, u64::from(count), total),
+                devices,
+            ),
         });
-        before += count;
+        before += u64::from(count);
     }
     plan
 }
@@ -111,16 +165,19 @@ pub fn build_group_plan(
 /// The LED count a light has now: its slice's count clamped to the zone, or the zone's
 /// count.
 ///
-/// A light whose device or zone is gone has no LEDs: the count is zero.
+/// A light whose device or zone is gone has no LEDs: the count is zero. A zone that
+/// reports more LEDs than `MAX_ZONE_LEDS` is planned as the cap, so a damaged device
+/// cannot make the planner allocate for billions of LEDs.
 pub fn light_led_count(light: &Light, devices: &[DeviceInfo]) -> u32 {
     let Some(zone) = zone_of(light, devices) else {
         return 0;
     };
-    match light.leds {
+    let count = match light.leds {
         None => zone.led_count,
         // A slice that runs past the end of a zone that shrank has only what is left.
         Some(slice) => slice.count.min(zone.led_count.saturating_sub(slice.start)),
-    }
+    };
+    count.min(MAX_ZONE_LEDS)
 }
 
 /// A slot of the group's canvas: where one member reads the picture.
@@ -141,7 +198,9 @@ impl Slot {
 
 /// The slot of one member: its share of the canvas in flow across, the whole canvas in
 /// each its own.
-fn slot_for(mode: GroupMode, before: u32, count: u32, total: u32) -> Slot {
+///
+/// The counts are in `u64` so a group of many capped zones cannot overflow the share.
+fn slot_for(mode: GroupMode, before: u64, count: u64, total: u64) -> Slot {
     match mode {
         GroupMode::FlowAcross => {
             let width = CANVAS_WIDTH as f32;
@@ -180,6 +239,8 @@ fn build_light_leds(
 }
 
 /// A strip: left to right at mid-height, each LED in the middle of its own cell.
+///
+/// The cell is `slot.w / n` wide and the slot's whole height.
 fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
     let cell_w = slot.w / n as f32;
     let y = slot.y + slot.h / 2.0;
@@ -194,6 +255,9 @@ fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
 }
 
 /// A ring: the largest circle that fits the slot, from the top, clockwise.
+///
+/// The cell is the square of one LED's share of the circle, `2 * pi * r / n`, capped at
+/// the circle's own diameter.
 fn ring_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
     let (cx, cy) = slot.centre();
     // The circle keeps a 4px inset from the slot's edges.
@@ -270,14 +334,17 @@ fn grid_cell_sample(
     LedSample { center_x: x, center_y: y, bounds, sampled: true }
 }
 
-/// A single LED: it reads the slot's centre.
+/// A single LED: it reads the slot's centre, and its cell is the whole slot.
 fn single_sample(slot: &Slot) -> LedSample {
     let (x, y) = slot.centre();
-    let bounds = clamp_cell(x - 0.5, y - 0.5, x + 0.5, y + 0.5);
+    let bounds = clamp_cell(slot.x, slot.y, slot.x + slot.w, slot.y + slot.h);
     LedSample { center_x: x, center_y: y, bounds, sampled: true }
 }
 
-/// Clamps a cell to the canvas and keeps it at least one pixel wide and tall.
+/// Clamps a cell to the canvas and keeps it at least one logical unit wide and tall.
+///
+/// The unit is logical: the engine scales the plan by the render factor before it
+/// samples, so at quarter scale the smallest cell is a quarter of a canvas pixel.
 fn clamp_cell(x0: f32, y0: f32, x1: f32, y1: f32) -> [f32; 4] {
     let width = CANVAS_WIDTH as f32;
     let height = CANVAS_HEIGHT as f32;
@@ -305,7 +372,9 @@ fn zone_of<'a>(light: &Light, devices: &'a [DeviceInfo]) -> Option<&'a ZoneInfo>
 /// Where the light's first LED sits in its device's frame.
 ///
 /// A device's frame holds its zones in zone order, so the light starts after the zones
-/// before its own; a slice starts after the LEDs before it in its zone.
+/// before its own; a slice starts after the LEDs before it in its zone. The frame
+/// follows the device's real counts, not the cap, and it saturates rather than
+/// overflowing on a device that reports more LEDs than any frame could hold.
 fn frame_start_of(light: &Light, devices: &[DeviceInfo]) -> u32 {
     let Some(device) = devices.iter().find(|d| d.id == light.device_id) else {
         return 0;
@@ -315,9 +384,9 @@ fn frame_start_of(light: &Light, devices: &[DeviceInfo]) -> u32 {
         if zone.index == light.zone_index {
             break;
         }
-        base += zone.led_count;
+        base = base.saturating_add(zone.led_count);
     }
-    base + light.leds.map(|s| s.start).unwrap_or(0)
+    base.saturating_add(light.leds.map(|s| s.start).unwrap_or(0))
 }
 
 #[cfg(test)]
