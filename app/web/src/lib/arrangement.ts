@@ -14,7 +14,8 @@
 // Inside a slot the light's own arrangement decides (the owner's choice on the Devices
 // page): a strip runs left to right at mid-height, a ring is the largest circle that fits
 // the slot, a grid fills the slot with the zone's own matrix map, and a single LED reads
-// the slot's centre. `reversed` flips the LED order inside the light.
+// the slot's centre and averages over one logical unit there. `reversed` flips the LED
+// order inside the light.
 //
 // This is the TypeScript port of the daemon's planner (`crates/canvas-core/src/arrangement.rs`),
 // so the builder stage draws the picture the daemon samples. The Rust planner prints its
@@ -41,7 +42,7 @@ export const RING_INSET = 4;
  *
  * A zone reports its own LED count, and a damaged or misbehaving device can report a
  * number no real zone has. The cap keeps the planner from holding more than 4096 samples
- * (about 80 KB) for one light.
+ * (about 112 KiB, a sample being 28 bytes) for one light.
  */
 export const MAX_ZONE_LEDS = 4096;
 
@@ -301,14 +302,21 @@ function gridCellSample(slot: Slot, col: number, row: number, cols: number, rows
   };
 }
 
-/** A single LED: it reads the slot's centre, and its cell is the whole slot. */
+/**
+ * A single LED: it reads the slot's centre, and its cell is one logical unit there.
+ *
+ * A single light is a point: it has no spread of its own to average over, so the
+ * smallest cell the planner allows is the honest one. The daemon's default sampler is
+ * area-average, so a whole-slot cell would make one LED report the mean of the entire
+ * picture instead of the colour it sits on.
+ */
 function singleSample(slot: Slot): LedSample {
   const x = slot.x + slot.w / 2;
   const y = slot.y + slot.h / 2;
   return {
     center_x: x,
     center_y: y,
-    bounds: clampCell(slot.x, slot.y, slot.x + slot.w, slot.y + slot.h),
+    bounds: clampCell(x - 0.5, y - 0.5, x + 0.5, y + 0.5),
     sampled: true,
   };
 }

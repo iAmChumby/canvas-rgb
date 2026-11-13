@@ -102,6 +102,11 @@ fn cases() -> Vec<Case> {
     let twice_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 12)])];
     let twice_lights = vec![light("a", "d0", 0, Arrangement::Strip)];
 
+    // A single light: every LED reads the slot's centre, and the cell is one logical unit
+    // there, not the whole slot.
+    let single_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 12)])];
+    let single_lights = vec![light("a", "d0", 0, Arrangement::Single)];
+
     vec![
         Case {
             name: "flow across 12 and 36",
@@ -151,6 +156,13 @@ fn cases() -> Vec<Case> {
             mode: GroupMode::FlowAcross,
             lights: twice_lights,
             devices: twice_devices,
+        },
+        Case {
+            name: "a single light of 12",
+            members: vec!["a".into()],
+            mode: GroupMode::EachItsOwn,
+            lights: single_lights,
+            devices: single_devices,
         },
     ]
 }

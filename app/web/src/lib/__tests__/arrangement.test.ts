@@ -17,6 +17,7 @@ import {
   buildGroupPlan,
   ledCount,
   lightLedCount,
+  planLight,
   region,
 } from "@/lib/arrangement";
 import type { Arrangement } from "@/proto/Arrangement";
@@ -285,13 +286,25 @@ describe("the arrangement planner (#310)", () => {
       }
     }
 
-    // A single light alone: its cell is the whole slot, so the whole canvas.
+    // A single light alone: it reads the slot's centre, and its cell is one logical
+    // unit there, not the whole slot. A single point has no spread to average over,
+    // so the smallest cell the planner allows is the honest one.
     {
       const devices = [device("d0", [zone(0, { type: "linear" }, 1)])];
       const plan = buildGroupPlan(ids(["a"]), "each_its_own", [light("a", "d0", 0, "single")], devices);
-      for (const led of first(plan.lights).leds) {
-        expectCell(led, width, height, "a single light's cell");
-      }
+      const led = first(first(plan.lights).leds);
+      expectCell(led, 1.0, 1.0, "a single light's cell");
+      expect(Math.abs(led.center_x - width / 2.0), `the centre x is ${led.center_x}`).toBeLessThan(
+        0.01,
+      );
+      expect(Math.abs(led.center_y - height / 2.0), `the centre y is ${led.center_y}`).toBeLessThan(
+        0.01,
+      );
+      const [x0, y0, x1, y1] = led.bounds;
+      expect(Math.abs(x0 - (width / 2.0 - 0.5)), `the cell starts at x = ${x0}`).toBeLessThan(0.01);
+      expect(Math.abs(x1 - (width / 2.0 + 0.5)), `the cell ends at x = ${x1}`).toBeLessThan(0.01);
+      expect(Math.abs(y0 - (height / 2.0 - 0.5)), `the cell starts at y = ${y0}`).toBeLessThan(0.01);
+      expect(Math.abs(y1 - (height / 2.0 + 0.5)), `the cell ends at y = ${y1}`).toBeLessThan(0.01);
     }
 
     // A ring alone: the cell of each LED is the square of its share of the circle.
@@ -420,6 +433,42 @@ describe("the arrangement planner (#310)", () => {
     const secondLed = first(plan.lights[1]!.leds);
     expect(firstLed.center_x < 160.0, `the first light sits at ${firstLed.center_x}`).toBe(true);
     expect(secondLed.center_x > 160.0, `the second light sits at ${secondLed.center_x}`).toBe(true);
+  });
+
+  it("starts a second zone after the first zone's real leds", () => {
+    const firstZone = 100000;
+    const devices = [
+      device("d0", [
+        zone(0, { type: "linear" }, firstZone),
+        zone(1, { type: "linear" }, 12),
+      ]),
+    ];
+    const second = { ...strip("b", "d0"), zone_index: 1 };
+    const lights = [strip("a", "d0"), second];
+    const plan = buildGroupPlan(ids(["a", "b"]), "each_its_own", lights, devices);
+
+    // The frame the engine builds for this device holds every real LED of both zones.
+    const frame = devices[0]!.zones.reduce((sum, z) => sum + z.led_count, 0);
+    expect(frame).toBe(firstZone + 12);
+    // The second zone starts after the first zone's real 100,000 LEDs, not after the
+    // 4,096 the planner samples.
+    const secondLight = planLight(plan, "b");
+    expect(secondLight?.frame_start).toBe(firstZone);
+    expect(secondLight?.leds.length).toBe(12);
+
+    // The first zone is planned as the cap's worth of samples...
+    const firstLight = planLight(plan, "a");
+    expect(firstLight?.frame_start).toBe(0);
+    expect(firstLight?.leds.length).toBe(MAX_ZONE_LEDS);
+    // ...and the LEDs past the cap have no sample: nothing in the plan covers frame
+    // index 4096, nor any index between the cap and the second zone's start.
+    for (const ledIndex of [MAX_ZONE_LEDS, firstZone - 1]) {
+      const covered = plan.lights.some((light) => {
+        const end = light.frame_start + light.leds.length;
+        return light.frame_start <= ledIndex && ledIndex < end;
+      });
+      expect(covered, `LED ${ledIndex} of the device frame has a sample`).toBe(false);
+    }
   });
 
   it("clamps a slice that runs past its zone", () => {
