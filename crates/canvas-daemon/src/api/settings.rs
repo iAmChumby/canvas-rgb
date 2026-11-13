@@ -119,6 +119,9 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
     };
 
     let store = app.store.read().await;
+    // The scenes travel with the bundle (0.14.0), unless the migration has not run yet: then
+    // only the layouts do, and the import migrates them with its own devices.
+    let (lights, scenes) = crate::storage::scenes_for_export(&store);
     let bundle = ExportBundle {
         schema_version: canvas_proto::config::EXPORT_SCHEMA,
         exported_at: crate::storage::export_timestamp(),
@@ -130,8 +133,8 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
         fans,
         displays: store.displays.displays.clone(),
         stacks: app.stacks.all(),
-        lights: None,
-        scenes: None,
+        lights,
+        scenes,
     };
     Ok(Json(bundle))
 }
@@ -256,7 +259,10 @@ pub async fn config_import(
     }
 
     let home = app.store.read().await.home.clone();
-    crate::storage::import_bundle_rated(&home, &bundle, rated_cpu, rated_gpu)
+    // A 0.13 bundle's layouts are migrated with the daemon's current devices, so the scenes it
+    // makes match this machine's zones (a matrix zone is a Grid, not a Strip).
+    let devices = app.devices.read().await.clone();
+    crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
         .map_err(|e| ApiFailure::internal(format!("could not import the config: {e}")))?;
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
