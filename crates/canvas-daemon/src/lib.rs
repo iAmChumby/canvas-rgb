@@ -84,7 +84,7 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
 /// built-in registry.
 ///
 /// `group` is the group the effect plays in: a stack resolves its layers in that group's
-/// canvas. `None` for the legacy layout, until the layout is gone (Task 12).
+/// canvas. `None` when no group is running the effect (a preview, or a test of the effect alone).
 ///
 /// Returns an error when the id is unknown or the effect fails to build.
 pub fn create_effect(

@@ -306,15 +306,7 @@ pub async fn config_import(
         }
 
         // Reload the store from disk and apply it.
-        let mut store = crate::storage::Store::load_from(&home);
-        // A 0.13 bundle imported before the first device list: its layouts are the migration the
-        // first list runs, and `layouts.json` is not written any more, so the bundle's layouts are
-        // put on the held migration here.
-        if bundle.scenes.is_none() && devices.is_empty() {
-            if let Some(pending) = store.scenes_pending.as_mut() {
-                pending.layouts = Some(bundle.layouts.clone());
-            }
-        }
+        let store = crate::storage::Store::load_from(&home);
         {
             let mut guard = app
                 .store

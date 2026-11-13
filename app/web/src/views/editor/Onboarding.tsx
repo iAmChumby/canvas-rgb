@@ -7,7 +7,6 @@ import { HelloStep } from "@/views/editor/HelloStep";
 import { putOffUntilNextLaunch } from "@/views/editor/flow";
 import { useOnboardEffects } from "@/views/editor/onboardEffects";
 import { setTakeover } from "@/views/editor/takeover";
-import type { DeviceInfo } from "@/proto/DeviceInfo";
 import s from "@/views/editor/onboarding.module.css";
 
 /**
