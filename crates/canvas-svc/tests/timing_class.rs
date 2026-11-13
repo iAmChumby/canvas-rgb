@@ -1,4 +1,4 @@
-//! The `cause:timing-test` class check (docs/bug-classes.md; #36 #39 #45 #47 #51 #55 #59 #66).
+﻿//! The `cause:timing-test` class check (docs/bug-classes.md; #36 #39 #45 #47 #51 #55 #59 #66).
 //!
 //! A test that reads its verdict off a real clock fails when a busy machine delays it. This scan
 //! runs over the repo's own test code on every `cargo test --workspace` (so in CI) and flags two
@@ -87,13 +87,6 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("attack_shark_x6/hid_cache.rs", "sleep(Duration::from_millis(350))", "safe: sleeps past a 300 ms TTL; a slower runner only ages the cache more"),
     ("canvas-adapters/tests/adapters_tests.rs", "sleep(Duration::from_millis(1700))", "safe: sleeps past the repeat interval; slowness only passes it further"),
     ("canvas-core/src/cpu.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop that waits for the engine to park, with a 10 s deadline"),
-    ("canvas-core/src/tests.rs", "stats.parked", "open: waits 300 ms for the engine to park, then asserts it parked (same family as #39)"),
-    ("canvas-core/src/tests.rs", "engine.stats().parked", "open: waits 300 ms for the engine to park, then asserts it parked (same family as #39)"),
-    ("canvas-core/src/tests.rs", "before, after", "safe: asserts the frame counter did not move over a 2 s sleep; slowness cannot add a frame to a parked engine"),
-    ("canvas-core/src/tests.rs", "let count = preview.count();", "open: a ceiling of 35 on the preview frames counted after a 2 s sleep; an overshooting sleep RAISES the count"),
-    ("canvas-core/src/tests.rs", "sleep(Duration::from_secs(1))", "safe: asserts the frame counter did not move while paused"),
-    ("canvas-core/src/tests.rs", "burst", "open: a ceiling of 15 frames after a 150 ms sleep; an overshooting sleep RAISES the count"),
-    ("canvas-core/src/tests.rs", "sleep(Duration::from_millis(500))", "safe: asserts no more preview frames arrive"),
     ("canvas-daemon/src/logging.rs", "|| std::thread::sleep(std::time::Duration::from_secs(5))", "the property: the sleep is the stuck step run_bounded must give up on"),
     ("canvas-daemon/src/peripherals.rs", "sleep(Duration::from_millis(200))", "safe: asserts the gated sink has NOT written yet"),
     ("canvas-daemon/src/thumbnail.rs", "sleep(std::time::Duration::from_millis(100))", "safe: asserts a waiting task has NOT finished"),

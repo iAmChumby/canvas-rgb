@@ -275,7 +275,7 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         "layouts.json",
         "zones.json",
         "effects.json",
-        // The scenes files (Â§ review 323 B1): an import writes both, so a bundle that lacks a
+        // The scenes files (§ review 323 B1): an import writes both, so a bundle that lacks a
         // split light or carries damaged scenes must leave the old ones recoverable.
         LIGHTS_FILE,
         SCENES_FILE,
@@ -1139,7 +1139,7 @@ pub fn import_bundle_rated(
     // The store never writes over a scenes file it could not read at load (`lights_blocked`,
     // `scenes_blocked`); an import must not either. It refuses here, before the snapshot and
     // before the first write, so a machine with a locked or unreadable file is left as it was
-    // instead of half imported (Â§ review 323 B1).
+    // instead of half imported (§ review 323 B1).
     refuse_unreadable_scenes_files(home)?;
     validate_bundle_rated(bundle, devices, rated_cpu_max_c, rated_gpu_max_c)?;
     // A snapshot before the import so a bad import is recoverable (G10).
@@ -1522,8 +1522,8 @@ power = "running"
     #[test]
     fn an_import_hot_limit_is_checked_against_the_known_rated_maximum() {
         use canvas_proto::config::EXPORT_SCHEMA;
-        // A 9800X3D's 95 Â°C maximum allows a 85 Â°C CPU limit (max settable 88 Â°C);
-        // the 89 Â°C fallback ceiling (max settable 82 Â°C) refuses it.
+        // A 9800X3D's 95 °C maximum allows a 85 °C CPU limit (max settable 88 °C);
+        // the 89 °C fallback ceiling (max settable 82 °C) refuses it.
         let fans = canvas_proto::config::FansFile {
             hot_limits: canvas_proto::fans::HotLimits { cpu_c: Some(85.0), gpu_c: None, board_c: None },
             ..Default::default()
@@ -1535,15 +1535,15 @@ power = "running"
         let bundle = ExportBundle { schema_version: EXPORT_SCHEMA, fans: export.fans, ..export };
         assert!(
             validate_bundle_rated(&bundle, &[], Some(95.0), None).is_ok(),
-            "85 Â°C is inside the 95 Â°C part's settable range"
+            "85 °C is inside the 95 °C part's settable range"
         );
         assert!(
             validate_bundle_rated(&bundle, &[], None, None).is_err(),
-            "85 Â°C is past the fallback 89 Â°C ceiling gap"
+            "85 °C is past the fallback 89 °C ceiling gap"
         );
         assert!(
             validate_bundle(&bundle).is_err(),
-            "the fallback path refuses 85 Â°C"
+            "the fallback path refuses 85 °C"
         );
     }
 

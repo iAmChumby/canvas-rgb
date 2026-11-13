@@ -6,7 +6,6 @@ import { CMD_GET_API_CONFIG } from "@/proto/tauri";
 import { EffectsView } from "@/views/EffectsView";
 import { FansView } from "@/views/FansView";
 import { SettingsView } from "@/views/SettingsView";
-import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 // The loads that do not end: a retry whose request never answers, and a refresh that fails
 // after the content is on screen.
@@ -160,4 +159,5 @@ describe("a refresh that fails after the content is on screen", () => {
   });
 
 });
+
 

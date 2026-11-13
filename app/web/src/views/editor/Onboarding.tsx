@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useEffect } from "react";
 import { api } from "@/lib/endpoints";
@@ -18,10 +18,8 @@ import s from "@/views/editor/onboarding.module.css";
  * there is nothing to map, place or match. The window takes over the shell while it is open.
  */
 export function Onboarding({
-  devices,
   onDone,
 }: {
-  devices: DeviceInfo[] | null;
   /** The owner left the hello: the onboarding is over, and the page behind shows. */
   onDone: () => void;
 }) {
@@ -61,3 +59,4 @@ export function Onboarding({
     </div>
   );
 }
+

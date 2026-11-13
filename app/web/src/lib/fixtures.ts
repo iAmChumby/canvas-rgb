@@ -548,7 +548,7 @@ export const DEMO_LIGHTS: LightView[] = DEVICES.flatMap((device) =>
       },
       led_count: zone.led_count,
       connected: device.connected,
-      label: `${device.name} Â· ${zone.name}`,
+      label: `${device.name} · ${zone.name}`,
     };
   }),
 );

@@ -1,4 +1,4 @@
-//! The tray icon, its menu, tooltip and warning icon, and the poll that keeps them current.
+﻿//! The tray icon, its menu, tooltip and warning icon, and the poll that keeps them current.
 //!
 //! One background thread polls the daemon every `POLL_INTERVAL`, and every action calls
 //! `refresh` too. A refresh rebuilds the menu only when the snapshot changed, so an open menu
@@ -37,7 +37,8 @@ pub struct Snapshot {
     pub daemon: bool,
     /// Lighting power is running (not paused).
     pub running: bool,
-    pub active_effect: Option<String>,
+    /// The effects the active scene plays: a favorite any of them names is ticked.
+    pub active_effects: Vec<String>,
     /// Favorite effects as `(id, name)`. `None` when the effects list could not be read.
     pub favorites: Option<Vec<(String, String)>>,
     /// The fan profile menu data. `None` when the fan service did not answer (503).
@@ -70,7 +71,7 @@ impl Snapshot {
         Snapshot {
             daemon: false,
             running: false,
-            active_effect: None,
+            active_effects: Vec::new(),
             favorites: None,
             fans: None,
             fan_service_down: false,
@@ -183,12 +184,12 @@ pub fn refresh<R: Runtime>(app: &AppHandle<R>) -> bool {
     snap.daemon
 }
 
-/// Opens the editor on Layout for the onboarding, now. Used for `--onboard`, which does not
+/// Opens the editor on Scenes for the onboarding, now. Used for `--onboard`, which does not
 /// count toward the auto-open limit. It marks this run as opened, so the poll does not open
 /// the window a second time.
 pub fn open_onboarding<R: Runtime>(app: &AppHandle<R>) {
     app.state::<TrayState>().onboarding_opened.store(true, Ordering::SeqCst);
-    editor::open(app, Some("layout"));
+    editor::open(app, Some("scenes"));
 }
 
 /// The poll path: the first successful poll that reports `onboarding_complete == false` opens
@@ -211,7 +212,7 @@ fn auto_open_for_onboarding<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) {
         )),
         Err(e) => log::append(&format!("onboarding: could not save the open counter: {e}")),
     }
-    editor::open(app, Some("layout"));
+    editor::open(app, Some("scenes"));
 }
 
 fn poll() -> Snapshot {
@@ -251,7 +252,7 @@ fn poll() -> Snapshot {
     Snapshot {
         daemon: true,
         running: status.power == Power::Running,
-        active_effect: status.active_effect.clone(),
+        active_effects: status.active_effects.clone(),
         favorites,
         fans,
         fan_service_down: status.service_down_ms.is_some_and(|ms| ms >= PIPE_LOST_WARN_MS),
@@ -413,7 +414,7 @@ fn effects_submenu<R: Runtime>(app: &AppHandle<R>, snap: &Snapshot) -> tauri::Re
             )?)),
             Some(favorites) => {
                 for (id, name) in favorites {
-                    let checked = snap.active_effect.as_deref() == Some(id.as_str());
+                    let checked = snap.active_effects.iter().any(|running| running == id);
                     items.push(Box::new(CheckMenuItem::with_id(
                         app,
                         format!("effect:{id}"),
@@ -717,3 +718,5 @@ mod tests {
         assert_ne!(snap(), b);
     }
 }
+
+

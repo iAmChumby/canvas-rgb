@@ -64,7 +64,6 @@ export function ScenesView() {
   const answered = useSnap((st) => st.scenes);
   const scenesError = useSnap((st) => st.scenesError);
   const retrying = useSnap((st) => st.pending.includes("scenes"));
-  const devices = useSnap((st) => st.devices);
   const [openId, setOpenId] = useState<string | null>(null);
   // The first run's hello (#310): the page behind it is Scenes, so the greeting lives here.
   const [hello, setHello] = useState(() => shouldOpen(getSnap().status));
@@ -257,7 +256,7 @@ export function ScenesView() {
   if (hello) {
     return (
       <div className="onboarding-page">
-        <Onboarding devices={devices} onDone={() => setHello(false)} />
+        <Onboarding onDone={() => setHello(false)} />
       </div>
     );
   }
@@ -282,12 +281,12 @@ export function ScenesView() {
               <span className="rd-scenes-context">
                 <b>{scene.name}</b>
                 {groups.length === 0 ? (
-                  <span className="rd-scenes-counts"> Â· no groups yet</span>
+                  <span className="rd-scenes-counts"> · no groups yet</span>
                 ) : (
                   <span className="rd-scenes-counts">
                     {" "}
-                    Â· {groups.length} {groups.length === 1 ? "group" : "groups"}
-                    {lightsState === "ready" ? ` Â· ${totalLeds} LEDs` : ""}
+                    · {groups.length} {groups.length === 1 ? "group" : "groups"}
+                    {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
                   </span>
                 )}
               </span>
@@ -493,4 +492,5 @@ export function ScenesView() {
     </div>
   );
 }
+
 
