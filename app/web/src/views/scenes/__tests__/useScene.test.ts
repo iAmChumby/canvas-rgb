@@ -895,6 +895,42 @@ describe("useScene", () => {
     expect(body.scene.name).toBe("Second");
   });
 
+  it("a live write refused three times is dropped: it leaves the screen, and no later save carries it", async () => {
+    api.scenes.patchGroupProps.mockRejectedValue(new ApiFailure(500, "http", "the daemon said no"));
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(5));
+    });
+    // Three tries, a throttle window apart, and then the group stops.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
+    expect(result.current.error).toBe("the daemon said no");
+    // The screen shows what the daemon saved, not the refused value.
+    const shownPlays = result.current.scene?.groups[0]?.plays;
+    expect(shownPlays?.type === "effect" ? shownPlays.props : {}).toEqual({});
+
+    // A later save does not carry the refused value, and the group does not try again on its own.
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "Renamed";
+      }, "Rename");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+    const [, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
+    const savedPlays = body.scene.groups[0]?.plays;
+    expect(savedPlays?.type === "effect" ? savedPlays.props : {}).toEqual({});
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
+  });
+
   it("a failed write leaves nothing on the undo stack", async () => {
     api.scenes.put.mockRejectedValueOnce(new ApiFailure(500, "http", "the daemon said no"));
     const { result } = renderHook(() => useScene());

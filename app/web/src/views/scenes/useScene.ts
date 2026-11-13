@@ -709,6 +709,20 @@ export function useScene(): UseScene {
         // The write did not land. The value that came while it was out still goes: a failed
         // write must not take the next value with it.
         g.failures += 1;
+        if (g.failures < LIVE_FAILURES) {
+          // Try again after the throttle, with the value that did not land, unless the user has
+          // moved on since (then the newer value is the one that goes).
+          if (kind === "props") {
+            if (g.version.props === version && g.queued.props === undefined) g.queued.props = written as Props;
+          } else if (g.version.brightness === version && g.queued.brightness === undefined) {
+            g.queued.brightness = written as number;
+          }
+        } else {
+          // Three tries in a row failed. The refused values leave the queue and the screen, so
+          // nothing shows as saved that is not, and no later save carries them. The error stays.
+          g.queued = {};
+          g.shown = {};
+        }
         fail(messageOf(failure));
       } else {
         g.failures = 0;
