@@ -37,6 +37,94 @@ pub fn color_report(c: Rgb8) -> [u8; REPORT_LEN] {
     r
 }
 
+// ---------------------------------------------------------------- per-key reports (#311)
+//
+// Everything below comes from other people's notes, none of it from this keyboard: see
+// `docs/adapters.md`, "ROYUAN MonsGeek (3151:4015): per-key colours", for each byte, its source
+// and its status. These builders are pure and are used only by the tests and by #312; the
+// driver (`write_frame`) does not send them yet.
+//
+// The one per-key path the sources show for the yc500 firmware family is a *stored* picture: seven
+// `SET_USERPIC` (0x0C) reports upload 128 slots of colour into the keyboard's flash, and light
+// mode 13 shows it. It is not a live stream. The sources disagree on whether it works on stock
+// firmware, so nothing here is checked on the device.
+
+/// Colour slots in one picture: 128 on the yc500 family, three bytes each.
+pub const PER_KEY_SLOTS: usize = 128;
+/// Bytes in one picture: `PER_KEY_SLOTS` * 3.
+pub const PER_KEY_BYTES: usize = PER_KEY_SLOTS * 3;
+/// Reports in one picture upload.
+pub const PER_KEY_PAGES: usize = 7;
+/// Picture bytes in one report (the last report carries the remaining 48).
+pub const PER_KEY_PAGE_DATA: usize = 56;
+/// Rows in the key matrix; the slot order runs down each column.
+pub const KEY_ROWS: usize = 6;
+/// Columns in the key matrix: 128 slots in columns of 6, rounded up.
+pub const KEY_COLS: usize = PER_KEY_SLOTS.div_ceil(KEY_ROWS);
+
+const SET_USERPIC: u8 = 0x0C;
+const SET_LEDPARAM: u8 = 0x07;
+const MODE_USER_PICTURE: u8 = 13;
+
+/// The slot a key has in a picture: the matrix runs down each column, six rows to a column.
+///
+/// `row` 0 is the top row. The slot is `col * 6 + row`. Which key sits at which row and column
+/// is per board (the table in `docs/adapters.md`).
+pub fn key_slot(row: usize, col: usize) -> usize {
+    col * KEY_ROWS + row
+}
+
+/// The row and column of a slot, the inverse of [`key_slot`].
+pub fn slot_position(slot: usize) -> (usize, usize) {
+    (slot % KEY_ROWS, slot / KEY_ROWS)
+}
+
+/// The sum-complement checksum the family uses: `0xFF - (sum & 0xFF)`.
+fn complement(sum: u32) -> u8 {
+    0xFF - (sum & 0xFF) as u8
+}
+
+/// One report of the stored-picture upload: report `page` (0 to 6) of `frame`.
+///
+/// `frame` holds the colour of each slot in slot order; slots past its end go out black.
+/// Layout of the 65 bytes (index 0 is the report id): `[0]` 0x00, `[1]` 0x0C, `[2]` 0x00,
+/// `[3]` 0x80 and `[4]` 0x01 (the length 384, little-endian), `[5]` page, `[6]` and `[7]`
+/// 0x00, `[8]` checksum over `[1..=7]`, `[9..]` up to 56 bytes of R, G, B per slot, in slot
+/// order, zero-padded. Page 6 carries 48 bytes.
+pub fn per_key_report(page: usize, frame: &[Rgb8]) -> [u8; REPORT_LEN] {
+    assert!(page < PER_KEY_PAGES, "a picture has {PER_KEY_PAGES} reports");
+    let mut r = [0u8; REPORT_LEN];
+    r[1] = SET_USERPIC;
+    r[3] = (PER_KEY_BYTES & 0xFF) as u8;
+    r[4] = (PER_KEY_BYTES >> 8) as u8;
+    r[5] = page as u8;
+    r[8] = complement(r[1..8].iter().map(|b| u32::from(*b)).sum());
+    let start = page * PER_KEY_PAGE_DATA;
+    let end = (start + PER_KEY_PAGE_DATA).min(PER_KEY_BYTES);
+    for (i, byte) in (start..end).enumerate() {
+        let c = frame.get(byte / 3).copied().unwrap_or(Rgb8::BLACK);
+        r[9 + i] = [c.r, c.g, c.b][byte % 3];
+    }
+    r
+}
+
+/// All seven reports of one picture upload, in the order they are sent.
+pub fn per_key_reports(frame: &[Rgb8]) -> [[u8; REPORT_LEN]; PER_KEY_PAGES] {
+    std::array::from_fn(|page| per_key_report(page, frame))
+}
+
+/// The report that shows the stored picture: light mode 13 ("User Picture").
+///
+/// Layout: `[1]` 0x07, `[2]` 0x0D, `[3]` speed 3, `[4]` brightness 4, `[5]` 0x00 (the
+/// picture slot is the high nibble: slot 0), `[6]` 0x00, `[7]` 0xC8, `[8]` 0xC8 and `[9]`
+/// the checksum over `[1..=8]`. The firmware ignores the colour bytes in this mode.
+pub fn user_picture_mode_report() -> [u8; REPORT_LEN] {
+    let mut r = [0u8; REPORT_LEN];
+    r[1..9].copy_from_slice(&[SET_LEDPARAM, MODE_USER_PICTURE, 3, 4, 0, 0, 0xC8, 0xC8]);
+    r[9] = complement(r[1..9].iter().map(|b| u32::from(*b)).sum());
+    r
+}
+
 fn device_id() -> DeviceId {
     DeviceId(format!("royuan:{VENDOR_ID:04x}:{PRODUCT_ID:04x}"))
 }
@@ -301,12 +389,78 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// The keyboard's colour memory as the fake models it (#311): the stored picture the
+    /// per-key reports fill in, page by page, and the light mode the last mode report set.
+    struct Picture {
+        bytes: [u8; PER_KEY_BYTES],
+        seen: [bool; PER_KEY_PAGES],
+        /// Pictures that arrived whole (all seven pages).
+        complete: u32,
+        /// The light mode the last valid `SET_LEDPARAM` named.
+        mode: Option<u8>,
+    }
+
+    impl Default for Picture {
+        fn default() -> Self {
+            Self { bytes: [0; PER_KEY_BYTES], seen: [false; PER_KEY_PAGES], complete: 0, mode: None }
+        }
+    }
+
+    impl Picture {
+        /// The colour of each slot, in slot order.
+        fn keys(&self) -> Vec<Rgb8> {
+            self.bytes.chunks(3).map(|c| Rgb8::new(c[0], c[1], c[2])).collect()
+        }
+
+        /// Takes one report the way the documented firmware would: the checksum, the header
+        /// and the page are checked, and a bad report changes nothing.
+        fn accept(&mut self, data: &[u8]) -> Result<(), String> {
+            if data.len() != REPORT_LEN || data[0] != 0 {
+                return Err(format!("report is {} bytes, wanted {REPORT_LEN} with id 0", data.len()));
+            }
+            match data[1] {
+                SET_USERPIC => {
+                    let sum: u32 = data[1..8].iter().map(|b| u32::from(*b)).sum();
+                    if data[8] != complement(sum) {
+                        return Err("bad checksum".into());
+                    }
+                    let (len, page) = (usize::from(data[3]) | usize::from(data[4]) << 8, usize::from(data[5]));
+                    if data[2] != 0 || len != PER_KEY_BYTES || page >= PER_KEY_PAGES || data[6] != 0 || data[7] != 0 {
+                        return Err(format!("bad picture header (length {len}, page {page})"));
+                    }
+                    let start = page * PER_KEY_PAGE_DATA;
+                    let n = PER_KEY_PAGE_DATA.min(PER_KEY_BYTES - start);
+                    if data[9 + n..].iter().any(|b| *b != 0) {
+                        return Err("bytes past the page's data are not zero".into());
+                    }
+                    self.bytes[start..start + n].copy_from_slice(&data[9..9 + n]);
+                    self.seen[page] = true;
+                    if self.seen.iter().all(|s| *s) {
+                        self.complete += 1;
+                        self.seen = [false; PER_KEY_PAGES];
+                    }
+                    Ok(())
+                }
+                SET_LEDPARAM => {
+                    let sum: u32 = data[1..9].iter().map(|b| u32::from(*b)).sum();
+                    if data[9] != complement(sum) {
+                        return Err("bad checksum".into());
+                    }
+                    self.mode = Some(data[2]);
+                    Ok(())
+                }
+                _ => Ok(()),
+            }
+        }
+    }
+
     #[derive(Default)]
     struct Shared {
         sent: Vec<Vec<u8>>,
         opens: u32,
         present: bool,
         fail_next_send: bool,
+        picture: Picture,
     }
 
     struct FakeOpener(Arc<Mutex<Shared>>);
@@ -319,6 +473,7 @@ mod tests {
                 s.fail_next_send = false;
                 return Err("unplugged".into());
             }
+            s.picture.accept(data)?;
             s.sent.push(data.to_vec());
             Ok(())
         }
@@ -500,6 +655,125 @@ mod tests {
         let g = s.lock().unwrap();
         assert_eq!(g.opens, 2);
         assert_eq!(direct_count(&g), 2);
+    }
+
+    /// A frame with a distinct colour in every slot: red is the slot index, so no two match.
+    fn distinct_frame() -> Vec<Rgb8> {
+        (0..PER_KEY_SLOTS).map(|i| Rgb8::new(i as u8, 255 - i as u8, (i as u8).wrapping_mul(2))).collect()
+    }
+
+    /// Opens the fake the way the adapter does and returns its transport.
+    fn open_fake(shared: &Arc<Mutex<Shared>>) -> Box<dyn Transport> {
+        FakeOpener(shared.clone()).open().unwrap().unwrap()
+    }
+
+    #[test]
+    fn per_key_report_bytes_and_checksum_for_a_known_frame() {
+        // LED 9 red and LED 40 blue, the rest black: the frame the issue's device check sends.
+        let mut frame = vec![Rgb8::BLACK; PER_KEY_SLOTS];
+        frame[9] = Rgb8::new(255, 0, 0);
+        frame[40] = Rgb8::new(0, 0, 255);
+        let reports = per_key_reports(&frame);
+        assert_eq!(reports.len(), 7);
+        for (page, r) in reports.iter().enumerate() {
+            assert_eq!(r.len(), 65);
+            // [id, opcode, 0, len lo, len hi, page, 0, 0, checksum]; 0xFF - (0x0C + 0x80 + 0x01 + page).
+            let ck = 0x72 - page as u8;
+            assert_eq!(&r[..9], &[0x00, 0x0C, 0x00, 0x80, 0x01, page as u8, 0x00, 0x00, ck], "page {page}");
+        }
+        // Slot 9 is bytes 27..30 of the picture: the first report, data starting at byte 9.
+        assert_eq!(&reports[0][9 + 27..9 + 30], &[255, 0, 0]);
+        // Slot 40 is bytes 120..123: report 2 (bytes 112..168), offset 8; blue is the last of the three.
+        assert_eq!(&reports[2][9 + 8..9 + 11], &[0, 0, 255]);
+        // Every other data byte is zero.
+        let lit: usize = reports.iter().flat_map(|r| r[9..].iter()).filter(|b| **b != 0).count();
+        assert_eq!(lit, 2);
+        // The last report carries 48 bytes, then zeros.
+        assert_eq!(reports[6][8], 0x6C, "checksum of page 6");
+        assert!(reports[6][9 + 48..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn per_key_report_pads_a_short_frame_with_black() {
+        let reports = per_key_reports(&[Rgb8::new(1, 2, 3)]);
+        assert_eq!(&reports[0][9..13], &[1, 2, 3, 0]);
+        assert!(reports.iter().all(|r| r.len() == 65));
+    }
+
+    #[test]
+    fn user_picture_mode_bytes_and_checksum() {
+        let r = user_picture_mode_report();
+        assert_eq!(&r[..10], &[0x00, 0x07, 0x0D, 0x03, 0x04, 0x00, 0x00, 0xC8, 0xC8, 0x54]);
+        assert!(r[10..].iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn fake_decodes_a_full_frame_of_distinct_colours_to_the_right_keys() {
+        let (_, shared) = rig(true);
+        let mut dev = open_fake(&shared);
+        let frame = distinct_frame();
+        for r in per_key_reports(&frame) {
+            dev.send_feature(&r).unwrap();
+        }
+        dev.send_feature(&user_picture_mode_report()).unwrap();
+        let g = shared.lock().unwrap();
+        assert_eq!(g.picture.complete, 1);
+        assert_eq!(g.picture.keys(), frame);
+        assert_eq!(g.picture.mode, Some(13));
+        // Spot checks by index, so a shifted decode cannot match by accident.
+        assert_eq!(g.picture.keys()[0], Rgb8::new(0, 255, 0));
+        assert_eq!(g.picture.keys()[55], Rgb8::new(55, 200, 110));
+        assert_eq!(g.picture.keys()[127], Rgb8::new(127, 128, 254));
+    }
+
+    #[test]
+    fn fake_refuses_a_bad_per_key_report_and_keeps_the_picture() {
+        let (_, shared) = rig(true);
+        let mut dev = open_fake(&shared);
+        let mut r = per_key_report(0, &[Rgb8::new(9, 9, 9)]);
+        r[8] ^= 1;
+        assert_eq!(dev.send_feature(&r).unwrap_err(), "bad checksum");
+        let mut wrong_page = per_key_report(0, &[]);
+        wrong_page[5] = 7;
+        wrong_page[8] = complement(wrong_page[1..8].iter().map(|b| u32::from(*b)).sum());
+        assert!(dev.send_feature(&wrong_page).unwrap_err().starts_with("bad picture header"));
+        assert!(dev.send_feature(&r[..64]).is_err());
+        let g = shared.lock().unwrap();
+        assert!(g.sent.is_empty(), "refused reports are not recorded");
+        assert!(g.picture.keys().iter().all(|c| *c == Rgb8::BLACK));
+        assert_eq!(g.picture.complete, 0);
+    }
+
+    #[test]
+    fn a_picture_with_a_page_missing_is_not_complete() {
+        let (_, shared) = rig(true);
+        let mut dev = open_fake(&shared);
+        let frame = distinct_frame();
+        for (page, r) in per_key_reports(&frame).iter().enumerate() {
+            if page != 3 {
+                dev.send_feature(r).unwrap();
+            }
+        }
+        assert_eq!(shared.lock().unwrap().picture.complete, 0);
+        dev.send_feature(&per_key_report(3, &frame)).unwrap();
+        assert_eq!(shared.lock().unwrap().picture.complete, 1);
+    }
+
+    #[test]
+    fn slots_run_down_each_column() {
+        assert_eq!(key_slot(0, 0), 0);
+        assert_eq!(key_slot(5, 0), 5);
+        assert_eq!(key_slot(0, 1), 6);
+        // The two keys confirmed on a FUN60 Pro by the monsgeek-rgb notes (A = 9, B = 40) are the
+        // second column's home-row key and the seventh column's bottom-letter-row key.
+        assert_eq!(slot_position(9), (3, 1));
+        assert_eq!(slot_position(40), (4, 6));
+        for slot in 0..PER_KEY_SLOTS {
+            let (row, col) = slot_position(slot);
+            assert_eq!(key_slot(row, col), slot);
+            assert!(col < KEY_COLS);
+        }
+        assert_eq!(KEY_COLS, 22);
     }
 
     #[tokio::test]
