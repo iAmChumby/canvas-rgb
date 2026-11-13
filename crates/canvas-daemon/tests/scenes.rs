@@ -52,21 +52,43 @@ impl Drop for TempHome {
     }
 }
 
-/// A sink that keeps the last frame it is given.
+/// The most frames a [`Rec`] keeps; the oldest go first.
+const REC_HISTORY: usize = 4096;
+
+/// A sink that keeps every frame it is given (the newest [`REC_HISTORY`]) and counts them.
 #[derive(Default)]
 struct Rec {
-    last: Mutex<Option<Vec<Rgb8>>>,
+    frames: Mutex<std::collections::VecDeque<Vec<Rgb8>>>,
+    seen: std::sync::atomic::AtomicUsize,
 }
 
 impl Rec {
     fn last(&self) -> Option<Vec<Rgb8>> {
-        self.last.lock().unwrap_or_else(|e| e.into_inner()).clone()
+        self.frames.lock().unwrap_or_else(|e| e.into_inner()).back().cloned()
+    }
+
+    /// How many frames the sink has been handed so far.
+    fn seen(&self) -> usize {
+        self.seen.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// The frames handed over after the first `since` of them.
+    fn since(&self, since: usize) -> Vec<Vec<Rgb8>> {
+        let frames = self.frames.lock().unwrap_or_else(|e| e.into_inner());
+        let total = self.seen();
+        let kept_from = total - frames.len();
+        frames.iter().skip(since.saturating_sub(kept_from)).cloned().collect()
     }
 }
 
 impl FrameSink for Rec {
     fn submit(&self, colors: Vec<Rgb8>) {
-        *self.last.lock().unwrap_or_else(|e| e.into_inner()) = Some(colors);
+        let mut frames = self.frames.lock().unwrap_or_else(|e| e.into_inner());
+        if frames.len() == REC_HISTORY {
+            frames.pop_front();
+        }
+        frames.push_back(colors);
+        self.seen.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -170,6 +192,14 @@ async fn rig_with(scenes: ScenesFile) -> Rig {
 
 /// [`rig_with`] with HTML effect files in the daemon's effects folder.
 async fn rig_in(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
+    let rig = rig_unstarted(scenes, html).await;
+    // The way start-up applies the saved scenes.
+    canvas_daemon::scenes::restore_active(&rig.app).await;
+    rig
+}
+
+/// The rig before start-up has run: the engine has its device sinks and nothing else.
+async fn rig_unstarted(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
     let home = TempHome::new();
     let effects = home.path.join("effects");
     std::fs::create_dir_all(&effects).expect("the effects folder is created");
@@ -201,7 +231,6 @@ async fn rig_in(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
     let (a, b) = (Arc::new(Rec::default()), Arc::new(Rec::default()));
     engine.add_sink(DeviceId(A.into()), a.clone());
     engine.add_sink(DeviceId(B.into()), b.clone());
-    canvas_daemon::scenes::apply_active(&app, false).await;
     Rig { router: canvas_daemon::api::router(app.clone()), app, a, b, home }
 }
 
@@ -245,6 +274,18 @@ async fn send_on(
 
 fn route(template: &str, pairs: &[(&str, &str)]) -> String {
     pairs.iter().fold(template.to_string(), |path, (key, value)| path.replace(&format!("{{{key}}}"), value))
+}
+
+/// Like [`shows`], for a frame that arrived after the first `since` frames of the sink.
+async fn shows_after(sink: &Rec, since: usize, want: Rgb8, what: &str) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if sink.since(since).iter().any(|f| f.len() == LEDS as usize && f.iter().all(|c| *c == want)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what}: no frame after #{since} showed {want:?}");
 }
 
 /// Waits (real time) until `sink`'s newest frame has `leds` LEDs that are all `want`.
@@ -333,13 +374,16 @@ async fn stale_rev_is_a_conflict() {
 #[tokio::test]
 async fn a_light_in_two_groups_is_a_422() {
     let rig = rig().await;
-    let mut scene = stored(&rig, "main").await;
+    let before = stored(&rig, "main").await;
+    let mut scene = before.clone();
     scene.groups[1].members.push("fake:a#z0".into());
     let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     assert_eq!(answer["error"], "validation");
-    assert_eq!(stored(&rig, "main").await.rev, 1, "refused: nothing changed");
+    assert_eq!(stored(&rig, "main").await, before, "refused: the stored groups are as they were");
+    let on_disk = rig.home.path.join("scenes.json");
+    assert!(!on_disk.exists(), "refused: nothing was written");
 }
 
 #[tokio::test]
@@ -586,10 +630,15 @@ async fn flash_lights_the_named_lights_and_blacks_the_rest_then_restores() {
     let (status, _) = send(&rig, "POST", routes::LIGHTS_FLASH, Some(body)).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
 
-    // Stop restores the normal frames; so does silence past the watchdog.
+    // Stop restores the normal frames: the device sinks show the scene again, in frames that came
+    // after the stop (the flag alone proves nothing about the lights).
+    let (a_seen, b_seen) = (rig.a.seen(), rig.b.seen());
     let (status, _) = send(&rig, "POST", routes::LIGHTS_FLASH, Some(serde_json::json!({ "stop": true }))).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(!rig.app.identify.is_active(), "the engine's frames flow again");
+    assert!(!rig.app.identify.is_active(), "the override is released");
+    shows_after(&rig.a, a_seen, rgb(RED), "A after the flash").await;
+    shows_after(&rig.b, b_seen, rgb(BLUE), "B after the flash").await;
+    // Silence past the watchdog restores too.
 
     let body = serde_json::json!({ "lights": ["fake:b#z0"] });
     send(&rig, "POST", routes::LIGHTS_FLASH, Some(body)).await;
@@ -650,51 +699,19 @@ fn placed(id: &str, x: f32) -> canvas_proto::layout::PlacedZone {
 /// `scenes.json` are written from the layouts and the devices present.
 #[tokio::test(start_paused = true)]
 async fn the_wait_timer_writes_the_scenes_when_a_placed_device_never_arrives() {
-    use canvas_proto::layout::{CaseForm, Layout, RenderScale, SamplingMode};
-    let home = TempHome::new();
-    let layouts = canvas_proto::config::LayoutsFile {
-        schema_version: canvas_proto::config::LAYOUTS_SCHEMA,
-        active: "desk".into(),
-        layouts: vec![Layout {
-            id: "desk".into(),
-            name: "Desk".into(),
-            render_scale: RenderScale::P100,
-            sampling: SamplingMode::AreaAverage,
-            zones: vec![placed(A, 0.0), placed("fake:gone", 160.0)],
-            effect: None,
-            case_form: CaseForm::None,
-            landmarks: Vec::new(),
-        }],
-    };
-    std::fs::write(home.path.join("layouts.json"), serde_json::to_vec(&layouts).unwrap()).unwrap();
-    let mut store = canvas_daemon::storage::Store::load_from(&home.path);
-    assert!(store.scenes_pending.is_some(), "no scenes.json: the migration is held");
-    store.config.first_run_done = true;
-    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let app = Arc::new(App::new(
-        store,
-        Arc::new(common::FakeEngine::default()),
-        Box::new(FakeAdapter::default()),
-        TOKEN.to_string(),
-        "0.0.0-test".to_string(),
-        tx,
-    ));
+    let (app, _router, home, layouts) = held_app().await;
 
     canvas_daemon::device_sync::apply_devices(&app, vec![device(A)]).await;
     assert!(app.store.read().await.scenes_pending.is_some(), "fake:gone is placed and absent: it waits");
     assert!(!home.path.join("scenes.json").exists() && !home.path.join("lights.json").exists());
 
-    tokio::time::sleep(Duration::from_secs(30)).await;
-    assert!(app.store.read().await.scenes_pending.is_some(), "30 s in, still waiting");
-
-    // Past the 60 s wait (plus the timer's 50 ms): the timer settles it with the devices present.
-    tokio::time::sleep(Duration::from_secs(31)).await;
-    for _ in 0..20 {
-        if app.store.read().await.scenes_pending.is_none() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_secs(1)).await;
-    }
+    // The wait is 60 s (SCENES_DEVICE_WAIT) and the timer adds 50 ms: at 59 s the scenes are still
+    // held, at 61 s they are written, with the devices present.
+    assert_eq!(canvas_daemon::storage::SCENES_DEVICE_WAIT, Duration::from_secs(60));
+    tokio::time::sleep(Duration::from_secs(59)).await;
+    assert!(app.store.read().await.scenes_pending.is_some(), "59 s in, still waiting");
+    assert!(!home.path.join("scenes.json").exists());
+    tokio::time::sleep(Duration::from_secs(2)).await;
     let store = app.store.read().await;
     assert!(store.scenes_pending.is_none(), "the timer wrote the scenes");
     assert!(home.path.join("scenes.json").exists() && home.path.join("lights.json").exists());
@@ -750,16 +767,29 @@ async fn light_patch_renames_and_sets_ring_and_the_engine_follows() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 
-    // A ring reads the gradient round a circle: the strip's red and blue ends are gone.
-    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::json!({ "arrangement": "ring" }))).await;
+    // A ring reads the gradient round a circle. LED j sits 30 degrees * j clockwise from the top,
+    // and the gradient depends on x alone, so the 12 LEDs fall into 7 colours by their x: the two
+    // that share a side, top and bottom, the left and right extremes. The classes below are those
+    // from the left (LED 9) to the right (LED 3); each class is one colour, and the colour runs
+    // from red to blue across them.
+    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::json!({ "arrangement": "ring", "reversed": false }))).await;
     assert_eq!(status, StatusCode::OK);
     let start = Instant::now();
-    loop {
-        if first(&rig).is_some_and(|(head, tail)| head.b < 255 && tail.r < 200 && head.r > 0 && tail.b > 0) {
-            break;
+    let ring = loop {
+        // On a strip LED 0 and LED 6 differ (opposite ends of the gradient); on a ring they share an x.
+        if let Some(f) = rig.a.last().filter(|f| f.len() == LEDS as usize && f[0] == f[6] && f[9] != f[3]) {
+            break f;
         }
-        assert!(start.elapsed() < Duration::from_secs(20), "the engine never read the light as a ring: {:?}", first(&rig));
+        assert!(start.elapsed() < Duration::from_secs(20), "the engine never read the light as a ring: {:?}", rig.a.last());
         tokio::time::sleep(Duration::from_millis(10)).await;
+    };
+    let classes: [&[usize]; 7] = [&[9], &[8, 10], &[7, 11], &[6, 0], &[5, 1], &[4, 2], &[3]];
+    for class in classes {
+        assert!(class.iter().all(|&j| ring[j] == ring[class[0]]), "LEDs {class:?} share an x, so one colour: {ring:?}");
+    }
+    for pair in classes.windows(2) {
+        let (left, right) = (ring[pair[0][0]], ring[pair[1][0]]);
+        assert!(left.r > right.r && left.b < right.b, "from LED {:?} to LED {:?} the gradient runs red to blue: {left:?} then {right:?}", pair[0], pair[1]);
     }
 }
 
@@ -1195,12 +1225,12 @@ async fn activate_in_scene_mode_never_writes_the_starting_values() {
     let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", "solid")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     shows(&rig.a, rgb((0, 150, 150)), "the group plays the values it was given").await;
-    assert!(rig.app.store.read().await.effects.saved.get("solid").is_none(), "no starting values were written");
+    assert!(!rig.app.store.read().await.effects.saved.contains_key("solid"), "no starting values were written");
     assert!(!rig.home.path.join("effects.json").exists(), "effects.json was never written");
     // The route that does write them still does.
     let (status, _) = send(&rig, "PATCH", &route(routes::EFFECT_DEFAULTS, &[("id", "solid")]), Some(serde_json::to_value(color(GREEN)).unwrap())).await;
     assert_eq!(status, StatusCode::OK);
-    assert!(rig.app.store.read().await.effects.saved.get("solid").is_some());
+    assert!(rig.app.store.read().await.effects.saved.contains_key("solid"));
 }
 
 /// An activate with no values starts from the effect's saved starting values.
@@ -1297,7 +1327,8 @@ async fn put_scene_refuses_empty_names() {
     let rig = rig().await;
     let path = route(routes::SCENE, &[("id", "main")]);
     let before = stored(&rig, "main").await;
-    let cases: [(&str, Box<dyn Fn(&mut Scene)>); 4] = [
+    type Change = Box<dyn Fn(&mut Scene)>;
+    let cases: [(&str, Change); 4] = [
         ("an empty scene name", Box::new(|s| s.name = "   ".into())),
         ("an empty group name", Box::new(|s| s.groups[0].name = String::new())),
         ("a long scene name", Box::new(|s| s.name = "n".repeat(SCENE_NAME_MAX + 1))),
@@ -1382,4 +1413,81 @@ async fn a_save_that_cannot_build_leaves_the_store_and_the_engine_agreeing() {
     let list: ScenesResponse = serde_json::from_value(send(&rig, "GET", routes::SCENES, None).await.1).unwrap();
     let left = list.group_states.iter().find(|g| g.id == "left").unwrap();
     assert!(left.failed.as_deref().is_some_and(|why| why.contains("not-there")), "named: {left:?}");
+}
+
+// ---------------------------------------------------------------- the rest of the plan's rules (fix pass)
+
+/// The status names the active scene's effects once each, and only the active scene's.
+#[tokio::test]
+async fn status_lists_each_active_effect_once_and_only_from_the_active_scene() {
+    let mut scenes = scenes_file();
+    scenes.scenes[1].groups[0].plays = plays("gradient");
+    let rig = rig_with(scenes).await;
+    let effects = |rig: &Rig| {
+        let app = Arc::clone(&rig.app);
+        async move { app.status().await.active_effects }
+    };
+    // Two groups play solid and the other scene plays gradient: one entry, no gradient.
+    assert_eq!(effects(&rig).await, vec!["solid".to_string()]);
+    // A second effect in the active scene is a second entry, in the scene's order.
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[1].plays = plays("gradient");
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(effects(&rig).await, vec!["solid".to_string(), "gradient".to_string()]);
+}
+
+/// A scene change fades: frames between the old and the new colour reach the device.
+#[tokio::test]
+async fn setting_a_scene_fades_through_frames_between_the_two() {
+    let rig = rig().await;
+    shows(&rig.a, rgb(RED), "main").await;
+    let seen = rig.a.seen();
+    let (status, _) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    shows(&rig.a, rgb(GREEN), "other").await;
+    let blended = rig.a.since(seen).into_iter().any(|f| f.iter().all(|c| c.r > 0 && c.r < 200 && c.g > 0 && c.g < 200));
+    assert!(blended, "no frame between red and green was sent: {:?}", rig.a.since(seen).iter().map(|f| f[0]).collect::<Vec<_>>());
+}
+
+/// Start-up: the saved active scene plays through the same function `main` calls, with no fade, and
+/// a group whose effect is gone is dark and named.
+#[tokio::test]
+async fn start_up_applies_the_active_scene() {
+    let mut scenes = scenes_file();
+    scenes.scenes[0].groups[1].plays = plays("html:deleted");
+    let rig = rig_unstarted(scenes, &[]).await;
+    assert!(!rig.app.scene.is_on(), "before start-up the engine runs no scene");
+    canvas_daemon::scenes::restore_active(&rig.app).await;
+    assert!(rig.app.scene.is_on());
+    shows(&rig.a, rgb(RED), "the saved scene's first group").await;
+    shows(&rig.b, Rgb8::BLACK, "the group whose effect is gone is dark").await;
+    assert!(rig.app.scene.failures().get("right").is_some_and(|why| why.contains("deleted")));
+    // No fade at start-up: no frame between the colours the engine has not shown.
+    assert!(rig.a.since(0).iter().all(|f| f.iter().all(|c| *c == rgb(RED) || *c == Rgb8::BLACK)), "no blended frame");
+}
+
+/// In scene mode the legacy layout call stays out of the engine: the groups keep playing.
+#[tokio::test]
+async fn set_layout_stays_out_of_the_engine_in_scene_mode() {
+    use canvas_proto::layout::{CaseForm, Layout, RenderScale, SamplingMode};
+    let rig = rig().await;
+    shows(&rig.a, rgb(RED), "before").await;
+    let layout = Layout {
+        id: "legacy".into(),
+        name: "Legacy".into(),
+        render_scale: RenderScale::P100,
+        sampling: SamplingMode::AreaAverage,
+        zones: vec![placed(A, 0.0), placed(B, 160.0)],
+        effect: None,
+        case_form: CaseForm::None,
+        landmarks: Vec::new(),
+    };
+    let seen = (rig.a.seen(), rig.b.seen());
+    rig.app.set_layout(&layout, &[device(A), device(B)]);
+    let groups: Vec<String> = rig.app.engine.group_states().iter().map(|g| g.id.clone()).collect();
+    assert_eq!(groups, ["left", "right"], "the engine still runs the scene's groups");
+    shows_after(&rig.a, seen.0, rgb(RED), "A keeps its group's colour").await;
+    shows_after(&rig.b, seen.1, rgb(BLUE), "B keeps its group's colour").await;
 }
