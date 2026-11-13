@@ -38,6 +38,13 @@ pub const DEFAULT_SCENE_NAME: &str = "Everything";
 pub const DEFAULT_GROUP_NAME: &str = "Everything";
 /// The most a group's brightness may be.
 pub const GROUP_BRIGHTNESS_MAX: u8 = 100;
+/// The most groups of one scene that may play an HTML effect. Each is a QuickJS runtime whose own
+/// script is the cost (about 5.5 ms a frame for the stock effects, whatever the canvas size); two
+/// keep a 20-group scene inside the frame budget (`docs/benchmark.md`, "Scenes: cost per group").
+/// The same limit as [`crate::stack::STACK_HTML_MAX`]. The daemon also counts a stack's HTML layers.
+pub const SCENE_HTML_MAX: usize = 2;
+/// The id prefix of an HTML effect.
+pub const HTML_EFFECT_PREFIX: &str = "html:";
 
 /// A light's id. Stable across reconnects: it is built from the device id, never from an
 /// adapter index.
@@ -199,10 +206,23 @@ pub enum SceneError {
     DuplicateId { id: String },
     #[error("the brightness of group {group} is over {GROUP_BRIGHTNESS_MAX}")]
     BrightnessRange { group: String },
+    #[error("more than {SCENE_HTML_MAX} groups play an HTML effect")]
+    TooManyHtml { count: usize },
+}
+
+/// How many groups of `scene` play an HTML effect (by id; a stack's own HTML layers are the
+/// daemon's to count).
+pub fn html_groups(scene: &Scene) -> usize {
+    scene
+        .groups
+        .iter()
+        .filter(|g| matches!(&g.plays, Plays::Effect { effect, .. } if effect.starts_with(HTML_EFFECT_PREFIX)))
+        .count()
 }
 
 /// Checks the rules a scene keeps: names fit, group ids are unique, every group has a member,
-/// every member is a known light, and no light is in two groups.
+/// every member is a known light, no light is in two groups, and at most [`SCENE_HTML_MAX`]
+/// groups play an HTML effect.
 pub fn validate_scene(scene: &Scene, lights: &[Light]) -> Result<(), SceneError> {
     if scene.name.chars().count() > SCENE_NAME_MAX {
         return Err(SceneError::NameTooLong { what: format!("scene {}", scene.id) });
@@ -231,6 +251,10 @@ pub fn validate_scene(scene: &Scene, lights: &[Light]) -> Result<(), SceneError>
                 return Err(SceneError::LightTwice { light: member.clone() });
             }
         }
+    }
+    let html = html_groups(scene);
+    if html > SCENE_HTML_MAX {
+        return Err(SceneError::TooManyHtml { count: html });
     }
     Ok(())
 }
@@ -324,6 +348,24 @@ mod tests {
         assert!(matches!(validate_scene(&scene(vec![long_group]), &lights()), Err(SceneError::NameTooLong { .. })));
         let dup = scene(vec![group("g1", &["a"]), group("g1", &["b"])]);
         assert_eq!(validate_scene(&dup, &lights()), Err(SceneError::DuplicateId { id: "g1".into() }));
+    }
+
+    #[test]
+    fn a_third_html_group_is_refused() {
+        let html = |id: &str, member: &str| {
+            let mut g = group(id, &[member]);
+            g.plays = Plays::Effect { effect: format!("html:{id}"), props: Props::new() };
+            g
+        };
+        let mut built_in = group("g4", &["d"]);
+        built_in.plays = Plays::Effect { effect: "aurora".into(), props: Props::new() };
+        let mut ls = lights();
+        ls.push(light("d"));
+        let two = scene(vec![html("g1", "a"), html("g2", "b"), built_in.clone()]);
+        assert_eq!(html_groups(&two), 2);
+        assert_eq!(validate_scene(&two, &ls), Ok(()));
+        let three = scene(vec![html("g1", "a"), html("g2", "b"), html("g3", "c"), built_in]);
+        assert_eq!(validate_scene(&three, &ls), Err(SceneError::TooManyHtml { count: 3 }));
     }
 
     #[test]
