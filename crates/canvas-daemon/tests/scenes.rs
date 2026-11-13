@@ -740,3 +740,271 @@ async fn light_patch_renames_and_sets_ring_and_the_engine_follows() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
 }
+
+// ---------------------------------------------------------------- the light feed (PREVIEW_LIGHTS)
+
+/// A WebSocket client over an in-memory connection: the handshake by hand and the server's frames
+/// (unmasked) read back. The daemon has no WebSocket client crate to lean on, and these few bytes
+/// of framing are all the feed uses.
+#[derive(Debug)]
+struct Ws {
+    stream: tokio::io::DuplexStream,
+    buf: Vec<u8>,
+}
+
+/// What a refused handshake answered.
+#[derive(Debug)]
+struct Refused {
+    status: String,
+    body: String,
+}
+
+impl Ws {
+    /// The handshake. `headers` are extra lines (`Origin: ...`); `host` is the `Host` header.
+    async fn open_with(
+        stream: tokio::io::DuplexStream,
+        target: &str,
+        host: &str,
+        headers: &[&str],
+    ) -> Result<Ws, Refused> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let mut stream = stream;
+        let mut request = format!(
+            "GET {target} HTTP/1.1\r\nHost: {host}\r\nConnection: Upgrade\r\nUpgrade: websocket\r\n\
+             Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n"
+        );
+        for line in headers {
+            request.push_str(line);
+            request.push_str("\r\n");
+        }
+        request.push_str("\r\n");
+        stream.write_all(request.as_bytes()).await.expect("the handshake is written");
+        let mut buf = Vec::new();
+        let head_end = loop {
+            if let Some(at) = buf.windows(4).position(|w| w == b"\r\n\r\n") {
+                break at + 4;
+            }
+            let mut chunk = [0u8; 512];
+            let n = stream.read(&mut chunk).await.expect("the handshake answer is read");
+            assert!(n > 0, "the server closed before it answered");
+            buf.extend_from_slice(&chunk[..n]);
+        };
+        let head = String::from_utf8_lossy(&buf[..head_end]).to_string();
+        let status = head.lines().next().unwrap_or("").to_string();
+        if status.contains(" 101 ") {
+            buf.drain(..head_end);
+            return Ok(Ws { stream, buf });
+        }
+        let length = head
+            .lines()
+            .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+            .unwrap_or(0);
+        while buf.len() < head_end + length {
+            let mut chunk = [0u8; 512];
+            let n = stream.read(&mut chunk).await.expect("the refusal body is read");
+            if n == 0 {
+                break;
+            }
+            buf.extend_from_slice(&chunk[..n]);
+        }
+        Err(Refused { status, body: String::from_utf8_lossy(&buf[head_end..]).to_string() })
+    }
+
+    async fn open(server: &common::MemoryServer, query: &str) -> Result<Ws, Refused> {
+        Self::open_with(server.connect(), &format!("{}{query}", routes::PREVIEW_LIGHTS), "127.0.0.1:9430", &[]).await
+    }
+
+    /// The next frame: `(opcode, payload)`. 1 is text, 2 is binary.
+    async fn frame(&mut self) -> (u8, Vec<u8>) {
+        use tokio::io::AsyncReadExt;
+        loop {
+            if self.buf.len() >= 2 {
+                let opcode = self.buf[0] & 0x0f;
+                let (len, head) = match self.buf[1] & 0x7f {
+                    126 if self.buf.len() >= 4 => (u16::from_be_bytes([self.buf[2], self.buf[3]]) as usize, 4),
+                    127 if self.buf.len() >= 10 => {
+                        (u64::from_be_bytes(self.buf[2..10].try_into().unwrap()) as usize, 10)
+                    }
+                    n @ 0..=125 => (n as usize, 2),
+                    _ => (usize::MAX, 0),
+                };
+                if head > 0 && self.buf.len() >= head + len {
+                    let payload = self.buf[head..head + len].to_vec();
+                    self.buf.drain(..head + len);
+                    return (opcode, payload);
+                }
+            }
+            let mut chunk = [0u8; 4096];
+            let n = tokio::time::timeout(Duration::from_secs(20), self.stream.read(&mut chunk))
+                .await
+                .expect("a frame came within 20 s")
+                .expect("the frame is read");
+            assert!(n > 0, "the server closed the socket");
+            self.buf.extend_from_slice(&chunk[..n]);
+        }
+    }
+
+    /// The next text frame (binary frames are skipped), as JSON.
+    async fn next_index(&mut self) -> serde_json::Value {
+        loop {
+            let (opcode, payload) = self.frame().await;
+            if opcode == 1 {
+                return serde_json::from_slice(&payload).expect("the text frame is the index JSON");
+            }
+        }
+    }
+}
+
+/// A binary light frame: `u16 index, u16 count, count RGB triples`, repeated.
+fn decode_lights(payload: &[u8]) -> Vec<(u16, Vec<Rgb8>)> {
+    let mut out = Vec::new();
+    let mut at = 0;
+    while at < payload.len() {
+        let index = u16::from_le_bytes([payload[at], payload[at + 1]]);
+        let count = u16::from_le_bytes([payload[at + 2], payload[at + 3]]) as usize;
+        at += 4;
+        let colors = payload[at..at + count * 3].chunks(3).map(|c| Rgb8::new(c[0], c[1], c[2])).collect();
+        at += count * 3;
+        out.push((index, colors));
+    }
+    out
+}
+
+#[tokio::test]
+async fn the_light_feed_opens_with_only_a_query_token_and_streams_the_lights() {
+    let rig = rig().await;
+    let server = common::serve_in_memory(rig.router.clone());
+    // A browser sends the token in the query and nothing else.
+    let mut ws = Ws::open(&server, &format!("?token={TOKEN}")).await.expect("the socket opens");
+    let (opcode, first) = ws.frame().await;
+    assert_eq!(opcode, 1, "the first message is text");
+    let index: serde_json::Value = serde_json::from_slice(&first).unwrap();
+    assert_eq!(index, serde_json::json!({ "0": "fake:a#z0", "1": "fake:b#z0" }));
+    // Then binary frames: light A (red) is index 0 and light B (blue) is index 1, 12 LEDs each.
+    let start = Instant::now();
+    loop {
+        let (opcode, payload) = ws.frame().await;
+        if opcode != 2 {
+            continue;
+        }
+        let lights = decode_lights(&payload);
+        let red = vec![rgb(RED); LEDS as usize];
+        let blue = vec![rgb(BLUE); LEDS as usize];
+        if lights.iter().any(|(i, c)| *i == 0 && *c == red) && lights.iter().any(|(i, c)| *i == 1 && *c == blue) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "no frame showed A red and B blue; last {lights:?}");
+    }
+}
+
+#[tokio::test]
+async fn the_light_feed_without_a_token_or_with_a_bad_one_is_a_401_from_the_handler() {
+    let rig = rig().await;
+    let server = common::serve_in_memory(rig.router.clone());
+    let none = Ws::open(&server, "").await.expect_err("no token is refused");
+    assert!(none.status.contains("401"), "{none:?}");
+    assert!(none.body.contains("the light preview needs a token"), "the handler answered, not the guard: {none:?}");
+    let bad = Ws::open(&server, "?token=not-the-token").await.expect_err("a bad token is refused");
+    assert!(bad.status.contains("401"), "{bad:?}");
+    assert!(bad.body.contains("the API token is not valid"), "the handler answered, not the guard: {bad:?}");
+    assert_eq!(rig.app.scene.feed.watchers(), 0, "a refused handshake joins nothing");
+}
+
+#[tokio::test]
+async fn the_light_feed_still_checks_the_origin_and_the_host() {
+    let rig = rig().await;
+    let server = common::serve_in_memory(rig.router.clone());
+    let target = format!("{}?token={TOKEN}", routes::PREVIEW_LIGHTS);
+    let origin = Ws::open_with(server.connect(), &target, "127.0.0.1:9430", &["Origin: http://evil.example"])
+        .await
+        .expect_err("a foreign origin is refused");
+    assert!(origin.status.contains("403") && origin.body.contains("forbidden_origin"), "{origin:?}");
+    let host = Ws::open_with(server.connect(), &target, "evil.example", &[]).await.expect_err("a foreign host is refused");
+    assert!(host.status.contains("403") && host.body.contains("bad_host"), "{host:?}");
+}
+
+#[tokio::test]
+async fn the_light_feed_sends_the_index_again_when_the_scene_or_the_lights_change() {
+    let rig = rig().await;
+    let server = common::serve_in_memory(rig.router.clone());
+    let mut ws = Ws::open(&server, &format!("?token={TOKEN}")).await.expect("the socket opens");
+    assert_eq!(ws.next_index().await.as_object().unwrap().len(), 2);
+
+    // A scene change sends it again.
+    let (status, _) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(ws.next_index().await.as_object().unwrap().len(), 2, "after a scene change");
+
+    // A light that appears is in the next index.
+    {
+        let mut store = rig.app.store.write().await;
+        let mut third = light(A);
+        third.id = "fake:c#z0".into();
+        store.lights.lights.push(third);
+    }
+    rig.app.scene.notify();
+    let index = ws.next_index().await;
+    assert_eq!(index["2"], "fake:c#z0", "after a light change: {index}");
+}
+
+#[tokio::test]
+async fn the_light_feed_takes_a_few_windows_and_answers_503_past_that() {
+    let rig = rig().await;
+    let server = common::serve_in_memory(rig.router.clone());
+    let cap = canvas_daemon::scenes::LIGHT_FEED_MAX_WATCHERS;
+    let mut open = Vec::new();
+    for _ in 0..cap {
+        open.push(Ws::open(&server, &format!("?token={TOKEN}")).await.expect("a window within the cap opens"));
+    }
+    assert_eq!(rig.app.scene.feed.watchers(), cap);
+    let over = Ws::open(&server, &format!("?token={TOKEN}")).await.expect_err("one past the cap is refused");
+    assert!(over.status.contains("503"), "{over:?}");
+    assert_eq!(rig.app.scene.feed.watchers(), cap, "the refused window took no slot");
+    // A window that leaves frees its slot.
+    drop(open.pop());
+    let start = Instant::now();
+    loop {
+        if Ws::open(&server, &format!("?token={TOKEN}")).await.is_ok() {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "the freed slot never came back");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+#[tokio::test]
+async fn a_window_that_stops_reading_loses_its_slot() {
+    let rig = rig().await;
+    rig.app.scene.feed.set_send_timeout(Duration::from_millis(200));
+    let server = common::serve_in_memory(rig.router.clone());
+    // A pipe of 256 bytes each way: the handshake answer and the index fit, the frames do not.
+    let stuck = Ws::open_with(
+        server.connect_with_buffer(256),
+        &format!("{}?token={TOKEN}", routes::PREVIEW_LIGHTS),
+        "127.0.0.1:9430",
+        &[],
+    )
+    .await
+    .expect("the socket opens");
+    assert_eq!(rig.app.scene.feed.watchers(), 1);
+    // `stuck` stays open and unread. The server gives up on it after the send timeout.
+    let start = Instant::now();
+    while rig.app.scene.feed.watchers() != 0 {
+        assert!(start.elapsed() < Duration::from_secs(20), "the stuck window still holds its slot");
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    drop(stuck);
+}
+
+#[tokio::test]
+async fn a_watcher_whose_task_dies_gives_its_slot_back() {
+    let rig = rig().await;
+    let app = Arc::clone(&rig.app);
+    let task = tokio::spawn(async move {
+        let _watch = canvas_daemon::scenes::LightWatch::join(&app).expect("a slot is free");
+        assert_eq!(app.scene.feed.watchers(), 1);
+        panic!("the feed task dies");
+    });
+    assert!(task.await.is_err(), "the task panicked");
+    assert_eq!(rig.app.scene.feed.watchers(), 0, "the guard gave the slot back");
+}

@@ -182,7 +182,16 @@ pub async fn preview_lights(
         )
         .into_response();
     }
-    upgrade.on_upgrade(move |socket| run_lights(socket, app))
+    // The place is taken before the upgrade, so a full feed is answered as a plain 503 the page can
+    // read. The guard is dropped when the session ends however it ends, or when the upgrade fails.
+    let Some(watch) = crate::scenes::LightWatch::join(&app) else {
+        return crate::api::ApiFailure::service_unavailable(format!(
+            "{} editor windows already watch the lights; close one first",
+            crate::scenes::LIGHT_FEED_MAX_WATCHERS
+        ))
+        .into_response();
+    };
+    upgrade.on_upgrade(move |socket| run_lights(socket, app, watch))
 }
 
 /// The light ids by index, in the order of `lights.json`.
@@ -220,8 +229,19 @@ pub fn encode_light_frame(
     (out, missing)
 }
 
-async fn run_lights(mut socket: WebSocket, app: Arc<App>) {
-    let mut frames = app.scene.feed.join(app.engine.as_ref());
+/// Sends `message`, giving up on a window that does not take it within the feed's send timeout.
+/// `false` when the window is gone or too slow to keep.
+async fn send_in_time(socket: &mut WebSocket, app: &App, message: Message) -> bool {
+    match tokio::time::timeout(app.scene.feed.send_timeout(), socket.send(message)).await {
+        Ok(sent) => sent.is_ok(),
+        Err(_) => {
+            tracing::info!("a light preview window did not read; it was dropped");
+            false
+        }
+    }
+}
+
+async fn run_lights(mut socket: WebSocket, app: Arc<App>, mut watch: crate::scenes::LightWatch) {
     let mut changed = app.scene.subscribe();
     let mut ids = light_index(&app).await;
     tracing::info!("the light preview connected");
@@ -229,24 +249,24 @@ async fn run_lights(mut socket: WebSocket, app: Arc<App>) {
     loop {
         if resend {
             resend = false;
-            if socket.send(Message::Text(index_message(&ids).into())).await.is_err() {
+            if !send_in_time(&mut socket, &app, Message::Text(index_message(&ids).into())).await {
                 break;
             }
         }
         tokio::select! {
-            frame = frames.recv() => match frame {
+            frame = watch.recv() => match frame {
                 Ok(frame) => {
                     let (mut payload, missing) = encode_light_frame(&frame, &ids);
                     if missing {
                         // A light the index lacks: a new one. Say so before the frame that names it.
                         ids = light_index(&app).await;
-                        if socket.send(Message::Text(index_message(&ids).into())).await.is_err() {
+                        if !send_in_time(&mut socket, &app, Message::Text(index_message(&ids).into())).await {
                             break;
                         }
                         payload = encode_light_frame(&frame, &ids).0;
                     }
                     if !payload.is_empty()
-                        && socket.send(Message::Binary(payload.into())).await.is_err()
+                        && !send_in_time(&mut socket, &app, Message::Binary(payload.into())).await
                     {
                         break;
                     }
@@ -268,7 +288,7 @@ async fn run_lights(mut socket: WebSocket, app: Arc<App>) {
             },
         }
     }
-    app.scene.feed.leave(app.engine.as_ref());
+    // `watch` gives the place back when it drops, here or if this task is cancelled or panics.
     tracing::info!("the light preview disconnected");
 }
 
