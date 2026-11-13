@@ -73,7 +73,7 @@ export function EffectsView() {
       status?.active_effects ?? [],
     [status],
   );
-  // The groups "Play on â€¦" offers: the active scene's, in its order.
+  // The groups "Play on …" offers: the active scene's, in its order.
   const scenesAnswer = useSnap((s) => s.scenes);
   const scenesError = useSnap((s) => s.scenesError);
   const groupsKnown = scenesAnswer !== null || scenesError !== null;
@@ -328,7 +328,7 @@ export function EffectsView() {
       });
       await refreshAll();
       // One pulse once the effect is on the lights (issue #187, rule 6): it
-      // fires only here, after the daemon confirmed â€” never from `running`,
+      // fires only here, after the daemon confirmed — never from `running`,
       // so it cannot pulse on mount or when `activeId` changes.
       pulseApply();
       pulseApplySheet();
@@ -1175,7 +1175,7 @@ export function EffectsView() {
         title="Effects"
         context={
           <span className="fig" data-testid="effect-count">
-            {effects === null || listStale ? "â€“" : <AnimatedNumber value={list.length} />} effects
+            {effects === null || listStale ? "–" : <AnimatedNumber value={list.length} />} effects
           </span>
         }
       />

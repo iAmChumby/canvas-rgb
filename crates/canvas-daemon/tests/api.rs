@@ -3797,8 +3797,8 @@ async fn preset_props_are_fitted_to_the_schema_and_capped() {
 #[tokio::test]
 async fn a_saved_hue_for_the_gradient_angle_is_listed_and_used_as_the_same_degrees() {
     // A gradient saved before the angle kind existed stores its angle as a hue. The fitter must
-    // read it as the same degrees, both when the preset is listed and when it is used â€” not
-    // silently drop it and let the 90Â° default show.
+    // read it as the same degrees, both when the preset is listed and when it is used — not
+    // silently drop it and let the 90° default show.
     let (router, _app, _home) = build();
     let (status, _) = send(
         &router,

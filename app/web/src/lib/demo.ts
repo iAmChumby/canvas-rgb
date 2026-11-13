@@ -262,6 +262,20 @@ function initialState(): DemoState {
     }
   }
   const sceneScenarios = applySceneScenarios(DEMO_SCENES, DEMO_LIGHTS);
+  // `?state=presets`: the group that plays Aurora plays it with the first preset's values, so the
+  // strip lights that key (0.14.0: a group's own values are what run, not the layout's effect).
+  if (s.has("presets")) {
+    const dusk = seededPresets().aurora?.[0];
+    if (dusk) {
+      for (const scene of sceneScenarios.scenes) {
+        for (const group of scene.groups) {
+          if (group.plays.type === "effect" && group.plays.effect === "aurora") {
+            group.plays = { type: "effect", effect: "aurora", props: { ...dusk.props } };
+          }
+        }
+      }
+    }
+  }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   const stacks = seededStacks(s, effects);
   return {
@@ -661,8 +675,8 @@ function fansStatus(): FansStatus {
     { source: { type: "gpu" }, label: "GPU", celsius: Math.round(r.gpu * 10) / 10 },
     { source: { type: "board", name: "SYSTIN" }, label: "Board SYSTIN", celsius: Math.round(r.board * 10) / 10 },
   ];
-  // Issue #130: the demo answers with the spine's defaults (7800X3D rated 89 Â°C,
-  // GPU on the 88 Â°C fallback, board at 50 Â°C) and whatever the user set.
+  // Issue #130: the demo answers with the spine's defaults (7800X3D rated 89 °C,
+  // GPU on the 88 °C fallback, board at 50 °C) and whatever the user set.
   const hotRow = (
     kind: HotLimitStatus["kind"],
     auto: number,
@@ -888,7 +902,7 @@ function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown)
       else delete view.light.name;
       const device = s.devices.find((d) => d.id === view.light.device_id);
       const zone = device?.zones.find((z) => z.index === view.light.zone_index);
-      view.label = name || (device && zone ? `${device.name} Â· ${zone.name}` : view.label);
+      view.label = name || (device && zone ? `${device.name} · ${zone.name}` : view.label);
     }
     if (patch.arrangement) view.light.arrangement = patch.arrangement;
     if (typeof patch.reversed === "boolean") view.light.reversed = patch.reversed;
@@ -1079,7 +1093,7 @@ export function checkPeripheralValue(device: DemoPeripheral, key: string, value:
   if (kind.type === "hue" && value.type === "hue") return;
   // An angle takes its own value, or the hue a preset saved before the kind existed carries:
   // the same degrees read on, the lift the daemon's preset fitter gives a saved preset. The
-  // peripheral adapters are stricter â€” their check refuses a hue on an angle â€” so this arm is
+  // peripheral adapters are stricter — their check refuses a hue on an angle — so this arm is
   // the demo's own preset-shaped leniency, not something a device would take.
   if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) return;
   // A saved number for an angle reads as the same degrees (clamped to 0..360, as the old
@@ -1872,7 +1886,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       ];
       for (const [kind, v, max] of maxes) {
         if (v !== null && (Number.isNaN(v) || v < 40 || v > max)) {
-          fail(422, "validation", `the ${kind} hot limit of ${v} Â°C is outside 40 to ${max} Â°C`);
+          fail(422, "validation", `the ${kind} hot limit of ${v} °C is outside 40 to ${max} °C`);
         }
       }
       s.fanHotLimits = { cpu_c: limits.cpu_c, gpu_c: limits.gpu_c, board_c: limits.board_c };

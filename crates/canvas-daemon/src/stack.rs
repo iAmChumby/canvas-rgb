@@ -497,7 +497,7 @@ fn rect_px(x: f32, y: f32, w: f32, h: f32, scale: f32, width: u32, height: u32) 
 
 /// One pixel of one layer, composited over what is under it (D95.3.3).
 ///
-/// Each mode is `d + aÂ·(blend(d, s) âˆ’ d)`, with Add's blend clamped before the opacity is
+/// Each mode is `d + a·(blend(d, s) âˆ’ d)`, with Add's blend clamped before the opacity is
 /// folded in: at `d = 0.5, s = 0.8, a = 0.5` the result is 0.75, not 0.90.
 pub fn blend_pixel(mode: BlendMode, d: [f32; 3], s: [f32; 3], a: f32) -> [f32; 3] {
     // A NaN has no value to clamp, so it is 0; an infinity clamps like any other number.
@@ -550,7 +550,7 @@ pub fn schema_for(stack: &Stack, resolve: &dyn Fn(&str) -> Option<PropertySchema
                 for def in &schema.properties {
                     properties.push(PropertyDef {
                         key: format!("{}.{}", layer.id, def.key),
-                        label: format!("{} Â· {}", layer.name, def.label),
+                        label: format!("{} · {}", layer.name, def.label),
                         kind: def.kind.clone(),
                     });
                 }
@@ -760,9 +760,9 @@ impl MaskLayer {
 /// The coverage one mask pixel gives, 0 (hidden) to 1 (whole), before invert and amount.
 ///
 /// Luma is Rec. 709's weights on the picture's **encoded sRGB** values
-/// (`0.2126 R + 0.7152 G + 0.0722 B`): the video-luma convention. Nothing here linearises â€” the
+/// (`0.2126 R + 0.7152 G + 0.0722 B`): the video-luma convention. Nothing here linearises — the
 /// canvas holds encoded values, exactly as `Rgb8::to_f32` divides its channels by 255 with no
-/// transfer function â€” so this is a perceptual-enough brightness, not linear luminance. The
+/// transfer function — so this is a perceptual-enough brightness, not linear luminance. The
 /// compositor's canvases are RGB with no alpha channel, so Alpha reads the picture's strongest
 /// channel: a pixel the mask effect left black is transparent, and any colour it drew is opaque at
 /// its strongest channel's strength.
@@ -1316,7 +1316,7 @@ impl Effect for StackEffect {
                     for def in schema.properties {
                         properties.push(PropertyDef {
                             key: format!("{}.{}", layer.id, def.key),
-                            label: format!("{} Â· {}", layer.name, def.label),
+                            label: format!("{} · {}", layer.name, def.label),
                             kind: def.kind,
                         });
                     }

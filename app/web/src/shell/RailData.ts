@@ -50,8 +50,8 @@ export function useRailData(): RailValues {
     const scene =
       status?.active_scene?.name ?? scenes?.scenes.find((x) => x.id === scenes.active)?.name ?? null;
 
-    // The status names the effects the scene plays; the effects list names them.
-    const effectId = status?.active_effects?.[0] ?? null;
+    // A scene is named on the scene row, so no one effect's name goes on the Effects row.
+    const effectId = status?.active_scene ? null : (status?.active_effects?.[0] ?? null);
     const effect = effectId ? effectNameOf(effects, effectId) : null;
 
     const deviceCounts = devices
@@ -78,4 +78,5 @@ export function useRailData(): RailValues {
     };
   }, [status, effects, devices, displays, scenes, fans, peripherals]);
 }
+
 

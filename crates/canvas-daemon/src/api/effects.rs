@@ -777,7 +777,7 @@ pub fn saved_presets(store: &crate::storage::Store) -> BTreeMap<String, Vec<canv
 ///
 /// The file name is checked first, then the file is parsed with the builder the loader
 /// uses: a file that does not parse is a validation error and nothing is written. A file
-/// whose load ran out of time is not the file's fault â€” the machine was busy â€” so it is
+/// whose load ran out of time is not the file's fault — the machine was busy — so it is
 /// written anyway and the answer says it was saved, took too long to load just now, and will be tried again. The file
 /// lands in the folder atomically (a temp file in the same folder, then a rename), the
 /// folder is rescanned and the effect's summary comes back.

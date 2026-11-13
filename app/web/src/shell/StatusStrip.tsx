@@ -109,7 +109,7 @@ export function StatusStrip({
   // The swatch's own name, for the widths where the effect's name is dropped from the row.
   // Before the daemon has answered there is nothing to name: the row says why, never a bare dash.
   const nowName = status ? now.name : offline ? "Offline" : "Connecting";
-  const swatchLabel = nowName === "â€”" ? "Nothing is running" : nowName;
+  const swatchLabel = nowName === "—" ? "Nothing is running" : nowName;
   // Each link and what it is doing: the panel shows them all, one after another.
   const linkList = links(status, offline);
 
@@ -230,10 +230,10 @@ export function StatusStrip({
       >
         <div className="strip-details-head">Details</div>
         <dl className="strip-details-list">
-          <Detail label="Frame rate" value={status ? <><AnimatedNumber value={status.fps_measured} decimals={1} /> / <AnimatedNumber value={status.fps_target} /> fps</> : "â€”"} />
-          <Detail label="Frame time" value={status ? <><AnimatedNumber value={status.frame_time_ms} decimals={1} /> ms</> : "â€”"} />
-          <Detail label="Lights" value={status ? (paused ? "paused" : status.parked ? "idle" : "running") : "â€”"} />
-          <Detail label="Devices" value={status ? <><AnimatedNumber value={status.devices_connected} /> connected</> : "â€”"} />
+          <Detail label="Frame rate" value={status ? <><AnimatedNumber value={status.fps_measured} decimals={1} /> / <AnimatedNumber value={status.fps_target} /> fps</> : "—"} />
+          <Detail label="Frame time" value={status ? <><AnimatedNumber value={status.frame_time_ms} decimals={1} /> ms</> : "—"} />
+          <Detail label="Lights" value={status ? (paused ? "paused" : status.parked ? "idle" : "running") : "—"} />
+          <Detail label="Devices" value={status ? <><AnimatedNumber value={status.devices_connected} /> connected</> : "—"} />
         </dl>
         {/* Each link and what it is doing, so "connecting" is never a mystery. */}
         <ul className="strip-details-links">

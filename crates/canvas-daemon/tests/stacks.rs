@@ -1,4 +1,4 @@
-﻿//! Effect stacks (D95.6, tests 1â€“9 and 12â€“14).
+﻿//! Effect stacks (D95.6, tests 1–9 and 12–14).
 //!
 //! Everything here runs on the fakes: the daemon's state is built from `common`, no test binds
 //! the API's port, and the compositor is driven by hand with an injected clock and fake effects,
@@ -2079,7 +2079,7 @@ fn the_schema_namespaces_every_layer_property() {
     assert_eq!(schema.name, "Namespaced");
     assert_eq!(schema.description, "2 layers: Gradient, Fire");
     assert!(schema.properties.iter().all(|def| def.key.starts_with("l1.") || def.key.starts_with("l2.")));
-    assert!(schema.properties.iter().any(|def| def.label.starts_with("Layer l1 Â· ")));
+    assert!(schema.properties.iter().any(|def| def.label.starts_with("Layer l1 · ")));
     let merged = stack::stack_props(&stack, &resolve);
     assert!(merged.keys().all(|key| key.starts_with("l1.") || key.starts_with("l2.")));
 }
@@ -3645,7 +3645,7 @@ fn masked_layer(id: &str, effect: &str, mask: canvas_proto::stack::LayerMask) ->
     layer
 }
 
-/// One frame of a stack with one red layer and the given mask, over a 320 Ã— 200 whole-canvas area.
+/// One frame of a stack with one red layer and the given mask, over a 320 × 200 whole-canvas area.
 fn masked_frame(mask: canvas_proto::stack::LayerMask, panic_mask: bool) -> (Canvas, StackEffect) {
     let stack = stack("stack:Masked", vec![masked_layer("l1", "layer", mask)]);
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
@@ -3723,7 +3723,7 @@ fn the_brightness_and_alpha_sources_read_different_channels() {
 
 #[test]
 fn a_mask_is_mapped_over_the_layers_own_area() {
-    // The layer is a 40 Ã— 20 rectangle at the origin; the mask is white on its left half.
+    // The layer is a 40 × 20 rectangle at the origin; the mask is white on its left half.
     let stack = stack(
         "stack:MaskedArea",
         vec![with_area(

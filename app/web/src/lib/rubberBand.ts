@@ -7,10 +7,10 @@
 //
 //   resisted = (o * c * d) / (d + c * o)
 //
-// A small overshoot tracks the pointer (resisted â‰ˆ c*o); a large one levels off
+// A small overshoot tracks the pointer (resisted ≈ c*o); a large one levels off
 // toward `d`, so the part can never be dragged arbitrarily far past its bound.
 // Inside the limits the position is the pointer's, exactly: no easing while held
-// (rule 4) â€” easing applies only to the settle after release, which is a plain
+// (rule 4) — easing applies only to the settle after release, which is a plain
 // clamp back to the limit (settleToLimit) under a CSS transition.
 
 /** The resistance constant: how hard the part pushes back, from the first pixel. */
@@ -24,7 +24,7 @@ export function resistedOvershoot(overshoot: number, dimension: number, c: numbe
 
 /**
  * The pointer's position, resisted past either limit. Inside [min, max] this is
- * the value itself â€” the held drag follows the pointer exactly.
+ * the value itself — the held drag follows the pointer exactly.
  */
 export function rubberBand(value: number, min: number, max: number, c: number = RUBBER_C): number {
   const span = max - min;

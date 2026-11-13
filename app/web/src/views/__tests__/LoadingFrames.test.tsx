@@ -194,7 +194,7 @@ describe("the retry", () => {
     expect(screen.queryByText("The effects could not be read")).toBeNull();
     expect(screen.getByText("The effect list may be out of date.")).toBeTruthy();
     // The count is a dash while the list may be old.
-    expect(screen.getByTestId("effect-count").textContent).toBe("â€“ effects");
+    expect(screen.getByTestId("effect-count").textContent).toBe("– effects");
   });
 });
 

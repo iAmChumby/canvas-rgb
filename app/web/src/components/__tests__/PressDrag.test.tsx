@@ -16,7 +16,7 @@ import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 // The class test for `cause:ui-interaction` (#105): one rule over every control the pointer
 // drags. On each drag surface a press is defaultPrevented (so Chromium's compatibility
 // mousedown never starts a native drag or a text selection), and it still moves focus the way
-// the native press did â€” a focused field outside the surface loses focus (a NumberField's
+// the native press did — a focused field outside the surface loses focus (a NumberField's
 // draft commits on blur), because canceling the press canceled the mousedown that carried it.
 // fireEvent returns false when the default was prevented.
 

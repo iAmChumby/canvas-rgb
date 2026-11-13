@@ -1,4 +1,4 @@
-﻿// Task 11: the Effects page's Play action is "Play on â€¦", and its controls set the effect's
+﻿// Task 11: the Effects page's Play action is "Play on …", and its controls set the effect's
 // starting values. The page reads the active scene's groups from the snapshot, so each test
 // puts the scene it needs there.
 
@@ -103,7 +103,7 @@ async function mount(active: string) {
   await screen.findByRole("heading", { name: selected?.name ?? active });
 }
 
-describe("Play on â€¦", () => {
+describe("Play on …", () => {
   it("opens the effect and group a scene asked for, and offers the way back", async () => {
     window.history.replaceState({}, "", "/effects/?effect=aurora&group=g-case&state=html,stack");
     await act(async () => {
@@ -151,7 +151,7 @@ describe("Play on â€¦", () => {
     await mount("aurora");
     const groups = [group("g-case", "Case fans"), group("g-ram", "Memory"), group("g-gpu", "Graphics card")];
     patchSnap({ scenes: scenesWith(groups) });
-    const play = await screen.findByRole("button", { name: "Play on â€¦" });
+    const play = await screen.findByRole("button", { name: "Play on …" });
     const spy = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
@@ -174,7 +174,7 @@ describe("Play on â€¦", () => {
         group("g-desk", "Cooler and desk"),
       ]),
     });
-    const play = await screen.findByRole("button", { name: "Playing on 1 of 4 Â· Play on â€¦" });
+    const play = await screen.findByRole("button", { name: "Playing on 1 of 4 · Play on …" });
     expect(play.getAttribute("aria-disabled")).toBeNull();
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
@@ -200,7 +200,7 @@ describe("Play on â€¦", () => {
     patchSnap({
       scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory"), group("g-gpu", "Graphics card")]),
     });
-    const play = await screen.findByRole("button", { name: "Play on â€¦" });
+    const play = await screen.findByRole("button", { name: "Play on …" });
     const spy = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
@@ -228,7 +228,7 @@ describe("Play on â€¦", () => {
       .mockRejectedValue(
         new ApiFailure(422, "validation", "at most 1 group of a scene may play an HTML effect (a stack with an HTML layer counts); 2 do"),
       );
-    const play = await screen.findByRole("button", { name: "Play on â€¦" });
+    const play = await screen.findByRole("button", { name: "Play on …" });
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
     await act(async () => {
@@ -265,7 +265,7 @@ describe("Play on â€¦", () => {
       </StripSlotsProvider>,
     );
     expect(await screen.findByRole("heading", { name: "Sunset glow" })).toBeTruthy();
-    const play = (await screen.findAllByRole("button", { name: "Play on â€¦" }))[0]!;
+    const play = (await screen.findAllByRole("button", { name: "Play on …" }))[0]!;
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
     expect(await within(dialog).findByText("One HTML effect at a time")).toBeTruthy();
@@ -306,7 +306,7 @@ describe("Play on â€¦", () => {
     window.history.replaceState({}, "", URL);
     await mount("html:fixture-sample");
     patchSnap({ scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]) });
-    const play = await screen.findByRole("button", { name: "Play on â€¦" });
+    const play = await screen.findByRole("button", { name: "Play on …" });
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
     expect(within(dialog).queryByRole("checkbox", { name: "Every group" })).toBeNull();

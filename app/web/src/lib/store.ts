@@ -442,6 +442,7 @@ export async function refreshAll(): Promise<void> {
   await Promise.all([
     refreshStatus(),
     refreshFans(),
+    refreshDevices(),
     refreshEffects(),
     refreshScenes(),
     refreshLights(),
@@ -476,6 +477,7 @@ export function startSync(): () => void {
     if (lastStatusFailureAt && Date.now() < lastStatusFailureAt + DOWN_RETRY_MS) return;
     void refreshDevices();
     void refreshEffects();
+    void refreshScenes();
     void refreshLights();
     void refreshSettings();
     void refreshDisplays();

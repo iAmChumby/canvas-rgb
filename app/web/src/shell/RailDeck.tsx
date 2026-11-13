@@ -170,7 +170,7 @@ function LightsPanel({
 
       <div className="rail-deck-row">
         <span className="rail-deck-name">
-          {activeName ?? (known ? "Nothing is running" : "â€”")}
+          {activeName ?? (known ? "Nothing is running" : "—")}
           <RunningPresetName effectId={presetId} />
         </span>
         {groups !== null ? (
@@ -220,7 +220,7 @@ function LightsPanel({
           onChange={setDraft}
           onCommit={(v) => void commit(v)}
         />
-        <span className="fig rail-bright-value">{shown === null ? "â€”" : `${shown}%`}</span>
+        <span className="fig rail-bright-value">{shown === null ? "—" : `${shown}%`}</span>
       </div>
     </div>
   );
@@ -256,8 +256,8 @@ function SystemPanel({
     // A whole number says no decimal: "54", not "54.0".
     const places = (v: number | null) => (v === null || Number.isInteger(v) ? 0 : 1);
     return [
-      { label: "CPU", value: cpu, unit: "Â°C", tone: "a3", scale: 100, decimals: places(cpu) },
-      { label: "GPU", value: gpu, unit: "Â°C", tone: "a3", scale: 100, decimals: places(gpu) },
+      { label: "CPU", value: cpu, unit: "°C", tone: "a3", scale: 100, decimals: places(cpu) },
+      { label: "GPU", value: gpu, unit: "°C", tone: "a3", scale: 100, decimals: places(gpu) },
       { label: "Fans", value: rpm, unit: "rpm", tone: "a2", scale: 2000, decimals: 0 },
       {
         label: "Render",
@@ -291,7 +291,7 @@ function MeterCell({ meter }: { meter: Meter }) {
       <span className="rail-meter-label">{label}</span>
       <span className="rail-meter-value">
         {value === null ? (
-          <span className="rail-meter-none">â€”</span>
+          <span className="rail-meter-none">—</span>
         ) : (
           <AnimatedNumber value={value} decimals={decimals} />
         )}

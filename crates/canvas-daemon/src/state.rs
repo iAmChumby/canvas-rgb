@@ -225,7 +225,7 @@ impl App {
         stacks.set_fps(store.config.settings.fps);
         stacks.reload(&user_effects);
         // B1: the persisted audio-source pick applies at startup, so it
-        // survives a restart (silently â€” no capture is running yet).
+        // survives a restart (silently — no capture is running yet).
         let audio_source = store.config.audio_source.clone();
         let inputs = Arc::new(crate::capture::DaemonInputs::production());
         inputs.set_requested(audio_source);
