@@ -2203,11 +2203,13 @@ fn a_re_layout_with_the_devices_in_another_order_keeps_each_device_s_own_frame()
 
 mod scene {
     use super::*;
+    use canvas_proto::consts::PREVIEW_MAX_FPS;
     use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light, SCENE_FADE_MS};
     use canvas_proto::traits::{Engine, EngineGroup, LightFrame, LightPreviewSink};
 
     const RED: Rgb8 = Rgb8::new(255, 0, 0);
     const BLUE: Rgb8 = Rgb8::new(0, 0, 255);
+    const GREEN: Rgb8 = Rgb8::new(0, 255, 0);
 
     /// A recording light-preview sink.
     #[derive(Default)]
@@ -2298,6 +2300,83 @@ mod scene {
 
     fn all(frame: &[Rgb8], color: Rgb8) -> bool {
         frame.iter().all(|c| *c == color)
+    }
+
+    /// An effect that panics in `update` and again in `Drop` (#310 review 1).
+    ///
+    /// The `update` panic marks the group failed, and a failed group keeps its effect in
+    /// the scene's state (the render thread does not take it out again). The effect is
+    /// therefore in the state when the scene ends, which is what `set_layout` drops.
+    struct FailingEffectThatPanicsInDrop;
+
+    impl Effect for FailingEffectThatPanicsInDrop {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test_fail_and_panic_in_drop".into(),
+                name: "Test Fail And Panic In Drop".into(),
+                description: "Panics in update and in Drop.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+            panic!("update boom");
+        }
+    }
+
+    impl Drop for FailingEffectThatPanicsInDrop {
+        fn drop(&mut self) {
+            panic!("drop boom");
+        }
+    }
+
+    /// An effect that fails in `update` and, when it is dropped, calls back into the
+    /// engine (#310 review 3).
+    ///
+    /// The `update` panic marks the group failed, and a failed group keeps its effect in
+    /// the scene's state, so the effect is in the state when the scene ends: that is
+    /// what `set_layout` drops. The drop calls back into the engine, which takes the
+    /// state lock again: a drop under that lock would wait for the lock it is holding,
+    /// and the call would never return.
+    struct EffectThatCallsBackInDrop {
+        /// The engine, in a slot the effect empties when it is dropped, so the effect
+        /// does not keep the engine alive.
+        engine: Arc<Mutex<Option<Arc<dyn Engine>>>>,
+    }
+
+    impl Effect for EffectThatCallsBackInDrop {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test_calls_back_in_drop".into(),
+                name: "Test Calls Back In Drop".into(),
+                description: "Fails in update and calls back into the engine in Drop.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+            panic!("update boom");
+        }
+    }
+
+    impl Drop for EffectThatCallsBackInDrop {
+        fn drop(&mut self) {
+            let engine = self.engine.lock().unwrap_or_else(|e| e.into_inner()).take();
+            if let Some(engine) = engine {
+                // The state lock, taken again while this drop runs.
+                engine.set_brightness(50);
+            }
+        }
     }
 
     #[test]
@@ -2592,6 +2671,13 @@ mod scene {
         engine.shutdown();
     }
 
+    /// #310 review: the preview's cap is a wall-clock limit (15 a second), so the test
+    /// measures the previews against the wall time they had. The old bound counted the
+    /// frames the machine rendered and compared the previews with a quarter of them: a
+    /// machine that renders at 30 fps a second sends half as many frames in the same
+    /// second, and a bound that counts the frames then fails correct code on a busy
+    /// machine (and the bound before it, `previews * 2 < frames`, let a cap over 15
+    /// through).
     #[test]
     fn light_preview_is_rate_limited() {
         let engine = spawn(settings(60));
@@ -2607,12 +2693,24 @@ mod scene {
             false,
         );
         assert!(wait_until(FIRST_FRAME_WAIT, || lights.count() > 0));
-        let (l0, s0) = (lights.count(), sink.frame_count());
+        // The window: from the first preview to a second's worth of frames.
+        let started = Instant::now();
+        let l0 = lights.count();
+        let s0 = sink.frame_count();
         assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > s0 + 60));
+        let seconds = started.elapsed().as_secs_f64();
         let previews = lights.count() - l0;
-        let frames = (sink.frame_count() - s0) as usize;
-        // 60 fps against a 15 fps cap: about a quarter of the frames, never half.
-        assert!(previews * 2 < frames, "{previews} previews for {frames} frames");
+        // The cap is 15 a second, so `seconds` of wall time cannot hold more than
+        // `seconds * 15` previews, plus the one the window's edges can hold. The bound
+        // follows the wall clock, so a slow machine cannot fail it. The other side of that:
+        // a looser cap is caught only when the engine renders faster than the looser cap
+        // (a 25/s cap is caught at 40 fps and up, not at 30).
+        assert!(previews > 0, "a second of frames sent no preview at all");
+        let limit = seconds * f64::from(PREVIEW_MAX_FPS) + 2.0;
+        assert!(
+            previews as f64 <= limit,
+            "{previews} previews in {seconds:.3}s: the preview runs at more than {PREVIEW_MAX_FPS} a second"
+        );
         engine.shutdown();
     }
 
@@ -2763,6 +2861,385 @@ mod scene {
         );
         assert!(wait_until(FIRST_FRAME_WAIT, || a.last().is_some_and(|f| all(&f, RED))));
         assert!(engine.group_states().is_empty(), "layout mode has no groups");
+        engine.shutdown();
+    }
+
+    /// #310 review 1: `set_layout` ends the scene, and the scene's effects drop behind the
+    /// guard, outside the state lock, exactly like `set_scene` does. An effect whose `Drop`
+    /// panics must not take the caller down, and the engine must keep rendering.
+    ///
+    /// What the drop being *outside* the lock buys is proved by
+    /// `a_scene_effect_whose_drop_calls_back_into_the_engine_does_not_deadlock_it`.
+    #[test]
+    fn set_layout_drops_a_scene_effect_that_panics_in_drop_and_the_engine_keeps_rendering() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group(
+                "a",
+                &["d1#z0"],
+                Some(Box::new(FailingEffectThatPanicsInDrop)),
+            )],
+            false,
+        );
+        // The group failed, so the effect stays in the scene's state: the render thread
+        // does not take a failed group's effect out again.
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || {
+                engine.group_states().iter().any(|s| s.id == "a" && s.failed.is_some())
+            }),
+            "the group failed: {:?}",
+            engine.group_states()
+        );
+        let before = sink.frame_count();
+
+        // The effect panics when it is dropped. The call must return.
+        let lay = layout(
+            vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+            SamplingMode::AreaAverage,
+            RenderScale::P100,
+        );
+        engine.set_layout(lay, devices);
+
+        // And the engine keeps rendering: the layout path delivers frames.
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > before + 5),
+            "the engine kept rendering: {} frames",
+            sink.frame_count()
+        );
+        assert!(sink.last().is_some_and(|f| all(&f, RED)), "the layout renders red");
+        engine.shutdown();
+    }
+
+    /// #310 review 3: a `Drop` that calls back into the engine must not deadlock it. The
+    /// scene's effects drop outside the state lock, so the callback takes the lock again
+    /// without waiting for the lock it is holding.
+    ///
+    /// The call runs on its own thread with a deadline, so a drop that did hold the lock
+    /// fails the test instead of hanging the suite.
+    #[test]
+    fn a_scene_effect_whose_drop_calls_back_into_the_engine_does_not_deadlock_it() {
+        let engine = spawn(settings(60));
+        let slot: Arc<Mutex<Option<Arc<dyn Engine>>>> = Arc::new(Mutex::new(None));
+        *slot.lock().unwrap_or_else(|e| e.into_inner()) = Some(engine.clone());
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group(
+                "a",
+                &["d1#z0"],
+                Some(Box::new(EffectThatCallsBackInDrop { engine: slot.clone() })),
+            )],
+            false,
+        );
+        // The group failed, so the effect stays in the scene's state.
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || {
+                engine.group_states().iter().any(|s| s.id == "a" && s.failed.is_some())
+            }),
+            "the group failed: {:?}",
+            engine.group_states()
+        );
+
+        // `set_layout` ends the scene and drops the effect, and the drop calls back into
+        // the engine.
+        let (tx, rx) = std::sync::mpsc::channel();
+        let worker = {
+            let engine = engine.clone();
+            std::thread::spawn(move || {
+                let lay = layout(
+                    vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+                    SamplingMode::AreaAverage,
+                    RenderScale::P100,
+                );
+                engine.set_layout(lay, devices);
+                let _ = tx.send(());
+            })
+        };
+        assert!(
+            rx.recv_timeout(Duration::from_secs(10)).is_ok(),
+            "set_layout returned: the effect's drop ran outside the state lock"
+        );
+        let _ = worker.join();
+
+        // And the engine still renders.
+        let before = sink.frame_count();
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > before + 5),
+            "the engine kept rendering: {} frames",
+            sink.frame_count()
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review 2: a sink whose device the scene does not hold gets a black frame of
+    /// its own length, like layout mode does. It never keeps the colours it was last
+    /// sent.
+    #[test]
+    fn a_sink_whose_device_is_not_in_the_scene_gets_a_black_frame() {
+        let engine = spawn(settings(60));
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        // The device is known first, so the sink's frames have 12 LEDs.
+        let devices = vec![strip_device("d1", 12)];
+        engine.set_layout(
+            layout(
+                vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+                SamplingMode::AreaAverage,
+                RenderScale::P100,
+            ),
+            devices.clone(),
+        );
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+
+        // Now a scene without that device: the sink stays, the device does not.
+        engine.set_scene(vec![], vec![strip_device("d2", 12)], vec![], false);
+        // Wait for the black frame itself, not for a number of frames: the layout mode's
+        // red frames can satisfy a frame count first, and then the last frame is red.
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, Rgb8::BLACK))),
+            "the sink whose device is gone went dark: {:?}",
+            sink.last()
+        );
+        let frame = sink.last().expect("a frame");
+        assert_eq!(frame.len(), 12, "the sink's own length");
+        assert!(
+            all(&frame, Rgb8::BLACK),
+            "the device is gone: it goes dark, never lit: {frame:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review 3: a fade blends from each device's last sent frame, whatever mode
+    /// sent it. Scene, then layout mode, then a scene with a fade: the fade starts from
+    /// the layout's frame, never from the old scene's.
+    #[test]
+    fn a_fade_after_layout_mode_blends_from_the_layouts_last_frame() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+
+        // Scene A: blue.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([0.0, 0.0, 1.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, BLUE))));
+
+        // Layout mode: red.
+        engine.set_layout(
+            layout(
+                vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+                SamplingMode::AreaAverage,
+                RenderScale::P100,
+            ),
+            devices.clone(),
+        );
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+        let before = sink.frame_count() as usize;
+
+        // Scene B with a fade: the first frames blend from the layout's red.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([0.0, 1.0, 0.0]))],
+            true,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, GREEN))));
+        let frames = sink.all_frames();
+        let after = &frames[before..];
+        assert!(
+            !after.iter().any(|f| all(f, BLUE)),
+            "the fade never shows the old scene's blue: {after:?}"
+        );
+        assert!(
+            after.iter().any(|f| f[0].r > 0 && f[0].g > 0),
+            "a frame between the layout's red and the new green: {after:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review: a fade that follows a pause starts from what the strip is showing.
+    /// The pause wrote a black frame, so the strip is dark and the fade blends from
+    /// black: the red the scene had before the pause is not on the strip any more.
+    #[test]
+    fn a_fade_after_a_pause_starts_from_the_black_the_strip_shows() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+
+        // Scene A: red.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+
+        // The pause writes one black frame: the strip goes dark.
+        engine.set_power(Power::Paused);
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, Rgb8::BLACK))),
+            "the pause wrote a black frame"
+        );
+        let before = sink.frame_count() as usize;
+
+        // Scene B with a fade, set while the engine is paused.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([0.0, 1.0, 0.0]))],
+            true,
+        );
+        engine.set_power(Power::Running);
+
+        // The fade settles on green.
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, GREEN))));
+        let frames = sink.all_frames();
+        let after = &frames[before..];
+        assert!(
+            !after.iter().any(|f| all(f, RED)),
+            "the fade never shows the red the strip was not showing: {after:?}"
+        );
+        assert!(
+            after.iter().any(|f| f[0].g > 0),
+            "a frame between the black and the green: {after:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review: a device that left the scene was sent black frames, so a fade that
+    /// follows starts from black: the colours it had before it left are not on the strip
+    /// any more.
+    #[test]
+    fn a_fade_after_a_device_left_the_scene_starts_from_the_black_it_shows() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+
+        // Scene A: red, on d1.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+
+        // Scene B: another device. d1's sink goes dark.
+        engine.set_scene(vec![], vec![strip_device("d2", 12)], vec![], false);
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, Rgb8::BLACK))),
+            "the device that left the scene went dark"
+        );
+        let before = sink.frame_count() as usize;
+
+        // Scene C with a fade, with d1 back in the scene.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([0.0, 1.0, 0.0]))],
+            true,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, GREEN))));
+        let frames = sink.all_frames();
+        let after = &frames[before..];
+        assert!(
+            !after.iter().any(|f| all(f, RED)),
+            "the fade never shows the colours the device was not showing: {after:?}"
+        );
+        assert!(
+            after.iter().any(|f| f[0].g > 0),
+            "a frame between the black and the green: {after:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review 4: `set_group_brightness` changes one group and leaves the others
+    /// alone.
+    #[test]
+    fn set_group_brightness_changes_one_group_and_leaves_the_other_alone() {
+        let (engine, devices, a, b) = two_devices();
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![
+                group("a", &["d1#z0"], solid([1.0, 0.0, 0.0])),
+                group("b", &["d2#z0"], solid([0.0, 0.0, 1.0])),
+            ],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || {
+            a.last().is_some_and(|f| all(&f, RED)) && b.last().is_some_and(|f| all(&f, BLUE))
+        }));
+        engine.set_group_brightness("a", 50);
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || {
+                a.last().is_some_and(|f| f.iter().all(|c| (127..=129).contains(&c.r)))
+            }),
+            "the group's own brightness halves its colours: {:?}",
+            a.last()
+        );
+        assert!(
+            b.last().is_some_and(|f| all(&f, BLUE)),
+            "the other group is unchanged: {:?}",
+            b.last()
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review 4: the light preview carries the group's own brightness, and the
+    /// device's frame carries the global one on top of it. A group at 50% and the global
+    /// at 50% on (200, 200, 200): the preview shows 100, the device 50.
+    #[test]
+    fn the_light_preview_carries_the_group_brightness_and_the_device_frame_the_global_one() {
+        let engine = spawn(settings(60));
+        engine.set_brightness(50);
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let lights = RecordingLights::new();
+        engine.set_light_preview(Some(lights.clone()));
+        let mut g = group("a", &["d1#z0"], solid([200.0 / 255.0; 3]));
+        g.brightness = 50;
+        engine.set_scene(vec![light_of("d1")], devices, vec![g], false);
+        assert!(wait_until(FIRST_FRAME_WAIT, || lights.count() > 0 && sink.frame_count() > 0));
+        let preview = lights.last().expect("a light frame");
+        let (_, colours) = &preview.lights[0];
+        assert!(
+            colours.iter().all(|c| (99..=101).contains(&c.r)),
+            "the preview carries the group's brightness: {colours:?}"
+        );
+        let frame = sink.last().expect("a frame");
+        assert!(
+            frame.iter().all(|c| (49..=51).contains(&c.r)),
+            "the device's frame carries the global one too: {frame:?}"
+        );
         engine.shutdown();
     }
 }

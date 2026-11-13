@@ -14,7 +14,7 @@ use canvas_proto::api::{
 };
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
-    validate_scene, Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, SCENE_NAME_MAX,
+    validate_scene, Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX, SCENE_NAME_MAX,
 };
 use canvas_proto::stack::STACK_ID_PREFIX;
 use std::sync::Arc;
@@ -26,6 +26,10 @@ use crate::state::App;
 /// The id no scene may take: `PUT /scenes/active` sets the active scene, so a scene with that id
 /// could never be reached by `PUT /scenes/{id}`.
 const RESERVED_SCENE_ID: &str = "active";
+
+/// The most lights one flash request may name. A house has tens of lights; a list past this is a
+/// mistake (or an attack on the lookup below), so it is refused before any light is looked up.
+pub const FLASH_LIGHTS_MAX: usize = 256;
 
 /// A route's failure: the API's usual error, or a `409` that carries the scene as it is now.
 pub enum SceneFailure {
@@ -180,17 +184,54 @@ pub async fn put_scene(
     }
     let mut new = put.scene;
     new.rev = old.rev + 1;
+    check_names(&new)?;
     {
         let store = app.store.read().await;
         validate_scene(&new, &store.lights.lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
     }
     scenes::check_html_limit(&app, &new).map_err(ApiFailure::validation)?;
+    fit_group_props(&app, &mut new)?;
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
         let _replace = crate::draft::hold_for_replace(&app).await;
         scenes::apply_group_change(&app, &lock, &old, &new).await;
     }
     Ok(Json(new))
+}
+
+/// A scene and its groups have a name, within the length the create route keeps.
+fn check_names(scene: &Scene) -> ApiResult<()> {
+    if scene.name.trim().is_empty() {
+        return Err(ApiFailure::validation("a scene needs a name"));
+    }
+    if scene.name.chars().count() > SCENE_NAME_MAX {
+        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
+    }
+    for group in &scene.groups {
+        if group.name.trim().is_empty() {
+            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
+        }
+        if group.name.chars().count() > GROUP_NAME_MAX {
+            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
+        }
+    }
+    Ok(())
+}
+
+/// The caps and the schema fit a props patch applies, for every group of a whole scene. A stack
+/// keeps its namespaced values as they are (its own builder owns them), but they pass the caps.
+fn fit_group_props(app: &App, scene: &mut Scene) -> Result<(), ApiFailure> {
+    for group in &mut scene.groups {
+        let Plays::Effect { effect, props } = &mut group.plays else { continue };
+        crate::api::effects::check_props_caps(props)?;
+        if effect.starts_with(STACK_ID_PREFIX) {
+            continue;
+        }
+        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+            *props = crate::api::effects::fit_props_to_schema(&schema, std::mem::take(props), "the group");
+        }
+    }
+    Ok(())
 }
 
 /// `DELETE /api/v1/scenes/{id}`.
@@ -264,7 +305,7 @@ pub async fn patch_group_props(
     Json(patch): Json<Props>,
 ) -> ApiResult<Json<Scene>> {
     crate::api::effects::check_props_caps(&patch)?;
-    let _lock = app.scene.lock().await;
+    let lock = app.scene.lock().await;
     let old = find_scene(&app, &id).await?;
     let at = group_index(&old, &group)?;
     let Plays::Effect { effect, props: current } = &old.groups[at].plays else {
@@ -286,7 +327,9 @@ pub async fn patch_group_props(
     new.groups[at].plays = Plays::Effect { effect: effect.clone(), props: merged.clone() };
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
-        app.engine.set_group_props(&group, &merged);
+        // Through the same path as a whole-scene save, so what the engine runs and what a repeat
+        // device list compares against stay one thing.
+        scenes::apply_group_change(&app, &lock, &old, &new).await;
     }
     Ok(Json(new))
 }
@@ -300,7 +343,7 @@ pub async fn put_group_brightness(
     if request.brightness > GROUP_BRIGHTNESS_MAX {
         return Err(ApiFailure::validation(format!("brightness is 0 to {GROUP_BRIGHTNESS_MAX}")));
     }
-    let _lock = app.scene.lock().await;
+    let lock = app.scene.lock().await;
     let old = find_scene(&app, &id).await?;
     let at = group_index(&old, &group)?;
     let mut new = old.clone();
@@ -308,13 +351,14 @@ pub async fn put_group_brightness(
     new.groups[at].brightness = request.brightness;
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
-        app.engine.set_group_brightness(&group, request.brightness);
+        scenes::apply_group_change(&app, &lock, &old, &new).await;
     }
     Ok(Json(new))
 }
 
 /// What `POST /effects/{id}/activate` does to the active scene: the groups it names (or every
-/// group) play `effect` with `props`. `Ok(None)` when no group changes. Validates the result; the
+/// group) play `effect` with `props`. `Ok(None)` when no group changes; a 503 while the scenes are
+/// held in memory for the migration. Validates the result; the
 /// caller saves it with [`commit_activation`] under the same lock.
 pub async fn plan_activation(
     app: &App,
@@ -326,9 +370,12 @@ pub async fn plan_activation(
         let store = app.store.read().await;
         if store.scenes_pending.is_some() {
             // The scenes are only in memory until the first device list; they are written (from
-            // the layouts) when it arrives, so a change made now would be lost.
+            // the layouts) when it arrives, so a change made now would be lost. Say so rather than
+            // answer ok with the lights unchanged.
             tracing::info!("the scenes are not written yet; the effect is not set on a group");
-            return Ok(None);
+            return Err(ApiFailure::service_unavailable(
+                "the scenes are not written yet (the app is still waiting for its devices); try again in a moment",
+            ));
         }
         scenes::active_scene(&store.scenes).clone()
     };
@@ -390,6 +437,9 @@ pub async fn flash_lights(
     }
     if request.lights.is_empty() {
         return Err(ApiFailure::validation("name at least one light to flash"));
+    }
+    if request.lights.len() > FLASH_LIGHTS_MAX {
+        return Err(ApiFailure::validation(format!("a flash names at most {FLASH_LIGHTS_MAX} lights")));
     }
     let devices = app.devices.read().await.clone();
     let mut runs = Vec::new();

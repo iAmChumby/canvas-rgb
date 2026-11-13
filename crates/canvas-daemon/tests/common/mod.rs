@@ -1024,7 +1024,13 @@ pub struct MemoryServer {
 impl MemoryServer {
     /// Opens a connection: the returned end is the client's, and the server has the other.
     pub fn connect(&self) -> tokio::io::DuplexStream {
-        let (client, server) = tokio::io::duplex(64 * 1024);
+        self.connect_with_buffer(64 * 1024)
+    }
+
+    /// Like [`MemoryServer::connect`] with a pipe that holds only `bytes` each way: a client that
+    /// stops reading then blocks the server's sends after a few frames.
+    pub fn connect_with_buffer(&self, bytes: usize) -> tokio::io::DuplexStream {
+        let (client, server) = tokio::io::duplex(bytes);
         self.connections
             .send(server)
             .expect("the in-memory server is serving");

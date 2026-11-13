@@ -274,27 +274,7 @@ async fn daemon_main(fakes: bool) -> Exit {
     // plays an effect. Its groups' effects are built here; a group whose effect is missing (a
     // deleted HTML file) is dark and named in the log, and the others run. The device list that
     // arrives next applies the scene to the real devices.
-    {
-        // No draft survives a restart, but every apply follows the same rule: end one first,
-        // and keep a beat off while the saved scene goes on.
-        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
-        canvas_daemon::scenes::apply_active(&app, false).await;
-    }
-    {
-        let failures = app.scene.failures();
-        let store = app.store.read().await;
-        let scene = canvas_daemon::scenes::active_scene(&store.scenes);
-        tracing::info!(scene = %scene.name, groups = scene.groups.len(), dark = failures.len(), "the active scene was restored");
-        for group in &scene.groups {
-            let canvas_proto::scene::Plays::Effect { effect, .. } = &group.plays else { continue };
-            if failures.contains_key(&group.id) && effect == canvas_daemon::migration::USER_POISON_ID {
-                tracing::warn!(
-                    path = %canvas_daemon::paths::effects_dir().join(canvas_daemon::migration::USER_POISON_FILE).display(),
-                    "the user effect file is missing; install it to run this effect"
-                );
-            }
-        }
-    }
+    canvas_daemon::scenes::restore_active(&app).await;
 
     // The background tasks. Fakes mode gates off every task that touches a
     // real touchpoint (see `canvas_daemon::fakes`); the OpenRGB supervisor

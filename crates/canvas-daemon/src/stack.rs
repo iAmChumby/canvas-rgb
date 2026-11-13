@@ -358,7 +358,7 @@ impl AreaMap {
         sampling: SamplingMode,
         version: u64,
     ) -> Self {
-        let scale = canvas_core::scene_engine::SCENE_RENDER_SCALE;
+        let scale = canvas_core::SCENE_RENDER_SCALE;
         let width = ((CANVAS_WIDTH as f32 * scale).round() as u32).max(1);
         let height = ((CANVAS_HEIGHT as f32 * scale).round() as u32).max(1);
         let mut map = Self {
@@ -1937,8 +1937,8 @@ mod tests {
             &devices,
         );
         for sample in plan.lights.iter().flat_map(|l| l.leds.iter()) {
-            let x = (sample.center_x * canvas_core::scene_engine::SCENE_RENDER_SCALE).round() as u32;
-            let y = (sample.center_y * canvas_core::scene_engine::SCENE_RENDER_SCALE).round() as u32;
+            let x = (sample.center_x * canvas_core::SCENE_RENDER_SCALE).round() as u32;
+            let y = (sample.center_y * canvas_core::SCENE_RENDER_SCALE).round() as u32;
             assert!(mask.contains(x, y), "the LED at {x},{y} is covered");
         }
         // And the device's own box is the box of those LEDs.
@@ -1971,7 +1971,7 @@ mod tests {
         let area = LayerArea::Rect { x: 16.0, y: 150.0, width: 110.0, height: 46.0 };
         let resolved = map.resolve(Some("g"), &area).expect("a rectangle covers the canvas");
         assert!(resolved.mask.is_none(), "a rectangle has no per-LED mask");
-        let scale = canvas_core::scene_engine::SCENE_RENDER_SCALE;
+        let scale = canvas_core::SCENE_RENDER_SCALE;
         assert_eq!(resolved.dest, [16.0 * scale, 150.0 * scale, 126.0 * scale, 196.0 * scale]);
         // The whole canvas is the whole canvas.
         let whole = map.resolve(Some("g"), &LayerArea::Canvas).expect("the canvas");

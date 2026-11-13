@@ -393,3 +393,257 @@ async fn the_lights_routes_need_the_token() {
         assert_eq!(error.error, canvas_proto::api::error_codes::UNAUTHORIZED);
     }
 }
+
+/// The guard is on the whole router, so the lights routes answer a browser from another site and
+/// a request that names another host the way the other routes do.
+#[tokio::test]
+async fn the_lights_routes_refuse_a_foreign_origin_and_a_foreign_host() {
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, _app, _home) = build(lights, Vec::new()).await;
+
+    for (method, path) in [
+        ("GET", routes::LIGHTS.to_string()),
+        ("PATCH", light_path("fake:mb#z0")),
+    ] {
+        // A browser from another site is refused.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("host", "127.0.0.1:9430")
+                    .header("origin", "https://evil.example")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reversed":true}"#.to_string()))
+                    .expect("the request builds"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "origin: {method} {path}");
+        let body = json(response).await;
+        let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+        assert_eq!(error.error, canvas_proto::api::error_codes::FORBIDDEN_ORIGIN);
+
+        // A request that names another host is refused too.
+        let response = router
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method(method)
+                    .uri(&path)
+                    .header("host", "evil.example")
+                    .header("authorization", format!("Bearer {TOKEN}"))
+                    .header("content-type", "application/json")
+                    .body(Body::from(r#"{"reversed":true}"#.to_string()))
+                    .expect("the request builds"),
+            )
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::FORBIDDEN, "host: {method} {path}");
+        let body = json(response).await;
+        let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+        assert_eq!(error.error, canvas_proto::api::error_codes::BAD_HOST);
+    }
+}
+
+/// A run that starts past the end of its zone owns no LED at all: there is nothing to light.
+#[tokio::test]
+async fn a_light_whose_run_starts_past_its_zone_has_no_leds() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    // The run starts at LED 20 of a zone with 12 LEDs.
+    let lights = lights_file(vec![light("fake:mb#z0p2", "fake:mb", 0, Some((20, 4)), None)]);
+    let (router, _app, _home) = build(lights, devices).await;
+
+    let (status, body) = get_lights(router).await;
+    assert_eq!(status, StatusCode::OK);
+    let answer = views(&body);
+    assert_eq!(answer.lights.len(), 1, "{body}");
+    assert_eq!(answer.lights[0].led_count, 0, "{body}");
+}
+
+/// A patch that leaves the name out keeps the name the light had.
+#[tokio::test]
+async fn a_patch_without_a_name_keeps_the_name_the_light_had() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, Some("Top fan"))]);
+    let (router, app, _home) = build(lights, devices).await;
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"reversed":true}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let view: LightView = serde_json::from_value(body.clone()).expect("the body is a LightView");
+    assert_eq!(view.light.name.as_deref(), Some("Top fan"), "{body}");
+    assert!(view.light.reversed, "{body}");
+    assert_eq!(app.store.read().await.lights.lights[0].name.as_deref(), Some("Top fan"));
+}
+
+/// A save that is refused leaves the light as it was: the list answers the old values.
+#[tokio::test]
+async fn a_refused_save_leaves_the_light_as_it_was() {
+    // `lights.json` could not be read at start: the store refuses to write over it.
+    let home = TempHome::new();
+    let mut store = Store::at(&home.path);
+    store.lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, Some("Top fan"))]);
+    store.lights_blocked = true;
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let (router, _app, _home) = build_with(store, devices, home).await;
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"name":"New fan","reversed":true}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+
+    // The light is as it was: the refused save changed nothing.
+    let (status, body) = get_lights(router).await;
+    assert_eq!(status, StatusCode::OK);
+    let answer = views(&body);
+    assert_eq!(answer.lights.len(), 1, "{body}");
+    assert_eq!(answer.lights[0].light.name.as_deref(), Some("Top fan"), "{body}");
+    assert!(!answer.lights[0].light.reversed, "{body}");
+}
+
+/// The name's limit is on characters, not bytes: forty multi-byte characters are forty
+/// characters and are accepted, forty-one are refused.
+#[tokio::test]
+async fn a_name_is_counted_in_characters_not_bytes() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, _home) = build(lights, devices).await;
+
+    let at_max = serde_json::json!({ "name": "é".repeat(GROUP_NAME_MAX) }).to_string();
+    let response = router
+        .clone()
+        .oneshot(request_with_body("PATCH", &light_path("fake:mb#z0"), &at_max))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK, "40 characters are 40 characters");
+    let body = json(response).await;
+    let view: LightView = serde_json::from_value(body.clone()).expect("the body is a LightView");
+    let expected = "é".repeat(GROUP_NAME_MAX);
+    assert_eq!(view.light.name.as_deref(), Some(expected.as_str()), "{body}");
+
+    // One more is over the limit.
+    let over = serde_json::json!({ "name": "é".repeat(GROUP_NAME_MAX + 1) }).to_string();
+    let response = router
+        .oneshot(request_with_body("PATCH", &light_path("fake:mb#z0"), &over))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::VALIDATION);
+    assert_eq!(
+        app.store.read().await.lights.lights[0].name.as_deref(),
+        Some(expected.as_str()),
+        "the refused name was not saved"
+    );
+}
+
+/// A body the route cannot read is refused in the API's own error shape, like every other
+/// validation error, and nothing is saved.
+#[tokio::test]
+async fn an_unknown_arrangement_is_refused_in_the_api_error_shape() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, _home) = build(lights, devices).await;
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"arrangement":"spiral"}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let body = json(response).await;
+    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::VALIDATION);
+    assert_eq!(
+        app.store.read().await.lights.lights[0].arrangement,
+        Arrangement::Strip,
+        "nothing was saved"
+    );
+}
+
+/// A patch that changes nothing leaves the file on disk alone.
+#[tokio::test]
+async fn a_patch_that_changes_nothing_does_not_rewrite_the_lights_file() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, _app, home) = build(lights, devices).await;
+
+    // A change, so the file is there.
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"reversed":true}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The file's time is put in the past, so a rewrite of the same bytes would show as a new
+    // time. The clock is not read to decide anything: the time is set, then compared.
+    let path = home.path.join("lights.json");
+    let stamp = std::time::SystemTime::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000_000);
+    let file = std::fs::File::options()
+        .write(true)
+        .open(&path)
+        .expect("the lights file is there");
+    file.set_times(std::fs::FileTimes::new().set_modified(stamp))
+        .expect("the file's time is set");
+    assert_eq!(modified_at(&path), stamp, "the file's time was set");
+
+    // A patch that changes nothing is answered, and the file is not written.
+    let response = router
+        .oneshot(request_with_body("PATCH", &light_path("fake:mb#z0"), r#"{}"#))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(modified_at(&path), stamp, "the empty patch rewrote lights.json");
+}
+
+/// When the file was last written.
+fn modified_at(path: &std::path::Path) -> std::time::SystemTime {
+    std::fs::metadata(path)
+        .expect("the file is there")
+        .modified()
+        .expect("the file has a time")
+}
+
+/// A light of a device that is here but has no such zone is named after the device.
+#[tokio::test]
+async fn a_light_of_a_zone_the_device_does_not_have_is_labelled_with_the_device_name() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    // The light names zone 7; the device has only zone 0.
+    let lights = lights_file(vec![light("fake:mb#z7", "fake:mb", 7, None, None)]);
+    let (router, _app, _home) = build(lights, devices).await;
+
+    let (status, body) = get_lights(router).await;
+    assert_eq!(status, StatusCode::OK);
+    let answer = views(&body);
+    assert_eq!(answer.lights.len(), 1, "{body}");
+    assert_eq!(answer.lights[0].label, "MSI B850", "{body}");
+    assert_eq!(answer.lights[0].led_count, 0, "{body}");
+    assert!(answer.lights[0].connected, "{body}");
+}

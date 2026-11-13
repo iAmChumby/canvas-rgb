@@ -1427,6 +1427,8 @@ async fn an_import_ends_the_draft_on_the_lights() {
     .await;
     bundle["layouts"]["layouts"][0]["effect"] =
         serde_json::json!({ "id": "gradient", "props": {} });
+    // In scene mode the import plays the bundle's scenes, so the bundle's own effect goes there too.
+    bring_gradient_in_scenes(&mut bundle);
     let response = router
         .clone()
         .oneshot(request_with_body(
@@ -1479,6 +1481,8 @@ async fn a_draft_put_in_the_gap_of_an_import_reads_the_imported_layout() {
     .await;
     bundle["layouts"]["layouts"][0]["effect"] =
         serde_json::json!({ "id": "gradient", "props": {} });
+    // In scene mode the import plays the bundle's scenes, so the bundle's own effect goes there too.
+    bring_gradient_in_scenes(&mut bundle);
 
     // The seam: the import waits between the end of the draft and the swap of the store.
     let seam = Arc::new(canvas_daemon::api::settings::ImportSeam::new());
@@ -1749,4 +1753,17 @@ async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_eff
         Some(canvas_effects::onboard::SWEEP_ID),
         "the stale timer must not restore the saved effect over the just-activated onboarding effect"
     );
+}
+
+/// Makes every group of every scene in an exported bundle play `gradient`, so an import of it
+/// plays something other than the `solid` the tests start from.
+fn bring_gradient_in_scenes(bundle: &mut serde_json::Value) {
+    let Some(scenes) = bundle["scenes"]["scenes"].as_array_mut() else {
+        return;
+    };
+    for scene in scenes {
+        for group in scene["groups"].as_array_mut().into_iter().flatten() {
+            group["plays"] = serde_json::json!({ "type": "effect", "effect": "gradient", "props": {} });
+        }
+    }
 }

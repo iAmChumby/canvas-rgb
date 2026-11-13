@@ -267,6 +267,14 @@ use crate::state::App;
 /// second, so a socket that falls this far behind skips ahead.
 const LIGHT_FEED_BACKLOG: usize = 4;
 
+/// The editor windows that may watch the lights at once. One window is the normal case, a few
+/// more cover a second monitor and a stale tab; past this the handshake is answered 503.
+pub const LIGHT_FEED_MAX_WATCHERS: usize = 8;
+
+/// How long a send to a watching window may take before the window is dropped. A window that stops
+/// reading would otherwise hold its task and its watcher slot for as long as the socket stays open.
+pub const LIGHT_FEED_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
+
 /// What the daemon keeps while a scene runs.
 pub struct SceneRuntime {
     on: AtomicBool,
@@ -279,6 +287,8 @@ pub struct SceneRuntime {
     /// What the engine was last handed, so a device list that changes nothing rebuilds nothing.
     applied: Mutex<Option<Applied>>,
     changed: tokio::sync::watch::Sender<u64>,
+    /// How many effects the scene path has built, so a test can tell a rebuild from a keep.
+    builds: std::sync::atomic::AtomicU64,
     /// The editor windows watching the lights, and the one engine sink that feeds them all.
     pub feed: LightFeed,
 }
@@ -300,6 +310,7 @@ impl Default for SceneRuntime {
             failures: Mutex::new(BTreeMap::new()),
             applied: Mutex::new(None),
             changed: tokio::sync::watch::channel(0).0,
+            builds: std::sync::atomic::AtomicU64::new(0),
             feed: LightFeed::default(),
         }
     }
@@ -328,6 +339,11 @@ impl SceneRuntime {
         SceneLock(self.order.lock().await)
     }
 
+    /// How many effects the scene path has built since the daemon started.
+    pub fn builds(&self) -> u64 {
+        self.builds.load(Ordering::SeqCst)
+    }
+
     /// Why each group that could not be built is dark, by group id.
     pub fn failures(&self) -> BTreeMap<String, String> {
         self.failures.lock().unwrap_or_else(|e| e.into_inner()).clone()
@@ -348,11 +364,17 @@ impl SceneRuntime {
 pub struct LightFeed {
     tx: tokio::sync::broadcast::Sender<Arc<LightFrame>>,
     watchers: Mutex<usize>,
+    /// [`LIGHT_FEED_SEND_TIMEOUT`], in milliseconds; a test shortens it.
+    send_timeout_ms: std::sync::atomic::AtomicU64,
 }
 
 impl Default for LightFeed {
     fn default() -> Self {
-        Self { tx: tokio::sync::broadcast::channel(LIGHT_FEED_BACKLOG).0, watchers: Mutex::new(0) }
+        Self {
+            tx: tokio::sync::broadcast::channel(LIGHT_FEED_BACKLOG).0,
+            watchers: Mutex::new(0),
+            send_timeout_ms: std::sync::atomic::AtomicU64::new(LIGHT_FEED_SEND_TIMEOUT.as_millis() as u64),
+        }
     }
 }
 
@@ -367,13 +389,17 @@ impl LightPreviewSink for FeedSink {
 
 impl LightFeed {
     /// One more window watches. The first one makes the engine start submitting light frames.
-    pub fn join(&self, engine: &dyn canvas_proto::traits::Engine) -> tokio::sync::broadcast::Receiver<Arc<LightFrame>> {
+    /// `None` when [`LIGHT_FEED_MAX_WATCHERS`] windows already watch.
+    pub fn join(&self, engine: &dyn canvas_proto::traits::Engine) -> Option<tokio::sync::broadcast::Receiver<Arc<LightFrame>>> {
         let mut watchers = self.watchers.lock().unwrap_or_else(|e| e.into_inner());
+        if *watchers >= LIGHT_FEED_MAX_WATCHERS {
+            return None;
+        }
         *watchers += 1;
         if *watchers == 1 {
             engine.set_light_preview(Some(Arc::new(FeedSink(self.tx.clone()))));
         }
-        self.tx.subscribe()
+        Some(self.tx.subscribe())
     }
 
     /// A window left. The last one makes the engine stop.
@@ -385,9 +411,45 @@ impl LightFeed {
         }
     }
 
+    /// How long a send to a window may take before the window is dropped.
+    pub fn send_timeout(&self) -> std::time::Duration {
+        std::time::Duration::from_millis(self.send_timeout_ms.load(Ordering::SeqCst))
+    }
+
+    /// Changes [`LightFeed::send_timeout`] (a test shortens it).
+    pub fn set_send_timeout(&self, timeout: std::time::Duration) {
+        self.send_timeout_ms.store(timeout.as_millis() as u64, Ordering::SeqCst);
+    }
+
     /// How many windows watch.
     pub fn watchers(&self) -> usize {
         *self.watchers.lock().unwrap_or_else(|e| e.into_inner())
+    }
+}
+
+/// One window's place in the light feed. The place is given back when this is dropped, however the
+/// window's task ends: a loop that breaks, an error, a cancel or a panic.
+pub struct LightWatch {
+    app: Arc<App>,
+    frames: tokio::sync::broadcast::Receiver<Arc<LightFrame>>,
+}
+
+impl LightWatch {
+    /// Takes a place, or `None` when [`LIGHT_FEED_MAX_WATCHERS`] windows already watch.
+    pub fn join(app: &Arc<App>) -> Option<Self> {
+        let frames = app.scene.feed.join(app.engine.as_ref())?;
+        Some(Self { app: Arc::clone(app), frames })
+    }
+
+    /// The next frame, or why there is none (the window skipped ahead, or the feed closed).
+    pub async fn recv(&mut self) -> Result<Arc<LightFrame>, tokio::sync::broadcast::error::RecvError> {
+        self.frames.recv().await
+    }
+}
+
+impl Drop for LightWatch {
+    fn drop(&mut self) {
+        self.app.scene.feed.leave(self.app.engine.as_ref());
     }
 }
 
@@ -397,6 +459,7 @@ impl LightFeed {
 /// `group` is the group the effect plays in: a stack resolves its layers in that group's
 /// canvas.
 fn build_effect(app: &App, id: &str, group: Option<&str>) -> Result<(Box<dyn Effect>, InputNeeds), String> {
+    app.scene.builds.fetch_add(1, Ordering::SeqCst);
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         crate::create_effect(&app.user_effects, &app.stacks, id, group)
     }))
@@ -477,6 +540,31 @@ pub async fn apply_active(app: &Arc<App>, fade: bool) {
 /// so the restores and the replacements never interleave.
 pub async fn apply_active_ungated(app: &Arc<App>, fade: bool) {
     apply_body(app, fade).await;
+}
+
+/// What start-up does with the saved scenes: ends any draft, applies the active scene with no
+/// fade, and logs what it restored. A group whose effect is missing is dark and named; the others
+/// run. Lives here, not in `main`, so a test runs the same path.
+pub async fn restore_active(app: &Arc<App>) {
+    {
+        // No draft survives a restart, but every apply follows the same rule: end one first,
+        // and keep a beat off while the saved scene goes on.
+        let _replace = crate::draft::hold_for_replace(app).await;
+        apply_active_ungated(app, false).await;
+    }
+    let failures = app.scene.failures();
+    let store = app.store.read().await;
+    let scene = active_scene(&store.scenes);
+    tracing::info!(scene = %scene.name, groups = scene.groups.len(), dark = failures.len(), "the active scene was restored");
+    for group in &scene.groups {
+        let Plays::Effect { effect, .. } = &group.plays else { continue };
+        if failures.contains_key(&group.id) && effect == crate::migration::USER_POISON_ID {
+            tracing::warn!(
+                path = %crate::paths::effects_dir().join(crate::migration::USER_POISON_FILE).display(),
+                "the user effect file is missing; install it to run this effect"
+            );
+        }
+    }
 }
 
 /// [`apply_active`] for a device list: a list that changes nothing the engine was handed (the
@@ -647,7 +735,7 @@ pub async fn publish_group_areas(app: &Arc<App>) {
             crate::stack::AreaMap::build_for_group(
                 &plan,
                 &lights,
-                canvas_core::scene_engine::SCENE_SAMPLING,
+                canvas_core::SCENE_SAMPLING,
                 0,
             ),
         );
@@ -664,7 +752,7 @@ pub async fn publish_group_areas(app: &Arc<App>) {
         crate::stack::AreaMap::build_for_group(
             &plan,
             &lights,
-            canvas_core::scene_engine::SCENE_SAMPLING,
+            canvas_core::SCENE_SAMPLING,
             0,
         ),
     );
@@ -811,9 +899,12 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
     }
     let mut failures = app.scene.failures();
     for (before, after) in old.groups.iter().zip(&new.groups) {
-        if before.plays != after.plays {
+        // A group that is dark (its effect could not be built) is tried again on every save, even
+        // one that names the same effect: the file may be back.
+        let dark = failures.contains_key(&after.id);
+        if before.plays != after.plays || dark {
             match (&before.plays, &after.plays) {
-                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now => {
+                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && !dark => {
                     app.engine.set_group_props(&after.id, props);
                 }
                 (_, Plays::Off) => {
@@ -827,17 +918,20 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
                         let group = after.id.clone();
                         tokio::task::spawn_blocking(move || build_effect(&app, &id, Some(&group))).await
                     };
+                    // The store keeps the effect the save named. When it cannot be built the group
+                    // is dark and the failure names why, so the store (what the group is meant to
+                    // play) and the engine (what it plays) never disagree about which it is.
+                    let built = built.unwrap_or_else(|e| Err(format!("the build task failed: {e}")));
                     match built {
-                        Ok(Ok((made, _))) => {
+                        Ok((made, _)) => {
                             failures.remove(&after.id);
                             app.engine.set_group_effect(&after.id, Some(made), props);
                         }
-                        Ok(Err(why)) => {
+                        Err(why) => {
                             tracing::warn!(group = %after.id, effect = %effect, error = %why, "a group's effect could not be built; the group is dark");
                             failures.insert(after.id.clone(), why);
                             app.engine.set_group_effect(&after.id, None, props);
                         }
-                        Err(e) => tracing::error!(error = %e, "the effect could not be built: the build task failed"),
                     }
                 }
             }
@@ -848,10 +942,14 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
     }
     app.inputs.apply_needs(needs_of(app, new));
     *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
-    // What the engine runs is now `new`; a device list that repeats it needs no rebuild.
-    let key = snapshot(app).await;
-    if key.scene.id == new.id {
-        *app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(Applied { scene: new.clone(), ..key });
+    // What the engine runs is now `new`; a device list that repeats it needs no rebuild. Only the
+    // scene changes in the key: the lights and devices stay the ones the engine was last handed. A
+    // fresh snapshot here could hold a device list that arrived while this change held the lock and
+    // that the engine never got, and the next `apply_for_devices` would then skip it as a repeat.
+    if let Some(applied) = app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        if applied.scene.id == new.id {
+            applied.scene = new.clone();
+        }
     }
     app.scene.notify();
 }

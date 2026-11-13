@@ -17,6 +17,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
 - Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
 - Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
+- Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+### Fixed
+
+- Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
 
 ## [0.13.1] - 2026-11-11
 

@@ -119,6 +119,9 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
     };
 
     let store = app.store.read().await;
+    // The scenes travel with the bundle (0.14.0), unless the migration has not run yet: then
+    // only the layouts do, and the import migrates them with its own devices.
+    let (lights, scenes) = crate::storage::scenes_for_export(&store);
     let bundle = ExportBundle {
         schema_version: canvas_proto::config::EXPORT_SCHEMA,
         exported_at: crate::storage::export_timestamp(),
@@ -130,8 +133,8 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
         fans,
         displays: store.displays.displays.clone(),
         stacks: app.stacks.all(),
-        lights: None,
-        scenes: None,
+        lights,
+        scenes,
     };
     Ok(Json(bundle))
 }
@@ -238,7 +241,11 @@ pub async fn config_import(
             .and_then(|s| s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c))
     };
     let (rated_cpu, rated_gpu) = (rated_of(HotKind::Cpu), rated_of(HotKind::Gpu));
-    crate::storage::validate_bundle_rated(&bundle, rated_cpu, rated_gpu)
+    // The machines's current devices, so a bundle with scenes and no lights rebuilds its lights
+    // (and so a 0.13 bundle's layouts are migrated with this machine's zones: a matrix zone is a
+    // Grid here, not a Strip).
+    let devices = app.devices.read().await.clone();
+    crate::storage::validate_bundle_rated(&bundle, &devices, rated_cpu, rated_gpu)
         .map_err(|e| ApiFailure::validation(e.to_string()))?;
 
     // The stacks in the bundle go through the rules a PUT does (D95.1.2). A bundle from before
@@ -256,8 +263,15 @@ pub async fn config_import(
     }
 
     let home = app.store.read().await.home.clone();
-    crate::storage::import_bundle_rated(&home, &bundle, rated_cpu, rated_gpu)
-        .map_err(|e| ApiFailure::internal(format!("could not import the config: {e}")))?;
+    crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
+        .map_err(|e| match &e {
+            // A file this machine cannot read refuses the import (nothing was written), and a
+            // scene that cannot be made valid is the bundle's fault: both are the caller's to
+            // fix, not an internal failure.
+            crate::storage::ImportError::Blocked(_) => ApiFailure::conflict(e.to_string()),
+            crate::storage::ImportError::Scenes(_) => ApiFailure::validation(e.to_string()),
+            _ => ApiFailure::internal(format!("could not import the config: {e}")),
+        })?;
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
 
@@ -317,6 +331,8 @@ pub async fn config_import(
         let balances = crate::api::devices::white_balance_map(&app.store.read().await.config);
         app.engine.set_white_balance(balances);
         app.stacks.set_fps(settings.fps);
+        // The engine is not told about the imported scenes: the scene API and the engine's scene
+        // path arrive in Task 6, and until then only the layout is applied here, as before.
         if let Some(layout) = app.active_layout().await {
             let devices = app.devices.read().await.clone();
             app.set_layout(&layout, &devices);
