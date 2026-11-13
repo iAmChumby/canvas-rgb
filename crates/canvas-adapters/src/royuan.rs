@@ -119,8 +119,9 @@ pub fn per_key_reports(frame: &[Rgb8]) -> [[u8; REPORT_LEN]; PER_KEY_PAGES] {
 /// The report that shows the stored picture: light mode 13 ("User Picture").
 ///
 /// Layout: `[1]` 0x07, `[2]` 0x0D, `[3]` speed 3, `[4]` brightness 4, `[5]` 0x00 (the
-/// picture slot is the high nibble: slot 0), `[6]` 0x00, `[7]` 0xC8, `[8]` 0xC8 and `[9]`
-/// the checksum over `[1..=8]`. The firmware ignores the colour bytes in this mode.
+/// yc500 user picture has no slot byte), `[6]` 0x00, `[7]` 0xC8, `[8]` 0xC8 (the colour bytes
+/// the vendor app sends in this mode; what the firmware does with them is unknown) and `[9]`
+/// the checksum over `[1..=8]`.
 pub fn user_picture_mode_report() -> [u8; REPORT_LEN] {
     let mut r = [0u8; REPORT_LEN];
     r[1..9].copy_from_slice(&[SET_LEDPARAM, MODE_USER_PICTURE, 3, 4, 0, 0, 0xC8, 0xC8]);

@@ -221,7 +221,7 @@ does not send them yet (#312).
   tests `direct_mode_bytes` and `color_bytes_and_checksums`). The sources document no per-key form of `0x0E`.
 
 So the answer from the sources: **the only per-key path documented on stock firmware is a stored picture,
-not a stream.** They give a driver no path to moving per-key lighting, and none of them tested PID `4015`.
+not a stream.** They give a driver no live path to moving per-key lighting, and none of them tested PID `4015`.
 Whether this keyboard accepts the picture upload at all is UNKNOWN until the device check in the last
 subsection; one project calls it blocked on another board (below).
 
@@ -271,7 +271,7 @@ pins the bytes for a frame with slot 9 red and slot 40 blue.
 checksum`, with 378 bytes (126 slots), 56 data bytes a report, 42 in the last and the apply bit `1` on report 6
 (source: https://github.com/Lightning-13/monsgeek-rgb/blob/main/docs/protocol.md, lines 71 to 142). Sharkfin
 files that shape (its "chunk length" field, protocol.md line 128) under the other firmware family, "gen2", and warns that "Sending the yc500 header on gen2 is
-a live write" (PROTOCOL.md lines 526 to 533 and 1099 to 1100). The 4015 boards are in sharkfin's yc500 list,
+a live write" (PROTOCOL.md lines 526 to 533 and 1099 to 1100). Most 4015 records are in sharkfin's yc500 list (115 of 174; the rest are "unknown"),
 so **try the sharkfin header first** and the FUN60 Pro shape second, never both in one session.
 
 A third project's upload did nothing on a board with PID `5002` ("every guessed frame is a no-op"). Its script
@@ -340,7 +340,7 @@ table for another board.
 
 ### Frame rate
 
-- **Live frame rate: none.** The upload is a flash write. In Lightning-13's notes the official software
+- **Live frame rate: none documented on stock firmware; for 4015, UNKNOWN.** The upload is a flash write. In Lightning-13's notes the official software
   "applies changes only after Save to Layer" and continuous writes "produce behavior consistent with repeated
   flash programming" (limitations.md lines 26 to 36).
 - **How fast uploads survive** (source: sharkfin PROTOCOL.md lines 547 to 558, a yc500 board, the author's
