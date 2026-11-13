@@ -32,8 +32,11 @@ pub struct CompositeAdapter {
 }
 
 impl CompositeAdapter {
+    /// The product's adapter: the OpenRGB controllers and the keyboard, whose still bookkeeping
+    /// lives in the daemon's user directory so a restart cannot reset its counters (#312).
     pub fn new(openrgb: OpenRgbAdapter) -> Self {
-        Self::with_keyboard(openrgb, RoyuanAdapter::new())
+        let store = canvas_adapters::royuan::FileStillStore::new(crate::paths::royuan_stills_file());
+        Self::with_keyboard(openrgb, RoyuanAdapter::with_file_store(Box::new(store)))
     }
 
     /// OpenRGB only: the keyboard adapter is held but never enumerated,

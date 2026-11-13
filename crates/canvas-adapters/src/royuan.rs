@@ -10,18 +10,25 @@
 //! whole-board colour; the keys then show their own colours. A moving frame sends the
 //! direct-mode report and the whole-board colour again, at once.
 //!
-//! A picture is a flash write, so three limits keep the flash from wearing out (#312's review):
+//! A picture is a flash write, so the limits below keep the flash from wearing out (#312's
+//! review):
 //!
 //! - the picture already in the flash is shown again with light mode 13, and not written again,
 //!   when the new still is within [`STILL_TOLERANCE`] of it;
-//! - the still window doubles each time a shown picture is abandoned soon after it appeared,
-//!   up to [`STILL_AFTER_MAX`], and drops back to [`STILL_AFTER`] after a picture that stays;
-//! - no more than [`UPLOADS_PER_HOUR_MAX`] uploads go out in any rolling hour. Past that, a
-//!   still keeps the whole-board colour until the oldest upload falls out of the hour.
+//! - once an upload starts it finishes, whatever the frame does: a half-written picture would
+//!   only leave the flash torn. A frame that moves ends a picture *on show*, and every one of
+//!   those abandons doubles the still window, up to [`STILL_AFTER_MAX`]; a picture that stays a
+//!   minute puts it back to [`STILL_AFTER`];
+//! - an attempt counts from before its first page goes out, and no more than
+//!   [`UPLOADS_PER_HOUR_MAX`] attempts go out in a rolling hour or [`UPLOADS_PER_DAY_MAX`] in a
+//!   rolling day, about 8.8k a year. Past that, a still keeps the whole-board colour until a
+//!   slot frees. A board that refuses every page is counted the same way.
 //!
-//! The gap between uploads, the hour's count and the still window belong to the flash, so they
-//! outlive a reconnect; the picture the flash holds is remembered in [`Flash`], and an upload
-//! that is abandoned part-way leaves it unknown, so the next still writes all seven pages.
+//! The attempts and the picture's hash live in a small JSON file under the daemon's user
+//! directory ([`StillStore`], read at start and written on every attempt), so a restart cannot
+//! reset the caps or rewrite a picture the flash already holds. A file that is missing or will
+//! not parse holds every upload off for [`STORE_HOLD_OFF`] and leaves the picture unknown: the
+//! counters fail closed, never open.
 
 use async_trait::async_trait;
 use canvas_proto::color::Rgb8;
@@ -61,16 +68,24 @@ const ABANDON_FAST: Duration = Duration::from_secs(30);
 /// A picture that stays this long resets the still window to [`STILL_AFTER`]: the effect has
 /// settled and the next still is worth its write.
 const STILL_LONG: Duration = Duration::from_secs(60);
-/// The shortest gap between two picture uploads; a still that changes sooner waits.
-pub const UPLOAD_MIN_GAP: Duration = Duration::from_secs(10);
-/// The most picture uploads in any rolling hour.
+/// The shortest gap between two upload attempts; a still that changes sooner waits.
 ///
-/// The window above caps an effect at six an hour (10 minutes each). Twelve is twice that, so
-/// a normal effect never reaches it and only a device that keeps reconnecting (each reconnect
-/// starts the still window over) or an effect that keeps changing does. A picture is 384 flash
-/// bytes, so this is at most about 3.5 kB an hour, 105 kB a year: inside what a serial flash
-/// cell is rated for (100k writes), and a real effect writes a handful a day.
-pub const UPLOADS_PER_HOUR_MAX: usize = 12;
+/// An attempt counts from before its first page goes out, so a refused page still uses the gap.
+pub const UPLOAD_MIN_GAP: Duration = Duration::from_secs(10);
+/// The most upload attempts in any rolling hour.
+///
+/// This, the daily cap and the still window bound the flash's erase cycles. A picture is one
+/// erase of one 384-byte region, not 384 bytes of wear: the flash is rated for about 100k
+/// erase cycles per sector, and at this cap a pathological effect reaches 4 an hour, 24 a day,
+/// about 8.8k a year. A normal effect writes a handful a day: the window alone needs a still to
+/// hold 2 s, doubling to 10 minutes as pictures keep being abandoned, and a still that holds a
+/// minute puts it back.
+pub const UPLOADS_PER_HOUR_MAX: usize = 4;
+/// The most upload attempts in any rolling 24 hours (about 8.8k a year at the ceiling).
+pub const UPLOADS_PER_DAY_MAX: usize = 24;
+/// How long a store that cannot be read holds every upload off, so a missing or broken file
+/// cannot buy attempts (#312 review: the counters fail closed, never open).
+pub const STORE_HOLD_OFF: Duration = Duration::from_secs(600);
 /// The gap between two pages of one upload.
 const PAGE_GAP: Duration = Duration::from_millis(100);
 /// The settle after the last page before light mode 13, as in the #311 device check.
@@ -83,6 +98,8 @@ const PICTURE_SETTLE: Duration = Duration::from_secs(2);
 const STILL_TOLERANCE: u8 = 1;
 /// A rolling hour, for [`UPLOADS_PER_HOUR_MAX`].
 const ONE_HOUR: Duration = Duration::from_secs(3_600);
+/// A rolling day, for [`UPLOADS_PER_DAY_MAX`] and the stored attempts.
+const ONE_DAY: Duration = Duration::from_secs(86_400);
 
 /// The report that switches the keyboard to direct (host-driven) lighting.
 pub fn direct_mode_report() -> [u8; REPORT_LEN] {
@@ -185,6 +202,99 @@ fn picture_slots(frame: &[Rgb8]) -> Vec<Rgb8> {
     let mut slots = frame[..frame.len().min(PER_KEY_SLOTS)].to_vec();
     slots.resize(PER_KEY_SLOTS, Rgb8::BLACK);
     slots
+}
+
+/// A hash of a picture's slots, the form the store keeps them in.
+///
+/// The store cannot carry a frame back into the adapter, but it can tell one picture from
+/// another: a still that hashes to the stored picture is the picture the flash holds. (The
+/// default hasher is fixed-key, so the hash is the same in the next run; it is not a stable
+/// contract across compiler versions, and a mismatch only costs one write.)
+fn picture_hash(slots: &[Rgb8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for c in slots {
+        (c.r, c.g, c.b).hash(&mut hasher);
+    }
+    hasher.finish()
+}
+
+/// What the keyboard's stills keep between runs (#312 review: the restart loop).
+///
+/// The counters are the wear bound, so they outlive the process: without them a daemon restart
+/// would reset the caps, and a crash loop would write the flash on every start. The picture's
+/// hash means a restart does not rewrite a picture the flash already holds.
+#[derive(Clone, Debug, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct StoredStills {
+    /// The Unix second of each upload attempt of the last day, oldest first.
+    pub attempts: Vec<u64>,
+    /// The hash of the picture the flash holds, when the last upload finished whole.
+    pub picture: Option<u64>,
+}
+
+/// Where [`StoredStills`] lives: a small JSON file under the daemon's user directory.
+///
+/// The daemon passes the path in (`crates/canvas-daemon/src/main.rs`), never `%ProgramData%`.
+pub trait StillStore: Send + Sync {
+    /// Reads the stored state. An error (a missing file included) makes the adapter treat the
+    /// counters as spent and the picture as unknown.
+    fn load(&self) -> Result<StoredStills, String>;
+    /// Writes the state back. An error is logged and the run goes on in memory.
+    fn save(&self, stored: &StoredStills) -> Result<(), String>;
+}
+
+/// The real store: one small JSON file, written whole through a temp file and a rename.
+pub struct FileStillStore {
+    path: std::path::PathBuf,
+}
+
+impl FileStillStore {
+    /// A store at `path`.
+    pub fn new(path: impl Into<std::path::PathBuf>) -> Self {
+        Self { path: path.into() }
+    }
+
+    /// The file this store reads and writes.
+    pub fn path(&self) -> &std::path::Path {
+        &self.path
+    }
+}
+
+impl StillStore for FileStillStore {
+    fn load(&self) -> Result<StoredStills, String> {
+        let bytes = std::fs::read(&self.path).map_err(|e| format!("{}: {e}", self.path.display()))?;
+        serde_json::from_slice(&bytes).map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+
+    fn save(&self, stored: &StoredStills) -> Result<(), String> {
+        let bytes = serde_json::to_vec_pretty(stored).map_err(|e| e.to_string())?;
+        let dir = self
+            .path
+            .parent()
+            .ok_or_else(|| format!("{} has no parent directory", self.path.display()))?;
+        std::fs::create_dir_all(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+        // A temp file in the same directory, then the rename: a crash never leaves half a file.
+        let tmp = self.path.with_extension("json.tmp");
+        std::fs::write(&tmp, &bytes).map_err(|e| format!("{}: {e}", tmp.display()))?;
+        std::fs::rename(&tmp, &self.path).map_err(|e| format!("{}: {e}", self.path.display()))
+    }
+}
+
+/// The Unix second now: the store's clock.
+fn unix_now() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// One upload attempt, on both clocks the adapter needs (#312 review B1).
+struct Attempt {
+    /// The caller's clock, for the rolling windows.
+    at: Instant,
+    /// The Unix second it happened at, for the store.
+    unix: u64,
 }
 
 /// Whether `b` is a different frame from `a`: another length, or any channel more than
@@ -329,13 +439,22 @@ pub struct RoyuanAdapter {
     /// The still picture: when the per-key frame last moved, and the upload in flight (#312).
     picture: Picture,
     /// What the keyboard's flash holds (#312 review S3): a picture it holds whole, or nothing
-    /// we can trust. A reconnect does not clear it: the flash keeps what it was given.
+    /// we can trust. A reconnect does not clear it: the flash keeps what it was given; a daemon
+    /// restart keeps only its hash, from the store.
     flash: Flash,
-    /// When each upload of the last [`ONE_HOUR`] started, oldest first (#312 review S1).
-    uploads: VecDeque<Instant>,
-    /// When the last upload's first page went out; [`UPLOAD_MIN_GAP`] is measured from it.
-    /// On the adapter, not in [`Picture`], so a reconnect cannot buy an upload (#312 review S1).
-    last_upload: Option<Instant>,
+    /// Every upload attempt of the last day, oldest first (#312 review B1, S1): one entry per
+    /// try, before its first page goes out, so a refused page is still counted and gapped.
+    attempts: VecDeque<Attempt>,
+    /// Where the attempts and the picture's hash are kept between runs, when the daemon gave
+    /// the adapter a file. `None` keeps them in memory only (the tests and the probes).
+    store: Option<Box<dyn StillStore>>,
+    /// The Unix second [`clock_base`] stood for: the store's clock, driven by the caller's.
+    clock_unix: u64,
+    /// The `Instant` the wall clock was read at, for [`Self::unix_at`].
+    clock_base: Instant,
+    /// While this has not passed, no upload starts: the store could not be read, so the
+    /// counters are treated as spent (#312 review: fail closed).
+    hold_off_until: Option<Instant>,
     /// How long a still has to hold before it uploads. Doubled when a shown picture is
     /// abandoned soon after it appears, back to [`STILL_AFTER`] after a picture that stays.
     still_after: Duration,
@@ -352,6 +471,9 @@ enum Flash {
     /// Nothing uploaded in this run, or an upload ended before its last page.
     #[default]
     Unknown,
+    /// The hash of a whole picture a previous run wrote and stored: enough to tell whether a
+    /// still is the picture in the flash, not enough to compare step by step.
+    Hashed(u64),
     /// A whole picture, its 128 slots in slot order.
     Known(Vec<Rgb8>),
 }
@@ -399,10 +521,29 @@ impl RoyuanAdapter {
         Self::with_opener(Box::new(HidOpener))
     }
 
+    /// The adapter with an opener and a store of the caller's.
+    ///
+    /// The product passes the file under the daemon's user directory, so the counters and the
+    /// picture's hash outlive a restart (#312 review). The adapter reads it here, once: a store
+    /// that cannot be read holds every upload off for [`STORE_HOLD_OFF`] and leaves the picture
+    /// unknown, which is the closed way round.
+    pub fn with_store(opener: Box<dyn Opener>, store: Box<dyn StillStore>) -> Self {
+        let mut adapter = Self::with_opener(opener);
+        adapter.store = Some(store);
+        adapter.load_stored();
+        adapter
+    }
+
+    /// The real keyboard over HID, with its counters and picture hash in `store`.
+    pub fn with_file_store(store: Box<dyn StillStore>) -> Self {
+        Self::with_store(Box::new(HidOpener), store)
+    }
+
     /// The adapter with an opener of the caller's.
     ///
     /// The product uses the HID opener; the tests use a fake one, so they can count the
-    /// reports the keyboard sends.
+    /// reports the keyboard sends. Without a store the counters and the picture live in memory
+    /// only.
     pub fn with_opener(opener: Box<dyn Opener>) -> Self {
         Self {
             opener,
@@ -412,10 +553,72 @@ impl RoyuanAdapter {
             seen_resume: crate::resume_epoch(),
             direct_pending: false,
             picture: Picture::default(),
-            flash: Flash::default(),
-            uploads: VecDeque::new(),
-            last_upload: None,
+            flash: Flash::Unknown,
+            attempts: VecDeque::new(),
+            store: None,
+            clock_unix: unix_now(),
+            clock_base: Instant::now(),
+            hold_off_until: None,
             still_after: STILL_AFTER,
+        }
+    }
+
+    /// The Unix second the caller's clock has reached at `now`.
+    fn unix_at(&self, now: Instant) -> u64 {
+        self.clock_unix + now.saturating_duration_since(self.clock_base).as_secs()
+    }
+
+    /// Reads the store into the counters and the flash state.
+    fn load_stored(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        match store.load() {
+            Ok(stored) => {
+                let now = self.clock_base;
+                let unix_now = self.clock_unix;
+                for unix in stored.attempts {
+                    // A stamp from the future (a clock set back) is kept at the base, so it
+                    // still counts against the caps until it ages out.
+                    let age = unix_now.saturating_sub(unix);
+                    if age >= ONE_DAY.as_secs() {
+                        continue;
+                    }
+                    let at = now.checked_sub(Duration::from_secs(age)).unwrap_or(now);
+                    self.attempts.push_back(Attempt { at, unix });
+                }
+                self.flash = match stored.picture {
+                    Some(hash) => Flash::Hashed(hash),
+                    None => Flash::Unknown,
+                };
+            }
+            Err(e) => {
+                // Closed, not open: a missing or unreadable file could otherwise be deleted to
+                // reset the counters, so the caps are treated as spent for a while.
+                tracing::warn!(
+                    error = %e,
+                    "the keyboard's still bookkeeping could not be read; uploads wait ten minutes"
+                );
+                self.hold_off_until = Some(self.clock_base + STORE_HOLD_OFF);
+            }
+        }
+    }
+
+    /// Writes the counters and the picture's hash back, when there is a store.
+    fn persist(&mut self) {
+        let Some(store) = self.store.as_ref() else {
+            return;
+        };
+        let stored = StoredStills {
+            attempts: self.attempts.iter().map(|a| a.unix).collect(),
+            picture: match &self.flash {
+                Flash::Known(frame) => Some(picture_hash(frame)),
+                Flash::Hashed(hash) => Some(*hash),
+                Flash::Unknown => None,
+            },
+        };
+        if let Err(e) = store.save(&stored) {
+            tracing::warn!(error = %e, "the keyboard's still bookkeeping could not be written");
         }
     }
 
@@ -466,7 +669,8 @@ impl RoyuanAdapter {
     /// An upload that stopped before its last page leaves part of a new picture over the old
     /// one, so the flash no longer holds a picture we know (#312 review S3); the next still
     /// writes all seven pages. A picture whose seven pages all went out is whole even if the
-    /// mode report never did, so it stays known.
+    /// mode report never did, so it stays known. A running adapter only comes here when the
+    /// device goes (a disconnect, a resume, a failed colour), never because a frame moved.
     fn drop_picture(&mut self) {
         if let Some(upload) = self.picture.upload.take() {
             self.flash = if upload.next < PER_KEY_PAGES {
@@ -474,7 +678,14 @@ impl RoyuanAdapter {
             } else {
                 Flash::Known(upload.frame)
             };
+            self.persist();
         }
+        self.end_shown();
+    }
+
+    /// Ends a picture on show, keeping a picture in flight: a frame that moves does not stop a
+    /// write the flash has already paid for (#312 review B2).
+    fn end_shown(&mut self) {
         self.picture.showing = false;
     }
 
@@ -482,9 +693,12 @@ impl RoyuanAdapter {
     ///
     /// Soon after a picture appears the effect is changing faster than its write is worth, so
     /// the next still has to hold twice as long; a picture that stayed a minute is a settled
-    /// effect, and the next still is back to [`STILL_AFTER`].
+    /// effect, and the next still is back to [`STILL_AFTER`]. Every abandon goes through here:
+    /// an upload is never dropped half written (#312 review B2), so an effect that keeps moving
+    /// gives up its window once per picture instead of once per frame.
     fn back_off(&mut self, now: Instant) {
         let Some(shown_at) = self.picture.shown_at.take() else {
+            self.still_after = (self.still_after * 2).min(STILL_AFTER_MAX);
             return;
         };
         let shown_for = now.saturating_duration_since(shown_at);
@@ -498,25 +712,44 @@ impl RoyuanAdapter {
     /// Whether the flash already holds this still, within [`STILL_TOLERANCE`] of the picture
     /// written last: showing it again then costs no write at all.
     fn flash_holds(&self, frame: &[Rgb8]) -> bool {
+        let slots = picture_slots(frame);
         match &self.flash {
-            Flash::Known(picture) => !frames_differ(picture, &picture_slots(frame)),
+            Flash::Known(picture) => !frames_differ(picture, &slots),
+            Flash::Hashed(hash) => picture_hash(&slots) == *hash,
             Flash::Unknown => false,
         }
     }
 
-    /// Drops the uploads older than an hour, and says whether another one fits in the hour.
-    fn hour_allows_upload(&mut self, now: Instant) -> bool {
-        self.uploads.retain(|at| now.saturating_duration_since(*at) < ONE_HOUR);
-        self.uploads.len() < UPLOADS_PER_HOUR_MAX
+    /// Whether the picture on show is still the frame the effect holds.
+    fn picture_is_current(&self, latest: &[Rgb8]) -> bool {
+        match &self.flash {
+            Flash::Known(picture) => !frames_differ(picture, &picture_slots(latest)),
+            _ => false,
+        }
     }
 
-    /// Whether a still may be uploaded now: the last one is a [`UPLOAD_MIN_GAP`] back, and the
-    /// hour's budget has room. A still that waits goes out when both allow.
+    /// Whether a still may be attempted now: the last attempt is a [`UPLOAD_MIN_GAP`] back, the
+    /// hour and the day have room, and a store that could not be read is not holding us off.
+    ///
+    /// An attempt is counted before its first page goes out, so this is also what bounds a
+    /// keyboard that refuses every page (#312 review B1).
     fn upload_allowed(&mut self, now: Instant) -> bool {
+        if self.hold_off_until.is_some_and(|until| now < until) {
+            return false;
+        }
+        self.attempts.retain(|a| now.saturating_duration_since(a.at) < ONE_DAY);
         let gap_ok = self
-            .last_upload
-            .is_none_or(|at| now.saturating_duration_since(at) >= UPLOAD_MIN_GAP);
-        gap_ok && self.hour_allows_upload(now)
+            .attempts
+            .back()
+            .is_none_or(|last| now.saturating_duration_since(last.at) >= UPLOAD_MIN_GAP);
+        let last_hour = self
+            .attempts
+            .iter()
+            .filter(|a| now.saturating_duration_since(a.at) < ONE_HOUR)
+            .count();
+        gap_ok
+            && last_hour < UPLOADS_PER_HOUR_MAX
+            && self.attempts.len() < UPLOADS_PER_DAY_MAX
     }
 
     /// Sends the direct-mode report and forgets the last colour, so the colour follows.
@@ -587,6 +820,11 @@ impl RoyuanAdapter {
     /// small state machine advanced by the frames the engine already streams: one page per
     /// [`PAGE_GAP`], then the mode report [`PICTURE_SETTLE`] after the last page. Nothing here
     /// sleeps, so the frame path never waits for the seconds an upload takes.
+    ///
+    /// Once an upload starts it finishes, whatever the frame does: the flash write is spent, so
+    /// dropping the remaining pages would only leave a torn picture and buy nothing (#312 review
+    /// B2). A frame that moves ends a picture *on show*, and each of those abandons widens the
+    /// still window.
     fn write_frame_at(&mut self, colors: &[Rgb8], now: Instant) -> Result<(), AdapterError> {
         if self.dev.is_none() {
             return Err(AdapterError::NotConnected);
@@ -599,10 +837,10 @@ impl RoyuanAdapter {
             None => true,
         };
         if moved {
-            // A moving frame: no picture can be shown, and an upload in flight is abandoned
-            // (its remaining pages would put a stale frame on the board).
+            // A moving frame: the picture on show gives way. An upload in flight does not: its
+            // pages still go out below.
             let was_showing = self.picture.showing;
-            self.drop_picture();
+            self.end_shown();
             self.picture.baseline = Some(colors.to_vec());
             self.picture.since = Some(now);
             self.picture.latest = Some(colors.to_vec());
@@ -613,13 +851,28 @@ impl RoyuanAdapter {
             }
         } else {
             self.picture.latest = Some(colors.to_vec());
-            self.advance_upload(now);
         }
 
-        // A still long enough takes the board. The picture the flash already holds is shown
-        // again with light mode 13, which writes nothing; a new one is uploaded when the gap
-        // and the hour's budget allow it.
-        if !self.picture.showing && self.picture.upload.is_none() {
+        // The pages keep their own pace whether the frame moves or not, so a started upload
+        // always reaches light mode 13.
+        self.advance_upload(now);
+
+        if self.picture.showing {
+            if self.picture_is_current(colors) {
+                // The board shows this still: nothing else goes out while it holds.
+                return Ok(());
+            }
+            // The frame moved on while the picture was being written: the colour takes over,
+            // and this abandon widens the window like any other.
+            self.end_shown();
+            self.direct_pending = true;
+            self.back_off(now);
+        }
+
+        // A still long enough takes the board. The picture the flash already holds (even one a
+        // previous run wrote) is shown again with light mode 13, which writes nothing; a new one
+        // is attempted when the gap, the hour and the day allow it.
+        if self.picture.upload.is_none() {
             let still_for = self
                 .picture
                 .since
@@ -635,10 +888,9 @@ impl RoyuanAdapter {
             }
         }
 
-        // The picture owns the board while it shows, and nothing else goes out then. Until light
-        // mode 13 goes out the whole-board colour keeps streaming (#312 review S4): what the
-        // board shows during the ~3 s of pages is UNKNOWN (docs/adapters.md, "Frame rate"), so
-        // the colour it was already given is the one state we can still count on.
+        // Until light mode 13 goes out the whole-board colour keeps streaming (#312 review S4):
+        // what the board shows during the ~3 s of pages is UNKNOWN (docs/adapters.md, "Frame
+        // rate"), so the colour it was already given is the one state we can count on.
         if self.picture.showing {
             return Ok(());
         }
@@ -656,15 +908,19 @@ impl RoyuanAdapter {
             self.upload_failed();
             return;
         }
-        self.picture_shown(None, now);
+        // The still is the picture the flash holds (that is why it is shown, not written), so
+        // the frame is known again, not just its hash.
+        if let Some(frame) = self.picture.latest.clone() {
+            self.picture_shown(frame, now);
+        }
     }
 
-    /// Records that light mode 13 went out, showing `frame`'s picture (or the one already
+    /// Returns that light mode 13 went out, showing `frame`'s picture (or the one already
     /// known to be in the flash, for `None`).
-    fn picture_shown(&mut self, frame: Option<Vec<Rgb8>>, now: Instant) {
-        if let Some(frame) = frame {
-            self.flash = Flash::Known(frame);
-        }
+    fn picture_shown(&mut self, frame: Vec<Rgb8>, now: Instant) {
+        self.flash = Flash::Known(frame);
+        // A whole picture is now in the flash, so the next run need not write it again.
+        self.persist();
         self.picture.showing = true;
         self.picture.shown_at = Some(now);
         self.picture.warned = false;
@@ -672,17 +928,19 @@ impl RoyuanAdapter {
         self.direct_pending = false;
     }
 
-    /// Sends the first page of `frame` and arms the rest of the upload.
+    /// Starts an upload of `frame`: counts the attempt, then sends its first page.
+    ///
+    /// The attempt is recorded before any page goes out (#312 review B1): a board that refuses
+    /// page 0 is still counted, still waits out [`UPLOAD_MIN_GAP`], and still counts against the
+    /// hour and the day, so a flaky endpoint cannot be made to write the flash every frame. A
+    /// failed page, page 0 included, leaves the flash unknown ([`Self::upload_failed`]).
     fn start_upload(&mut self, frame: &[Rgb8], now: Instant) {
         let frame = picture_slots(frame);
         let reports = Box::new(per_key_reports(&frame));
-        if self.send_picture_report(&reports[0]).is_err() {
-            self.upload_failed();
-            return;
-        }
-        self.last_upload = Some(now);
-        self.uploads.push_back(now);
-        self.picture.upload = Some(Upload { frame, reports, next: 1, at: now + PAGE_GAP });
+        self.attempts.push_back(Attempt { at: now, unix: self.unix_at(now) });
+        self.persist();
+        self.picture.upload = Some(Upload { frame, reports, next: 0, at: now });
+        self.advance_upload(now);
     }
 
     /// Sends what the upload owes at `now`: at most one report per call, at the adapter's pace.
@@ -715,7 +973,7 @@ impl RoyuanAdapter {
                 self.upload_failed();
                 return;
             }
-            self.picture_shown(Some(upload.frame), now);
+            self.picture_shown(upload.frame, now);
             return;
         }
     }
@@ -925,6 +1183,11 @@ mod tests {
         opens: u32,
         present: bool,
         fail_next_send: bool,
+        /// The keyboard refuses every `SET_USERPIC` page (#312 review B1): a board whose flash
+        /// write always fails. Direct mode and the whole-board colour still go through.
+        refuse_pages: bool,
+        /// Page-0 reports the fake refused: one per upload attempt on such a board.
+        refused: usize,
         picture: Picture,
     }
 
@@ -937,6 +1200,12 @@ mod tests {
             if s.fail_next_send {
                 s.fail_next_send = false;
                 return Err("unplugged".into());
+            }
+            if s.refuse_pages && data.get(1) == Some(&SET_USERPIC) {
+                if data.get(5) == Some(&0) {
+                    s.refused += 1;
+                }
+                return Err("the page was refused".into());
             }
             s.picture.accept(data)?;
             s.sent.push(data.to_vec());
@@ -966,6 +1235,47 @@ mod tests {
     fn rig(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
         let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
         (RoyuanAdapter::with_opener(Box::new(FakeOpener(shared.clone()))), shared)
+    }
+
+    /// The keyboard as `rig` builds it, with a store beside it (#312 review S1).
+    fn rig_stored(present: bool, store: FakeStore) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
+        let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
+        let adapter =
+            RoyuanAdapter::with_store(Box::new(FakeOpener(shared.clone())), Box::new(store));
+        (adapter, shared)
+    }
+
+    /// The still store the tests hold in memory: `None` stands for a file that is missing or
+    /// will not parse.
+    #[derive(Clone, Default)]
+    struct FakeStore(Arc<Mutex<Option<StoredStills>>>);
+
+    impl FakeStore {
+        /// A store with a file holding `stored`.
+        fn with(stored: StoredStills) -> Self {
+            Self(Arc::new(Mutex::new(Some(stored))))
+        }
+
+        /// A store whose file is missing.
+        fn missing() -> Self {
+            Self::default()
+        }
+
+        /// What the adapter last wrote, or the default when it wrote nothing.
+        fn saved(&self) -> StoredStills {
+            self.0.lock().unwrap().clone().unwrap_or_default()
+        }
+    }
+
+    impl StillStore for FakeStore {
+        fn load(&self) -> Result<StoredStills, String> {
+            self.0.lock().unwrap().clone().ok_or_else(|| "no file".to_string())
+        }
+
+        fn save(&self, stored: &StoredStills) -> Result<(), String> {
+            *self.0.lock().unwrap() = Some(stored.clone());
+            Ok(())
+        }
     }
 
     fn direct_count(s: &Shared) -> usize {
@@ -1320,10 +1630,12 @@ mod tests {
 
     // ---- #312: stills on change
 
-    /// The still tests stream at 20 fps, slower than the engine: every page gap lands on a frame.
-    const FRAME_MS: u64 = 50;
-    /// Frames in the one simulated hour the wear tests run.
+    /// The still tests stream at 10 fps, slower than the engine: one page of an upload a frame.
+    const FRAME_MS: u64 = 100;
+    /// Frames in one simulated hour at [`FRAME_MS`].
     const HOUR_FRAMES: u64 = 3_600_000 / FRAME_MS;
+    /// Frames in one simulated day at [`FRAME_MS`].
+    const DAY_FRAMES: u64 = 24 * HOUR_FRAMES;
 
     /// A breathing frame: every key the same colour, `level` of full brightness at the peak, at
     /// `hz` cycles a second.
@@ -1340,13 +1652,31 @@ mod tests {
         vec![Rgb8::new(v, v, v); PER_KEY_SLOTS]
     }
 
-    /// Streams `frame(t)` every [`FRAME_MS`] of the simulated clock for one hour.
-    fn an_hour(a: &mut RoyuanAdapter, t0: Instant, frame: impl Fn(f64) -> Vec<Rgb8>) {
-        for i in 0..HOUR_FRAMES {
+    /// Streams `frame(t)` every [`FRAME_MS`] of the simulated clock for `frames` frames.
+    fn simulate(a: &mut RoyuanAdapter, t0: Instant, frames: u64, frame: impl Fn(f64) -> Vec<Rgb8>) {
+        for i in 0..frames {
             let ms = i * FRAME_MS;
             let f = frame(ms as f64 / 1000.0);
             a.write_frame_at(&f, at(t0, ms)).expect("a frame");
         }
+    }
+
+    /// What a run of frames did to the flash: attempts started, whole pictures written, pages.
+    #[derive(Debug, PartialEq, Eq)]
+    struct Wear {
+        attempts: usize,
+        pictures: u32,
+        pages: usize,
+    }
+
+    /// Runs `frames` of `frame` on a fresh keyboard and reports what it wrote.
+    fn wear_of(frames: u64, frame: impl Fn(f64) -> Vec<Rgb8>) -> Wear {
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        simulate(&mut a, t0, frames, frame);
+        let g = s.lock().unwrap();
+        Wear { attempts: upload_count(&g), pictures: g.picture.complete, pages: userpic_count(&g) }
     }
 
     /// How many uploads started: the page-0 reports.
@@ -1572,97 +1902,212 @@ mod tests {
         assert_eq!(s.lock().unwrap().picture.complete, 0, "no still ran long enough to upload");
     }
 
-    // ---- #312 review: flash wear (B1)
+    // ---- #312 review pass 2: flash wear, over an hour and over a day (B1, B2)
 
     #[test]
-    fn a_dim_breathing_effect_uploads_a_handful_of_pictures_an_hour() {
+    fn a_dim_breathing_effect_uploads_a_handful_of_pictures_a_day() {
         let _serial = serial();
-        let (mut a, s) = rig(true);
-        let t0 = Instant::now();
-        a.open_and_init().expect("connect");
         // 5% of full brightness at 0.1 Hz: a 13-step swing over ten seconds, the effect the
-        // review measured at 360 uploads an hour.
-        an_hour(&mut a, t0, |t| breathing_frame(t, 0.1, 0.05));
-        let g = s.lock().unwrap();
-        // Twelve: a 13-step swing holds a step for about half a second near its peak, so a
-        // still starts an upload and then moves before the seven pages and the settle are done.
-        // Each write is abandoned (no picture ever reaches the keys), and the hour's cap is the
-        // only bound: before it this effect wrote a picture every ten seconds (the review's 360).
-        assert_eq!(g.picture.complete, 0, "no upload of a dim breathing effect finishes");
-        assert_eq!(upload_count(&g), 12, "uploads of a dim breathing effect in an hour");
-        assert_eq!(userpic_count(&g), 72, "six pages an upload, then the frame moves");
-        assert!(color_count(&g) > 0, "the whole-board colour kept streaming");
+        // review measured at 360 uploads an hour (one every ten seconds, all day).
+        let dim = |t: f64| breathing_frame(t, 0.1, 0.05);
+        // One picture, in the first hour, and never another: the frame moves away while its
+        // picture is being written, so the abandon doubles the window to 4 s, and the swing
+        // never holds within a step that long again. Before pass 2 the window never saw those
+        // abandons at all, so this effect sat on the hourly cap forever.
+        let hour = Wear { attempts: 1, pictures: 1, pages: PER_KEY_PAGES };
+        assert_eq!(wear_of(HOUR_FRAMES, dim), hour, "a dim breathing effect in an hour");
+        assert_eq!(wear_of(DAY_FRAMES, dim), hour, "and in a day");
     }
 
     #[test]
-    fn a_slow_ramp_uploads_a_handful_of_pictures_an_hour() {
+    fn a_slow_ramp_uploads_a_handful_of_pictures_a_day() {
         let _serial = serial();
-        let (mut a, s) = rig(true);
-        let t0 = Instant::now();
-        a.open_and_init().expect("connect");
-        // A level every 2.5 s: a still holds for 2.5 s and then changes, the review's 0.4
-        // level/s ramp, 360 uploads an hour before the window backs off.
-        an_hour(&mut a, t0, |t| ramp_frame(t, 0.4));
-        let g = s.lock().unwrap();
-        // Twelve, and twelve whole pictures: a ramp holds within a step of its baseline for
-        // five seconds, which is long enough to upload and to show, and the window then doubles
-        // until one write a ten-second gap is all the hour allows. Before the cap and the
-        // backing-off window this was an upload every ten seconds, 360 an hour.
-        assert_eq!(g.picture.complete, 12, "pictures a slow ramp puts up in an hour");
-        assert_eq!(upload_count(&g), 12, "uploads of a slow ramp in an hour");
-        assert_eq!(userpic_count(&g), 12 * PER_KEY_PAGES, "seven pages an upload");
+        // A step every 2.5 s: a still holds within one step for five seconds, the review's 0.4
+        // steps a second, 360 uploads an hour before the caps.
+        let ramp = |t: f64| ramp_frame(t, 0.4);
+        // Two: the first still uploads and shows; the frame moves, the window doubles to 4 s and
+        // a second picture goes up; its abandon doubles to 8 s, which the ramp never holds.
+        let day = Wear { attempts: 2, pictures: 2, pages: 2 * PER_KEY_PAGES };
+        assert_eq!(wear_of(HOUR_FRAMES, ramp), day, "a slow ramp in an hour");
+        assert_eq!(wear_of(DAY_FRAMES, ramp), day, "and in a day");
     }
 
     #[test]
-    fn a_wide_slow_breathing_effect_uploads_a_handful_of_pictures_an_hour() {
+    fn a_wide_slow_breathing_effect_uploads_a_handful_of_pictures_a_day() {
         let _serial = serial();
-        let (mut a, s) = rig(true);
-        let t0 = Instant::now();
-        a.open_and_init().expect("connect");
-        // Black to white and back over 50 s: its peaks hold still for about 3 s, the review's
-        // 0.02 Hz breathing, 72 uploads an hour.
-        an_hour(&mut a, t0, |t| breathing_frame(t, 0.02, 1.0));
-        let g = s.lock().unwrap();
-        // One: only the trough of a 50 s swing holds within a step for two whole seconds, and
-        // once the picture is abandoned there the window doubles past what the swing allows.
-        // The review measured 72 an hour for this effect.
-        assert_eq!(g.picture.complete, 1, "uploads of a wide breathing effect in an hour");
-        assert_eq!(userpic_count(&g), PER_KEY_PAGES, "seven pages, once");
+        // Black to white and back over 50 s: a peak holds within a step for about 2.8 s.
+        let wide = |t: f64| breathing_frame(t, 0.02, 1.0);
+        let day = Wear { attempts: 1, pictures: 1, pages: PER_KEY_PAGES };
+        assert_eq!(wear_of(HOUR_FRAMES, wide), day, "a wide breathing effect in an hour");
+        assert_eq!(wear_of(DAY_FRAMES, wide), day, "and in a day");
     }
 
     #[test]
-    fn a_static_rainbow_uploads_once_an_hour() {
+    fn a_static_rainbow_uploads_once_a_day() {
         let _serial = serial();
-        let (mut a, s) = rig(true);
-        let t0 = Instant::now();
-        a.open_and_init().expect("connect");
         let frame = distinct_frame();
-        an_hour(&mut a, t0, |_| frame.clone());
-        let g = s.lock().unwrap();
-        assert_eq!(g.picture.complete, 1, "a still that never changes is written once");
-        assert_eq!(userpic_count(&g), PER_KEY_PAGES, "seven pages, once");
-        assert_eq!(g.picture.keys(), frame);
+        let day = Wear { attempts: 1, pictures: 1, pages: PER_KEY_PAGES };
+        assert_eq!(wear_of(HOUR_FRAMES, |_| frame.clone()), day, "a static rainbow in an hour");
+        assert_eq!(wear_of(DAY_FRAMES, |_| frame.clone()), day, "and in a day");
     }
 
-    #[test]
-    fn a_flapping_device_uploads_at_most_the_hour_cap() {
-        let _serial = serial();
+    /// A keyboard that leaves and comes back every five seconds, for `spans` of five seconds.
+    fn flapping(spans: u64) -> Wear {
         let (mut a, s) = rig(true);
         let t0 = Instant::now();
         let frame = distinct_frame();
-        // A keyboard that comes back every five seconds: each connection gets a fresh still
-        // window, so only the gap and the hour's count hold it (#312 review S1).
-        let mut t = 0u64;
-        while t + 2500 <= 3_600_000 {
+        for i in 0..spans {
+            let t = i * 5000;
             a.open_and_init().expect("the keyboard came back");
             hold(&mut a, &frame, t, t + 2500, t0);
-            t += 5000;
         }
         let g = s.lock().unwrap();
-        // UPLOADS_PER_HOUR_MAX is 12: 360 uploads got through before the cap existed.
-        assert!(upload_count(&g) <= 12, "a flapping device stays inside the hour: {}", upload_count(&g));
-        assert!(upload_count(&g) > 0, "and it does upload while the hour has room");
-        assert!(g.picture.complete <= 12, "no whole picture past the cap either");
+        Wear { attempts: upload_count(&g), pictures: g.picture.complete, pages: userpic_count(&g) }
+    }
+
+    #[test]
+    fn a_flapping_device_uploads_at_most_the_caps() {
+        let _serial = serial();
+        // Each connection gets a fresh still window, so the gap and the caps are all that hold
+        // it: four an hour, twenty-four a day, and a picture is never whole because the
+        // keyboard leaves in the middle of its pages.
+        assert_eq!(flapping(720).attempts, UPLOADS_PER_HOUR_MAX, "one hour of flapping");
+        assert_eq!(flapping(17_280).attempts, UPLOADS_PER_DAY_MAX, "one day of flapping");
+    }
+
+    /// A still frame for `frames`, on a keyboard that refuses every picture page.
+    fn refused_pages(frames: u64) -> (Wear, usize, bool, usize, usize) {
+        let shared =
+            Arc::new(Mutex::new(Shared { present: true, refuse_pages: true, ..Default::default() }));
+        let mut a = RoyuanAdapter::with_opener(Box::new(FakeOpener(shared.clone())));
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        simulate(&mut a, t0, frames, |_| frame.clone());
+        let connected = a.is_connected();
+        let attempts = a.attempts.len();
+        let g = shared.lock().unwrap();
+        let wear = Wear { attempts, pictures: g.picture.complete, pages: userpic_count(&g) };
+        (wear, g.refused, connected, direct_count(&g), color_count(&g))
+    }
+
+    #[test]
+    fn a_keyboard_that_refuses_every_page_uploads_at_most_the_caps() {
+        let _serial = serial();
+        let logs = crate::test_logs::LogBuf::default();
+        let _guard = logs.install();
+        // Before pass 2 a refused page 0 was not counted and did not start the gap, so the next
+        // frame tried the flash again: an erroring endpoint wrote once per frame.
+        let (hour, hour_refused, connected, direct, colors) = refused_pages(HOUR_FRAMES);
+        assert_eq!(
+            hour_refused, UPLOADS_PER_HOUR_MAX,
+            "page-0 sends in an hour with every page refused"
+        );
+        assert_eq!(hour.attempts, UPLOADS_PER_HOUR_MAX, "and the attempts they count as");
+        assert_eq!(hour.pages, 0, "no page ever landed");
+        assert!(connected, "a refused page does not cost the device");
+        assert!(direct > 0, "direct mode goes back out");
+        assert!(colors > 0, "and the whole-board colour streams again");
+        let (day, day_refused, ..) = refused_pages(DAY_FRAMES);
+        assert_eq!(day.attempts, UPLOADS_PER_DAY_MAX, "attempts in a day with every page refused");
+        assert_eq!(day_refused, day.attempts, "one page-0 send per attempt, all day");
+        assert_eq!(
+            logs.text().matches("per-key picture").count(),
+            2,
+            "one refusal line per run, not one per attempt"
+        );
+    }
+
+    // ---- #312 review pass 2: the counters and the picture across a restart (S1)
+
+    #[test]
+    fn a_picture_a_previous_run_wrote_is_shown_again_without_a_write() {
+        let _serial = serial();
+        let frame = distinct_frame();
+        // The first run writes the picture and leaves the file behind.
+        let store = FakeStore::with(StoredStills::default());
+        {
+            let (mut a, s) = rig_stored(true, store.clone());
+            let t0 = Instant::now();
+            a.open_and_init().expect("connect");
+            hold(&mut a, &frame, 0, 4700, t0);
+            assert_eq!(s.lock().unwrap().picture.complete, 1, "the first run wrote it");
+        }
+        let saved = store.saved();
+        assert_eq!(saved.picture, Some(picture_hash(&frame)), "the file holds its hash");
+        assert_eq!(saved.attempts.len(), 1, "and the attempt");
+        // A daemon restart: the same still comes back, and only light mode 13 goes out.
+        let (mut b, s) = rig_stored(true, store);
+        let t0 = Instant::now();
+        b.open_and_init().expect("connect");
+        hold(&mut b, &frame, 0, 12_000, t0);
+        let g = s.lock().unwrap();
+        assert_eq!(upload_count(&g), 0, "the picture was not written again");
+        assert_eq!(mode_count(&g), 1, "light mode 13 showed it");
+        assert_eq!(g.picture.mode, Some(13));
+    }
+
+    #[test]
+    fn the_attempts_a_previous_run_made_still_count() {
+        let _serial = serial();
+        let frame = distinct_frame();
+        // Four attempts in the last hour: the hour is spent, so the first frees at 30 minutes.
+        let now = unix_now();
+        let stored = StoredStills {
+            attempts: vec![now - 1800, now - 1200, now - 600, now - 60],
+            picture: None,
+        };
+        let (mut a, s) = rig_stored(true, FakeStore::with(stored));
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        simulate(&mut a, t0, 25 * 60 * 10, |_| frame.clone());
+        assert_eq!(upload_count(&s.lock().unwrap()), 0, "no attempt while the stored hour is spent");
+        // The oldest stored attempt is half an hour old, so the hour frees at 30 minutes.
+        simulate(&mut a, at(t0, 25 * 60 * 1000), 6 * 60 * 10, |_| frame.clone());
+        assert_eq!(upload_count(&s.lock().unwrap()), 1, "an attempt once the hour frees");
+        // The same over a day: twenty-four stored attempts spend the day, and only the oldest
+        // ageing out of the rolling window (at about 55 minutes) frees one write.
+        let stored = StoredStills {
+            attempts: (0..24).map(|k| now - 3600 * k - 60).collect(),
+            picture: None,
+        };
+        let (mut b, s) = rig_stored(true, FakeStore::with(stored));
+        let t0 = Instant::now();
+        b.open_and_init().expect("connect");
+        simulate(&mut b, t0, DAY_FRAMES, |_| frame.clone());
+        assert_eq!(upload_count(&s.lock().unwrap()), 1, "only the slot that ages out is used");
+    }
+
+    #[test]
+    fn a_missing_or_broken_store_fails_closed_for_ten_minutes() {
+        let _serial = serial();
+        let frame = distinct_frame();
+        let (mut a, s) = rig_stored(true, FakeStore::missing());
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        // Nothing may be written until the hold-off ends: a missing file cannot buy attempts.
+        simulate(&mut a, t0, 6000, |_| frame.clone());
+        assert_eq!(upload_count(&s.lock().unwrap()), 0, "no attempt inside the hold-off");
+        // Ten minutes after the start, one still is written, all seven pages.
+        simulate(&mut a, at(t0, 600_000), 4000, |_| frame.clone());
+        assert_eq!(upload_count(&s.lock().unwrap()), 1, "an attempt once the hold-off ends");
+        assert_eq!(userpic_count(&s.lock().unwrap()), PER_KEY_PAGES, "and it is whole");
+    }
+
+    #[test]
+    fn a_file_store_round_trips_and_a_missing_file_is_an_error() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-stills-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let path = dir.join("royuan-stills.json");
+        let store = FileStillStore::new(&path);
+        assert!(store.load().is_err(), "a missing file does not load");
+        let stored = StoredStills { attempts: vec![1_700_000_000, 1_700_000_010], picture: Some(42) };
+        store.save(&stored).expect("the file is written");
+        assert_eq!(store.load().expect("the file reads"), stored);
+        // A file that will not parse is an error too, not a silent reset.
+        std::fs::write(&path, b"{ not json").expect("the broken file is written");
+        assert!(store.load().is_err(), "a broken file does not load");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
@@ -1759,35 +2204,56 @@ mod tests {
         assert_eq!(upload_count(&g), 1, "and still no write");
     }
 
-    // ---- #312 review: a torn picture (S3)
+    // ---- #312 review pass 2: a cut-off upload (S3, and B2's "an upload finishes")
 
-    #[test]
-    fn an_upload_abandoned_at_page_three_is_never_shown_and_is_written_again() {
+    #[tokio::test]
+    async fn an_upload_cut_off_at_page_three_is_never_shown_and_is_written_again() {
         let _serial = serial();
         let (mut a, s) = rig(true);
         let t0 = Instant::now();
-        a.open_and_init().expect("connect");
+        a.connect().await.expect("connect");
         let first = distinct_frame();
         hold(&mut a, &first, 0, 4700, t0);
         assert_eq!(s.lock().unwrap().picture.complete, 1, "the first picture is up");
-        // Another still starts at 12 s, and the frame moves after page 3: the flash now holds
-        // four new pages over the picture that was there.
+        // Another still starts at 12 s; four of its pages go out before the keyboard goes away,
+        // so the flash holds new pages over the picture that was there.
         let second = shifted_frame(60);
-        hold(&mut a, &second, 4700, 12400, t0);
-        a.write_frame_at(&first, at(t0, 12400)).expect("the frame moves again");
+        hold(&mut a, &second, 4700, 12_400, t0);
+        a.disconnect().await.expect("the keyboard goes");
         {
             let g = s.lock().unwrap();
             assert_eq!(userpic_count(&g), PER_KEY_PAGES + 4, "pages 0 to 3 of the second landed");
             assert_eq!(mode_count(&g), 1, "a torn picture is never shown");
         }
+        a.connect().await.expect("the keyboard comes back");
         // The first still comes back. The flash holds half of another picture, so its seven
         // pages have to go again: light mode 13 would show a torn picture.
-        hold(&mut a, &first, 12500, 25000, t0);
+        hold(&mut a, &first, 12_500, 26_000, t0);
         let g = s.lock().unwrap();
         assert_eq!(userpic_count(&g), PER_KEY_PAGES + 4 + PER_KEY_PAGES, "all seven pages again");
         assert_eq!(g.picture.complete, 2, "and the first picture is whole on the board again");
         assert_eq!(g.picture.keys(), first);
         assert_eq!(mode_count(&g), 2, "light mode 13 only ever for a whole picture");
+    }
+
+    #[test]
+    fn a_frame_that_moves_during_an_upload_does_not_stop_it() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        // The still crosses two seconds, then the frame moves before the pages are all out.
+        hold(&mut a, &frame, 0, 2100, t0);
+        assert_eq!(userpic_count(&s.lock().unwrap()), 1, "page 0 went out");
+        a.write_frame_at(&shifted_frame(60), at(t0, 2150)).expect("a moving frame");
+        hold(&mut a, &shifted_frame(60), 2300, 6000, t0);
+        let g = s.lock().unwrap();
+        // The picture was finished and shown, then the moving frame took the board back.
+        assert_eq!(g.picture.complete, 1, "the whole picture was written");
+        assert_eq!(userpic_count(&g), PER_KEY_PAGES, "seven pages, none dropped");
+        assert_eq!(mode_count(&g), 1, "and light mode 13 showed it");
+        assert_eq!(g.picture.mode, Some(21), "before the colour took over");
     }
 
     // ---- #312 review: the look during an upload (S4)
