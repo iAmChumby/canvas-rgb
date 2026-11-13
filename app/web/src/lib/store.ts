@@ -50,6 +50,12 @@ let lightsUnsupported = false;
 let daemonVersion = "";
 
 /**
+ * The frame count the daemon last reported. It counts frames since start and never goes back
+ * within one process (it stops while parked), so a smaller count is a daemon that restarted.
+ */
+let lastFrames: number | null = null;
+
+/**
  * When the daemon was last tried and when the next try is due. The daemon-down page shows it,
  * so the page can say something new instead of repeating its own heading.
  */
@@ -251,8 +257,13 @@ export async function refreshStatus(n?: number): Promise<void> {
     const cameBack = statusFailures > 0;
     lastStatusFailureAt = 0;
     statusFailures = 0;
-    // A daemon that changed, or came back, is a daemon that may have the scene routes now.
-    if (cameBack || status.version !== daemonVersion) {
+    // A daemon restarted inside one poll gap answers every read and keeps its version, so neither
+    // the version nor a failed read shows it: its frame count starts again from zero.
+    const frames = typeof status.frames_rendered === "number" ? status.frames_rendered : null;
+    const restarted = frames !== null && lastFrames !== null && frames < lastFrames;
+    if (frames !== null) lastFrames = frames;
+    // A daemon that changed, came back or restarted is a daemon that may have the scene routes now.
+    if (cameBack || restarted || status.version !== daemonVersion) {
       daemonVersion = status.version;
       scenesUnsupported = false;
       lightsUnsupported = false;
