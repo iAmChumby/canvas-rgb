@@ -32,6 +32,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Effects: a group the editor has open is not put over by a change to that group (its brightness, its effect or a light's arrangement): the change is saved and lands when the editor closes (#310)
 - Effects: a scene with more HTML effects than a scene may have is refused when it is set, and a stack with an HTML layer is refused when a scene plays it beside another HTML effect (#310)
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
+- Effects: a draft that a scene save, an activation, a layout switch or a change of the running effect's properties ends is ended on the lights as well: the group the draft was on plays the scene's effect again, and the lights keep the capture every group of the scene needs (#310)
+- Effects: with a scene running, the layout routes and the change of the running effect's properties change the groups that play that effect and leave the captures of the other groups alone (#310)
 
 ## [0.13.1] - 2026-11-11
 

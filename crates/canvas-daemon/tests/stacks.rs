@@ -1814,7 +1814,7 @@ async fn the_props_guard_and_the_two_delete_routes() {
 // ================================================================ test 12
 
 #[tokio::test]
-async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back() {
+async fn a_layout_switch_during_a_draft_puts_the_scene_back() {
     let harness = build("t12");
     // The active layout runs Solid; another layout names an effect that does not exist.
     {
@@ -1870,7 +1870,7 @@ async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back()
         assert_eq!(draft.status(), StatusCode::OK);
         assert!(harness.app.draft.is_active());
 
-        // The switch: the draft ends, its new effect fails, and the prior effect goes back.
+        // The switch: the draft ends and the scene goes back on the lights.
         let switched = harness
             .router
             .clone()
@@ -1887,11 +1887,13 @@ async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back()
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("solid".to_string()),
-        "the draft's prior effect went back on the lights"
+        "the scene's group plays the scene's effect again"
     );
+    // The scene is on the lights: the layout's own effect is not put on the engine, and an
+    // effect that does not exist is never tried.
     assert!(
-        log.text().contains("active scene went back"),
-        "the log says what happened: {}",
+        !log.text().contains("no-such-effect"),
+        "the layout's effect was not tried: {}",
         log.text()
     );
 }

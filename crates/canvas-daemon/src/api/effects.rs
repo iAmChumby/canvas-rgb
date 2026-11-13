@@ -311,10 +311,27 @@ pub async fn patch_active_props(
     // The scene order, then the draft gate: the order every route takes.
     let lock = app.scene.lock().await;
     if app.scene.is_on() {
+        // What the route changes is worked out first: a route that cannot change anything
+        // answers without ending the draft.
+        let (effect, base) = {
+            let store = app.store.read().await;
+            let layout_effect = store
+                .active_layout()
+                .and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
+            crate::scenes::running_effect(crate::scenes::active_scene(&store.scenes), layout_effect.as_deref())
+                .ok_or_else(|| ApiFailure::not_found("no effect is active"))?
+        };
+        let schema = find_schema(&app.user_effects, &app.stacks, &effect)
+            .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {effect}")))?;
+        if effect.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+            return Err(ApiFailure::conflict(format!(
+                "{effect} is a stack; change its values in the stack builder, not with this route"
+            )));
+        }
         // The draft ends here: the whole scene goes on again, so the group the draft was on
         // plays the scene's effect and not the draft's.
         let replace = crate::draft::hold_for_replace(&app).await;
-        return patch_active_props_in_scene(&app, &lock, props, replace).await;
+        return patch_active_props_in_scene(&app, &lock, &schema, effect, base, props, replace).await;
     }
     // A draft holds the lights; the layout's effect is not what is running. The props of a
     // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
@@ -385,6 +402,9 @@ pub async fn patch_active_props(
 async fn patch_active_props_in_scene(
     app: &Arc<App>,
     lock: &crate::scenes::SceneLock<'_>,
+    schema: &PropertySchema,
+    effect: String,
+    base: Props,
     props: Props,
     replace: crate::draft::ReplaceGuard<'_>,
 ) -> ApiResult<Json<serde_json::Value>> {
@@ -392,19 +412,6 @@ async fn patch_active_props_in_scene(
         let store = app.store.read().await;
         crate::scenes::active_scene(&store.scenes).clone()
     };
-    let layout_effect = {
-        let store = app.store.read().await;
-        store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()))
-    };
-    let (effect, base) = crate::scenes::running_effect(&scene, layout_effect.as_deref())
-        .ok_or_else(|| ApiFailure::not_found("no effect is active"))?;
-    let schema = find_schema(&app.user_effects, &app.stacks, &effect)
-        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {effect}")))?;
-    if effect.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-        return Err(ApiFailure::conflict(format!(
-            "{effect} is a stack; change its values in the stack builder, not with this route"
-        )));
-    }
     let mut merged = base;
     merged.extend(props);
 

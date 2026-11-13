@@ -76,6 +76,14 @@ impl TestClock {
 /// Like [`build`], with the fake engine and the draft's clock handed back too.
 async fn build_with_clock(
 ) -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome, PathBuf, TestClock) {
+    build_with_clock_and_scene(true).await
+}
+
+/// [`build_with_clock`] with the scene left off the lights: the daemon in its legacy mode,
+/// where the layout's one effect is what plays.
+async fn build_with_clock_and_scene(
+    scene: bool,
+) -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome, PathBuf, TestClock) {
     let home = TempHome::new();
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
@@ -104,7 +112,9 @@ async fn build_with_clock(
     let app = Arc::new(app);
     // The scene runs, so the daemon is in scene mode: a draft takes over the groups of the
     // active scene, and the old layout path stays out of the engine.
-    canvas_daemon::scenes::apply_active(&app, false).await;
+    if scene {
+        canvas_daemon::scenes::apply_active(&app, false).await;
+    }
     (api::router(app.clone()), app, engine, home, folder, clock)
 }
 
@@ -681,20 +691,52 @@ async fn a_layout_switch_ends_the_draft_without_restoring_it() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(running(&engine).0.as_deref(), Some("gradient"));
+    // The scene is on the lights: the layout's own effect does not go on the engine, and the
+    // scene's group keeps playing what it plays.
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"), "the scene still plays");
 
     assert!(!draft_state(router).await.active, "the switch ended the draft");
     clock.advance(canvas_proto::consts::DRAFT_LEASE * 2);
     assert_eq!(
         running(&engine).0.as_deref(),
-        Some("gradient"),
+        Some("solid"),
         "nothing restored the draft's prior effect over the chosen layout"
     );
 }
 
+/// The props route ends a draft that holds the lights: the scene's group plays the scene's
+/// effect again, and the props go to the groups that play that effect.
 #[tokio::test]
-async fn the_active_props_route_is_refused_while_a_draft_runs() {
+async fn the_active_props_route_ends_a_draft_that_holds_the_lights() {
     let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            routes::EFFECT_ACTIVE_PROPS,
+            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    // The scene's group plays the scene's effect again, with the new colour.
+    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+    assert_eq!(
+        running(&engine).1,
+        color("#00ff00"),
+        "the group that plays the effect has the new colour"
+    );
+    assert!(!draft_state(router).await.active, "the route ended the draft");
+}
+
+/// Without a scene on the lights the props route is refused while a draft runs: the draft's
+/// props are changed with PUT /effects/draft, not with this route.
+#[tokio::test]
+async fn the_active_props_route_is_refused_while_a_draft_runs_without_a_scene() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock_and_scene(false).await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
 
@@ -715,26 +757,6 @@ async fn the_active_props_route_is_refused_while_a_draft_runs() {
         Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
         "the draft is still what runs"
     );
-
-    // After Stop, the route works again.
-    assert_eq!(
-        router
-            .clone()
-            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
-            .await
-            .expect("the router answers")
-            .status(),
-        StatusCode::OK
-    );
-    let response = router
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::EFFECT_ACTIVE_PROPS,
-            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
 }
 
 #[tokio::test]
