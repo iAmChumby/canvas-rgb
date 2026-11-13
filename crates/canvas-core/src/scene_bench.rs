@@ -21,8 +21,8 @@
 //! 60 Hz internally, so at 1/30 s each HTML group runs two of its own script frames per
 //! engine frame.
 //!
-//! The sampling is area average over a strip of 60 LEDs, the most expensive of the
-//! three sampling modes, so the numbers are an upper bound on the sampling cost. The
+//! The sampling is area average over a strip of 60 LEDs (the other two modes are not
+//! timed here, so it is not known to be the costliest). The
 //! LED count test below varies it, to see what the sampling costs next to the effect.
 //!
 //! A second test measures the mixed compositions the scene limit has to cover: 20
@@ -109,7 +109,8 @@ const STOCK_EFFECTS: [(&str, &str); 3] = [
     (WET_SMEAR_ID, WET_SMEAR_HTML),
 ];
 
-/// A SignalRGB-format effect whose script draws nothing: the runtime's floor.
+/// A minimal HTML effect (a script and a canvas, no meta tags) whose script draws nothing: the
+/// runtime's floor.
 ///
 /// The file is a stock-format effect with the same canvas as the stock effects, whose
 /// animation frame only asks for the next frame. The runtime still runs the script,
@@ -307,7 +308,7 @@ fn frame(groups: &mut [Group], dt: f32, inputs: &Inputs) {
 }
 
 /// The nearest-rank percentile of the times: the value at `ceil(p * n)`, counted from
-/// one. With 300 frames the p95 is the 285th slowest frame.
+/// one. With 300 frames the p95 is the 285th of the frames sorted fastest first (`sorted[284]`).
 fn percentile(sorted: &[Duration], p: f64) -> f64 {
     let rank = ((p * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
     sorted[rank - 1].as_secs_f64() * 1000.0

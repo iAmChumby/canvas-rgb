@@ -31,7 +31,7 @@ Method: `crates/canvas-core/src/scene_bench.rs`, ignored tests, run through the 
 `cargo test -p canvas-core --release -- --ignored --nocapture --test-threads=1 bench_scene`
 
 One scene frame: every group runs its own effect on its own canvas, then its LEDs are sampled from that
-canvas (area average, the most expensive of the three sampling modes, so these numbers are an upper bound
+canvas (area average; whether it is the costliest of the three sampling modes for a scene is unknown
 on the sampling cost). 30 warm-up frames, then 300 timed frames. The times are for the whole frame, every
 group together. The built-in effect is `aurora`; the HTML effect is the daemon's own stock file, one QuickJS
 runtime per group. An HTML effect runs its script at 60 Hz, so at 30 fps each HTML group runs two script
@@ -153,10 +153,9 @@ above decide two constants:
 
 ```rust
 // crates/canvas-proto/src/scene.rs (the spine, Task 2)
-/// The most HTML groups one scene may hold: each is its own script and the slowest
-/// group there is. From the Task 1 benchmark, see "Scenes: cost per group" in
-/// `docs/benchmark.md`.
-pub const SCENE_HTML_MAX: usize = 2;
+/// The most HTML groups one scene may hold. 1 until Task 4 Step 5 proves 2 through the
+/// real engine (see "The decision" below).
+pub const SCENE_HTML_MAX: usize = 1;
 
 // crates/canvas-core/src/scene_engine.rs (Task 4)
 /// The render scale every group's canvas runs at: 0.25 is an 80x50 canvas, the size
@@ -165,23 +164,29 @@ pub const SCENE_HTML_MAX: usize = 2;
 pub const SCENE_RENDER_SCALE: f32 = 0.25;
 ```
 
-**`SCENE_RENDER_SCALE = 0.25`, `SCENE_HTML_MAX = 2`.**
+**The decision.** `SCENE_RENDER_SCALE = 0.25`. `SCENE_HTML_MAX = 1` for now; 2 only on the evidence below.
 
-Why 0.25 and not 0.5: the HTML limit is 2 at both, so the extra pixels of 0.5 buy no group, and 0.25
-leaves more of the bar free (13.221 ms p95 for 2 HTML groups against 14.934 ms at 0.5, of a 16.6 ms bar).
-0.25 is also the size the stock HTML effects draw at, so their picture is copied into the canvas one to
-one and is never resampled; at 1.0 it is blown up four times to 320x200 and then sampled back down into
-the LEDs.
+Why 0.25 and not 0.5: in the k-table above both scales fit 2 HTML groups and miss at 3, so the extra
+pixels of 0.5 buy no group, and 0.25 leaves more of the bar free (13.221 ms p95 for 2 HTML groups against
+14.934 ms at 0.5). The built-in groups cost about 14 times less at 0.25 than at 1.0.
 
-Why 2 and not 3: three HTML groups at 0.25 measured 16.102 ms p95 on a quieter run (inside the bar by
-3%) and 19.763 ms on the run above (outside it by 19%). A limit that flips with the machine's load is not
-a limit; two measured 11.231 ms and 13.221 ms, inside the bar in both runs.
+Why 1 and not 2, yet (the review on PR #318):
+- These numbers time only the effects' `update` and the LED sampling. The engine's frame also applies
+  the brightness, warmth and white balance, builds each device's frame and hands it to the device's
+  writer; none of that is timed here.
+- The mixed rows use `ink-drop` only; `wet-smear` costs more a group (6.5 ms mean against 5.4 ms).
+- The one clean run at 2 HTML groups and 0.25 is 13.221 ms p95. Another reading quoted for this case
+  (11.231 ms) and the 16.102 ms for 3 groups come from a run spoiled by another build on the machine and
+  are not counted.
+Task 4 Step 5 times the whole frame through `CoreEngine` with each stock HTML effect, 0 to 3 HTML groups,
+three runs of 900 frames, dropped frames counted. The limit rises to 2 only if every stock effect fits at
+2 in all three runs.
 
 What a scene loses at 0.25, measured and not:
 
-- **An HTML group loses nothing.** The three stock effects draw an 80x50 picture and the runtime copies
-  the raster into the canvas at the canvas's own size (`canvas-html`'s `set_device_size` and `blit`), so
-  at 0.25 the picture lands on the canvas one pixel to one.
+- **An HTML group:** the three stock effects draw an 80x50 picture, and `canvas-html` sizes its raster to
+  the canvas (`set_device_size`, `blit`), so at 0.25 the copy is one to one. Whether the picture looks the
+  same as at 1.0 is **UNKNOWN**: no pictures were compared.
 - **A built-in group draws at 80x50 instead of 320x200.** Every built-in effect is scale-aware
   (`canvas.scale()`) and renders correctly at 0.25 (the effect crate's own test
   `every_effect_renders_finite_values_in_range_at_every_scale`). A smooth gradient looks the same; fine
@@ -191,9 +196,8 @@ What a scene loses at 0.25, measured and not:
   pixels is 3 pixels wide. That is the sampling mode's doing, not the scale's.
 - **The editor's preview of a group shows an 80x50 canvas.** How that reads is **UNKNOWN**: not looked at.
 
-The scene's sampling mode: every number above is area average, the most expensive of the three, so the
-limit holds for it and for any cheaper choice. Nearest and bilinear were not measured for a scene
-(**UNKNOWN**).
+The scene's sampling mode: every number above is area average. Whether it is the most expensive of the
+three for a scene, and what nearest and bilinear cost, is **UNKNOWN** (not measured).
 
 ### The fallback Task 4 has to build
 
@@ -212,9 +216,7 @@ The spec's order, with what each one does to the measured numbers:
 ### How the numbers move
 
 The machine is shared, and the HTML group's cost moves with the load on it: the 20-group all-HTML p95 was
-107.376, 108.035, 107.933 and 108.487 ms over the four runs of the first bench, and 126.500 ms on the run
-above, which ran while other work was on the machine. The 20-group all-built-in p95 was 9.347, 9.469,
-9.119 and 9.625 ms over the first bench's four runs and 10.150 ms on the run above. The mixed case moved
-by less: 13.796 ms (the first bench) against 15.697 ms for 1 HTML group + 19 built-in, and 18.505 ms
-against 21.489 ms for 2 HTML groups + 18 built-in. Every pass and fail call in this section holds in every
-run except one, the 3-HTML-group case at 0.25, which is why the limit is 2 and not 3.
+108.035 ms on the first bench's run and 126.500 ms on the second, which ran while other work was on the
+machine; the 20-group all-built-in p95 was 9.347 ms and 10.150 ms. The mixed case moved less: 13.796 ms
+against 15.697 ms for 1 HTML group + 19 built-in at 1.0. Readings from a run spoiled by another build are
+left out. One run per case is not enough to call a limit that sits near the bar: Task 4 Step 5 runs three.
