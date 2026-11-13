@@ -263,6 +263,10 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         "layouts.json",
         "zones.json",
         "effects.json",
+        // The scenes files (§ review 323 B1): an import writes both, so a bundle that lacks a
+        // split light or carries damaged scenes must leave the old ones recoverable.
+        LIGHTS_FILE,
+        SCENES_FILE,
         canvas_proto::stack::STACKS_FILE,
         DISPLAYS_FILE,
         PERIPHERALS_FILE,
@@ -890,6 +894,8 @@ pub enum ImportError {
     Settings(String),
     #[error("scenes refused: {0}")]
     Scenes(String),
+    #[error("a file the import would replace could not be read: {0}")]
+    Blocked(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -997,6 +1003,20 @@ fn prepared_scenes(
     (lights, scenes, changes)
 }
 
+/// Refuses an import while `lights.json` or `scenes.json` exists but cannot be read.
+///
+/// That is exactly the state [`Store::load_from`] holds as blocked (`lights_blocked`,
+/// `scenes_blocked`): the store promises never to write over such a file, and the import writes
+/// both. The check reads nothing and moves nothing; it only asks whether the file can be read.
+fn refuse_unreadable_scenes_files(home: &Path) -> Result<(), ImportError> {
+    for name in [LIGHTS_FILE, SCENES_FILE] {
+        if let Err(e) = paths::read_checked(&home.join(name)) {
+            return Err(ImportError::Blocked(format!("{name} could not be read ({e})")));
+        }
+    }
+    Ok(())
+}
+
 /// Writes a validated bundle over the daemon's own files. `devices` is the daemon's current
 /// device list, which a 0.13 bundle's layouts are migrated with.
 pub fn import_bundle(
@@ -1016,6 +1036,11 @@ pub fn import_bundle_rated(
     rated_cpu_max_c: Option<f32>,
     rated_gpu_max_c: Option<f32>,
 ) -> Result<(), ImportError> {
+    // The store never writes over a scenes file it could not read at load (`lights_blocked`,
+    // `scenes_blocked`); an import must not either. It refuses here, before the snapshot and
+    // before the first write, so a machine with a locked or unreadable file is left as it was
+    // instead of half imported (§ review 323 B1).
+    refuse_unreadable_scenes_files(home)?;
     validate_bundle_rated(bundle, rated_cpu_max_c, rated_gpu_max_c)?;
     // A snapshot before the import so a bad import is recoverable (G10).
     crate::logging::warn_if_err("the pre-import snapshot could not be taken; the import goes on without one", snapshot(home, "pre-import"));
@@ -1717,5 +1742,46 @@ power = "running"
         assert_eq!(kb.arrangement, Arrangement::Strip, "with no device list there is nothing that says matrix");
         let _ = std::fs::remove_dir_all(&with_keyboard);
         let _ = std::fs::remove_dir_all(&without);
+    }
+
+    /// Blocker 1 (review 323): the snapshot taken before an import carries every file the import
+    /// writes over, `lights.json` and `scenes.json` included. A bundle whose lights lack a split
+    /// light loses it on the import; the snapshot is the only way back.
+    #[test]
+    fn the_pre_import_snapshot_keeps_the_lights_and_scenes() {
+        let dir = temp_home("snapshot-scenes");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        write_json(&dir.join(SCENES_FILE), &crate::scenes::default_scenes(&lights)).unwrap();
+
+        let snap = snapshot(&dir, "before-import").expect("the snapshot is taken");
+
+        assert!(snap.join(LIGHTS_FILE).exists(), "the snapshot keeps lights.json");
+        assert!(snap.join(SCENES_FILE).exists(), "the snapshot keeps scenes.json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Blocker 1 (review 323): an import never writes over a scenes file the store holds as
+    /// blocked (it exists but cannot be read), and it refuses before writing anything at all.
+    #[test]
+    fn an_import_refuses_a_scenes_file_it_could_not_read() {
+        for name in [SCENES_FILE, LIGHTS_FILE] {
+            let dir = temp_home("blocked-import");
+            // A directory where the file belongs: it exists, and no read returns a file.
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            let bundle = bundle_of(default_layouts(), None, None);
+
+            let err = import_bundle(&dir, &bundle, &[bundle_board()]).expect_err("the import is refused");
+
+            let text = err.to_string();
+            assert!(
+                text.contains(name) && text.contains("could not be read"),
+                "the refusal names {name} and says it could not be read: {text}"
+            );
+            assert!(!dir.join(LAYOUTS_FILE).exists(), "nothing was written before the refusal");
+            assert!(!dir.join(ZONES_FILE).exists(), "nothing was written before the refusal");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
     }
 }

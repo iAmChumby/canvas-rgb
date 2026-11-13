@@ -263,7 +263,14 @@ pub async fn config_import(
     // makes match this machine's zones (a matrix zone is a Grid, not a Strip).
     let devices = app.devices.read().await.clone();
     crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
-        .map_err(|e| ApiFailure::internal(format!("could not import the config: {e}")))?;
+        .map_err(|e| match &e {
+            // A file this machine cannot read refuses the import (nothing was written), and a
+            // scene that cannot be made valid is the bundle's fault: both are the caller's to
+            // fix, not an internal failure.
+            crate::storage::ImportError::Blocked(_) => ApiFailure::conflict(e.to_string()),
+            crate::storage::ImportError::Scenes(_) => ApiFailure::validation(e.to_string()),
+            _ => ApiFailure::internal(format!("could not import the config: {e}")),
+        })?;
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
 
