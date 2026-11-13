@@ -382,12 +382,14 @@ table for another board.
   the file, so a crash loop cannot exceed it), and that cap is the *only* report a budget refuses: the report that
   takes a picture off the board and the direct report on a (re)connect are always sent, because refusing them is
   what would leave a wrong picture on the board. Past the cap the board stays in direct mode and the whole-board
-  colour streams, and no upload starts unless the board is confirmed in direct mode on this connection. A wake's own
-  direct report is deduped within 2.5 minutes, so a storm of resume notifications cannot run away; the composite
-  reopens a keyboard that keeps dropping on a wait that doubles from 5 s to 5 min while it drops within 30 s of
-  connecting, and starts again from 5 s once it stays up five minutes. Whether the firmware persists `SET_LEDPARAM`
-  reports (light mode 13 and the direct-mode report) to flash is not stated by any source: UNKNOWN. If it does, the
-  entries are the ones that matter, and they are capped.
+  colour streams, and no upload starts unless the board is confirmed in direct mode on this connection. What the
+  driver knows about the board's mode is only ever "a send returned Ok": every resume makes it unknown and sends the
+  mode again (one report per wake, bounded only by the OS's event rate), and so does any mode report whose send
+  returned an error, because that report may have landed. The composite reopens a keyboard that keeps dropping on a
+  wait that doubles from 5 s to 5 min while it drops within 30 s of connecting, and starts again from 5 s once it
+  stays up five minutes. Whether the firmware persists `SET_LEDPARAM` reports (light mode 13 and the direct-mode
+  report) to flash is not stated by any source: UNKNOWN. If it does, the entries are the ones that matter, and they
+  are capped.
 - **The whole-board colour keeps streaming through the pages**, and stops when light mode 13 goes out about
   3 s later. **What the board shows during those pages is UNKNOWN**: the `0x0E` stream should keep it lit,
   but no device check has watched one. The check below settles it.

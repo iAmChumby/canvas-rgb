@@ -33,14 +33,21 @@
 //! upload off for [`STORE_HOLD_OFF`]. The counters fail closed, never open.
 //!
 //! Mode reports are bounded too, but a budget never keeps a wrong picture on the board
-//! (#312 review passes 3 and 4): a report that repeats the mode the board is already in on this
-//! connection is skipped, entering light mode 13 is capped at [`MODES_13_PER_HOUR_MAX`] entries
-//! a rolling hour, and that cap is the only thing a budget refuses. The report that takes a
-//! picture off the board and the direct report on a (re)connect are always sent: they are
-//! bounded by their own causes, the entry cap and the reopen backoff ([`RetryPolicy`], driven by
-//! the composite, 5 s doubling to 5 min). Past the entry cap the board stays in direct mode and
-//! the whole-board colour streams. No upload starts while the board is, or may be, in light mode
-//! 13: the mode must be confirmed direct on this connection first.
+//! (#312 review passes 3, 4 and 5): a report that repeats the mode the board is already known to
+//! be in on this connection is skipped, entering light mode 13 is capped at
+//! [`MODES_13_PER_HOUR_MAX`] entries a rolling hour, and that cap is the only thing a budget
+//! refuses. The report that takes a picture off the board and the direct report on a (re)connect
+//! are always sent: they are bounded by their own causes, the entry cap and the reopen backoff
+//! ([`RetryPolicy`], driven by the composite, 5 s doubling to 5 min). Past the entry cap the
+//! board stays in direct mode and the whole-board colour streams. No upload starts while the
+//! board is, or may be, in light mode 13: the mode must be confirmed direct on this connection
+//! first.
+//!
+//! `sent_mode` is *certainty*, never a guess: it is set only after a send that returned Ok, and
+//! cleared by every resume (the board may have lost its mode in any sleep), by a disconnect, and
+//! by any mode report whose send returned an error (the report may have landed, so the next frame
+//! sends direct mode — #312 review pass 5). A resume storm therefore costs one direct report per
+//! wake, bounded only by the OS's event rate.
 
 use async_trait::async_trait;
 use canvas_proto::color::Rgb8;
@@ -99,13 +106,6 @@ pub const UPLOADS_PER_DAY_MAX: usize = 24;
 /// report most likely to be a flash write if the firmware persists it, and it is the only mode
 /// report a budget may refuse (#312 review pass 4, B-1).
 pub const MODES_13_PER_HOUR_MAX: usize = 12;
-/// The shortest gap between two resume-driven direct reports.
-///
-/// A real wake gives the board its mode report; the OS sends its notifications more than once,
-/// and a repeat inside this window is the same wake. With the picture cap this is what holds
-/// the resume case under forty mode reports an hour, without ever letting a budget refuse the
-/// report that takes the board *out* of light mode 13 (#312 review pass 4, B-1).
-pub const RESUME_MODE_MIN_GAP: Duration = Duration::from_secs(150);
 /// How long a missing store file holds every upload off: a first run waits it out, and a deleted
 /// file cannot buy attempts sooner than that (#312 review pass 4, S-2).
 pub const STORE_HOLD_OFF: Duration = Duration::from_secs(600);
@@ -592,7 +592,6 @@ pub struct RoyuanAdapter {
     /// (#312 review pass 4, B-1). Kept per process and in the store.
     mode_13s: VecDeque<Attempt>,
     /// When a resume last put the direct mode back, so a wake's repeats are not re-sent.
-    last_resume_report: Option<Instant>,
     /// The caller's clock at the last entry point: every stamp the adapter makes goes through
     /// it, so a test that drives simulated time drives all of it (#312 review pass 4, S-3).
     now: Instant,
@@ -703,7 +702,6 @@ impl RoyuanAdapter {
             save_logged_at: None,
             sent_mode: None,
             mode_13s: VecDeque::new(),
-            last_resume_report: None,
             now: Instant::now(),
             still_after: STILL_AFTER,
         }
@@ -865,24 +863,16 @@ impl RoyuanAdapter {
     ///
     /// A picture the flash holds stays known: after a resume whose frame did not move, the next
     /// still shows it again with light mode 13 instead of writing it again (#312 review S2).
-    /// A wake's own direct report is deduped by [`RESUME_MODE_MIN_GAP`], so a storm of resume
-    /// notifications cannot spend the board's mode budget; the report that takes the board *out*
-    /// of a picture is never deduped (#312 review pass 4, B-1).
+    /// Every wake sets the mode again: the board's mode over a sleep is unknown, so correctness
+    /// beats the count, and a resume storm is bounded only by the OS's event rate
+    /// (#312 review pass 5, B-A).
     fn sync_resume(&mut self, now: Instant) {
         if crate::resume_epoch() != self.seen_resume {
             self.seen_resume = crate::resume_epoch();
             self.direct_pending = true;
             self.drop_picture(now);
-            // The board's own mode over the sleep is unknown, so the next write sets it again,
-            // unless this is a repeat of a wake that already had its report within
-            // [`RESUME_MODE_MIN_GAP`]: repeats collapse, real wakes get their report.
-            let repeat = self
-                .last_resume_report
-                .is_some_and(|at| now.saturating_duration_since(at) < RESUME_MODE_MIN_GAP);
-            if !repeat {
-                self.sent_mode = None;
-                self.last_resume_report = Some(now);
-            }
+            // The board may have lost its mode in any sleep, so nothing about it is known now.
+            self.sent_mode = None;
             // The picture has to be shown again before its time on the board counts.
             self.picture.shown_at = None;
         }
@@ -993,14 +983,16 @@ impl RoyuanAdapter {
             && self.attempts.len() < UPLOADS_PER_DAY_MAX
     }
 
-    /// Sends a mode report, unless the board is already in that mode on this connection.
+    /// Sends a mode report, unless the board is already known to be in that mode on this
+    /// connection.
     ///
-    /// Two reports that set the same mode change nothing, and each one may be a flash write if
-    /// the firmware persists `SET_LEDPARAM` (UNKNOWN, `docs/adapters.md`): a still that is
-    /// rebuilt page by page is shown again by the mode it is already in (#312 review pass 3,
-    /// S1a).
+    /// A send that errors leaves the mode *unknown* and arms the direct report (#312 review pass
+    /// 5, B-B): the report may have landed, so nothing may be assumed from `sent_mode` until
+    /// direct mode has gone out again.
     fn send_mode(&mut self, mode: u8) -> Result<(), String> {
         if self.sent_mode == Some(mode) {
+            // Certain: nothing was sent, and the board is where the last acknowledged send put
+            // it (a resume and a failed report both set `None`, so this is only ever a repeat).
             return Ok(());
         }
         let report = if mode == MODE_USER_PICTURE {
@@ -1008,9 +1000,17 @@ impl RoyuanAdapter {
         } else {
             direct_mode_report()
         };
-        self.send_picture_report(&report)?;
-        self.sent_mode = Some(mode);
-        Ok(())
+        match self.send_picture_report(&report) {
+            Ok(()) => {
+                self.sent_mode = Some(mode);
+                Ok(())
+            }
+            Err(e) => {
+                self.sent_mode = None;
+                self.direct_pending = true;
+                Err(e)
+            }
+        }
     }
 
     /// Whether a still may enter light mode 13 now, and records the entry if it does.
@@ -1033,23 +1033,18 @@ impl RoyuanAdapter {
     /// Sends the direct-mode report and forgets the last colour, so the colour follows.
     ///
     /// Never refused (#312 review pass 4, B-1): it is what leaves light mode 13, so a budget may
-    /// not hold it back. It is skipped only when the board is already in direct mode on this
-    /// connection.
+    /// not hold it back. It is skipped only when the board is already known to be in direct mode
+    /// on this connection, and a failed send leaves the mode unknown and the report armed
+    /// (#312 review pass 5, B-B).
     fn resend_direct(&mut self) -> Result<(), AdapterError> {
         if self.dev.is_none() {
             return Err(AdapterError::NotConnected);
         }
-        if self.sent_mode != Some(MODE_DIRECT) {
-            let sent = match self.dev.as_mut() {
-                Some(dev) => dev.send_feature(&direct_mode_report()),
-                None => Err("not connected".into()),
-            };
-            if let Err(e) = sent {
-                self.dev = None;
-                self.last_sent = None;
-                return Err(AdapterError::Protocol(e));
-            }
-            self.sent_mode = Some(MODE_DIRECT);
+        if let Err(e) = self.send_mode(MODE_DIRECT) {
+            self.dev = None;
+            self.last_sent = None;
+            self.direct_pending = true;
+            return Err(AdapterError::Protocol(e));
         }
         self.direct_pending = false;
         self.last_sent = None;
@@ -1522,6 +1517,9 @@ mod tests {
         refuse_pages: bool,
         /// Page-0 reports the fake refused: one per upload attempt on such a board.
         refused: usize,
+        /// Picture-mode reports the fake applies and then refuses, as a write that timed out
+        /// after it landed does (#312 review pass 5, B-B).
+        refuse_picture_modes: usize,
         picture: Picture,
     }
 
@@ -1540,6 +1538,14 @@ mod tests {
                     s.refused += 1;
                 }
                 return Err("the page was refused".into());
+            }
+            if s.refuse_picture_modes > 0
+                && data.get(1) == Some(&SET_LEDPARAM)
+                && data.get(2) == Some(&MODE_USER_PICTURE)
+            {
+                s.refuse_picture_modes -= 1;
+                s.picture.accept(data)?;
+                return Err("the report was not acknowledged".into());
             }
             s.picture.accept(data)?;
             s.sent.push(data.to_vec());
@@ -2911,7 +2917,7 @@ mod tests {
     }
 
     #[test]
-    fn a_resume_every_three_seconds_stays_under_the_mode_target() {
+    fn a_resume_every_three_seconds_sets_the_mode_on_every_wake() {
         let _serial = serial();
         let (mut a, s) = rig(true);
         let t0 = Instant::now();
@@ -2928,14 +2934,11 @@ mod tests {
             }
         }
         let g = s.lock().unwrap();
-        // Twelve picture entries, and the resume reports deduped to one per two and a half
-        // minutes after them: 12 + 24 = 36.
-        assert!(
-            mode_reports(&g) <= MODE_REPORTS_TARGET,
-            "{} mode reports in an hour of waking",
-            mode_reports(&g)
-        );
-        assert_eq!(mode_count(&g), MODES_13_PER_HOUR_MAX, "the pictures are at their cap");
+        // Every wake sets the mode again (the board may have lost it in any sleep), so the count
+        // is bounded only by the OS's event rate: here 1,200 wakes, minus the 12 a picture takes,
+        // plus the connection's own report.
+        assert_eq!(direct_count(&g), 1_189, "one direct report per wake");
+        assert_eq!(mode_count(&g), MODES_13_PER_HOUR_MAX, "and the pictures stay inside their cap");
     }
 
     #[test]
@@ -3018,6 +3021,54 @@ mod tests {
         assert_eq!(mode_count(&g), 1, "one entry all hour");
         assert_eq!(direct_count(&g), 2, "the connection's report and the one that left");
         assert_eq!(g.sent.last().unwrap()[1], 0x0E, "the colour streams");
+    }
+
+    #[test]
+    fn a_second_wake_after_the_board_lost_its_mode_still_sets_it() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        // The first wake, a second after the connection: its report goes out.
+        crate::note_resume();
+        a.write_frame_at(&frame, at(t0, 1000)).expect("a frame after the wake");
+        assert_eq!(direct_count(&s.lock().unwrap()), 2, "the connect's report and the wake's");
+        // The sleep drops the board out of direct mode, and the machine wakes again a minute
+        // later: nothing may be assumed about the board's mode.
+        s.lock().unwrap().picture.mode = None;
+        crate::note_resume();
+        a.write_frame_at(&frame, at(t0, 60_000)).expect("a frame after the second wake");
+        let g = s.lock().unwrap();
+        assert_eq!(direct_count(&g), 3, "the second wake sets the mode again");
+        assert_eq!(g.picture.mode, Some(21), "and the board is in direct mode");
+        assert_eq!(g.sent.last().unwrap()[1], 0x0E, "the colour follows it");
+    }
+
+    #[test]
+    fn a_picture_report_that_lands_and_errors_is_undone_by_direct_mode() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        // The picture's pages go out; the mode report that shows it lands on the board but the
+        // send reports an error (a write that timed out after it was taken), and so does the
+        // adapter's retry in the same frame.
+        hold(&mut a, &frame, 0, 2100, t0);
+        s.lock().unwrap().refuse_picture_modes = 3;
+        hold(&mut a, &frame, 2100, 4700, t0);
+        // Every report the adapter sent landed, so the board is showing the picture; nothing may
+        // assume it is in direct mode, and the direct report goes out in that same frame.
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.mode, Some(21), "the board is back in direct mode in the frame that failed");
+        assert_eq!(g.sent.last().unwrap()[1], 0x0E, "and the colour is streaming");
+        drop(g);
+        // A moving frame keeps it there.
+        a.write_frame_at(&shifted_frame(60), at(t0, 4800)).expect("a moving frame");
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.mode, Some(21), "and it stays in direct mode");
+        assert_eq!(g.sent.last().unwrap()[1], 0x0E, "with the colour");
     }
 
     #[test]
