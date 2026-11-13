@@ -21,7 +21,7 @@ import { useTakeover } from "@/views/editor/takeover";
 import { StripSlotsProvider } from "@/shell/PageHeader";
 
 const PAGE_PATHS: Record<string, string> = {
-  layout: "/",
+  scenes: "/",
   effects: "/effects/",
   devices: "/devices/",
   fans: "/fans/",

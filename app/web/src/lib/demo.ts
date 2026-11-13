@@ -14,6 +14,7 @@ import {
   applyDeviceScenarios,
   applyFanScenarios,
   applyLayoutScenarios,
+  applySceneScenarios,
   applyStatusScenarios,
   conflictClearsMs,
   daemonDown,
@@ -281,6 +282,7 @@ function initialState(): DemoState {
       // Not remembered.
     }
   }
+  const sceneScenarios = applySceneScenarios(DEMO_SCENES, DEMO_LIGHTS);
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   const stacks = seededStacks(s, effects);
   return {
@@ -296,9 +298,9 @@ function initialState(): DemoState {
     activeEffect: "aurora",
     layouts: layouts.layouts,
     activeLayout: layouts.active,
-    scenes: structuredClone(DEMO_SCENES.scenes),
-    activeScene: DEMO_SCENES.active,
-    lights: structuredClone(DEMO_LIGHTS),
+    scenes: sceneScenarios.scenes,
+    activeScene: sceneScenarios.active,
+    lights: sceneScenarios.lights,
     fanModes,
     fanFloor: 20,
     fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },

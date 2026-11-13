@@ -119,13 +119,16 @@ const SCROLL_PANES = [
   ".fixedList",
   ".chain",
   ".panel",
+  ".frame",
+  ".strip",
 ];
 
 /**
- * The bars that hide themselves on purpose: the Peripherals key row and the preset keys on a
- * phone scroll sideways with no bar at all. Every one of them has to say so here.
+ * The bars that hide themselves on purpose: the Peripherals key row, the preset keys on a phone
+ * and the Scenes page's scene keys scroll sideways with no bar at all. Every one of them has to
+ * say so here.
  */
-const HIDDEN_ON_PURPOSE = [".rd-peri-keys", ".preset-chips"];
+const HIDDEN_ON_PURPOSE = [".rd-peri-keys", ".preset-chips", ".strip"];
 
 const THUMB = "var(--scroll-thumb) var(--scroll-track)";
 const THUMB_HOVER = "var(--scroll-thumb-hover) var(--scroll-track)";

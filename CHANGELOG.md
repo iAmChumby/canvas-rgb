@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
+
 ## [0.13.1] - 2026-11-11
 
 ### Fixed
