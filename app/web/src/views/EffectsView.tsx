@@ -86,7 +86,18 @@ export function EffectsView() {
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<string | null>(null);
+  // `?effect=<id>&group=<id>` is how an open group's "Edit effect" arrives: the effect opens,
+  // and the way back to the Scenes page names the group.
+  const [params] = useState(() =>
+    typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search),
+  );
+  const effectParam = params.get("effect");
+  const groupParam = params.get("group");
+  const groupName = groups.find((g) => g.id === groupParam)?.name ?? null;
+  const groupHref = groupParam ? `/?group=${encodeURIComponent(groupParam)}` : null;
+  const [picked, setPicked] = useState<string | null>(() =>
+    effectParam && !effectParam.startsWith("stack:") ? effectParam : null,
+  );
   // The running effect is the default; a click on the list overrides it.
   const selectedId = picked ?? activeId ?? effects?.[0]?.id ?? null;
   const setSelectedId = setPicked;
@@ -141,16 +152,35 @@ export function EffectsView() {
   // Build mode is `?stack=<name>` on this route (D95.5.1).
   const [stackParam, goStack] = useStackParam();
   const openStack = (name: string) => goStack(name);
+  // A group whose effect is a stack opens its builder, with the group it was tuned in.
+  const openedFromGroup = useRef(false);
+  useEffect(() => {
+    if (openedFromGroup.current || !effectParam?.startsWith("stack:")) return;
+    openedFromGroup.current = true;
+    goStack(effectParam.slice("stack:".length));
+    // The URL is read once at mount; `goStack` is the route's own setter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectParam]);
   // The sheet's Back reaches the editor's unsaved prompt through this.
   const editorRef = useRef<EffectEditorHandle | null>(null);
   // On a phone the detail is pushed over the gallery.
   const narrow = useMediaQuery("(max-width: 720px)");
-  const [pushed, setPushed] = useState(false);
+  // A phone opens the sheet when the page was asked for one effect by name ("Edit effect" from
+  // a group): the effect must not sit behind the library. Read once, at mount.
+  const opensEffect = effectParam !== null && !effectParam.startsWith("stack:");
+  const [pushed, setPushed] = useState(
+    () =>
+      opensEffect &&
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 720px)").matches,
+  );
   const [closing, setClosing] = useState(false);
   // Set when the push has settled: the gallery is then out of the way and out of the tab order.
-  const [settled, setSettled] = useState(false);
+  const [settled, setSettled] = useState(pushed);
   // The height of the status strip when the sheet opened.
-  const [sheetTop, setSheetTop] = useState<string | null>(null);
+  const [sheetTop, setSheetTop] = useState<string | null>(() =>
+    pushed ? currentStripHeight() : null,
+  );
 
   const pending = useRef<Values>({});
   /** The effect the waiting values were edited on. */
@@ -483,6 +513,10 @@ export function EffectsView() {
     setSheetTop(currentStripHeight());
     setTimeout(() => setSettled(true), 240);
   };
+
+  // "Edit effect" from a group (`?effect=<id>`) opens that effect: on a phone the sheet it
+  // lives in opens too (its initial state above), so the page does not land on the library
+  // with the effect behind it.
 
   /**
    * Switches the inspector into the code editor for one effect (D2.2). The detail is optional:
@@ -1054,6 +1088,8 @@ export function EffectsView() {
     return (
       <StackBuilder
         initialName={stackParam}
+        groupHref={groupHref}
+        groupName={groupName}
         onClose={() => goStack(null, { replace: true })}
         onName={(name) => goStack(name, { replace: true })}
         onWriteCode={() => {
@@ -1092,6 +1128,17 @@ export function EffectsView() {
         }
       />
       <PageActions>
+        {groupHref && (
+          <ButtonLink
+            href={groupHref}
+            variant="ghost"
+            size="sm"
+            icon={<CaretLeft size={15} />}
+            label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+          >
+            <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+          </ButtonLink>
+        )}
         <Button
           size="sm"
           variant="primary"
@@ -1285,6 +1332,17 @@ export function EffectsView() {
                   }}
                 />
                 <span>Effects</span>
+                {groupHref && (
+                  <ButtonLink
+                    href={groupHref}
+                    variant="ghost"
+                    size="sm"
+                    className="effect-sheet-group"
+                    label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+                  >
+                    {groupName ? `Back to ${groupName}` : "Back to the scene"}
+                  </ButtonLink>
+                )}
               </div>
               {detailPane}
             </div>

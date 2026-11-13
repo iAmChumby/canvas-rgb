@@ -104,6 +104,34 @@ async function mount(active: string) {
 }
 
 describe("Play on …", () => {
+  it("opens the effect and group a scene asked for, and offers the way back", async () => {
+    window.history.replaceState({}, "", "/effects/?effect=aurora&group=g-case&state=html");
+    await act(async () => {
+      await refreshAll();
+    });
+    patchSnap({
+      status: {
+        ...getSnap().status!,
+        active_scene: { id: "s", name: "Scene" },
+        active_effect: "white",
+        active_effects: ["white"],
+      },
+      scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]),
+    });
+    render(
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <StripSlot kind="actions" />
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    // The effect the group asked for is the one on screen.
+    expect(await screen.findByRole("heading", { name: "Aurora" })).toBeTruthy();
+    // And the way back names the group it came from.
+    const back = screen.getByRole("link", { name: "Back to Case fans" });
+    expect(back.getAttribute("href")).toBe("/?group=g-case");
+  });
+
   it("with one group Play plays there without a popover", async () => {
     window.history.replaceState({}, "", URL);
     await mount("aurora");

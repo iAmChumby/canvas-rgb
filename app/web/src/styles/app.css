@@ -3266,10 +3266,14 @@ button.chip:hover {
   line-height: 1.4;
 }
 
-/* Play on …: the groups of the active scene, and every group as one choice. */
-.play-on-anchor {
+/* Play on …: the groups of the active scene, and every group as one choice. */.play-on-anchor {
   display: inline-flex;
   min-width: 0;
+}
+
+/* The phone sheet's way back to the group it came from. */
+.effect-sheet-group {
+  margin-left: auto;
 }
 
 .play-on {
@@ -7624,13 +7628,20 @@ button.chip:hover {
 }
 
 /* The live picture: the panel keeps its head and foot, the canvas takes the rest. */
-.rd-stack-stage {
+.rd-stacks .rd-stack-stage {
   flex: 1 1 auto;
   display: flex;
   flex-direction: column;
   gap: var(--s3);
   min-height: 0;
   padding: var(--s3);
+}
+
+/* The builder's leading pair on a phone: back to Effects, and back to the group in Scenes. */
+.rd-stacks-leading {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s1);
 }
 
 .rd-stack-stage .panel-head {

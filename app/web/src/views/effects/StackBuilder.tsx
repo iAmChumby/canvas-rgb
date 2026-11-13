@@ -66,12 +66,17 @@ import type { Stack } from "@/proto/Stack";
 
 export function StackBuilder({
   initialName,
+  groupHref,
+  groupName,
   onClose,
   onName,
   onWriteCode,
 }: {
   /** The `?stack=` value: a saved stack's name, or `new`. */
   initialName: string;
+  /** The way back to the Scenes page's open group, when the builder was opened from one. */
+  groupHref?: string | null;
+  groupName?: string | null;
   onClose: () => void;
   /** A newly saved stack's name: the URL becomes `?stack=<name>` without reloading. */
   onName: (name: string) => void;
@@ -345,6 +350,8 @@ export function StackBuilder({
         dirty={dirty}
         saveState={saver.saveState}
         canSave={count > 0 && load.phase === "ready" && load.loadError === null}
+        groupHref={groupHref}
+        groupName={groupName}
         backRef={backRef}
         onBack={saver.askLeave}
         onRevert={saver.revert}

@@ -18,6 +18,14 @@ vi.mock("@/lib/stackPreview", async (importOriginal) => {
   };
 });
 
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => undefined, replace: () => undefined }),
+  usePathname: () => "/effects/",
+}));
+vi.mock("next/link", () => ({
+  default: ({ href, children }: { href: string; children?: React.ReactNode }) => <a href={href}>{children}</a>,
+}));
+
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
 beforeAll(() => {
