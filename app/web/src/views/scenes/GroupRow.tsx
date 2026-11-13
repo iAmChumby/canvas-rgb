@@ -129,7 +129,7 @@ export function GroupRow({ group, lights, effectName, failed, index, open, onOpe
 export function UnassignedRow({ lights }: { lights: LightView[] }) {
   return (
     <article className={s.row} data-testid="unassigned-row" data-unassigned="true" aria-label="Unassigned">
-      <div className={s.who}>
+      <div className={`${s.who} ${s.whoStatic}`}>
         <span className={s.name}>Unassigned</span>
         <Summary lights={lights} />
       </div>

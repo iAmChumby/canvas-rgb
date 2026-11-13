@@ -43,22 +43,31 @@ export interface RunLayout {
  * without a canvas.
  */
 export function layoutRun(lights: LightView[], width: number, height: number): RunLayout {
-  const gaps = Math.max(0, lights.length - 1) * LIGHT_GAP;
-  const avail = Math.max(0, width - PAD * 2 - gaps);
+  const usable = Math.max(0, width - PAD * 2);
+  // The gaps keep their width until the lights crowd: then they close up, never taking more than a
+  // fifth of the room, so sixteen devices in a phone's run still fit side by side.
+  const gap =
+    lights.length > 1 ? Math.max(1.5, Math.min(LIGHT_GAP, (usable * 0.2) / (lights.length - 1))) : 0;
+  const avail = Math.max(0, usable - Math.max(0, lights.length - 1) * gap);
   const isRing = (l: LightView) => l.light.arrangement === "ring" && l.led_count > 1;
   const rings = lights.filter(isRing).length;
   const runLeds = lights.reduce((n, l) => n + (isRing(l) ? 0 : Math.max(1, l.led_count)), 0);
   let ringD = Math.min(height - 8, 44);
-  if (rings > 0 && runLeds > 0) ringD = Math.min(ringD, Math.max(16, (avail - runLeds) / rings));
-  if (rings > 0 && runLeds === 0) ringD = Math.min(ringD, Math.max(16, avail / rings));
-  const unit = runLeds > 0 ? Math.min(MAX_UNIT, Math.max(0.5, (avail - rings * ringD) / runLeds)) : 0;
+  // Rings keep a round slot of up to 44 px. When strips share the room, the rings take a quarter
+  // of it, at least 20 px each (a ring any smaller is a speck) but never more than two fifths: the
+  // strips then take what is left, thin as that is.
+  if (rings > 0 && runLeds > 0) {
+    ringD = Math.min(ringD, Math.max((avail * 0.25) / rings, Math.min(20, (avail * 0.4) / rings)));
+  }
+  if (rings > 0 && runLeds === 0) ringD = Math.min(ringD, avail / rings);
+  const unit = runLeds > 0 ? Math.min(MAX_UNIT, Math.max(0, (avail - rings * ringD) / runLeds)) : 0;
   const slots: Slot[] = [];
   let x = PAD;
   for (const light of lights) {
     const ring = isRing(light);
     const w = ring ? ringD : Math.max(1, light.led_count) * unit;
     slots.push({ x, w, light, ring });
-    x += w + LIGHT_GAP;
+    x += w + gap;
   }
   return { slots, unit };
 }

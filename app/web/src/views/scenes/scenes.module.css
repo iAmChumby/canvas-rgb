@@ -146,6 +146,11 @@
   text-align: left;
 }
 
+.whoStatic {
+  /* the open key beside it has a 1 px border: this one keeps the same box so the two line up */
+  border: 1px solid transparent;
+}
+
 .name {
   display: block;
   max-width: 100%;
@@ -315,6 +320,38 @@
   display: inline-flex;
   flex-wrap: wrap;
   gap: var(--s2);
+}
+
+/* The keys are a row of their own in a narrow box: one line that scrolls sideways, so the notice
+   stays two lines tall over the rows instead of a stack of five. */
+@container page (max-width: 520px) {
+  .noticeKeys {
+    display: flex;
+    flex-wrap: nowrap;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    padding-bottom: 3px;
+  }
+
+  .noticeKeys::-webkit-scrollbar {
+    display: none;
+  }
+
+  .noticeKeys > * {
+    flex: none;
+  }
+
+  /* The banner's action box must be able to be narrower than its keys, or it grows past the window. */
+  .notice :global(.banner-actions) {
+    min-width: 0;
+    max-width: 100%;
+  }
+
+  .noticeKeys {
+    min-width: 0;
+    width: 100%;
+  }
 }
 
 /* ---------- placeholders ---------- */
