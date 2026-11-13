@@ -21,6 +21,8 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
+use canvas_proto::device::DeviceInfo;
+
 use crate::displays::{DisplaysFile, DISPLAYS_FILE, DISPLAYS_SCHEMA};
 use crate::paths;
 use crate::peripherals::{PeripheralsFile, PERIPHERALS_FILE, PERIPHERALS_SCHEMA};
@@ -81,13 +83,24 @@ pub fn read_parsed<T: DeserializeOwned + SchemaVersioned>(
     let Some(bytes) = paths::read_optional(path) else {
         return Ok(None);
     };
+    parse_bytes(path, &bytes, schema_version, expected)
+}
+
+/// The parse half of [`read_parsed`], for bytes already read: a file that parses and has the
+/// right schema yields `Ok(Some)`; one that does not is moved aside and yields `Ok(None)`.
+fn parse_bytes<T: DeserializeOwned + SchemaVersioned>(
+    path: &Path,
+    bytes: &[u8],
+    schema_version: u32,
+    expected: &str,
+) -> Result<Option<T>, StorageError> {
     let parsed: Result<T, _> = if path.extension().is_some_and(|e| e == "toml") {
-        match std::str::from_utf8(&bytes) {
+        match std::str::from_utf8(bytes) {
             Ok(text) => toml::from_str(text).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         }
     } else {
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())
     };
     match parsed {
         Ok(value) => {
@@ -108,6 +121,47 @@ pub fn read_parsed<T: DeserializeOwned + SchemaVersioned>(
             tracing::error!(path = %path.display(), error = %e, "{expected} did not parse; starting from defaults");
             quarantine(path)?;
             Ok(None)
+        }
+    }
+}
+
+/// What reading a file that must not be mistaken for an absent one found.
+enum Loaded<T> {
+    /// The file does not exist.
+    Absent,
+    /// The file exists but could not be read (or could not be moved aside): it stays where it is
+    /// and nothing is written over it.
+    Unreadable,
+    /// The file did not parse or had the wrong schema, and was moved aside as `*.corrupt`.
+    Quarantined,
+    Parsed(T),
+}
+
+/// [`read_parsed`] for the scenes files: tells absent from unreadable, and logs the path of a
+/// read error. [`paths::read_optional`], which maps every error to "absent", stays as it is for
+/// the other files.
+fn load_checked<T: DeserializeOwned + SchemaVersioned>(
+    path: &Path,
+    schema_version: u32,
+    expected: &str,
+) -> Loaded<T> {
+    let bytes = match paths::read_checked(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Loaded::Absent,
+        Err(e) => {
+            tracing::error!(
+                path = %path.display(), error = %e,
+                "{expected} exists but could not be read; it is left alone and nothing is written over it"
+            );
+            return Loaded::Unreadable;
+        }
+    };
+    match parse_bytes(path, &bytes, schema_version, expected) {
+        Ok(Some(value)) => Loaded::Parsed(value),
+        Ok(None) => Loaded::Quarantined,
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "{expected} could not be moved aside; it is left alone");
+            Loaded::Unreadable
         }
     }
 }
@@ -244,6 +298,15 @@ pub struct Store {
     /// The scenes (`scenes.json`): named sets of groups, one active. Migrated from `layouts`
     /// once, when this file is absent; the layouts stay as the old path reads them until Task 12.
     pub scenes: ScenesFile,
+    /// Set while the scenes are held in memory only: `scenes.json` was absent (or quarantined),
+    /// so the first device list migrates the layouts (or makes the first-run scene) with the real
+    /// devices and writes both files ([`Store::finish_scenes`]). Nothing is written before that.
+    pub scenes_pending: Option<PendingScenes>,
+    /// `lights.json` exists but could not be read at load. It is never written over.
+    pub lights_blocked: bool,
+    /// `scenes.json` (or the `layouts.json` it would migrate from) exists but could not be read at
+    /// load. It is never written over.
+    pub scenes_blocked: bool,
     pub zones: ZonesFile,
     pub effects: EffectsFile,
     /// The numeric display configs (`displays.json`). A display is driven only while it has one.
@@ -256,6 +319,18 @@ pub struct Store {
     pub home: PathBuf,
 }
 
+/// A scenes migration waiting for the first device list.
+#[derive(Debug, Clone)]
+pub struct PendingScenes {
+    /// The saved layouts to migrate (Poison already renamed), or `None` for a first run.
+    pub layouts: Option<LayoutsFile>,
+    /// The lights `lights.json` held at load (empty when it was absent): they keep their
+    /// settings through the migration. The in-memory placeholder lights are not these.
+    pub held_lights: LightsFile,
+    /// The `before-scenes` snapshot is taken once, however many lists it takes to write.
+    pub snapshotted: bool,
+}
+
 impl Default for Store {
     fn default() -> Self {
         Self {
@@ -263,6 +338,9 @@ impl Default for Store {
             layouts: default_layouts(),
             lights: crate::scenes::empty_lights(),
             scenes: crate::scenes::default_scenes(&crate::scenes::empty_lights()),
+            scenes_pending: None,
+            lights_blocked: false,
+            scenes_blocked: false,
             zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
             effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
             displays: DisplaysFile::default(),
@@ -351,22 +429,19 @@ impl Store {
                 None
             });
 
-        let scenes_existed = home.join(SCENES_FILE).exists();
-        let lights_value: Option<LightsFile> = read_parsed(&home.join(LIGHTS_FILE), LIGHTS_SCHEMA, LIGHTS_FILE)
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "lights.json could not be read");
-                None
-            });
-        let scenes_value: Option<ScenesFile> = read_parsed(&home.join(SCENES_FILE), SCENES_SCHEMA, SCENES_FILE)
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "scenes.json could not be read");
-                None
-            });
+        let lights_value: Loaded<LightsFile> = load_checked(&home.join(LIGHTS_FILE), LIGHTS_SCHEMA, LIGHTS_FILE);
+        let scenes_value: Loaded<ScenesFile> = load_checked(&home.join(SCENES_FILE), SCENES_SCHEMA, SCENES_FILE);
+        // A layouts.json that is still there but gave nothing could not be read (a parse failure
+        // moved it aside, so it is gone): the scenes are not migrated from a file we cannot see.
+        let layouts_unreadable = layouts_value.is_none() && layouts.exists();
 
         let mut store = Store {
             config: config_value.unwrap_or_default(),
-            lights: lights_value.unwrap_or_else(crate::scenes::empty_lights),
+            lights: crate::scenes::empty_lights(),
             scenes: Store::default().scenes,
+            scenes_pending: None,
+            lights_blocked: false,
+            scenes_blocked: false,
             layouts: layouts_value.clone().unwrap_or_else(default_layouts),
             zones: zones_value.unwrap_or_else(|| Store::default().zones),
             effects: effects_value.unwrap_or_else(|| Store::default().effects),
@@ -379,52 +454,139 @@ impl Store {
             store.config.schema_version = CONFIG_SCHEMA;
         }
         store.ensure_layouts();
-        store.load_scenes(scenes_value, scenes_existed, layouts_value.as_ref());
+        store.load_scenes(lights_value, scenes_value, layouts_value.as_ref(), layouts_unreadable);
         store
     }
 
-    /// Settles `lights` and `scenes` after the files are read.
+    /// Settles `lights` and `scenes` after the files are read. Writes at most a repair of a
+    /// `scenes.json` that read fine; never `layouts.json`.
     ///
-    /// - `scenes.json` read fine: it is repaired (a light in two groups, an empty group, an
-    ///   `active` naming nothing) and the repair is saved.
-    /// - It existed but would not read (it was quarantined): the default scene holds every light.
-    /// - It is absent and `layouts.json` was read: the layouts migrate, once
-    ///   ([`crate::scene_migration::run`]).
-    /// - Both absent: the default scene, in memory only. Nothing exists to preserve, and the
-    ///   first device list gives the lights.
-    ///
-    /// Never writes `layouts.json`.
-    fn load_scenes(&mut self, scenes: Option<ScenesFile>, existed: bool, layouts: Option<&LayoutsFile>) {
-        match (scenes, existed, layouts) {
-            (Some(mut scenes), _, _) => {
+    /// - A file that exists but could not be read is not absent: it is left alone, the store runs
+    ///   on an in-memory default, and nothing is written to it (see `lights_blocked`,
+    ///   `scenes_blocked`).
+    /// - `scenes.json` read fine: it is repaired (see [`crate::scenes::repair`]) and the repair is
+    ///   saved.
+    /// - `scenes.json` is absent or was quarantined: nothing is written here. The migration is held
+    ///   in memory ([`PendingScenes`]: from `layouts.json` when it was read, else the first-run
+    ///   scene) and runs on the first device list, so the real devices decide arrangements and
+    ///   zero-LED zones ([`Store::finish_scenes`]).
+    fn load_scenes(
+        &mut self,
+        lights: Loaded<LightsFile>,
+        scenes: Loaded<ScenesFile>,
+        layouts: Option<&LayoutsFile>,
+        layouts_unreadable: bool,
+    ) {
+        match lights {
+            Loaded::Parsed(lights) => self.lights = lights,
+            Loaded::Unreadable => self.lights_blocked = true,
+            Loaded::Absent | Loaded::Quarantined => {}
+        }
+        match scenes {
+            Loaded::Parsed(mut scenes) => {
                 let changes = crate::scenes::repair(&mut scenes, &self.lights);
+                for change in &changes {
+                    tracing::warn!("scenes.json was repaired: {change}");
+                }
+                self.scenes = scenes;
                 if !changes.is_empty() {
-                    for change in &changes {
-                        tracing::warn!("scenes.json was repaired: {change}");
-                    }
-                    self.scenes = scenes;
                     crate::logging::warn_if_err("the repaired scenes.json could not be saved", self.save_scenes());
-                } else {
-                    self.scenes = scenes;
                 }
             }
-            (None, true, _) => {
-                tracing::error!("scenes.json was damaged; the default scene holds every light");
+            Loaded::Unreadable => {
+                self.scenes_blocked = true;
                 self.scenes = crate::scenes::default_scenes(&self.lights);
-                crate::logging::warn_if_err("the default scenes.json could not be saved", self.save_scenes());
             }
-            (None, false, Some(layouts)) => {
+            Loaded::Absent | Loaded::Quarantined if layouts_unreadable || self.lights_blocked => {
+                self.scenes_blocked = true;
+                self.scenes = crate::scenes::default_scenes(&self.lights);
+            }
+            Loaded::Absent | Loaded::Quarantined => {
                 // A layouts file from before Poison became a user effect names it `poison`; the
-                // scenes are built from the ids the daemon uses today.
-                let mut layouts = layouts.clone();
-                crate::migration::migrate_poison(&mut layouts, &mut self.effects.clone());
-                let (lights, scenes) = crate::scene_migration::run(&self.home, &layouts, &[]);
+                // scenes are built from the ids the daemon uses today. Only the layouts half of
+                // `migrate_poison` matters here: `main` runs `migrate_store` on the real store,
+                // which moves the saved props, presets and favourites, so the effects half is
+                // thrown away on purpose.
+                let layouts = layouts.map(|l| {
+                    let mut l = l.clone();
+                    crate::migration::migrate_poison(&mut l, &mut EffectsFile::default());
+                    l
+                });
+                let held_lights = self.lights.clone();
+                let (lights, scenes) = Self::build_scenes(&held_lights, layouts.as_ref(), &[]);
                 self.lights = lights;
                 self.scenes = scenes;
+                self.scenes_pending = Some(PendingScenes { layouts, held_lights, snapshotted: false });
             }
-            (None, false, None) => {
-                self.scenes = crate::scenes::default_scenes(&self.lights);
+        }
+    }
+
+    /// The lights and scenes a migration makes: the lights already held, plus the ones the
+    /// layouts (or, on a first run, the devices) bring. A light already held keeps its settings.
+    fn build_scenes(
+        held: &LightsFile,
+        layouts: Option<&LayoutsFile>,
+        devices: &[DeviceInfo],
+    ) -> (LightsFile, ScenesFile) {
+        let (migrated, scenes) = crate::scene_migration::migrate(layouts, devices);
+        let mut lights = held.clone();
+        for light in migrated.lights {
+            if !lights.lights.iter().any(|l| l.id == light.id) {
+                lights.lights.push(light);
             }
+        }
+        let scenes = match layouts {
+            Some(_) => scenes,
+            // The first-run scene holds every light, the ones already held included.
+            None => crate::scenes::default_scenes(&lights),
+        };
+        (lights, scenes)
+    }
+
+    /// Runs the held scenes migration with the first device list: migrates with the real devices,
+    /// takes the `before-scenes` snapshot, writes `lights.json` and `scenes.json`, and clears
+    /// `scenes_pending`. Returns true when the files were written. Never writes `layouts.json`.
+    ///
+    /// An empty list waits for the next one: with no devices there are no lights to group, and a
+    /// first-run `Everything` made now would hold none. A failed write keeps the migration
+    /// pending, so the next list tries again.
+    pub fn finish_scenes(&mut self, devices: &[DeviceInfo]) -> bool {
+        if devices.is_empty() {
+            return false;
+        }
+        let Some(pending) = self.scenes_pending.as_mut() else {
+            return false;
+        };
+        if !pending.snapshotted {
+            pending.snapshotted = true;
+            crate::logging::warn_if_err(
+                "the snapshot before the scenes migration could not be taken; it goes on without one",
+                snapshot(&self.home, "before-scenes"),
+            );
+        }
+        let layouts = pending.layouts.clone();
+        let (lights, scenes) = Self::build_scenes(&pending.held_lights, layouts.as_ref(), devices);
+        let wrote_lights = crate::logging::warn_if_err(
+            "lights.json could not be written",
+            write_json(&self.home.join(LIGHTS_FILE), &lights),
+        );
+        let wrote_scenes = crate::logging::warn_if_err(
+            "scenes.json could not be written",
+            write_json(&self.home.join(SCENES_FILE), &scenes),
+        );
+        tracing::info!(
+            from_layouts = layouts.as_ref().map_or(0, |l| l.layouts.len()),
+            lights = lights.lights.len(),
+            scenes = scenes.scenes.len(),
+            "the scenes were made from the first device list"
+        );
+        self.lights = lights;
+        self.scenes = scenes;
+        if wrote_lights.is_some() && wrote_scenes.is_some() {
+            self.scenes_pending = None;
+            true
+        } else {
+            false
         }
     }
 
@@ -457,12 +619,32 @@ impl Store {
         write_json(&self.home.join(LAYOUTS_FILE), &self.layouts)
     }
 
+    /// Refuses while the file could not be read at load, or while the scenes are only in memory
+    /// ([`Store::finish_scenes`] writes them first).
     pub fn save_lights(&self) -> std::io::Result<()> {
+        self.may_write_scenes_files(LIGHTS_FILE, self.lights_blocked)?;
         write_json(&self.home.join(LIGHTS_FILE), &self.lights)
     }
 
+    /// Refuses while the file could not be read at load, or while the scenes are only in memory
+    /// ([`Store::finish_scenes`] writes them first).
     pub fn save_scenes(&self) -> std::io::Result<()> {
+        self.may_write_scenes_files(SCENES_FILE, self.scenes_blocked)?;
         write_json(&self.home.join(SCENES_FILE), &self.scenes)
+    }
+
+    fn may_write_scenes_files(&self, name: &str, blocked: bool) -> std::io::Result<()> {
+        if blocked {
+            return Err(std::io::Error::other(format!(
+                "{name} could not be read at start, so it is not written over"
+            )));
+        }
+        if self.scenes_pending.is_some() {
+            return Err(std::io::Error::other(format!(
+                "{name} waits for the first device list before it is written"
+            )));
+        }
+        Ok(())
     }
 
     pub fn save_zones(&self) -> std::io::Result<()> {

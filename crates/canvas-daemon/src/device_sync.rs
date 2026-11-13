@@ -35,6 +35,11 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         // went away stays, so it keeps its place when the device returns (the id is built from
         // the device id, never the adapter index).
         let store = &mut *store;
+        // The first device list settles a held scenes migration (spec "Storage and migration"):
+        // arrangements and zero-LED zones come from the real devices, not from a guess at load.
+        if store.finish_scenes(&devices) {
+            tracing::info!("scenes.json and lights.json were written from the first device list");
+        }
         let new_lights = crate::scenes::sync_lights(&mut store.lights, &devices);
         if !new_lights.is_empty() {
             tracing::info!(added = new_lights.len(), "new lights were added");

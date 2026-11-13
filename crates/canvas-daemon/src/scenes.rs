@@ -11,8 +11,8 @@ use canvas_proto::device::{DeviceInfo, ZoneInfo};
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
     zone_light_id, Arrangement, Group, GroupMode, Light, LightId, LightsFile, Plays, Scene,
-    ScenesFile, DEFAULT_GROUP_NAME, DEFAULT_SCENE_NAME, GROUP_BRIGHTNESS_MAX, LIGHTS_SCHEMA,
-    SCENES_SCHEMA,
+    ScenesFile, DEFAULT_GROUP_NAME, DEFAULT_SCENE_NAME, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX,
+    LIGHTS_SCHEMA, SCENES_SCHEMA, SCENE_NAME_MAX,
 };
 
 /// What the default scene plays: the effect the first run turns on, so the lights are lit.
@@ -101,6 +101,10 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
 ///
 /// A zone has a light when any light names its device and zone index, whole or a slice of it, so
 /// a zone the owner split into parts is never given a second whole-zone light.
+///
+/// Only whole-zone lights are made here. A split-zone light (`…p{n}`) is not recreated: if
+/// `lights.json` is lost, a split zone comes back as one whole-zone light, and the slices'
+/// labels, arrangements and `reversed` flags are gone (the files hold the only copy).
 pub fn sync_lights(lights: &mut LightsFile, devices: &[DeviceInfo]) -> Vec<LightId> {
     let mut added = Vec::new();
     for device in devices {
@@ -119,26 +123,80 @@ pub fn sync_lights(lights: &mut LightsFile, devices: &[DeviceInfo]) -> Vec<Light
     added
 }
 
-/// Makes a loaded file safe: drops a light's second membership, drops empty groups, points
-/// `active` at the first scene if it names none, and makes the default scene if there are no
-/// scenes. Returns what it changed, for the log.
+/// `text` cut to `max` characters (not bytes), `true` when it was cut.
+fn cut_chars(text: &mut String, max: usize) -> bool {
+    match text.char_indices().nth(max) {
+        Some((at, _)) => {
+            text.truncate(at);
+            true
+        }
+        None => false,
+    }
+}
+
+/// Makes a loaded file safe: after it, every scene passes
+/// [`canvas_proto::scene::validate_scene`] against `lights`. It cuts scene and group names to
+/// their maximum (by characters), clamps brightness to 100, gives a scene id used twice a numeric
+/// suffix (the first keeps it), gives a group id used twice one too, drops a light's second
+/// membership (the FIRST group that names it keeps it), drops members that name no light, then
+/// empty groups. It points `active` at the first scene if it names none, and makes the default
+/// scene if there are no scenes. Returns what it changed, for the log.
 ///
-/// A member that names no light in `lights` stays: the lights file may have been lost while the
-/// scenes survived, and the same ids come back when the devices are read again. Two groups
-/// sharing an id are told apart by a numeric suffix.
+/// One exception: while `lights` is empty (the lights file was lost, or never written) members
+/// that name no light are kept, because [`sync_lights`] brings the whole-zone ids back from the
+/// devices. Those scenes validate again once the lights are back. (A lost split-zone light
+/// does not come back; see [`sync_lights`].)
 pub fn repair(scenes: &mut ScenesFile, lights: &LightsFile) -> Vec<String> {
     let mut changes = Vec::new();
+    let known: HashSet<&str> = lights.lights.iter().map(|l| l.id.as_str()).collect();
+    let lights_lost = lights.lights.is_empty();
+    let mut scene_ids: Vec<String> = Vec::new();
     for scene in &mut scenes.scenes {
+        if scene_ids.contains(&scene.id) {
+            let new = fresh_id(&scene.id, scene_ids.iter().map(String::as_str));
+            changes.push(format!("scene id {} was used twice; renamed {new}", scene.id));
+            scene.id = new;
+        }
+        scene_ids.push(scene.id.clone());
+        if cut_chars(&mut scene.name, SCENE_NAME_MAX) {
+            changes.push(format!("scene {}: its name was cut to {SCENE_NAME_MAX} characters", scene.id));
+        }
         let mut held: HashSet<LightId> = HashSet::new();
         for group in &mut scene.groups {
-            let before = group.members.len();
-            group.members.retain(|m| held.insert(m.clone()));
-            let dropped = before - group.members.len();
-            if dropped > 0 {
+            if cut_chars(&mut group.name, GROUP_NAME_MAX) {
                 changes.push(format!(
-                    "scene {}: group {} lost {dropped} light(s) already in another group",
+                    "scene {}: group {} name was cut to {GROUP_NAME_MAX} characters",
                     scene.id, group.id
                 ));
+            }
+            if group.brightness > GROUP_BRIGHTNESS_MAX {
+                group.brightness = GROUP_BRIGHTNESS_MAX;
+                changes.push(format!("scene {}: group {} brightness was clamped to {GROUP_BRIGHTNESS_MAX}", scene.id, group.id));
+            }
+            let (mut unknown, mut elsewhere, mut twice) = (0, 0, 0);
+            let mut here: HashSet<LightId> = HashSet::new();
+            let mut kept = Vec::with_capacity(group.members.len());
+            for member in std::mem::take(&mut group.members) {
+                if !lights_lost && !known.contains(member.as_str()) {
+                    unknown += 1;
+                } else if held.contains(&member) {
+                    elsewhere += 1;
+                } else if !here.insert(member.clone()) {
+                    twice += 1;
+                } else {
+                    kept.push(member);
+                }
+            }
+            held.extend(here);
+            group.members = kept;
+            for (n, what) in [
+                (unknown, "that name no light"),
+                (elsewhere, "already in another group"),
+                (twice, "listed twice in the group"),
+            ] {
+                if n > 0 {
+                    changes.push(format!("scene {}: group {} lost {n} light(s) {what}", scene.id, group.id));
+                }
             }
         }
         let before = scene.groups.len();
@@ -307,7 +365,11 @@ pub(crate) mod tests {
         assert_eq!(scenes.active, "s");
         let s = active_scene(&scenes);
         canvas_proto::scene::validate_scene(s, &lights.lights).expect("the repaired scene is valid");
-        assert_eq!(s.groups.iter().map(|g| g.members.len()).collect::<Vec<_>>(), vec![1, 1]);
+        // The FIRST group keeps the light both named; a repair that kept it in the wrong group
+        // would leave `a` empty (and dropped) or `b` holding both.
+        assert_eq!(s.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(), vec!["a", "b"]);
+        assert_eq!(s.groups[0].members, vec!["b#z0".to_string()]);
+        assert_eq!(s.groups[1].members, vec!["b#z1".to_string()]);
         assert_eq!(s.rev, 3, "repair keeps the revision");
 
         // No scene at all: the default scene, with every light in one group, playing something.
@@ -318,6 +380,139 @@ pub(crate) mod tests {
         assert_eq!(d.groups.len(), 1);
         assert_eq!(d.groups[0].members.len(), 2);
         assert!(matches!(d.groups[0].plays, Plays::Effect { .. }));
+    }
+
+    /// A scene whose only fault is the one the test sets.
+    fn scene_with(groups: Vec<Group>) -> ScenesFile {
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "s".into(),
+            scenes: vec![Scene { id: "s".into(), name: "S".into(), rev: 1, groups }],
+        }
+    }
+
+    fn two_lights() -> LightsFile {
+        let mut lights = empty_lights();
+        sync_lights(&mut lights, &[device("b", 0, vec![zone(0, ZoneKind::Linear, 30), zone(1, ZoneKind::Linear, 20)])]);
+        lights
+    }
+
+    /// The FIRST group that names a light keeps it; the later group loses it.
+    #[test]
+    fn the_first_group_keeps_a_light_two_groups_hold() {
+        let lights = two_lights();
+        let mut scenes = scene_with(vec![group("a", &["b#z0"]), group("b", &["b#z0", "b#z1"])]);
+        repair(&mut scenes, &lights);
+        let groups = &scenes.scenes[0].groups;
+        assert_eq!(groups[0].members, vec!["b#z0".to_string()]);
+        assert_eq!(groups[1].members, vec!["b#z1".to_string()]);
+    }
+
+    /// A light listed twice inside one group is not "in another group".
+    #[test]
+    fn a_light_listed_twice_in_one_group_says_so() {
+        let lights = two_lights();
+        let mut scenes = scene_with(vec![group("a", &["b#z0", "b#z0", "b#z1"])]);
+        let changes = repair(&mut scenes, &lights);
+        assert_eq!(scenes.scenes[0].groups[0].members, vec!["b#z0".to_string(), "b#z1".to_string()]);
+        assert_eq!(changes.len(), 1, "{changes:?}");
+        assert!(changes[0].contains("twice"), "{changes:?}");
+        assert!(!changes[0].contains("another group"), "{changes:?}");
+    }
+
+    /// With the lights known, a member that names no light is dropped, and its group with it when
+    /// nothing is left (S2: the scene must pass `validate_scene`).
+    #[test]
+    fn members_naming_no_light_are_dropped_then_empty_groups() {
+        let lights = two_lights();
+        let mut scenes = scene_with(vec![group("a", &["gone", "b#z0"]), group("ghost", &["gone-too"])]);
+        let changes = repair(&mut scenes, &lights);
+        let groups = &scenes.scenes[0].groups;
+        assert_eq!(groups.len(), 1, "{changes:?}");
+        assert_eq!(groups[0].members, vec!["b#z0".to_string()]);
+        canvas_proto::scene::validate_scene(&scenes.scenes[0], &lights.lights).expect("valid");
+    }
+
+    /// The one exception: with the lights file empty (lost), the members stay, because
+    /// `sync_lights` brings the whole-zone ids back from the devices.
+    #[test]
+    fn members_stay_while_the_lights_file_is_empty() {
+        let mut scenes = scene_with(vec![group("a", &["b#z0", "b#z1"])]);
+        let changes = repair(&mut scenes, &empty_lights());
+        assert!(changes.is_empty(), "{changes:?}");
+        assert_eq!(scenes.scenes[0].groups[0].members.len(), 2);
+    }
+
+    #[test]
+    fn long_names_are_cut_and_brightness_is_clamped() {
+        use canvas_proto::scene::{GROUP_NAME_MAX, SCENE_NAME_MAX};
+        let lights = two_lights();
+        let mut g = group("a", &["b#z0"]);
+        g.name = "é".repeat(GROUP_NAME_MAX + 9);
+        g.brightness = 255;
+        let mut scenes = scene_with(vec![g]);
+        scenes.scenes[0].name = "ü".repeat(SCENE_NAME_MAX + 5);
+        repair(&mut scenes, &lights);
+        assert_eq!(scenes.scenes[0].name.chars().count(), SCENE_NAME_MAX);
+        assert_eq!(scenes.scenes[0].groups[0].name.chars().count(), GROUP_NAME_MAX);
+        assert_eq!(scenes.scenes[0].groups[0].brightness, 100);
+        canvas_proto::scene::validate_scene(&scenes.scenes[0], &lights.lights).expect("valid");
+    }
+
+    #[test]
+    fn a_scene_id_used_twice_gets_a_suffix() {
+        let lights = two_lights();
+        let mut scenes = scene_with(vec![group("a", &["b#z0"])]);
+        let twin = Scene { name: "Twin".into(), groups: vec![group("a", &["b#z1"])], ..scenes.scenes[0].clone() };
+        scenes.scenes.push(twin);
+        let changes = repair(&mut scenes, &lights);
+        let ids: Vec<_> = scenes.scenes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, vec!["s", "s-2"], "{changes:?}");
+        assert_eq!(scenes.active, "s", "the first keeps the id the file's active names");
+    }
+
+    /// Property-style: damaged scenes built from a seeded generator all validate after repair,
+    /// whatever mix of faults they hold.
+    #[test]
+    fn whatever_the_damage_the_repaired_scenes_validate() {
+        let lights = two_lights();
+        let pool = ["b#z0", "b#z1", "gone", "also-gone"];
+        let mut seed: u64 = 0x2545_F491_4F6C_DD1D;
+        let mut next = move |n: usize| {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % n as u64) as usize
+        };
+        for round in 0..200 {
+            let scene_count = 1 + next(3);
+            let mut scenes = ScenesFile { schema_version: SCENES_SCHEMA, active: "nope".into(), scenes: Vec::new() };
+            for _ in 0..scene_count {
+                let mut groups = Vec::new();
+                for _ in 0..next(4) {
+                    let members: Vec<&str> = (0..next(4)).map(|_| pool[next(pool.len())]).collect();
+                    let mut g = group(["a", "b"][next(2)], &members);
+                    g.name = "n".repeat(next(90));
+                    g.brightness = [0u8, 50, 100, 101, 255][next(5)];
+                    groups.push(g);
+                }
+                scenes.scenes.push(Scene {
+                    id: ["s", "t"][next(2)].into(),
+                    name: "x".repeat(next(90)),
+                    rev: 1,
+                    groups,
+                });
+            }
+            repair(&mut scenes, &lights);
+            assert!(!scenes.scenes.is_empty());
+            let mut ids = HashSet::new();
+            for scene in &scenes.scenes {
+                assert!(ids.insert(scene.id.clone()), "round {round}: scene id used twice");
+                canvas_proto::scene::validate_scene(scene, &lights.lights)
+                    .unwrap_or_else(|e| panic!("round {round}: {e} in {scene:?}"));
+            }
+            assert!(scenes.scenes.iter().any(|s| s.id == scenes.active), "round {round}");
+        }
     }
 
     #[test]
