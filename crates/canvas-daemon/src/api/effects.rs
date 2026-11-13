@@ -204,14 +204,17 @@ pub async fn activate(
     };
 
     // Save the props for next time, then apply the effect. A stack is never in `effects.saved`
-    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot.
+    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot. In scene mode
+    // activating only changes groups: an effect's starting values are written by
+    // `PATCH /effects/{id}/defaults` and nothing else, so playing it on one group never changes
+    // what another group starts from.
     let is_stack = stack.is_some();
     if !transient {
         let mut store = app
             .store
             .write()
             .await;
-        if !is_stack {
+        if !is_stack && !app.scene.is_on() {
             store.effects.saved.insert(schema.id.clone(), props.clone());
             store
                 .save_effects()

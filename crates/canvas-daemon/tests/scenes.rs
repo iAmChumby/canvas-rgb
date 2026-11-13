@@ -202,6 +202,15 @@ async fn send(
     path: &str,
     body: Option<serde_json::Value>,
 ) -> (StatusCode, serde_json::Value) {
+    send_on(&rig.router, method, path, body).await
+}
+
+async fn send_on(
+    router: &axum::Router,
+    method: &str,
+    path: &str,
+    body: Option<serde_json::Value>,
+) -> (StatusCode, serde_json::Value) {
     let mut builder = Request::builder()
         .method(method)
         .uri(path)
@@ -214,7 +223,7 @@ async fn send(
         }
         None => Body::empty(),
     };
-    let response = rig.router.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
+    let response = router.clone().oneshot(builder.body(body).unwrap()).await.unwrap();
     let status = response.status();
     let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let json = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
@@ -1007,4 +1016,189 @@ async fn a_watcher_whose_task_dies_gives_its_slot_back() {
     });
     assert!(task.await.is_err(), "the task panicked");
     assert_eq!(rig.app.scene.feed.watchers(), 0, "the guard gave the slot back");
+}
+
+// ---------------------------------------------------------------- what a save hands the engine (fix pass)
+
+/// The scenes held in memory: a `layouts.json` that places a device the list never brings, so the
+/// migration waits and the scenes live only in memory. The engine is a fake; the daemon is in scene
+/// mode, as start-up leaves it.
+async fn held_app() -> (Arc<App>, axum::Router, TempHome, canvas_proto::config::LayoutsFile) {
+    use canvas_proto::layout::{CaseForm, Layout, RenderScale, SamplingMode};
+    let home = TempHome::new();
+    let layouts = canvas_proto::config::LayoutsFile {
+        schema_version: canvas_proto::config::LAYOUTS_SCHEMA,
+        active: "desk".into(),
+        layouts: vec![Layout {
+            id: "desk".into(),
+            name: "Desk".into(),
+            render_scale: RenderScale::P100,
+            sampling: SamplingMode::AreaAverage,
+            zones: vec![placed(A, 0.0), placed("fake:gone", 160.0)],
+            effect: None,
+            case_form: CaseForm::None,
+            landmarks: Vec::new(),
+        }],
+    };
+    std::fs::write(home.path.join("layouts.json"), serde_json::to_vec(&layouts).unwrap()).unwrap();
+    let mut store = canvas_daemon::storage::Store::load_from(&home.path);
+    assert!(store.scenes_pending.is_some(), "no scenes.json: the migration is held");
+    store.config.first_run_done = true;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(
+        store,
+        Arc::new(common::FakeEngine::default()),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.0.0-test".to_string(),
+        tx,
+    ));
+    let router = canvas_daemon::api::router(app.clone());
+    (app, router, home, layouts)
+}
+
+/// S1: a props or brightness change is already what the engine runs, so the next device list (the
+/// supervisor repeats it every few seconds) rebuilds nothing and no effect restarts.
+#[tokio::test]
+async fn a_group_change_is_not_rebuilt_by_the_next_device_list() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two groups once");
+
+    let path = route(routes::GROUP_PROPS, &[("id", "main"), ("group", "left")]);
+    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::to_value(color(GREEN)).unwrap())).await;
+    assert_eq!(status, StatusCode::OK);
+    canvas_daemon::scenes::apply_for_devices(&rig.app).await;
+    assert_eq!(rig.app.scene.builds(), built, "a props patch, then the same device list, built nothing");
+
+    let path = route(routes::GROUP_BRIGHTNESS, &[("id", "main"), ("group", "right")]);
+    let (status, _) = send(&rig, "PUT", &path, Some(serde_json::json!({ "brightness": 40 }))).await;
+    assert_eq!(status, StatusCode::OK);
+    canvas_daemon::scenes::apply_for_devices(&rig.app).await;
+    assert_eq!(rig.app.scene.builds(), built, "a brightness change, then the same device list, built nothing");
+    shows(&rig.a, rgb(GREEN), "the patched group still plays").await;
+}
+
+/// A save rebuilds only what it changed: values and brightness keep the running effect, one
+/// group's new effect builds one effect, a changed membership takes the whole scene again.
+#[tokio::test]
+async fn put_scene_rebuilds_only_what_changed() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    let path = route(routes::SCENE, &[("id", "main")]);
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "solid".into(), props: color(GREEN) };
+    scene.groups[1].brightness = 60;
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.app.scene.builds(), built, "new values and a new brightness rebuild nothing");
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props: Props::new() };
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 2 }).unwrap();
+    let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.app.scene.builds(), built + 1, "one group's new effect builds one effect");
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].members.push("fake:b#z0".into());
+    scene.groups.remove(1);
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 3 }).unwrap();
+    let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.app.scene.builds(), built + 2, "a changed membership takes the one group that is left, built again");
+}
+
+/// A light patch that renames rebuilds nothing; one that changes what the engine plays does.
+#[tokio::test]
+async fn a_name_only_light_patch_builds_nothing() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    let path = route(routes::LIGHT, &[("id", "fake:a%23z0")]);
+    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::json!({ "name": "Desk" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.app.scene.builds(), built, "a rename builds nothing");
+    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::json!({ "reversed": true }))).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.app.scene.builds(), built + 2, "a direction change takes the whole scene again");
+}
+
+/// S2: while the scenes are held in memory a change would be lost, so activate says so.
+#[tokio::test]
+async fn activate_during_the_migration_wait_is_a_503() {
+    let (app, router, home, layouts) = held_app().await;
+    canvas_daemon::scenes::apply_active(&app, false).await;
+    assert!(app.scene.is_on(), "start-up put the engine in scene mode");
+    let held = send_on(&router, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", "solid")]), Some(serde_json::json!({}))).await;
+    assert_eq!(held.0, StatusCode::SERVICE_UNAVAILABLE, "{}", held.1);
+    assert_eq!(held.1["error"], "service_unavailable");
+    assert!(held.1["message"].as_str().is_some_and(|m| m.contains("not written yet")), "{}", held.1);
+    assert!(app.store.read().await.effects.saved.is_empty(), "nothing was saved");
+    assert!(!home.path.join("effects.json").exists());
+    assert_eq!(std::fs::read(home.path.join("layouts.json")).unwrap(), serde_json::to_vec(&layouts).unwrap(), "layouts.json is as it was");
+}
+
+/// S3: a whole-scene write passes the same caps and schema fit as a props patch.
+#[tokio::test]
+async fn put_scene_caps_and_fits_the_props_like_a_patch() {
+    let rig = rig().await;
+    let path = route(routes::SCENE, &[("id", "main")]);
+
+    let mut huge = Props::new();
+    for i in 0..10_000 {
+        huge.insert(format!("key{i}"), PropValue::Bool(true));
+    }
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props: huge };
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "10 000 keys: {answer}");
+    assert_eq!(stored(&rig, "main").await.rev, 1, "refused: nothing changed");
+
+    // A value outside the range is clamped, a key the effect does not have is dropped.
+    let mut props = Props::new();
+    props.insert("scroll_speed".into(), PropValue::Number(99_999.0));
+    props.insert("nonsense".into(), PropValue::Bool(true));
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props };
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let answered = scene_of(answer);
+    let Plays::Effect { props, .. } = &answered.groups[0].plays else { panic!("plays an effect") };
+    assert_eq!(props.get("scroll_speed"), Some(&PropValue::Number(100.0)), "clamped to the schema's maximum");
+    assert!(!props.contains_key("nonsense"), "a key the effect lacks is dropped: {props:?}");
+    assert_eq!(stored(&rig, "main").await, answered, "stored as answered");
+}
+
+/// S4: in scene mode activate plays on groups and leaves the effect's starting values alone; only
+/// `PATCH /effects/{id}/defaults` writes them.
+#[tokio::test]
+async fn activate_in_scene_mode_never_writes_the_starting_values() {
+    let rig = rig().await;
+    let body = serde_json::json!({ "props": serde_json::to_value(color((0, 150, 150))).unwrap(), "groups": ["LEFT"] });
+    let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", "solid")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb((0, 150, 150)), "the group plays the values it was given").await;
+    assert!(rig.app.store.read().await.effects.saved.get("solid").is_none(), "no starting values were written");
+    assert!(!rig.home.path.join("effects.json").exists(), "effects.json was never written");
+    // The route that does write them still does.
+    let (status, _) = send(&rig, "PATCH", &route(routes::EFFECT_DEFAULTS, &[("id", "solid")]), Some(serde_json::to_value(color(GREEN)).unwrap())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(rig.app.store.read().await.effects.saved.get("solid").is_some());
+}
+
+/// An activate with no values starts from the effect's saved starting values.
+#[tokio::test]
+async fn activate_with_no_props_starts_from_the_saved_values() {
+    let rig = rig().await;
+    let (status, _) = send(&rig, "PATCH", &route(routes::EFFECT_DEFAULTS, &[("id", "solid")]), Some(serde_json::to_value(color((0, 90, 200))).unwrap())).await;
+    assert_eq!(status, StatusCode::OK);
+    let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", "solid")]), Some(serde_json::json!({}))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb((0, 90, 200)), "A starts from the saved values").await;
+    shows(&rig.b, rgb((0, 90, 200)), "B starts from the saved values").await;
+    assert!(stored(&rig, "main").await.groups.iter().all(|g| matches!(&g.plays, Plays::Effect { props, .. } if *props == color((0, 90, 200)))));
 }
