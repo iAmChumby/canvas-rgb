@@ -1,8 +1,15 @@
 //! Native adapter for the ROYUAN MonsGeek keyboard (USB 3151:4015).
 //!
-//! The board is one LED: a single colour for the whole keyboard. It is driven over its
-//! vendor HID interface (interface 2, usage page 0xFFFF, usage 0x0002) with two 65-byte
-//! feature reports. The key-press interfaces (0 and 1) are never opened.
+//! The board is driven over its vendor HID interface (interface 2, usage page 0xFFFF, usage
+//! 0x0002) with 65-byte feature reports. The key-press interfaces (0 and 1) are never opened.
+//!
+//! Two paths light it (#312). While a frame moves, the keyboard shows one colour for the whole
+//! board: the frame's average, streamed as the single `0x0E` report. When the frame holds still
+//! for [`STILL_AFTER`], the adapter uploads it once as a stored picture (`SET_USERPIC`, seven
+//! pages 100 ms apart, then light mode 13) and stops sending the whole-board colour; the keys
+//! then show their own colours. A moving frame sends the direct-mode report and the whole-board
+//! colour again, at once. A picture is a flash write, so uploads are at least
+//! [`UPLOAD_MIN_GAP`] apart.
 
 use async_trait::async_trait;
 use canvas_proto::color::Rgb8;
@@ -18,6 +25,23 @@ const USAGE: u16 = 0x0002;
 const REPORT_LEN: usize = 65;
 /// Re-send the same colour at least this often.
 const KEEPALIVE: Duration = Duration::from_secs(1);
+
+// ---------------------------------------------------------------- stills (#312)
+//
+// A stored picture is a flash write. The cadences that survived on a yc500 board are pages
+// 100 ms apart and one upload per 10 s (docs/adapters.md, "Frame rate"), so the picture is only
+// sent when the effect holds still; a frame that keeps moving stays on the whole-board colour.
+
+/// How long the per-key frame must stay put before it is uploaded as a stored picture.
+pub const STILL_AFTER: Duration = Duration::from_secs(2);
+/// The shortest gap between two picture uploads; a still that changes sooner waits.
+pub const UPLOAD_MIN_GAP: Duration = Duration::from_secs(10);
+/// The gap between two pages of one upload.
+const PAGE_GAP: Duration = Duration::from_millis(100);
+/// The settle after the last page before light mode 13, as in the #311 device check.
+const PICTURE_SETTLE: Duration = Duration::from_secs(2);
+/// Two frames within this many steps in every channel are the same still.
+const STILL_TOLERANCE: u8 = 1;
 
 /// The report that switches the keyboard to direct (host-driven) lighting.
 pub fn direct_mode_report() -> [u8; REPORT_LEN] {
@@ -39,15 +63,12 @@ pub fn color_report(c: Rgb8) -> [u8; REPORT_LEN] {
 
 // ---------------------------------------------------------------- per-key reports (#311)
 //
-// Everything below comes from other people's notes, none of it from this keyboard: see
-// `docs/adapters.md`, "ROYUAN MonsGeek (3151:4015): per-key colours", for each byte, its source
-// and its status. These builders are pure and are used only by the tests and by #312; the
-// driver (`write_frame`) does not send them yet.
+// The byte layout below came from other people's notes; the key map and the upload were then
+// checked on this keyboard (#311, `docs/adapters.md`, "Checked on the device (2026-11-13)").
 //
-// The one per-key path the sources show for the yc500 firmware family is a *stored* picture: seven
-// `SET_USERPIC` (0x0C) reports upload 128 slots of colour into the keyboard's flash, and light
-// mode 13 shows it. It is not a live stream. The sources disagree on whether it works on stock
-// firmware, so nothing here is checked on the device.
+// The one per-key path stock firmware has is a *stored* picture: seven `SET_USERPIC` (0x0C)
+// reports upload 128 slots of colour into the keyboard's flash, and light mode 13 shows it. It
+// is not a live stream, so [`RoyuanAdapter::write_frame`] sends it only for a still (#312).
 
 /// Colour slots in one picture: 128 on the yc500 family, three bytes each.
 pub const PER_KEY_SLOTS: usize = 128;
@@ -79,6 +100,49 @@ pub fn key_slot(row: usize, col: usize) -> Option<usize> {
 /// The row and column of a slot, the inverse of [`key_slot`].
 pub fn slot_position(slot: usize) -> (usize, usize) {
     (slot % KEY_ROWS, slot / KEY_ROWS)
+}
+
+/// The zone's key matrix: `map[row * KEY_COLS + col]` is the slot of the key there, or `None`
+/// for the positions past the last slot (the four bottom rows of the last column).
+pub fn key_map() -> Vec<Option<u32>> {
+    (0..KEY_ROWS)
+        .flat_map(|row| (0..KEY_COLS).map(move |col| key_slot(row, col).map(|slot| slot as u32)))
+        .collect()
+}
+
+/// The whole-board colour for a frame: the arithmetic mean of each channel over the colours
+/// the matrix shows, rounded to the nearest step.
+///
+/// The keyboard has one whole-board LED, so it shows one colour whatever the frame holds. The
+/// mean runs over the first [`PER_KEY_SLOTS`] colours, the ones the matrix has a key for: a
+/// longer frame drops its extra colours as the picture does, and a shorter frame averages the
+/// colours it has (so a one-colour frame is that colour, exactly as before). An empty frame is
+/// black.
+pub fn frame_color(colors: &[Rgb8]) -> Rgb8 {
+    let shown = &colors[..colors.len().min(PER_KEY_SLOTS)];
+    if shown.is_empty() {
+        return Rgb8::BLACK;
+    }
+    let n = shown.len() as u32;
+    let (mut r, mut g, mut b) = (0u32, 0u32, 0u32);
+    for c in shown {
+        r += u32::from(c.r);
+        g += u32::from(c.g);
+        b += u32::from(c.b);
+    }
+    let mean = |sum: u32| ((sum + n / 2) / n) as u8;
+    Rgb8::new(mean(r), mean(g), mean(b))
+}
+
+/// Whether `b` is a different frame from `a`: another length, or any channel more than
+/// [`STILL_TOLERANCE`] away. A drift of one step in a channel is the same still.
+fn frames_differ(a: &[Rgb8], b: &[Rgb8]) -> bool {
+    a.len() != b.len()
+        || a.iter().zip(b).any(|(x, y)| {
+            x.r.abs_diff(y.r) > STILL_TOLERANCE
+                || x.g.abs_diff(y.g) > STILL_TOLERANCE
+                || x.b.abs_diff(y.b) > STILL_TOLERANCE
+        })
 }
 
 /// The sum-complement checksum the family uses: `0xFF - (sum & 0xFF)`.
@@ -201,14 +265,43 @@ impl Opener for HidOpener {
 pub struct RoyuanAdapter {
     opener: Box<dyn Opener>,
     dev: Option<Box<dyn Transport>>,
-    /// Colour and time of the last successful send.
+    /// Colour and time of the last successful whole-board send.
     last_sent: Option<(Rgb8, Instant)>,
     /// Last colour handed to `write_frame` that went out (for `read_back`).
     last_color: Rgb8,
     /// The resume count when the keyboard last got its direct-mode report.
     seen_resume: u64,
-    /// Set after a resume: the next write sends the direct-mode report again (#5).
+    /// Set after a resume (or a refused picture): the next write sends the direct-mode report.
     direct_pending: bool,
+    /// The still picture: when the per-key frame last moved, and the upload in flight (#312).
+    picture: Picture,
+}
+
+/// The stored-picture state (#312).
+#[derive(Default)]
+struct Picture {
+    /// The frame the still window is measured against.
+    baseline: Option<Vec<Rgb8>>,
+    /// When `baseline` arrived.
+    since: Option<Instant>,
+    /// The latest frame within tolerance of `baseline`: the picture a still uploads.
+    latest: Option<Vec<Rgb8>>,
+    /// The upload in flight, if any.
+    upload: Option<Upload>,
+    /// When the last upload's first page went out (the [`UPLOAD_MIN_GAP`] is measured from it).
+    last_upload: Option<Instant>,
+    /// True while light mode 13 shows a stored picture: no whole-board colour goes out then.
+    showing: bool,
+    /// A refused upload logs one line, not one a frame.
+    warned: bool,
+}
+
+/// One upload: its seven pages, then the mode report that shows the picture.
+enum Upload {
+    /// The pages already sent, the next page, and the earliest time it may go.
+    Pages { reports: Box<[[u8; REPORT_LEN]; PER_KEY_PAGES]>, next: usize, at: Instant },
+    /// The pages are in; light mode 13 goes out at `at` (the device check's settle).
+    Mode { at: Instant },
 }
 
 impl Default for RoyuanAdapter {
@@ -227,7 +320,15 @@ impl RoyuanAdapter {
     /// The product uses the HID opener; the tests use a fake one, so they can count the
     /// reports the keyboard sends.
     pub fn with_opener(opener: Box<dyn Opener>) -> Self {
-        Self { opener, dev: None, last_sent: None, last_color: Rgb8::BLACK, seen_resume: crate::resume_epoch(), direct_pending: false }
+        Self {
+            opener,
+            dev: None,
+            last_sent: None,
+            last_color: Rgb8::BLACK,
+            seen_resume: crate::resume_epoch(),
+            direct_pending: false,
+            picture: Picture::default(),
+        }
     }
 
     fn check_id(&self, id: &DeviceId) -> Result<(), AdapterError> {
@@ -249,26 +350,59 @@ impl RoyuanAdapter {
         self.last_sent = None;
         self.seen_resume = crate::resume_epoch();
         self.direct_pending = false;
+        self.picture = Picture::default();
         Ok(())
     }
 
-    fn write_at(&mut self, color: Rgb8, now: Instant) -> Result<(), AdapterError> {
-        let Some(dev) = self.dev.as_mut() else {
-            return Err(AdapterError::NotConnected);
-        };
+    /// Takes the resume into account: a wake may have dropped the keyboard out of direct mode
+    /// (and out of light mode 13), so the next write sets the mode again.
+    fn sync_resume(&mut self) {
         if crate::resume_epoch() != self.seen_resume {
             self.seen_resume = crate::resume_epoch();
             self.direct_pending = true;
+            self.end_picture();
         }
-        if self.direct_pending {
-            if let Err(e) = dev.send_feature(&direct_mode_report()) {
-                self.dev = None;
-                self.last_sent = None;
-                return Err(AdapterError::Protocol(e));
-            }
-            self.direct_pending = false;
+    }
+
+    /// Drops a picture in flight or on show: the whole-board colour owns the board again.
+    fn end_picture(&mut self) {
+        self.picture.upload = None;
+        self.picture.showing = false;
+    }
+
+    /// Sends the direct-mode report and forgets the last colour, so the colour follows.
+    fn resend_direct(&mut self) -> Result<(), AdapterError> {
+        let Some(dev) = self.dev.as_mut() else {
+            return Err(AdapterError::NotConnected);
+        };
+        if let Err(e) = dev.send_feature(&direct_mode_report()) {
+            self.dev = None;
             self.last_sent = None;
+            return Err(AdapterError::Protocol(e));
         }
+        self.direct_pending = false;
+        self.last_sent = None;
+        Ok(())
+    }
+
+    /// The whole-board path: one colour, skipped while it is unchanged within [`KEEPALIVE`].
+    fn write_at(&mut self, color: Rgb8, now: Instant) -> Result<(), AdapterError> {
+        if self.dev.is_none() {
+            return Err(AdapterError::NotConnected);
+        }
+        // A diagnostic write owns the board: a picture on show, or an upload in flight, gives way.
+        self.end_picture();
+        self.sync_resume();
+        if self.direct_pending {
+            self.resend_direct()?;
+        }
+        self.send_color(color, now)
+    }
+
+    fn send_color(&mut self, color: Rgb8, now: Instant) -> Result<(), AdapterError> {
+        let Some(dev) = self.dev.as_mut() else {
+            return Err(AdapterError::NotConnected);
+        };
         if let Some((last, at)) = self.last_sent {
             if last == color && now.saturating_duration_since(at) < KEEPALIVE {
                 return Ok(());
@@ -283,8 +417,146 @@ impl RoyuanAdapter {
             Err(e) => {
                 self.dev = None;
                 self.last_sent = None;
+                self.picture = Picture::default();
                 Err(AdapterError::Protocol(e))
             }
+        }
+    }
+
+    /// One frame: the whole-board colour, or a still picture over the keys (#312).
+    ///
+    /// The clock is the caller's, so the tests drive seconds without sleeping. The upload is a
+    /// small state machine advanced by the frames the engine already streams: one page per
+    /// [`PAGE_GAP`], then the mode report [`PICTURE_SETTLE`] after the last page. Nothing here
+    /// sleeps, so the frame path never waits for the seconds an upload takes.
+    fn write_frame_at(&mut self, colors: &[Rgb8], now: Instant) -> Result<(), AdapterError> {
+        if self.dev.is_none() {
+            return Err(AdapterError::NotConnected);
+        }
+        self.sync_resume();
+        if self.direct_pending {
+            self.resend_direct()?;
+        }
+
+        // Where this frame stands against the one the still window began with.
+        let moved = match self.picture.baseline.as_deref() {
+            Some(baseline) => frames_differ(baseline, colors),
+            None => true,
+        };
+        if moved {
+            // A moving frame: no picture can be shown, and an upload in flight is abandoned
+            // (its remaining pages would put a stale frame on the board).
+            let was_showing = self.picture.showing;
+            self.end_picture();
+            self.picture.baseline = Some(colors.to_vec());
+            self.picture.since = Some(now);
+            self.picture.latest = Some(colors.to_vec());
+            if was_showing {
+                // Back to the whole-board colour now, not at the next keepalive.
+                self.direct_pending = true;
+            }
+        } else {
+            self.picture.latest = Some(colors.to_vec());
+            self.advance_upload(now);
+        }
+
+        // A still long enough starts the upload, unless the last one is too recent: a still that
+        // changes again inside the gap waits, and the latest one goes out when the gap ends.
+        if self.picture.upload.is_none() && !self.picture.showing {
+            let still_for = self
+                .picture
+                .since
+                .map_or(Duration::ZERO, |since| now.saturating_duration_since(since));
+            let gap_ok = self
+                .picture
+                .last_upload
+                .is_none_or(|at| now.saturating_duration_since(at) >= UPLOAD_MIN_GAP);
+            if still_for >= STILL_AFTER && gap_ok {
+                if let Some(frame) = self.picture.latest.clone() {
+                    self.start_upload(&frame, now);
+                }
+            }
+        }
+
+        if self.picture.showing || self.picture.upload.is_some() {
+            // The picture owns the board; no whole-board colour goes out while it shows.
+            return Ok(());
+        }
+
+        if self.direct_pending {
+            self.resend_direct()?;
+        }
+        self.send_color(frame_color(colors), now)
+    }
+
+    /// Sends the first page of `frame` and arms the rest of the upload.
+    fn start_upload(&mut self, frame: &[Rgb8], now: Instant) {
+        let reports = Box::new(per_key_reports(frame));
+        if self.send_picture_report(&reports[0]).is_err() {
+            self.upload_failed();
+            return;
+        }
+        self.picture.last_upload = Some(now);
+        self.picture.upload = Some(Upload::Pages { reports, next: 1, at: now + PAGE_GAP });
+    }
+
+    /// Sends what the upload owes at `now`: at most one report per call, at the adapter's pace.
+    fn advance_upload(&mut self, now: Instant) {
+        loop {
+            match self.picture.upload.take() {
+                None => return,
+                Some(Upload::Pages { reports, next, at }) => {
+                    if now < at {
+                        self.picture.upload = Some(Upload::Pages { reports, next, at });
+                        return;
+                    }
+                    if self.send_picture_report(&reports[next]).is_err() {
+                        self.upload_failed();
+                        return;
+                    }
+                    let next = next + 1;
+                    self.picture.upload = if next == PER_KEY_PAGES {
+                        Some(Upload::Mode { at: now + PICTURE_SETTLE })
+                    } else {
+                        Some(Upload::Pages { reports, next, at: now + PAGE_GAP })
+                    };
+                }
+                Some(Upload::Mode { at }) => {
+                    if now < at {
+                        self.picture.upload = Some(Upload::Mode { at });
+                        return;
+                    }
+                    if self.send_picture_report(&user_picture_mode_report()).is_err() {
+                        self.upload_failed();
+                        return;
+                    }
+                    self.picture.showing = true;
+                    self.picture.warned = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// A page or the mode report the keyboard refused: the whole-board colour takes over again,
+    /// and the refusal is logged once.
+    fn upload_failed(&mut self) {
+        self.end_picture();
+        // The board may or may not have taken the last report: send direct mode, then the colour.
+        self.direct_pending = true;
+        self.last_sent = None;
+        if !self.picture.warned {
+            self.picture.warned = true;
+            tracing::warn!(
+                "the ROYUAN keyboard refused a per-key picture; the whole-board colour takes over"
+            );
+        }
+    }
+
+    fn send_picture_report(&mut self, report: &[u8]) -> Result<(), String> {
+        match self.dev.as_mut() {
+            Some(dev) => dev.send_feature(report),
+            None => Err("not connected".into()),
         }
     }
 
@@ -301,10 +573,14 @@ impl RoyuanAdapter {
             zones: vec![ZoneInfo {
                 index: 0,
                 name: "Keyboard".into(),
-                kind: ZoneKind::Single,
-                led_count: 1,
-                min_leds: 1,
-                max_leds: 1,
+                kind: ZoneKind::Matrix {
+                    width: KEY_COLS as u32,
+                    height: KEY_ROWS as u32,
+                    map: key_map(),
+                },
+                led_count: PER_KEY_SLOTS as u32,
+                min_leds: PER_KEY_SLOTS as u32,
+                max_leds: PER_KEY_SLOTS as u32,
                 resizable: false,
             }],
             connected: true,
@@ -337,6 +613,7 @@ impl DeviceAdapter for RoyuanAdapter {
     async fn disconnect(&mut self) -> Result<(), AdapterError> {
         self.dev = None;
         self.last_sent = None;
+        self.picture = Picture::default();
         Ok(())
     }
 
@@ -354,13 +631,12 @@ impl DeviceAdapter for RoyuanAdapter {
 
     async fn write_frame(&mut self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
         self.check_id(device)?;
-        let color = colors.first().copied().unwrap_or(Rgb8::BLACK);
-        self.write_at(color, Instant::now())
+        self.write_frame_at(colors, Instant::now())
     }
 
     async fn set_zone_size(&mut self, device: &DeviceId, _zone: u32, _leds: u32) -> Result<(), AdapterError> {
         self.check_id(device)?;
-        Err(AdapterError::Unsupported("the ROYUAN keyboard has one fixed LED"))
+        Err(AdapterError::Unsupported("the ROYUAN keyboard has a fixed key matrix"))
     }
 
     async fn identify(&mut self, device: &DeviceId, zone: u32, _led: u32) -> Result<(), AdapterError> {
@@ -511,6 +787,43 @@ mod tests {
         s.sent.iter().filter(|r| r.as_slice() == direct_mode_report()).count()
     }
 
+    fn userpic_count(s: &Shared) -> usize {
+        s.sent.iter().filter(|r| r[1] == SET_USERPIC).count()
+    }
+
+    fn mode_count(s: &Shared) -> usize {
+        s.sent
+            .iter()
+            .filter(|r| r[1] == SET_LEDPARAM && r[2] == MODE_USER_PICTURE)
+            .count()
+    }
+
+    fn color_count(s: &Shared) -> usize {
+        s.sent.iter().filter(|r| r[1] == 0x0E).count()
+    }
+
+    /// The clock the still tests drive: `t0` plus `ms`.
+    fn at(t0: Instant, ms: u64) -> Instant {
+        t0 + Duration::from_millis(ms)
+    }
+
+    /// Writes `frame` every 100 ms in `from..to` (the upper bound is exclusive), as the engine
+    /// streams it. No real time passes: the clock is the caller's.
+    fn hold(a: &mut RoyuanAdapter, frame: &[Rgb8], from: u64, to: u64, t0: Instant) {
+        for ms in (from..to).step_by(100) {
+            a.write_frame_at(frame, at(t0, ms)).unwrap();
+        }
+    }
+
+    /// `distinct_frame()` moved in every channel by `by`, so it differs from the baseline by
+    /// more than one step: a new change, not a still within tolerance.
+    fn shifted_frame(by: u8) -> Vec<Rgb8> {
+        distinct_frame()
+            .into_iter()
+            .map(|c| Rgb8::new(c.r.wrapping_add(by), c.g.wrapping_sub(by), c.b.wrapping_add(by)))
+            .collect()
+    }
+
     #[test]
     fn direct_mode_bytes() {
         let r = direct_mode_report();
@@ -542,7 +855,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_describes_one_led_keyboard() {
+    async fn discover_describes_a_128_key_keyboard() {
         let _serial = serial();
         let (mut a, _) = rig(true);
         let d = a.discover().await.unwrap();
@@ -550,7 +863,7 @@ mod tests {
         assert_eq!(d[0].id, DeviceId("royuan:3151:4015".into()));
         assert_eq!(d[0].name, "ROYUAN MonsGeek Keyboard");
         assert_eq!(d[0].kind, DeviceKind::Keyboard);
-        assert_eq!(d[0].led_count(), 1);
+        assert_eq!(d[0].led_count(), PER_KEY_SLOTS as u32);
         assert!(d[0].connected);
         assert_eq!(a.name(), "royuan");
     }
@@ -811,5 +1124,225 @@ mod tests {
         assert!(matches!(a.set_zone_size(&id, 0, 5).await, Err(AdapterError::Unsupported(_))));
         let other = DeviceId("x".into());
         assert!(matches!(a.write_frame(&other, &[]).await, Err(AdapterError::UnknownDevice(_))));
+    }
+
+    // ---- #312: stills on change
+
+    #[test]
+    fn an_animated_frame_never_uploads() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        // Every frame moves by more than one step in every channel for six seconds.
+        for step in 0..60u32 {
+            let frame: Vec<Rgb8> = (0..PER_KEY_SLOTS)
+                .map(|slot| {
+                    let n = slot as u32 + step * 17;
+                    Rgb8::new((n & 0xFF) as u8, (n.wrapping_mul(3) & 0xFF) as u8, (n.wrapping_mul(7) & 0xFF) as u8)
+                })
+                .collect();
+            a.write_frame_at(&frame, at(t0, 100 * u64::from(step))).expect("a frame");
+        }
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 0, "an animated effect never uploads a picture");
+        assert_eq!(userpic_count(&g), 0, "no page of a picture went out");
+        assert_eq!(mode_count(&g), 0, "the board never entered light mode 13");
+        assert!(color_count(&g) > 0, "the whole-board colour kept streaming");
+    }
+
+    #[test]
+    fn a_frame_still_for_two_seconds_uploads_once() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        // Two seconds of one unchanged frame: nothing is uploaded yet.
+        hold(&mut a, &frame, 0, 2000, t0);
+        assert_eq!(userpic_count(&s.lock().unwrap()), 0, "a still alone waits for two seconds");
+        // The still crosses 2 s here: the first page goes out.
+        a.write_frame_at(&frame, at(t0, 2000)).expect("the trigger frame");
+        assert_eq!(userpic_count(&s.lock().unwrap()), 1, "page 0 goes out at two seconds");
+        // Pages 1 to 6, 100 ms apart, then light mode 13 two seconds after page 6.
+        hold(&mut a, &frame, 2100, 4700, t0);
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 1, "one whole picture arrived");
+        assert_eq!(g.picture.keys(), frame, "every key got its slot's colour");
+        assert_eq!(g.picture.mode, Some(13), "light mode 13 shows it");
+        assert_eq!(userpic_count(&g), PER_KEY_PAGES, "seven pages once");
+        assert_eq!(mode_count(&g), 1, "one mode report");
+    }
+
+    #[test]
+    fn two_changes_inside_ten_seconds_upload_once_the_last() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let first = distinct_frame();
+        hold(&mut a, &first, 0, 4700, t0);
+        assert_eq!(s.lock().unwrap().picture.complete, 1, "the first still uploaded");
+        // Two changes inside the 10 s after that upload (it went out at 2 s).
+        let second = shifted_frame(40);
+        let third = shifted_frame(80);
+        hold(&mut a, &second, 5000, 7000, t0);
+        hold(&mut a, &third, 7000, 12000, t0);
+        assert_eq!(
+            userpic_count(&s.lock().unwrap()),
+            PER_KEY_PAGES,
+            "the deferred still does not upload early"
+        );
+        // The gap ends at 12 s; the latest still goes out then.
+        hold(&mut a, &third, 12000, 17000, t0);
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 2, "one upload before the changes and one after the gap");
+        assert_eq!(g.picture.keys(), third, "the latest still is the one on the board");
+        assert_eq!(userpic_count(&g), 2 * PER_KEY_PAGES, "two uploads, seven pages each");
+    }
+
+    #[test]
+    fn moving_again_returns_to_the_whole_board_colour() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        hold(&mut a, &frame, 0, 4700, t0);
+        assert_eq!(s.lock().unwrap().picture.mode, Some(13), "the still shows");
+        let colours = color_count(&s.lock().unwrap());
+        // Still frames leave the board alone: no whole-board colour while the picture shows.
+        hold(&mut a, &frame, 4700, 6000, t0);
+        assert_eq!(color_count(&s.lock().unwrap()), colours, "the colour is silent while the still shows");
+        // The frame moves: direct mode and the whole-board colour go out in that write.
+        let moving = shifted_frame(60);
+        let before = s.lock().unwrap().sent.len();
+        a.write_frame_at(&moving, at(t0, 6000)).expect("the moving frame");
+        let g = s.lock().unwrap();
+        let sent = &g.sent[before..];
+        assert_eq!(sent.len(), 2, "direct mode, then the colour, at once");
+        assert_eq!(sent[0].as_slice(), direct_mode_report());
+        assert_eq!(sent[1].as_slice(), color_report(frame_color(&moving)));
+        assert_eq!(g.picture.mode, Some(21), "the board is back in canvas-rgb's own mode");
+    }
+
+    #[test]
+    fn a_distinct_colour_frame_reaches_the_right_keys_by_the_key_map() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let map = key_map();
+        let frame: Vec<Rgb8> = (0..PER_KEY_SLOTS)
+            .map(|slot| Rgb8::new((slot * 3) as u8, (255 - slot) as u8, (slot / 2) as u8))
+            .collect();
+        hold(&mut a, &frame, 0, 4700, t0);
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 1);
+        let keys = g.picture.keys();
+        // A is the second column's home-row key: row 3, column 1, slot 9 (checked on the device).
+        assert_eq!(map[3 * KEY_COLS + 1], Some(9));
+        assert_eq!(keys[9], frame[9]);
+        // B is row 4, column 6, slot 40.
+        assert_eq!(map[4 * KEY_COLS + 6], Some(40));
+        assert_eq!(keys[40], frame[40]);
+        // Every key the map names carries its slot's colour.
+        for (entry, slot) in map.iter().enumerate() {
+            if let Some(slot) = slot {
+                assert_eq!(keys[*slot as usize], frame[*slot as usize], "map entry {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn gaps_in_the_matrix_are_skipped() {
+        let _serial = serial();
+        let (a, _) = rig(true);
+        let map = key_map();
+        assert_eq!(map.len(), KEY_ROWS * KEY_COLS);
+        assert_eq!(
+            map.iter().filter(|entry| entry.is_none()).count(),
+            KEY_ROWS * KEY_COLS - PER_KEY_SLOTS,
+            "the four positions past slot 127 are gaps"
+        );
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                assert_eq!(
+                    map[row * KEY_COLS + col],
+                    key_slot(row, col).map(|slot| slot as u32),
+                    "row {row}, column {col}"
+                );
+            }
+        }
+        // The last column holds the last two slots on its top rows, and gaps below them.
+        assert_eq!(map[21], Some(126));
+        assert_eq!(map[KEY_COLS + 21], Some(127));
+        assert_eq!(map[2 * KEY_COLS + 21], None);
+        // The zone the editor sees has one LED per key, not one per position.
+        let zone = &a.device_info().zones[0];
+        assert_eq!(zone.led_count, PER_KEY_SLOTS as u32);
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 22, height: 6, map });
+    }
+
+    #[test]
+    fn a_refused_upload_falls_back_to_one_colour() {
+        let _serial = serial();
+        let logs = crate::test_logs::LogBuf::default();
+        let _guard = logs.install();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let frame = distinct_frame();
+        hold(&mut a, &frame, 0, 2100, t0);
+        assert_eq!(userpic_count(&s.lock().unwrap()), 1, "page 0 went out");
+        // The keyboard refuses page 1.
+        s.lock().unwrap().fail_next_send = true;
+        hold(&mut a, &frame, 2100, 2400, t0);
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 0, "no picture arrived");
+        assert_ne!(g.picture.mode, Some(13), "the board never entered light mode 13");
+        assert_eq!(
+            g.sent.last().unwrap(),
+            &color_report(frame_color(&frame)).to_vec(),
+            "the whole-board colour took over"
+        );
+        assert!(g.sent.iter().rev().any(|r| r.as_slice() == direct_mode_report()), "direct mode again");
+        drop(g);
+        assert!(a.is_connected(), "a refused page does not cost the device");
+        let text = logs.text();
+        assert_eq!(text.matches("per-key picture").count(), 1, "the refusal is logged once: {text}");
+    }
+
+    #[test]
+    fn device_id_and_zone_index_are_unchanged() {
+        let (a, _) = rig(true);
+        let d = a.device_info();
+        assert_eq!(d.id, DeviceId("royuan:3151:4015".into()));
+        assert_eq!(d.zones.len(), 1);
+        let zone = &d.zones[0];
+        assert_eq!(zone.index, 0, "the zone index stays 0");
+        assert_eq!(zone.name, "Keyboard");
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 22, height: 6, map: key_map() });
+        assert_eq!(zone.led_count, PER_KEY_SLOTS as u32);
+        assert_eq!(zone.min_leds, PER_KEY_SLOTS as u32);
+        assert_eq!(zone.max_leds, PER_KEY_SLOTS as u32);
+        assert!(!zone.resizable);
+    }
+
+    #[test]
+    fn a_frame_longer_or_shorter_than_the_key_count_never_panics() {
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        for (i, len) in [0usize, 1, 127, 128, 129, 1000].into_iter().enumerate() {
+            let frame: Vec<Rgb8> =
+                (0..len).map(|n| Rgb8::new((n & 0xFF) as u8, 7, 9)).collect();
+            let expected = color_report(frame_color(&frame)).to_vec();
+            a.write_frame_at(&frame, at(t0, 500 * i as u64)).expect("a frame of any length");
+            let g = s.lock().unwrap();
+            assert_eq!(g.sent.last().unwrap(), &expected, "a {len}-colour frame averages");
+        }
+        assert_eq!(s.lock().unwrap().picture.complete, 0, "no still ran long enough to upload");
     }
 }
