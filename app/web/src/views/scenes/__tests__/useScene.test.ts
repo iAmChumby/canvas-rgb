@@ -57,6 +57,24 @@ function number(value: number): Props {
   return { amount: { type: "number", value } };
 }
 
+/** The active scene with one group's effect props replaced, at `rev`. */
+function withProps(groupId: string, props: Props, rev: number): Scene {
+  const scene = gaming();
+  scene.rev = rev;
+  const group = scene.groups.find((g) => g.id === groupId);
+  if (group && group.plays.type === "effect") group.plays = { ...group.plays, props: { ...props } };
+  return scene;
+}
+
+/** The answer `GET /scenes` gives for one scene. */
+function oneScene(scene: Scene): ScenesResponse {
+  return {
+    active: scene.id,
+    scenes: [scene],
+    group_states: scene.groups.map((g) => ({ id: g.id, failed: null })),
+  };
+}
+
 /** The scene the daemon answers a live write with: the whole scene, one rev on. */
 function liveAnswer(scene: Scene, groupId: string, props?: Props, brightness?: number): Scene {
   const next = clone(scene);
@@ -729,6 +747,127 @@ describe("useScene", () => {
     const [, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
     expect(body.expected_rev).toBe(8);
     expect(body.scene.name).toBe("Renamed");
+  });
+
+  it("a write that did not land is not taken for another window's save of the same key", async () => {
+    // This window's write never reaches the daemon. Another window saves the same group's same key
+    // with another value, so the rev moves one on: one rev on is this write's own only when the
+    // value that was sent is there.
+    const groupId = gaming().groups[0]?.id ?? "";
+    const mine = withProps(groupId, { amount: { type: "number", value: 1 } }, gaming().rev);
+    const other = withProps(groupId, { amount: { type: "number", value: 7 } }, gaming().rev + 1);
+    api.scenes.list.mockResolvedValueOnce(oneScene(mine)).mockResolvedValue(oneScene(other));
+    api.scenes.patchGroupProps.mockRejectedValue(
+      new ApiFailure(0, "unreachable", "canvas-rgb did not answer."),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(42));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    // The read found the other window's 7, not this window's 42: a conflict, said out loud, and
+    // this window's value is not taken for saved.
+    expect(result.current.error).toBe("Changed in another window");
+    const plays = result.current.scene?.groups[0]?.plays;
+    expect(plays?.type === "effect" ? plays.props.amount : undefined).toEqual({ type: "number", value: 7 });
+  });
+
+  it("a write that did not land is not taken for another window's save of another key", async () => {
+    // The other window changed a different key. The sent key is still there with the value it had
+    // before this write, which is not the value that was sent: one rev on is not this write's own.
+    const groupId = gaming().groups[0]?.id ?? "";
+    const mine = withProps(
+      groupId,
+      { amount: { type: "number", value: 1 }, speed: { type: "number", value: 2 } },
+      gaming().rev,
+    );
+    const other = withProps(
+      groupId,
+      { amount: { type: "number", value: 1 }, speed: { type: "number", value: 3 } },
+      gaming().rev + 1,
+    );
+    api.scenes.list.mockResolvedValueOnce(oneScene(mine)).mockResolvedValue(oneScene(other));
+    api.scenes.patchGroupProps.mockRejectedValue(
+      new ApiFailure(0, "unreachable", "canvas-rgb did not answer."),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(42));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    expect(result.current.error).toBe("Changed in another window");
+    const plays = result.current.scene?.groups[0]?.plays;
+    expect(plays?.type === "effect" ? plays.props.amount : undefined).toEqual({ type: "number", value: 1 });
+  });
+
+  it("a write the daemon refuses is not read back", async () => {
+    api.scenes.patchGroupProps.mockRejectedValue(
+      new ApiFailure(422, "validation", "the value is not in range"),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(1));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+
+    // A 4xx is the daemon's own refusal: nothing was saved, so the scene is not read again and the
+    // value is tried three times like any refusal.
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+  });
+
+  it("a read-back that never answers is given up on, and the value goes again", async () => {
+    // The write's outcome is unknown and the read never answers: the write's slot must not be held
+    // by it for good.
+    api.scenes.list.mockResolvedValueOnce(answer()).mockImplementation(() => new Promise(() => undefined));
+    let first = true;
+    api.scenes.patchGroupProps.mockImplementation(async (_id: string, group: string, props: Props) => {
+      if (first) {
+        first = false;
+        throw new ApiFailure(0, "unreachable", "canvas-rgb did not answer.");
+      }
+      return answerLive(group, props);
+    });
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(1));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+
+    // The read gives up after its deadline (5 s), and the value goes again on its throttle.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(6000);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(2);
   });
 
   it("each kind gets its own three tries: one kind's failures do not refuse the other", async () => {

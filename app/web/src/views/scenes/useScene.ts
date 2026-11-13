@@ -35,6 +35,7 @@ import type { GroupState } from "@/proto/GroupState";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
 import type { Props } from "@/proto/props";
+import type { PropValue } from "@/proto/PropValue";
 
 /** How many whole scenes undo remembers. */
 export const HISTORY_DEPTH = 100;
@@ -48,6 +49,12 @@ export const LIVE_RETRY_MS = 20;
  * the error stays. A daemon that is down is not asked again and again.
  */
 export const LIVE_FAILURES = 3;
+/**
+ * How long the read that follows a live write whose outcome is unknown waits for its answer. A
+ * write's slot is held until the read settles, so the read gives up on its own: a daemon that
+ * stopped mid-answer must not hold the live writes of the page.
+ */
+export const LIVE_READ_TIMEOUT_MS = 5000;
 /** What the page says after a 409. */
 export const CONFLICT_MESSAGE = "Changed in another window";
 
@@ -78,17 +85,36 @@ type LostAnswer =
   /** The daemon is still on the rev the write was sent on: the write did not land. */
   | null;
 
+/** One prop value as text, so two of them compare by what they say and not by their key order. */
+function propText(value: PropValue): string {
+  return `${value.type}:${String(value.value)}`;
+}
+
 /**
- * True when `group` holds the values a live write sent. The daemon fits a props patch to the
- * effect's schema, so it may keep its own value for a key: the key being there is what says the
- * merge happened. A brightness is stored as it was sent.
+ * True when `group` holds exactly the values a live write sent. A key that is there with another
+ * value is not this write's: another window may have saved, or the daemon fitted the patch to the
+ * effect's schema. Either way the answer is ambiguous, and it is taken as a conflict.
  */
 function holdsValue(group: Group, kind: LiveKind, written: Props | number): boolean {
   if (kind === "brightness") return group.brightness === written;
   const plays = group.plays;
   if (plays.type !== "effect") return false;
   const sent = written as Props;
-  return Object.keys(sent).every((key) => plays.props[key] !== undefined);
+  return Object.keys(sent).every((key) => {
+    const got = plays.props[key];
+    const want = sent[key];
+    return got !== undefined && want !== undefined && propText(got) === propText(want);
+  });
+}
+
+/**
+ * True when a live write's failure does not say whether the daemon saved it: no answer at all (a
+ * transport failure, a deadline) or a 5xx (the daemon may have saved before it failed). A 4xx is
+ * the daemon's own refusal, so nothing was saved and there is nothing to read back.
+ */
+function outcomeUnknown(e: unknown): boolean {
+  if (!(e instanceof ApiFailure)) return true;
+  return e.status === 0 || e.status >= 500;
 }
 
 /** One change this window made that the daemon has not confirmed yet. */
@@ -650,9 +676,32 @@ export function useScene(): UseScene {
   }, []);
 
   /**
-   * Reads the scene after a live write's answer was lost, and says what became of the write. A
-   * write can reach the daemon and be saved while its answer is lost (a dropped connection, a
-   * timeout): taking the next answer for another window's save would drop the user's unsent draft.
+   * Reads one scene straight from its route, for a live write whose outcome is unknown. It is not
+   * the store's read: a newer poll cannot drop its answer, a daemon that answered 404 for the
+   * scene routes cannot skip it, and the page's own snapshot is never taken for the daemon's
+   * word. It gives up on its own after [`LIVE_READ_TIMEOUT_MS`], and answers `null` when it did
+   * not read the scene.
+   */
+  const readScene = useCallback(async (sceneId: string): Promise<Scene | null> => {
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const giveUp = new Promise<null>((resolve) => {
+      timer = setTimeout(() => resolve(null), LIVE_READ_TIMEOUT_MS);
+    });
+    try {
+      const answer = await Promise.race([api.scenes.list(), giveUp]);
+      return answer?.scenes.find((s) => s.id === sceneId) ?? null;
+    } catch {
+      return null;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }, []);
+
+  /**
+   * Reads the scene after a live write whose outcome is unknown, and says what became of the
+   * write. A write can reach the daemon and be saved while its answer is lost (a dropped
+   * connection, a deadline): taking the next answer for another window's save would drop the
+   * user's unsent draft, and taking it for this write's own would drop the draft just the same.
    */
   const afterLostAnswer = useCallback(
     async (
@@ -663,18 +712,17 @@ export function useScene(): UseScene {
       written: Props | number,
     ): Promise<LostAnswer> => {
       if (sentRev === null) return null;
-      await refreshScenes();
-      const scene = getSnap().scenes?.scenes.find((s) => s.id === sceneId) ?? null;
+      const scene = await readScene(sceneId);
       // The read did not answer, or answered from the scene the write was sent on: the write did
       // not land, and the retry is an ordinary one.
       if (!scene || scene.rev <= sentRev) return null;
-      // The rev moved more than this write would move it, or the group does not hold what was
-      // sent: another window saved in between.
+      // The rev moved more than this write would move it, or the group holds another value for
+      // what was sent: another window saved in between.
       const group = scene.groups.find((g) => g.id === groupId);
       if (scene.rev > sentRev + 1 || !group || !holdsValue(group, kind, written)) return { conflict: scene };
       return { landed: scene };
     },
-    [],
+    [readScene],
   );
 
   /** Sends the live values of one group that are waiting. */
@@ -748,10 +796,13 @@ export function useScene(): UseScene {
       } catch (e) {
         failure = e;
       }
-      // A write whose answer was lost may have landed all the same. The scene says which: it is
-      // read before the live write is let go, so no whole-scene save can move the rev while it is
-      // out, and the answer it finds is taken as this write's own or another window's save.
-      const lost = failure ? await afterLostAnswer(g.sceneId, groupId, kind, sentRev, written) : null;
+      // A write whose outcome is unknown may have landed all the same: no answer at all, or a 5xx.
+      // The scene says which, and it is read before the live write is let go (bounded by the
+      // read's own deadline), so no whole-scene save can move the rev while it is out.
+      const lost =
+        failure && outcomeUnknown(failure)
+          ? await afterLostAnswer(g.sceneId, groupId, kind, sentRev, written)
+          : null;
       g.sending = false;
       liveBusy.current -= 1;
       if (liveBusy.current === 0) {
