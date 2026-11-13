@@ -38,7 +38,8 @@ let statusFailures = 0;
 /**
  * The daemon answered 404 for the scene routes: it is older than the scenes. Asking again
  * every four seconds would only get the same answer, so the poll stops until the daemon's
- * version changes (the daemon was replaced or updated).
+ * version changes (the daemon was replaced or updated) or it answers a status read again after
+ * a failed one (it was restarted).
  */
 let scenesUnsupported = false;
 
@@ -245,10 +246,13 @@ export async function refreshStatus(n?: number): Promise<void> {
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
     patchSnap({ status, statusError: null });
+    // A read that answers after a failed one is a daemon that came back. A rebuilt dev daemon keeps
+    // its version, so the version alone would leave it dark until a Try again.
+    const cameBack = statusFailures > 0;
     lastStatusFailureAt = 0;
     statusFailures = 0;
-    // A daemon that changed is a daemon that may have the scene routes now.
-    if (status.version !== daemonVersion) {
+    // A daemon that changed, or came back, is a daemon that may have the scene routes now.
+    if (cameBack || status.version !== daemonVersion) {
       daemonVersion = status.version;
       scenesUnsupported = false;
       lightsUnsupported = false;
