@@ -733,6 +733,7 @@ function statusNow(): Status {
     preview_subscribers: 1,
     active_layout: s.activeLayout,
     active_effect: s.activeEffect,
+    active_effects: s.activeEffect ? [s.activeEffect] : [],
     openrgb: waking ? "connecting" : "connected",
     service: down ? "down" : "connected",
     service_down_ms: down ? 14000 + elapsed : null,

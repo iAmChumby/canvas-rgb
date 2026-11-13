@@ -10,4 +10,9 @@ props: { [key in string]: PropValue },
  * A built-in preset (`schema.presets`) or a user preset, by name. A preset's props sit on
  * the defaults, not on the saved values, so two presets never leak into each other.
  */
-preset: string | null, };
+preset: string | null, 
+/**
+ * Scenes: the groups of the active scene to play it on, by name. `None` plays it on every
+ * group, from the effect's starting values.
+ */
+groups?: Array<string>, };

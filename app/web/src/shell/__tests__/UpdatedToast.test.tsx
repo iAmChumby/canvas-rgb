@@ -87,6 +87,7 @@ const baseStatus: Status = {
   preview_subscribers: 0,
   active_layout: "desk",
   active_effect: null,
+  active_effects: [],
   openrgb: "connected",
   service: "connected",
   service_down_ms: null,

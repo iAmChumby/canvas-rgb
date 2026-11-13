@@ -415,6 +415,9 @@ impl App {
             preview_subscribers: self.preview_subs.subscribers() + self.stack_subs.subscribers(),
             active_layout,
             active_effect,
+            // Filled when the daemon runs scenes (Scenes, Task 6).
+            active_scene: None,
+            active_effects: Vec::new(),
             openrgb,
             service: if down == 0 { LinkState::Connected } else { LinkState::Down },
             service_down_ms: if down == 0 { None } else { Some(down) },

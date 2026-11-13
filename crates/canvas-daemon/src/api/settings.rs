@@ -130,6 +130,8 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
         fans,
         displays: store.displays.displays.clone(),
         stacks: app.stacks.all(),
+        lights: None,
+        scenes: None,
     };
     Ok(Json(bundle))
 }

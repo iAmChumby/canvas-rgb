@@ -223,6 +223,23 @@ impl Engine for FakeEngine {
         self.stats.lock().unwrap().clone()
     }
 
+    // Scenes (0.14.0): stubs until the scene engine lands (Scenes plan, Task 4).
+    fn set_scene(
+        &self,
+        _lights: Vec<canvas_proto::scene::Light>,
+        _devices: Vec<DeviceInfo>,
+        _groups: Vec<canvas_proto::EngineGroup>,
+        _fade: bool,
+    ) {
+    }
+    fn set_group_effect(&self, _group: &str, _effect: Option<Box<dyn Effect>>, _props: &Props) {}
+    fn set_group_props(&self, _group: &str, _props: &Props) {}
+    fn set_group_brightness(&self, _group: &str, _brightness: u8) {}
+    fn set_light_preview(&self, _sink: Option<std::sync::Arc<dyn canvas_proto::LightPreviewSink>>) {}
+    fn group_states(&self) -> Vec<canvas_proto::GroupState> {
+        Vec::new()
+    }
+
     fn shutdown(&self) {
         self.shutdown.store(1, Ordering::SeqCst);
     }

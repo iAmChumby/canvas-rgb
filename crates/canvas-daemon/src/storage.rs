@@ -439,6 +439,8 @@ pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
         fans,
         displays: store.displays.displays.clone(),
         stacks: crate::stacks::read_file(home).stacks,
+        lights: None,
+        scenes: None,
     }
 }
 
@@ -817,6 +819,8 @@ power = "running"
             fans: canvas_proto::config::FansFile::default(),
             displays: Vec::new(),
             stacks: Vec::new(),
+            lights: None,
+            scenes: None,
         };
         assert!(validate_bundle(&bundle(Settings::default())).is_ok());
         for bad in [
@@ -864,6 +868,8 @@ power = "running"
             fans: canvas_proto::config::FansFile::default(),
             displays: Vec::new(),
             stacks: Vec::new(),
+            lights: None,
+            scenes: None,
         };
         import_bundle(&dir, &bundle).unwrap();
         let loaded = Store::load_from(&dir);

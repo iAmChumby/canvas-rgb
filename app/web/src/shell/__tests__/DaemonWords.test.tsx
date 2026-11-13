@@ -33,6 +33,7 @@ const status: Status = {
   preview_subscribers: 0,
   active_layout: "desk",
   active_effect: null,
+  active_effects: [],
   openrgb: "connected",
   service: "down",
   service_down_ms: 14000,
