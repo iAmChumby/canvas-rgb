@@ -13,6 +13,8 @@ const { api } = vi.hoisted(() => ({
     render: vi.fn(),
     settings: vi.fn(),
     displays: vi.fn(),
+    scenes: { list: vi.fn() },
+    lights: { list: vi.fn() },
   },
 }));
 
@@ -26,16 +28,24 @@ import {
   refreshEffects,
   refreshFans,
   refreshLayouts,
+  refreshLights,
+  refreshScenes,
   refreshSettings,
   refreshStatus,
   retryEffects,
+  retryScenes,
 } from "@/lib/store";
+import { ApiFailure } from "@/lib/errors";
 
 const STATUS = { version: "0.2.0", devices_connected: 3, devices_total: 4 };
 
 describe("the store's answers", () => {
   beforeEach(() => {
-    for (const fn of Object.values(api)) fn.mockReset();
+    for (const fn of Object.values(api)) {
+      if (typeof fn === "function") fn.mockReset();
+    }
+    api.scenes.list.mockReset();
+    api.lights.list.mockReset();
     patchSnap({
       status: null,
       statusError: null,
@@ -94,6 +104,56 @@ describe("the store's answers", () => {
     await Promise.all([first, second]);
     expect(getSnap().pending).toEqual([]);
   });
+
+  it("stops asking a daemon without the scene routes until its version changes", async () => {
+    // The first status read sets this daemon's version, so the test does not depend on an earlier
+    // test having set one.
+    api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    api.lights.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/lights"));
+
+    await refreshScenes();
+    await refreshLights();
+    await refreshStatus();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+    expect(api.lights.list).toHaveBeenCalledTimes(1);
+
+    // The poll asks again: a daemon that has no scene routes says the same.
+    await refreshScenes();
+    await refreshLights();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+    expect(api.lights.list).toHaveBeenCalledTimes(1);
+
+    // A Try again asks again: the user says so.
+    await retryScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+    expect(api.lights.list).toHaveBeenCalledTimes(2);
+
+    // A daemon that changed may have the routes.
+    api.status.mockResolvedValue({ ...STATUS, version: "0.14.0" });
+    await refreshStatus();
+    await refreshScenes();
+    await refreshLights();
+    expect(api.scenes.list).toHaveBeenCalledTimes(3);
+    expect(api.lights.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("asks the scene routes again when the daemon comes back after a failed status read", async () => {
+    api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+
+    // The daemon is down for one read, then answers again at the same version: a rebuilt dev
+    // daemon keeps its version, and it may have the routes now.
+    api.status.mockRejectedValueOnce(new Error("connection refused"));
+    await refreshStatus();
+    await refreshStatus();
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+  });
 });
 
 /**
@@ -123,7 +183,9 @@ const AREAS = [
 
 describe("the store's late failures", () => {
   beforeEach(() => {
-    for (const fn of Object.values(api)) fn.mockReset();
+    for (const fn of Object.values(api)) {
+      if (typeof fn === "function") fn.mockReset();
+    }
     patchSnap({
       statusError: null,
       fansError: null,

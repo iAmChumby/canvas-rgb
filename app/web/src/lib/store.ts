@@ -36,6 +36,20 @@ let lastStatusFailureAt = 0;
 let statusFailures = 0;
 
 /**
+ * The daemon answered 404 for the scene routes: it is older than the scenes. Asking again
+ * every four seconds would only get the same answer, so the poll stops until the daemon's
+ * version changes (the daemon was replaced or updated) or it answers a status read again after
+ * a failed one (it was restarted).
+ */
+let scenesUnsupported = false;
+
+/** The daemon answered 404 for the light routes: it is older than the lights. Same rule. */
+let lightsUnsupported = false;
+
+/** The daemon's version the last time it answered. */
+let daemonVersion = "";
+
+/**
  * When the daemon was last tried and when the next try is due. The daemon-down page shows it,
  * so the page can say something new instead of repeating its own heading.
  */
@@ -232,8 +246,17 @@ export async function refreshStatus(n?: number): Promise<void> {
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
     patchSnap({ status, statusError: null });
+    // A read that answers after a failed one is a daemon that came back. A rebuilt dev daemon keeps
+    // its version, so the version alone would leave it dark until a Try again.
+    const cameBack = statusFailures > 0;
     lastStatusFailureAt = 0;
     statusFailures = 0;
+    // A daemon that changed, or came back, is a daemon that may have the scene routes now.
+    if (cameBack || status.version !== daemonVersion) {
+      daemonVersion = status.version;
+      scenesUnsupported = false;
+      lightsUnsupported = false;
+    }
   } catch (e) {
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
@@ -327,6 +350,9 @@ export async function refreshLayouts(n?: number): Promise<void> {
 }
 
 export async function refreshScenes(n?: number): Promise<void> {
+  // A daemon without the scene routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (scenesUnsupported && n === undefined) return;
   const req = n ?? beginRequest("scenes");
   try {
     const scenes = await api.scenes.list();
@@ -336,11 +362,15 @@ export async function refreshScenes(n?: number): Promise<void> {
   } catch (e) {
     if (!isNewest("scenes", req)) return;
     markAnswered("scenes", req);
+    if (e instanceof ApiFailure && e.status === 404) scenesUnsupported = true;
     patchSnap({ scenesError: messageOf(e) });
   }
 }
 
 export async function refreshLights(n?: number): Promise<void> {
+  // A daemon without the light routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (lightsUnsupported && n === undefined) return;
   const req = n ?? beginRequest("lights");
   try {
     const lights = (await api.lights.list()).lights;
@@ -350,6 +380,7 @@ export async function refreshLights(n?: number): Promise<void> {
   } catch (e) {
     if (!isNewest("lights", req)) return;
     markAnswered("lights", req);
+    if (e instanceof ApiFailure && e.status === 404) lightsUnsupported = true;
     patchSnap({ lightsError: messageOf(e) });
   }
 }
@@ -409,7 +440,7 @@ export const retryDevices = (): Promise<void> =>
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
 export const retryScenes = (): Promise<void> =>
   retryArea("scenes", async (n) => {
-    await Promise.all([refreshScenes(n), refreshLights()]);
+    await Promise.all([refreshScenes(n), refreshLights(beginRequest("lights"))]);
   });
 export const retryLayouts = (): Promise<void> => retryArea("layouts", refreshLayouts);
 export const retrySettings = (): Promise<void> => retryArea("settings", refreshSettings);

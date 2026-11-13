@@ -193,11 +193,12 @@ export const api = {
     /** Sets a scene, with a fade. */
     setActive: (id: string) =>
       request<ScenesResponse>("PUT", routes.sceneActive, { id } satisfies SceneActivePut),
-    /** New values for one group's effect, no rebuild. */
+    /** New values for one group's effect, no rebuild. Saved; answers the scene with its new rev. */
     patchGroupProps: (sceneId: string, groupId: string, props: Props) =>
-      request<unknown>("PATCH", routes.groupProps(sceneId, groupId), props),
+      request<Scene>("PATCH", routes.groupProps(sceneId, groupId), props),
+    /** One group's brightness. Saved; answers the scene with its new rev. */
     putGroupBrightness: (sceneId: string, groupId: string, brightness: number) =>
-      request<unknown>("PUT", routes.groupBrightness(sceneId, groupId), {
+      request<Scene>("PUT", routes.groupBrightness(sceneId, groupId), {
         brightness,
       } satisfies GroupBrightnessPut),
   },
