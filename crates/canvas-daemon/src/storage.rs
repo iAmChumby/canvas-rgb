@@ -1661,6 +1661,45 @@ power = "running"
         serde_json::from_slice(&std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json is written")).unwrap()
     }
 
+    /// `layouts.json` is read for the 0.14.0 migration and for nothing else: the daemon's own save
+    /// helpers, the held migration and an import all leave its bytes and its mtime alone, and
+    /// nothing renames it (#316 B3, Task 12).
+    #[test]
+    fn no_daemon_path_writes_or_renames_layouts_json() {
+        let dir = temp_home("layouts-read-only");
+        let layouts = default_layouts();
+        std::fs::write(dir.join(LAYOUTS_FILE), serde_json::to_vec(&layouts).unwrap()).unwrap();
+        let path = dir.join(LAYOUTS_FILE);
+        let before = (
+            std::fs::read(&path).unwrap(),
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+        );
+
+        // The load reads it for the migration.
+        let mut store = Store::load_from(&dir);
+        assert_eq!(store.scenes.scenes[0].name, "Default", "the migration read the layout");
+        // The writers a settings change, a save-all and the first device list go through.
+        store.save_all().unwrap();
+        assert!(store.finish_scenes(&[bundle_board()]), "the first device list writes the scenes");
+        // An export reads the store, and an import (a 0.14 bundle with scenes) writes its files.
+        let bundle = export_bundle(&dir, FansFile::default());
+        let _ = bundle;
+        import_bundle(&dir, &bundle_of(default_layouts(), None, None), &[bundle_board()]).unwrap();
+
+        let after = (
+            std::fs::read(&path).unwrap(),
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+        );
+        assert_eq!(after, before, "layouts.json is untouched: the same bytes and the same mtime");
+        let renamed = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("layouts.json."))
+            .count();
+        assert_eq!(renamed, 0, "nothing renamed layouts.json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     fn read_scenes(home: &Path) -> ScenesFile {
         serde_json::from_slice(&std::fs::read(home.join(SCENES_FILE)).expect("scenes.json is written")).unwrap()
     }
@@ -2172,5 +2211,7 @@ power = "running"
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
+
+
 
 
