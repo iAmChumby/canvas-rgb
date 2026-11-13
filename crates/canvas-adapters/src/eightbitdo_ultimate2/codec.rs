@@ -1545,8 +1545,8 @@ mod tests {
             );
         }
         // The four paddles of that profile are unmapped.
-        for slot in EXTRA_BUTTON_FIRST..MAP_SLOTS {
-            assert_eq!(button_target(profile.map[slot]), "none", "slot {slot}");
+        for (slot, mask) in profile.map.iter().enumerate().skip(EXTRA_BUTTON_FIRST) {
+            assert_eq!(button_target(*mask), "none", "slot {slot}");
         }
     }
 
