@@ -281,21 +281,23 @@ describe("useScene", () => {
     await waitFor(() => expect(result.current.scene).not.toBeNull());
     const groupId = result.current.scene?.groups[0]?.id ?? "";
 
+    // Overlaps are counted here and asserted after the run. An expect inside the mock would throw
+    // into the page's own catch, which would turn the overlap into a failed write and hide it.
     let onTheWay = 0;
-    api.scenes.patchGroupProps.mockImplementation(async () => {
+    let overlaps = 0;
+    const onWay = async (answer: () => Scene): Promise<Scene> => {
       onTheWay += 1;
-      expect(onTheWay).toBe(1);
+      if (onTheWay > 1) overlaps += 1;
       await new Promise((resolve) => setTimeout(resolve, 100));
       onTheWay -= 1;
-      return answerLive(groupId);
-    });
-    api.scenes.putGroupBrightness.mockImplementation(async () => {
-      onTheWay += 1;
-      expect(onTheWay).toBe(1);
-      await new Promise((resolve) => setTimeout(resolve, 100));
-      onTheWay -= 1;
-      return answerLive(groupId);
-    });
+      return answer();
+    };
+    api.scenes.patchGroupProps.mockImplementation((_id: string, group: string, props: Props) =>
+      onWay(() => answerLive(group, props)),
+    );
+    api.scenes.putGroupBrightness.mockImplementation((_id: string, group: string, brightness: number) =>
+      onWay(() => answerLive(group, undefined, brightness)),
+    );
 
     vi.useFakeTimers();
     act(() => {
@@ -314,6 +316,7 @@ describe("useScene", () => {
       await vi.advanceTimersByTimeAsync(600);
     });
 
+    expect(overlaps).toBe(0);
     expect(onTheWay).toBe(0);
     // Both kinds went out, and the values that came last are the ones that went.
     const lastProps = api.scenes.patchGroupProps.mock.calls.at(-1) as [string, string, Props];
