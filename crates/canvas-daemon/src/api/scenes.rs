@@ -268,6 +268,9 @@ pub async fn delete_scene(
 }
 
 /// `PUT /api/v1/scenes/active`.
+///
+/// The scene that is set must be able to run: a scene with more HTML groups than a scene may
+/// have is refused, before the lights change.
 pub async fn put_active(
     State(app): State<Arc<App>>,
     Json(request): Json<SceneActivePut>,
@@ -275,9 +278,12 @@ pub async fn put_active(
     let lock = app.scene.lock().await;
     {
         let mut store = app.store.write().await;
-        if !store.scenes.scenes.iter().any(|s| s.id == request.id) {
+        let Some(scene) = store.scenes.scenes.iter().find(|s| s.id == request.id) else {
             return Err(ApiFailure::not_found(format!("no scene with the id {}", request.id)));
-        }
+        };
+        // The scene must not run more HTML groups than a scene may: it is about to be on the
+        // lights.
+        scenes::check_html_limit(&app, scene).map_err(ApiFailure::validation)?;
         let before = std::mem::replace(&mut store.scenes.active, request.id.clone());
         if let Err(e) = store.save_scenes() {
             store.scenes.active = before;
@@ -299,6 +305,10 @@ fn group_index(scene: &Scene, group: &str) -> ApiResult<usize> {
 }
 
 /// `PATCH /api/v1/scenes/{id}/groups/{group}/props`.
+///
+/// The scene order, then the draft gate: the order every route takes. A group a takeover holds
+/// keeps the draft; the change is in the scene, and the takeover's restore puts the scene back
+/// with the change.
 pub async fn patch_group_props(
     State(app): State<Arc<App>>,
     Path((id, group)): Path<(String, String)>,
@@ -306,6 +316,7 @@ pub async fn patch_group_props(
 ) -> ApiResult<Json<Scene>> {
     crate::api::effects::check_props_caps(&patch)?;
     let lock = app.scene.lock().await;
+    let _gate = app.draft.gate().lock().await;
     let old = find_scene(&app, &id).await?;
     let at = group_index(&old, &group)?;
     let Plays::Effect { effect, props: current } = &old.groups[at].plays else {
@@ -335,6 +346,10 @@ pub async fn patch_group_props(
 }
 
 /// `PUT /api/v1/scenes/{id}/groups/{group}/brightness`.
+///
+/// The scene order, then the draft gate: the order every route takes. A group a takeover holds
+/// keeps the draft; the change is in the scene, and the takeover's restore puts the scene back
+/// with the change.
 pub async fn put_group_brightness(
     State(app): State<Arc<App>>,
     Path((id, group)): Path<(String, String)>,
@@ -344,6 +359,7 @@ pub async fn put_group_brightness(
         return Err(ApiFailure::validation(format!("brightness is 0 to {GROUP_BRIGHTNESS_MAX}")));
     }
     let lock = app.scene.lock().await;
+    let _gate = app.draft.gate().lock().await;
     let old = find_scene(&app, &id).await?;
     let at = group_index(&old, &group)?;
     let mut new = old.clone();

@@ -606,7 +606,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let target = crate::scenes::takeover_groups(app, &effect_id).await;
     let group = target.first().cloned().unwrap_or_default();
     // The scene must not run more HTML groups than it may: the draft's effect is one of them.
-    crate::scenes::check_takeover_html_limit(app, &effect_id, &target)
+    crate::scenes::check_takeover_html_limit(app, &effect_id, &target, None)
         .await
         .map_err(PutError::Validation)?;
     let builder = takeover_builder(app, &id, html);
@@ -801,7 +801,8 @@ pub async fn put_stack(
     let target = crate::scenes::takeover_groups(app, &stack.id).await;
     let group = target.first().cloned().unwrap_or_default();
     // The scene must not run more HTML groups than it may: a stack with an HTML layer is one.
-    crate::scenes::check_takeover_html_limit(app, &stack.id, &target)
+    // The draft's own layers count, not the saved stack's: the draft is what runs.
+    crate::scenes::check_takeover_html_limit(app, &stack.id, &target, Some(stack))
         .await
         .map_err(PutError::Validation)?;
 
@@ -1039,6 +1040,11 @@ pub async fn hold_for_replace(app: &Arc<App>) -> ReplaceGuard<'_> {
     // The live sequence goes, the epoch order stays, so an older tab cannot re-take the slot
     // after a layout switch or an activation.
     app.draft.epochs.clear_live();
+    // The draft is gone, so its takeover is over: the group it held takes the replacement's
+    // effect. The engine's groups stay as they are until the apply that follows rebuilds them.
+    let mut held = app.scene.held();
+    held.takeover = Vec::new();
+    app.scene.set_held(held);
     if let Some(slot) = &dropped {
         tracing::info!(draft = %slot.id, "the draft ended: a saved effect is being put on");
     }

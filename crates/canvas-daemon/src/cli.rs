@@ -142,6 +142,11 @@ pub fn split_groups(args: &[String]) -> (Vec<String>, Vec<String>) {
                 continue;
             }
         }
+        // `--group=NAME` is the same flag.
+        if let Some(name) = arg.strip_prefix(&format!("{}=", canvas_proto::cli::GROUP_FLAG)) {
+            groups.push(name.to_string());
+            continue;
+        }
         props.push(arg.clone());
     }
     (groups, props)
@@ -897,14 +902,19 @@ pub fn scenes_list(api: &dyn Api, json: bool) -> Result<Output, CliError> {
     })
 }
 
-/// `canvas-rgb scenes set <name>`: sets the scene by name, case-insensitively.
+/// `canvas-rgb scenes set <name>`: sets the scene by name, case-insensitively, or by its id.
 ///
 /// A name that matches nothing prints the list and fails: the owner sees the names the daemon
 /// knows and picks one. A name that matches several scenes is refused too, and the matches are
-/// listed: scene names are not unique, and picking one of them is the owner's call.
+/// listed: scene names are not unique, and picking one of them is the owner's call. An id
+/// names one scene, so it is accepted as well.
 pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliError> {
     let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
     let scenes = list.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    // An exact id names one scene.
+    if let Some(found) = scenes.iter().find(|scene| scene.get("id").and_then(|v| v.as_str()) == Some(name)) {
+        return set_scene(api, found, json);
+    }
     let matches: Vec<&serde_json::Value> = scenes
         .iter()
         .filter(|scene| {
@@ -939,8 +949,13 @@ pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliEr
         }
         return Err(CliError::Other(format!("no scene is named {name}\n{list_text}")));
     };
-    let id = found.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
-    let canonical = found.get("name").and_then(|v| v.as_str()).unwrap_or(name).to_string();
+    set_scene(api, found, json)
+}
+
+/// Sets the scene the answer names.
+fn set_scene(api: &dyn Api, scene: &serde_json::Value, json: bool) -> Result<Output, CliError> {
+    let id = scene.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let canonical = scene.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
     let body = serde_json::json!({ "id": id }).to_string();
     let answer = api.call("PUT", canvas_proto::api::routes::SCENE_ACTIVE, Some(&body))?;
     Ok(if json {
@@ -1784,10 +1799,10 @@ mod tests {
     fn scenes_set_refuses_an_ambiguous_name_and_lists_the_matches() {
         let api = ScenesApi {
             answer: serde_json::json!({
-                "active": "gaming",
+                "active": "one",
                 "scenes": [
-                    { "id": "gaming", "name": "Gaming" },
-                    { "id": "gaming-2", "name": "GAMING" },
+                    { "id": "one", "name": "Gaming" },
+                    { "id": "two", "name": "GAMING" },
                 ],
                 "group_states": []
             }),
@@ -1796,7 +1811,8 @@ mod tests {
         let error = super::scenes_set(&api, "gaming", false).expect_err("the name is ambiguous");
         let message = error.to_string();
         assert!(message.contains("gaming"), "{message}");
-        assert!(message.contains("gaming-2"), "the matches are listed: {message}");
+        assert!(message.contains("two"), "the matches are listed: {message}");
+        assert!(message.contains("one"), "the matches are listed: {message}");
         let asked = api.asked.lock().unwrap().clone();
         assert_eq!(asked.len(), 1, "only the list was asked for");
     }
@@ -1824,6 +1840,59 @@ mod tests {
         let (groups, props) = super::split_groups(&args(&["--color", "#f00"]));
         assert!(groups.is_empty());
         assert_eq!(props, args(&["--color", "#f00"]));
+    }
+
+    /// The `--group` flag works through clap, before and after the properties, in both forms.
+    #[test]
+    fn the_group_flag_parses_through_clap() {
+        for args in [
+            vec!["canvas-rgb", "effects", "activate", "solid", "--group", "Intake", "--color", "red"],
+            vec!["canvas-rgb", "effects", "activate", "solid", "--color", "red", "--group", "Intake"],
+            vec!["canvas-rgb", "effects", "activate", "solid", "--group=Intake", "--color", "red"],
+            vec!["canvas-rgb", "effects", "activate", "solid", "--color", "red", "--group=Intake"],
+            vec!["canvas-rgb", "effects", "activate", "--group", "Intake", "solid", "--color", "red"],
+        ] {
+            let cli = Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            match cli.command {
+                Command::Effects(EffectsCommand::Activate(activate)) => {
+                    let (from_props, prop_args) = super::split_groups(&activate.props);
+                    let mut groups = activate.groups.clone();
+                    groups.extend(from_props);
+                    assert_eq!(groups, vec!["Intake".to_string()], "{args:?}");
+                    assert_eq!(
+                        prop_args,
+                        vec!["--color".to_string(), "red".to_string()],
+                        "{args:?}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// An id names one scene, so it is accepted even when the names are ambiguous.
+    #[test]
+    fn scenes_set_accepts_an_id() {
+        let api = ScenesApi {
+            answer: serde_json::json!({
+                "active": "one",
+                "scenes": [
+                    { "id": "one", "name": "Gaming" },
+                    { "id": "two", "name": "GAMING" },
+                ],
+                "group_states": []
+            }),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let output = super::scenes_set(&api, "two", false).expect("the id names one scene");
+        match output {
+            super::Output::Text(text) => assert!(text.contains("GAMING"), "{text}"),
+            other => panic!("{other:?}"),
+        }
+        let asked = api.asked.lock().unwrap().clone();
+        let last = asked.last().expect("the set was sent");
+        let body: serde_json::Value = serde_json::from_str(last.2.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["id"], "two");
     }
 
     /// The commands parse: `scenes list`, `scenes set <name>`, and `--group` on the activate.

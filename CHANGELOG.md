@@ -26,6 +26,9 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Effects: a stack with an HTML layer is refused while another group of the scene already plays an HTML effect, so a scene never runs more of them than it may (#310)
 - Effects: the first run's ARGB headers are lights that join the first scene, instead of staying dark in no group (#310)
 - Command line: `canvas-rgb effects activate <effect> --group <name>` takes the group whether it comes before or after the effect's properties, and `canvas-rgb scenes set <name>` refuses a name that two scenes share and lists them (#310)
+- Effects: a draft on one group no longer stops the capture another group needs: the lights keep the capture of every group that is running (#310)
+- Effects: a group the editor has open is not put over by a change to that group (its brightness, its effect or a light's arrangement): the change is saved and lands when the editor closes (#310)
+- Effects: a scene with more HTML effects than a scene may have is refused when it is set, and a stack with an HTML layer is refused when a scene plays it beside another HTML effect (#310)
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
 
 ## [0.13.1] - 2026-11-11

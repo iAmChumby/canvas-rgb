@@ -212,6 +212,12 @@ pub async fn put_layout(
     if active == id {
         // The layout's effect is what runs now: a draft on the lights ends, and the guard
         // holds a beat off until this layout's effect is on.
+        //
+        // The scene is on the lights: `App::set_layout` leaves the engine alone then, and
+        // `Engine::set_effect` does not end the scene mode (`canvas-core/src/engine.rs`: the
+        // render loop keeps running the scene). So the engine still holds the scene's groups and
+        // `SceneRuntime::held` is still right; the layout's effect does not play, and the scene
+        // does, until the layout is gone (Task 12).
         let replace = crate::draft::hold_for_replace(&app).await;
         app.set_layout(&layout, &devices);
         app.stacks.publish_areas(&layout, &devices);
