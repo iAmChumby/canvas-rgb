@@ -21,12 +21,20 @@
 //! 60 Hz internally, so at 1/30 s each HTML group runs two of its own script frames per
 //! engine frame.
 //!
-//! The sampling is area average over a strip of 60 LEDs, the most expensive of the
-//! three sampling modes, so the numbers are an upper bound on the sampling cost. The
-//! LED count test below varies it, to see what the sampling costs next to the effect.
+//! The sampling is area average over a strip of 60 LEDs. Which of the three sampling
+//! modes is the most expensive is **unknown**: only area average was measured.
 //!
 //! A second test measures the mixed compositions the scene limit has to cover: 20
 //! groups with one HTML group in them, and with two.
+//!
+//! # What a scene frame does not cover
+//!
+//! The frame timed here is the group's own work: every effect's `update` and every
+//! group's LED sampling. The engine's frame does more around it (the brightness and
+//! warmth stages, the per-device packing, the last-good copy and the sends to the
+//! devices), and that part is **not** timed here. The bar therefore has to be
+//! re-checked through the real engine (`CoreEngine`) when the scene engine exists;
+//! until then every number below is a lower bound on a scene frame.
 //!
 //! # The render scale
 //!
@@ -39,11 +47,37 @@
 //! - one HTML group alone, for each of the three stock effects, at each scale;
 //! - the split between the script's own work and the runtime's floor (an effect whose
 //!   script draws nothing), at each scale;
-//! - the mixed scenes of 20 groups with k HTML groups in them, at each scale, and the
-//!   largest k that still fits in half a 30 fps frame;
 //! - the LED count of a group, at the scale the mixed table uses.
 //!
-//! The bench is single-threaded, like the engine's render thread.
+//! # The stock-effect table
+//!
+//! The limit on HTML groups per scene has to hold for every stock effect, not for
+//! `ink-drop` alone, so the table measures 20 groups with `k` of them HTML, for `k` from
+//! 0 to 4 with no early stop, for each of the three stock effects and for the worst
+//! case (two different effects in one scene), at the two scales the decision uses (0.25
+//! and 0.5).
+//!
+//! Two things make that table honest:
+//!
+//! - **The window is 900 frames, 30 s of scene time.** Palette Knife's cycle is 24 s at
+//!   its default speed (its own clock, `crates/canvas-daemon/stock-effects/palette-knife.html`:
+//!   one cycle is `3 * (HOLD + TRANS)` T-units and the clock runs `sp / 60` a frame), so
+//!   a 300-frame window (10 s) can sit inside one part of the cycle and miss the rest.
+//! - **The table is run three times and no row is averaged.** A row is a measurement
+//!   only if every run agrees. A run with a dropped frame (a script that ran past the
+//!   runtime's own budget) or a load spike is reported and run again, never averaged
+//!   in.
+//!
+//! # The engine's own clock
+//!
+//! The tables above step every effect by a fixed 1/30 s. The engine does not: it
+//! starts every frame on a tick schedule and steps the effect by the real time between
+//! two frame starts (`crates/canvas-core/src/engine.rs`, the render loop, and
+//! `crate::timer::FrameTimer`, the timer it sleeps on). That step carries the timer
+//! jitter, and the HTML runtime turns the step into whole 60 Hz script frames
+//! (`canvas-html`'s accumulator), so a step that runs a little over 1/30 s makes the
+//! runtime run a third script frame now and then. The engine-clock table measures what
+//! that costs, on the same rows.
 //!
 //! # A measurement that the machine spoiled
 //!
@@ -63,9 +97,20 @@ use canvas_proto::{PropertySchema, Props};
 
 use crate::geometry::LedSample;
 use crate::sampling;
+use crate::timer::FrameTimer;
 
 /// The frames timed after the warm-up.
 const FRAMES: usize = 300;
+
+/// The frames timed in the stock-effect table.
+///
+/// 900 frames is 30 s of scene time at 30 fps, which is what Palette Knife's 24 s
+/// cycle needs to be inside the window.
+const STOCK_FRAMES: usize = 900;
+
+/// How many times the stock-effect table is run: a row is a measurement only if every
+/// run agrees, so the table is run three times and no row is averaged.
+const STOCK_RUNS: usize = 3;
 
 /// The frames run before the timing starts, so the pages are faulted in.
 const WARMUP: usize = 30;
@@ -78,6 +123,9 @@ const DT_30: f32 = 1.0 / 30.0;
 
 /// The engine's step at 60 fps, its fastest rate.
 const DT_60: f32 = 1.0 / 60.0;
+
+/// The engine's frame rate the engine-clock table runs at.
+const ENGINE_FPS: u32 = 30;
 
 /// The group counts measured.
 const GROUP_COUNTS: [usize; 3] = [1, 8, MAX_GROUPS];
@@ -109,13 +157,16 @@ const STOCK_EFFECTS: [(&str, &str); 3] = [
     (WET_SMEAR_ID, WET_SMEAR_HTML),
 ];
 
-/// A SignalRGB-format effect whose script draws nothing: the runtime's floor.
+/// A minimal HTML file whose script draws nothing: the runtime's floor.
 ///
-/// The file is a stock-format effect with the same canvas as the stock effects, whose
+/// The file is a plain HTML document with the same canvas as the stock effects, whose
 /// animation frame only asks for the next frame. The runtime still runs the script,
 /// still runs its frame call and still copies the raster into the engine's canvas; it
 /// just paints no pixels. What the stock effects cost on top of this floor is what
 /// their scripts and their pixels cost.
+///
+/// The file declares no properties, so it is not a SignalRGB-format effect: it is a
+/// smaller file that loads the same way and runs the same runtime.
 const NOOP_HTML: &str = r#"<head>
   <title>Nothing</title>
 </head>
@@ -187,12 +238,57 @@ impl Set {
     }
 }
 
+/// The HTML effects one measured scene mixes.
+///
+/// A scene's HTML groups do not have to run the same effect, so the table measures each
+/// stock effect on its own and the worst case: the two effects with the highest p95
+/// (`wet-smear` and `palette-knife`), in turn.
+struct Mix {
+    /// The name the table prints.
+    name: &'static str,
+    /// The effect the first HTML group runs.
+    first: (&'static str, &'static str),
+    /// The effect the second HTML group runs, and so on in turn.
+    second: (&'static str, &'static str),
+}
+
+/// The mixes the stock-effect table measures.
+const MIXES: [Mix; 4] = [
+    Mix {
+        name: "ink-drop",
+        first: (INK_DROP_ID, INK_DROP_HTML),
+        second: (INK_DROP_ID, INK_DROP_HTML),
+    },
+    Mix {
+        name: "palette-knife",
+        first: (PALETTE_KNIFE_ID, PALETTE_KNIFE_HTML),
+        second: (PALETTE_KNIFE_ID, PALETTE_KNIFE_HTML),
+    },
+    Mix {
+        name: "wet-smear",
+        first: (WET_SMEAR_ID, WET_SMEAR_HTML),
+        second: (WET_SMEAR_ID, WET_SMEAR_HTML),
+    },
+    Mix {
+        name: "wet-smear + palette-knife",
+        first: (WET_SMEAR_ID, WET_SMEAR_HTML),
+        second: (PALETTE_KNIFE_ID, PALETTE_KNIFE_HTML),
+    },
+];
+
+/// The scales the stock-effect table is measured at: the two the decision uses.
+const STOCK_SCALES: [f32; 2] = [0.25, 0.5];
+
+/// The HTML group counts the stock-effect table walks: 0 to 4, with no early stop, so
+/// the table shows where each effect misses the bar and not only where it stops.
+const STOCK_K: [usize; 5] = [0, 1, 2, 3, 4];
+
 /// A group's effect: the built-in one or an HTML one.
 ///
 /// The HTML effect is kept as its own type, not behind the trait, so the benchmark can
 /// ask it whether it dropped a frame. A frame that runs past the runtime's own budget
-/// is dropped and the group stops drawing for that frame, so the measurement of such
-/// a run is the machine's load and not the effect's cost: it has to say so.
+/// is dropped and the group stops drawing for that frame, so the measurement of such a
+/// run is the machine's load and not the effect's cost: it has to say so.
 enum AnyEffect {
     /// A native Rust effect.
     Builtin(Box<dyn Effect>),
@@ -307,7 +403,8 @@ fn frame(groups: &mut [Group], dt: f32, inputs: &Inputs) {
 }
 
 /// The nearest-rank percentile of the times: the value at `ceil(p * n)`, counted from
-/// one. With 300 frames the p95 is the 285th slowest frame.
+/// one. With 300 frames the p95 is the 285th smallest frame; with 900 frames it is
+/// the 855th.
 fn percentile(sorted: &[Duration], p: f64) -> f64 {
     let rank = ((p * sorted.len() as f64).ceil() as usize).clamp(1, sorted.len());
     sorted[rank - 1].as_secs_f64() * 1000.0
@@ -315,12 +412,24 @@ fn percentile(sorted: &[Duration], p: f64) -> f64 {
 
 /// What one measurement found.
 struct Measurement {
+    /// The frames timed.
+    frames: usize,
     /// The mean milliseconds per whole frame.
     mean: f64,
     /// The p95 milliseconds per whole frame.
     p95: f64,
     /// The HTML groups that dropped a frame for running past the runtime's budget.
     dropped: usize,
+}
+
+/// How the step between two frames is decided.
+#[derive(Clone, Copy)]
+enum Clock {
+    /// A fixed step: every frame advances the effects by the same `dt`.
+    Fixed(f32),
+    /// The engine's own clock at `fps`: the frames start on a fixed tick schedule and
+    /// the step is the real time between two frame starts.
+    Engine(u32),
 }
 
 /// Measures one set of groups and returns what the measurement found.
@@ -337,20 +446,63 @@ fn measure_kinds(kinds: &[Kind], dt: f32) -> Measurement {
 /// Measures the given groups on canvases at the given render scale, with the given
 /// number of LEDs per group, and returns what the measurement found.
 fn measure_kinds_at(kinds: &[Kind], dt: f32, scale: f32, leds: usize) -> Measurement {
+    measure_kinds_at_clock(kinds, Clock::Fixed(dt), scale, leds, FRAMES)
+}
+
+/// Measures the given groups on canvases at the given render scale, with the given
+/// number of LEDs per group, over `frames` frames, on the given clock, and returns what
+/// the measurement found.
+fn measure_kinds_at_clock(
+    kinds: &[Kind],
+    clock: Clock,
+    scale: f32,
+    leds: usize,
+    frames: usize,
+) -> Measurement {
     let mut groups: Vec<Group> =
         kinds.iter().map(|kind| Group::new(*kind, scale, leds)).collect();
+    // The engine reads its inputs once a frame and passes them to every effect. The
+    // benchmark passes the default ones: the HTML runtime ignores them and `aurora`
+    // ignores them too (`canvas-effects/src/aurora.rs`), so the engine's own
+    // `build_inputs` would not change these numbers.
     let inputs = Inputs::default();
 
-    // Warm up, so the first timed frame is not the one that faults the pages in.
-    for _ in 0..WARMUP {
-        frame(&mut groups, dt, &inputs);
-    }
-
-    let mut times: Vec<Duration> = Vec::with_capacity(FRAMES);
-    for _ in 0..FRAMES {
-        let start = Instant::now();
-        frame(&mut groups, dt, &inputs);
-        times.push(start.elapsed());
+    let mut times: Vec<Duration> = Vec::with_capacity(frames);
+    match clock {
+        Clock::Fixed(dt) => {
+            // Warm up, so the first timed frame is not the one that faults the pages in.
+            for _ in 0..WARMUP {
+                frame(&mut groups, dt, &inputs);
+            }
+            for _ in 0..frames {
+                let start = Instant::now();
+                frame(&mut groups, dt, &inputs);
+                times.push(start.elapsed());
+            }
+        }
+        Clock::Engine(fps) => {
+            // The engine's own render loop: the frame starts, the step is the time
+            // since the last frame started, the work runs, and the loop sleeps until
+            // the next tick (`crates/canvas-core/src/engine.rs`, the render loop, and
+            // `crate::timer::FrameTimer`, the timer it sleeps on). The timed span is
+            // the work, as the engine times it (`frame_start.elapsed()`).
+            let mut timer = FrameTimer::new();
+            timer.acquire_resolution();
+            let mut last_frame_at = Instant::now();
+            for index in 0..(WARMUP + frames) {
+                let frame_start = Instant::now();
+                let dt = frame_start.duration_since(last_frame_at).as_secs_f32();
+                last_frame_at = frame_start;
+                let start = Instant::now();
+                frame(&mut groups, dt, &inputs);
+                let work = start.elapsed();
+                if index >= WARMUP {
+                    times.push(work);
+                }
+                timer.sleep_until_next(fps);
+            }
+            timer.release_resolution();
+        }
     }
 
     let total: Duration = times.iter().sum();
@@ -359,15 +511,19 @@ fn measure_kinds_at(kinds: &[Kind], dt: f32, scale: f32, leds: usize) -> Measure
     // A group that dropped a frame did not draw it, so the frame it was in says
     // nothing about the effect's cost.
     let dropped = groups.iter().filter(|group| group.effect.dropped_a_frame()).count();
-    Measurement { mean, p95: percentile(&times, 0.95), dropped }
+    Measurement { frames, mean, p95: percentile(&times, 0.95), dropped }
 }
 
-/// Prints the line under a measurement, and the warning under it when a group dropped
-/// a frame: such a measurement is the machine's load, not the effect's cost.
+/// Prints the line under a measurement, the number of dropped frames on every row, and
+/// the warning under it when a group dropped a frame: such a measurement is the
+/// machine's load, not the effect's cost.
 fn report(label: &str, m: &Measurement) {
     println!(
-        "{label}: {FRAMES} frames -> mean {:.3} ms/frame, p95 {:.3} ms/frame",
-        m.mean, m.p95
+        "{label}: {frames} frames -> mean {mean:.3} ms/frame, p95 {p95:.3} ms/frame, {dropped} dropped frames",
+        frames = m.frames,
+        mean = m.mean,
+        p95 = m.p95,
+        dropped = m.dropped
     );
     if m.dropped > 0 {
         println!(
@@ -385,13 +541,29 @@ fn mixed_kinds(k: usize) -> Vec<Kind> {
     kinds
 }
 
+/// The groups of a scene with `k` HTML groups running the mix's two effects in turn,
+/// the rest running the built-in effect.
+fn mix_kinds(mix: &Mix, k: usize) -> Vec<Kind> {
+    let mut kinds: Vec<Kind> = (0..k)
+        .map(|index| {
+            if index % 2 == 0 {
+                Kind::Html(mix.first.0, mix.first.1)
+            } else {
+                Kind::Html(mix.second.0, mix.second.1)
+            }
+        })
+        .collect();
+    kinds.resize(MAX_GROUPS, Kind::Builtin);
+    kinds
+}
+
 /// The scenes benchmark: nine numbers per frame rate.
 #[test]
 #[ignore = "a benchmark, not a correctness test"]
 fn bench_scene_groups() {
     for (label, dt) in [("30 fps", DT_30), ("60 fps", DT_60)] {
         println!();
-        println!("scenes benchmark at {label} (dt {:.4} s):", dt);
+        println!("scenes benchmark at {label} (dt {dt:.4} s):");
         for count in GROUP_COUNTS {
             for set in [Set::AllBuiltin, Set::AllHtml, Set::Half] {
                 let m = measure(set, count, dt);
@@ -453,8 +625,8 @@ fn bench_scene_html_by_scale() {
 ///
 /// `canvas-html` gives no seam for this: `HtmlEffect::update` runs the script and
 /// copies the raster into the engine's canvas in one call, and neither half is timed
-/// on its own. So the floor is measured with an effect whose script draws nothing:
-/// the same QuickJS runtime, the same frame call, the same copy of the raster, no
+/// on its own. So the floor is measured with a file whose script draws nothing: the
+/// same QuickJS runtime, the same frame call, the same copy of the raster, no
 /// painting. What ink-drop costs on top of that floor is what its script and its
 /// pixels cost. The floor is a lower bound for the copy: a transparent pixel is
 /// cheaper to copy than an opaque one.
@@ -480,12 +652,12 @@ fn bench_scene_html_split() {
     println!();
 }
 
-/// The mixed scenes of the largest size: 20 groups, k of them HTML (ink-drop) and the
-/// rest built-in, at each render scale.
+/// The mixed scenes of the largest size at the full render scale: 20 groups, k of them
+/// HTML (ink-drop) and the rest built-in, at 320x200.
 ///
-/// The limit on HTML groups per scene depends on the render scale, so the table is
-/// measured at each scale. The search walks k up until one k misses the bar, so the
-/// largest k that fits is measured and not guessed.
+/// The scale the decision does not use, measured so the table below has a row for it.
+/// Every k from 1 to 4 is measured: the search does not stop at the first miss, so the
+/// table says where the bar is missed and not only that it was.
 #[test]
 #[ignore = "a benchmark, not a correctness test"]
 fn bench_scene_html_mix_by_scale() {
@@ -498,7 +670,7 @@ fn bench_scene_html_mix_by_scale() {
         report(&format!("{MAX_GROUPS:>2} groups, all built-in (aurora) at scale {scale:<4}"), &builtin);
 
         let mut largest = 0usize;
-        for k in 1..=MAX_GROUPS {
+        for k in STOCK_K {
             let m = measure_kinds_at(&mixed_kinds(k), DT_30, scale, LEDS_PER_GROUP);
             report(
                 &format!(
@@ -509,13 +681,129 @@ fn bench_scene_html_mix_by_scale() {
             );
             if m.p95 <= BAR_MS && m.dropped == 0 {
                 largest = k;
-            } else {
-                break;
             }
         }
         println!("scale {scale}: the largest k with a p95 at or under {BAR_MS} ms is {largest}");
     }
     println!();
+}
+
+/// The stock-effect table: 20 groups, k of them HTML, for every stock effect and for
+/// the worst-case mix of two of them, at the two scales the decision uses.
+///
+/// The table is run three times and no row is averaged, and the walk over k does not
+/// stop at the first miss: every k from 0 to 4 is measured, so the table says where
+/// each effect misses the bar and not only where it stops.
+fn stock_k_table(scales: &[f32]) {
+    for run in 1..=STOCK_RUNS {
+        println!();
+        println!(
+            "scenes benchmark, the stock-effect table, run {run} of {STOCK_RUNS} (dt {DT_30:.4} s, {STOCK_FRAMES} frames):"
+        );
+        for scale in scales {
+            for mix in &MIXES {
+                for k in STOCK_K {
+                    let m = measure_kinds_at_clock(
+                        &mix_kinds(mix, k),
+                        Clock::Fixed(DT_30),
+                        *scale,
+                        LEDS_PER_GROUP,
+                        STOCK_FRAMES,
+                    );
+                    report(
+                        &format!(
+                            "{MAX_GROUPS:>2} groups, {k} HTML + {} built-in, {} at scale {scale:<4}",
+                            MAX_GROUPS - k,
+                            mix.name
+                        ),
+                        &m,
+                    );
+                }
+            }
+        }
+    }
+    println!();
+}
+
+/// The stock-effect table, both scales, three runs.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_stock_k_table() {
+    stock_k_table(&STOCK_SCALES);
+}
+
+/// The stock-effect table at a quarter scale, three runs.
+///
+/// The table is split by scale because one invocation of the whole table, three runs
+/// over, is longer than the build lock lets one build hold the lock.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_stock_k_table_quarter() {
+    stock_k_table(&[0.25]);
+}
+
+/// The stock-effect table at a half scale, three runs.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_stock_k_table_half() {
+    stock_k_table(&[0.5]);
+}
+
+/// The stock-effect table on the engine's own clock: the frames start on the engine's
+/// tick schedule and every effect is stepped by the real time between two frame
+/// starts.
+///
+/// The engine's step carries the timer jitter, and the HTML runtime turns the step into
+/// whole 60 Hz script frames, so a step that runs a little over 1/30 s makes the
+/// runtime run a third script frame now and then. This table is what that costs.
+fn stock_k_table_engine_clock(scales: &[f32]) {
+    println!();
+    println!(
+        "scenes benchmark, the stock-effect table on the engine's clock ({ENGINE_FPS} fps, {STOCK_FRAMES} frames):"
+    );
+    for scale in scales {
+        for mix in &MIXES {
+            for k in STOCK_K {
+                let m = measure_kinds_at_clock(
+                    &mix_kinds(mix, k),
+                    Clock::Engine(ENGINE_FPS),
+                    *scale,
+                    LEDS_PER_GROUP,
+                    STOCK_FRAMES,
+                );
+                report(
+                    &format!(
+                        "{MAX_GROUPS:>2} groups, {k} HTML + {} built-in, {} at scale {scale:<4}",
+                        MAX_GROUPS - k,
+                        mix.name
+                    ),
+                    &m,
+                );
+            }
+        }
+    }
+    println!();
+}
+
+/// The stock-effect table on the engine's own clock, both scales.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_stock_k_table_engine_clock() {
+    stock_k_table_engine_clock(&STOCK_SCALES);
+}
+
+/// The stock-effect table on the engine's own clock, a quarter scale.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_stock_k_table_engine_clock_quarter() {
+    stock_k_table_engine_clock(&[0.25]);
+}
+
+/// The stock-effect table on the engine's own clock, a half scale.
+#[test]
+#[ignore = "a benchmark, not a correctness test"]
+fn bench_scene_stock_k_table_engine_clock_half() {
+    stock_k_table_engine_clock(&[0.5]);
 }
 
 /// The LED count of a group, at the scale the mixed table uses: does the sampling
