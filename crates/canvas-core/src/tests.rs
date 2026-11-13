@@ -2702,7 +2702,10 @@ mod scene {
         let previews = lights.count() - l0;
         // The cap is 15 a second, so `seconds` of wall time cannot hold more than
         // `seconds * 15` previews, plus the one the window's edges can hold. The bound
-        // follows the wall clock, so a slow machine cannot fail it.
+        // follows the wall clock, so a slow machine cannot fail it. The other side of that:
+        // a looser cap is caught only when the engine renders faster than the looser cap
+        // (a 25/s cap is caught at 40 fps and up, not at 30).
+        assert!(previews > 0, "a second of frames sent no preview at all");
         let limit = seconds * f64::from(PREVIEW_MAX_FPS) + 2.0;
         assert!(
             previews as f64 <= limit,

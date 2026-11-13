@@ -57,9 +57,6 @@ struct SinkEntry {
     sink: Arc<dyn FrameSink>,
     /// LED count of the device; a frame has exactly this many colors.
     led_count: u32,
-    /// The black frame this sink is sent when its device is not in the scene. The buffer
-    /// is reused, so the frame is not built in a fresh allocation every frame.
-    black: Vec<Rgb8>,
 }
 
 /// Everything the render thread reads and the API mutates.
@@ -591,7 +588,6 @@ impl Engine for CoreEngine {
                 device_id: device_id.clone(),
                 sink,
                 led_count,
-                black: Vec::new(),
             });
             // The new sink has no frame yet. A panicked effect stops the delivery, so the
             // render thread re-sends the last good frame when it sees this (#145).
@@ -1482,15 +1478,10 @@ fn write_black(state: &mut State, runner: &mut SceneRunner) {
     }
 }
 
-/// The black frame a sink is sent, at the sink's own LED count.
-///
-/// The sink's own buffer holds the frame, so it is not built in a fresh allocation every
-/// frame. The copy the sink takes ownership of is the one allocation
-/// [`FrameSink::submit`] asks for, like every other frame.
-fn black_frame(sink: &mut SinkEntry) -> Vec<Rgb8> {
-    sink.black.clear();
-    sink.black.resize(sink.led_count as usize, Rgb8::BLACK);
-    sink.black.clone()
+/// The black frame a sink is sent, at the sink's own LED count. [`FrameSink::submit`] takes
+/// the frame by value, so this is one allocation per send, like every other frame.
+fn black_frame(sink: &SinkEntry) -> Vec<Rgb8> {
+    vec![Rgb8::BLACK; sink.led_count as usize]
 }
 
 /// Sends the last good frame to every sink again (#145).
