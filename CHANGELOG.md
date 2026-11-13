@@ -8,37 +8,21 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
-- Scenes: several effects at once, one per group of devices (#310)
+- Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+- The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
 - Command line: `canvas-rgb scenes list` shows the scenes with the active one marked, `canvas-rgb scenes set <name>` sets one by name (case does not matter), and `canvas-rgb status` names the active scene (#310)
-- Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names (#310)
+- Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names, whether the group comes before or after the effect's properties (#310)
 
 ### Changed
 
 - Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
 - Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
 - Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
-- The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
-- Scenes: several effects at once, one per group of devices (#310)
-- Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+- Effects: the change of the running effect's properties is refused while the editor's draft holds the lights: the draft is the editor's unsaved work, and its values are changed in the editor, not with this route (#310)
+
 ### Fixed
 
-- Effects: flashing a light (the identify) no longer puts the saved scene back over a draft or over the onboarding greeting: the flash only overrides what the lights show while it runs (#310)
-- Effects: a draft that moves from the whole-scene preview to a group of the scene lands on that group, and the other groups keep playing their own effect (#310)
-- Effects: a stack's draft resolves its layers in the group it lands on, so a layer over a device of that group paints the right lights (#310)
-- Effects: a stack with an HTML layer is refused while another group of the scene already plays an HTML effect, so a scene never runs more of them than it may (#310)
-- Effects: the first run's ARGB headers are lights that join the first scene, instead of staying dark in no group (#310)
-- Command line: `canvas-rgb effects activate <effect> --group <name>` takes the group whether it comes before or after the effect's properties, and `canvas-rgb scenes set <name>` refuses a name that two scenes share and lists them (#310)
-- Effects: a draft on one group no longer stops the capture another group needs: the lights keep the capture of every group that is running (#310)
-- Effects: a group the editor has open is not put over by a change to that group (its brightness, its effect or a light's arrangement): the change is saved and lands when the editor closes (#310)
-- Effects: a scene with more HTML effects than a scene may have is refused when it is set, and a stack with an HTML layer is refused when a scene plays it beside another HTML effect (#310)
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
-- Effects: a draft that a scene save, an activation or a layout switch ends is ended on the lights as well: the group the draft was on plays the scene's effect again, and the lights keep the capture every group of the scene needs (#310)
-- Effects: with a scene running, the layout routes and the change of the running effect's properties change the groups that play that effect and leave the captures of the other groups alone (#310)
-- Effects: the change of the running effect's properties is refused while the editor's draft holds the lights: the draft is the editor's unsaved work, and its values are changed in the editor, not with this route (#310)
-- Effects: the onboarding greeting is put back by a scene save, an activation or a layout switch: it never stays on the lights after something else was chosen (#310)
-- Effects: a scene that cannot be built leaves its groups dark and names the failure, instead of leaving the lights on what was there before (#310)
-- Effects: a draft that is replaced while the browser goes away no longer stays on the lights: the scene goes back on them when the request is dropped or the daemon trips over it (#310)
-- Effects: a draft that arrives while the editor's request is being replaced is not put over by the scene: it keeps the lights until it ends (#310)
 
 ## [0.13.1] - 2026-11-11
 
