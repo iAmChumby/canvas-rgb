@@ -55,6 +55,8 @@ pub fn real_engine() -> Arc<dyn Engine> {
 pub struct PreviewSlot {
     /// `stack:` + the name, as the builder gave it.
     pub stack_id: String,
+    /// The group the preview shows: its layers resolve in that group's canvas.
+    pub group: String,
     /// The structure hash the effect was built from (D95.4.6).
     pub structure: String,
     /// The live map the effect holds, so a value change re-applies without a rebuild.
@@ -115,11 +117,10 @@ pub struct StackPreview {
     engine: Mutex<Option<Arc<dyn Engine>>>,
     /// How the daemon makes the engine. The tests install a fake instead.
     pub make_engine: Box<dyn Fn() -> Arc<dyn Engine> + Send + Sync>,
-    /// True once the engine has been given its rate, layout and input source.
+    /// True once the engine has been given its rate, group and input source.
     configured: AtomicBool,
-    /// The layout and devices as last published, so an engine made after the change starts
-    /// from them.
-    latest_layout: Mutex<Option<(Layout, Vec<DeviceInfo>)>>,
+    /// The group the preview shows, and what the engine needs to run it, as last published.
+    latest: Mutex<Option<crate::scenes::GroupRun>>,
     /// The WebSocket subscribers of the preview engine (`?stack=1`).
     pub subs: PreviewRegistry,
     /// The stack the preview engine runs, and what it was built from.
@@ -146,7 +147,7 @@ impl StackPreview {
             engine: Mutex::new(None),
             make_engine,
             configured: AtomicBool::new(false),
-            latest_layout: Mutex::new(None),
+            latest: Mutex::new(None),
             subs: PreviewRegistry::default(),
             slot: Mutex::new(None),
             epochs: EpochBook::default(),
@@ -190,37 +191,38 @@ impl StackPreview {
         // so the next open configures the engine instead of trusting a flag that is not true
         // yet. Two callers that overlap both configure it with the same values.
         let latest = self
-            .latest_layout
+            .latest
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone();
-        let layout = match latest {
-            Some(found) => Some(found),
-            None => match app.active_layout().await {
-                Some(layout) => Some((layout, app.devices.read().await.clone())),
-                None => None,
-            },
+        let run = match latest {
+            Some(found) => found,
+            None => crate::scenes::every_light_run(app).await,
         };
         engine.set_fps(canvas_proto::consts::PREVIEW_MAX_FPS);
-        if let Some((layout, devices)) = layout {
-            engine.set_layout(layout, devices);
-        }
+        // The preview runs one group: the one being tuned, or one temporary group of every
+        // light. It has no effect yet: the PUT that follows gives it one.
+        let group = run.engine_group(None, &Props::new());
+        engine.set_scene(run.lights.clone(), run.devices.clone(), vec![group], false);
         engine.set_input_source(app.input_source());
         self.configured.store(true, Ordering::SeqCst);
         engine
     }
 
-    /// A layout change reaches the preview engine when it exists. Before it does, the engine is
-    /// given the last published layout when it is made, so no change is dropped.
-    pub fn set_layout(&self, layout: &Layout, devices: &[DeviceInfo]) {
-        *self
-            .latest_layout
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((layout.clone(), devices.to_vec()));
-        if let Some(engine) = self.engine_guard().as_ref() {
-            engine.set_layout(layout.clone(), devices.to_vec());
-        }
+    /// The group the preview shows, and what the engine needs to run it, as last published.
+    pub fn group(&self) -> Option<crate::scenes::GroupRun> {
+        self.latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner()).clone()
     }
+
+    /// A group change reaches the preview engine when it exists. Before it does, the engine is
+    /// given the last published group when it is made, so no change is dropped.
+    pub fn set_group(&self, run: crate::scenes::GroupRun) {
+        *self.latest.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(run);
+    }
+
+    /// The legacy layout path does not reach the preview: it runs a group, and a layout call
+    /// would end the preview's scene mode.
+    pub fn set_layout(&self, _layout: &Layout, _devices: &[DeviceInfo]) {}
 
     /// An input-source change reaches the preview engine when it exists; otherwise the engine
     /// gets the app's current source when it is made.
@@ -238,6 +240,7 @@ impl StackPreview {
             .as_ref()
             .map(|slot| PreviewSlot {
                 stack_id: slot.stack_id.clone(),
+                group: slot.group.clone(),
                 structure: slot.structure.clone(),
                 live: Arc::clone(&slot.live),
                 props: slot.props.clone(),
@@ -396,6 +399,9 @@ pub fn props_of(app: &App, stack: &Stack) -> Props {
 /// page, or whose seq is not above the live one, lands nowhere and answers 200 with
 /// `applied: false`.
 ///
+/// `group` is the group the preview shows: its layers resolve in that group's canvas. With no
+/// group, the preview shows one temporary flow-across group of every light.
+///
 /// A PUT whose structure is already building joins that build instead of starting another: a
 /// build slower than the builder's beat is still the build that lands.
 pub async fn put(
@@ -403,7 +409,17 @@ pub async fn put(
     stack: &Stack,
     epoch: &str,
     seq: u64,
+    group: Option<&str>,
 ) -> Result<StackPreviewResponse, PreviewError> {
+    // The group the preview shows. A group the active scene does not have is refused: the
+    // builder would show a picture of nothing.
+    let run = match group {
+        Some(id) => crate::scenes::group_run(app, id).await.ok_or_else(|| {
+            PreviewError::Validation(format!("the active scene has no group with the id {id}"))
+        })?,
+        None => crate::scenes::every_light_run(app).await,
+    };
+    app.stack_preview.set_group(run.clone());
     // The render slot is taken only when a new build starts (below): a beat that only changes
     // values, or joins the build in flight, starts nothing and is never refused as busy.
     let slot;
@@ -435,14 +451,14 @@ pub async fn put(
             return Ok(superseded(app, epoch, seq));
         }
         if let Some(slot) = app.stack_preview.snapshot() {
-            if slot.stack_id == stack.id && slot.structure == structure {
+            if slot.stack_id == stack.id && slot.structure == structure && slot.group == run.id {
                 crate::stack::replace_live(&slot.live, stack);
                 // The structure on screen is the one the page wants; a build for another one
                 // that is still running is superseded by this newer PUT.
                 app.stack_preview.supersede_build();
                 // The live map's lock is dropped before the props reach the engine.
-                engine.set_props(&props);
-                let layers = reports(app, stack, &slot.errors, &slot.statuses);
+                engine.set_group_props(&run.id, &props);
+                let layers = reports(app, stack, &slot.errors, &slot.statuses, &run.id);
                 {
                     let mut guard = app
                         .stack_preview
@@ -474,7 +490,7 @@ pub async fn put(
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .clone();
-            let layers = reports(app, stack, &errors, &building.statuses);
+            let layers = reports(app, stack, &errors, &building.statuses, &run.id);
             tracing::info!(stack = %stack.id, seq, "a beat joined the preview build in flight");
             return Ok(answer(app, true, epoch, seq, layers));
         }
@@ -509,6 +525,7 @@ pub async fn put(
     let build_live = Arc::clone(&building.live);
     let build_statuses = Arc::clone(&building.statuses);
     let build_errors = Arc::clone(&building.errors);
+    let build_group = run.id.clone();
     let fps = Arc::new(AtomicU32::new(canvas_proto::consts::PREVIEW_MAX_FPS));
     let effect = tokio::task::spawn_blocking(move || {
         let _slot = slot;
@@ -535,6 +552,7 @@ pub async fn put(
             )
             .with_clock(build_app.stacks.clock())
             .with_fps(fps)
+            .with_group(&build_group)
             .with_status_sink(build_statuses),
         ) as Box<dyn Effect>
     })
@@ -547,16 +565,19 @@ pub async fn put(
     let Some(building) = app.stack_preview.take_in_flight_if(token) else {
         return Ok(superseded(app, epoch, seq));
     };
-    engine.set_effect(effect, &building.props);
+    // The preview engine runs the group being tuned, with the stack on it.
+    let group = run.engine_group(Some(effect), &building.props);
+    engine.set_scene(run.lights.clone(), run.devices.clone(), vec![group], false);
 
     let errors = building
         .errors
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
         .clone();
-    let layers = reports(app, stack, &errors, &building.statuses);
+    let layers = reports(app, stack, &errors, &building.statuses, &run.id);
     let slot = PreviewSlot {
         stack_id: stack.id.clone(),
+        group: run.id.clone(),
         structure,
         live: building.live,
         props: building.props,
@@ -604,18 +625,17 @@ pub async fn clear(app: &Arc<App>, epoch: Option<&str>) -> ClearOutcome {
     }
     app.stack_preview.epochs.clear_live();
     app.stack_preview.supersede_build();
-    let had = app
+    let dropped = app
         .stack_preview
         .slot
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .take()
-        .is_some();
+        .take();
+    let had = dropped.is_some();
     if had {
-        if let Some(engine) = app.stack_preview.engine_guard().as_ref() {
-            if let Some(effect) = canvas_effects::create("solid") {
-                engine.set_effect(effect, &crate::draft::black());
-            }
+        if let (Some(engine), Some(slot)) = (app.stack_preview.engine_guard().as_ref(), dropped) {
+            // The group the preview showed goes black: it has no effect any more.
+            engine.set_group_effect(&slot.group, None, &crate::draft::black());
         }
         tracing::info!("the preview was dropped");
     }
@@ -655,13 +675,17 @@ fn answer(
     }
 }
 
-/// What each layer is doing: nested, missing (with the build's reason), off the desk, or the
+/// What each layer is doing: nested, missing (with the build's reason), off the group, or the
 /// runtime's own held/faulted report.
+///
+/// `group` is the group the preview shows: an area that matches nothing in it paints nothing,
+/// and the layer says so.
 fn reports(
     app: &App,
     stack: &Stack,
     errors: &BTreeMap<String, String>,
     statuses: &Arc<Mutex<Vec<StackLayerStatus>>>,
+    group: &str,
 ) -> Vec<StackPreviewLayer> {
     let runtime = statuses
         .lock()
@@ -694,8 +718,9 @@ fn reports(
             } else if mask_error.is_some() {
                 // The layer runs; its mask does not, so it draws unmasked (#256).
                 (StackLayerState::MissingEffect, mask_error)
-            } else if areas.is_empty_area(&layer.area) {
-                (StackLayerState::NoArea, None)
+            } else if areas.is_empty_area(Some(group), &layer.area) {
+                // The area matches no light of the group: the layer paints nothing, and says so.
+                (StackLayerState::NoArea, Some("not in this group".into()))
             } else if let Some(reported) = runtime.iter().find(|status| status.id == layer.id) {
                 (reported.status, None)
             } else {

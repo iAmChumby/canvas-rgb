@@ -29,7 +29,6 @@
 //! The gate orders transitions, not builds: a build runs outside it, so Stop and expiry answer
 //! while a slow HTML layer loads. The gate is taken to read the slot, to swap it and to apply.
 
-use canvas_proto::layout::ActiveEffect;
 use canvas_proto::props::Props;
 use canvas_proto::stack::Stack;
 use canvas_proto::traits::Effect;
@@ -76,9 +75,13 @@ pub struct Slot {
     /// `draft:` + the source hash for HTML, or `stack:` + the name for a stack.
     pub id: String,
     pub props: Props,
-    /// The effect the active layout had before the draft: what Stop and expiry put back.
-    /// `None` when the layout had no effect (the lights go black, as after onboarding).
-    pub prior: Option<ActiveEffect>,
+    /// The effect the draft took over: the id a group's `Plays` names, when the draft is that
+    /// effect's own source. `None` when the draft names no saved effect, so it plays on one
+    /// temporary group of every light.
+    pub effect_id: Option<String>,
+    /// The groups the draft is on: the scene's own groups that play its effect, or the one
+    /// temporary group of every light ([`crate::scenes::TAKEOVER_GROUP`]).
+    pub groups: Vec<String>,
     /// When the lease ends, on the draft clock.
     pub lease_until: Duration,
     pub kind: SlotKind,
@@ -158,8 +161,6 @@ struct InFlight {
     kind: Building,
     /// The newest props a PUT (or a beat that joined) gave the draft.
     props: Props,
-    /// The effect the draft takes over from, read when the build starts.
-    prior: Option<ActiveEffect>,
     /// The page whose PUT started a stack build. A stack draft's lease does not run out under
     /// a build the owning page has in flight (D95.4.4). `None` for an HTML draft, which has no
     /// epoch.
@@ -335,12 +336,11 @@ impl Draft {
         &self,
         kind: Building,
         props: &Props,
-        prior: Option<ActiveEffect>,
         epoch: Option<String>,
     ) -> u64 {
         let token = self.tokens.fetch_add(1, Ordering::SeqCst) + 1;
         let mut builds = self.lock_builds();
-        builds.running.push(InFlight { token, kind, props: props.clone(), prior, epoch });
+        builds.running.push(InFlight { token, kind, props: props.clone(), epoch });
         builds.current = Some(token);
         token
     }
@@ -485,18 +485,21 @@ impl std::fmt::Display for PutError {
 /// What ending a draft did to the lights.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Ended {
-    /// A sentence for the answer when the prior effect could not be put back and black was
-    /// used instead. `None` when the prior (or the no-prior black) went on normally.
+    /// A sentence for the answer when the scene could not be put back. `None` when the active
+    /// scene went on normally.
     pub note: Option<String>,
 }
 
 /// Puts `html` on the lights as the draft, renews a running draft's lease and updates its props.
 ///
-/// The prior effect is the active layout's effect when the draft starts, and stays the same
-/// when a later PUT replaces the draft's source: a draft is one visit to the editor, however
-/// many times its code changes. A PUT that is superseded while it built (a Stop, or another
-/// source) answers `false` and leaves the newer state alone. A beat whose source is already
-/// building joins that build rather than starting another.
+/// The draft plays on every group of the active scene whose `Plays` names its effect, or on one
+/// temporary flow-across group of every light when no group plays it. Stop and expiry put the
+/// active scene back (see [`restore`]).
+///
+/// A later PUT that replaces the draft's source keeps the same takeover: a draft is one visit to
+/// the editor, however many times its code changes. A PUT that is superseded while it built (a
+/// Stop, or another source) answers `false` and leaves the newer state alone. A beat whose
+/// source is already building joins that build rather than starting another.
 pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutError> {
     let source_hash = crate::user_effects::source_hash(html);
     let id = format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX);
@@ -517,6 +520,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             if slot.is_same_html(html, &source_hash) {
                 let props_changed = slot.props != *props;
                 let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
+                let groups = slot.groups.clone();
                 {
                     let mut guard = app.draft.lock();
                     if let Some(slot) = guard.as_mut() {
@@ -527,7 +531,9 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
                 // A newer PUT for the draft on the lights supersedes a build for another one.
                 app.draft.supersede_build();
                 if props_changed {
-                    app.engine.set_props(props);
+                    for group in &groups {
+                        app.engine.set_group_props(group, props);
+                    }
                 }
                 return Ok(true);
             }
@@ -550,22 +556,11 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
             return Err(PutError::Build(message));
         }
 
-        // The layout is read only when the draft starts: a refresh keeps the prior it took over
-        // from, even if something changed the layout meanwhile.
-        let prior = match &existing {
-            Some(slot) => slot.prior.clone(),
-            None => app.active_layout().await.and_then(|layout| layout.effect),
-        };
         let Ok(acquired) = app.draft_slots.clone().try_acquire_owned() else {
             return Err(PutError::Busy);
         };
         slot = acquired;
-        token = app.draft.begin_build(
-            Building::Html { source: Arc::from(html) },
-            props,
-            prior,
-            None,
-        );
+        token = app.draft.begin_build(Building::Html { source: Arc::from(html) }, props, None);
     }
     // Every exit path from here frees the route: an error, a join error, or a panic in the
     // blocking task must not leave a token for later beats to join. The lease stays in this
@@ -602,9 +597,19 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let Some(building) = app.draft.take_in_flight_if(token) else {
         return Ok(false);
     };
-    crate::apply_built(app, effect, &building.props)
-        .await
-        .map_err(PutError::Internal)?;
+    // The draft takes over the groups of the active scene that play its effect, or one
+    // temporary group of every light when no group does.
+    let effect_id = saved_effect_id(app, &source_hash);
+    let builder = takeover_builder(app, &id, html);
+    let groups = crate::scenes::apply_takeover(
+        app,
+        effect_id.as_deref().unwrap_or(&id),
+        &building.props,
+        Some(effect),
+        builder,
+    )
+    .await
+    .map_err(PutError::Internal)?;
     app.draft.clear_failure();
     // The lease starts when the draft reaches the lights, not when its build started: a slow
     // build must not eat the editor's beat.
@@ -613,17 +618,42 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let slot = Slot {
         id,
         props: building.props,
-        prior: building.prior,
+        effect_id,
+        groups,
         lease_until,
         kind: SlotKind::Html { source: Arc::from(html), source_hash },
     };
     *app.draft.lock() = Some(slot.clone());
     app.draft.clear_ending();
     // A draft started after an onboarding greeting outranks its restore: the owner is choosing
-    // a look, and ending the draft puts the layout's effect back anyway.
+    // a look, and ending the draft puts the active scene back anyway.
     app.transient.cancel();
-    tracing::info!(draft = %slot.id, "a draft is on the lights");
+    tracing::info!(draft = %slot.id, groups = slot.groups.len(), "a draft is on the lights");
     Ok(true)
+}
+
+/// The id of the saved effect the draft's source is, when the draft is that effect's own
+/// source: a draft of a saved effect plays on the groups that play it. `None` when the draft is
+/// a new file, or one whose text has changed since it was saved.
+fn saved_effect_id(app: &App, source_hash: &str) -> Option<String> {
+    app.user_effects
+        .schemas()
+        .iter()
+        .filter(|schema| schema.id.starts_with(crate::user_effects::USER_EFFECT_PREFIX))
+        .find(|schema| {
+            app.user_effects
+                .source_and_file_name(&schema.id)
+                .is_some_and(|(source, _)| crate::user_effects::source_hash(&source) == source_hash)
+        })
+        .map(|schema| schema.id.clone())
+}
+
+/// The builder a takeover makes its extra instances with: the same file, built again.
+fn takeover_builder(app: &Arc<App>, id: &str, html: &str) -> crate::scenes::EffectBuilder {
+    let build = app.draft.builder();
+    let id = id.to_string();
+    let html = html.to_string();
+    Arc::new(move |_group| build(&id, &html))
 }
 
 /// Puts a whole stack on the lights as the draft (D95.4.5).
@@ -678,6 +708,7 @@ pub async fn put_stack(
                     if stack_id == &stack.id {
                         crate::stack::replace_live(live, stack);
                         let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
+                        let groups = slot.groups.clone();
                         {
                             let mut guard = app.draft.lock();
                             if let Some(slot) = guard.as_mut() {
@@ -689,7 +720,9 @@ pub async fn put_stack(
                         // another one that is still running is superseded.
                         app.draft.supersede_build();
                         // The live map's lock is dropped before the props reach the engine.
-                        app.engine.set_props(&props);
+                        for group in &groups {
+                            app.engine.set_group_props(group, &props);
+                        }
                         app.stacks.note_running(&stack.id, &structure, Arc::clone(live));
                         return Ok(true);
                     }
@@ -714,10 +747,6 @@ pub async fn put_stack(
             return Ok(true);
         }
 
-        let prior = match &existing {
-            Some(slot) => slot.prior.clone(),
-            None => app.active_layout().await.and_then(|layout| layout.effect),
-        };
         let Ok(acquired) = app.draft_slots.clone().try_acquire_owned() else {
             return Err(PutError::Busy);
         };
@@ -729,7 +758,6 @@ pub async fn put_stack(
                 live: Arc::new(RwLock::new(LiveMap::from_stack(stack, 1))),
             },
             &props,
-            prior,
             Some(epoch.to_string()),
         );
     }
@@ -785,9 +813,18 @@ pub async fn put_stack(
         Building::Stack { live, .. } => live,
         Building::Html { .. } => unreachable!("this PUT started a stack build"),
     };
-    crate::apply_built(app, effect, &building.props)
-        .await
-        .map_err(PutError::Internal)?;
+    // The draft takes over the groups of the active scene that play this stack, or one
+    // temporary group of every light when no group does.
+    let builder = stack_takeover_builder(app, stack, Arc::clone(&live));
+    let groups = crate::scenes::apply_takeover(
+        app,
+        &stack.id,
+        &building.props,
+        Some(effect),
+        builder,
+    )
+    .await
+    .map_err(PutError::Internal)?;
     app.draft.clear_failure();
     // The stack is what the main engine runs: a save-then-activate with the same structure
     // reuses it instead of building again (D95.4.3, D95.4.6).
@@ -798,15 +835,42 @@ pub async fn put_stack(
     let slot = Slot {
         id: stack.id.clone(),
         props: building.props,
-        prior: building.prior,
+        effect_id: Some(stack.id.clone()),
+        groups,
         lease_until,
         kind: SlotKind::Stack { stack_id: stack.id.clone(), structure, live },
     };
     *app.draft.lock() = Some(slot.clone());
     app.draft.clear_ending();
     app.transient.cancel();
-    tracing::info!(draft = %slot.id, seq, "a stack draft is on the lights");
+    tracing::info!(draft = %slot.id, seq, groups = slot.groups.len(), "a stack draft is on the lights");
     Ok(true)
+}
+
+/// The builder a stack takeover makes its extra instances with: the same stack, with the same
+/// live map, built again.
+fn stack_takeover_builder(
+    app: &Arc<App>,
+    stack: &Stack,
+    live: LiveStack,
+) -> crate::scenes::EffectBuilder {
+    let app = Arc::clone(app);
+    let stack = stack.clone();
+    Arc::new(move |group| {
+        let mut effect = crate::stack::StackEffect::new(
+            &stack,
+            crate::leaf_builder(&app.user_effects),
+            Arc::clone(&live),
+            app.stacks.areas(),
+        )
+        .with_clock(app.stacks.clock())
+        .with_fps(app.stacks.fps_handle())
+        .with_status_sink(app.stacks.status_sink());
+        if !group.is_empty() {
+            effect = effect.with_group(group);
+        }
+        Ok(Box::new(effect) as Box<dyn Effect>)
+    })
 }
 
 /// What `DELETE /effects/draft` did.
@@ -917,7 +981,7 @@ pub struct ReplaceGuard<'a> {
 }
 
 impl ReplaceGuard<'_> {
-    /// Puts the dropped draft's prior effect back on the lights, exactly as Stop would, and
+    /// Puts the dropped draft's prior back on the lights, exactly as Stop would, and
     /// remembers the ending's note. `None` when no draft was dropped.
     ///
     /// Called once, by the caller whose apply failed.
@@ -928,7 +992,7 @@ impl ReplaceGuard<'_> {
         tracing::info!(
             draft = %slot.id,
             note = ended.note.as_deref().unwrap_or(""),
-            "the draft ended and its prior effect went back after the layout's effect failed"
+            "the draft ended and the active scene went back after the replacement failed"
         );
         Some(ended)
     }
@@ -992,47 +1056,27 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
     }
 }
 
-/// Puts the effect the draft took over from back on the lights. Never fails: when the prior
-/// effect cannot be built (its file was deleted mid-draft), black goes on the lights and the
-/// returned note says why, so the draft can still end.
-async fn restore(app: &Arc<App>, slot: &Slot) -> Ended {
-    if let Some(effect) = &slot.prior {
-        match crate::apply_effect(app, &effect.id, &effect.props).await {
-            Ok(()) => return Ended::default(),
-            Err(error) => {
-                tracing::warn!(
-                    draft = %slot.id,
-                    effect = %effect.id,
-                    error = %error,
-                    "the prior effect could not be restored; the lights are black"
-                );
-                let note = format!(
-                    "the prior effect {} could not be restored, so the lights are black: {error}",
-                    effect.id
-                );
-                let black_note = set_black(app).await;
-                return Ended {
-                    note: Some(match black_note {
-                        Some(black_error) => format!("{note}; and {black_error}"),
-                        None => note,
-                    }),
-                };
-            }
-        }
+/// Puts the active scene back on the lights: the draft's prior is the scene, not one effect.
+///
+/// The scene order is not taken here (see [`crate::scenes::apply_active_ungated`]): the draft
+/// gate is held, and a scene write holds the scene order while it waits for that gate.
+async fn restore(app: &Arc<App>, _slot: &Slot) -> Ended {
+    crate::scenes::apply_active_ungated(app, false).await;
+    // The scene is back. A group whose effect cannot be built is dark, and the answer says so:
+    // the owner sees why the lights are not what they set.
+    let failures = app.scene.failures();
+    if failures.is_empty() {
+        return Ended::default();
     }
-    // No prior effect: black is the normal end, as after onboarding.
-    Ended { note: set_black(app).await }
-}
-
-/// Puts black on the lights. `Some` is why it failed, which is a failure of the daemon and not
-/// of the draft.
-async fn set_black(app: &Arc<App>) -> Option<String> {
-    match crate::apply_effect(app, "solid", &black()).await {
-        Ok(()) => None,
-        Err(error) => {
-            tracing::warn!(error = %error, "the lights could not be set to black");
-            Some(format!("the lights could not be set to black: {error}"))
-        }
+    let groups: Vec<String> = failures
+        .iter()
+        .map(|(group, why)| format!("{group}: {why}"))
+        .collect();
+    Ended {
+        note: Some(format!(
+            "the active scene is back, but a group of it is dark: {}",
+            groups.join("; ")
+        )),
     }
 }
 
@@ -1100,7 +1144,8 @@ mod tests {
         Slot {
             id: format!("{}{source_hash}", canvas_proto::consts::DRAFT_ID_PREFIX),
             props: Props::new(),
-            prior: None,
+            effect_id: None,
+            groups: Vec::new(),
             lease_until: Duration::ZERO,
             kind: SlotKind::Html {
                 source: Arc::from(source),
@@ -1133,7 +1178,8 @@ mod tests {
         let slot = Slot {
             id: "stack:one".to_string(),
             props: Props::new(),
-            prior: None,
+            effect_id: None,
+            groups: Vec::new(),
             lease_until: Duration::ZERO,
             kind: SlotKind::Stack {
                 stack_id: "one".to_string(),

@@ -322,6 +322,9 @@ pub async fn config_import(
             app.set_layout(&layout, &devices);
             app.stacks.publish_areas(&layout, &devices);
         }
+        // The scene goes on again (Scenes, 0.14.0): the import brought a store of its own, and
+        // the active scene is what plays now, not the layout's one effect.
+        crate::scenes::apply_active_ungated(&app, false).await;
     }
 
     tracing::info!("the config was imported");

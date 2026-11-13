@@ -61,12 +61,18 @@ pub async fn get_stack(
         .stacks
         .get(&id)
         .ok_or_else(|| ApiFailure::not_found(format!("no stack with the id or name {id}")))?;
-    let layers = layer_statuses(&app, &stack);
+    // The group of the active scene that plays the stack: its layers resolve in that group's
+    // canvas. A stack no group plays resolves in the legacy layout's, until the layout is gone.
+    let group = crate::scenes::groups_playing(&app, &stack.id).await.into_iter().next();
+    let layers = layer_statuses(&app, &stack, group.as_deref());
     Ok(Json(StackDetail { stack, layers }))
 }
 
 /// What each layer is doing: its effect missing, the area empty, or the runtime's own report.
-fn layer_statuses(app: &Arc<App>, stack: &Stack) -> Vec<StackLayerStatus> {
+///
+/// `group` is the group of the active scene that plays the stack: an area that matches no light
+/// of that group paints nothing.
+fn layer_statuses(app: &Arc<App>, stack: &Stack, group: Option<&str>) -> Vec<StackLayerStatus> {
     let runtime = if app.stacks.running_id().as_deref() == Some(stack.id.as_str()) {
         app.stacks.runtime_statuses()
     } else {
@@ -88,7 +94,7 @@ fn layer_statuses(app: &Arc<App>, stack: &Stack) -> Vec<StackLayerStatus> {
             }) {
                 // The layer runs; its mask does not, so it draws unmasked (#256).
                 (StackLayerState::MissingEffect, None)
-            } else if areas.is_empty_area(&layer.area) {
+            } else if areas.is_empty_area(group, &layer.area) {
                 (StackLayerState::NoArea, None)
             } else if let Some(reported) = runtime.iter().find(|status| status.id == layer.id) {
                 (reported.status, reported.last_ms)
@@ -165,9 +171,10 @@ pub async fn put_stack(
 
 /// `DELETE /api/v1/stacks/{id}`.
 ///
-/// A stack on the lights is only deleted with `?force=true`: its layout names it, and the lights
-/// would go black. A forced delete removes the stack, its presets and its favourite, and puts
-/// black on the lights with a note (D95.1.6, D95.4.7).
+/// A stack a group plays is only deleted with `?force=true`: a group of some scene names it,
+/// and that group would go dark. The refusal names the scenes, so the owner knows where it is
+/// used. A forced delete removes the stack, its presets and its favourite, and the group that
+/// played it goes dark with a note (D95.1.6, D95.4.7).
 pub async fn delete_stack(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -178,21 +185,14 @@ pub async fn delete_stack(
         .get(&id)
         .ok_or_else(|| ApiFailure::not_found(format!("no stack with the id or name {id}")))?;
 
-    let active = app.active_layout().await;
-    let named_by = active
-        .as_ref()
-        .filter(|layout| {
-            layout
-                .effect
-                .as_ref()
-                .is_some_and(|effect| effect.id == stack.id)
-        })
-        .map(|layout| (layout.id.clone(), layout.name.clone()));
-    if named_by.is_some() && !query.force {
-        let (layout_id, layout_name) = named_by.clone().unwrap();
+    // Every group of every scene: a stack in a scene that is not active is still in use.
+    let named_by = crate::scenes::scenes_playing(&app, &stack.id).await;
+    if !named_by.is_empty() && !query.force {
+        let names: Vec<String> = named_by.iter().map(|(_, name)| name.clone()).collect();
         return Err(ApiFailure::conflict(format!(
-            "{} is on the lights in the layout {layout_name} ({layout_id}); delete it with ?force=true and the lights will go black",
-            stack.id
+            "{} is played by a group of {}; delete it with ?force=true and that group will go dark",
+            stack.id,
+            names.join(", ")
         )));
     }
 
@@ -234,26 +234,20 @@ pub async fn delete_stack(
     };
     drop(store);
 
-    // A stack on the lights ends with black and a note, the ending a deleted prior effect gets.
+    // A stack a group plays ends with that group dark and a note, the ending a deleted prior
+    // effect gets.
     let running = app.stacks.running_id().as_deref() == Some(removed.id.as_str());
     app.stacks.clear_running();
     let mut note = None;
-    if running || named_by.is_some() {
-        match crate::apply_effect(&app, "solid", &crate::draft::black()).await {
-            Ok(()) => {
-                note = Some(format!(
-                    "{} was deleted while it was on the lights, so the lights are black",
-                    removed.id
-                ));
-            }
-            Err(error) => {
-                note = Some(format!(
-                    "{} was deleted while it was on the lights, and they could not be set to black: {error}",
-                    removed.id
-                ));
-            }
-        }
-        tracing::warn!(stack = %removed.id, "a stack on the lights was deleted");
+    if running || !named_by.is_empty() {
+        // The active scene goes on again: the group that played the stack cannot build it any
+        // more, so that group is dark and the others run.
+        crate::scenes::apply_active_ungated(&app, false).await;
+        note = Some(format!(
+            "{} was deleted while a group played it, so that group is dark",
+            removed.id
+        ));
+        tracing::warn!(stack = %removed.id, "a stack a group played was deleted");
     }
     tracing::info!(stack = %removed.id, presets_removed, favorite_removed, "a stack was deleted");
 

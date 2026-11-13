@@ -9,13 +9,15 @@ use canvas_proto::stack::{
     Stack, StackFile, StackLayer, LAYER_NAME_MAX, STACKS_FILE, STACKS_SCHEMA, STACK_HTML_MAX,
     STACK_ID_PREFIX, STACK_MAX_LAYERS, STACK_NAME_MAX,
 };
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 use std::time::Instant;
 
 use crate::stack::{
-    read_recovering, write_recovering, AreaBook, AreaMap, Clock, LiveMap, LiveStack, real_clock,
+    read_recovering, write_recovering, AreaBook, AreaMap, AreaMaps, Clock, LiveMap, LiveStack,
+    real_clock,
 };
 use crate::user_effects::UserEffects;
 
@@ -568,7 +570,7 @@ impl Stacks {
             home: home.into(),
             file: RwLock::new(StackFile::default()),
             generation: AtomicU64::new(0),
-            areas: Arc::new(RwLock::new(AreaMap::default())),
+            areas: Arc::new(RwLock::new(AreaMaps::default())),
             fps: Arc::new(AtomicU32::new(canvas_proto::consts::FPS_DEFAULT)),
             clock: real_clock(),
             running: Mutex::new(None),
@@ -792,7 +794,18 @@ impl Stacks {
         let mut map = AreaMap::build(layout, devices, 0);
         let mut guard = write_recovering(&self.areas);
         map.version = guard.version.wrapping_add(1);
-        *guard = map;
+        guard.version = map.version;
+        guard.layout = Some(map);
+    }
+
+    /// Publishes the masks of the groups of the active scene: a stack resolves its layers in
+    /// the group it plays in, so every group has its own masks.
+    ///
+    /// The version moves, so every running stack re-resolves its layers on its next frame.
+    pub fn publish_group_areas(&self, groups: BTreeMap<String, AreaMap>) {
+        let mut guard = write_recovering(&self.areas);
+        guard.version = guard.version.wrapping_add(1);
+        guard.groups = groups;
     }
 
     /// The frame rate the HTML budget is derived from.
@@ -1168,13 +1181,14 @@ mod tests {
             landmarks: Vec::new(),
         };
         let map = crate::stack::AreaMap::build(&layout, &[], 1);
-        let resolved = map
-            .resolve(&hands[0].layers[0].area)
+        let book = crate::stack::AreaMaps { layout: Some(map), ..crate::stack::AreaMaps::default() };
+        let resolved = book
+            .resolve(None, &hands[0].layers[0].area)
             .expect("the clipped area covers the canvas edge, not nothing");
         assert_eq!(resolved.dest, [0.0, 5.0, 7.0, 15.0], "the area resolves to its on-canvas box (the compositor draws the layer into it)");
-        assert!(!map.is_empty_area(&hands[0].layers[0].area));
-        assert!(map
-            .resolve(&LayerArea::Rect { x: 400.0, y: 0.0, width: 10.0, height: 10.0 })
+        assert!(!book.is_empty_area(None, &hands[0].layers[0].area));
+        assert!(book
+            .resolve(None, &LayerArea::Rect { x: 400.0, y: 0.0, width: 10.0, height: 10.0 })
             .is_none(), "a wholly out-of-canvas rect paints nothing");
         let _ = std::fs::remove_dir_all(&dir);
     }

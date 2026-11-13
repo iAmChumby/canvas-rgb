@@ -11,12 +11,12 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, ScenePut, ScenesResponse, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::props::{PropValue, Props};
+use canvas_proto::props::{PropValue, Props, PropertySchema};
 use canvas_proto::scene::{
     Arrangement, Group, GroupMode, Light, LightsFile, Plays, Scene, ScenesFile, LIGHTS_SCHEMA,
     SCENES_SCHEMA,
 };
-use canvas_proto::traits::{Engine, EngineSettings, FrameSink};
+use canvas_proto::traits::{Canvas, Effect, Engine, EngineSettings, FrameSink, Inputs};
 use canvas_proto::Rgb8;
 use common::FakeAdapter;
 use std::sync::{Arc, Mutex};
@@ -155,6 +155,79 @@ fn scenes_file() -> ScenesFile {
     }
 }
 
+/// The source of the saved user effect the rig's user effects hold.
+const MINE: &str = "<html><body>the saved effect</body></html>";
+/// A source no saved effect has: a draft of it plays on every light.
+const UNUSED: &str = "<html><body>an effect nobody saved</body></html>";
+
+/// An effect that paints one colour, whatever it is.
+struct Solid {
+    colour: Rgb8,
+}
+
+impl Effect for Solid {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "fake:solid".into(),
+            name: "Fake Solid".into(),
+            description: String::new(),
+            needs: Default::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        let c = self.colour;
+        canvas.fill([c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0]);
+    }
+}
+
+/// The builder the rig's effects and drafts use: a draft paints green, the saved effect it
+/// takes over paints red.
+fn fake_builder() -> canvas_daemon::user_effects::Builder {
+    Arc::new(|id: &str, _source: &str| {
+        let colour = if id.starts_with("draft:") { rgb(GREEN) } else { rgb(RED) };
+        Ok(Box::new(Solid { colour }) as Box<dyn Effect>)
+    })
+}
+
+/// The scenes the draft tests use: the left group plays the saved user effect, the right one a
+/// solid colour.
+fn draft_scenes_file() -> ScenesFile {
+    ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![
+            Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("left", &["fake:a#z0"], "html:mine", Props::new()),
+                    group("right", &["fake:b#z0"], "solid", color(BLUE)),
+                ],
+            },
+            Scene {
+                id: "other".into(),
+                name: "Other".into(),
+                rev: 1,
+                groups: vec![group("all", &["fake:a#z0", "fake:b#z0"], "solid", color(GREEN))],
+            },
+        ],
+    }
+}
+
+/// The scenes the stack guard test uses: the scene that is not active plays the stack.
+fn stack_scenes_file() -> ScenesFile {
+    let mut scenes = draft_scenes_file();
+    scenes.scenes[1].groups = vec![group("all", &["fake:a#z0"], "stack:Glow", Props::new())];
+    scenes
+}
+
 struct Rig {
     router: axum::Router,
     app: Arc<App>,
@@ -164,6 +237,9 @@ struct Rig {
 }
 
 /// The daemon's state around a real engine and the two devices, with `scenes` active.
+///
+/// The user effects and the drafts are fakes: a draft paints green and the saved effect it
+/// takes over paints red, so a test knows the picture it sees.
 async fn rig_with(scenes: ScenesFile) -> Rig {
     let home = TempHome::new();
     let mut store = canvas_daemon::storage::Store::at(&home.path);
@@ -176,14 +252,23 @@ async fn rig_with(scenes: ScenesFile) -> Rig {
         warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let app = Arc::new(App::new(
+    let mut app = App::new(
         store,
         Arc::clone(&engine),
         Box::new(FakeAdapter::default()),
         TOKEN.to_string(),
         "0.0.0-test".to_string(),
         tx,
+    );
+    // The saved user effect the draft tests take over: its source is `MINE`, so a draft of
+    // that source is that effect.
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
+        fake_builder(),
+        &[("mine", MINE)],
     ));
+    // The drafts are built by the same fake, so a draft's picture is known.
+    app.draft = canvas_daemon::draft::Draft::with_builder(Arc::new(|| Duration::ZERO), fake_builder());
+    let app = Arc::new(app);
     *app.devices.write().await = vec![device(A), device(B)];
     let (a, b) = (Arc::new(Rec::default()), Arc::new(Rec::default()));
     engine.add_sink(DeviceId(A.into()), a.clone());
@@ -402,6 +487,76 @@ async fn setting_a_scene_changes_what_the_fake_devices_show() {
     assert_eq!(rig.app.store.read().await.scenes.active, "other");
     let (status, _) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "nope" }))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------- takeovers
+
+/// A draft plays on the groups of the active scene that play its effect.
+#[tokio::test]
+async fn a_draft_plays_on_the_groups_that_play_its_effect() {
+    let rig = rig_with(draft_scenes_file()).await;
+    shows(&rig.a, rgb(RED), "the saved effect plays").await;
+    shows(&rig.b, rgb(BLUE), "the other group plays").await;
+    // The draft is the saved effect's own source, so it plays where that effect plays.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft plays on the group that plays its effect").await;
+    shows(&rig.b, rgb(BLUE), "the other group keeps its own effect").await;
+}
+
+/// A draft of an effect no group plays goes on one temporary group of every light.
+#[tokio::test]
+async fn a_draft_for_an_unused_effect_plays_on_every_light() {
+    let rig = rig_with(draft_scenes_file()).await;
+    shows(&rig.a, rgb(RED), "before").await;
+    shows(&rig.b, rgb(BLUE), "before").await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft plays on every light").await;
+    shows(&rig.b, rgb(GREEN), "the draft plays on every light").await;
+}
+
+/// Stopping a draft puts the active scene back.
+#[tokio::test]
+async fn stopping_a_draft_restores_the_active_scene() {
+    let rig = rig_with(draft_scenes_file()).await;
+    shows(&rig.a, rgb(RED), "before").await;
+    shows(&rig.b, rgb(BLUE), "before").await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on").await;
+    let (status, answer) = send(&rig, "DELETE", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(RED), "the active scene is back").await;
+    shows(&rig.b, rgb(BLUE), "the active scene is back").await;
+}
+
+/// A stack a group of any scene plays is not deleted without `?force=true`, and the refusal
+/// names the scenes it is in.
+#[tokio::test]
+async fn a_stack_played_by_a_group_in_an_inactive_scene_cannot_be_deleted() {
+    let rig = rig_with(stack_scenes_file()).await;
+    // The stack is saved first: the delete route answers 404 for a stack that is not there.
+    let stack = serde_json::json!({
+        "id": "stack:Glow",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "solid", "area": { "kind": "canvas" } }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Glow", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // The scene that plays it is not the active one, and the guard still refuses.
+    assert_eq!(rig.app.store.read().await.scenes.active, "main");
+    let (status, answer) = send(&rig, "DELETE", "/api/v1/stacks/stack:Glow", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("Other"), "the refusal names the scene: {message}");
+    assert!(rig.app.stacks.get("stack:Glow").is_some(), "the stack is still there");
+    // With the force it goes, and the group that played it is dark.
+    let (status, answer) = send(&rig, "DELETE", "/api/v1/stacks/stack:Glow?force=true", None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(rig.app.stacks.get("stack:Glow").is_none(), "the stack is gone");
 }
 
 // ---------------------------------------------------------------- one group

@@ -256,11 +256,23 @@ pub async fn activate(
         None => false,
     };
     // Once the engine runs a scene the layout's single effect is not what plays: the groups are.
-    // The onboarding effects are the exception until the takeovers move to scenes.
     if let Some(planned) = planned {
         crate::api::scenes::commit_activation(&app, &scene_lock, planned).await?;
     }
-    if !reused && (transient || !app.scene.is_on()) {
+    if transient {
+        // The onboarding effect takes over the lights: it plays on the groups of the active
+        // scene that play it (none does), so it plays on one temporary flow-across group of
+        // every light. The timer puts the active scene back when it ends.
+        crate::scenes::apply_takeover(
+            &app,
+            &schema.id,
+            &props,
+            None,
+            crate::takeover_builder(&app, &schema.id),
+        )
+        .await
+        .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
+    } else if !reused && !app.scene.is_on() {
         crate::apply_effect(&app, &schema.id, &props)
             .await
             .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
@@ -1059,32 +1071,25 @@ pub async fn delete_effect(
     }
 
     // The effect was the active one: the daemon falls back the same way it does when
-    // the file is missing. The active layout still names it, so the restore path
+    // the file is missing. The active scene still names it, so the restore path
     // cannot build it any more and says so, exactly as it does at start.
-    let active = app.active_layout().await.and_then(|l| l.effect);
+    let playing = crate::scenes::groups_playing(&app, &id).await;
     let mut draft_ended = None;
-    if let Some(active) = active {
-        if active.id == id {
-            tracing::warn!(effect = %id, "the active user effect was deleted");
-            // A draft took this effect over from, and its prior now names a file that is
-            // gone. End the draft first, chosen over refusing the delete with a 409: the
-            // draft is in memory only, and deleting what the lights show is what the owner
-            // asked for. The restore cannot build the file any more, so the lights go black
-            // and the note says so, in the answer as well as the log.
-            if let Some(ended) = crate::draft::stop(&app, None).await.ended {
-                if let Some(note) = &ended.note {
-                    tracing::warn!(%note, "the draft ended when its prior effect was deleted");
-                }
-                draft_ended = Some(DraftEnded { note: ended.note });
+    if !playing.is_empty() {
+        tracing::warn!(effect = %id, "a user effect a group plays was deleted");
+        // A draft took this effect over from, and its prior (the active scene) now names a
+        // file that is gone. End the draft first, chosen over refusing the delete with a 409:
+        // the draft is in memory only, and deleting what the lights show is what the owner
+        // asked for. The restore cannot build the file any more, so that group goes dark and
+        // the note says so, in the answer as well as the log.
+        if let Some(ended) = crate::draft::stop(&app, None).await.ended {
+            if let Some(note) = &ended.note {
+                tracing::warn!(%note, "the draft ended when its prior effect was deleted");
             }
-            if let Err(e) = crate::apply_effect(&app, &active.id, &active.props).await {
-                tracing::warn!(
-                    effect = %active.id,
-                    error = %e,
-                    "the deleted effect could not be restored"
-                );
-            }
+            draft_ended = Some(DraftEnded { note: ended.note });
         }
+        // The scene goes on again: the group that played the deleted effect is dark.
+        crate::scenes::apply_active_ungated(&app, false).await;
     }
 
     Ok(Json(DeleteEffectResponse { ok: true, id, presets_removed, draft_ended }))

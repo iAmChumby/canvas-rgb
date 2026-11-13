@@ -270,6 +270,9 @@ const LIGHT_FEED_BACKLOG: usize = 4;
 /// What the daemon keeps while a scene runs.
 pub struct SceneRuntime {
     on: AtomicBool,
+    /// True while a takeover (a draft, an onboarding effect) holds the lights: what the engine
+    /// runs is not the scene in the store, so a scene change takes the whole scene again.
+    taken_over: AtomicBool,
     order: tokio::sync::Mutex<()>,
     /// Why a group's effect could not be built, by group id, for the scene the engine runs.
     failures: Mutex<BTreeMap<String, String>>,
@@ -292,6 +295,7 @@ impl Default for SceneRuntime {
     fn default() -> Self {
         Self {
             on: AtomicBool::new(false),
+            taken_over: AtomicBool::new(false),
             order: tokio::sync::Mutex::new(()),
             failures: Mutex::new(BTreeMap::new()),
             applied: Mutex::new(None),
@@ -310,6 +314,13 @@ impl SceneRuntime {
     /// engine (`App::set_layout`), because a layout call would end scene mode.
     pub fn is_on(&self) -> bool {
         self.on.load(Ordering::SeqCst)
+    }
+
+    /// True while a takeover holds the lights: what the engine runs is not the scene in the
+    /// store. A scene change then takes the whole scene again, because the engine's groups are
+    /// not the store's.
+    pub fn is_taken_over(&self) -> bool {
+        self.taken_over.load(Ordering::SeqCst)
     }
 
     /// Takes the order. Held across a route's read, write and apply.
@@ -382,9 +393,12 @@ impl LightFeed {
 
 /// The effect for `id`, built the way the lights build it, and what it needs. Runs on a blocking
 /// thread: an HTML effect runs its script while it loads.
-fn build_effect(app: &App, id: &str) -> Result<(Box<dyn Effect>, InputNeeds), String> {
+///
+/// `group` is the group the effect plays in: a stack resolves its layers in that group's
+/// canvas.
+fn build_effect(app: &App, id: &str, group: Option<&str>) -> Result<(Box<dyn Effect>, InputNeeds), String> {
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::create_effect(&app.user_effects, &app.stacks, id)
+        crate::create_effect(&app.user_effects, &app.stacks, id, group)
     }))
     .map_err(|payload| format!("the effect panicked while it loaded: {}", crate::panic_payload_text(&payload)))??;
     let schema = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -418,7 +432,7 @@ fn build_and_set(app: &App, lights: &[Light], devices: &[DeviceInfo], scene: &Sc
     for group in &scene.groups {
         let (effect, props) = match &group.plays {
             Plays::Off => (None, Props::new()),
-            Plays::Effect { effect: id, props } => match build_effect(app, id) {
+            Plays::Effect { effect: id, props } => match build_effect(app, id, Some(&group.id)) {
                 Ok((built, group_needs)) => {
                     needs.screen |= group_needs.screen;
                     needs.audio |= group_needs.audio;
@@ -453,11 +467,28 @@ pub async fn apply_active(app: &Arc<App>, fade: bool) {
     apply_with(app, &lock, fade).await;
 }
 
+/// [`apply_active`] for a caller that already orders the lights with the draft gate.
+///
+/// The scene order is *not* taken here, and that is deliberate: a scene write holds the scene
+/// order and then takes the draft gate (see [`crate::api::scenes::put_scene`]), while a restore
+/// holds the draft gate. A restore that took the scene order here would wait for a write that
+/// waits for the gate it holds, and the two would deadlock. The draft gate is enough: every
+/// route that replaces what is on the lights holds it (see [`crate::draft::hold_for_replace`]),
+/// so the restores and the replacements never interleave.
+pub async fn apply_active_ungated(app: &Arc<App>, fade: bool) {
+    apply_body(app, fade).await;
+}
+
 /// [`apply_active`] for a device list: a list that changes nothing the engine was handed (the
 /// same lights, the same devices, the same scene) rebuilds nothing, so the supervisor's refresh
 /// never restarts an effect.
 pub async fn apply_for_devices(app: &Arc<App>) {
     let lock = app.scene.lock().await;
+    // A takeover holds the lights: the engine's groups are not the store's, so a device list
+    // does not put the scene back over it.
+    if app.scene.is_taken_over() {
+        return;
+    }
     let key = snapshot(app).await;
     let unchanged = app.scene.is_on()
         && app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()).as_ref() == Some(&key);
@@ -466,7 +497,6 @@ pub async fn apply_for_devices(app: &Arc<App>) {
     }
     apply_with(app, &lock, false).await;
 }
-
 async fn snapshot(app: &App) -> Applied {
     let (lights, scene) = {
         let store = app.store.read().await;
@@ -477,6 +507,11 @@ async fn snapshot(app: &App) -> Applied {
 
 /// [`apply_active`] for a caller that holds the order.
 pub async fn apply_with(app: &Arc<App>, _lock: &SceneLock<'_>, fade: bool) {
+    apply_body(app, fade).await;
+}
+
+/// The body of every apply: the active scene is built and handed to the engine.
+async fn apply_body(app: &Arc<App>, fade: bool) {
     let key = snapshot(app).await;
     let built = {
         let app = Arc::clone(app);
@@ -488,10 +523,272 @@ pub async fn apply_with(app: &Arc<App>, _lock: &SceneLock<'_>, fade: bool) {
             *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
             *app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
             app.scene.on.store(true, Ordering::SeqCst);
+            // The scene is on the lights again: a takeover is over.
+            app.scene.taken_over.store(false, Ordering::SeqCst);
             app.scene.notify();
+            // The masks of the groups follow the scene: a stack resolves its layers in the group
+            // it plays in.
+            publish_group_areas(app).await;
         }
         Err(e) => tracing::error!(error = %e, "the scene could not be applied: the build task failed"),
     }
+}
+
+// ---------------------------------------------------------------- takeovers
+
+/// The id of the group a takeover uses when no group of the active scene plays the effect: one
+/// temporary flow-across group of every light.
+pub const TAKEOVER_GROUP: &str = "takeover";
+
+/// How a takeover makes its effect: one call per group it lands on, with that group's id. It
+/// is an `Arc` so it can cross to the blocking thread that builds the effect.
+pub type EffectBuilder = Arc<dyn Fn(&str) -> Result<Box<dyn Effect>, String> + Send + Sync>;
+
+/// One group, with what the engine needs to run it.
+#[derive(Clone, Debug)]
+pub struct GroupRun {
+    /// The group's id.
+    pub id: String,
+    /// The group's members, in the owner's order.
+    pub members: Vec<LightId>,
+    /// How the group's members share the canvas.
+    pub mode: GroupMode,
+    /// Every light the daemon knows.
+    pub lights: Vec<Light>,
+    /// The devices the daemon sees.
+    pub devices: Vec<DeviceInfo>,
+}
+
+impl GroupRun {
+    /// The engine's group, with an effect on it.
+    pub fn engine_group(&self, effect: Option<Box<dyn Effect>>, props: &Props) -> EngineGroup {
+        EngineGroup {
+            id: self.id.clone(),
+            members: self.members.clone(),
+            mode: self.mode,
+            brightness: GROUP_BRIGHTNESS_MAX,
+            effect,
+            props: props.clone(),
+        }
+    }
+}
+
+/// The group of the active scene with this id, with what the engine needs to run it.
+/// `None` when the active scene has no group with that id.
+pub async fn group_run(app: &App, id: &str) -> Option<GroupRun> {
+    let (group, lights) = {
+        let store = app.store.read().await;
+        let scene = active_scene(&store.scenes);
+        let group = scene.groups.iter().find(|g| g.id == id)?.clone();
+        (group, store.lights.lights.clone())
+    };
+    let devices = app.devices.read().await.clone();
+    Some(GroupRun {
+        id: group.id,
+        members: group.members,
+        mode: group.mode,
+        lights,
+        devices,
+    })
+}
+
+/// The temporary group of every light, flowing across: what a takeover with no group of its
+/// own shows, and what a stack preview with no group shows.
+pub async fn every_light_run(app: &App) -> GroupRun {
+    let lights = app.store.read().await.lights.lights.clone();
+    let devices = app.devices.read().await.clone();
+    GroupRun {
+        id: TAKEOVER_GROUP.to_string(),
+        members: lights.iter().map(|l| l.id.clone()).collect(),
+        mode: GroupMode::FlowAcross,
+        lights,
+        devices,
+    }
+}
+
+/// The scenes that have a group playing `effect`, by id and name.
+pub async fn scenes_playing(app: &App, effect: &str) -> Vec<(String, String)> {
+    let store = app.store.read().await;
+    store
+        .scenes
+        .scenes
+        .iter()
+        .filter(|scene| {
+            scene.groups.iter().any(|group| match &group.plays {
+                Plays::Effect { effect: playing, .. } => playing == effect,
+                Plays::Off => false,
+            })
+        })
+        .map(|scene| (scene.id.clone(), scene.name.clone()))
+        .collect()
+}
+
+/// Publishes the masks of the active scene's groups: a stack resolves its layers in the group
+/// it plays in.
+pub async fn publish_group_areas(app: &Arc<App>) {
+    let (lights, devices) = {
+        let store = app.store.read().await;
+        (store.lights.lights.clone(), app.devices.read().await.clone())
+    };
+    let scene = {
+        let store = app.store.read().await;
+        active_scene(&store.scenes).clone()
+    };
+    let mut maps = BTreeMap::new();
+    for group in &scene.groups {
+        let plan = canvas_core::arrangement::build_group_plan(
+            &group.members,
+            group.mode,
+            &lights,
+            &devices,
+        );
+        maps.insert(
+            group.id.clone(),
+            crate::stack::AreaMap::build_for_group(
+                &plan,
+                &lights,
+                canvas_core::scene_engine::SCENE_SAMPLING,
+                0,
+            ),
+        );
+    }
+    // The temporary group of every light: what a takeover with no group of its own shows.
+    let plan = canvas_core::arrangement::build_group_plan(
+        &every_light_run(app).await.members,
+        GroupMode::FlowAcross,
+        &lights,
+        &devices,
+    );
+    maps.insert(
+        TAKEOVER_GROUP.to_string(),
+        crate::stack::AreaMap::build_for_group(
+            &plan,
+            &lights,
+            canvas_core::scene_engine::SCENE_SAMPLING,
+            0,
+        ),
+    );
+    app.stacks.publish_group_areas(maps);
+}
+
+/// The groups of the active scene that play `effect`, by id, in the scene's order.
+pub async fn groups_playing(app: &App, effect: &str) -> Vec<String> {
+    let store = app.store.read().await;
+    active_scene(&store.scenes)
+        .groups
+        .iter()
+        .filter(|group| match &group.plays {
+            Plays::Effect { effect: playing, .. } => playing == effect,
+            Plays::Off => false,
+        })
+        .map(|group| group.id.clone())
+        .collect()
+}
+
+/// The schema of a built effect, behind the guard: a panicking schema is an error, never a
+/// crash.
+fn schema_of(effect: &dyn Effect) -> Result<canvas_proto::props::PropertySchema, String> {
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+        canvas_core::effect_guard::run_guarded(|| effect.schema())
+    }))
+    .map_err(|payload| format!("the effect's schema panicked: {}", crate::panic_payload_text(&payload)))
+}
+
+/// Puts a takeover on the lights: the effect on every group of the active scene whose `Plays`
+/// names it, or on one temporary flow-across group of every light when no group plays it.
+///
+/// `ready` is an instance that is already built; it goes on the first group the takeover lands
+/// on, so the caller that built one does not build it twice. `build` makes the rest, one per
+/// group. It runs on a blocking thread: building an HTML effect runs its scripts, which must not
+/// block the async workers.
+///
+/// Returns the groups the takeover is on: the scene's own group ids, or [`TAKEOVER_GROUP`].
+pub async fn apply_takeover(
+    app: &Arc<App>,
+    effect: &str,
+    props: &Props,
+    ready: Option<Box<dyn Effect>>,
+    build: EffectBuilder,
+) -> Result<Vec<String>, String> {
+    let groups = groups_playing(app, effect).await;
+    let mut needs = {
+        let store = app.store.read().await;
+        let scene = active_scene(&store.scenes).clone();
+        needs_of(app, &scene)
+    };
+    // Anything that is not a stack means no stack is on the engine: whatever was running is
+    // gone, and a later activation of it must build again.
+    let mut stack = false;
+    let mut ready = ready;
+
+    if groups.is_empty() {
+        // No group plays it: one temporary flow-across group of every light.
+        let lights = app.store.read().await.lights.lights.clone();
+        if lights.is_empty() {
+            return Ok(Vec::new());
+        }
+        let devices = app.devices.read().await.clone();
+        let made = match ready.take() {
+            Some(effect) => effect,
+            None => build_one(&build, TAKEOVER_GROUP).await?,
+        };
+        let schema = schema_of(made.as_ref())?;
+        needs.screen |= schema.needs.screen;
+        needs.audio |= schema.needs.audio;
+        stack = schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX);
+        let group = EngineGroup {
+            id: TAKEOVER_GROUP.to_string(),
+            members: lights.iter().map(|l| l.id.clone()).collect(),
+            mode: GroupMode::FlowAcross,
+            brightness: GROUP_BRIGHTNESS_MAX,
+            effect: Some(made),
+            props: props.clone(),
+        };
+        if !stack {
+            app.stacks.clear_running();
+        }
+        app.engine.set_scene(lights, devices, vec![group], false);
+        app.inputs.apply_needs(needs);
+        // The engine's groups are not the store's now: a scene change takes the whole scene.
+        app.scene.taken_over.store(true, Ordering::SeqCst);
+        app.scene.notify();
+        return Ok(vec![TAKEOVER_GROUP.to_string()]);
+    }
+
+    let mut landed = Vec::with_capacity(groups.len());
+    for group in groups {
+        let made = match ready.take() {
+            Some(effect) => effect,
+            None => build_one(&build, &group).await?,
+        };
+        let schema = schema_of(made.as_ref())?;
+        needs.screen |= schema.needs.screen;
+        needs.audio |= schema.needs.audio;
+        if schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+            stack = true;
+        }
+        app.engine.set_group_effect(&group, Some(made), props);
+        landed.push(group);
+    }
+    if !stack {
+        app.stacks.clear_running();
+    }
+    app.inputs.apply_needs(needs);
+    // The engine's groups are not the store's now: a scene change takes the whole scene.
+    app.scene.taken_over.store(true, Ordering::SeqCst);
+    app.scene.notify();
+    Ok(landed)
+}
+
+/// Builds one instance of a takeover's effect, on a blocking thread: building an HTML effect
+/// runs its scripts, which must not block the async workers. The group id is the one the
+/// instance is for: a stack resolves its layers in that group's canvas.
+async fn build_one(build: &EffectBuilder, group: &str) -> Result<Box<dyn Effect>, String> {
+    let build = Arc::clone(build);
+    let group = group.to_string();
+    tokio::task::spawn_blocking(move || build(&group))
+        .await
+        .map_err(|e| format!("the effect load task failed: {e}"))?
 }
 
 /// Brings the engine from `old` to `new`, the same scene saved with a change. It rebuilds only the
@@ -500,6 +797,12 @@ pub async fn apply_with(app: &Arc<App>, _lock: &SceneLock<'_>, fade: bool) {
 /// was added, removed or reordered, or its members or mode changed, the engine takes the whole
 /// scene again (`set_scene` is the only way members reach it), so every effect is built again.
 pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scene, new: &Scene) {
+    // A takeover holds the lights: the engine's groups are not the store's, so a change of one
+    // group cannot be made on them. The whole scene goes on again.
+    if app.scene.is_taken_over() {
+        apply_with(app, lock, false).await;
+        return;
+    }
     let same_shape = old.groups.len() == new.groups.len()
         && old.groups.iter().zip(&new.groups).all(|(o, n)| o.id == n.id && o.members == n.members && o.mode == n.mode);
     if !same_shape {
@@ -521,7 +824,8 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
                     let built = {
                         let app = Arc::clone(app);
                         let id = effect.clone();
-                        tokio::task::spawn_blocking(move || build_effect(&app, &id)).await
+                        let group = after.id.clone();
+                        tokio::task::spawn_blocking(move || build_effect(&app, &id, Some(&group))).await
                     };
                     match built {
                         Ok(Ok((made, _))) => {

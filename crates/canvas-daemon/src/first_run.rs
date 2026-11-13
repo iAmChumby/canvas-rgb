@@ -850,9 +850,9 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         }
     }
 
-    // Re-discover after sizing, so the layout and the engine see the new LED counts (the
+    // Re-discover after sizing, so the scene and the engine see the new LED counts (the
     // list read above still has the headers at 0 LEDs).
-    let devices = if sizes.is_empty() {
+    let _devices = if sizes.is_empty() {
         devices
     } else {
         let rediscovered = app.adapter.lock().await.discover().await;
@@ -868,35 +868,18 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         }
     };
 
-    // Place the devices and activate the first effect. The effect is saved on the layout,
-    // as the activate route does, so the status and the next start both see it.
-    let props = canvas_proto::props::Props::new();
-    let mut layout = build_default_layout(&devices);
-    layout.effect = Some(canvas_proto::layout::ActiveEffect {
-        id: FIRST_RUN_EFFECT.to_string(),
-        props: props.clone(),
-    });
-    {
-        let mut store = app.store.write().await;
-        store.layouts.active = layout.id.clone();
-        match store.layouts.layouts.iter_mut().find(|l| l.id == layout.id) {
-            Some(existing) => *existing = layout.clone(),
-            None => store.layouts.layouts.push(layout.clone()),
-        }
-        crate::logging::warn_if_err("the first run could not save the layouts", store.save_layouts());
-    }
-    let device_list = app.devices.read().await.clone();
-    // The first run puts an effect of its own on the lights: a draft (only possible when a
-    // completed setup is walked through again) ends here, and a beat cannot start another
-    // until this effect is on.
+    // The scene: the store made it from the first device list (on a first run the migration
+    // through `migrate(None, devices)`), and it is already on disk. Nothing is written here:
+    // writing it twice would fight the migration the store owns.
+    //
+    // The default scene plays the first run's effect, so applying the scene puts the lights
+    // on the way the owner expects.
     let _replace = crate::draft::hold_for_replace(app).await;
-    app.set_layout(&layout, &device_list);
-    app.stacks.publish_areas(&layout, &device_list);
-
-    if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {
-        tracing::error!(error = %e, effect = FIRST_RUN_EFFECT, "the first run could not activate the effect");
-    } else {
-        tracing::info!(effect = FIRST_RUN_EFFECT, "the first run activated the effect");
+    crate::scenes::apply_active_ungated(app, false).await;
+    {
+        let store = app.store.read().await;
+        let scene = crate::scenes::active_scene(&store.scenes);
+        tracing::info!(scene = %scene.name, groups = scene.groups.len(), effect = FIRST_RUN_EFFECT, "the first run applied the default scene");
     }
 
     // The zone panel stays open until the user dismisses it.

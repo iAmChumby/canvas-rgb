@@ -5,7 +5,7 @@
 
 use canvas_daemon::cli::{
     Cli, CliError, Command, ConfigCommand, DevicesCommand, DiagCommand, EffectsCommand, FansCommand,
-    OutputCommand, PeripheralsCommand,
+    OutputCommand, PeripheralsCommand, ScenesCommand,
 };use clap::Parser;
 use std::process::ExitCode;
 
@@ -29,6 +29,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Effects(EffectsCommand::Activate(args)) => effects_activate(cli, args),
         Command::Effects(EffectsCommand::Import(args)) => effects_import(cli, args),
         Command::Effects(EffectsCommand::Check(args)) => effects_check(cli, args),
+        Command::Scenes(ScenesCommand::List) => scenes_list(cli),
+        Command::Scenes(ScenesCommand::Set { name }) => scenes_set(cli, name),
         Command::Output(OutputCommand::Pause) => output(cli, "paused"),
         Command::Output(OutputCommand::Resume) => output(cli, "running"),
         Command::Fans(FansCommand::Status) => fans_status(cli),
@@ -116,12 +118,25 @@ fn status(cli: &Cli) -> Result<(), CliError> {
     if let Some(down) = status.get("service_down_ms").and_then(|v| v.as_u64()) {
         println!("               down for {down} ms");
     }
-    println!(
-        "  layout       {}",
+    println!("  layout       {}",
         status.get("active_layout").and_then(|v| v.as_str()).unwrap_or("none")
     );
-    println!(
-        "  effect       {}",
+    // The active scene: its name, and its id beside it.
+    let scene = status.get("active_scene");
+    let scene_name = scene
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let scene_id = scene
+        .and_then(|s| s.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if scene_id.is_empty() {
+        println!("  scene        {scene_name}");
+    } else {
+        println!("  scene        {scene_name} ({scene_id})");
+    }
+    println!("  effect       {}",
         status.get("active_effect").and_then(|v| v.as_str()).unwrap_or("none")
     );
     if status.get("show_zone_panel").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -255,7 +270,14 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
         props.insert(key, serde_json::to_value(parsed).map_err(|e| CliError::Other(e.to_string()))?);
     }
 
-    let body = serde_json::json!({ "props": props }).to_string();
+    // The groups the effect plays on, by name: with none, every group of the active scene
+    // plays it.
+    let mut body = serde_json::Map::new();
+    body.insert("props".into(), serde_json::Value::Object(props));
+    if !args.groups.is_empty() {
+        body.insert("groups".into(), serde_json::json!(args.groups));
+    }
+    let body = serde_json::Value::Object(body).to_string();
     let answer = client.request(
         "POST",
         &format!("{}/{}/activate", canvas_proto::api::routes::EFFECTS, args.effect),
@@ -265,6 +287,26 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
         print_json(cli, &answer);
     } else {
         println!("activated {}", args.effect);
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes list`.
+fn scenes_list(cli: &Cli) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_list(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes set <name>`.
+fn scenes_set(cli: &Cli, name: &str) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_set(&client, name, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
     }
     Ok(())
 }
