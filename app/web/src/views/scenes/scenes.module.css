@@ -42,8 +42,39 @@
 /* The strip scrolls sideways when the keys outrun the window; a fade on each edge that has more
    behind it says so, since the bars are hidden everywhere. */
 .stripFrame {
-  position: relative;
+  display: flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: var(--s3);
+}
+
+/* The keys and their edge fades; the "N new" slot sits beside them. */
+.stripScroll {
+  position: relative;
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+/* The slot for the "N new" key is always there, at the same size, so the strip never changes
+   width when a light arrives or is dismissed. */
+.newSlot {
+  display: flex;
+  flex: 0 0 auto;
+  align-items: center;
+  justify-content: flex-end;
+  width: 92px;
+  height: 40px;
+}
+
+.newSlot button.newKey {
+  width: 100%;
+  height: 40px;
+  padding: 0 var(--s3);
+  justify-content: center;
+  gap: var(--s2);
+  border-radius: var(--r-md);
+  font: 600 var(--t15) / 1 var(--fu);
+  white-space: nowrap;
 }
 
 .fadeStart,
@@ -63,12 +94,13 @@
 }
 
 .fadeEnd {
-  right: 0;
+  /* left of the pinned "+" key (40 px and its 8 px of padding) */
+  right: 48px;
   background: linear-gradient(to left, var(--g1), transparent);
 }
 
-.stripFrame[data-start="true"] .fadeStart,
-.stripFrame[data-end="true"] .fadeEnd {
+.stripScroll[data-start="true"] .fadeStart,
+.stripScroll[data-end="true"] .fadeEnd {
   opacity: 1;
 }
 
@@ -107,6 +139,22 @@
 
 .strip button.sceneKey[aria-pressed="true"] {
   color: var(--ink);
+}
+
+/* The "+" key is pinned to the strip's right edge: when the scene keys outrun the window they slide
+   behind it, so the key that makes a scene is always on screen. The gap to its left is its own
+   padding, over the page's colour, so keys do not show through beside it. */
+.plusPin {
+  position: sticky;
+  right: 0;
+  z-index: 1;
+  display: flex;
+  flex: 0 0 auto;
+  align-self: stretch;
+  align-items: center;
+  margin-left: calc(var(--s2) * -1);
+  padding-left: var(--s2);
+  background: var(--g1);
 }
 
 .strip button.plusKey {
@@ -361,10 +409,21 @@
   padding-top: var(--s1);
 }
 
-/* The notice for a new light is the first thing in the list, in the flow: it covers no row, and a
-   keyboard reaches it right after the scene keys. */
+/* The notice for a new light sits under the Unassigned row the light is in, above "New group":
+   nothing above it moves when it arrives or goes. The "N new" key in the strip scrolls to it. */
 .notice {
   flex: none;
+  scroll-margin-block: var(--s3);
+}
+
+.notice:focus {
+  outline: none;
+}
+
+.notice:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 3px;
+  border-radius: var(--r-md);
 }
 
 /* The keys are the banner's own action items and wrap with them: every key is on screen at every
@@ -485,8 +544,26 @@
     position: sticky;
     top: 0;
     z-index: 2;
+    align-items: flex-start;
+    gap: 0;
     margin: calc(var(--s3) * -1) calc(var(--s3) * -1) 0;
     background: var(--g1);
+  }
+
+  /* The slot sits level with the keys: the strip's own padding sets their top. */
+  .newSlot {
+    margin: var(--s3) var(--s3) 0 0;
+    width: 60px;
+  }
+
+  /* The phone has no room for the plus: the count and the word are the key. */
+  .newSlot button.newKey {
+    padding: 0 var(--s2);
+    font-size: var(--t14);
+  }
+
+  .newIcon {
+    display: none;
   }
 
   .strip {

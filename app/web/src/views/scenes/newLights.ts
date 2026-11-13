@@ -68,7 +68,9 @@ export function useNewLights(
   const seen = useSyncExternalStore(subscribe, getSeen, () => null);
 
   useEffect(() => {
-    if (!all) return;
+    // An empty list is not a first look at the lights: nothing has been seen yet, and a light that
+    // arrives later must not be announced for it. The first visit is the first list with a light in it.
+    if (!all || all.length === 0) return;
     if (seen === null) {
       // First visit: everything on screen is known, and nothing is announced.
       markSeen(all.map((l) => l.light.id));

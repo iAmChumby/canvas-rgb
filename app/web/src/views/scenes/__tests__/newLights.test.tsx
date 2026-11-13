@@ -102,6 +102,19 @@ describe("useNewLights", () => {
     expect(result.current.fresh).toEqual([]);
   });
 
+  it("an empty list on the first visit seeds nothing: the first light list with lights in it is the first look", () => {
+    const { result, rerender } = mount([], []);
+    expect(result.current.fresh).toEqual([]);
+    expect(window.localStorage.getItem(SEEN_LIGHTS_KEY)).toBeNull();
+    // The lights arrive after the empty read: they are known, not announced.
+    rerender({ all: [A, B], unassigned: [A, B] });
+    expect(result.current.fresh).toEqual([]);
+    expect(JSON.parse(window.localStorage.getItem(SEEN_LIGHTS_KEY) ?? "null")).toEqual(["a#z0", "b#z0"]);
+    // A light after that is new.
+    rerender({ all: [A, B, C], unassigned: [A, B, C] });
+    expect(ids(result.current.fresh)).toEqual(["c#z0"]);
+  });
+
   it("still works when the browser's storage is blocked: nothing throws, and a light is announced once seen new", () => {
     vi.spyOn(Storage.prototype, "getItem").mockImplementation(() => {
       throw new DOMException("blocked", "SecurityError");

@@ -1,6 +1,6 @@
 "use client";
 
-import { useRef, useState } from "react";
+import { useRef, useState, type Ref } from "react";
 import { CaretDown, Plus } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button } from "@/components/Button";
@@ -58,15 +58,18 @@ function MoreGroups({ groups, onAdd }: { groups: Group[]; onAdd: (groupId: strin
 
 /**
  * The notice for a light that was just detected and that no group holds: one key per group for
- * the first few, a menu for the rest. It sits in the flow above the rows, so it covers nothing and
- * it is the first thing a keyboard reaches after the scene keys.
+ * the first few, a menu for the rest. It sits at the foot of the list, under the Unassigned row the
+ * light is in, so its arrival and its dismissal move no row above it. The "N new" key in the scene
+ * strip scrolls to it and focuses it (`noticeRef`), which keeps it a few Tab stops from the top.
  */
 export function NewLightNotice({
   fresh,
   groups,
   onAdd,
   onDismiss,
+  noticeRef,
 }: {
+  noticeRef?: Ref<HTMLDivElement>;
   fresh: LightView[];
   groups: Group[];
   onAdd: (groupId: string) => void;
@@ -75,7 +78,7 @@ export function NewLightNotice({
   const shown = groups.slice(0, NOTICE_KEYS);
   const rest = groups.slice(NOTICE_KEYS);
   return (
-    <div className={s.notice} role="region" aria-label={`New: ${namesOf(fresh)}`}>
+    <div className={s.notice} ref={noticeRef} tabIndex={-1} role="region" aria-label={`New: ${namesOf(fresh)}`}>
       <Banner
         tone="work"
         icon={<Plus size={20} weight="bold" />}

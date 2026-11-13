@@ -64,6 +64,16 @@ export function links(status: Status | null, offline: boolean): Link[] {
   ];
 }
 
+/** What the scenes are doing wrong, for the status mark: groups that cannot light, and a read that failed. */
+export interface SceneFaults {
+  /** Groups of the active scene whose last write failed (a missing effect, a refused value). */
+  dark: number;
+  /** The scenes could not be read at all. */
+  unread: boolean;
+}
+
+export const NO_FAULTS: SceneFaults = { dark: 0, unread: false };
+
 /**
  * What is not working, worst first. An empty list means everything is fine.
  *
@@ -72,7 +82,7 @@ export function links(status: Status | null, offline: boolean): Link[] {
  * coming up. The words are short on purpose: the strip has one line, and a phone has one
  * line's worth of room.
  */
-export function problems(status: Status | null, offline: boolean): Problem[] {
+export function problems(status: Status | null, offline: boolean, scenes: SceneFaults = NO_FAULTS): Problem[] {
   const out: Problem[] = [];
   if (offline) {
     out.push({ tone: "down", text: "Daemon offline", short: "Daemon" });
@@ -84,6 +94,15 @@ export function problems(status: Status | null, offline: boolean): Problem[] {
   }
   if (status.openrgb === "down") out.push({ tone: "down", text: "OpenRGB down", short: "OpenRGB" });
   if (status.service === "down") out.push({ tone: "down", text: "Fan control off", short: "Fans" });
+  if (scenes.dark > 0) {
+    // A group whose effect cannot run is dark: the lights it holds sit unlit, so it is said in words.
+    out.push({
+      tone: "warn",
+      text: scenes.dark === 1 ? "1 group dark" : `${scenes.dark} groups dark`,
+      short: scenes.dark === 1 ? "Group dark" : `${scenes.dark} dark`,
+    });
+  }
+  if (scenes.unread) out.push({ tone: "warn", text: "Scenes not read", short: "Scenes" });
   // The lights are running, but not at the rate they were asked for.
   if (status.power === "running" && !status.parked && status.fps_measured < status.fps_target - 1) {
     out.push({ tone: "warn", text: "Running slow" });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { CheckCircle, CircleDashed, MagnifyingGlass, Pause, Play, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Button, IconButton, Swap } from "@/components/Button";
 import { IconSwap } from "@/components/IconSwap";
@@ -12,7 +12,7 @@ import { Popover } from "@/components/Popover";
 import { notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { links, playing, problems, type Tone } from "@/lib/status";
+import { links, playing, problems, type SceneFaults, type Tone } from "@/lib/status";
 import { patchSnap, refreshStatus, useSnap } from "@/lib/store";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { RunningPresetName, useTrackRunningPreset } from "@/shell/RunningPresetName";
@@ -59,6 +59,8 @@ export function StatusStrip({
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
   const effects = useSnap((s) => s.effects);
+  const scenesAnswer = useSnap((s) => s.scenes);
+  const scenesError = useSnap((s) => s.scenesError);
   const [busy, setBusy] = useState(false);
   const stripRef = useRef<HTMLDivElement>(null);
   const markRef = useRef<HTMLButtonElement>(null);
@@ -88,7 +90,16 @@ export function StatusStrip({
   // With scenes the strip names the scene, so no one effect's preset belongs after it.
   const presetId = status?.active_scene ? null : (status?.active_effect ?? null);
   useTrackRunningPreset(presetId);
-  const list = problems(status, offline);
+  // A group that cannot light and a scene list that could not be read are said in the mark, at
+  // every width, so the row never claims "All connected" over a dark group.
+  const faults = useMemo<SceneFaults>(
+    () => ({
+      dark: (scenesAnswer?.group_states ?? []).filter((g) => g.failed !== null).length,
+      unread: scenesAnswer === null && scenesError !== null,
+    }),
+    [scenesAnswer, scenesError],
+  );
+  const list = problems(status, offline, faults);
   const tone: Tone = list[0]?.tone ?? "ok";
   // On a phone the row has room for the link's name, not for the whole sentence. The full
   // words are the button's own label, so nothing is lost.
@@ -134,6 +145,7 @@ export function StatusStrip({
           <span
             className="strip-swatch"
             data-paused={paused ? "true" : "false"}
+            data-idle={known ? "false" : "true"}
             role="img"
             aria-label={swatchLabel}
             title={swatchLabel}

@@ -227,12 +227,45 @@ describe("the Scenes page", () => {
     expect(draft.groups[0]?.members).not.toContain(FRESH.light.id);
   });
 
-  it("the notice comes before the rows, so a keyboard reaches it early and it covers none", () => {
+  it("the notice sits after every row, so its arrival moves none of them", () => {
     withFresh();
     const notice = screen.getByRole("region", { name: /Desk lamp/ });
-    const firstRow = rows()[0] as HTMLElement;
-    expect(notice.compareDocumentPosition(firstRow) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    for (const row of rows()) {
+      expect(row.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    const unassigned = screen.getByTestId("unassigned-row");
+    expect(unassigned.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
     expect(within(notice).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+
+  it("the strip holds a slot for the 'N new' key whether or not a light is new; the key scrolls to the notice and focuses it", () => {
+    mount(fake());
+    expect(screen.getByTestId("new-slot")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /new light/ })).toBeNull();
+    cleanup();
+    withFresh();
+    expect(screen.getByTestId("new-slot")).toBeTruthy();
+    const key = screen.getByRole("button", { name: /1 new light, go to the notice/ });
+    expect(key.textContent).toContain("1 new");
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    fireEvent.click(key);
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: /Desk lamp/ }));
+  });
+
+  it("the '3 more' menu closes on Escape and on a click outside, and hands focus back to its key", () => {
+    withFresh();
+    const notice = screen.getByRole("region", { name: /Desk lamp/ });
+    const more = within(notice).getByRole("button", { name: /more$/ });
+    fireEvent.click(more);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(more.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(more);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.pointerDown(document.body);
+    expect(more.getAttribute("aria-expanded")).toBe("false");
   });
 
   it("the notice goes when it is dismissed", () => {

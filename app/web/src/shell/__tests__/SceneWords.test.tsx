@@ -162,4 +162,47 @@ describe("the status strip", () => {
     );
     expect(document.querySelector(".strip-effect-name")?.textContent).toBe("Offline");
   });
+
+  const strip = () =>
+    render(
+      <StripSlotsProvider>
+        <StatusStrip detailsOpen={false} onDetailsOpen={() => {}} />
+      </StripSlotsProvider>,
+    );
+  const mark = () => document.querySelector(".strip-mark") as HTMLElement;
+
+  it("says a group is dark in words, never 'All connected' over it", () => {
+    const states = DEMO_SCENES.scenes[0]?.groups.map((g, i) => ({ id: g.id, failed: i === 0 ? "gone" : null })) ?? [];
+    patchSnap({
+      status: status(),
+      effects: EFFECTS,
+      statusError: null,
+      scenes: { active: "gaming", scenes: structuredClone(DEMO_SCENES.scenes), group_states: states },
+      scenesError: null,
+    });
+    strip();
+    expect(mark().getAttribute("aria-label")).toBe("1 group dark");
+    expect(mark().textContent).toContain("1 group dark");
+    expect(mark().textContent).not.toContain("All connected");
+    expect(mark().getAttribute("data-tone")).toBe("warn");
+  });
+
+  it("says the scenes could not be read, where the scene's name would otherwise sit over a green tick", () => {
+    patchSnap({ status: status(), effects: EFFECTS, statusError: null, scenes: null, scenesError: "refused" });
+    strip();
+    expect(mark().getAttribute("aria-label")).toBe("Scenes not read");
+    expect(mark().getAttribute("data-tone")).toBe("warn");
+  });
+
+  it("is all connected again once every group lights and the scenes are read", () => {
+    patchSnap({
+      status: status(),
+      effects: EFFECTS,
+      statusError: null,
+      scenes: { active: "gaming", scenes: structuredClone(DEMO_SCENES.scenes), group_states: [] },
+      scenesError: null,
+    });
+    strip();
+    expect(mark().getAttribute("data-tone")).toBe("ok");
+  });
 });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowClockwise, ArrowCounterClockwise, Plus, SquaresFour } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
@@ -45,7 +45,7 @@ function ScenesShape({ rows }: { rows: number }) {
 
 /**
  * The Scenes page: the scene keys, then one row per group of the active scene with its live
- * LEDs, the lights no group holds, and the notice for a light that was just detected. Every
+ * LEDs, the lights no group holds, and under them the notice for a light that was just detected. Every
  * change reaches the lights at once (`useScene`); there is no Save.
  */
 export function ScenesView() {
@@ -58,6 +58,7 @@ export function ScenesView() {
   const scenesError = useSnap((st) => st.scenesError);
   const retrying = useSnap((st) => st.pending.includes("scenes"));
   const [openId, setOpenId] = useState<string | null>(null);
+  const noticeRef = useRef<HTMLDivElement>(null);
   const { scene, unassigned, error } = use;
 
   const byId = useMemo(() => new Map((lights ?? []).map((l) => [l.light.id, l])), [lights]);
@@ -104,6 +105,15 @@ export function ScenesView() {
       const group = draft.groups.find((g) => g.id === groupId);
       if (group) group.members.push(...ids.filter((id) => !group.members.includes(id)));
     }, "Add a new light to a group");
+  };
+
+  // The "N new" key in the strip: the notice is at the foot of the list, so scroll to it and move focus there.
+  const jumpToNotice = () => {
+    const el = noticeRef.current;
+    if (!el) return;
+    const calm = window.matchMedia?.("(prefers-reduced-motion: reduce)").matches ?? false;
+    el.scrollIntoView?.({ block: "nearest", behavior: calm ? "auto" : "smooth" });
+    el.focus({ preventScroll: true });
   };
 
   const newScene = () => {
@@ -176,8 +186,10 @@ export function ScenesView() {
         active={scene?.id ?? null}
         loading={state === "loading"}
         canCopy={state === "ready"}
+        fresh={scene ? fresh.length : 0}
         onSet={use.setActive}
         onNew={newScene}
+        onJumpToNew={jumpToNotice}
       />
 
       <LightFeedContext.Provider value={feed}>
@@ -197,16 +209,6 @@ export function ScenesView() {
           }
         >
           <div className={s.list}>
-            {fresh.length > 0 && scene && (
-              <NewLightNotice
-                fresh={fresh}
-                groups={scene.groups}
-                onAdd={addFresh}
-                onDismiss={() => {
-                  for (const l of fresh) dismiss(l.light.id);
-                }}
-              />
-            )}
             {groups.length === 0 && (
               <EmptyState icon={<SquaresFour size={22} />} title="This scene has no groups yet">
                 Make a group from the devices below and they light up.
@@ -233,6 +235,19 @@ export function ScenesView() {
             })}
             {/* With no list of lights there is nothing to say is unassigned. */}
             {lightsState === "ready" && unassigned.length > 0 && <UnassignedRow lights={unassigned} />}
+            {/* The notice is at the foot, under the Unassigned row the new light is in: it arrives and
+                leaves below every group row, so none of them moves. */}
+            {fresh.length > 0 && scene && (
+              <NewLightNotice
+                noticeRef={noticeRef}
+                fresh={fresh}
+                groups={scene.groups}
+                onAdd={addFresh}
+                onDismiss={() => {
+                  for (const l of fresh) dismiss(l.light.id);
+                }}
+              />
+            )}
             <div className={s.newGroup}>
               <Button
                 icon={<Plus size={16} />}
