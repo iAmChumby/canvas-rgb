@@ -27,7 +27,7 @@ const { api } = vi.hoisted(() => ({
 vi.mock("@/lib/endpoints", () => ({ api }));
 
 import { ApiFailure } from "@/lib/errors";
-import { patchSnap } from "@/lib/store";
+import { getSnap, patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES, demoSceneProblem } from "@/lib/fixtures";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
@@ -773,6 +773,80 @@ describe("useScene", () => {
     const [id, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
     expect(id).toBe(second.id);
     expect(body.scene.groups[0]?.brightness).toBe(second.groups[0]?.brightness);
+  });
+
+  it("a live write left at unmount waits for the save on its way, and its answer is kept", async () => {
+    const { result, unmount } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const sceneId = result.current.scene?.id ?? "";
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // A live write and a save of the scene are never on their way together. Counted here and
+    // asserted after the run: an expect inside a mock is swallowed by the page's own catch.
+    let onTheWay = 0;
+    let overlaps = 0;
+    const track = <T,>(call: () => Promise<T>): Promise<T> => {
+      onTheWay += 1;
+      if (onTheWay > 1) overlaps += 1;
+      return call().finally(() => {
+        onTheWay -= 1;
+      });
+    };
+
+    // This window's first save is out until the test lets it land.
+    let holdFirst = true;
+    let releaseFirst!: () => void;
+    api.scenes.put.mockImplementation((_id: string, body: { scene: Scene; expected_rev: number }) =>
+      track(async () => {
+        if (holdFirst) {
+          holdFirst = false;
+          await new Promise<void>((resolve) => {
+            releaseFirst = resolve;
+          });
+        }
+        serverRev = body.expected_rev + 1;
+        return { ...clone(body.scene), rev: serverRev };
+      }),
+    );
+    api.scenes.patchGroupProps.mockImplementation((_id: string, group: string, props: Props) =>
+      track(async () => answerLive(group, props)),
+    );
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "First";
+      }, "Rename");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+
+    // A slider value waits behind the save, and a second edit lands while the save is out.
+    act(() => {
+      result.current.setProps(groupId, number(9));
+      result.current.edit((draft) => {
+        draft.name = "Second";
+      }, "Rename again");
+    });
+
+    // The page goes away with both still waiting; then the first save lands.
+    unmount();
+    await act(async () => {
+      releaseFirst();
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    expect(overlaps).toBe(0);
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+    const props = api.scenes.patchGroupProps.mock.calls[0]?.[2] as Props;
+    expect(props.amount).toEqual({ type: "number", value: 9 });
+    // The second save carries the rev the first one answered; the slider's answer is kept.
+    expect(api.scenes.put).toHaveBeenCalledTimes(2);
+    const [, second] = api.scenes.put.mock.calls[1] as [string, { scene: Scene; expected_rev: number }];
+    expect(second.expected_rev).toBe(8);
+    expect(getSnap().scenes?.scenes.find((s) => s.id === sceneId)?.rev).toBe(10);
   });
 
   it("an edit that has not gone out goes out when the scene switches", async () => {

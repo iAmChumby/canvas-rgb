@@ -100,6 +100,8 @@ interface GroupLive {
   sending: boolean;
   /** The timer that sends the next value. */
   timer: ReturnType<typeof setTimeout> | null;
+  /** The values that wait go now, without the 60 ms wait: the page or the scene is going away. */
+  hurry: boolean;
 }
 
 /** One step of the undo history. */
@@ -339,38 +341,19 @@ export function useScene(): UseScene {
     return overlayOn(scene, shown);
   }, []);
 
-  /** Sends the live values that are waiting, at once: the page is going away or the scene changes. */
-  const flushLive = useCallback(
-    (groupId: string, g: GroupLive) => {
-      const props = g.queued.props;
-      const brightness = g.queued.brightness;
-      g.queued = {};
-      if (g.timer) {
-        clearTimeout(g.timer);
-        g.timer = null;
-      }
-      if (props === undefined && brightness === undefined) return;
-      const send = async (): Promise<void> => {
-        if (writing.current) await waitForWrite();
-        if (props !== undefined) {
-          await api.scenes.patchGroupProps(g.sceneId, groupId, props).catch(() => undefined);
-        }
-        if (brightness !== undefined) {
-          await api.scenes.putGroupBrightness(g.sceneId, groupId, brightness).catch(() => undefined);
-        }
-      };
-      if (g.sending) {
-        // The write that is on its way carries an older value: this one goes after it.
-        const wait = (async () => {
-          while (g.sending) await new Promise((resolve) => setTimeout(resolve, LIVE_RETRY_MS));
-        })();
-        void wait.then(send);
-        return;
-      }
-      void send();
-    },
-    [waitForWrite],
-  );
+  /**
+   * Sends the live values that are waiting now, without the 60 ms wait: the page is going away or
+   * the scene is. They go through the same queue as every live write, one at a time, and their
+   * answers are kept. The entry leaves the queue once it has nothing left to send.
+   */
+  const flushLive = useCallback((g: GroupLive) => {
+    g.hurry = true;
+    if (g.timer) {
+      clearTimeout(g.timer);
+      g.timer = null;
+    }
+    void sendLiveRef.current(liveKey(g.sceneId, g.groupId));
+  }, []);
 
   useEffect(() => {
     mounted.current = true;
@@ -381,9 +364,7 @@ export function useScene(): UseScene {
     return () => {
       mounted.current = false;
       // The last live value goes out even when the page goes away.
-      for (const g of [...groups.values()]) {
-        flushLive(g.groupId, g);
-      }
+      for (const g of [...groups.values()]) flushLive(g);
     };
   }, [flushLive]);
 
@@ -392,10 +373,9 @@ export function useScene(): UseScene {
     // One scene's history never outlives a switch to another scene.
     if (history.current.sceneId !== (activeId ?? "")) {
       // The live values of the scene that goes go to that scene, not to the new one.
-      for (const [key, g] of [...live.current]) {
-        flushLive(g.groupId, g);
-        live.current.delete(key);
-      }
+      // The entries stay until their queue has drained: they are keyed by their scene, so they
+      // never show on or ride on the scene that comes.
+      for (const g of [...live.current.values()]) flushLive(g);
       // A write that has not gone out yet stays in the queue: it belongs to the scene that is
       // going, and it goes out there.
       history.current = { sceneId: activeId ?? "", past: [], future: [] };
@@ -626,6 +606,19 @@ export function useScene(): UseScene {
     [adoptScene, settleShown],
   );
 
+  /** Takes a group's entry out of the queue once nothing of it is on its way or waiting. */
+  const retireIfIdle = useCallback(
+    (key: string, g: GroupLive) => {
+      if (g.sending || g.timer || g.queued.props !== undefined || g.queued.brightness !== undefined) return;
+      g.hurry = false;
+      if (live.current.get(key) === g) {
+        live.current.delete(key);
+        publish();
+      }
+    },
+    [publish],
+  );
+
   /** Starts the next live write of every group that has one waiting. */
   const kickLive = useCallback(() => {
     for (const groupId of [...live.current.keys()]) void sendLiveRef.current(groupId);
@@ -644,7 +637,10 @@ export function useScene(): UseScene {
       if (g.sending) return;
       // The group's turn is already booked.
       if (g.timer) return;
-      if (g.queued.props === undefined && g.queued.brightness === undefined) return;
+      if (g.queued.props === undefined && g.queued.brightness === undefined) {
+        retireIfIdle(key, g);
+        return;
+      }
       if (writing.current) {
         // A whole-scene save is on its way. It carries the rev of the last answer, and a live
         // write now would answer a scene one rev behind it. The value waits.
@@ -660,7 +656,7 @@ export function useScene(): UseScene {
       if (liveBusy.current > 0) return;
       const now = Date.now();
       const ready = (kind: LiveKind): boolean =>
-        g.queued[kind] !== undefined && now - g.sentAt[kind] >= LIVE_THROTTLE_MS;
+        g.queued[kind] !== undefined && (g.hurry || now - g.sentAt[kind] >= LIVE_THROTTLE_MS);
       if (!ready("props") && !ready("brightness")) {
         // The window of one kind is not over yet: wait for the earliest one.
         const waits: number[] = [];
@@ -678,6 +674,8 @@ export function useScene(): UseScene {
       const brightness = g.queued.brightness;
       if (kind === "props") g.queued.props = undefined;
       else g.queued.brightness = undefined;
+      // The values that were waiting when the page or the scene went are sent; later ones are paced.
+      if (g.queued.props === undefined && g.queued.brightness === undefined) g.hurry = false;
       g.sentAt[kind] = now;
       const version = g.version[kind];
       const written = kind === "props" ? (props as Props) : (brightness as number);
@@ -718,8 +716,9 @@ export function useScene(): UseScene {
       }
       // The values that came while this write was out go next, one write at a time.
       kickLive();
+      retireIfIdle(key, g);
     },
-    [adoptLive, fail, knownRev, kickLive, liveConflict, publish],
+    [adoptLive, fail, knownRev, kickLive, liveConflict, publish, retireIfIdle],
   );
 
   useEffect(() => {
@@ -745,6 +744,7 @@ export function useScene(): UseScene {
           failures: 0,
           sending: false,
           timer: null,
+          hurry: false,
         };
         live.current.set(key, g);
       }
