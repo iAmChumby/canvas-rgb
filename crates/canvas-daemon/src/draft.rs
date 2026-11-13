@@ -1006,6 +1006,9 @@ async fn expire_locked(app: &Arc<App>) -> Option<Ended> {
 pub struct ReplaceGuard<'a> {
     /// The draft gate, when this guard took it. `None` when the caller holds it.
     _gate: Option<tokio::sync::MutexGuard<'a, ()>>,
+    /// The daemon, so the guard can put the scene back on the lights when it is dropped with
+    /// the debt unpaid.
+    _app: Arc<App>,
     /// True when a draft was on the lights and was dropped here.
     pub dropped: bool,
     /// True when a takeover held the lights when this guard was taken: the engine's groups are
@@ -1043,11 +1046,13 @@ impl ReplaceGuard<'_> {
         if self.settled.load(std::sync::atomic::Ordering::SeqCst) {
             return;
         }
-        self.settled.store(true, std::sync::atomic::Ordering::SeqCst);
         if self.ended_takeover {
             tracing::info!("the takeover ended: the scene went back on the lights");
         }
         crate::scenes::apply_active_ungated(app, fade).await;
+        // The debt is paid only now: a caller that went away while the apply was running has
+        // not put the scene on the lights, and the guard's drop has to do it.
+        self.settled.store(true, std::sync::atomic::Ordering::SeqCst);
     }
 
     /// The caller did a full scene apply itself: the takeover is ended on the engine.
@@ -1084,6 +1089,37 @@ impl ReplaceGuard<'_> {
     }
 }
 
+impl Drop for ReplaceGuard<'_> {
+    /// Puts the scene back on the lights when the guard is dropped with the debt unpaid.
+    ///
+    /// Two exits skip the caller's own [`ReplaceGuard::end_takeover`]: the client goes away and
+    /// the handler's future is dropped with the guard in it, and a panic between the guard and
+    /// the answer. In both, the takeover would be left on the lights with nothing owning it,
+    /// and the flag would stay set (so a device list would be ignored).
+    ///
+    /// The apply runs in its own task: a drop cannot wait for it.
+    fn drop(&mut self) {
+        if !self.ended_takeover || self.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let app = Arc::clone(&self._app);
+        match tokio::runtime::Handle::try_current() {
+            Ok(handle) => {
+                handle.spawn(async move {
+                    tracing::warn!(
+                        "the takeover ended on the engine: the route went away before it could"
+                    );
+                    crate::scenes::apply_active_ungated(&app, false).await;
+                });
+            }
+            // No runtime to run the apply in: the lights keep the takeover, and the log says so.
+            Err(_) => tracing::error!(
+                "the takeover is still on the lights: the route went away and the scene cannot go back on"
+            ),
+        }
+    }
+}
+
 /// Ends any draft (without restoring it) and holds the gate until the guard is dropped.
 ///
 /// The takeover flag is left alone: ending a takeover always ends it on the engine, so the
@@ -1096,8 +1132,7 @@ impl ReplaceGuard<'_> {
 /// the caller puts the whole scene on again.
 pub async fn hold_for_replace(app: &Arc<App>) -> ReplaceGuard<'_> {
     let gate = app.draft.gate.lock().await;
-    let guard = take_guard(app, true);
-    ReplaceGuard { _gate: Some(gate), ..guard }
+    take_guard(app, true, Some(gate))
 }
 
 /// Looks at the lights and owes the full apply that ends a takeover, with the draft gate
@@ -1108,11 +1143,15 @@ pub async fn hold_for_replace(app: &Arc<App>) -> ReplaceGuard<'_> {
 /// superseded either. What it does need is to know whether a takeover (the onboarding
 /// greeting) holds the lights, and to put the whole scene on again when the route ends it.
 pub fn hold_for_takeover(app: &Arc<App>) -> ReplaceGuard<'_> {
-    take_guard(app, false)
+    take_guard(app, false, None)
 }
 
 /// The guard's own state: what holds the lights, and what the route owes.
-fn take_guard(app: &Arc<App>, drop_the_draft: bool) -> ReplaceGuard<'_> {
+fn take_guard<'a>(
+    app: &'a Arc<App>,
+    drop_the_draft: bool,
+    gate: Option<tokio::sync::MutexGuard<'a, ()>>,
+) -> ReplaceGuard<'a> {
     let dropped = if drop_the_draft {
         let dropped = app.draft.lock().take();
         // The replacement outranks any build still running, landed or not.
@@ -1131,7 +1170,8 @@ fn take_guard(app: &Arc<App>, drop_the_draft: bool) -> ReplaceGuard<'_> {
     // put the whole scene on again.
     let ended_takeover = app.scene.is_taken_over();
     ReplaceGuard {
-        _gate: None,
+        _gate: gate,
+        _app: Arc::clone(app),
         dropped: dropped.is_some(),
         ended_takeover,
         settled: std::sync::atomic::AtomicBool::new(false),

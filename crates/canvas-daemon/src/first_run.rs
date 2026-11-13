@@ -909,8 +909,10 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
     //
     // The default scene plays the first run's effect, so applying the scene puts the lights
     // on the way the owner expects.
-    let _replace = crate::draft::hold_for_replace(app).await;
+    let replace = crate::draft::hold_for_replace(app).await;
     crate::scenes::apply_active_ungated(app, false).await;
+    // The scene is on the lights: the takeover is over, and the guard owes nothing.
+    replace.settle();
     {
         let store = app.store.read().await;
         let scene = crate::scenes::active_scene(&store.scenes);

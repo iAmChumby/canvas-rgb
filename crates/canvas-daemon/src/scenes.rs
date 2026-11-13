@@ -603,8 +603,10 @@ pub async fn restore_active(app: &Arc<App>) {
     {
         // No draft survives a restart, but every apply follows the same rule: end one first,
         // and keep a beat off while the saved scene goes on.
-        let _replace = crate::draft::hold_for_replace(app).await;
+        let replace = crate::draft::hold_for_replace(app).await;
         apply_active_ungated(app, false).await;
+        // The scene is on the lights: the takeover is over, and the guard owes nothing.
+        replace.settle();
     }
     let failures = app.scene.failures();
     let store = app.store.read().await;

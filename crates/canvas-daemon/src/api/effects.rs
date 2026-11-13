@@ -294,9 +294,21 @@ pub async fn activate(
             .await
             .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
         } else if !reused && !app.scene.is_on() {
-            crate::apply_effect(&app, &schema.id, &props)
-                .await
-                .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
+            if let Err(error) = crate::apply_effect(&app, &schema.id, &props).await {
+                tracing::warn!(
+                    effect = %schema.id,
+                    %error,
+                    "the effect was activated but it did not start"
+                );
+                // The dropped draft's prior effect goes back, so the engine is never left
+                // showing a draft nothing owns (D95.4.5).
+                if let Some(ended) = replace.restore_dropped(&app).await {
+                    if let Some(note) = ended.note {
+                        tracing::warn!(%note, "the draft's prior effect could not be restored");
+                    }
+                }
+                return Err(ApiFailure::internal(format!("could not activate the effect: {error}")));
+            }
         }
         if transient {
             crate::transient::arm(&app, &schema.id);

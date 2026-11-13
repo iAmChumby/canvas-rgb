@@ -190,10 +190,18 @@ const UNUSED: &str = "<html><body>an effect nobody saved</body></html>";
 struct Solid {
     colour: Rgb8,
     schema: PropertySchema,
+    /// When this is set and armed, the schema panics: the effect is found (its schema was
+    /// built when the rig was made) and cannot be built any more.
+    panic: Option<Arc<std::sync::atomic::AtomicBool>>,
 }
 
 impl Effect for Solid {
     fn schema(&self) -> PropertySchema {
+        if let Some(flag) = &self.panic {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                panic!("the effect's schema panicked");
+            }
+        }
         self.schema.clone()
     }
 
@@ -209,7 +217,15 @@ impl Effect for Solid {
 /// takes over paints red, and an effect whose id says it is an audio one asks for the audio
 /// capture.
 fn fake_builder() -> canvas_daemon::user_effects::Builder {
-    Arc::new(|id: &str, _source: &str| {
+    fake_builder_with_panic(None)
+}
+
+/// The builder that panics in the schema when the flag is armed: the effect is found (its
+/// schema was built when the rig was made) and cannot be built any more.
+fn fake_builder_with_panic(
+    panic: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> canvas_daemon::user_effects::Builder {
+    Arc::new(move |id: &str, _source: &str| {
         let colour = if id.starts_with("draft:") { rgb(GREEN) } else { rgb(RED) };
         let needs = canvas_proto::InputNeeds {
             audio: id.contains("audio"),
@@ -224,7 +240,7 @@ fn fake_builder() -> canvas_daemon::user_effects::Builder {
             presets: Vec::new(),
             thumbnail: None,
         };
-        Ok(Box::new(Solid { colour, schema }) as Box<dyn Effect>)
+        Ok(Box::new(Solid { colour, schema, panic: panic.clone() }) as Box<dyn Effect>)
     })
 }
 
@@ -287,6 +303,15 @@ async fn rig_in(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
 
 /// The rig before start-up has run: the engine has its device sinks and nothing else.
 async fn rig_unstarted(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
+    rig_unstarted_with(scenes, html, fake_builder()).await
+}
+
+/// [`rig_unstarted`] with the builder the rig's effects and drafts use.
+async fn rig_unstarted_with(
+    scenes: ScenesFile,
+    html: &[(&str, &str)],
+    builder: canvas_daemon::user_effects::Builder,
+) -> Rig {
     let home = TempHome::new();
     let effects = home.path.join("effects");
     std::fs::create_dir_all(&effects).expect("the effects folder is created");
@@ -315,11 +340,11 @@ async fn rig_unstarted(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
     // The saved user effect the draft tests take over: its source is `MINE`, so a draft of
     // that source is that effect.
     app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
-        fake_builder(),
+        builder.clone(),
         &[("mine", MINE), ("audio", AUDIO)],
     ));
     // The drafts are built by the same fake, so a draft's picture is known.
-    app.draft = canvas_daemon::draft::Draft::with_builder(Arc::new(|| Duration::ZERO), fake_builder());
+    app.draft = canvas_daemon::draft::Draft::with_builder(Arc::new(|| Duration::ZERO), builder);
     app.user_effects.rescan(&effects);
     let app = Arc::new(app);
     *app.devices.write().await = vec![device(A), device(B)];
@@ -381,6 +406,18 @@ async fn shows_after(sink: &Rec, since: usize, want: Rgb8, what: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("{what}: no frame after #{since} showed {want:?}");
+}
+
+/// Waits (real time) until `check` is true, for at most ten seconds.
+async fn wait_until(mut check: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the condition did not come true");
 }
 
 /// Waits (real time) until `sink`'s newest frame has `leds` LEDs that are all `want`.
@@ -1367,6 +1404,97 @@ async fn a_failed_activation_after_a_draft_puts_the_scene_back() {
     // The scene is back on the lights and the takeover is over.
     assert!(rig.app.scene.held().takeover.is_empty(), "the takeover is over");
     shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A route that goes away after the guard ended the takeover still ends it on the engine: the
+/// guard's drop puts the scene back on the lights.
+#[tokio::test]
+async fn a_route_that_goes_away_ends_the_takeover_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // The client goes away: the request is dropped at the first await it cannot finish, which
+    // is the apply's build, after the guard took the takeover.
+    let dropped = tokio::time::timeout(
+        Duration::ZERO,
+        send_on(
+            &rig.router,
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+            Some(serde_json::json!({
+                "props": { "color": { "type": "color", "value": "#ff00ff" } },
+                "preset": null,
+                "groups": ["left"],
+            })),
+        ),
+    )
+    .await;
+    assert!(dropped.is_err(), "the request was dropped");
+    assert!(!rig.app.draft.is_active(), "the guard was taken before the drop");
+
+    // The guard's drop put the scene back on the lights: the takeover is over.
+    wait_until(|| rig.app.scene.held().takeover.is_empty()).await;
+    shows(&rig.a, rgb(MAGENTA), "the scene plays the effect it was given").await;
+}
+
+/// A panic between the guard and the answer still ends the takeover on the engine: the guard's
+/// drop puts the scene back on the lights.
+#[tokio::test]
+async fn a_panic_after_the_guard_ends_the_takeover_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // A route that takes the guard and then panics: the guard is dropped with the debt unpaid.
+    let app = rig.app.clone();
+    let task = tokio::spawn(async move {
+        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
+        panic!("the route panicked after the guard");
+    });
+    assert!(task.await.is_err(), "the task panicked");
+
+    // The guard's drop put the scene back on the lights: the takeover is over.
+    wait_until(|| rig.app.scene.held().takeover.is_empty()).await;
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// The legacy path (no scene on the lights): an activation whose effect cannot start answers
+/// the error and says so in the log, the way the layout route does.
+#[tokio::test]
+async fn an_activation_that_cannot_start_answers_the_error() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The rig before start-up: no scene is on the lights, so the legacy path runs.
+    let rig = rig_unstarted_with(
+        draft_scenes_file(),
+        &[],
+        fake_builder_with_panic(Some(Arc::clone(&flag))),
+    )
+    .await;
+    // The effect is found (its schema was built with the rig) and cannot be built any more.
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let log = common::LogBuf::default();
+    let _guard = log.install();
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "html:mine"),
+        Some(serde_json::json!({ "props": {}, "preset": null, "groups": ["left"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+    let text = log.text();
+    assert!(
+        text.contains("did not start"),
+        "the log says the effect did not start: {text}"
+    );
 }
 
 // ---------------------------------------------------------------- one group
