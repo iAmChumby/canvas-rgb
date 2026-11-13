@@ -337,6 +337,12 @@ impl SceneRunner {
         (frame.len() == led_count).then_some(frame)
     }
 
+    /// Whether the scene holds this device. A sink whose device the scene does not hold
+    /// gets a black frame of its own length, like layout mode does, instead of nothing.
+    pub fn knows_device(&self, device: &DeviceId) -> bool {
+        self.device_index.contains_key(device)
+    }
+
     fn rebuild(&mut self, rebuild: Rebuild, generation: u64) {
         self.generation = generation;
         self.devices = rebuild

@@ -1390,6 +1390,13 @@ fn render_scene_frame(
                 // dropped, never sent: a resize lands between two frames, not inside one.
                 let Some(colors) = runner.take_frame(&sink.device_id, sink.led_count as usize)
                 else {
+                    // The device is not in the scene at all: the sink gets a black frame of
+                    // its own length, never nothing, so a strip whose device dropped goes
+                    // dark instead of holding the colours it was last sent. Layout mode
+                    // does the same for a sink whose device the plan does not know.
+                    if !runner.knows_device(&sink.device_id) && sink.led_count > 0 {
+                        sink.sink.submit(vec![Rgb8::BLACK; sink.led_count as usize]);
+                    }
                     continue;
                 };
                 if !colors.is_empty() {

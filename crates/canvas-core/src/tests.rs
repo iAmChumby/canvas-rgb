@@ -2850,4 +2850,45 @@ mod scene {
         assert!(sink.last().is_some_and(|f| all(&f, RED)), "the layout renders red");
         engine.shutdown();
     }
+
+    /// #310 review 2: a sink whose device the scene does not hold gets a black frame of
+    /// its own length, like layout mode does. It never keeps the colours it was last
+    /// sent.
+    #[test]
+    fn a_sink_whose_device_is_not_in_the_scene_gets_a_black_frame() {
+        let engine = spawn(settings(60));
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        // The device is known first, so the sink's frames have 12 LEDs.
+        let devices = vec![strip_device("d1", 12)];
+        engine.set_layout(
+            layout(
+                vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+                SamplingMode::AreaAverage,
+                RenderScale::P100,
+            ),
+            devices.clone(),
+        );
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+        let before = sink.frame_count();
+
+        // Now a scene without that device: the sink stays, the device does not.
+        engine.set_scene(vec![], vec![strip_device("d2", 12)], vec![], false);
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > before + 2),
+            "the sink whose device is gone still gets frames: {}",
+            sink.frame_count()
+        );
+        let frame = sink.last().expect("a frame");
+        assert_eq!(frame.len(), 12, "the sink's own length");
+        assert!(
+            all(&frame, Rgb8::BLACK),
+            "the device is gone: it goes dark, never lit: {frame:?}"
+        );
+        engine.shutdown();
+    }
 }
