@@ -413,9 +413,32 @@ line. Three mechanisms, and one bug the timing only exposed.
   nothing between the two ends can drop or reset. The same shape in `tests/stacks.rs` (the preview
   sockets) moved too. After: 0 in 45 runs of the same loop. 1 in 45 before is too rare to prove the cure;
   the in-memory server removes the stack from the test, which the count cannot show.
+- [#328](https://github.com/iAmChumby/canvas-rgb/issues/328): `cli_import`'s import test failed about one run
+  in three and once held a build slot for the full 20 minutes. Two faults. The test picked a port by binding
+  `127.0.0.1:0`, dropped the listener, and started its fake API on that port, so any process could take it in
+  the gap (the file's five tests get neighbouring ephemeral ports: 29601 and 29602 in one run). And nothing
+  was bounded: the test waited on `Command::output()` of a CLI that set no timeout at all, where the tray's
+  client sets 5 s (`app/src-tauri/src/api.rs`). Measured on a loaded PC: the fake, a copy of the test binary,
+  took 36 s to start and bind; one CLI request in a 30-run loop spent 21.06 s in the connect and failed with
+  the operating system's timeout (`timeout: connect`, WSAETIMEDOUT) while the fake was listening, and another
+  run was answered after 65.9 s and succeeded. The dropped loopback connect is #194's fault seen here
+  directly, with the error kept. Fixed (`crates/canvas-daemon/tests/cli_import.rs`): the child binds `:0`
+  itself and publishes its port through a file, so no port is ever picked and given up; every child is
+  bounded (a CLI run at 120 s, the fake's start at 90 s, and the fake ends itself after 600 s); and a run the
+  machine drops is repeated up to 8 times, each repeat written to stderr. The CLI bounds every request now
+  (5 s to connect, 120 s in all, `bounded_agent` in `crates/canvas-daemon/src/cli.rs`), so a dropped connect
+  fails in 5 s instead of 21 and a daemon that accepts and never answers cannot hang it. Siblings:
+  `crates/canvas-daemon/tests/quit.rs` picked a free port and let the daemon bind it later, and now tries a
+  fresh port when the daemon ends before its API answers. Safe as they stand, and why: the tests that need a
+  port to stay *closed* (`app/src-tauri/src/api.rs`, `app/src-tauri/src/update/tests.rs`) only have to keep
+  one free for a connect, and nothing is asked to bind it later; the ones that keep their listener bound for
+  the whole check (`crates/canvas-daemon/src/cli.rs`, both `peer.rs` copies, `tests/exit_lines.rs`,
+  `tests/quit.rs`'s `free_port` for OpenRGB) hold the socket while they read it.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
+  A test also never picks a port and lets another process bind it later (#328): the child binds `:0` and
+  reports which port it got, and every process a test starts is killed at a bound.
   - #66: the marker carries its start in milliseconds and the installer reads time through
     `UpdateConfig::now_unix_ms`, which a test drives; ages and limits compare as milliseconds.
   - #39/#47: the gate counts the parked loop's wake-ups (`CoreEngine::park_wakeups`) and that nothing

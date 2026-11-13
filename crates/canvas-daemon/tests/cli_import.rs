@@ -9,17 +9,29 @@
 //! the token file lives in a temporary home, and the fake API writes down what it was
 //! sent.
 //!
-//! Every process this file starts is bounded: the fake API ends itself after twice
-//! [`CHILD_LIMIT`], and a CLI run or a wait for the fake is cut off at [`CHILD_LIMIT`]
-//! with a failure that says so. A test here can never hold a build slot for long (at
-//! most [`CLI_ATTEMPTS`] runs of [`CHILD_LIMIT`] each).
+//! # Bounds (#328)
 //!
-//! Why a run is repeated (#328): on a loaded PC a loopback connect to a listener that
-//! is up can take the operating system's full connect timeout (about 21 s, error 10060)
-//! and then fail. The CLI reports every failed request as "the daemon is not running",
-//! and it sets no timeout of its own. That message, with the fake alive, is a connect
-//! that the machine dropped; it is the one failure [`run_cli`] repeats, and each repeat
-//! is written to stderr.
+//! Every process this file starts is bounded, so a test here can never hold a build slot
+//! for minutes: one did, for the full 20 minutes of the lock. The fake API ends itself
+//! after [`FAKE_LIFETIME`] if the test dies first, a CLI run is killed at [`CLI_LIMIT`],
+//! and the wait for the fake's port gives up at [`FAKE_START_LIMIT`].
+//!
+//! The bounds are generous because a loaded PC is slow in two measured ways, both worse
+//! than the work:
+//!
+//! - the fake's image is a copy of this test binary, and one took 36 s to start and bind
+//!   its port while eight other threads kept the cores busy;
+//! - a loopback connect can be dropped by the machine under that load. One CLI request
+//!   in a 30-run loop spent 21.06 s in the connect and then failed with the operating
+//!   system's own timeout (`timeout: connect`, WSAETIMEDOUT) while the fake was up and
+//!   listening; another run of the same loop took 65.9 s to be answered and succeeded.
+//!   The CLI bounds a request now (5 s to connect, 120 s in all) and reports a failed
+//!   request as "nothing answers on", so a dropped connect is exactly that message.
+//!
+//! A run that ends that way is repeated, up to [`CLI_ATTEMPTS`] times, with each repeat
+//! written to stderr. It is the machine's network stack, not the daemon and not a wrong
+//! port: the CLI's own port check passed, the fake is still listening, and a repeat sends
+//! the same file, which the daemon imports under the same name.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -35,11 +47,20 @@ const LOG_ENV: &str = "CANVAS_RGB_TEST_FAKE_API_LOG";
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// The name of the test that becomes the fake API in the child process.
 const SERVER_TEST: &str = "the_fake_api_answers_the_import_route";
-/// The most a CLI run, or the wait for the fake API's port, may take. A run on a loaded PC
-/// takes seconds; this ends a stuck one.
-const CHILD_LIMIT: Duration = Duration::from_secs(30);
-/// How many times a CLI run is made when the machine drops its connection.
-const CLI_ATTEMPTS: u32 = 3;
+/// The most one CLI run may take. A run takes about 1.4 s; the slowest seen on a loaded PC
+/// was 65.9 s, and it succeeded. This is a hang guard, not a performance bar.
+const CLI_LIMIT: Duration = Duration::from_secs(120);
+/// The most the fake API may take to publish its port and answer on it. Starting a copy of
+/// this test binary took 36 s on a loaded PC, so this is a hang guard too.
+const FAKE_START_LIMIT: Duration = Duration::from_secs(90);
+/// How long the fake API keeps serving if the test that started it is killed before it can
+/// stop it. Comfortably longer than the slowest test here, and short enough that a leaked
+/// child cannot sit on a port for the session.
+const FAKE_LIFETIME: Duration = Duration::from_secs(600);
+/// How many times a CLI run is made when the machine drops its connection. The operating
+/// system gives up on a dropped connect after about 21 s, and the CLI gives up after 5 s, so
+/// eight attempts cover two such windows.
+const CLI_ATTEMPTS: u32 = 8;
 /// What the CLI prints, with exit code 2, when its request failed (`cli.rs`, `NotRunning`).
 const CONNECT_DROPPED: &str = "nothing answers on";
 
@@ -79,7 +100,7 @@ fn the_fake_api_answers_the_import_route() {
     // If the test that started this process is killed before it can kill this one, the
     // fake must not outlive it.
     std::thread::spawn(|| {
-        std::thread::sleep(CHILD_LIMIT * 2);
+        std::thread::sleep(FAKE_LIFETIME);
         std::process::exit(3);
     });
 
@@ -166,6 +187,8 @@ impl FakeApi {
             if let Ok(text) = std::fs::read_to_string(port_file) {
                 let port: u16 = text.trim().parse().expect("the port file holds a port");
                 let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                // A connect the machine drops costs the operating system's timeout, so this
+                // waits a bounded one at a time.
                 if std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5)).is_ok() {
                     return port;
                 }
@@ -173,8 +196,8 @@ impl FakeApi {
             if let Some(status) = self.child.try_wait().expect("the fake API can be asked") {
                 panic!("the fake API ended before it answered ({status})");
             }
-            if started.elapsed() >= CHILD_LIMIT {
-                panic!("the fake API did not answer within {CHILD_LIMIT:?}");
+            if started.elapsed() >= FAKE_START_LIMIT {
+                panic!("the fake API did not answer within {FAKE_START_LIMIT:?}");
             }
             std::thread::sleep(Duration::from_millis(50));
         }
@@ -189,7 +212,7 @@ impl Drop for FakeApi {
 }
 
 /// Runs the CLI with `args` and a temporary home, and returns its exit code, stdout and
-/// stderr. A run that has not ended after [`CHILD_LIMIT`] is killed and fails the test. A run
+/// stderr. A run that has not ended after [`CLI_LIMIT`] is killed and fails the test. A run
 /// that ends because the machine dropped its connection (see the file's header) is made
 /// again, up to [`CLI_ATTEMPTS`] times in all.
 fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
@@ -197,7 +220,10 @@ fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
     loop {
         let (code, stdout, stderr) = run_cli_once(home, args);
         if code == 2 && stderr.contains(CONNECT_DROPPED) && attempt < CLI_ATTEMPTS {
-            eprintln!("cli_import: attempt {attempt} of {CLI_ATTEMPTS}: {}", stderr.trim());
+            eprintln!(
+                "cli_import: attempt {attempt} of {CLI_ATTEMPTS}: the machine dropped the connect: {}",
+                stderr.trim()
+            );
             attempt += 1;
             continue;
         }
@@ -205,7 +231,7 @@ fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
     }
 }
 
-/// One CLI run, ended after [`CHILD_LIMIT`] at the latest.
+/// One CLI run, ended after [`CLI_LIMIT`] at the latest.
 fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
         .args(args)
@@ -234,12 +260,12 @@ fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String)
         if let Some(status) = child.try_wait().expect("the CLI can be asked") {
             break status;
         }
-        if started.elapsed() >= CHILD_LIMIT {
+        if started.elapsed() >= CLI_LIMIT {
             let _ = child.kill();
             let _ = child.wait();
             let stdout = out.join().unwrap_or_default();
             let stderr = err.join().unwrap_or_default();
-            panic!("the CLI was still running after {CHILD_LIMIT:?} and was killed: {stdout} {stderr}");
+            panic!("the CLI was still running after {CLI_LIMIT:?} and was killed: {stdout} {stderr}");
         }
         std::thread::sleep(Duration::from_millis(20));
     };

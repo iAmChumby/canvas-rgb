@@ -6,11 +6,21 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use canvas_proto::peripheral::PeripheralAccess;
 use canvas_proto::traits::Effect;
 
 use crate::peer;
+
+/// The most a request may take to reach the daemon. The tray's client uses the same 5 s
+/// (`app/src-tauri/src/api.rs`): the API is on the loopback, so anything slower is down.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most one request may take in all, so a daemon that accepts a connection and never
+/// answers cannot hang the command (#328: an import sat for twenty minutes). An import is
+/// parsed and installed by the daemon, so this is far more than a status read needs.
+const REQUEST_LIMIT: Duration = Duration::from_secs(120);
 /// The CLI's commands.
 #[derive(Debug, Parser)]
 #[command(name = "canvas-rgb", version, about = "canvas-rgb: lighting and fan control")]
@@ -709,6 +719,18 @@ impl CliError {
     }
 }
 
+/// The HTTP agent every command uses. 4xx and 5xx come back as responses, so the API's own
+/// message is shown; and every request is bounded, so one that cannot reach the daemon or is
+/// never answered fails instead of waiting on the machine (#328).
+fn bounded_agent() -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(CONNECT_TIMEOUT))
+        .timeout_global(Some(REQUEST_LIMIT))
+        .build()
+        .into()
+}
+
 /// The API client the commands use.
 pub struct Client {
     base: String,
@@ -745,10 +767,7 @@ impl Client {
                 token_path.display()
             )));
         }
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent = bounded_agent();
         Ok(Self { base, token, agent })
     }
 
@@ -1308,6 +1327,16 @@ mod tests {
         assert_eq!(key, "color");
         assert_eq!(value, "#ff0000");
         assert!(parse_prop_pair("nope").is_err());
+    }
+
+    /// #328: a request that cannot reach the daemon, or is never answered, used to wait on
+    /// the operating system's own timeout (about 21 s for a dropped connect) or for ever.
+    /// The bounds are what end that wait, so they are pinned here.
+    #[test]
+    fn the_client_bounds_every_request_so_a_wedged_daemon_cannot_hang_it() {
+        let timeouts = bounded_agent().config().timeouts();
+        assert_eq!(timeouts.connect, Some(CONNECT_TIMEOUT));
+        assert_eq!(timeouts.global, Some(REQUEST_LIMIT));
     }
 
     #[test]

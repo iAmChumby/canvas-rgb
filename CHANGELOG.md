@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- `canvas-rgb`: a command that cannot reach the daemon, or is never answered, now fails with its message instead of waiting on the machine: a request gives up after 5 s to connect and 120 s in all, where before it waited for the operating system's own connect timeout (about 21 s) or, for an answer that never came, for ever (#328)
+
 ## [0.13.1] - 2026-11-11
 
 ### Fixed
