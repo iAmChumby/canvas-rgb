@@ -12,7 +12,7 @@ use canvas_proto::props::Props;
 use canvas_proto::scene::{
     zone_light_id, Arrangement, Group, GroupMode, Light, LightId, LightsFile, Plays, Scene,
     ScenesFile, DEFAULT_GROUP_NAME, DEFAULT_SCENE_NAME, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX,
-    LIGHTS_SCHEMA, SCENES_SCHEMA, SCENE_NAME_MAX,
+    LIGHTS_SCHEMA, SCENES_SCHEMA, SCENE_HTML_MAX, SCENE_NAME_MAX, HTML_EFFECT_PREFIX,
 };
 
 /// What the default scene plays: the effect the first run turns on, so the lights are lit.
@@ -212,6 +212,21 @@ pub fn repair(scenes: &mut ScenesFile, lights: &LightsFile) -> Vec<String> {
                 group.id = new;
             }
             seen.push(group.id.clone());
+        }
+        // At most SCENE_HTML_MAX groups play an HTML effect: later ones, in scene order, go Off.
+        let mut html = 0;
+        for group in &mut scene.groups {
+            let is_html = matches!(&group.plays, Plays::Effect { effect, .. } if effect.starts_with(HTML_EFFECT_PREFIX));
+            if is_html {
+                html += 1;
+                if html > SCENE_HTML_MAX {
+                    group.plays = Plays::Off;
+                    changes.push(format!(
+                        "scene {}: group {} was set to Off (more than {SCENE_HTML_MAX} HTML effect groups)",
+                        scene.id, group.id
+                    ));
+                }
+            }
         }
     }
     if scenes.scenes.is_empty() {
@@ -473,6 +488,50 @@ pub(crate) mod tests {
 
     /// Property-style: damaged scenes built from a seeded generator all validate after repair,
     /// whatever mix of faults they hold.
+    #[test]
+    fn html_groups_over_the_limit_are_set_off_in_scene_order() {
+        let ls = LightsFile {
+            schema_version: LIGHTS_SCHEMA,
+            lights: ["a", "b", "c"].iter().map(|id| Light {
+                id: (*id).into(),
+                device_id: canvas_proto::DeviceId("fake:1".into()),
+                zone_index: 0,
+                leds: None,
+                name: None,
+                arrangement: Arrangement::Strip,
+                reversed: false,
+            }).collect(),
+        };
+        let g = |id: &str, member: &str, effect: &str| Group {
+            id: id.into(),
+            name: id.into(),
+            members: vec![member.into()],
+            plays: Plays::Effect { effect: effect.into(), props: Default::default() },
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+        };
+        let mut file = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "s".into(),
+            scenes: vec![Scene {
+                id: "s".into(),
+                name: "s".into(),
+                rev: 1,
+                groups: vec![g("g1", "a", "html:ink-drop"), g("g2", "b", "aurora"), g("g3", "c", "html:wet-smear")],
+            }],
+        };
+        let changes = repair(&mut file, &ls);
+        let plays: Vec<bool> = file.scenes[0].groups.iter().map(|g| g.plays == Plays::Off).collect();
+        // With a limit of one, the first HTML group keeps playing and the second goes Off.
+        let mut expect = vec![false, false, false];
+        if SCENE_HTML_MAX < 2 {
+            expect[2] = true;
+        }
+        assert_eq!(plays, expect);
+        assert_eq!(changes.iter().filter(|c| c.contains("set to Off")).count(), expect.iter().filter(|x| **x).count());
+        assert_eq!(canvas_proto::scene::validate_scene(&file.scenes[0], &ls.lights), Ok(()));
+    }
+
     #[test]
     fn whatever_the_damage_the_repaired_scenes_validate() {
         let lights = two_lights();
