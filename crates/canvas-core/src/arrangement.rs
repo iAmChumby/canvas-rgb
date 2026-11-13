@@ -21,6 +21,39 @@
 //!
 //! The samples are in the group's canvas units (0..320 x 0..200), the same units the layout
 //! path's samples are in before a render scale is applied.
+//!
+//! # The cells
+//!
+//! Every sample carries the cell it averages over, clamped to the canvas:
+//! - a strip cell is `slot.w / n` wide and the slot's whole height,
+//! - a grid cell is the matrix's own cell,
+//! - a single light's cell is its whole slot,
+//! - a ring cell is the square of one LED's share of the circle, `2 * pi * r / n`.
+//!
+//! Three edge cases the cells meet:
+//! - **The one-unit minimum is logical.** A cell never falls below one canvas unit, but
+//!   the engine scales the plan by the render factor before it samples, so at quarter
+//!   scale that one unit is a quarter of a canvas pixel. Sampling falls back to the
+//!   nearest pixel, so nothing crashes; the guarantee just does not survive scaling.
+//! - **A ring in a slot narrower than twice the inset has no circle.** Its radius is 0
+//!   and every one of its LEDs lands on the slot's centre.
+//! - **A single light with more than one LED puts them all on one point**, the slot's
+//!   centre. The zone still has that many LEDs; they just all read the same pixel.
+//!
+//! # Where this and the layout path disagree
+//!
+//! A grid light on a matrix zone with a slice maps only the LEDs of that slice, so the
+//! LEDs outside the slice have no cell and stay black. The layout path
+//! (`geometry.rs`) ignores a slice on a matrix zone entirely, because the map owns every
+//! LED of the zone. The two paths answer "who owns these LEDs" differently; the builder
+//! calls this a 0.15 case.
+//!
+//! # Counts
+//!
+//! A zone reports its LED count, and a damaged device can report a number no real zone
+//! has. Every count is capped at `MAX_ZONE_LEDS`, and the group's total is summed in
+//! `u64`, so a broken count cannot overflow the sum or make the planner allocate more
+//! than the cap for one light.
 
 use canvas_proto::device::{DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
 use canvas_proto::layout::{CANVAS_HEIGHT, CANVAS_WIDTH};
@@ -30,6 +63,17 @@ use crate::geometry::LedSample;
 
 /// How far the ring's circle stays inside its slot, in canvas units.
 const RING_INSET: f32 = 4.0;
+
+/// The most LEDs one zone may plan for.
+///
+/// A zone reports its own LED count, and a damaged or misbehaving device can report a
+/// number no real zone has. The largest zone this repo knows of is an OpenRGB zone
+/// resized to its maximum of 512 LEDs (`crates/canvas-daemon/src/first_run.rs`), and the
+/// desk-shaped fake in `crates/canvas-core/src/cpu.rs` has 100 LEDs a zone. The cap is
+/// eight times the largest of those, so every real zone plans in full, while a broken
+/// count can never make the planner hold more than 4096 samples (about 80 KB) for one
+/// light.
+pub const MAX_ZONE_LEDS: u32 = 4096;
 
 /// One light's LEDs, as sample points on the group's canvas.
 #[derive(Debug, Clone, PartialEq)]
@@ -56,7 +100,9 @@ pub struct GroupPlan {
 impl GroupPlan {
     /// How many LEDs the plan covers.
     pub fn led_count(&self) -> u32 {
-        self.lights.iter().map(|l| l.leds.len() as u32).sum()
+        // The sum is in u64: a group of capped lights can hold more than a u32 count.
+        let total: u64 = self.lights.iter().map(|l| l.leds.len() as u64).sum();
+        total.min(u32::MAX as u64) as u32
     }
 
     /// The samples of one light, by its id.
@@ -69,7 +115,8 @@ impl GroupPlan {
 ///
 /// `members` is the group's member list, in the owner's order. A member that names no
 /// light, or a light whose device is not in `devices`, is skipped. A light whose device is
-/// there but whose zone has no LEDs left gets no slot and no samples.
+/// there but whose zone has no LEDs left gets no slot and no samples. A member named
+/// twice is one member: the first occurrence wins, and the light gets one slot.
 pub fn build_group_plan(
     members: &[LightId],
     mode: GroupMode,
@@ -79,6 +126,10 @@ pub fn build_group_plan(
     // The members that have LEDs, in the group's order.
     let mut placed: Vec<(&Light, u32)> = Vec::with_capacity(members.len());
     for member in members {
+        // A member named twice is one member: the first occurrence holds the slot.
+        if placed.iter().any(|(l, _)| l.id == *member) {
+            continue;
+        }
         let Some(light) = lights.iter().find(|l| l.id == *member) else {
             continue;
         };
@@ -89,18 +140,24 @@ pub fn build_group_plan(
         placed.push((light, count));
     }
 
-    // The group's LEDs: what the slots are shared out by.
-    let total: u32 = placed.iter().map(|(_, count)| *count).sum();
+    // The group's LEDs: what the slots are shared out by. The sum is in u64 so a group
+    // of capped zones cannot overflow it.
+    let total: u64 = placed.iter().map(|(_, count)| u64::from(*count)).sum();
     let mut plan = GroupPlan::default();
-    let mut before = 0u32;
+    let mut before = 0u64;
     for (light, count) in placed {
         plan.lights.push(LightSamples {
             light: light.id.clone(),
             device_id: light.device_id.clone(),
             frame_start: frame_start_of(light, devices),
-            leds: build_light_leds(light, count, &slot_for(mode, before, count, total), devices),
+            leds: build_light_leds(
+                light,
+                count,
+                &slot_for(mode, before, u64::from(count), total),
+                devices,
+            ),
         });
-        before += count;
+        before += u64::from(count);
     }
     plan
 }
@@ -108,16 +165,19 @@ pub fn build_group_plan(
 /// The LED count a light has now: its slice's count clamped to the zone, or the zone's
 /// count.
 ///
-/// A light whose device or zone is gone has no LEDs: the count is zero.
+/// A light whose device or zone is gone has no LEDs: the count is zero. A zone that
+/// reports more LEDs than `MAX_ZONE_LEDS` is planned as the cap, so a damaged device
+/// cannot make the planner allocate for billions of LEDs.
 pub fn light_led_count(light: &Light, devices: &[DeviceInfo]) -> u32 {
     let Some(zone) = zone_of(light, devices) else {
         return 0;
     };
-    match light.leds {
+    let count = match light.leds {
         None => zone.led_count,
         // A slice that runs past the end of a zone that shrank has only what is left.
         Some(slice) => slice.count.min(zone.led_count.saturating_sub(slice.start)),
-    }
+    };
+    count.min(MAX_ZONE_LEDS)
 }
 
 /// A slot of the group's canvas: where one member reads the picture.
@@ -138,7 +198,9 @@ impl Slot {
 
 /// The slot of one member: its share of the canvas in flow across, the whole canvas in
 /// each its own.
-fn slot_for(mode: GroupMode, before: u32, count: u32, total: u32) -> Slot {
+///
+/// The counts are in `u64` so a group of many capped zones cannot overflow the share.
+fn slot_for(mode: GroupMode, before: u64, count: u64, total: u64) -> Slot {
     match mode {
         GroupMode::FlowAcross => {
             let width = CANVAS_WIDTH as f32;
@@ -177,6 +239,8 @@ fn build_light_leds(
 }
 
 /// A strip: left to right at mid-height, each LED in the middle of its own cell.
+///
+/// The cell is `slot.w / n` wide and the slot's whole height.
 fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
     let cell_w = slot.w / n as f32;
     let y = slot.y + slot.h / 2.0;
@@ -191,6 +255,9 @@ fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
 }
 
 /// A ring: the largest circle that fits the slot, from the top, clockwise.
+///
+/// The cell is the square of one LED's share of the circle, `2 * pi * r / n`, capped at
+/// the circle's own diameter.
 fn ring_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
     let (cx, cy) = slot.centre();
     // The circle keeps a 4px inset from the slot's edges.
@@ -267,14 +334,17 @@ fn grid_cell_sample(
     LedSample { center_x: x, center_y: y, bounds, sampled: true }
 }
 
-/// A single LED: it reads the slot's centre.
+/// A single LED: it reads the slot's centre, and its cell is the whole slot.
 fn single_sample(slot: &Slot) -> LedSample {
     let (x, y) = slot.centre();
-    let bounds = clamp_cell(x - 0.5, y - 0.5, x + 0.5, y + 0.5);
+    let bounds = clamp_cell(slot.x, slot.y, slot.x + slot.w, slot.y + slot.h);
     LedSample { center_x: x, center_y: y, bounds, sampled: true }
 }
 
-/// Clamps a cell to the canvas and keeps it at least one pixel wide and tall.
+/// Clamps a cell to the canvas and keeps it at least one logical unit wide and tall.
+///
+/// The unit is logical: the engine scales the plan by the render factor before it
+/// samples, so at quarter scale the smallest cell is a quarter of a canvas pixel.
 fn clamp_cell(x0: f32, y0: f32, x1: f32, y1: f32) -> [f32; 4] {
     let width = CANVAS_WIDTH as f32;
     let height = CANVAS_HEIGHT as f32;
@@ -302,7 +372,9 @@ fn zone_of<'a>(light: &Light, devices: &'a [DeviceInfo]) -> Option<&'a ZoneInfo>
 /// Where the light's first LED sits in its device's frame.
 ///
 /// A device's frame holds its zones in zone order, so the light starts after the zones
-/// before its own; a slice starts after the LEDs before it in its zone.
+/// before its own; a slice starts after the LEDs before it in its zone. The frame
+/// follows the device's real counts, not the cap, and it saturates rather than
+/// overflowing on a device that reports more LEDs than any frame could hold.
 fn frame_start_of(light: &Light, devices: &[DeviceInfo]) -> u32 {
     let Some(device) = devices.iter().find(|d| d.id == light.device_id) else {
         return 0;
@@ -312,9 +384,9 @@ fn frame_start_of(light: &Light, devices: &[DeviceInfo]) -> u32 {
         if zone.index == light.zone_index {
             break;
         }
-        base += zone.led_count;
+        base = base.saturating_add(zone.led_count);
     }
-    base + light.leds.map(|s| s.start).unwrap_or(0)
+    base.saturating_add(light.leds.map(|s| s.start).unwrap_or(0))
 }
 
 #[cfg(test)]
@@ -371,6 +443,24 @@ mod tests {
         list.iter().map(|s| s.to_string()).collect()
     }
 
+    /// Checks that a sample's bounds hold its centre and are as wide and as tall as the
+    /// cell around it.
+    fn assert_cell(led: &LedSample, cell_w: f32, cell_h: f32, what: &str) {
+        let [x0, y0, x1, y1] = led.bounds;
+        assert!(
+            x0 <= led.center_x && led.center_x <= x1,
+            "{what}: the centre x {} is not in {x0}..{x1}",
+            led.center_x
+        );
+        assert!(
+            y0 <= led.center_y && led.center_y <= y1,
+            "{what}: the centre y {} is not in {y0}..{y1}",
+            led.center_y
+        );
+        assert!((x1 - x0 - cell_w).abs() < 0.05, "{what}: the cell is {} wide, not {cell_w}", x1 - x0);
+        assert!((y1 - y0 - cell_h).abs() < 0.05, "{what}: the cell is {} tall, not {cell_h}", y1 - y0);
+    }
+
     #[test]
     fn flow_across_gives_slots_by_led_share() {
         let devices = vec![
@@ -402,9 +492,24 @@ mod tests {
         let plan = build_group_plan(&ids(&["a", "b"]), GroupMode::EachItsOwn, &lights, &devices);
         assert_eq!(plan.lights.len(), 2);
         for light in &plan.lights {
-            let min = light.leds.iter().map(|s| s.center_x).fold(f32::INFINITY, f32::min);
-            let max = light.leds.iter().map(|s| s.center_x).fold(f32::NEG_INFINITY, f32::max);
-            assert!(max - min > 250.0, "{} spans {}", light.light, max - min);
+            // The slot is the whole canvas: the first cell starts at 0 and the last ends
+            // at 320, so the light covers the whole picture and not a part of it.
+            let first = light.leds.first().expect("the light has LEDs");
+            let last = light.leds.last().expect("the light has LEDs");
+            assert!(first.bounds[0].abs() < 0.05, "{} starts at {}", light.light, first.bounds[0]);
+            assert!(
+                (last.bounds[2] - CANVAS_WIDTH as f32).abs() < 0.05,
+                "{} ends at {}",
+                light.light,
+                last.bounds[2]
+            );
+            assert!(first.bounds[1].abs() < 0.05, "{} starts at {}", light.light, first.bounds[1]);
+            assert!(
+                (last.bounds[3] - CANVAS_HEIGHT as f32).abs() < 0.05,
+                "{} ends at {}",
+                light.light,
+                last.bounds[3]
+            );
         }
     }
 
@@ -438,6 +543,38 @@ mod tests {
         assert!((leds[2].center_y - cy).abs() < 0.01, "LED 2 sits at {}", leds[2].center_y);
     }
 
+    /// The ring's circle keeps its inset from the slot's edges: 4 units, so the top LED
+    /// of a ring on the whole canvas sits at y = 4 and the bottom one at y = 196.
+    #[test]
+    fn the_ring_keeps_its_inset_from_the_slot() {
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 8)])];
+        let lights = vec![light("a", "d0", 0, Arrangement::Ring)];
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        let leds = &plan.lights[0].leds;
+        assert_eq!(leds.len(), 8);
+        // LED 0 is at the top of the circle, 4 units from the top of the slot.
+        assert!((leds[0].center_x - 160.0).abs() < 0.01, "LED 0 sits at {}", leds[0].center_x);
+        assert!((leds[0].center_y - 4.0).abs() < 0.01, "LED 0 sits at {}", leds[0].center_y);
+        // And the bottom of the circle keeps the same inset.
+        assert!((leds[4].center_y - 196.0).abs() < 0.01, "LED 4 sits at {}", leds[4].center_y);
+    }
+
+    /// A ring in a slot narrower than twice the inset has no circle to draw: its radius
+    /// is 0 and every LED lands on the slot's centre.
+    #[test]
+    fn a_ring_in_a_narrow_slot_collapses_to_its_centre() {
+        let devices = vec![
+            device("d0", vec![zone(0, ZoneKind::Linear, 1)]),
+            device("d1", vec![zone(0, ZoneKind::Linear, 99)]),
+        ];
+        let lights = vec![light("a", "d0", 0, Arrangement::Ring), strip("b", "d1")];
+        let plan = build_group_plan(&ids(&["a", "b"]), GroupMode::FlowAcross, &lights, &devices);
+        // The ring's slot is a 3.2 unit slice of the canvas: too narrow for a circle.
+        let led = plan.lights[0].leds[0];
+        assert!((led.center_x - 1.6).abs() < 0.01, "the LED sits at {}", led.center_x);
+        assert!((led.center_y - 100.0).abs() < 0.01, "the LED sits at {}", led.center_y);
+    }
+
     #[test]
     fn reversed_flips_led_order() {
         let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 6)])];
@@ -466,6 +603,84 @@ mod tests {
             // The first slot is 0..80, so its centre is at x=40.
             assert!((led.center_x - 40.0).abs() < 0.01, "the LED sits at {}", led.center_x);
             assert!((led.center_y - 100.0).abs() < 0.01, "the LED sits at {}", led.center_y);
+        }
+    }
+
+    /// A single light with more than one LED puts all of them on one point: the slot's
+    /// centre.
+    #[test]
+    fn a_single_light_with_many_leds_puts_them_on_one_point() {
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 12)])];
+        let lights = vec![light("a", "d0", 0, Arrangement::Single)];
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        let leds = &plan.lights[0].leds;
+        assert_eq!(leds.len(), 12);
+        for led in leds {
+            assert!((led.center_x - 160.0).abs() < 0.01, "the LED sits at {}", led.center_x);
+            assert!((led.center_y - 100.0).abs() < 0.01, "the LED sits at {}", led.center_y);
+        }
+    }
+
+    /// The bounds of a sample hold its centre and are the cell around it: a strip cell is
+    /// `slot.w / n` wide, a grid cell is the grid's own cell, a single light takes the
+    /// whole slot, and a ring cell is the square of one LED's share of the circle.
+    #[test]
+    fn every_bounds_holds_its_centre_and_its_cell() {
+        let width = CANVAS_WIDTH as f32;
+        let height = CANVAS_HEIGHT as f32;
+
+        // A strip alone: the slot is the whole canvas, so each of its 8 cells is a
+        // 320/8 = 40 wide column of the whole height.
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 8)])];
+        let plan =
+            build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &[strip("a", "d0")], &devices);
+        for led in &plan.lights[0].leds {
+            assert_cell(led, width / 8.0, height, "a strip cell");
+        }
+
+        // A grid alone on a 4x4 matrix: each cell is 320/4 by 200/4.
+        let map: Vec<Option<u32>> = (0..16).map(Some).collect();
+        let devices =
+            vec![device("d0", vec![zone(0, ZoneKind::Matrix { width: 4, height: 4, map }, 16)])];
+        let lights = vec![light("a", "d0", 0, Arrangement::Grid)];
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        for led in &plan.lights[0].leds {
+            assert_cell(led, width / 4.0, height / 4.0, "a grid cell");
+        }
+
+        // A single light alone: its cell is the whole slot, so the whole canvas.
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 1)])];
+        let lights = vec![light("a", "d0", 0, Arrangement::Single)];
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        for led in &plan.lights[0].leds {
+            assert_cell(led, width, height, "a single light's cell");
+        }
+
+        // A ring alone: the cell of each LED is the square of its share of the circle.
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 8)])];
+        let lights = vec![light("a", "d0", 0, Arrangement::Ring)];
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        let radius = (height.min(width) - 2.0 * RING_INSET) / 2.0;
+        let side = std::f32::consts::TAU * radius / 8.0;
+        for led in &plan.lights[0].leds {
+            let [x0, y0, x1, y1] = led.bounds;
+            assert!(
+                x0 <= led.center_x && led.center_x <= x1,
+                "a ring cell: the centre x {} is not in {x0}..{x1}",
+                led.center_x
+            );
+            assert!(
+                y0 <= led.center_y && led.center_y <= y1,
+                "a ring cell: the centre y {} is not in {y0}..{y1}",
+                led.center_y
+            );
+            assert!((x1 - x0 - side).abs() < 0.05, "a ring cell: the cell is {} wide, not {side}", x1 - x0);
+            // The circle's top and bottom LEDs have their cell cut off by the canvas.
+            assert!(
+                y1 - y0 <= side + 0.05 && y1 - y0 >= 1.0,
+                "a ring cell: the cell is {} tall",
+                y1 - y0
+            );
         }
     }
 
@@ -531,6 +746,60 @@ mod tests {
         assert_eq!(plan.lights[0].light, "a");
         // The gone light has no LEDs at all.
         assert_eq!(light_led_count(&lights[1], &devices), 0);
+    }
+
+    /// A zone that is there but has no LEDs gets no slot and no samples.
+    #[test]
+    fn a_zone_with_no_leds_gets_no_slot() {
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 0)])];
+        let lights = vec![strip("a", "d0")];
+        assert_eq!(light_led_count(&lights[0], &devices), 0);
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::FlowAcross, &lights, &devices);
+        assert!(plan.lights.is_empty(), "a light with no LEDs gets no slot");
+        assert_eq!(plan.led_count(), 0);
+    }
+
+    /// A member named twice is one member: it gets one slot and its LEDs are counted
+    /// once.
+    #[test]
+    fn a_member_listed_twice_gets_one_slot() {
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 12)])];
+        let lights = vec![strip("a", "d0")];
+        let plan = build_group_plan(&ids(&["a", "a"]), GroupMode::FlowAcross, &lights, &devices);
+        assert_eq!(plan.lights.len(), 1, "the same light twice gets one slot");
+        assert_eq!(plan.lights[0].light, "a");
+        assert_eq!(plan.lights[0].leds.len(), 12);
+        assert_eq!(plan.led_count(), 12, "the light's LEDs are counted once");
+    }
+
+    /// A zone that reports more LEDs than the cap is planned as the cap: the planner
+    /// never plans more than `MAX_ZONE_LEDS` samples for one light.
+    #[test]
+    fn a_zone_that_reports_too_many_leds_is_capped() {
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 100_000)])];
+        let lights = vec![strip("a", "d0")];
+        assert_eq!(light_led_count(&lights[0], &devices), MAX_ZONE_LEDS);
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::FlowAcross, &lights, &devices);
+        assert_eq!(plan.lights[0].leds.len(), MAX_ZONE_LEDS as usize);
+        assert_eq!(plan.led_count(), MAX_ZONE_LEDS);
+    }
+
+    /// Two zones that report billions of LEDs: every count is capped, so the group's
+    /// total never overflows and the plan never holds billions of samples.
+    #[test]
+    fn two_huge_zones_do_not_overflow_the_sum() {
+        let devices = vec![
+            device("d0", vec![zone(0, ZoneKind::Linear, 3_000_000_000)]),
+            device("d1", vec![zone(0, ZoneKind::Linear, 3_000_000_000)]),
+        ];
+        let lights = vec![strip("a", "d0"), strip("b", "d1")];
+        let plan = build_group_plan(&ids(&["a", "b"]), GroupMode::FlowAcross, &lights, &devices);
+        assert_eq!(plan.led_count(), 2 * MAX_ZONE_LEDS);
+        // The two slots share the canvas: the first holds the left half.
+        let first = plan.lights[0].leds[0].center_x;
+        let second = plan.lights[1].leds[0].center_x;
+        assert!(first < 160.0, "the first light sits at {first}");
+        assert!(second > 160.0, "the second light sits at {second}");
     }
 
     #[test]
