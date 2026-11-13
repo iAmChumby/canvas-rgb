@@ -4,15 +4,15 @@
 //!
 //! ```text
 //! cargo run -p canvas-adapters --example royuan_check -- read      # read only: id, key map, mode
-//! cargo run -p canvas-adapters --example royuan_check -- picture   # overwrites User Picture slot 0
-//! cargo run -p canvas-adapters --example royuan_check -- restore   # canvas-rgb's own mode, white
+//! cargo run -p canvas-adapters --example royuan_check -- picture   # overwrites the stored picture (key slot 9 red)
+//! cargo run -p canvas-adapters --example royuan_check -- restore   # canvas-rgb's own mode, white then black
 //! ```
 //!
 //! `read` sends three kinds of get-requests and prints each reply in hex. `picture` sends the seven
 //! `SET_USERPIC` reports of a frame with slot 9 (A) red and every other slot black, 100 ms apart,
-//! waits 2 s, then light mode 13. `restore` sends `direct_mode_report` and a white whole-board
-//! colour. Nothing here repeats fast: the sources say a fast upload loop killed a keyboard's
-//! control endpoint until a re-plug.
+//! waits 2 s, then light mode 13. `restore` sends `direct_mode_report`, then a white then black whole-board
+//! colour, streamed for 3 s (about 90 colour reports, never an upload). No picture upload repeats: the
+//! sources say a fast upload loop killed a keyboard's control endpoint until a re-plug.
 
 use canvas_adapters::royuan::{color_report, direct_mode_report, per_key_reports, user_picture_mode_report, PER_KEY_SLOTS};
 use canvas_proto::color::Rgb8;

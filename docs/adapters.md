@@ -190,7 +190,7 @@ From `CLAUDE.md` in the repo root:
 ## 8. ROYUAN MonsGeek (3151:4015): per-key colours
 
 Researched for #311, then checked on Luke's keyboard on 2026-11-13 ("Checked on the device", below). **Only the lines tagged `checked on the device` were run on it.** Every line is tagged
-`checked on the device` (none yet) or `source: <URL>`. A source's claim is the source's, not ours. The reports
+`checked on the device` or `source: <URL>`. A source's claim is the source's, not ours. The reports
 are built by `per_key_report`, `per_key_reports` and `user_picture_mode_report` in
 `crates/canvas-adapters/src/royuan.rs`, and the fake keyboard in that file's tests decodes them. `write_frame`
 does not send them yet (#312).
@@ -367,13 +367,18 @@ paused, Luke watching the keyboard.
 
 - **Per-key colour works on this keyboard** (`checked on the device`). The seven `per_key_reports` of a frame
   with slot 9 red and the rest black, 100 ms apart, then light mode 13 after 2 s: only the A key lit red, every
-  other key dark (Luke, yes). So the yc500 header above is the right one for 4015, and slot 9 is A.
+  other key dark (Luke, yes). So the yc500 header above is right for THIS board (device id 1933), and slot 9 is A on
+  it. Sharkfin's `devices.json` lists 1933 as `yc3121_m1w_v5_soc` with key layout `Common82_SG9000_v3` (source: the
+  devices.json linked above); the other boards sharing 3151:4015 are not checked.
 - **Device id** (`8F`): reply `8F 8D 07 00 00`, id 1933 (`0x078D`) (`checked on the device`).
-- **Light mode** (`87`): reply `87 15 04 04 07`, mode 21 (Screen Sync), canvas-rgb's own mode, before and after.
-- **The key map** (`89`, pages 0 to 8): 4 bytes a slot, the HID keycode in byte 2, 16 slots a page; pages 6
-  to 8 are empty. Slot = `column * 6 + row` holds (`checked on the device`). A 75% board with a knob: column 15
-  holds the consumer codes `E9`/`EA` (volume up and down); `0A01` is Fn; `0A0E` (row 0, column 1) is a vendor key
-  code, its function UNKNOWN. The map carries both the ISO keys (`ISO #`, `ISO \`) and the ANSI Backslash:
+- **Light mode** (`87`): reply `87 15 04 04 07`, mode 21 (Screen Sync), canvas-rgb's own mode, read before the
+  upload and again after the first restore (`checked on the device`).
+- **The key map** (`89`, pages 0 to 8): the reply's byte 0 is the report id; from byte 1, 4 bytes a slot with the
+  HID keycode in the slot's byte 2, 16 slots a page (page p holds slots 16p to 16p + 15); pages 6 to 8 are empty.
+  Slot = `column * 6 + row` holds (`checked on the device`). Column 15 holds the HID consumer codes `E9`/`EA`
+  (volume up and down), which suggests a knob; `0A01` (row 5, column 10) where an Fn key usually sits and `0A0E`
+  (row 0, column 1) are vendor codes. The knob and the two vendor codes' functions are UNKNOWN (inferred, not
+  checked). The map carries both the ISO keys (`ISO #`, `ISO \`) and the ANSI Backslash:
   which caps the board has fitted is UNKNOWN from the map alone.
 
 | row \ col | 0 | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 | 11 | 12 | 13 | 14 | 15 | 16 | 17 | 18 | 19 | 20 | 21 |
@@ -387,17 +392,20 @@ paused, Luke watching the keyboard.
 
 - **The whole-board colour must be streamed** (`checked on the device`). One `0x0E` report sent 100 ms after the
   direct-mode report was not shown (the board stayed dark); the same report sent every 33 ms for 2 s was (white,
-  then black). The adapter streams at the engine's rate and resends at least every second, so canvas-rgb is
-  unaffected; a one-shot tool must stream.
+  then black). The adapter streams at the engine's rate and resends at least every second, so canvas-rgb
+  should be unaffected (UNKNOWN: not run on the device with the adapter itself); a one-shot tool must stream.
 - **Restore** (`checked on the device`): direct mode, then the streamed whole-board colour: the board followed
-  white then black and reported mode 21 again.
+  white then black (Luke, yes). The mode read after the restore was taken after the first (single-report)
+  restore, not after the streamed one.
 
 ### Device check for Luke (run 2026-11-13; kept for a re-run)
 
-Nothing here was run. It needs Luke's OK in chat and the real-hardware rules in `CLAUDE.md`.
+Run on 2026-11-13 (results above) with Luke's OK. A re-run needs his OK in chat again and the real-hardware rules
+in `CLAUDE.md`.
 
-**Read only. An agent runs these and decodes the answers; Luke judges nothing.** `Transport` has no
-get-feature call yet, so the probe needs one.
+**Read only. An agent runs these and decodes the answers; Luke judges nothing.** The probe
+(`crates/canvas-adapters/examples/royuan_check.rs`) reads with hidapi's `get_feature_report`; the adapter's
+`Transport` has no get-feature call.
 
 1. Which board is it? Send `00 8F 00 00 00 00 00 00 70` and read the feature report; the reply is `8F` then
    the device id as a 32-bit little-endian number (source: sharkfin PROTOCOL.md line 169). Look the id up in
