@@ -158,6 +158,8 @@ pub struct App {
     /// Fakes mode (#199, debug builds only): the daemon talks only to fakes. The
     /// auth guard reads it to accept the UI-capture origin (#200) only here.
     pub fakes: bool,
+    /// What the scenes need at run time: scene mode, the apply order, build failures.
+    pub scene: crate::scenes::SceneRuntime,
 }
 
 /// The fan config the daemon keeps a copy of.
@@ -250,6 +252,7 @@ impl App {
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             draft_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             fakes: false,
+            scene: Default::default(),
             store: tokio::sync::RwLock::new(store),
             engine,
             adapter: Arc::new(tokio::sync::Mutex::new(adapter as Box<dyn DeviceAdapter>)),
@@ -330,8 +333,15 @@ impl App {
 
     /// The layout reaches both engines at the same call sites: the lights' engine and, when
     /// the builder has made it, the preview engine (D95.4.4).
+    ///
+    /// Once the engine runs a scene the layout stays out of it: a layout call would end scene mode
+    /// and leave the lights dark (the layout routes live on until Scenes Task 12, and the old page
+    /// still saves layouts). What the engine needs from a device change reaches it through
+    /// [`crate::scenes::apply_for_devices`].
     pub fn set_layout(&self, layout: &Layout, devices: &[DeviceInfo]) {
-        self.engine.set_layout(layout.clone(), devices.to_vec());
+        if !self.scene.is_on() {
+            self.engine.set_layout(layout.clone(), devices.to_vec());
+        }
         self.stack_preview.set_layout(layout, devices);
     }
 
@@ -393,6 +403,17 @@ impl App {
         let active_layout = Some(store.layouts.active.clone());
         let active_effect =
             store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
+        let scene = crate::scenes::active_scene(&store.scenes);
+        let active_scene = Some(canvas_proto::api::SceneRef { id: scene.id.clone(), name: scene.name.clone() });
+        // One entry per distinct effect the active scene's groups play, in the scene's order.
+        let mut active_effects: Vec<String> = Vec::new();
+        for group in &scene.groups {
+            if let canvas_proto::scene::Plays::Effect { effect, .. } = &group.plays {
+                if !active_effects.contains(effect) {
+                    active_effects.push(effect.clone());
+                }
+            }
+        }
         // G7: the editor shows the dismissible "size your ARGB headers" panel until the user
         // dismisses it.
         let show_zone_panel = !store.config.zone_panel_dismissed;
@@ -412,12 +433,13 @@ impl App {
             parked: stats.parked,
             devices_connected: self.devices_connected().await,
             devices_total: self.devices_total().await,
-            preview_subscribers: self.preview_subs.subscribers() + self.stack_subs.subscribers(),
+            preview_subscribers: self.preview_subs.subscribers()
+                + self.stack_subs.subscribers()
+                + self.scene.feed.watchers() as u32,
             active_layout,
             active_effect,
-            // Filled when the daemon runs scenes (Scenes, Task 6).
-            active_scene: None,
-            active_effects: Vec::new(),
+            active_scene,
+            active_effects,
             openrgb,
             service: if down == 0 { LinkState::Connected } else { LinkState::Down },
             service_down_ms: if down == 0 { None } else { Some(down) },
