@@ -638,10 +638,14 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
     }
     app.inputs.apply_needs(needs_of(app, new));
     *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
-    // What the engine runs is now `new`; a device list that repeats it needs no rebuild.
-    let key = snapshot(app).await;
-    if key.scene.id == new.id {
-        *app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(Applied { scene: new.clone(), ..key });
+    // What the engine runs is now `new`; a device list that repeats it needs no rebuild. Only the
+    // scene changes in the key: the lights and devices stay the ones the engine was last handed. A
+    // fresh snapshot here could hold a device list that arrived while this change held the lock and
+    // that the engine never got, and the next `apply_for_devices` would then skip it as a repeat.
+    if let Some(applied) = app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()).as_mut() {
+        if applied.scene.id == new.id {
+            applied.scene = new.clone();
+        }
     }
     app.scene.notify();
 }

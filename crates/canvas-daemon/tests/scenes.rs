@@ -1122,6 +1122,27 @@ async fn a_group_change_is_not_rebuilt_by_the_next_device_list() {
     shows(&rig.a, rgb(GREEN), "the patched group still plays").await;
 }
 
+/// Review 327 verify: a device list that arrives while a group change holds the scene lock is never
+/// recorded as applied by that change, so the `apply_for_devices` that follows still takes it.
+#[tokio::test]
+async fn a_device_list_that_lands_during_a_group_change_is_still_applied() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+
+    // The supervisor has written the new list (device A grew) but not yet applied it.
+    let mut grown = device(A);
+    grown.zones[0].led_count = LEDS * 2;
+    *rig.app.devices.write().await = vec![grown, device(B)];
+
+    let path = route(routes::GROUP_PROPS, &[("id", "main"), ("group", "left")]);
+    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::to_value(color(GREEN)).unwrap())).await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(rig.app.scene.builds(), built, "the props patch alone rebuilds nothing");
+
+    canvas_daemon::scenes::apply_for_devices(&rig.app).await;
+    assert!(rig.app.scene.builds() > built, "the new device list is applied, not skipped as a repeat");
+}
+
 /// A save rebuilds only what it changed: values and brightness keep the running effect, one
 /// group's new effect builds one effect, a changed membership takes the whole scene again.
 #[tokio::test]
