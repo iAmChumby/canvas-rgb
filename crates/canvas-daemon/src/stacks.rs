@@ -545,6 +545,8 @@ struct Running {
     id: String,
     structure: String,
     live: LiveStack,
+    /// The group the stack plays in: its layers resolve in that group's canvas.
+    group: Option<String>,
 }
 
 /// The saved stacks, with the runtime state the compositor shares.
@@ -798,10 +800,17 @@ impl Stacks {
         guard.layout = Some(map);
     }
 
-    /// Publishes the masks of the groups of the active scene: a stack resolves its layers in
-    /// the group it plays in, so every group has its own masks.
+    /// Publishes the masks of one group, when the book does not hold it yet.
     ///
-    /// The version moves, so every running stack re-resolves its layers on its next frame.
+    /// The stack preview shows a group of its own: its layers resolve in that group's canvas.
+    pub fn publish_group_area(&self, group: String, map: AreaMap) {
+        let mut guard = write_recovering(&self.areas);
+        guard.version = guard.version.wrapping_add(1);
+        guard.groups.insert(group, map);
+    }
+
+    /// Publishes the masks of the groups of the active scene: a stack resolves its layers in the
+    /// group it plays in.
     pub fn publish_group_areas(&self, groups: BTreeMap<String, AreaMap>) {
         let mut guard = write_recovering(&self.areas);
         guard.version = guard.version.wrapping_add(1);
@@ -844,11 +853,14 @@ impl Stacks {
     }
 
     /// Records that `stack` is what the engine is running, with the live map the effect holds.
-    pub fn note_running(&self, id: &str, structure: &str, live: LiveStack) {
+    ///
+    /// `group` is the group it plays in: its layers resolve in that group's canvas.
+    pub fn note_running(&self, id: &str, structure: &str, live: LiveStack, group: Option<&str>) {
         *self.running.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some(Running {
             id: id.to_string(),
             structure: structure.to_string(),
             live,
+            group: group.map(str::to_string),
         });
         *self
             .statuses
@@ -881,6 +893,16 @@ impl Stacks {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .as_ref()
             .map(|running| running.id.clone())
+    }
+
+    /// The group the stack on the engine plays in: its layers resolve in that group's canvas.
+    /// `None` when no stack is on the engine, or when it plays in no group (the legacy layout).
+    pub fn running_group(&self) -> Option<String> {
+        self.running
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .as_ref()
+            .and_then(|running| running.group.clone())
     }
 
     /// Updates the running stack's live map from the file, when it is the stack on the engine.

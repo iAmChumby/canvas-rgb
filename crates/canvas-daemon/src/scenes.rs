@@ -275,12 +275,24 @@ pub const LIGHT_FEED_MAX_WATCHERS: usize = 8;
 /// reading would otherwise hold its task and its watcher slot for as long as the socket stays open.
 pub const LIGHT_FEED_SEND_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// What the engine holds: the groups it has, and the groups a takeover put its effect on.
+///
+/// The engine drops an effect for a group it does not have (`canvas-core/src/engine.rs`:
+/// "set_group_effect: no such group in the running scene"), so a takeover has to know what the
+/// engine holds before it hands one an effect.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Held {
+    /// The group ids the engine holds.
+    pub groups: Vec<String>,
+    /// The groups a takeover put its effect on.
+    pub takeover: Vec<String>,
+}
+
 /// What the daemon keeps while a scene runs.
 pub struct SceneRuntime {
     on: AtomicBool,
-    /// True while a takeover (a draft, an onboarding effect) holds the lights: what the engine
-    /// runs is not the scene in the store, so a scene change takes the whole scene again.
-    taken_over: AtomicBool,
+    /// What the engine holds: the groups it has, and the ones a takeover put its effect on.
+    held: Mutex<Held>,
     order: tokio::sync::Mutex<()>,
     /// Why a group's effect could not be built, by group id, for the scene the engine runs.
     failures: Mutex<BTreeMap<String, String>>,
@@ -305,7 +317,7 @@ impl Default for SceneRuntime {
     fn default() -> Self {
         Self {
             on: AtomicBool::new(false),
-            taken_over: AtomicBool::new(false),
+            held: Mutex::new(Held::default()),
             order: tokio::sync::Mutex::new(()),
             failures: Mutex::new(BTreeMap::new()),
             applied: Mutex::new(None),
@@ -331,7 +343,17 @@ impl SceneRuntime {
     /// store. A scene change then takes the whole scene again, because the engine's groups are
     /// not the store's.
     pub fn is_taken_over(&self) -> bool {
-        self.taken_over.load(Ordering::SeqCst)
+        !self.held().takeover.is_empty()
+    }
+
+    /// What the engine holds: the groups it has, and the ones a takeover put its effect on.
+    pub fn held(&self) -> Held {
+        self.held.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Records what the engine holds.
+    pub fn set_held(&self, held: Held) {
+        *self.held.lock().unwrap_or_else(|e| e.into_inner()) = held;
     }
 
     /// Takes the order. Held across a route's read, write and apply.
@@ -538,6 +560,11 @@ pub async fn apply_active(app: &Arc<App>, fade: bool) {
 /// waits for the gate it holds, and the two would deadlock. The draft gate is enough: every
 /// route that replaces what is on the lights holds it (see [`crate::draft::hold_for_replace`]),
 /// so the restores and the replacements never interleave.
+///
+/// The callers that replace the lights without the draft gate are the ones that end the draft
+/// first (the effect delete) or that only re-plan the lights (the light patch, which does not
+/// change what plays). A route that replaces what plays and does not end the draft would put
+/// the scene over it, so it takes the gate.
 pub async fn apply_active_ungated(app: &Arc<App>, fade: bool) {
     apply_body(app, fade).await;
 }
@@ -609,10 +636,15 @@ async fn apply_body(app: &Arc<App>, fade: bool) {
     match built {
         Ok(failures) => {
             *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
+            // The scene is on the lights again: a takeover is over, and the engine holds the
+            // scene's own groups.
+            let held = Held {
+                groups: key.scene.groups.iter().map(|g| g.id.clone()).collect(),
+                takeover: Vec::new(),
+            };
             *app.scene.applied.lock().unwrap_or_else(|e| e.into_inner()) = Some(key);
             app.scene.on.store(true, Ordering::SeqCst);
-            // The scene is on the lights again: a takeover is over.
-            app.scene.taken_over.store(false, Ordering::SeqCst);
+            app.scene.set_held(held);
             app.scene.notify();
             // The masks of the groups follow the scene: a stack resolves its layers in the group
             // it plays in.
@@ -782,48 +814,135 @@ fn schema_of(effect: &dyn Effect) -> Result<canvas_proto::props::PropertySchema,
     .map_err(|payload| format!("the effect's schema panicked: {}", crate::panic_payload_text(&payload)))
 }
 
+/// Publishes the masks of one group, when the book does not hold it yet.
+///
+/// The book holds the active scene's groups (and the takeover group's) after the scene is
+/// applied. A stack preview shows a group of its own, and a group the book does not hold would
+/// resolve to nothing ("not in this group"), so the preview publishes its own.
+pub async fn publish_area_for(app: &Arc<App>, group: &str) {
+    let book = app.stacks.areas();
+    if crate::stack::read_recovering(&book).groups.contains_key(group) {
+        return;
+    }
+    let run = match group_run(app, group).await {
+        Some(run) => run,
+        None => every_light_run(app).await,
+    };
+    let plan = canvas_core::arrangement::build_group_plan(
+        &run.members,
+        run.mode,
+        &run.lights,
+        &run.devices,
+    );
+    let map = crate::stack::AreaMap::build_for_group(
+        &plan,
+        &run.lights,
+        canvas_core::SCENE_SAMPLING,
+        0,
+    );
+    app.stacks.publish_group_area(group.to_string(), map);
+}
+
+/// The groups a takeover of `effect` lands on: the groups of the active scene whose `Plays`
+/// names it, or the one temporary group of every light when none does.
+///
+/// The caller reads this before it builds the takeover's effect, so a stack is built for the
+/// group it lands on and resolves its areas in that group's canvas.
+pub async fn takeover_groups(app: &App, effect: &str) -> Vec<String> {
+    let groups = groups_playing(app, effect).await;
+    if groups.is_empty() {
+        vec![TAKEOVER_GROUP.to_string()]
+    } else {
+        groups
+    }
+}
+
+/// The takeover's effect, and the groups it goes on.
+struct Takeover<'a> {
+    /// The groups the takeover goes on.
+    groups: &'a [String],
+    /// The props the takeover's effect runs with.
+    props: &'a Props,
+    /// The builder, for the groups beyond the first.
+    build: &'a EffectBuilder,
+    /// The instance the caller built for the first group, and the group it was built for.
+    ready: Option<(String, Box<dyn Effect>)>,
+}
+
+impl Takeover<'_> {
+    /// The instance the caller built, when it was built for `group`.
+    fn take_ready(&mut self, group: &str) -> Option<Box<dyn Effect>> {
+        if let Some((for_group, effect)) = self.ready.take() {
+            if for_group == group {
+                return Some(effect);
+            }
+            // It was built for another group: a stack resolves its areas in the group's canvas,
+            // so it cannot be used here.
+            self.ready = None;
+        }
+        None
+    }
+
+    /// The instance for `group`: the one the caller built, when it was built for that group,
+    /// or a new one.
+    async fn instance(&mut self, group: &str) -> Result<Box<dyn Effect>, String> {
+        if let Some(effect) = self.take_ready(group) {
+            return Ok(effect);
+        }
+        build_one(self.build, group).await
+    }
+
+    /// The instance for `group`, built on this thread: the same, without the await.
+    fn instance_blocking(&mut self, group: &str) -> Result<Box<dyn Effect>, String> {
+        if let Some(effect) = self.take_ready(group) {
+            return Ok(effect);
+        }
+        (self.build)(group)
+    }
+}
+
 /// Puts a takeover on the lights: the effect on every group of the active scene whose `Plays`
 /// names it, or on one temporary flow-across group of every light when no group plays it.
 ///
-/// `ready` is an instance that is already built; it goes on the first group the takeover lands
-/// on, so the caller that built one does not build it twice. `build` makes the rest, one per
-/// group. It runs on a blocking thread: building an HTML effect runs its scripts, which must not
-/// block the async workers.
+/// The engine decides how: an effect for a group the engine does not have is dropped, so the
+/// takeover only hands one to a group the engine holds. When the engine holds the takeover
+/// group (a draft of an effect no group plays) and the takeover now lands on a group of the
+/// scene, or when the groups of the last takeover are not the groups of this one, the whole
+/// scene goes on again.
+///
+/// `ready` is an instance the caller built outside the gate, with the group it was built for:
+/// it goes on that group, so the caller does not build it twice. `build` makes the rest, one per
+/// group. It runs on a blocking thread: building an HTML effect runs its scripts, which must
+/// not block the async workers.
 ///
 /// Returns the groups the takeover is on: the scene's own group ids, or [`TAKEOVER_GROUP`].
 pub async fn apply_takeover(
     app: &Arc<App>,
     effect: &str,
     props: &Props,
-    ready: Option<Box<dyn Effect>>,
+    ready: Option<(String, Box<dyn Effect>)>,
     build: EffectBuilder,
 ) -> Result<Vec<String>, String> {
-    let groups = groups_playing(app, effect).await;
-    let mut needs = {
+    let target = takeover_groups(app, effect).await;
+    let (scene, lights, devices) = {
         let store = app.store.read().await;
-        let scene = active_scene(&store.scenes).clone();
-        needs_of(app, &scene)
+        (
+            active_scene(&store.scenes).clone(),
+            store.lights.lights.clone(),
+            app.devices.read().await.clone(),
+        )
     };
-    // Anything that is not a stack means no stack is on the engine: whatever was running is
-    // gone, and a later activation of it must build again.
-    let mut stack = false;
-    let mut ready = ready;
+    let scene_groups: Vec<String> = scene.groups.iter().map(|g| g.id.clone()).collect();
+    let held = app.scene.held();
+    let mut takeover = Takeover { groups: &target, props, build: &build, ready };
 
-    if groups.is_empty() {
-        // No group plays it: one temporary flow-across group of every light.
-        let lights = app.store.read().await.lights.lights.clone();
+    // The takeover group: the engine holds that group and nothing else.
+    if target.len() == 1 && target[0] == TAKEOVER_GROUP {
         if lights.is_empty() {
             return Ok(Vec::new());
         }
-        let devices = app.devices.read().await.clone();
-        let made = match ready.take() {
-            Some(effect) => effect,
-            None => build_one(&build, TAKEOVER_GROUP).await?,
-        };
+        let made = takeover.instance(TAKEOVER_GROUP).await?;
         let schema = schema_of(made.as_ref())?;
-        needs.screen |= schema.needs.screen;
-        needs.audio |= schema.needs.audio;
-        stack = schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX);
         let group = EngineGroup {
             id: TAKEOVER_GROUP.to_string(),
             members: lights.iter().map(|l| l.id.clone()).collect(),
@@ -832,40 +951,121 @@ pub async fn apply_takeover(
             effect: Some(made),
             props: props.clone(),
         };
-        if !stack {
+        if !schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
             app.stacks.clear_running();
         }
         app.engine.set_scene(lights, devices, vec![group], false);
-        app.inputs.apply_needs(needs);
+        app.inputs.apply_needs(schema.needs);
         // The engine's groups are not the store's now: a scene change takes the whole scene.
-        app.scene.taken_over.store(true, Ordering::SeqCst);
+        app.scene.set_held(Held {
+            groups: vec![TAKEOVER_GROUP.to_string()],
+            takeover: target.clone(),
+        });
         app.scene.notify();
-        return Ok(vec![TAKEOVER_GROUP.to_string()]);
+        return Ok(target);
     }
 
-    let mut landed = Vec::with_capacity(groups.len());
-    for group in groups {
-        let made = match ready.take() {
-            Some(effect) => effect,
-            None => build_one(&build, &group).await?,
-        };
-        let schema = schema_of(made.as_ref())?;
-        needs.screen |= schema.needs.screen;
-        needs.audio |= schema.needs.audio;
-        if schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-            stack = true;
+    // The engine holds the scene's groups and the groups the last takeover held are among the
+    // ones this one lands on: only the target groups change.
+    let keeps = held.takeover.iter().all(|group| target.contains(group));
+    if held.groups == scene_groups && keeps {
+        let mut needs = InputNeeds::default();
+        for group in &target {
+            let made = takeover.instance(group).await?;
+            let schema = schema_of(made.as_ref())?;
+            needs.screen |= schema.needs.screen;
+            needs.audio |= schema.needs.audio;
+            if !schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+                app.stacks.clear_running();
+            }
+            app.engine.set_group_effect(group, Some(made), props);
         }
-        app.engine.set_group_effect(&group, Some(made), props);
-        landed.push(group);
+        app.inputs.apply_needs(needs);
+        app.scene.set_held(Held { groups: scene_groups, takeover: target.clone() });
+        app.scene.notify();
+        return Ok(target);
     }
-    if !stack {
-        app.stacks.clear_running();
+
+    // The engine does not have the groups this takeover lands on, or the groups the last one
+    // held are not among them: the whole scene goes on again, with the takeover's effect on
+    // the target groups and the scene's own effect on the others.
+    let built = {
+        let app = Arc::clone(app);
+        let lights = lights.clone();
+        let devices = devices.clone();
+        let scene = scene.clone();
+        let target = target.clone();
+        let props = props.clone();
+        let build = Arc::clone(&build);
+        let ready = takeover.ready.take();
+        tokio::task::spawn_blocking(move || {
+            let mut takeover = Takeover {
+                groups: &target,
+                props: &props,
+                build: &build,
+                ready,
+            };
+            build_and_set_with(&app, &lights, &devices, &scene, &mut takeover)
+        })
+        .await
+    };
+    match built {
+        Ok(Ok(())) => {
+            app.scene.set_held(Held { groups: scene_groups, takeover: target.clone() });
+            app.scene.notify();
+            Ok(target)
+        }
+        Ok(Err(why)) => Err(why),
+        Err(e) => Err(format!("the takeover's build task failed: {e}")),
+    }
+}
+
+/// Builds every group's effect and hands the scene to the engine, with the takeover's effect on
+/// the groups it names. A group whose effect cannot be built is dark (`effect: None`).
+fn build_and_set_with(
+    app: &App,
+    lights: &[Light],
+    devices: &[DeviceInfo],
+    scene: &Scene,
+    takeover: &mut Takeover<'_>,
+) -> Result<(), String> {
+    let mut needs = InputNeeds::default();
+    let mut groups = Vec::with_capacity(scene.groups.len());
+    for group in &scene.groups {
+        let (effect, group_props) = if takeover.groups.contains(&group.id) {
+            let made = takeover.instance_blocking(&group.id)?;
+            let schema = schema_of(made.as_ref())?;
+            needs.screen |= schema.needs.screen;
+            needs.audio |= schema.needs.audio;
+            (Some(made), takeover.props.clone())
+        } else {
+            match &group.plays {
+                Plays::Off => (None, Props::new()),
+                Plays::Effect { effect: id, props } => match build_effect(app, id, Some(&group.id)) {
+                    Ok((built, group_needs)) => {
+                        needs.screen |= group_needs.screen;
+                        needs.audio |= group_needs.audio;
+                        (Some(built), props.clone())
+                    }
+                    Err(why) => {
+                        tracing::warn!(group = %group.id, effect = %id, error = %why, "a group's effect could not be built; the group is dark");
+                        (None, props.clone())
+                    }
+                },
+            }
+        };
+        groups.push(EngineGroup {
+            id: group.id.clone(),
+            members: group.members.clone(),
+            mode: group.mode,
+            brightness: group.brightness,
+            effect,
+            props: group_props,
+        });
     }
     app.inputs.apply_needs(needs);
-    // The engine's groups are not the store's now: a scene change takes the whole scene.
-    app.scene.taken_over.store(true, Ordering::SeqCst);
-    app.scene.notify();
-    Ok(landed)
+    app.engine.set_scene(lights.to_vec(), devices.to_vec(), groups, false);
+    Ok(())
 }
 
 /// Builds one instance of a takeover's effect, on a blocking thread: building an HTML effect
@@ -988,12 +1188,110 @@ pub fn html_group_count(scene: &Scene, has_html_layer: &dyn Fn(&str) -> bool) ->
 
 /// True when the saved stack `id` has an HTML layer or mask.
 pub fn stack_has_html(stacks: &crate::stacks::Stacks, id: &str) -> bool {
-    stacks.get(id).is_some_and(|stack| {
-        stack.layers.iter().any(|layer| {
-            layer.effect.starts_with(HTML_EFFECT_PREFIX)
-                || layer.mask.as_ref().is_some_and(|m| m.effect.starts_with(HTML_EFFECT_PREFIX))
-        })
+    stacks.get(id).is_some_and(|stack| stack_has_html_layers(&stack))
+}
+
+/// True when the stack has an HTML layer or mask.
+pub fn stack_has_html_layers(stack: &canvas_proto::stack::Stack) -> bool {
+    stack.layers.iter().any(|layer| {
+        layer.effect.starts_with(HTML_EFFECT_PREFIX)
+            || layer.mask.as_ref().is_some_and(|m| m.effect.starts_with(HTML_EFFECT_PREFIX))
     })
+}
+
+/// True when the effect plays an HTML effect, or a stack with an HTML layer in it.
+pub fn effect_is_html(app: &App, effect: &str) -> bool {
+    effect.starts_with(HTML_EFFECT_PREFIX) || stack_has_html(&app.stacks, effect)
+}
+
+/// True when the group plays an HTML effect, or a stack with an HTML layer in it.
+fn group_is_html(app: &App, group: &Group) -> bool {
+    match &group.plays {
+        Plays::Effect { effect, .. } => effect_is_html(app, effect),
+        Plays::Off => false,
+    }
+}
+
+/// The number of HTML groups the scene would run with a takeover of `effect` on `targets`.
+///
+/// The takeover group replaces the scene's groups, so only the takeover's own effect counts.
+/// Otherwise the scene's groups count, with the target groups playing the takeover's effect.
+pub fn html_count_with_takeover(app: &App, scene: &Scene, targets: &[String], effect: &str) -> usize {
+    let html = effect_is_html(app, effect);
+    if targets.iter().any(|group| group == TAKEOVER_GROUP) {
+        return usize::from(html);
+    }
+    scene
+        .groups
+        .iter()
+        .filter(|group| {
+            if targets.contains(&group.id) {
+                html
+            } else {
+                group_is_html(app, group)
+            }
+        })
+        .count()
+}
+
+/// The sentence when the scene would run more HTML groups than it may.
+///
+/// At most [`SCENE_HTML_MAX`] groups of a scene may play an HTML effect: each is a script of
+/// its own, the slowest group there is. A stack with an HTML layer counts as one.
+pub fn html_limit_sentence(count: usize) -> String {
+    format!(
+        "at most {SCENE_HTML_MAX} group{} of a scene may play an HTML effect (a stack with an HTML layer counts); {count} do",
+        if SCENE_HTML_MAX == 1 { "" } else { "s" }
+    )
+}
+
+/// Checks the HTML limit for a takeover of `effect` on `targets`: the scene must not run more
+/// HTML groups than it may.
+pub async fn check_takeover_html_limit(
+    app: &App,
+    effect: &str,
+    targets: &[String],
+) -> Result<(), String> {
+    let scene = {
+        let store = app.store.read().await;
+        active_scene(&store.scenes).clone()
+    };
+    let count = html_count_with_takeover(app, &scene, targets, effect);
+    if count > SCENE_HTML_MAX {
+        return Err(html_limit_sentence(count));
+    }
+    Ok(())
+}
+
+/// Checks the HTML limit for a stack that a group of the active scene plays: the scene must not
+/// run more HTML groups than it may.
+///
+/// The stack is the one being saved, not the saved one: a new HTML layer is what makes the
+/// scene run one group too many.
+pub async fn check_stack_html_limit(
+    app: &App,
+    stack: &canvas_proto::stack::Stack,
+) -> Result<(), String> {
+    if !stack_has_html_layers(stack) {
+        return Ok(());
+    }
+    let scene = {
+        let store = app.store.read().await;
+        active_scene(&store.scenes).clone()
+    };
+    let count = scene
+        .groups
+        .iter()
+        .filter(|group| match &group.plays {
+            Plays::Effect { effect, .. } if effect == &stack.id => true,
+            Plays::Effect { effect, .. } => effect_is_html(app, effect),
+            Plays::Off => false,
+        })
+        .count();
+    if count > SCENE_HTML_MAX {
+        return Err(html_limit_sentence(count));
+    }
+    Ok(())
 }
 
 /// `Err` with the sentence to show when `scene` plays more HTML effects than a scene may.

@@ -253,7 +253,14 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
     let schema = detail.get("schema").cloned().unwrap_or(serde_json::Value::Null);
     let properties = schema.get("properties").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-    let raw = canvas_daemon::cli::parse_activate_props(&args.props)?;
+    // The groups the effect plays on, by name: with none, every group of the active scene
+    // plays it. The `--group` pairs are taken out of the trailing list, so the flag works
+    // before and after the properties.
+    let (from_props, prop_args) = canvas_daemon::cli::split_groups(&args.props);
+    let mut groups = args.groups.clone();
+    groups.extend(from_props);
+
+    let raw = canvas_daemon::cli::parse_activate_props(&prop_args)?;
     let mut props = serde_json::Map::new();
     for (key, value) in raw {
         let Some(property) = properties.iter().find(|p| p.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
@@ -270,12 +277,10 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
         props.insert(key, serde_json::to_value(parsed).map_err(|e| CliError::Other(e.to_string()))?);
     }
 
-    // The groups the effect plays on, by name: with none, every group of the active scene
-    // plays it.
     let mut body = serde_json::Map::new();
     body.insert("props".into(), serde_json::Value::Object(props));
-    if !args.groups.is_empty() {
-        body.insert("groups".into(), serde_json::json!(args.groups));
+    if !groups.is_empty() {
+        body.insert("groups".into(), serde_json::json!(groups));
     }
     let body = serde_json::Value::Object(body).to_string();
     let answer = client.request(

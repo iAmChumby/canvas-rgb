@@ -142,7 +142,11 @@ pub async fn patch_light(
 
     // The engine follows: a new arrangement or direction is a new plan for the light's group.
     if replan && saved {
-        crate::scenes::apply_active(&app, false).await;
+        // The scene order, then the draft gate: the order every route takes. The scene is
+        // re-planned here, so a draft is not put over by accident.
+        let lock = app.scene.lock().await;
+        let _gate = app.draft.gate().lock().await;
+        crate::scenes::apply_with(&app, &lock, false).await;
     } else {
         app.scene.notify();
     }

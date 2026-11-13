@@ -260,12 +260,12 @@ impl Engine for FakeEngine {
     fn set_group_effect(&self, group: &str, effect: Option<Box<dyn Effect>>, props: &Props) {
         let id = effect.map(|effect| effect.schema().id);
         let mut scene = self.scene.lock().unwrap();
-        match scene.iter_mut().find(|(held, _, _)| held == group) {
-            Some(entry) => {
-                entry.1 = id.clone();
-                entry.2 = props.clone();
-            }
-            None => scene.push((group.to_string(), id.clone(), props.clone())),
+        // The real engine drops an effect for a group it does not have
+        // (`canvas-core/src/engine.rs`: "set_group_effect: no such group in the running scene"),
+        // so the fake does the same: a group that is not in the scene is not added to it.
+        if let Some(entry) = scene.iter_mut().find(|(held, _, _)| held == group) {
+            entry.1 = id.clone();
+            entry.2 = props.clone();
         }
         let first = scene.first().cloned();
         drop(scene);
@@ -392,6 +392,16 @@ impl DeviceAdapter for FakeAdapter {
         leds: u32,
     ) -> Result<(), AdapterError> {
         self.zone_sizes.lock().unwrap().push((device.clone(), zone, leds));
+        // The zone has that many LEDs now, as a real adapter's does: the next discovery
+        // reports them.
+        let mut devices = self.devices.lock().unwrap();
+        if let Some(found) = devices.iter_mut().find(|d| &d.id == device) {
+            if let Some(found) = found.zones.iter_mut().find(|z| z.index == zone) {
+                found.led_count = leds;
+                found.min_leds = leds;
+                found.max_leds = leds;
+            }
+        }
         Ok(())
     }
 

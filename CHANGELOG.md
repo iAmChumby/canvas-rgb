@@ -20,6 +20,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
 ### Fixed
 
+- Effects: flashing a light (the identify) no longer puts the saved scene back over a draft or over the onboarding greeting: the flash only overrides what the lights show while it runs (#310)
+- Effects: a draft that moves from the whole-scene preview to a group of the scene lands on that group, and the other groups keep playing their own effect (#310)
+- Effects: a stack's draft resolves its layers in the group it lands on, so a layer over a device of that group paints the right lights (#310)
+- Effects: a stack with an HTML layer is refused while another group of the scene already plays an HTML effect, so a scene never runs more of them than it may (#310)
+- Effects: the first run's ARGB headers are lights that join the first scene, instead of staying dark in no group (#310)
+- Command line: `canvas-rgb effects activate <effect> --group <name>` takes the group whether it comes before or after the effect's properties, and `canvas-rgb scenes set <name>` refuses a name that two scenes share and lists them (#310)
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
 
 ## [0.13.1] - 2026-11-11

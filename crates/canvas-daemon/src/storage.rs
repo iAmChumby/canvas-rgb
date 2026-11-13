@@ -738,6 +738,41 @@ impl Store {
     }
 
     /// Makes sure there is always an active layout to write scale and sampling into.
+    /// Makes the first-run scene hold every light again.
+    ///
+    /// The first run sizes the JARGB headers: the zones it sized are lights now, and the scene
+    /// the migration made holds the lights it knew then. The first-run scene is one scene with
+    /// one group holding every light, so it is made again with the lights there are now: the
+    /// owner just installed the app, and every light plays. A scene the owner made is left
+    /// alone: its groups are theirs.
+    ///
+    /// Returns true when the scene was changed.
+    pub fn refresh_first_run_scene(&mut self) -> bool {
+        let default = crate::scenes::default_scenes(&self.lights);
+        let first_run =
+            self.scenes.scenes.len() == 1 && self.scenes.scenes[0].id == default.scenes[0].id;
+        if !first_run {
+            return false;
+        }
+        let members: Vec<canvas_proto::scene::LightId> =
+            self.lights.lights.iter().map(|light| light.id.clone()).collect();
+        let mut groups = self.scenes.scenes[0].groups.clone();
+        if groups.is_empty() {
+            // The scene was made when there was no light at all, so it has no group. The group
+            // that holds every light is made now.
+            groups = default.scenes[0].groups.clone();
+            if groups.is_empty() {
+                return false;
+            }
+        } else if groups[0].members == members {
+            return false;
+        } else {
+            groups[0].members = members;
+        }
+        self.scenes.scenes[0].groups = groups;
+        true
+    }
+
     /// Adds a light for every zone with LEDs that has none, and saves when any was added. A save
     /// that fails (the migration is pending, or a file is blocked) is logged once, not on every
     /// device list.

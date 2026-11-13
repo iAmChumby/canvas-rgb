@@ -118,8 +118,33 @@ pub struct ActivateArgs {
     pub props: Vec<String>,
     /// The groups of the active scene to play it on, by name. Repeatable. With no group, every
     /// group of the active scene plays it.
+    ///
+    /// The properties are a trailing list (everything after the effect is one), so a `--group`
+    /// after them is taken out of that list by [`split_groups`]: the flag works before and after
+    /// the properties.
     #[arg(long = "group", value_name = "NAME")]
     pub groups: Vec<String>,
+}
+
+/// The groups named by `--group <name>` in the activate's trailing arguments, and the rest of
+/// them.
+///
+/// The properties are a trailing var arg (everything after the effect), so `--group` can come
+/// before or after them: the pairs are taken out of the list, whatever their place.
+pub fn split_groups(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut groups = Vec::new();
+    let mut props = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == canvas_proto::cli::GROUP_FLAG {
+            if let Some(name) = rest.next() {
+                groups.push(name.clone());
+                continue;
+            }
+        }
+        props.push(arg.clone());
+    }
+    (groups, props)
 }
 
 /// `canvas-rgb scenes ...`
@@ -875,17 +900,36 @@ pub fn scenes_list(api: &dyn Api, json: bool) -> Result<Output, CliError> {
 /// `canvas-rgb scenes set <name>`: sets the scene by name, case-insensitively.
 ///
 /// A name that matches nothing prints the list and fails: the owner sees the names the daemon
-/// knows and picks one.
+/// knows and picks one. A name that matches several scenes is refused too, and the matches are
+/// listed: scene names are not unique, and picking one of them is the owner's call.
 pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliError> {
     let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
     let scenes = list.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
-    let found = scenes.iter().find(|scene| {
-        scene
-            .get("name")
-            .and_then(|v| v.as_str())
-            .is_some_and(|scene_name| scene_name.eq_ignore_ascii_case(name))
-    });
-    let Some(found) = found else {
+    let matches: Vec<&serde_json::Value> = scenes
+        .iter()
+        .filter(|scene| {
+            scene
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|scene_name| scene_name.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    if matches.len() > 1 {
+        let names: Vec<String> = matches
+            .iter()
+            .map(|scene| {
+                let id = scene.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let scene_name = scene.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("{id} ({scene_name})")
+            })
+            .collect();
+        return Err(CliError::Other(format!(
+            "{name} names {} scenes: {}; name one of them by its id",
+            matches.len(),
+            names.join(", ")
+        )));
+    }
+    let Some(found) = matches.first() else {
         let list_text = scenes_list_text(&list);
         if json {
             return Err(CliError::Other(format!(
@@ -1732,6 +1776,54 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// A name that names two scenes is refused, and the matches are listed: scene names are
+    /// not unique, and picking one is the owner's call.
+    #[test]
+    fn scenes_set_refuses_an_ambiguous_name_and_lists_the_matches() {
+        let api = ScenesApi {
+            answer: serde_json::json!({
+                "active": "gaming",
+                "scenes": [
+                    { "id": "gaming", "name": "Gaming" },
+                    { "id": "gaming-2", "name": "GAMING" },
+                ],
+                "group_states": []
+            }),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let error = super::scenes_set(&api, "gaming", false).expect_err("the name is ambiguous");
+        let message = error.to_string();
+        assert!(message.contains("gaming"), "{message}");
+        assert!(message.contains("gaming-2"), "the matches are listed: {message}");
+        let asked = api.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "only the list was asked for");
+    }
+
+    /// The `--group` flag works before and after the properties: the properties are a trailing
+    /// list, so the flag is taken out of it.
+    #[test]
+    fn the_group_flag_works_before_and_after_the_properties() {
+        let args = |rest: &[&str]| -> Vec<String> { rest.iter().map(|s| s.to_string()).collect() };
+        let (groups, props) = super::split_groups(&args(&["--color", "#f00", "--group", "Intake"]));
+        assert_eq!(groups, vec!["Intake".to_string()]);
+        assert_eq!(props, args(&["--color", "#f00"]));
+
+        let (groups, props) = super::split_groups(&args(&["--group", "Intake", "--color", "#f00"]));
+        assert_eq!(groups, vec!["Intake".to_string()]);
+        assert_eq!(props, args(&["--color", "#f00"]));
+
+        // Two groups, and no properties.
+        let (groups, props) =
+            super::split_groups(&args(&["--group", "Intake", "--group", "Desk"]));
+        assert_eq!(groups, vec!["Intake".to_string(), "Desk".to_string()]);
+        assert!(props.is_empty());
+
+        // No flag: the properties are the properties.
+        let (groups, props) = super::split_groups(&args(&["--color", "#f00"]));
+        assert!(groups.is_empty());
+        assert_eq!(props, args(&["--color", "#f00"]));
     }
 
     /// The commands parse: `scenes list`, `scenes set <name>`, and `--group` on the activate.

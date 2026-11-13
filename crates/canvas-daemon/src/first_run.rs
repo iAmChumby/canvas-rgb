@@ -755,6 +755,83 @@ fn is_jargb_zone(device_name: &str, zone_name: &str) -> bool {
     zone.contains("jargb") || zone.contains("argb")
 }
 
+/// Sizes the JARGB headers, saves the sizes, and makes the lights that come of it join the
+/// first-run scene.
+///
+/// The zones the sizing gives LEDs are lights now: they join the hardware map, and the first-run
+/// scene (one group holding every light) takes them, so the owner's headers are lit and not
+/// dark. The devices are read again after the sizing, so the counts are the new ones.
+pub async fn size_headers(
+    app: &std::sync::Arc<crate::state::App>,
+    devices: &[DeviceInfo],
+    counts: &JargbCounts,
+) -> Vec<DeviceInfo> {
+    let sizes = jargb_zone_sizes(devices, counts);
+    if sizes.is_empty() {
+        return devices.to_vec();
+    }
+    for (device, zones) in &sizes {
+        for (zone, leds) in zones {
+            let mut adapter = app.adapter.lock().await;
+            if let Err(e) = adapter
+                .set_zone_size(&canvas_proto::device::DeviceId(device.clone()), *zone, *leds)
+                .await
+            {
+                tracing::warn!(device, zone, leds, error = %e, "could not size the header");
+            }
+        }
+    }
+    {
+        let home = app.store.read().await.home.clone();
+        let mut guard = app.zones.write().await;
+        for (device, zones) in &sizes {
+            guard.entry(device.clone()).or_default().extend(zones.clone());
+        }
+        let file = canvas_proto::config::ZonesFile {
+            schema_version: canvas_proto::config::ZONES_SCHEMA,
+            sizes: guard.clone(),
+        };
+        crate::logging::warn_if_err(
+            "the first run could not save the zone sizes",
+            crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
+        );
+    }
+
+    // Read the devices again, so the scene and the engine see the new LED counts (the list
+    // read above still has the headers at 0 LEDs).
+    let devices = match app.adapter.lock().await.discover().await {
+        Ok(list) => {
+            *app.devices.write().await = list.clone();
+            list
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not re-discover after sizing the headers");
+            devices.to_vec()
+        }
+    };
+
+    // The lights that come of the sizing join the hardware map, and the first-run scene takes
+    // them: they were skipped when the scene was made, because the headers had no LEDs then.
+    {
+        let mut store = app.store.write().await;
+        let added = store.sync_lights_from(&devices);
+        if added > 0 {
+            tracing::info!(added, "the sized headers are lights now");
+        }
+        // A migration that is still held (the layouts place a device that has not arrived)
+        // runs now, with the devices the sizing left.
+        store.finish_scenes(&devices);
+        if store.refresh_first_run_scene() {
+            tracing::info!("the first run's scene holds every light");
+            crate::logging::warn_if_err(
+                "the first run could not save the scenes",
+                store.save_scenes(),
+            );
+        }
+    }
+    devices
+}
+
 /// The colour the devices get before the first run's layout is applied.
 pub fn first_frame_color() -> Rgb8 {
     Rgb8::BLACK
@@ -822,51 +899,9 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         }
     }
 
-    // Size the JARGB headers and save the sizes.
-    let sizes = jargb_zone_sizes(&devices, &counts);
-    if !sizes.is_empty() {
-        for (device, zones) in &sizes {
-            for (zone, leds) in zones {
-                let mut adapter = app.adapter.lock().await;
-                if let Err(e) = adapter.set_zone_size(&canvas_proto::device::DeviceId(device.clone()), *zone, *leds).await {
-                    tracing::warn!(device, zone, leds, error = %e, "could not size the header");
-                }
-            }
-        }
-        {
-            let home = app.store.read().await.home.clone();
-            let mut guard = app.zones.write().await;
-            for (device, zones) in &sizes {
-                guard.entry(device.clone()).or_default().extend(zones.clone());
-            }
-            let file = canvas_proto::config::ZonesFile {
-                schema_version: canvas_proto::config::ZONES_SCHEMA,
-                sizes: guard.clone(),
-            };
-            crate::logging::warn_if_err(
-                "the first run could not save the zone sizes",
-                crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
-            );
-        }
-    }
-
-    // Re-discover after sizing, so the scene and the engine see the new LED counts (the
-    // list read above still has the headers at 0 LEDs).
-    let _devices = if sizes.is_empty() {
-        devices
-    } else {
-        let rediscovered = app.adapter.lock().await.discover().await;
-        match rediscovered {
-            Ok(list) => {
-                *app.devices.write().await = list.clone();
-                list
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "could not re-discover after sizing the headers");
-                devices
-            }
-        }
-    };
+    // Size the JARGB headers, save the sizes, and make the lights that come of it join the
+    // first-run scene.
+    let _devices = size_headers(app, &devices, &counts).await;
 
     // The scene: the store made it from the first device list (on a first run the migration
     // through `migrate(None, devices)`), and it is already on disk. Nothing is written here:

@@ -420,6 +420,8 @@ pub async fn put(
         None => crate::scenes::every_light_run(app).await,
     };
     app.stack_preview.set_group(run.clone());
+    // The group's masks: the preview's layers resolve in that group's canvas.
+    crate::scenes::publish_area_for(app, &run.id).await;
     // The render slot is taken only when a new build starts (below): a beat that only changes
     // values, or joins the build in flight, starts nothing and is never refused as busy.
     let slot;

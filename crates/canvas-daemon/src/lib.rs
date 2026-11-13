@@ -113,7 +113,7 @@ pub fn create_effect(
         }
         // The engine is about to run this stack: record the structure it was built from, so a
         // save-then-activate with the same structure reuses it instead of rebuilding.
-        stacks.note_running(&stack.id, &structure, live);
+        stacks.note_running(&stack.id, &structure, live, group);
         return Ok(Box::new(effect));
     }
     match user.create(id) {

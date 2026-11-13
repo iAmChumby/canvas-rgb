@@ -147,6 +147,11 @@ pub async fn put_stack(
             crate::stacks::StackRefusal::Invalid(message) => ApiFailure::validation(message),
         },
     )?;
+    // The scene must not run more HTML groups than it may: a stack with an HTML layer is one,
+    // and a group of the active scene plays this stack.
+    crate::scenes::check_stack_html_limit(&app, &stack)
+        .await
+        .map_err(ApiFailure::validation)?;
     let saved = app.stacks.put(stack, &known).map_err(|error| match error {
         StacksError::Invalid(message) => ApiFailure::validation(message),
         StacksError::Conflict(message) => ApiFailure::conflict(message),
@@ -184,6 +189,10 @@ pub async fn delete_stack(
         .stacks
         .get(&id)
         .ok_or_else(|| ApiFailure::not_found(format!("no stack with the id or name {id}")))?;
+
+    // The delete replaces what is on the lights: the draft gate is held across it, so a draft
+    // is not put over by accident.
+    let _gate = app.draft.gate().lock().await;
 
     // Every group of every scene: a stack in a scene that is not active is still in use.
     let named_by = crate::scenes::scenes_playing(&app, &stack.id).await;
@@ -240,9 +249,23 @@ pub async fn delete_stack(
     app.stacks.clear_running();
     let mut note = None;
     if running || !named_by.is_empty() {
+        // A draft of this stack holds the lights: it ends here, before the stack is gone, or it
+        // would put a stack that cannot be built any more back on the lights.
+        let drafted = app.draft.snapshot().is_some_and(|slot| slot.id == removed.id);
+        if drafted {
+            let ended = crate::draft::stop_locked(&app, None).await;
+            if let Some(ended) = ended.ended {
+                if let Some(note) = ended.note {
+                    tracing::warn!(%note, "the draft ended when the stack it played was deleted");
+                }
+            }
+        }
         // The active scene goes on again: the group that played the stack cannot build it any
-        // more, so that group is dark and the others run.
-        crate::scenes::apply_active_ungated(&app, false).await;
+        // more, so that group is dark and the others run. A draft that holds the lights keeps
+        // them: the scene waits for it.
+        if !app.draft.is_active() {
+            crate::scenes::apply_active_ungated(&app, false).await;
+        }
         note = Some(format!(
             "{} was deleted while a group played it, so that group is dark",
             removed.id

@@ -599,13 +599,22 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     };
     // The draft takes over the groups of the active scene that play its effect, or one
     // temporary group of every light when no group does.
-    let effect_id = saved_effect_id(app, &source_hash);
+    let saved_id = saved_effect_id(app, &source_hash);
+    let effect_id = saved_id.clone().unwrap_or_else(|| id.clone());
+    // The group the draft lands on, so the instance is built for it: a stack resolves its
+    // areas in the group's canvas.
+    let target = crate::scenes::takeover_groups(app, &effect_id).await;
+    let group = target.first().cloned().unwrap_or_default();
+    // The scene must not run more HTML groups than it may: the draft's effect is one of them.
+    crate::scenes::check_takeover_html_limit(app, &effect_id, &target)
+        .await
+        .map_err(PutError::Validation)?;
     let builder = takeover_builder(app, &id, html);
     let groups = crate::scenes::apply_takeover(
         app,
-        effect_id.as_deref().unwrap_or(&id),
+        &effect_id,
         &building.props,
-        Some(effect),
+        Some((group, effect)),
         builder,
     )
     .await
@@ -618,7 +627,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     let slot = Slot {
         id,
         props: building.props,
-        effect_id,
+        effect_id: saved_id,
         groups,
         lease_until,
         kind: SlotKind::Html { source: Arc::from(html), source_hash },
@@ -723,7 +732,12 @@ pub async fn put_stack(
                         for group in &groups {
                             app.engine.set_group_props(group, &props);
                         }
-                        app.stacks.note_running(&stack.id, &structure, Arc::clone(live));
+                        app.stacks.note_running(
+                            &stack.id,
+                            &structure,
+                            Arc::clone(live),
+                            groups.first().map(String::as_str),
+                        );
                         return Ok(true);
                     }
                 }
@@ -782,22 +796,34 @@ pub async fn put_stack(
         Building::Html { .. } => unreachable!("this PUT started a stack build"),
     };
 
+    // The group the draft lands on, so the stack is built for it: its layers resolve in that
+    // group's canvas.
+    let target = crate::scenes::takeover_groups(app, &stack.id).await;
+    let group = target.first().cloned().unwrap_or_default();
+    // The scene must not run more HTML groups than it may: a stack with an HTML layer is one.
+    crate::scenes::check_takeover_html_limit(app, &stack.id, &target)
+        .await
+        .map_err(PutError::Validation)?;
+
     // A new structure. Its HTML layers load here, outside the gate.
     let build_app = Arc::clone(app);
     let build_stack = stack.clone();
+    let build_group = group.clone();
     let effect = tokio::task::spawn_blocking(move || -> Result<Box<dyn Effect>, String> {
         let _slot = slot;
-        Ok(Box::new(
-            crate::stack::StackEffect::new(
-                &build_stack,
-                crate::leaf_builder(&build_app.user_effects),
-                live,
-                build_app.stacks.areas(),
-            )
-            .with_clock(build_app.stacks.clock())
-            .with_fps(build_app.stacks.fps_handle())
-            .with_status_sink(build_app.stacks.status_sink()),
-        ))
+        let mut effect = crate::stack::StackEffect::new(
+            &build_stack,
+            crate::leaf_builder(&build_app.user_effects),
+            live,
+            build_app.stacks.areas(),
+        )
+        .with_clock(build_app.stacks.clock())
+        .with_fps(build_app.stacks.fps_handle())
+        .with_status_sink(build_app.stacks.status_sink());
+        if !build_group.is_empty() {
+            effect = effect.with_group(&build_group);
+        }
+        Ok(Box::new(effect))
     })
     .await
     .map_err(|e| PutError::Internal(format!("the stack draft load task failed: {e}")))?
@@ -820,15 +846,21 @@ pub async fn put_stack(
         app,
         &stack.id,
         &building.props,
-        Some(effect),
+        Some((group, effect)),
         builder,
     )
     .await
     .map_err(PutError::Internal)?;
     app.draft.clear_failure();
     // The stack is what the main engine runs: a save-then-activate with the same structure
-    // reuses it instead of building again (D95.4.3, D95.4.6).
-    app.stacks.note_running(&stack.id, &structure, Arc::clone(&live));
+    // reuses it instead of building again (D95.4.3, D95.4.6). It resolves in the group the
+    // draft landed on.
+    app.stacks.note_running(
+        &stack.id,
+        &structure,
+        Arc::clone(&live),
+        groups.first().map(String::as_str),
+    );
     // The lease starts when the draft reaches the lights, not when its build started.
     let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
 

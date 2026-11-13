@@ -624,6 +624,207 @@ async fn a_stack_played_by_a_group_in_an_inactive_scene_cannot_be_deleted() {
     assert!(rig.app.stacks.get("stack:Glow").is_none(), "the stack is gone");
 }
 
+/// A draft that moves from the takeover group to a group of the scene lands on that group: the
+/// engine holds the takeover group, and an effect for a group it does not have is dropped.
+#[tokio::test]
+async fn a_draft_that_moves_to_a_scene_group_lands_on_that_group() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // The first draft is of an effect no group plays: it lands on the takeover group, and
+    // every light follows it.
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on every light").await;
+    shows(&rig.b, rgb(GREEN), "the draft is on every light").await;
+
+    // The next draft is of the effect the left group plays: it lands on that group, and the
+    // other group keeps its own effect.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft plays on the group that plays its effect").await;
+    shows(&rig.b, rgb(BLUE), "the other group keeps its own effect").await;
+}
+
+/// Identify is a sink-level override: it does not take the lights away from a draft, and
+/// stopping it does not put the scene back over the draft.
+#[tokio::test]
+async fn identify_during_a_draft_leaves_the_draft_on_the_lights() {
+    let rig = rig_with(draft_scenes_file()).await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on the lights").await;
+
+    // The identify flashes one light: it overrides what the engine sends.
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        routes::LIGHTS_FLASH,
+        Some(serde_json::json!({ "lights": ["fake:a#z0"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The identify stops: the draft is still the thing on the lights.
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        routes::LIGHTS_FLASH,
+        Some(serde_json::json!({ "lights": ["fake:a#z0"], "stop": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.draft.snapshot().is_some(),
+        "the draft is still the draft: the identify did not end it"
+    );
+    assert!(
+        !rig.app.scene.held().takeover.is_empty(),
+        "the draft still holds the lights: the identify did not put the scene back over it"
+    );
+}
+
+/// A stack draft's first instance resolves its areas in the group it lands on.
+#[tokio::test]
+async fn a_stack_draft_resolves_its_areas_in_the_group_it_lands_on() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A stack with a layer over the device of the left group.
+    let stack = serde_json::json!({
+        "id": "stack:Area",
+        "layers": [{
+            "id": "l1",
+            "name": "l1",
+            "effect": "solid",
+            "area": { "kind": "device", "device": "fake:a" },
+        }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Area", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The draft of that stack: no group plays it, so it lands on the takeover group of every
+    // light, and its areas resolve in that group's plan.
+    let body = serde_json::json!({
+        "stack": {
+            "id": "stack:Area",
+            "layers": [{
+                "id": "l1",
+                "name": "l1",
+                "effect": "solid",
+                "area": { "kind": "device", "device": "fake:a" },
+            }],
+        },
+        "epoch": "0123456789abcdef",
+        "seq": 1,
+        "props": {},
+    });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.stacks.running_group().as_deref(),
+        Some(canvas_daemon::scenes::TAKEOVER_GROUP),
+        "the draft's stack resolves in the takeover group's plan"
+    );
+}
+
+/// A stack with an HTML layer cannot be saved while another group of the scene plays HTML: the
+/// scene would run more HTML groups than it may.
+#[tokio::test]
+async fn a_stack_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() {
+    let mut scenes = draft_scenes_file();
+    // The left group plays a stack, the right one an HTML effect: the scene is at the limit.
+    scenes.scenes[0].groups[0].plays =
+        Plays::Effect { effect: "stack:Html".into(), props: Props::new() };
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "html:mine".into(), props: Props::new() };
+    let rig = rig_with(scenes).await;
+    // The stack is saved first: it has no HTML layer yet.
+    let stack = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "solid" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // Now it has an HTML layer: the scene would run two HTML groups.
+    let stack = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("HTML"), "the refusal says why: {message}");
+}
+
+/// The first run sizes the JARGB headers: the zones it sized are lights now, and they join the
+/// first-run scene, so they are lit and not dark.
+#[tokio::test]
+async fn the_sized_jargb_headers_join_the_first_run_scene() {
+    let home = TempHome::new();
+    // The MSI header, with a zone that has no LEDs yet.
+    let mut header = device("fake:MSI B850 Mystic Light");
+    header.name = "MSI B850 Mystic Light".into();
+    header.zones[0].name = "JARGB1".into();
+    header.zones[0].led_count = 0;
+    header.zones[0].min_leds = 0;
+    header.zones[0].max_leds = 0;
+
+    let mut store = canvas_daemon::storage::Store::at(&home.path);
+    // The first-run scene: the default one, with no light yet: the header had no LEDs when the
+    // scene was made.
+    store.lights = canvas_proto::scene::LightsFile {
+        schema_version: LIGHTS_SCHEMA,
+        lights: Vec::new(),
+    };
+    store.scenes = canvas_daemon::scenes::default_scenes(&store.lights);
+    let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
+        fps: 30,
+        power: canvas_proto::api::Power::Running,
+        brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // The adapter the daemon holds has the header in it.
+    let adapter = FakeAdapter::default();
+    *adapter.devices.lock().unwrap() = vec![header.clone()];
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(adapter),
+        TOKEN.to_string(),
+        "0.0.0-test".to_string(),
+        tx,
+    );
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
+        fake_builder(),
+        &[("mine", MINE)],
+    ));
+    let app = Arc::new(app);
+    *app.devices.write().await = vec![header.clone()];
+
+    // The first run sizes the header: the zone gets LEDs, and the light joins the scene.
+    let counts = canvas_daemon::first_run::JargbCounts {
+        source: canvas_daemon::first_run::CountSource::Unknown,
+        counts: vec![12],
+    };
+    let sized = canvas_daemon::first_run::size_headers(&app, &[header.clone()], &counts).await;
+    assert_eq!(sized[0].zones[0].led_count, 12, "the header was sized");
+
+    let store = app.store.read().await;
+    assert_eq!(
+        store.lights.lights.len(),
+        1,
+        "the sized header is a light now: {:?}",
+        store.lights.lights
+    );
+    let scene = canvas_daemon::scenes::active_scene(&store.scenes);
+    assert_eq!(
+        scene.groups[0].members,
+        vec![store.lights.lights[0].id.clone()],
+        "and it joins the first run's group"
+    );
+}
+
 // ---------------------------------------------------------------- one group
 
 #[tokio::test]

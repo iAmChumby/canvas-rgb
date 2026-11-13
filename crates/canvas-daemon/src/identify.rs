@@ -381,18 +381,17 @@ pub fn spawn_ticker(app: Arc<App>) {
     });
 }
 
-/// Puts the lights back after the override: the active scene goes on again, and a paused output
-/// needs its one black frame again.
+/// Puts the lights back after the override: the engine resumes by itself when running; a
+/// paused output needs its one black frame again.
+///
+/// The identify is a sink-level override: it never took the lights away from what the engine
+/// runs. A draft on the lights stays on the lights, the onboarding effect is not killed, and
+/// the scene is not rebuilt. Nothing is applied here.
 pub async fn restore(app: &Arc<App>) {
     let power = app.store.read().await.config.settings.power;
     if power == Power::Paused {
         app.engine.write_solid(Rgb8::BLACK);
-        return;
     }
-    // The scene order is not taken (see `crate::scenes::apply_active_ungated`): the identify
-    // restore holds no gate, and a scene write holds the scene order while it waits for the
-    // draft gate.
-    crate::scenes::apply_active_ungated(app, false).await;
 }
 
 #[cfg(test)]

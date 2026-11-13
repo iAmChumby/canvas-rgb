@@ -456,25 +456,29 @@ pub struct AreaMaps {
 impl AreaMaps {
     /// The mask for the area a layer names, or `None` when it covers nothing.
     ///
-    /// `group` is the group the stack plays in: its areas resolve in that group's canvas. With
-    /// no group (the legacy layout, a library tile) the layout's map is used.
+    /// `group` is the group the stack plays in: its areas resolve in that group's canvas. A group
+    /// the book does not hold resolves to nothing ("not in this group"), never the legacy
+    /// layout's map. With no group (the legacy layout, a library tile) the layout's map is used.
     pub fn resolve(&self, group: Option<&str>, area: &LayerArea) -> Option<ResolvedArea<'_>> {
-        match group.and_then(|id| self.groups.get(id)).or(self.layout.as_ref()) {
-            Some(map) => map.resolve(area),
-            // A map nobody published yet (a library tile has no layout) still resolves the whole
-            // canvas and a rectangle, at the logical size and 100 %; a device or a zone has no
-            // mask then, so it covers nothing.
-            None => match area {
-                LayerArea::Canvas => Some(ResolvedArea {
-                    dest: [0.0, 0.0, CANVAS_WIDTH as f32, CANVAS_HEIGHT as f32],
-                    mask: None,
-                    whole_canvas: true,
-                }),
-                LayerArea::Rect { x, y, width, height } => {
-                    let dest = rect_px(*x, *y, *width, *height, 1.0, CANVAS_WIDTH, CANVAS_HEIGHT)?;
-                    Some(ResolvedArea { dest, mask: None, whole_canvas: false })
-                }
-                LayerArea::Device { .. } | LayerArea::Zone { .. } => None,
+        match group {
+            Some(id) => self.groups.get(id)?.resolve(area),
+            None => match self.layout.as_ref() {
+                Some(map) => map.resolve(area),
+                // A map nobody published yet (a library tile has no layout) still resolves the
+                // whole canvas and a rectangle, at the logical size and 100 %; a device or a zone
+                // has no mask then, so it covers nothing.
+                None => match area {
+                    LayerArea::Canvas => Some(ResolvedArea {
+                        dest: [0.0, 0.0, CANVAS_WIDTH as f32, CANVAS_HEIGHT as f32],
+                        mask: None,
+                        whole_canvas: true,
+                    }),
+                    LayerArea::Rect { x, y, width, height } => {
+                        let dest = rect_px(*x, *y, *width, *height, 1.0, CANVAS_WIDTH, CANVAS_HEIGHT)?;
+                        Some(ResolvedArea { dest, mask: None, whole_canvas: false })
+                    }
+                    LayerArea::Device { .. } | LayerArea::Zone { .. } => None,
+                },
             },
         }
     }
@@ -1914,6 +1918,34 @@ mod tests {
             .into_iter()
             .collect(),
         }
+    }
+
+    /// A group the book does not hold resolves to nothing: "not in this group", never the
+    /// legacy layout's masks.
+    #[test]
+    fn an_unknown_group_resolves_to_nothing() {
+        let devices = vec![device("a", vec![zone(0, ZoneKind::Linear, 4)])];
+        let lights = vec![light("a#z0", "a", 0)];
+        let map = group_map(&["a#z0"], &lights, &devices, canvas_proto::scene::GroupMode::FlowAcross);
+        // The legacy layout's map is there, with the device in it.
+        let mut with_layout = map.clone();
+        with_layout.layout = Some(AreaMap::build(
+            &layout(
+                vec![placed("a", 0, 0.0, 0.0, 40.0, 20.0)],
+                RenderScale::P100,
+                SamplingMode::AreaAverage,
+            ),
+            &devices,
+            1,
+        ));
+        let area = LayerArea::Device { device: DeviceId("a".into()) };
+        assert!(
+            with_layout.resolve(Some("not-a-group"), &area).is_none(),
+            "a group the book does not hold paints nothing"
+        );
+        assert!(with_layout.is_empty_area(Some("not-a-group"), &area));
+        // The group the book holds still resolves.
+        assert!(with_layout.resolve(Some("g"), &area).is_some());
     }
 
     /// A device's area covers every light of that device in the group, and no other device's.
