@@ -84,10 +84,11 @@ export const routes = {
   scene: (id: string) => `/api/v1/scenes/${encodeURIComponent(id)}`,
   // PUT SceneActivePut: sets a scene, with a fade.
   sceneActive: "/api/v1/scenes/active",
-  // PATCH Props: one group's effect values, no rebuild.
+  // PATCH Props: one group's effect values, no rebuild. Saved; the scene's rev goes up by one;
+  // answers the whole Scene with its new rev.
   groupProps: (scene: string, group: string) =>
     `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/props`,
-  // PUT GroupBrightnessPut.
+  // PUT GroupBrightnessPut. As groupProps: saved, rev + 1, answers the scene.
   groupBrightness: (scene: string, group: string) =>
     `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/brightness`,
   // GET LightsResponse.

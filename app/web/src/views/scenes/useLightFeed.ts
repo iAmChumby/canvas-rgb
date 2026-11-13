@@ -121,6 +121,16 @@ export function useLightFeed(): LightColours {
 
     const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
 
+    /**
+     * The socket is gone: the colours on the canvas are stale, and the index belongs to a
+     * daemon that may come back with the lights in another order. Both go, so a frame that
+     * arrives before the new index never reaches a light of the old order.
+     */
+    const forget = () => {
+      store.clear();
+      names = new Map();
+    };
+
     const close = () => {
       if (retry) {
         clearTimeout(retry);
@@ -137,6 +147,7 @@ export function useLightFeed(): LightColours {
         socket.close();
         socket = null;
       }
+      forget();
     };
 
     const schedule = () => {
@@ -179,6 +190,8 @@ export function useLightFeed(): LightColours {
       };
       ws.onclose = () => {
         socket = null;
+        // The socket is gone: the colours and the index go with it.
+        forget();
         // The tray may have handed out a new token: ask again.
         dropApiConfig();
         schedule();

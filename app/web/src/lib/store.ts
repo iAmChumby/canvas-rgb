@@ -36,6 +36,19 @@ let lastStatusFailureAt = 0;
 let statusFailures = 0;
 
 /**
+ * The daemon answered 404 for the scene routes: it is older than the scenes. Asking again
+ * every four seconds would only get the same answer, so the poll stops until the daemon's
+ * version changes (the daemon was replaced or updated).
+ */
+let scenesUnsupported = false;
+
+/** The daemon answered 404 for the light routes: it is older than the lights. Same rule. */
+let lightsUnsupported = false;
+
+/** The daemon's version the last time it answered. */
+let daemonVersion = "";
+
+/**
  * When the daemon was last tried and when the next try is due. The daemon-down page shows it,
  * so the page can say something new instead of repeating its own heading.
  */
@@ -234,6 +247,12 @@ export async function refreshStatus(n?: number): Promise<void> {
     patchSnap({ status, statusError: null });
     lastStatusFailureAt = 0;
     statusFailures = 0;
+    // A daemon that changed is a daemon that may have the scene routes now.
+    if (status.version !== daemonVersion) {
+      daemonVersion = status.version;
+      scenesUnsupported = false;
+      lightsUnsupported = false;
+    }
   } catch (e) {
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
@@ -327,6 +346,8 @@ export async function refreshLayouts(n?: number): Promise<void> {
 }
 
 export async function refreshScenes(n?: number): Promise<void> {
+  // A daemon without the scene routes is not asked again until its version changes.
+  if (scenesUnsupported) return;
   const req = n ?? beginRequest("scenes");
   try {
     const scenes = await api.scenes.list();
@@ -336,11 +357,14 @@ export async function refreshScenes(n?: number): Promise<void> {
   } catch (e) {
     if (!isNewest("scenes", req)) return;
     markAnswered("scenes", req);
+    if (e instanceof ApiFailure && e.status === 404) scenesUnsupported = true;
     patchSnap({ scenesError: messageOf(e) });
   }
 }
 
 export async function refreshLights(n?: number): Promise<void> {
+  // A daemon without the light routes is not asked again until its version changes.
+  if (lightsUnsupported) return;
   const req = n ?? beginRequest("lights");
   try {
     const lights = (await api.lights.list()).lights;
@@ -350,6 +374,7 @@ export async function refreshLights(n?: number): Promise<void> {
   } catch (e) {
     if (!isNewest("lights", req)) return;
     markAnswered("lights", req);
+    if (e instanceof ApiFailure && e.status === 404) lightsUnsupported = true;
     patchSnap({ lightsError: messageOf(e) });
   }
 }
