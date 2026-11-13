@@ -107,6 +107,88 @@ fn cases() -> Vec<Case> {
     let single_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 12)])];
     let single_lights = vec![light("a", "d0", 0, Arrangement::Single)];
 
+    // A ring, a single and a grid in flow across: each arrangement draws inside its own
+    // share of the canvas, not the whole picture.
+    let mixed_devices = vec![
+        device("d0", vec![zone(0, ZoneKind::Linear, 8)]),
+        device("d1", vec![zone(0, ZoneKind::Linear, 4)]),
+        device(
+            "d2",
+            vec![zone(
+                0,
+                ZoneKind::Matrix { width: 2, height: 2, map: vec![Some(0), Some(1), Some(2), Some(3)] },
+                4,
+            )],
+        ),
+    ];
+    let mixed_lights = vec![
+        light("a", "d0", 0, Arrangement::Ring),
+        light("b", "d1", 0, Arrangement::Single),
+        light("c", "d2", 0, Arrangement::Grid),
+    ];
+
+    // A grid on a linear zone has no matrix to read: the hardware cannot tell a grid from
+    // a line, so the planner draws a strip.
+    let grid_linear_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 4)])];
+    let grid_linear_lights = vec![light("a", "d0", 0, Arrangement::Grid)];
+
+    // A ring in a slot too narrow for a circle: every LED lands on the slot's centre.
+    let narrow_ring_devices = vec![
+        device("d0", vec![zone(0, ZoneKind::Linear, 1)]),
+        device("d1", vec![zone(0, ZoneKind::Linear, 99)]),
+    ];
+    let narrow_ring_lights = vec![light("a", "d0", 0, Arrangement::Ring), light("b", "d1", 0, Arrangement::Strip)];
+
+    // A reversed grid and a reversed ring: the LED order flips inside the light.
+    let reversed_devices = vec![
+        device(
+            "d0",
+            vec![zone(
+                0,
+                ZoneKind::Matrix { width: 2, height: 2, map: vec![Some(0), Some(1), Some(2), Some(3)] },
+                4,
+            )],
+        ),
+        device("d1", vec![zone(0, ZoneKind::Linear, 8)]),
+    ];
+    let mut reversed_grid = light("a", "d0", 0, Arrangement::Grid);
+    reversed_grid.reversed = true;
+    let mut reversed_ring = light("b", "d1", 0, Arrangement::Ring);
+    reversed_ring.reversed = true;
+    let reversed_lights = vec![reversed_grid, reversed_ring];
+
+    // A member whose device is gone is skipped: the plan holds the light that is there.
+    let absent_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 12)])];
+    let absent_lights =
+        vec![light("a", "d0", 0, Arrangement::Strip), light("ghost", "gone", 0, Arrangement::Strip)];
+
+    // A zone that is there with no LEDs gets no slot and no samples.
+    let empty_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 0)])];
+    let empty_lights = vec![light("a", "d0", 0, Arrangement::Strip)];
+
+    // A zone over the cap, and the zone after it: the first plans the cap's worth of
+    // samples, and the second starts after the first zone's real LEDs.
+    let capped_devices = vec![device(
+        "d0",
+        vec![zone(0, ZoneKind::Linear, 100_000), zone(1, ZoneKind::Linear, 12)],
+    )];
+    let capped_lights = vec![light("a", "d0", 0, Arrangement::Strip), light("b", "d0", 1, Arrangement::Strip)];
+
+    // A map shorter than the matrix: the planner plans the LEDs the map names.
+    let short_map_devices = vec![device(
+        "d0",
+        vec![zone(0, ZoneKind::Matrix { width: 3, height: 3, map: vec![Some(0), Some(1), Some(2)] }, 3)],
+    )];
+    let short_map_lights = vec![light("a", "d0", 0, Arrangement::Grid)];
+
+    // A 512 LED ring on the whole canvas: the largest zone this repo knows of.
+    let big_ring_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 512)])];
+    let big_ring_lights = vec![light("a", "d0", 0, Arrangement::Ring)];
+
+    // A 4096 LED strip: a zone at the cap.
+    let big_strip_devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 4096)])];
+    let big_strip_lights = vec![light("a", "d0", 0, Arrangement::Strip)];
+
     vec![
         Case {
             name: "flow across 12 and 36",
@@ -163,6 +245,76 @@ fn cases() -> Vec<Case> {
             mode: GroupMode::EachItsOwn,
             lights: single_lights,
             devices: single_devices,
+        },
+        Case {
+            name: "a ring, a single and a grid in flow across",
+            members: vec!["a".into(), "b".into(), "c".into()],
+            mode: GroupMode::FlowAcross,
+            lights: mixed_lights,
+            devices: mixed_devices,
+        },
+        Case {
+            name: "a grid on a linear zone",
+            members: vec!["a".into()],
+            mode: GroupMode::EachItsOwn,
+            lights: grid_linear_lights,
+            devices: grid_linear_devices,
+        },
+        Case {
+            name: "a narrow ring",
+            members: vec!["a".into(), "b".into()],
+            mode: GroupMode::FlowAcross,
+            lights: narrow_ring_lights,
+            devices: narrow_ring_devices,
+        },
+        Case {
+            name: "a reversed grid and a reversed ring",
+            members: vec!["a".into(), "b".into()],
+            mode: GroupMode::EachItsOwn,
+            lights: reversed_lights,
+            devices: reversed_devices,
+        },
+        Case {
+            name: "an absent device",
+            members: vec!["a".into(), "ghost".into(), "nothing".into()],
+            mode: GroupMode::FlowAcross,
+            lights: absent_lights,
+            devices: absent_devices,
+        },
+        Case {
+            name: "a zone with no leds",
+            members: vec!["a".into()],
+            mode: GroupMode::FlowAcross,
+            lights: empty_lights,
+            devices: empty_devices,
+        },
+        Case {
+            name: "a capped zone and the zone after it",
+            members: vec!["a".into(), "b".into()],
+            mode: GroupMode::EachItsOwn,
+            lights: capped_lights,
+            devices: capped_devices,
+        },
+        Case {
+            name: "a map shorter than the matrix",
+            members: vec!["a".into()],
+            mode: GroupMode::EachItsOwn,
+            lights: short_map_lights,
+            devices: short_map_devices,
+        },
+        Case {
+            name: "a 512 led ring on the whole canvas",
+            members: vec!["a".into()],
+            mode: GroupMode::EachItsOwn,
+            lights: big_ring_lights,
+            devices: big_ring_devices,
+        },
+        Case {
+            name: "a 4096 led strip",
+            members: vec!["a".into()],
+            mode: GroupMode::FlowAcross,
+            lights: big_strip_lights,
+            devices: big_strip_devices,
         },
     ]
 }

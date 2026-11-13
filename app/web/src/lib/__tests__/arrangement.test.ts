@@ -501,6 +501,42 @@ describe("the arrangement planner (#310)", () => {
     expect(Math.abs(led0.center_y - 175.0), `LED 0 sits at ${led0.center_y}`).toBeLessThan(0.01);
   });
 
+  it("plans a damaged matrix from its map, not its dimensions", () => {
+    // 100000 x 100000 cells is 10^10 of them, and the map holds one LED: the planner walks
+    // the map, so the plan is one sample and takes no noticeable time.
+    const devices = [
+      device("d0", [zone(0, { type: "matrix", width: 100000, height: 100000, map: [0] }, 1)]),
+    ];
+    const lights = [light("a", "d0", 0, "grid")];
+    const started = performance.now();
+    const plan = buildGroupPlan(ids(["a"]), "each_its_own", lights, devices);
+    const elapsed = performance.now() - started;
+    const leds = first(plan.lights).leds;
+    expect(leds.length).toBe(1);
+    expect(region(first(leds))).toBeDefined();
+    expect(elapsed, `the plan took ${elapsed} ms`).toBeLessThan(50);
+  });
+
+  it("plans the leds a map shorter than the matrix names", () => {
+    // A 3x3 matrix whose map holds only its top row.
+    const map = [0, 1, 2];
+    const devices = [device("d0", [zone(0, { type: "matrix", width: 3, height: 3, map }, 3)])];
+    const lights = [light("a", "d0", 0, "grid")];
+    const plan = buildGroupPlan(ids(["a"]), "each_its_own", lights, devices);
+    const leds = first(plan.lights).leds;
+    expect(leds.length).toBe(3);
+    let last = Number.NEGATIVE_INFINITY;
+    for (const led of leds) {
+      expect(region(led), "a named LED has a cell").toBeDefined();
+      // The three LEDs are the matrix's top row: the cells of 3x3.
+      expect(Math.abs(led.center_y - 200.0 / 6.0), `the LED sits at ${led.center_y}`).toBeLessThan(
+        0.01,
+      );
+      expect(led.center_x > last, `the xs ascend: ${last} then ${led.center_x}`).toBe(true);
+      last = led.center_x;
+    }
+  });
+
   it("keeps every sample inside the canvas", () => {
     for (let n = 1; n <= 300; n++) {
       const devices = [device("d0", [zone(0, { type: "linear" }, n)])];
@@ -619,6 +655,19 @@ describe("the Rust planner's own output", () => {
     expect(vectors.canvas.width).toBe(CANVAS_WIDTH);
     expect(vectors.canvas.height).toBe(CANVAS_HEIGHT);
     expect(vectors.cases.length).toBeGreaterThan(0);
+    // The largest gap between the two planners, over every case and every LED: the f32
+    // Rust planner against the double TS one. One assertion at the end, so the number is
+    // reported whether or not it passes.
+    let maxDeviation = 0;
+    let maxWhere = "";
+    let ledsChecked = 0;
+    const deviation = (got: number | undefined, want: number, where: string): void => {
+      const d = Math.abs((got ?? 0) - want);
+      if (d > maxDeviation) {
+        maxDeviation = d;
+        maxWhere = where;
+      }
+    };
     for (const testCase of vectors.cases) {
       const plan = buildGroupPlan(testCase.members, testCase.mode, testCase.lights, testCase.devices);
       const what = testCase.name;
@@ -637,24 +686,23 @@ describe("the Rust planner's own output", () => {
         for (let j = 0; j < want.leds.length; j++) {
           const gotLed = got?.leds[j];
           const wantLed = want.leds[j]!;
-          expect(
-            Math.abs((gotLed?.center_x ?? 0) - wantLed.center_x),
-            `${what}: light ${i} LED ${j} centre x`,
-          ).toBeLessThanOrEqual(1e-4);
-          expect(
-            Math.abs((gotLed?.center_y ?? 0) - wantLed.center_y),
-            `${what}: light ${i} LED ${j} centre y`,
-          ).toBeLessThanOrEqual(1e-4);
-          expect(gotLed?.sampled, `${what}: light ${i} LED ${j} sampled`).toBe(wantLed.sampled);
-          const gotBounds = gotLed?.bounds;
+          const where = `${what}: light ${i} LED ${j}`;
+          deviation(gotLed?.center_x, wantLed.center_x, `${where} centre x`);
+          deviation(gotLed?.center_y, wantLed.center_y, `${where} centre y`);
+          expect(gotLed?.sampled, `${where} sampled`).toBe(wantLed.sampled);
           for (let k = 0; k < 4; k++) {
-            expect(
-              Math.abs((gotBounds?.[k] ?? 0) - (wantLed.bounds[k] ?? 0)),
-              `${what}: light ${i} LED ${j} bound ${k}`,
-            ).toBeLessThanOrEqual(1e-4);
+            deviation(gotLed?.bounds[k], wantLed.bounds[k]!, `${where} bound ${k}`);
           }
+          ledsChecked++;
         }
       }
     }
+    console.log(
+      `the largest deviation from the Rust planner over ${vectors.cases.length} cases and ${ledsChecked} LEDs is ${maxDeviation} (${maxWhere})`,
+    );
+    expect(
+      maxDeviation,
+      `the largest deviation from the Rust planner is ${maxDeviation} at ${maxWhere}`,
+    ).toBeLessThanOrEqual(1e-4);
   });
 });

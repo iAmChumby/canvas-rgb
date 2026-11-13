@@ -62,6 +62,11 @@
 //! policy that may rise; a wrapped total would quietly divide the canvas by a wrong
 //! number, and the wider sum costs nothing once per plan.
 //!
+//! The precision limit is the `f32` cast of the share, not the sum: `f32` holds `before`
+//! and `total` exactly up to 2^24 (16,777,216 LEDs), and a group under the cap holds at
+//! most 4096 LEDs a member, so the cast is exact for every scene this repo can build. See
+//! `slot_for`.
+//!
 //! A light is planned for at most `MAX_ZONE_LEDS` LEDs from its own start (LED 0 of the
 //! zone, or the slice's start). The LEDs past the cap have no sample, so the engine's
 //! device frame leaves them black. The next zone still starts after its predecessor's
@@ -214,6 +219,11 @@ impl Slot {
 /// each its own.
 ///
 /// The counts are in `u64` so a group of many capped zones cannot overflow the share.
+///
+/// The share is then divided in `f32`, which is exact for `before` and `total` up to
+/// 2^24 (16,777,216 LEDs): a group under the cap holds at most 4096 LEDs a member, so
+/// every scene this repo can build divides exactly. The TS port divides in a double,
+/// exact to 2^53; the two agree far inside the vectors' 1e-4 tolerance.
 fn slot_for(mode: GroupMode, before: u64, count: u64, total: u64) -> Slot {
     match mode {
         GroupMode::FlowAcross => {
@@ -312,22 +322,25 @@ fn grid_samples(
         return strip_samples(slot, n);
     }
 
-    // The map names the zone's LEDs; the light owns a run of them.
+    // The map names the zone's LEDs; the light owns a run of them. The map is the walk,
+    // not the matrix: a damaged matrix can report a huge width and height (100000 x
+    // 100000 is 10^10 cells) for a map that names one LED, and walking the matrix would
+    // freeze the plan.
     let start = light.leds.map(|s| s.start as usize).unwrap_or(0);
+    let cells = (cols as u64).saturating_mul(rows as u64);
+    let bound = map.len().min(usize::try_from(cells).unwrap_or(usize::MAX));
     let mut leds = vec![LedSample::default(); n];
-    for row in 0..rows {
-        for col in 0..cols {
-            let Some(Some(led)) = map.get(row * cols + col).copied() else {
-                continue;
-            };
-            let Ok(led) = usize::try_from(led) else {
-                continue;
-            };
-            if led < start || led >= start + n {
-                continue;
-            }
-            leds[led - start] = grid_cell_sample(slot, col, row, cols, rows);
+    for (index, entry) in map.iter().take(bound).enumerate() {
+        let Some(led) = *entry else {
+            continue;
+        };
+        let Ok(led) = usize::try_from(led) else {
+            continue;
+        };
+        if led < start || led >= start + n {
+            continue;
         }
+        leds[led - start] = grid_cell_sample(slot, index % cols, index / cols, cols, rows);
     }
     leds
 }
@@ -899,6 +912,57 @@ mod tests {
         // And the first LED of the slice is the bottom-left cell.
         assert!((leds[0].center_x - 40.0).abs() < 0.01, "LED 0 sits at {}", leds[0].center_x);
         assert!((leds[0].center_y - 175.0).abs() < 0.01, "LED 0 sits at {}", leds[0].center_y);
+    }
+
+    /// A damaged matrix can report a huge width and height with a map that names one LED.
+    /// The planner walks the map, not the matrix: 100000 x 100000 cells is 10^10 of them,
+    /// and the map holds one.
+    #[test]
+    fn a_damaged_matrix_plans_from_its_map_not_its_dimensions() {
+        let devices = vec![device(
+            "d0",
+            vec![zone(
+                0,
+                ZoneKind::Matrix { width: 100_000, height: 100_000, map: vec![Some(0)] },
+                1,
+            )],
+        )];
+        let lights = vec![light("a", "d0", 0, Arrangement::Grid)];
+        let started = std::time::Instant::now();
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        let elapsed = started.elapsed();
+        let leds = &plan.lights[0].leds;
+        assert_eq!(leds.len(), 1);
+        assert!(leds[0].region().is_some(), "the map's one LED has a cell");
+        assert!(
+            elapsed < std::time::Duration::from_millis(50),
+            "the plan took {elapsed:?}"
+        );
+    }
+
+    /// A map shorter than the matrix names fewer LEDs than the matrix has cells: the
+    /// planner plans the LEDs the map names, in the cells it names them, and the rest of
+    /// the matrix is empty.
+    #[test]
+    fn a_map_shorter_than_the_matrix_plans_the_leds_it_names() {
+        // A 3x3 matrix whose map holds only its top row.
+        let map = vec![Some(0), Some(1), Some(2)];
+        let devices = vec![device(
+            "d0",
+            vec![zone(0, ZoneKind::Matrix { width: 3, height: 3, map }, 3)],
+        )];
+        let lights = vec![light("a", "d0", 0, Arrangement::Grid)];
+        let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
+        let leds = &plan.lights[0].leds;
+        assert_eq!(leds.len(), 3);
+        let mut last = f32::NEG_INFINITY;
+        for led in leds {
+            assert!(led.region().is_some(), "a named LED has a cell");
+            // The three LEDs are the matrix's top row: the cells of 3x3.
+            assert!((led.center_y - 200.0 / 6.0).abs() < 0.01, "the LED sits at {}", led.center_y);
+            assert!(led.center_x > last, "the xs ascend: {} then {}", last, led.center_x);
+            last = led.center_x;
+        }
     }
 
     #[test]

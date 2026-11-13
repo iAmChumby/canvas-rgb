@@ -42,7 +42,7 @@ export const RING_INSET = 4;
  *
  * A zone reports its own LED count, and a damaged or misbehaving device can report a
  * number no real zone has. The cap keeps the planner from holding more than 4096 samples
- * (about 112 KiB, a sample being 28 bytes) for one light.
+ * (about 112 KiB in the daemon, whose `LedSample` is 28 bytes) for one light.
  */
 export const MAX_ZONE_LEDS = 4096;
 
@@ -274,16 +274,22 @@ function gridSamples(
   const rows = zone.kind.height;
   if (cols === 0 || rows === 0) return stripSamples(slot, n);
 
-  // The map names the zone's LEDs; the light owns a run of them.
+  // The map names the zone's LEDs; the light owns a run of them. The map is the walk, not
+  // the matrix: a damaged matrix can report a huge width and height (100000 x 100000 is
+  // 10^10 cells) for a map that names one LED, and walking the matrix would freeze the
+  // editor.
   const start = light.leds ? light.leds.start : 0;
   const leds: LedSample[] = Array.from({ length: n }, () => blackSample());
-  for (let row = 0; row < rows; row++) {
-    for (let col = 0; col < cols; col++) {
-      const led = zone.kind.map[row * cols + col];
-      if (led === undefined || led === null) continue;
-      if (led < start || led >= start + n) continue;
-      leds[led - start] = gridCellSample(slot, col, row, cols, rows);
-    }
+  const bound = Math.min(zone.kind.map.length, cols * rows);
+  for (let index = 0; index < bound; index++) {
+    const led = zone.kind.map[index];
+    if (led === undefined || led === null) continue;
+    if (led < start || led >= start + n) continue;
+    // The row and column of a map index, as the Rust planner counts them. The floor is
+    // exact: an index and a width below 2^53 divide exactly in a double.
+    const row = Math.floor(index / cols);
+    const col = index % cols;
+    leds[led - start] = gridCellSample(slot, col, row, cols, rows);
   }
   return leds;
 }
