@@ -12,10 +12,15 @@
 // that puts the older scene back.
 //
 // `setProps` and `setBrightness` are the live paths for a slider drag: they go to the engine
-// (`PATCH .../props`, `PUT .../brightness`) one at a time per group, at most once per 60 ms per
-// kind, and the last value always goes. The daemon answers those writes with the whole scene
-// and its new `rev`, so a whole-scene save after a live write carries that rev and never reverts
-// the value: the live values go with the save.
+// (`PATCH .../props`, `PUT .../brightness`) at most once per 60 ms per kind, and the last value
+// always goes. One live write of the scene is on its way at a time, across the groups, so each
+// answer can be checked: it must carry the rev its write was sent on plus one. Any other rev
+// means another window saved in between, which is handled as a 409 is. The daemon answers those
+// writes with the whole scene and its new `rev`, so a whole-scene save after a live write carries
+// that rev and never reverts the value: the live values go with the save. Live values are keyed
+// by scene and group, since two scenes can share a group id. A write the daemon refuses is tried
+// again, three times in a row at most; then its value leaves the queue and the screen. A scene
+// that goes, or a page that goes away, sends its waiting values through the same queue.
 //
 // The bookkeeping lives in refs, because the write loop and the timers read it between renders.
 // Everything a render shows is copied into one state object (`publish`), so a render never
@@ -37,8 +42,9 @@ export const LIVE_THROTTLE_MS = 60;
 /** How long a live write waits when a whole-scene save holds the daemon. */
 export const LIVE_RETRY_MS = 20;
 /**
- * How many live writes of one group may fail in a row before the group stops trying. A daemon
- * that is down is not asked again and again; the value stays on screen and in the queue.
+ * How many tries a live write of one group gets in a row. A write the daemon refuses is tried
+ * again after the throttle; after the last refusal the value leaves the queue and the screen, and
+ * the error stays. A daemon that is down is not asked again and again.
  */
 export const LIVE_FAILURES = 3;
 /** What the page says after a 409. */
@@ -272,8 +278,6 @@ export function useScene(): UseScene {
   const liveBusy = useRef(0);
   /** The whole-scene writes that wait for the live writes to finish. */
   const liveWaiters = useRef<Array<() => void>>([]);
-  /** The live writes that wait for the whole-scene write to finish. */
-  const writeWaiters = useRef<Array<() => void>>([]);
   const mounted = useRef(false);
   // What the daemon last said, for the callbacks that run between renders.
   const known = useRef<{ server: Scene | null; activeId: string | null }>({ server: null, activeId: null });
@@ -332,15 +336,6 @@ export function useScene(): UseScene {
     () =>
       new Promise<void>((resolve) => {
         liveWaiters.current.push(resolve);
-      }),
-    [],
-  );
-
-  /** Waits until no whole-scene write is on its way. */
-  const waitForWrite = useCallback(
-    () =>
-      new Promise<void>((resolve) => {
-        writeWaiters.current.push(resolve);
       }),
     [],
   );
@@ -425,9 +420,6 @@ export function useScene(): UseScene {
           failure = e;
         }
         writing.current = false;
-        const waiters = writeWaiters.current;
-        writeWaiters.current = [];
-        for (const resolve of waiters) resolve();
         const now = outgoing.current.get(sceneId);
         if (!failure && answer) {
           adoptScene(answer);
@@ -640,9 +632,6 @@ export function useScene(): UseScene {
       const g = live.current.get(key);
       if (!g) return;
       const groupId = g.groupId;
-      // The daemon has refused this group's writes three times in a row: the value waits for the
-      // next move of the slider, which resets the count.
-      if (g.failures >= LIVE_FAILURES) return;
       // One write at a time for this group: a second one would race the first.
       if (g.sending) return;
       // The group's turn is already booked.
