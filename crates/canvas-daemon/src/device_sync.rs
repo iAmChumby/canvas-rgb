@@ -29,6 +29,7 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     *app.openrgb.write().await = LinkState::Connected;
     // After the first run, a zone that appears (a late device, a header that got its LEDs) is
     // placed instead of staying black.
+    let scenes_deadline;
     {
         let mut store = app.store.write().await;
         // Scenes: every zone with LEDs is a light. A new one joins no group; one whose device
@@ -40,6 +41,7 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         if store.finish_scenes(&devices) {
             tracing::info!("scenes.json and lights.json were written from the first device list");
         }
+        scenes_deadline = store.scenes_deadline_to_arm(std::time::Instant::now());
         store.sync_lights_from(&devices);
         if store.config.first_run_done {
             let added = store
@@ -52,6 +54,18 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
                 }
             }
         }
+    }
+    // A placed device that never arrives sends no new list, so the wait is settled by a timer,
+    // with the devices known when it ends.
+    if let Some(wait) = scenes_deadline {
+        let app = Arc::clone(app);
+        tokio::spawn(async move {
+            tokio::time::sleep(wait + std::time::Duration::from_millis(50)).await;
+            let devices = app.devices.read().await.clone();
+            if app.store.write().await.finish_scenes(&devices) {
+                tracing::info!("scenes.json and lights.json were written when the wait for the devices ended");
+            }
+        });
     }
     // The engine needs the new devices and the zone sizes.
     if let Some(layout) = app.active_layout().await {

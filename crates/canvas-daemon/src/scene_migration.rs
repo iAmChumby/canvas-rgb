@@ -777,6 +777,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// A device that stays absent sends no new list: the wait arms one timer, with the time left.
+    #[test]
+    fn the_wait_arms_one_timer_that_ends_it() {
+        let dir = home_with_layouts("wait-timer", &layouts_with_a_late_device());
+        let mut store = Store::load_from(&dir);
+        let t0 = Instant::now();
+        assert_eq!(store.scenes_deadline_to_arm(t0), None, "no list yet: nothing to wait for");
+        assert!(!store.finish_scenes_at(&[board()], t0));
+        let left = store.scenes_deadline_to_arm(t0 + Duration::from_secs(10));
+        assert_eq!(left, Some(crate::storage::SCENES_DEVICE_WAIT - Duration::from_secs(10)));
+        assert_eq!(store.scenes_deadline_to_arm(t0 + Duration::from_secs(11)), None, "armed once");
+        // When the timer fires, the same unchanged list now migrates.
+        assert!(store.finish_scenes_at(&[board()], t0 + crate::storage::SCENES_DEVICE_WAIT));
+        assert!(store.scenes_pending.is_none());
+        assert_eq!(store.scenes_deadline_to_arm(t0 + Duration::from_secs(90)), None, "nothing left to wait for");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
     /// The device arrives within the wait: the migration runs with the real zones.
     #[test]
     fn the_missing_device_arriving_migrates_with_its_arrangements() {

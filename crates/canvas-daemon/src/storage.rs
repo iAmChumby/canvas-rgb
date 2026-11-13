@@ -356,6 +356,10 @@ pub struct PendingScenes {
     pub first_list_at: Option<Instant>,
     /// The wait for a placed device is logged once, not on every list.
     pub logged_waiting: bool,
+    /// A timer to settle the wait has been started. The supervisor sends a list only when the
+    /// devices change, so a device that stays absent sends none: without the timer the wait would
+    /// never end.
+    pub deadline_armed: bool,
 }
 
 impl PendingScenes {
@@ -578,6 +582,7 @@ impl Store {
                     snapshotted: false,
                     first_list_at: None,
                     logged_waiting: false,
+                    deadline_armed: false,
                 });
             }
         }
@@ -628,11 +633,27 @@ impl Store {
     /// `arrangement_of`: a ring stays a ring, a grid shape is a grid, a point is a single, anything
     /// else a strip), `reversed` and slice. It has LEDs unless the layout gives it a slice of no
     /// LEDs: the layouts only place a zone that had LEDs when it was placed (`first_run.rs`
-    /// skips `led_count == 0`), so a whole-zone placement is the evidence that it has some.
+    /// skips `led_count == 0`), so a whole-zone placement is the evidence that it has some. The
+    /// layout does not record a zone's kind, so an absent device's matrix or single zone placed
+    /// `Auto` becomes a strip; the light keeps it until the owner changes it in Devices (a single
+    /// LED reads the same point either way).
     ///
     /// Refuses while `lights.json` or `scenes.json` is blocked (could not be read at load).
     pub fn finish_scenes(&mut self, devices: &[DeviceInfo]) -> bool {
         self.finish_scenes_at(devices, Instant::now())
+    }
+
+    /// While the migration waits for a placed device, the time left on that wait, once: the caller
+    /// starts one timer that runs [`Store::finish_scenes`] again when it ends. `None` when nothing
+    /// waits (no migration held, no list yet) or the timer is already running.
+    pub fn scenes_deadline_to_arm(&mut self, now: Instant) -> Option<Duration> {
+        let pending = self.scenes_pending.as_mut()?;
+        let first = pending.first_list_at?;
+        if pending.deadline_armed {
+            return None;
+        }
+        pending.deadline_armed = true;
+        Some(SCENES_DEVICE_WAIT.saturating_sub(now.saturating_duration_since(first)))
     }
 
     /// [`Store::finish_scenes`] with the clock passed in, so a test drives the wait.
