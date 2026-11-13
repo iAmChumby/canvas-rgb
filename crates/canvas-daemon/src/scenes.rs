@@ -679,7 +679,41 @@ async fn apply_body(app: &Arc<App>, fade: bool) {
             // it plays in.
             publish_group_areas(app).await;
         }
-        Err(e) => tracing::error!(error = %e, "the scene could not be applied: the build task failed"),
+        Err(e) => {
+            // The build task failed: nothing was built, so the takeover is over and the
+            // groups are dark. The lights are never left on a takeover nothing owns.
+            let why = format!("the scene could not be built: {e}");
+            let failures: BTreeMap<String, String> =
+                key.scene.groups.iter().map(|group| (group.id.clone(), why.clone())).collect();
+            *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
+            // The takeover is over before the engine is handed anything: the flag is cleared
+            // first, so a panic in the engine cannot leave it set.
+            let held = Held {
+                groups: key.scene.groups.iter().map(|g| g.id.clone()).collect(),
+                takeover: Vec::new(),
+            };
+            app.scene.on.store(true, Ordering::SeqCst);
+            app.scene.set_held(held);
+            app.scene.notify();
+            let groups: Vec<EngineGroup> = key
+                .scene
+                .groups
+                .iter()
+                .map(|group| EngineGroup {
+                    id: group.id.clone(),
+                    members: group.members.clone(),
+                    mode: group.mode,
+                    brightness: group.brightness,
+                    effect: None,
+                    props: match &group.plays {
+                        Plays::Effect { props, .. } => props.clone(),
+                        Plays::Off => Props::new(),
+                    },
+                })
+                .collect();
+            tracing::error!(error = %e, "the scene could not be applied: the build task failed; the groups are dark");
+            app.engine.set_scene(key.lights.clone(), key.devices.clone(), groups, false);
+        }
     }
 }
 

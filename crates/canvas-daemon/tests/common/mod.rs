@@ -139,6 +139,9 @@ pub struct FakeEngine {
     pub panic_on_set_scene: AtomicU32,
     /// How many times `set_scene` has panicked: a test waits on this, not on the slot (#282).
     pub set_scene_panics: AtomicU32,
+    /// How many times `set_props` was called: the legacy path's one effect. A test counts it
+    /// to see that a route left the legacy effect alone.
+    pub set_props_calls: AtomicU32,
 }
 
 impl Default for FakeEngine {
@@ -164,6 +167,7 @@ impl Default for FakeEngine {
             set_effect_panics: AtomicU32::new(0),
             panic_on_set_scene: AtomicU32::new(0),
             set_scene_panics: AtomicU32::new(0),
+            set_props_calls: AtomicU32::new(0),
         }
     }
 }
@@ -183,6 +187,7 @@ impl Engine for FakeEngine {
     }
 
     fn set_props(&self, props: &Props) {
+        self.set_props_calls.fetch_add(1, Ordering::SeqCst);
         *self.props.lock().unwrap() = props.clone();
     }
 
@@ -242,7 +247,9 @@ impl Engine for FakeEngine {
         groups: Vec<canvas_proto::EngineGroup>,
         _fade: bool,
     ) {
-        if self.panic_on_set_scene.load(Ordering::SeqCst) != 0 {
+        // The panic is one-shot: the flag is cleared as it fires, so the daemon's own answer
+        // to a failed build (the groups go dark) can be handed to the engine.
+        if self.panic_on_set_scene.swap(0, Ordering::SeqCst) != 0 {
             self.set_scene_panics.fetch_add(1, Ordering::SeqCst);
             panic!("the engine panicked on set_scene");
         }

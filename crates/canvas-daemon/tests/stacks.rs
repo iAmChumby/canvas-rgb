@@ -1889,11 +1889,10 @@ async fn a_layout_switch_during_a_draft_puts_the_scene_back() {
         Some("solid".to_string()),
         "the scene's group plays the scene's effect again"
     );
-    // The scene is on the lights: the layout's own effect is not put on the engine, and an
-    // effect that does not exist is never tried.
+    // The scene went back on the lights: the takeover is over and the scene plays.
     assert!(
-        !log.text().contains("no-such-effect"),
-        "the layout's effect was not tried: {}",
+        log.text().contains("the scene went back"),
+        "the log says the scene went back: {}",
         log.text()
     );
 }
@@ -2827,6 +2826,90 @@ async fn a_stack_draft_builds_once_across_its_values_and_a_save() {
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("stack:Session".to_string())
+    );
+}
+
+/// The props the group that plays the stack runs with.
+fn stack_group_props(harness: &Harness, id: &str) -> Props {
+    let scene = harness.engine.scene.lock().unwrap().clone();
+    scene
+        .iter()
+        .find(|(_, effect, _)| effect.as_deref() == Some(id))
+        .map(|(_, _, props)| props.clone())
+        .unwrap_or_default()
+}
+
+/// A stack that is already running takes its new values on the group that plays it: while a
+/// scene runs, the legacy path's one effect is never touched.
+#[tokio::test]
+async fn a_running_stack_takes_its_new_values_on_the_group_that_plays_it() {
+    let (user, builds) = counting_user(None);
+    let harness = build_with("t11-reuse", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    // The scene is on the lights: the groups are what play.
+    canvas_daemon::scenes::apply_active(&harness.app, false).await;
+
+    // The stack is saved with a value and played on the scene's group.
+    let mut saved = stack("stack:Reuse", vec![layer("l1", "html:Tinted")]);
+    saved.layers[0].props.insert("tint".into(), tint("#ff0000"));
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let activated = harness
+        .router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "stack:Reuse"),
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    let built = builds.load(Ordering::SeqCst);
+    assert_eq!(
+        stack_group_props(&harness, "stack:Reuse").get("l1.tint"),
+        Some(&tint("#ff0000")),
+        "the group plays the stack with its value"
+    );
+    let legacy_calls = harness
+        .engine
+        .set_props_calls
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    // The same stack with another value: it is running, so it is reused and not rebuilt.
+    saved.layers[0].props.insert("tint".into(), tint("#00ff00"));
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let activated = harness
+        .router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "stack:Reuse"),
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        built,
+        "the running stack was not rebuilt"
+    );
+
+    // The value is on the group that plays the stack, and the legacy path's one effect is
+    // untouched: the scene does not run it.
+    assert_eq!(
+        stack_group_props(&harness, "stack:Reuse").get("l1.tint"),
+        Some(&tint("#00ff00")),
+        "the group has the new value"
+    );
+    assert_eq!(
+        harness
+            .engine
+            .set_props_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        legacy_calls,
+        "the legacy path's one effect was not given the stack's values"
     );
 }
 

@@ -147,6 +147,8 @@ fn group(id: &str, members: &[&str], effect: &str, props: Props) -> Group {
 const RED: (u8, u8, u8) = (200, 0, 0);
 const BLUE: (u8, u8, u8) = (0, 0, 200);
 const GREEN: (u8, u8, u8) = (0, 200, 0);
+/// The colour the activation test gives the effect it activates: nothing else paints it.
+const MAGENTA: (u8, u8, u8) = (255, 0, 255);
 
 fn rgb(c: (u8, u8, u8)) -> Rgb8 {
     Rgb8::new(c.0, c.1, c.2)
@@ -1178,12 +1180,14 @@ async fn a_layout_switch_over_a_draft_ends_the_draft_on_the_engine() {
     assert_the_draft_ended(&rig).await;
 }
 
-/// The legacy props route ends the draft on the engine, and takes the captures of the scene's
-/// groups with it.
+/// The props route does not end the editor's draft: the draft is the editor's unsaved work,
+/// and its props are changed with PUT /effects/draft. The route answers a conflict and writes
+/// nothing.
 #[tokio::test]
-async fn the_active_props_route_over_a_draft_ends_the_draft_on_the_engine() {
+async fn the_active_props_route_is_refused_while_a_draft_holds_the_lights() {
     let rig = rig_with(takeover_scenes_file()).await;
     draft_on_a_scene_group(&rig).await;
+    let before = stored(&rig, "main").await;
 
     let (status, answer) = send(
         &rig,
@@ -1192,8 +1196,19 @@ async fn the_active_props_route_over_a_draft_ends_the_draft_on_the_engine() {
         Some(serde_json::json!({ "color": { "type": "color", "value": "#00ff00" } })),
     )
     .await;
-    assert_eq!(status, StatusCode::OK, "{answer}");
-    assert_the_draft_ended(&rig).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert!(
+        answer["message"].as_str().unwrap_or_default().contains("draft"),
+        "the message names the draft route: {answer}"
+    );
+    // Nothing changed: the draft still holds the lights and the scene is as it was.
+    assert!(rig.app.draft.snapshot().is_some(), "the draft is still the draft");
+    assert_eq!(
+        rig.app.scene.held().takeover,
+        vec!["left".to_string()],
+        "the draft still holds the group"
+    );
+    assert_eq!(stored(&rig, "main").await, before, "the scene is not written");
 }
 
 /// A change to the group the draft is on leaves the draft alone: the draft holds the lights
@@ -1241,6 +1256,117 @@ async fn a_failed_takeover_leaves_the_failures_it_had() {
             .await;
     assert!(error.is_err(), "the takeover failed: {error:?}");
     assert_eq!(rig.app.scene.failures(), before, "the failures are the ones the engine had");
+}
+
+/// The onboarding greeting holds the lights: a takeover with no draft behind it.
+async fn greeting_on_the_lights(rig: &Rig) {
+    let body = serde_json::json!({ "props": {}, "preset": null });
+    let (status, answer) = send(
+        rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "onboard-hello"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.held().takeover,
+        vec!["takeover".to_string()],
+        "the greeting holds the lights"
+    );
+}
+
+/// After a route that ended the greeting: the takeover is over.
+async fn assert_the_greeting_ended(rig: &Rig) {
+    assert!(rig.app.scene.held().takeover.is_empty(), "the takeover is over");
+}
+
+/// An activation ends the greeting on the engine: the scene plays again.
+#[tokio::test]
+async fn an_activation_ends_the_greeting_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    greeting_on_the_lights(&rig).await;
+
+    let body = serde_json::json!({
+        "props": { "color": { "type": "color", "value": "#ff00ff" } },
+        "preset": null,
+        "groups": ["left"],
+    });
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_greeting_ended(&rig).await;
+    shows(&rig.a, rgb(MAGENTA), "the group plays the effect it was given").await;
+}
+
+/// A scene save ends the greeting on the engine: the scene plays again.
+#[tokio::test]
+async fn a_scene_save_ends_the_greeting_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    greeting_on_the_lights(&rig).await;
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[1].brightness = 20;
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) =
+        send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_greeting_ended(&rig).await;
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A layout switch ends the greeting on the engine: the scene plays again.
+#[tokio::test]
+async fn a_layout_switch_ends_the_greeting_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    greeting_on_the_lights(&rig).await;
+
+    let active = rig.app.store.read().await.layouts.active.clone();
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        routes::LAYOUT_ACTIVE,
+        Some(serde_json::json!({ "id": active })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_greeting_ended(&rig).await;
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A route that fails after it ended a takeover puts the scene back on the lights: a takeover
+/// is never left there with nothing owning it.
+#[tokio::test]
+async fn a_failed_activation_after_a_draft_puts_the_scene_back() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // The store cannot write the scenes: the save fails.
+    std::fs::create_dir_all(rig.home.path.join("scenes.json")).expect("the scenes file is blocked");
+
+    // The activation ends the draft and then fails to save the scene.
+    let body = serde_json::json!({ "props": {}, "preset": null, "groups": ["left"] });
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+
+    // The scene is back on the lights and the takeover is over.
+    assert!(rig.app.scene.held().takeover.is_empty(), "the takeover is over");
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
 }
 
 // ---------------------------------------------------------------- one group

@@ -1004,16 +1004,20 @@ async fn expire_locked(app: &Arc<App>) -> Option<Ended> {
 /// between "the draft is gone" and "the saved effect is on", which the apply would then
 /// overwrite while the slot said the draft was running. Dropping a draft here restores nothing.
 pub struct ReplaceGuard<'a> {
-    _gate: tokio::sync::MutexGuard<'a, ()>,
+    /// The draft gate, when this guard took it. `None` when the caller holds it.
+    _gate: Option<tokio::sync::MutexGuard<'a, ()>>,
     /// True when a draft was on the lights and was dropped here.
     pub dropped: bool,
-    /// True when the draft that was dropped held the lights: the engine's groups are the
-    /// takeover's, so the caller's work must be a full scene apply from the store, never a
+    /// True when a takeover held the lights when this guard was taken: the engine's groups are
+    /// the takeover's, so the caller's work must be a full scene apply from the store, never a
     /// diff and never a single effect.
     ///
     /// The takeover flag stays set until that full apply clears it: ending a takeover always
     /// ends it on the engine.
     ended_takeover: bool,
+    /// True when the takeover was ended on the engine. The full apply is the only thing that
+    /// clears the flag, so the guard remembers that it was paid.
+    settled: std::sync::atomic::AtomicBool,
     /// The draft that was dropped here. If the caller's own apply then fails, the engine is
     /// left showing a draft nothing owns, so the guard can put this slot's prior effect back
     /// (or black, with a note) instead (D95.4.5, test 12).
@@ -1021,13 +1025,46 @@ pub struct ReplaceGuard<'a> {
 }
 
 impl ReplaceGuard<'_> {
-    /// True when the draft that was dropped held the lights.
+    /// True when a takeover held the lights and it has not been ended on the engine yet.
     ///
     /// The engine's groups are then the takeover's, and the caller's work has to be a full
-    /// scene apply from the store: a diff would leave the draft's effect on a group the scene
-    /// names, and a single effect would take the captures the other groups need.
+    /// scene apply from the store: a diff would leave the takeover's effect on a group the
+    /// scene names, and a single effect would take the captures the other groups need.
     pub fn ended_takeover(&self) -> bool {
-        self.ended_takeover
+        self.ended_takeover && !self.settled.load(std::sync::atomic::Ordering::SeqCst)
+    }
+
+    /// Puts the whole scene on again: the takeover ends on the engine.
+    ///
+    /// The takeover flag is cleared by the full apply and by nothing else, so this is the only
+    /// way to end one. A route that fails before it comes here leaves the guard to do it (see
+    /// [`ReplaceGuard::fail`]), so the lights are never left on a takeover nothing owns.
+    pub async fn end_takeover(&self, app: &Arc<App>, fade: bool) {
+        if self.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.settled.store(true, std::sync::atomic::Ordering::SeqCst);
+        if self.ended_takeover {
+            tracing::info!("the takeover ended: the scene went back on the lights");
+        }
+        crate::scenes::apply_active_ungated(app, fade).await;
+    }
+
+    /// The caller did a full scene apply itself: the takeover is ended on the engine.
+    pub fn settle(&self) {
+        self.settled.store(true, std::sync::atomic::Ordering::SeqCst);
+    }
+
+    /// The route failed before it could end the takeover on the engine: it happens here,
+    /// before the error goes out.
+    ///
+    /// The scene goes back on the lights even though the route failed: the takeover is over,
+    /// and nothing owns it any more.
+    pub async fn fail(&self, app: &Arc<App>) {
+        if !self.ended_takeover || self.settled.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        self.end_takeover(app, false).await;
     }
 
     /// Puts the dropped draft's prior back on the lights, exactly as Stop would, and
@@ -1051,22 +1088,55 @@ impl ReplaceGuard<'_> {
 ///
 /// The takeover flag is left alone: ending a takeover always ends it on the engine, so the
 /// caller that ends one does a full scene apply, and that apply clears the flag. A caller that
-/// only diffs the scene must not leave the draft's effect on the lights with the flag cleared.
+/// only diffs the scene must not leave the takeover's effect on the lights with the flag
+/// cleared.
+///
+/// A takeover is anything that holds the lights: the editor's draft, the onboarding greeting,
+/// or a stack draft. The guard does not care which: it records that the lights were held, so
+/// the caller puts the whole scene on again.
 pub async fn hold_for_replace(app: &Arc<App>) -> ReplaceGuard<'_> {
     let gate = app.draft.gate.lock().await;
-    let dropped = app.draft.lock().take();
-    // The replacement outranks any build still running, landed or not.
-    app.draft.supersede_build();
-    // The live sequence goes, the epoch order stays, so an older tab cannot re-take the slot
-    // after a layout switch or an activation.
-    app.draft.epochs.clear_live();
-    // The draft held the lights: the engine's groups are the takeover's, and the caller has to
+    let guard = take_guard(app, true);
+    ReplaceGuard { _gate: Some(gate), ..guard }
+}
+
+/// Looks at the lights and owes the full apply that ends a takeover, with the draft gate
+/// already held.
+///
+/// The props route uses this one: it refuses to change anything while the editor's draft holds
+/// the lights, so it must not end that draft, and a build that is still running must not be
+/// superseded either. What it does need is to know whether a takeover (the onboarding
+/// greeting) holds the lights, and to put the whole scene on again when the route ends it.
+pub fn hold_for_takeover(app: &Arc<App>) -> ReplaceGuard<'_> {
+    take_guard(app, false)
+}
+
+/// The guard's own state: what holds the lights, and what the route owes.
+fn take_guard(app: &Arc<App>, drop_the_draft: bool) -> ReplaceGuard<'_> {
+    let dropped = if drop_the_draft {
+        let dropped = app.draft.lock().take();
+        // The replacement outranks any build still running, landed or not.
+        app.draft.supersede_build();
+        // The live sequence goes, the epoch order stays, so an older tab cannot re-take the
+        // slot after a layout switch or an activation.
+        app.draft.epochs.clear_live();
+        if let Some(slot) = &dropped {
+            tracing::info!(draft = %slot.id, "the draft ended: a saved effect is being put on");
+        }
+        dropped
+    } else {
+        None
+    };
+    // Something held the lights: the engine's groups are the takeover's, and the caller has to
     // put the whole scene on again.
-    let ended_takeover = dropped.is_some() && app.scene.is_taken_over();
-    if let Some(slot) = &dropped {
-        tracing::info!(draft = %slot.id, "the draft ended: a saved effect is being put on");
+    let ended_takeover = app.scene.is_taken_over();
+    ReplaceGuard {
+        _gate: None,
+        dropped: dropped.is_some(),
+        ended_takeover,
+        settled: std::sync::atomic::AtomicBool::new(false),
+        dropped_slot: dropped,
     }
-    ReplaceGuard { _gate: gate, dropped: dropped.is_some(), ended_takeover, dropped_slot: dropped }
 }
 
 /// The answer `GET`/`PUT`/`DELETE /effects/draft` give. A `note` is only set by an ending that

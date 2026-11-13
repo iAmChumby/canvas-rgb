@@ -195,9 +195,9 @@ pub async fn put_scene(
     if is_active(&app, &id).await {
         let replace = crate::draft::hold_for_replace(&app).await;
         if replace.ended_takeover() {
-            // The draft held the lights: the whole scene goes on again, so the group the draft
-            // was on plays the scene's effect and not the draft's.
-            scenes::apply_with(&app, &lock, true).await;
+            // Something held the lights: the whole scene goes on again, so the group the
+            // takeover was on plays the scene's effect and not the takeover's.
+            replace.end_takeover(&app, true).await;
         } else {
             scenes::apply_group_change(&app, &lock, &old, &new).await;
         }
@@ -433,17 +433,27 @@ pub async fn plan_activation(
 /// Saves and applies what [`plan_activation`] planned.
 ///
 /// `full` puts the whole scene on again instead of the groups that changed: the caller uses it
-/// when a draft held the lights, so the group the draft was on plays the scene's effect.
+/// when something held the lights, so the group it was on plays the scene's effect. The guard
+/// does that apply ([`crate::draft::ReplaceGuard::end_takeover`]), and it does the same when
+/// the save fails, so a takeover is never left on the lights with nothing owning it.
 pub async fn commit_activation(
     app: &Arc<App>,
     lock: &SceneLock<'_>,
     planned: (Scene, Scene),
     full: bool,
+    replace: &crate::draft::ReplaceGuard<'_>,
 ) -> ApiResult<()> {
     let (old, new) = planned;
-    replace_saved(app, new.clone()).await?;
+    if let Err(error) = replace_saved(app, new.clone()).await {
+        // The save failed: the takeover is still on the lights and nothing owns it. The guard
+        // puts the scene back before the error goes out.
+        replace.fail(app).await;
+        return Err(error);
+    }
     if full {
-        scenes::apply_with(app, lock, false).await;
+        // The whole scene goes on again: the group the takeover was on plays the scene's
+        // effect and not the takeover's.
+        replace.end_takeover(app, false).await;
     } else {
         scenes::apply_group_change(app, lock, &old, &new).await;
     }

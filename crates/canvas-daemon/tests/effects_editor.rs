@@ -704,10 +704,9 @@ async fn a_layout_switch_ends_the_draft_without_restoring_it() {
     );
 }
 
-/// The props route ends a draft that holds the lights: the scene's group plays the scene's
-/// effect again, and the props go to the groups that play that effect.
+/// The props route does not end the editor's draft: it answers a conflict and writes nothing.
 #[tokio::test]
-async fn the_active_props_route_ends_a_draft_that_holds_the_lights() {
+async fn the_active_props_route_is_refused_while_a_draft_runs() {
     let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -721,15 +720,68 @@ async fn the_active_props_route_ends_a_draft_that_holds_the_lights() {
         ))
         .await
         .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    // The scene's group plays the scene's effect again, with the new colour.
-    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
+    assert!(message.contains("draft"), "the message names the draft route: {message}");
     assert_eq!(
-        running(&engine).1,
-        color("#00ff00"),
-        "the group that plays the effect has the new colour"
+        running(&engine).0,
+        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
+        "the draft is still what runs"
     );
-    assert!(!draft_state(router).await.active, "the route ended the draft");
+    assert!(app.draft.is_active(), "the draft is still the draft");
+
+    // After Stop, the route works again.
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+            .await
+            .expect("the router answers")
+            .status(),
+        StatusCode::OK
+    );
+    let response = router
+        .oneshot(request_with_body(
+            "PATCH",
+            routes::EFFECT_ACTIVE_PROPS,
+            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+}
+
+/// A scene that cannot be built leaves the lights dark and the takeover over: the build task
+/// died, so nothing is left on the takeover.
+#[tokio::test]
+async fn a_failed_scene_build_leaves_the_lights_dark_and_the_takeover_over() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
+    prior_effect(&app, "solid", color("#112233")).await;
+    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert!(!app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // The engine panics on the next scene: the build task dies with it.
+    engine
+        .panic_on_set_scene
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+
+    // The activation ends the draft: the whole scene goes on again.
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            "/api/v1/effects/solid/activate",
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The takeover is over and the groups are dark: the failure is named.
+    assert!(app.scene.held().takeover.is_empty(), "the takeover is over");
+    let failures = app.scene.failures();
+    assert!(!failures.is_empty(), "the failure is named: {failures:?}");
+    assert_eq!(running(&engine).0, None, "the groups are dark");
 }
 
 /// Without a scene on the lights the props route is refused while a draft runs: the draft's
@@ -1693,14 +1745,15 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
     })
     .await;
     assert!(!app.draft.is_active());
-    assert_eq!(
-        running(&engine).0,
-        Some(format!(
-            "draft:{}",
-            canvas_daemon::user_effects::source_hash(MOVING)
-        )),
-        "the restore that panicked did not finish"
+    // The build task died with the panic: the groups go dark and the takeover is over, so the
+    // lights are not left on the draft nothing owns.
+    wait_until(|| app.scene.held().takeover.is_empty() && running(&engine).0.is_none()).await;
+    assert!(
+        !app.scene.failures().is_empty(),
+        "the failure is named: {:?}",
+        app.scene.failures()
     );
+    assert_eq!(running(&engine).0, None, "the groups are dark");
 
     // The sweeper is still there: the next draft ends the same way, without a panic.
     engine
