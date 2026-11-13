@@ -16,7 +16,7 @@ pub mod effect_guard;
 pub mod geometry;
 mod preview;
 pub mod sampling;
-pub mod scene_engine;
+pub(crate) mod scene_engine;
 mod timer;
 
 #[cfg(test)]

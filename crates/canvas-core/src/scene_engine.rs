@@ -18,6 +18,9 @@
 //! render thread's own: canvases, plans and buffers, and it runs the frame without the lock
 //! ([`SceneRunner::render`]). The effects go back into the state when the frame is done.
 //!
+//! The frame's group buffers live in the runner and travel with the frame, so the hot path
+//! allocates nothing per group.
+//!
 //! The engine stays one render thread: the groups run one after the other.
 
 use std::collections::HashMap;
@@ -32,6 +35,7 @@ use canvas_proto::scene::{GroupMode, Light, LightId, SCENE_FADE_MS};
 use canvas_proto::traits::{
     AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, ScreenFrame,
 };
+use tracing::warn;
 
 use crate::arrangement::{build_group_plan, GroupPlan};
 use crate::engine::{guarded_call, panic_text, report_effect_panic};
@@ -97,7 +101,9 @@ pub(crate) struct SceneState {
 
 /// What one group hands the render thread for one frame.
 pub(crate) struct GroupWork {
-    pub id: String,
+    /// The group's place in the scene's group list. The effect comes back to that place,
+    /// and the generation says whether the slot still holds the effect it took.
+    pub index: usize,
     pub effect: Option<Box<dyn Effect>>,
     pub effect_generation: u64,
     pub needs: InputNeeds,
@@ -126,17 +132,24 @@ pub(crate) struct SceneInput {
 impl SceneState {
     /// Takes each group's effect and pending props out for one frame. `seen_generation` is the
     /// scene generation the render thread has plans for.
-    pub fn take_input(&mut self, devices: &[DeviceInfo], seen_generation: u64) -> SceneInput {
+    ///
+    /// `works` is the render thread's buffer: it is refilled and handed back with the
+    /// frame, so the hot path allocates nothing per group.
+    pub fn take_input(
+        &mut self,
+        devices: &[DeviceInfo],
+        seen_generation: u64,
+        mut works: Vec<GroupWork>,
+    ) -> SceneInput {
         let rebuild = (self.generation != seen_generation).then(|| Rebuild {
             lights: self.lights.clone(),
             devices: devices.to_vec(),
             groups: self.groups.iter().map(|g| (g.members.clone(), g.mode)).collect(),
         });
-        let works = self
-            .groups
-            .iter_mut()
-            .map(|g| GroupWork {
-                id: g.id.clone(),
+        works.clear();
+        for (index, g) in self.groups.iter_mut().enumerate() {
+            works.push(GroupWork {
+                index,
                 failed: g.failed.is_some(),
                 // A failed group keeps its effect: it is not called, and nothing else needs it.
                 effect: if g.failed.is_some() { None } else { g.effect.take() },
@@ -145,8 +158,8 @@ impl SceneState {
                 started: g.started,
                 brightness: g.brightness,
                 pending_props: g.pending_props.take(),
-            })
-            .collect();
+            });
+        }
         SceneInput {
             generation: self.generation,
             works,
@@ -158,13 +171,15 @@ impl SceneState {
     /// Puts the frame's effects back and records the failures. An effect whose slot was
     /// replaced during the frame (a newer generation, or the scene itself changed) comes back
     /// in the returned list: the caller drops it behind the guard, outside the lock.
-    pub fn put_back(&mut self, done: Vec<GroupDone>) -> Vec<Box<dyn Effect>> {
+    pub fn put_back(&mut self, done: &mut Vec<GroupDone>) -> Vec<Box<dyn Effect>> {
         let mut superseded = Vec::new();
-        for item in done {
+        for item in done.drain(..) {
+            // The slot is the group's place in the list, and the generation says whether it
+            // still holds the effect this frame took: a replaced effect never goes back.
             let slot = self
                 .groups
-                .iter_mut()
-                .find(|g| g.id == item.id && g.effect_generation == item.effect_generation);
+                .get_mut(item.index)
+                .filter(|slot| slot.effect_generation == item.effect_generation);
             match slot {
                 Some(slot) => {
                     if slot.effect.is_none() {
@@ -189,7 +204,8 @@ impl SceneState {
 
 /// One group's effect coming back from the frame.
 pub(crate) struct GroupDone {
-    id: String,
+    /// The group's place in the scene's group list.
+    pub(crate) index: usize,
     /// The effect coming back. The caller drops it behind the guard when it has nowhere
     /// to put it.
     pub(crate) effect: Option<Box<dyn Effect>>,
@@ -241,7 +257,6 @@ pub(crate) struct FrameParams {
 
 /// What a frame gives back besides the device frames.
 pub(crate) struct FrameOutput {
-    pub done: Vec<GroupDone>,
     pub light_frame: Option<LightFrame>,
     /// How many effect panics this frame caught.
     pub panics: u64,
@@ -258,6 +273,13 @@ pub(crate) struct SceneRunner {
     last_sent: HashMap<DeviceId, Vec<Rgb8>>,
     fade: Option<Fade>,
     last_light_preview_at: Option<Instant>,
+    /// The frame's groups, on their way to the state. The buffer is reused every frame.
+    works: Vec<GroupWork>,
+    /// The groups coming back from the frame. The buffer is reused every frame.
+    done: Vec<GroupDone>,
+    /// Whether a light's LEDs did not fit the device's frame and the write was dropped.
+    /// The warning is logged once, not on every frame.
+    warned_out_of_range: bool,
 }
 
 impl Default for SceneRunner {
@@ -276,6 +298,9 @@ impl SceneRunner {
             last_sent: HashMap::new(),
             fade: None,
             last_light_preview_at: None,
+            works: Vec::new(),
+            done: Vec::new(),
+            warned_out_of_range: false,
         }
     }
 
@@ -284,9 +309,20 @@ impl SceneRunner {
         self.generation
     }
 
+    /// Takes the frame's group buffer out, so the scene can fill it. [`SceneRunner::render`]
+    /// puts it back when the frame is done.
+    pub fn take_works(&mut self) -> Vec<GroupWork> {
+        std::mem::take(&mut self.works)
+    }
+
+    /// The groups coming back from the frame. The caller drains it.
+    pub fn done(&mut self) -> &mut Vec<GroupDone> {
+        &mut self.done
+    }
+
     /// Runs one frame: effects, sampling, merge, global stages, fade. The device frames wait in
     /// the runner for [`SceneRunner::take_frame`].
-    pub fn render(&mut self, input: SceneInput, params: &FrameParams) -> FrameOutput {
+    pub fn render(&mut self, mut input: SceneInput, params: &FrameParams) -> FrameOutput {
         if let Some(rebuild) = input.rebuild {
             self.rebuild(rebuild, input.generation);
             // A new scene replaces a fade that was still running; `start_fade` below starts a
@@ -300,14 +336,16 @@ impl SceneRunner {
         // Capture data is read once per frame and handed to every group.
         let (screen, audio) = read_captures(&input.works, params.input_source.as_ref());
 
-        let mut done = Vec::with_capacity(input.works.len());
+        // The frame's buffer comes back to the runner, so the next frame allocates nothing.
+        let mut works = std::mem::take(&mut input.works);
+        self.done.clear();
         let mut panics = 0;
-        for (index, work) in input.works.into_iter().enumerate() {
+        for (index, work) in works.drain(..).enumerate() {
             let Some(group) = self.groups.get_mut(index) else {
                 // Cannot happen: the plans are rebuilt whenever the scene changes. Keep the
                 // effect so it goes back to its slot.
-                done.push(GroupDone {
-                    id: work.id,
+                self.done.push(GroupDone {
+                    index: work.index,
                     effect: work.effect,
                     effect_generation: work.effect_generation,
                     failure: None,
@@ -316,14 +354,17 @@ impl SceneRunner {
             };
             let (item, panicked) = run_group(group, work, params.dt, &screen, &audio);
             panics += u64::from(panicked);
-            done.push(item);
+            self.done.push(item);
         }
+
+        // The frame's buffer goes back to the runner: the next frame allocates nothing.
+        self.works = works;
 
         self.merge_devices();
         let light_frame = self.light_frame(params);
         self.apply_global_stages(params);
         self.apply_fade(params.dt);
-        FrameOutput { done, light_frame, panics }
+        FrameOutput { light_frame, panics }
     }
 
     /// Records a frame that was sent to a device's sink, whatever mode sent it.
@@ -361,6 +402,9 @@ impl SceneRunner {
 
     fn rebuild(&mut self, rebuild: Rebuild, generation: u64) {
         self.generation = generation;
+        // A new scene may have its own out-of-range write: it is logged once, for this
+        // scene.
+        self.warned_out_of_range = false;
         self.devices = rebuild
             .devices
             .iter()
@@ -411,8 +455,22 @@ impl SceneRunner {
                 let frame = &mut self.devices[index].frame;
                 let start = light.frame_start as usize;
                 for (offset, color) in colors.iter().enumerate() {
-                    if let Some(slot) = frame.get_mut(start + offset) {
-                        *slot = *color;
+                    match frame.get_mut(start + offset) {
+                        Some(slot) => *slot = *color,
+                        None => {
+                            // A light's LEDs do not fit the device's frame: the write is
+                            // dropped. It is logged once, not on every frame.
+                            if !self.warned_out_of_range {
+                                self.warned_out_of_range = true;
+                                warn!(
+                                    device = %light.device_id,
+                                    start,
+                                    leds = colors.len(),
+                                    frame = frame.len(),
+                                    "a light's LEDs do not fit the device's frame; the writes past its end are dropped"
+                                );
+                            }
+                        }
                     }
                 }
             }
@@ -580,7 +638,7 @@ fn run_group(
     let panicked = failure.is_some();
     (
         GroupDone {
-            id: work.id,
+            index: work.index,
             effect,
             effect_generation: work.effect_generation,
             failure,
@@ -663,6 +721,14 @@ mod tests {
         }
     }
 
+    /// One frame: the scene hands the runner its groups, the runner renders them.
+    fn frame(scene: &mut SceneState, runner: &mut SceneRunner, devices: &[DeviceInfo]) {
+        let generation = runner.generation();
+        let works = runner.take_works();
+        let input = scene.take_input(devices, generation, works);
+        runner.render(input, &params());
+    }
+
     /// A frame built for the old LED count of a zone is never handed to a sink that expects the
     /// new one (Review Focus 2), and the frame of the right length is.
     #[test]
@@ -670,14 +736,12 @@ mod tests {
         let mut scene = state(&["d1#z0"], vec![light("d1")]);
         let mut runner = SceneRunner::new();
         let devices = vec![strip_device("d1", 12)];
-        let input = scene.take_input(&devices, runner.generation());
-        runner.render(input, &params());
+        frame(&mut scene, &mut runner, &devices);
         let id = DeviceId("d1".into());
         // The zone grew to 20 LEDs after the frame was built: its sink now expects 20.
         assert_eq!(runner.take_frame(&id, 20), None, "a 12-LED frame for a 20-LED sink");
 
-        let input = scene.take_input(&devices, runner.generation());
-        runner.render(input, &params());
+        frame(&mut scene, &mut runner, &devices);
         let frame = runner.take_frame(&id, 12).expect("a frame of the right length");
         assert_eq!(frame.len(), 12);
     }
@@ -688,12 +752,10 @@ mod tests {
     fn a_new_scene_rebuilds_the_frame_to_the_new_length() {
         let mut runner = SceneRunner::new();
         let mut scene = state(&["d1#z0"], vec![light("d1")]);
-        let input = scene.take_input(&[strip_device("d1", 12)], runner.generation());
-        runner.render(input, &params());
+        frame(&mut scene, &mut runner, &[strip_device("d1", 12)]);
         let mut scene = state(&["d1#z0"], vec![light("d1")]);
         scene.generation = 2;
-        let input = scene.take_input(&[strip_device("d1", 20)], runner.generation());
-        runner.render(input, &params());
+        frame(&mut scene, &mut runner, &[strip_device("d1", 20)]);
         let frame = runner.take_frame(&DeviceId("d1".into()), 20).expect("a 20-LED frame");
         assert_eq!(frame.len(), 20);
     }

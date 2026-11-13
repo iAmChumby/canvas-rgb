@@ -1356,7 +1356,10 @@ fn render_scene_frame(
         let Some(scene) = state.scene.as_mut() else {
             return false;
         };
-        let input = scene.take_input(&state.devices, runner.generation());
+        // The runner's group buffer goes into the frame and comes back with it.
+        let generation = runner.generation();
+        let works = runner.take_works();
+        let input = scene.take_input(&state.devices, generation, works);
         let dt = frame_start.duration_since(*last_frame_at).as_secs_f32();
         *last_frame_at = frame_start;
         let params = FrameParams {
@@ -1381,11 +1384,11 @@ fn render_scene_frame(
     let (superseded, light_sink) = {
         let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
         let superseded = match state.scene.as_mut() {
-            Some(scene) => scene.put_back(output.done),
+            Some(scene) => scene.put_back(runner.done()),
             // The scene ended while the frame ran (`set_layout`): the effects have nowhere
             // to go back to. They are dropped behind the guard, outside the lock, like
             // every other replaced effect: an effect's `Drop` is effect code.
-            None => output.done.into_iter().filter_map(|item| item.effect).collect(),
+            None => runner.done().drain(..).filter_map(|item| item.effect).collect(),
         };
         // `set_layout` ended scene mode during the frame: the frame is stale, nothing is sent.
         if state.scene.is_some() {
