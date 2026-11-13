@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+﻿import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { getSnap, patchSnap, refreshDevices, refreshDisplays, refreshEffects } from "@/lib/store";
 import { DevicesView } from "@/views/DevicesView";
@@ -62,8 +62,6 @@ const status: Status = {
   devices_connected: 11,
   devices_total: 12,
   preview_subscribers: 0,
-  active_layout: "desk",
-  active_effect: null,
   active_effects: [],
   openrgb: "connected",
   service: "connected",
@@ -196,7 +194,7 @@ describe("the retry", () => {
     expect(screen.queryByText("The effects could not be read")).toBeNull();
     expect(screen.getByText("The effect list may be out of date.")).toBeTruthy();
     // The count is a dash while the list may be old.
-    expect(screen.getByTestId("effect-count").textContent).toBe("– effects");
+    expect(screen.getByTestId("effect-count").textContent).toBe("â€“ effects");
   });
 });
 
@@ -392,3 +390,4 @@ describe("the updates page", () => {
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
+

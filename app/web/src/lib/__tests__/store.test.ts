@@ -1,4 +1,4 @@
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+﻿import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The store's one way to the daemon. The tests here answer it themselves, so an answer can be
 // slow, late or never.
@@ -9,7 +9,6 @@ const { api } = vi.hoisted(() => ({
     fans: vi.fn(),
     devices: vi.fn(),
     effects: vi.fn(),
-    layouts: vi.fn(),
     render: vi.fn(),
     settings: vi.fn(),
     displays: vi.fn(),
@@ -27,7 +26,6 @@ import {
   refreshDisplays,
   refreshEffects,
   refreshFans,
-  refreshLayouts,
   refreshLights,
   refreshScenes,
   refreshSettings,
@@ -56,8 +54,6 @@ describe("the store's answers", () => {
       devicesTotal: null,
       effects: null,
       effectsError: null,
-      layouts: null,
-      layoutsError: null,
       settings: null,
       settingsError: null,
       displays: null,
@@ -188,12 +184,6 @@ const AREAS = [
     answer: { effects: [], active: null, failed: [] },
     field: "effectsError",
   },
-  {
-    name: "layouts",
-    call: () => refreshLayouts(),
-    answer: { layouts: [], active: "" },
-    field: "layoutsError",
-  },
   { name: "settings", call: () => refreshSettings(), answer: { fps: 30 }, field: "settingsError" },
   { name: "displays", call: () => refreshDisplays(), answer: [], field: "displaysError" },
 ] as const;
@@ -208,7 +198,6 @@ describe("the store's late failures", () => {
       fansError: null,
       devicesError: null,
       effectsError: null,
-      layoutsError: null,
       settingsError: null,
       displaysError: null,
     });
@@ -233,3 +222,4 @@ describe("the store's late failures", () => {
     expect(getSnap()[area.field]).toBeNull();
   });
 });
+

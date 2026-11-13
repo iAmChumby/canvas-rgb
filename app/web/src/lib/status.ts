@@ -149,25 +149,21 @@ export function effectMissing(effects: EffectSummary[] | null, id: string): bool
 }
 
 /**
- * What is playing, in words. With scenes it is the active scene's name and how many devices are
- * lit; a daemon without scenes names the layout's effect. This is the same words the strip shows.
+ * What is playing, in words. Scenes are the only render path (#310), so it is the active
+ * scene's name and how many devices are lit. This is the same words the strip shows.
  */
 export function playing(
   status: Status | null,
   effects: EffectSummary[] | null,
 ): { name: string; detail: string; count: boolean } {
   if (!status) return { name: "—", detail: "", count: false };
-  if (!status.active_scene && !status.active_effect) return { name: "No scene yet", detail: "", count: false };
-  const scene = status.active_scene?.name ?? null;
-  const effectName = status.active_scene
-    ? (status.active_effects ?? []).map((id) => effectNameOf(effects, id)).join(", ")
-    : status.active_effect
-      ? effectNameOf(effects, status.active_effect)
-      : "";
+  if (!status.active_scene) return { name: "No scene yet", detail: "", count: false };
+  const scene = status.active_scene.name;
+  const effectName = (status.active_effects ?? []).map((id) => effectNameOf(effects, id)).join(", ");
   // A scene is named even when every group of it is off.
-  const name = scene ?? effectName;
+  const name = scene;
   if (!name) return { name: "Nothing is running", detail: "", count: false };
-  if (scene && !effectName) return { name: scene, detail: "all off", count: false };
+  if (!effectName) return { name: scene, detail: "all off", count: false };
   if (status.power === "paused") return { name, detail: "paused", count: false };
   if (status.parked) return { name, detail: "idle", count: false };
   const n = status.devices_connected;

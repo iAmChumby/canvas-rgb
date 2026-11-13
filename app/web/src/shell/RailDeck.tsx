@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useMemo, useState, type CSSProperties } from "react";
 import { SkipBack, SkipForward, Sun } from "@phosphor-icons/react";
@@ -31,7 +31,6 @@ export function RailDeck() {
   const status = useSnap((s) => s.status);
   const effects = useSnap((s) => s.effects);
   const fans = useSnap((s) => s.fans);
-  const render = useSnap((s) => s.render);
 
   const scenes = useSnap((s) => s.scenes);
 
@@ -41,7 +40,8 @@ export function RailDeck() {
   const sceneGroups = sceneName
     ? (scenes?.scenes.find((x) => x.id === (status?.active_scene?.id ?? scenes.active))?.groups.length ?? null)
     : null;
-  const activeId = status?.active_effect ?? null;
+  // The effect the first group of the scene plays: what the "next effect" step starts from.
+  const activeId = status?.active_effects?.[0] ?? null;
   const active = effects?.find((e) => e.id === activeId) ?? null;
 
   // The effect before and the effect after: the neighbours in the effects list, in its order.
@@ -49,7 +49,7 @@ export function RailDeck() {
     async (dir: -1 | 1) => {
       const list = getSnap().effects ?? [];
       if (list.length === 0) return;
-      const current = getSnap().status?.active_effect ?? null;
+      const current = getSnap().status?.active_effects?.[0] ?? null;
       const at = list.findIndex((e) => e.id === current);
       const from = at < 0 ? 0 : at;
       const next = list[(from + dir + list.length) % list.length];
@@ -109,7 +109,7 @@ export function RailDeck() {
         <SystemPanel
           fans={fans}
           fps={status?.fps_measured ?? null}
-          target={render?.fps ?? status?.fps_target ?? null}
+          target={status?.fps_target ?? null}
         />
       )}
     </section>
@@ -170,7 +170,7 @@ function LightsPanel({
 
       <div className="rail-deck-row">
         <span className="rail-deck-name">
-          {activeName ?? (known ? "Nothing is running" : "—")}
+          {activeName ?? (known ? "Nothing is running" : "â€”")}
           <RunningPresetName effectId={presetId} />
         </span>
         {groups !== null ? (
@@ -220,7 +220,7 @@ function LightsPanel({
           onChange={setDraft}
           onCommit={(v) => void commit(v)}
         />
-        <span className="fig rail-bright-value">{shown === null ? "—" : `${shown}%`}</span>
+        <span className="fig rail-bright-value">{shown === null ? "â€”" : `${shown}%`}</span>
       </div>
     </div>
   );
@@ -256,8 +256,8 @@ function SystemPanel({
     // A whole number says no decimal: "54", not "54.0".
     const places = (v: number | null) => (v === null || Number.isInteger(v) ? 0 : 1);
     return [
-      { label: "CPU", value: cpu, unit: "°C", tone: "a3", scale: 100, decimals: places(cpu) },
-      { label: "GPU", value: gpu, unit: "°C", tone: "a3", scale: 100, decimals: places(gpu) },
+      { label: "CPU", value: cpu, unit: "Â°C", tone: "a3", scale: 100, decimals: places(cpu) },
+      { label: "GPU", value: gpu, unit: "Â°C", tone: "a3", scale: 100, decimals: places(gpu) },
       { label: "Fans", value: rpm, unit: "rpm", tone: "a2", scale: 2000, decimals: 0 },
       {
         label: "Render",
@@ -291,7 +291,7 @@ function MeterCell({ meter }: { meter: Meter }) {
       <span className="rail-meter-label">{label}</span>
       <span className="rail-meter-value">
         {value === null ? (
-          <span className="rail-meter-none">—</span>
+          <span className="rail-meter-none">â€”</span>
         ) : (
           <AnimatedNumber value={value} decimals={decimals} />
         )}
@@ -305,3 +305,6 @@ function MeterCell({ meter }: { meter: Meter }) {
     </div>
   );
 }
+
+
+

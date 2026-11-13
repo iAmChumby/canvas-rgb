@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+﻿import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotifyHost, dismissNotifications } from "@/components/Notify";
 import { continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
@@ -85,8 +85,6 @@ const baseStatus: Status = {
   devices_connected: 3,
   devices_total: 4,
   preview_subscribers: 0,
-  active_layout: "desk",
-  active_effect: null,
   active_effects: [],
   openrgb: "connected",
   service: "connected",
@@ -430,3 +428,4 @@ describe("the updated-to toast", () => {
     expect(screen.getByText("Added")).toBeTruthy();
   });
 });
+

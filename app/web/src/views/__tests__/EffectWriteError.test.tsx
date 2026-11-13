@@ -90,7 +90,6 @@ beforeEach(() => {
     effectsError: null,
     effectsFailed: [],
     status: {
-      active_effect: "aurora",
       active_effects: ["aurora"],
       active_scene: { id: "s", name: "Scene" },
     } as unknown as Status,
@@ -216,4 +215,5 @@ describe("other ways a failure is left behind", () => {
     expect(screen.queryByText("the favourite was not saved")).toBeNull();
   });
 });
+
 

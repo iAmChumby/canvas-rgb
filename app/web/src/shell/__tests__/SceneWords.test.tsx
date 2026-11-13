@@ -1,4 +1,4 @@
-import { cleanup, render, screen, within } from "@testing-library/react";
+﻿import { cleanup, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { effectMissing, effectNameOf, playing, readableEffectId } from "@/lib/status";
 import { patchSnap } from "@/lib/store";
@@ -56,8 +56,6 @@ const status = (over: Partial<Status> = {}): Status => ({
   devices_connected: 12,
   devices_total: 12,
   preview_subscribers: 0,
-  active_layout: null,
-  active_effect: "aurora",
   active_effects: ["aurora", "rainbow_wave"],
   active_scene: { id: "gaming", name: "Gaming" },
   openrgb: "connected",
@@ -95,20 +93,10 @@ describe("what is playing", () => {
     expect(playing(status({ active_effects: [] }), EFFECTS)).toMatchObject({ name: "Gaming", detail: "all off" });
   });
 
-  it("says 'No scene yet', not 'No layout yet', when there is neither a scene nor a layout", () => {
-    const none = playing(status({ active_scene: null, active_layout: null, active_effect: null }), EFFECTS);
+  it("says 'No scene yet' when there is no scene", () => {
+    const none = playing(status({ active_scene: null, active_effects: [] }), EFFECTS);
     expect(none.name).toBe("No scene yet");
     expect(none.name).not.toMatch(/layout/i);
-  });
-
-  it("says 'No scene yet' when a layout has no effect, because scenes are the only key", () => {
-    const old = status({ active_scene: null, active_layout: "desk", active_effect: null });
-    expect(playing(old, EFFECTS).name).toBe("No scene yet");
-  });
-
-  it("names the effect for a daemon without scenes", () => {
-    const old = status({ active_scene: null, active_layout: "desk" });
-    expect(playing(old, EFFECTS).name).toBe("Aurora");
   });
 });
 
@@ -139,13 +127,6 @@ describe("the rail with a scene", () => {
     mountRail();
     const link = screen.getByRole("link", { name: /Effects/ });
     expect(within(link).queryByText("Aurora")).toBeNull();
-  });
-
-  it("still shows the playing effect for a daemon without scenes", () => {
-    patchSnap({ status: status({ active_scene: null, active_layout: "desk" }), effects: EFFECTS, scenes: null });
-    mountRail();
-    const link = screen.getByRole("link", { name: /Effects/ });
-    expect(within(link).getByText("Aurora")).toBeTruthy();
   });
 });
 
@@ -211,3 +192,4 @@ describe("the status strip", () => {
     expect(mark().getAttribute("data-tone")).toBe("ok");
   });
 });
+

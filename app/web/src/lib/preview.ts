@@ -1,4 +1,4 @@
-// The live preview feed. In the tray it is the daemon's WebSocket (binary frames: u16 LE width,
+﻿// The live preview feed. In the tray it is the daemon's WebSocket (binary frames: u16 LE width,
 // u16 LE height, then width*height*3 RGB bytes). In a plain browser it is the running effect's
 // own look, drawn from the demo shades. The socket is open only while the window is visible. The
 // dominant hue of the frame is written to --live-h at no more than 2 Hz, so the chrome tints with
@@ -192,7 +192,7 @@ const demoThumbs = new Map<string, Thumb>();
  */
 function demoFrame(t: number): Frame {
   // The status is null until the demo backend answers its first request.
-  const id = getSnap().status?.active_effect ?? "";
+  const id = getSnap().status?.active_effects?.[0] ?? "";
   const thumb = demoThumbs.get(id);
   if (!thumb) {
     if (id && !demoThumbs.has(id)) {
@@ -326,4 +326,5 @@ function readLiveHue(): number {
   const value = Number.parseFloat(raw);
   return Number.isFinite(value) ? value : 215;
 }
+
 

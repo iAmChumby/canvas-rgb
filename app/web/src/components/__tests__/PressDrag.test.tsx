@@ -1,4 +1,4 @@
-import { cleanup, fireEvent, render } from "@testing-library/react";
+﻿import { cleanup, fireEvent, render } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi, type Mock } from "vitest";
 import { act, useState } from "react";
 import { AngleDial } from "@/components/AngleDial";
@@ -10,14 +10,13 @@ import { Slider } from "@/components/Slider";
 import type { CurvePoint } from "@/proto/CurvePoint";
 import type { StackLayer } from "@/proto/StackLayer";
 import { FanCurveEditor } from "@/views/FanCurveEditor";
-import { PreviewStage } from "@/views/PreviewStage";
 import { Stage } from "@/views/effects/Stage";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 
 // The class test for `cause:ui-interaction` (#105): one rule over every control the pointer
 // drags. On each drag surface a press is defaultPrevented (so Chromium's compatibility
 // mousedown never starts a native drag or a text selection), and it still moves focus the way
-// the native press did — a focused field outside the surface loses focus (a NumberField's
+// the native press did â€” a focused field outside the surface loses focus (a NumberField's
 // draft commits on blur), because canceling the press canceled the mousedown that carried it.
 // fireEvent returns false when the default was prevented.
 
@@ -192,36 +191,6 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     expect(document.activeElement).toBe(el);
   });
 
-  it("the layout stage's empty-desk press is prevented and still blurs a focused field", () => {
-    const onBlur: Mock = vi.fn();
-    const { container } = render(
-      <>
-        <input aria-label="Field" onBlur={onBlur} />
-        <PreviewStage
-          zones={[]}
-          landmarks={[]}
-          devices={null}
-          selection={[]}
-          onSelect={vi.fn()}
-          onChangeZones={vi.fn()}
-          onChangeLandmark={vi.fn()}
-          onChangeParts={vi.fn()}
-          onDrop={vi.fn()}
-          dropPayloadType="layout-zone"
-          layoutId="t1"
-          mode="lights"
-          onMode={vi.fn()}
-          unit="cm"
-        />
-      </>,
-    );
-    const input = container.querySelector("input") as HTMLInputElement;
-    act(() => input.focus());
-    const el = container.querySelector(".stage") as HTMLDivElement;
-    expect(fireEvent.pointerDown(el, { clientX: 10, clientY: 10, button: 0, pointerId: 1 })).toBe(false);
-    expect(onBlur).toHaveBeenCalled();
-  });
-
   it("the area picker's desk press is prevented and still blurs a focused field", () => {
     const onBlur: Mock = vi.fn();
     const layer: StackLayer = {
@@ -316,3 +285,4 @@ describe("PressDrag: a press never starts a native drag or a text selection (#10
     expect(el.getAttribute("draggable")).toBe("false");
   });
 });
+

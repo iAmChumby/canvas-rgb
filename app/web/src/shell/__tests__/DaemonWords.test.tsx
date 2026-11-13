@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+﻿import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { DaemonDown } from "@/components/DaemonDown";
 import { GlobalBanners } from "@/shell/GlobalBanners";
@@ -31,8 +31,6 @@ const status: Status = {
   devices_connected: 3,
   devices_total: 4,
   preview_subscribers: 0,
-  active_layout: "desk",
-  active_effect: null,
   active_effects: [],
   openrgb: "connected",
   service: "down",
@@ -59,3 +57,4 @@ describe("the words on the page", () => {
     expect(banner.textContent ?? "").toMatch(/canvas-rgb/);
   });
 });
+

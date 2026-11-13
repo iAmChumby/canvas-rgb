@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ArrowClockwise, ArrowCounterClockwise, CopySimple, DotsThree, PencilSimple, Plus, SquaresFour, Trash } from "@phosphor-icons/react";
@@ -11,7 +11,7 @@ import { NameField } from "@/components/NameField";
 import { Popover } from "@/components/Popover";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { effectMissing, effectNameOf } from "@/lib/status";
-import { retryScenes, useSnap } from "@/lib/store";
+import { getSnap, retryScenes, useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
 import { GroupRow, UnassignedRow, type LightsState } from "@/views/scenes/GroupRow";
 import { GroupSheet, Sheet } from "@/views/scenes/GroupSheet";
@@ -23,6 +23,8 @@ import { useNewLights } from "@/views/scenes/newLights";
 import { useLightFeed } from "@/views/scenes/useLightFeed";
 import { useScene } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
+import { Onboarding } from "@/views/editor/Onboarding";
+import { shouldOpen } from "@/views/editor/flow";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
 
@@ -62,7 +64,10 @@ export function ScenesView() {
   const answered = useSnap((st) => st.scenes);
   const scenesError = useSnap((st) => st.scenesError);
   const retrying = useSnap((st) => st.pending.includes("scenes"));
+  const devices = useSnap((st) => st.devices);
   const [openId, setOpenId] = useState<string | null>(null);
+  // The first run's hello (#310): the page behind it is Scenes, so the greeting lives here.
+  const [hello, setHello] = useState(() => shouldOpen(getSnap().status));
   const [sheetStep, setSheetStep] = useState<"group" | "name" | "effect">("group");
   const [making, setMaking] = useState(false);
   const [renaming, setRenaming] = useState(false);
@@ -248,6 +253,15 @@ export function ScenesView() {
   );
   const groups = scene?.groups ?? [];
 
+  // The first run's hello takes the whole window (#310): the page behind it is this one.
+  if (hello) {
+    return (
+      <div className="onboarding-page">
+        <Onboarding devices={devices} onDone={() => setHello(false)} />
+      </div>
+    );
+  }
+
   return (
     <div className={`rd-page ${s.page}`}>
       <PageTitle
@@ -268,12 +282,12 @@ export function ScenesView() {
               <span className="rd-scenes-context">
                 <b>{scene.name}</b>
                 {groups.length === 0 ? (
-                  <span className="rd-scenes-counts"> · no groups yet</span>
+                  <span className="rd-scenes-counts"> Â· no groups yet</span>
                 ) : (
                   <span className="rd-scenes-counts">
                     {" "}
-                    · {groups.length} {groups.length === 1 ? "group" : "groups"}
-                    {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
+                    Â· {groups.length} {groups.length === 1 ? "group" : "groups"}
+                    {lightsState === "ready" ? ` Â· ${totalLeds} LEDs` : ""}
                   </span>
                 )}
               </span>
@@ -479,3 +493,4 @@ export function ScenesView() {
     </div>
   );
 }
+

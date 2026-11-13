@@ -1,10 +1,10 @@
-// The demo backend: answers the same routes as the daemon, from in-memory state, when the page
+﻿// The demo backend: answers the same routes as the daemon, from in-memory state, when the page
 // runs outside the Tauri host (a plain browser or the screenshot server). It mirrors the
 // daemon's validation messages (crates/canvas-proto/src/fans.rs) so the inline 422 and 503 paths
 // can be seen. `?state=conflict|service-down|first-run|html` changes what the status reports.
 //
 // The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
-// be seen in a plain browser: `?state=daemon-down|openrgb-down|no-layout|device-empty|slow|
+// be seen in a plain browser: `?state=daemon-down|openrgb-down|device-empty|slow|
 // save-error|handback:<header id>`.
 
 import { ApiFailure } from "@/lib/errors";
@@ -13,7 +13,6 @@ import {
   answerDelayMs,
   applyDeviceScenarios,
   applyFanScenarios,
-  applyLayoutScenarios,
   applySceneScenarios,
   applyStatusScenarios,
   conflictClearsMs,
@@ -37,7 +36,6 @@ import {
   INITIAL_SETTINGS,
   ONBOARD_EFFECTS,
   isHiddenEffect,
-  LAYOUT_DESK,
   DEMO_LIGHTS,
   DEMO_SCENES,
   demoSceneProblem,
@@ -50,7 +48,6 @@ import { demoHtmlEffects, demoSource, parseUserEffect } from "@/lib/demoEffects"
 import { scriptBody } from "@/lib/effectSource";
 import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
-import type { Layout } from "@/proto/Layout";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { ScenePut } from "@/proto/ScenePut";
@@ -107,7 +104,6 @@ import { stackThumbnailBytes } from "@/lib/stackFrame";
 import { wholeLightsCanvas } from "@/lib/groupCanvas";
 
 const BASE = "/api/v1";
-const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
 const APP_VERSION = "0.13.1";
 const SCHEMA_VERSION = 1;
@@ -129,8 +125,6 @@ interface DemoState {
   /** The owner's presets per effect, in the order they were saved. */
   userPresets: Record<string, Preset[]>;
   activeEffect: string | null;
-  layouts: Layout[];
-  activeLayout: string;
   /** The scenes (0.14.0), the id of the active one and the lights they group. */
   scenes: Scene[];
   activeScene: string;
@@ -259,22 +253,6 @@ function initialState(): DemoState {
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
   const favorites = new Set(EFFECTS.filter((e) => e.summary.favorite).map((e) => e.schema.id));
-  const layouts = applyLayoutScenarios([{ ...LAYOUT_DESK, zones: LAYOUT_DESK.zones.map((z) => ({ ...z })) }], LAYOUT_DESK.id);
-  // `?state=persist`: saved layouts are kept in localStorage, so a reload sees what was saved,
-  // as it does with the daemon. Used by the onboarding's reload checks.
-  if (s.has("persist")) {
-    try {
-      const kept = window.localStorage.getItem(DEMO_LAYOUTS_KEY);
-      if (kept) layouts.layouts = JSON.parse(kept) as Layout[];
-    } catch {
-      // Starts from the fixture.
-    }
-  }
-  if (s.has("presets")) {
-    const dusk = seededPresets().aurora?.[0];
-    const layout = layouts.layouts.find((l) => l.id === layouts.active);
-    if (dusk && layout) layout.effect = { id: "aurora", props: { ...dusk.props } };
-  }
   let onboarded = onboardingDone();
   if (s.has("persist")) {
     try {
@@ -297,8 +275,6 @@ function initialState(): DemoState {
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
-    layouts: layouts.layouts,
-    activeLayout: layouts.active,
     scenes: sceneScenarios.scenes,
     activeScene: sceneScenarios.active,
     lights: sceneScenarios.lights,
@@ -510,12 +486,6 @@ function checkWhiteBalance(wb: { red: number; green: number; blue: number }): vo
 const WHITE_BALANCE_MAX_DEVICES = 128;
 const WHITE_BALANCE_MAX_ID_LEN = 256;
 
-function activeLayout(): Layout {
-  const found = st().layouts.find((l) => l.id === st().activeLayout);
-  if (!found) fail(404, "not_found", "no active layout");
-  return found;
-}
-
 // ---- a slow device read (`?state=slow-read`) ----
 
 /** When each open read started. */
@@ -691,8 +661,8 @@ function fansStatus(): FansStatus {
     { source: { type: "gpu" }, label: "GPU", celsius: Math.round(r.gpu * 10) / 10 },
     { source: { type: "board", name: "SYSTIN" }, label: "Board SYSTIN", celsius: Math.round(r.board * 10) / 10 },
   ];
-  // Issue #130: the demo answers with the spine's defaults (7800X3D rated 89 °C,
-  // GPU on the 88 °C fallback, board at 50 °C) and whatever the user set.
+  // Issue #130: the demo answers with the spine's defaults (7800X3D rated 89 Â°C,
+  // GPU on the 88 Â°C fallback, board at 50 Â°C) and whatever the user set.
   const hotRow = (
     kind: HotLimitStatus["kind"],
     auto: number,
@@ -750,9 +720,7 @@ function statusNow(): Status {
     devices_connected: connected,
     devices_total: total,
     preview_subscribers: 1,
-    active_layout: s.activeLayout,
     active_scene: activeSceneOf(s) ? { id: s.activeScene, name: activeSceneOf(s)?.name ?? "" } : null,
-    active_effect: s.activeEffect,
     active_effects: activeSceneOf(s)
       ? sceneEffects(activeSceneOf(s) as Scene)
       : s.activeEffect
@@ -920,7 +888,7 @@ function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown)
       else delete view.light.name;
       const device = s.devices.find((d) => d.id === view.light.device_id);
       const zone = device?.zones.find((z) => z.index === view.light.zone_index);
-      view.label = name || (device && zone ? `${device.name} · ${zone.name}` : view.label);
+      view.label = name || (device && zone ? `${device.name} Â· ${zone.name}` : view.label);
     }
     if (patch.arrangement) view.light.arrangement = patch.arrangement;
     if (typeof patch.reversed === "boolean") view.light.reversed = patch.reversed;
@@ -953,11 +921,14 @@ function stackOrNotFound(id: string): Stack {
 }
 
 function currentProps(e: DemoEffect): Props {
+  // The group that plays the effect has its own values (0.14.0); otherwise the saved ones sit on
+  // the schema's defaults.
   const s = st();
-  if (s.activeEffect === e.schema.id) {
-    const layout = activeLayout();
-    if (layout.effect) return { ...layout.effect.props };
-  }
+  const scene = activeSceneOf(s);
+  const group = scene?.groups.find(
+    (g) => g.plays.type === "effect" && g.plays.effect === e.schema.id,
+  );
+  if (group && group.plays.type === "effect") return { ...group.plays.props };
   return { ...e.defaults, ...(s.saved[e.schema.id] ?? {}) };
 }
 
@@ -975,9 +946,15 @@ function setActiveProps(over: Props): void {
   const s = st();
   if (!s.activeEffect) fail(422, "validation", "no effect is active");
   const e = effectOrNotFound(s.activeEffect);
-  const layout = activeLayout();
-  const next = mergeProps(layout.effect?.props ?? currentProps(e), over);
-  layout.effect = { id: e.schema.id, props: next };
+  const next = mergeProps(currentProps(e), over);
+  // The groups that play the effect carry the new values (0.14.0): the layout's one effect is
+  // not what plays.
+  const scene = activeSceneOf(s);
+  for (const group of scene?.groups ?? []) {
+    if (group.plays.type === "effect" && group.plays.effect === e.schema.id) {
+      group.plays = { type: "effect", effect: e.schema.id, props: { ...next } };
+    }
+  }
   s.saved[e.schema.id] = next;
 }
 
@@ -1102,7 +1079,7 @@ export function checkPeripheralValue(device: DemoPeripheral, key: string, value:
   if (kind.type === "hue" && value.type === "hue") return;
   // An angle takes its own value, or the hue a preset saved before the kind existed carries:
   // the same degrees read on, the lift the daemon's preset fitter gives a saved preset. The
-  // peripheral adapters are stricter — their check refuses a hue on an angle — so this arm is
+  // peripheral adapters are stricter â€” their check refuses a hue on an angle â€” so this arm is
   // the demo's own preset-shaped leniency, not something a device would take.
   if (kind.type === "angle" && (value.type === "angle" || value.type === "hue")) return;
   // A saved number for an angle reads as the same degrees (clamped to 0..360, as the old
@@ -1300,26 +1277,6 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
-  if (head === "render") {
-    if (method === "GET") {
-      const layout = activeLayout();
-      return { fps: s.settings.fps, scale: layout.render_scale, sampling: layout.sampling };
-    }
-    if (method === "PATCH") {
-      const b = body as { fps?: number | null; scale?: number | null; sampling?: string | null };
-      if (typeof b.fps === "number") {
-        if (b.fps < 10 || b.fps > 60) fail(422, "validation", `fps must be 10 to 60, got ${b.fps}`);
-        s.settings.fps = b.fps;
-      }
-      const layout = activeLayout();
-      if (b.scale === 25 || b.scale === 50 || b.scale === 100) layout.render_scale = b.scale;
-      if (b.sampling === "nearest" || b.sampling === "bilinear" || b.sampling === "area_average") {
-        layout.sampling = b.sampling;
-      }
-      return { fps: s.settings.fps, scale: layout.render_scale, sampling: layout.sampling };
-    }
-    return bad();
-  }
 
   if (head === "devices") {
     if (seg.length === 1 && method === "GET") {
@@ -1611,8 +1568,6 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       s.draft = null;
       const next = mergeProps(base, req.props ?? {});
       s.activeEffect = id;
-      const layout = activeLayout();
-      layout.effect = { id, props: next };
       // Scenes: the effect plays on the groups asked for (every group when none is named). The
       // starting values are written by PATCH /effects/{id}/defaults and nothing else.
       const scene = activeSceneOf(s);
@@ -1870,38 +1825,6 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   if (head === "scenes") return scenesRoute(s, method, seg, body);
   if (head === "lights") return lightsRoute(s, method, seg, body);
 
-  if (head === "layouts") {
-    if (seg.length === 1 && method === "GET") return { active: s.activeLayout, layouts: s.layouts };
-    if (seg[1] === "active" && method === "PUT") {
-      s.activeLayout = (body as { id: string }).id;
-      return { active: s.activeLayout, layouts: s.layouts };
-    }
-    const id = seg[1] ?? "";
-    const layout = s.layouts.find((l) => l.id === id);
-    if (seg.length === 2 && method === "GET") {
-      if (!layout) fail(404, "not_found", `no layout ${id}`);
-      return layout;
-    }
-    if (seg.length === 2 && method === "PUT") {
-      const next = body as Layout;
-      if (next.id !== id) fail(422, "validation", "the layout id in the body does not match the path");
-      if (![25, 50, 100].includes(next.render_scale)) {
-        fail(422, "validation", `render scale must be 25, 50 or 100, got ${next.render_scale}`);
-      }
-      const idx = s.layouts.findIndex((l) => l.id === id);
-      if (idx < 0) s.layouts.push(next);
-      else s.layouts[idx] = next;
-      if (scenario().has("persist")) {
-        try {
-          window.localStorage.setItem(DEMO_LAYOUTS_KEY, JSON.stringify(s.layouts));
-        } catch {
-          // Kept in memory only.
-        }
-      }
-      return next;
-    }
-    return bad();
-  }
 
   if (head === "fans") {
     if (seg.length === 1 && method === "GET") {
@@ -1949,7 +1872,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       ];
       for (const [kind, v, max] of maxes) {
         if (v !== null && (Number.isNaN(v) || v < 40 || v > max)) {
-          fail(422, "validation", `the ${kind} hot limit of ${v} °C is outside 40 to ${max} °C`);
+          fail(422, "validation", `the ${kind} hot limit of ${v} Â°C is outside 40 to ${max} Â°C`);
         }
       }
       s.fanHotLimits = { cpu_c: limits.cpu_c, gpu_c: limits.gpu_c, board_c: limits.board_c };
@@ -2093,7 +2016,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         exported_at: new Date().toISOString(),
         app_version: APP_VERSION,
         settings: { ...s.settings },
-        layouts: { schema_version: SCHEMA_VERSION, active: s.activeLayout, layouts: s.layouts },
+        layouts: { schema_version: SCHEMA_VERSION, active: "", layouts: [] },
         zones: {
           schema_version: SCHEMA_VERSION,
           sizes: Object.fromEntries(
@@ -2132,3 +2055,8 @@ export async function demoRequest(method: string, path: string, body: unknown): 
 
   return bad();
 }
+
+
+
+
+

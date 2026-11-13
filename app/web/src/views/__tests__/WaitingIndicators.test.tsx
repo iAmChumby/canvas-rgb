@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+﻿import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import type { Status } from "@/proto/Status";
 import type { StackLayer } from "@/proto/StackLayer";
@@ -11,7 +11,7 @@ import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 // Issue #296: four places in the editor waited for the daemon with no sign: the stack builder's
 // preview canvas, the Import and Replace buttons, and the path that starts a stopped effect when an
 // edit lands on it (which goes through the Activate button). Each now shows the editor's standard
-// wait — `aria-busy` on the control or the canvas, the spinner after `LOAD_DELAY_MS` — and drops it
+// wait â€” `aria-busy` on the control or the canvas, the spinner after `LOAD_DELAY_MS` â€” and drops it
 // when the answer lands.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -109,7 +109,6 @@ beforeEach(() => {
     effectsError: null,
     effectsFailed: [],
     status: {
-      active_effect: "aurora",
       active_effects: ["aurora"],
       active_scene: { id: "s", name: "Scene" },
     } as unknown as Status,
@@ -284,7 +283,6 @@ describe("an edit to an effect", () => {
     // The effect is stopped: an edit changes what the next group starts from, nothing more.
     patchSnap({
       status: {
-        active_effect: null,
         active_effects: [],
         active_scene: { id: "s", name: "Scene" },
       } as unknown as Status,
@@ -314,3 +312,4 @@ describe("an edit to an effect", () => {
     expect(play.getAttribute("aria-busy")).toBeNull();
   });
 });
+
