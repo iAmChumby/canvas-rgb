@@ -514,7 +514,9 @@ describe("the arrangement planner (#310)", () => {
     const leds = first(plan.lights).leds;
     expect(leds.length).toBe(1);
     expect(region(first(leds))).toBeDefined();
-    expect(elapsed, `the plan took ${elapsed} ms`).toBeLessThan(50);
+    // A hang guard: the old walk of 10^10 cells takes tens of seconds; the map walk takes well under
+    // a millisecond, so 5 s fails only the old code, never a slow runner.
+    expect(elapsed, `the plan took ${elapsed} ms`).toBeLessThan(5000);
   });
 
   it("plans the leds a map shorter than the matrix names", () => {
@@ -654,7 +656,8 @@ describe("the Rust planner's own output", () => {
     const vectors = JSON.parse(readFileSync(vectorsPath(), "utf8")) as Vectors;
     expect(vectors.canvas.width).toBe(CANVAS_WIDTH);
     expect(vectors.canvas.height).toBe(CANVAS_HEIGHT);
-    expect(vectors.cases.length).toBeGreaterThan(0);
+    // The Rust example writes 18 cases; a trimmed or stale file fails here.
+    expect(vectors.cases.length).toBe(18);
     // The largest gap between the two planners, over every case and every LED: the f32
     // Rust planner against the double TS one. One assertion at the end, so the number is
     // reported whether or not it passes.
