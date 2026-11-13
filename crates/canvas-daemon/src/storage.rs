@@ -869,16 +869,30 @@ pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
     }
 }
 
-/// The lights and scenes a bundle carries: the store's own, unless the scenes migration has not
-/// run yet. Nothing is written then ([`Store::finish_scenes`] writes both files on the first
-/// device list), so the bundle carries only its layouts and the import migrates them with its own
-/// devices, as a 0.13 bundle is.
+/// The lights and scenes a bundle carries: only what the store really holds.
+///
+/// - A file that could not be read at load (`lights_blocked`, `scenes_blocked`) is left out. The
+///   in-memory value beside it is a default (an empty lights file, a one-`Everything` scenes file),
+///   and an import would write that default over the target's real data: a fabricated scene or
+///   whole-zone-only lights are never exported. The other file still goes in where it is real.
+/// - While the migration is pending, `scenes.json` does not exist, so no scenes are exported. The
+///   lights do: `lights.json` as it was held at load, which the importing machine holds through its
+///   own migration (a first run with no file yet exports neither).
+/// - Otherwise both are the store's own.
 pub fn scenes_for_export(store: &Store) -> (Option<LightsFile>, Option<ScenesFile>) {
-    if store.scenes_pending.is_some() {
-        (None, None)
+    let lights = if store.lights_blocked {
+        None
+    } else if let Some(pending) = &store.scenes_pending {
+        (!pending.held_lights.lights.is_empty()).then(|| pending.held_lights.clone())
     } else {
-        (Some(store.lights.clone()), Some(store.scenes.clone()))
-    }
+        Some(store.lights.clone())
+    };
+    let scenes = if store.scenes_blocked || store.scenes_pending.is_some() {
+        None
+    } else {
+        Some(store.scenes.clone())
+    };
+    (lights, scenes)
 }
 
 /// Why an import was refused.
@@ -1893,5 +1907,52 @@ power = "running"
         assert!(import_bundle(&refused, &bundle, &[]).is_err());
         assert!(!refused.join(SCENES_FILE).exists());
         let _ = std::fs::remove_dir_all(&refused);
+    }
+
+    /// Should-fix 3 (review 323): an export never carries the in-memory default. `lights.json` or
+    /// `scenes.json` that could not be read is left out of the bundle, and the scenes the store
+    /// holds only in memory are not exported either: the file is on disk, the bundle names the
+    /// real one or none.
+    #[test]
+    fn the_export_omits_a_file_the_store_could_not_read() {
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let scenes = crate::scenes::default_scenes(&lights);
+
+        // scenes.json exists but cannot be read: the scenes stay out of the bundle, and the
+        // real lights go in. A default scene would replace the target's scenes on import.
+        let dir = temp_home("export-scenes-blocked");
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        std::fs::create_dir_all(dir.join(SCENES_FILE)).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.scenes_blocked, "the store holds the file as blocked");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.scenes, None, "a blocked scenes file is not exported as a made-up default");
+        assert_eq!(bundle.lights, Some(lights.clone()), "the real lights are exported");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // lights.json exists but cannot be read: the lights stay out (the bundle's scenes are
+        // rebuilt from the importing machine's devices), and the real scenes go in.
+        let dir = temp_home("export-lights-blocked");
+        write_json(&dir.join(SCENES_FILE), &scenes).unwrap();
+        std::fs::create_dir_all(dir.join(LIGHTS_FILE)).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.lights_blocked, "the store holds the file as blocked");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights, None, "a blocked lights file is not exported as an empty one");
+        assert_eq!(bundle.scenes, Some(scenes.clone()), "the real scenes are exported");
+
+        // While the migration is pending, the lights on disk are what the store holds, and no
+        // scenes exist yet: the bundle carries the lights and no scenes, so the import migrates
+        // its layouts with them held.
+        let dir = temp_home("export-pending");
+        write_json(&dir.join(LAYOUTS_FILE), &default_layouts()).unwrap();
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.scenes_pending.is_some(), "the migration is held");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights, Some(lights), "the lights.json held on disk is exported");
+        assert_eq!(bundle.scenes, None, "there is no scenes.json to export");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
