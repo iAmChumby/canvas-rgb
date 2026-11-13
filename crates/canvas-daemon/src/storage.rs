@@ -601,7 +601,11 @@ impl Store {
     /// win. A light the OWNER changed cannot exist yet: there is no scene API until Task 6, so
     /// nothing edits a light before the files are written. (Task 6 must revisit this if a pending
     /// store can ever hold an edit.)
-    fn build_scenes(
+    ///
+    /// An import with lights and no scenes also comes through here (bundle → migration): the
+    /// bundle's lights are what it holds, so a split light's label, slice and `reversed` flag are
+    /// not lost to a migration that can only re-derive whole-zone lights.
+    pub(crate) fn build_scenes(
         held: &LightsFile,
         layouts: Option<&LayoutsFile>,
         devices: &[DeviceInfo],
@@ -1076,13 +1080,16 @@ pub fn import_bundle_rated(
     // The scenes (0.14.0). A bundle that carries them replaces `lights.json` and `scenes.json`,
     // repaired so every scene passes `validate_scene`; a 0.13 bundle carries layouts only and is
     // migrated with THIS machine's current devices, so a matrix zone placed `Auto` becomes a Grid
-    // here and a Strip on a machine that cannot see the keyboard. The scenes code path below
-    // writes nothing to `layouts.json`: the old layout import still writes it from the bundle
-    // until Task 12, exactly as it did before.
+    // here and a Strip on a machine that cannot see the keyboard. A bundle with lights and no
+    // scenes still has its own hardware map: those lights are held through the migration, as the
+    // pending migration holds `lights.json` (labels, slices and `reversed` survive). The scenes
+    // code path below writes nothing to `layouts.json`: the old layout import still writes it from
+    // the bundle until Task 12, exactly as it did before.
     let (lights, scenes, repairs) = match &bundle.scenes {
         Some(scenes) => prepared_scenes(bundle.lights.as_ref(), scenes),
         None => {
-            let (lights, scenes) = crate::scene_migration::migrate(Some(&layouts), devices);
+            let held = bundle.lights.clone().unwrap_or_else(crate::scenes::empty_lights);
+            let (lights, scenes) = Store::build_scenes(&held, Some(&layouts), devices);
             (lights, scenes, Vec::new())
         }
     };
@@ -1783,5 +1790,59 @@ power = "running"
             assert!(!dir.join(ZONES_FILE).exists(), "nothing was written before the refusal");
             let _ = std::fs::remove_dir_all(&dir);
         }
+    }
+
+    /// Should-fix 1 (review 323): a bundle with lights and no scenes migrates its layouts with the
+    /// bundle's own lights held, as `Store::build_scenes` does. Re-deriving the lights from the
+    /// layouts alone loses a split light's label, its slice and its `reversed` flag.
+    #[test]
+    fn a_bundle_with_lights_and_no_scenes_keeps_its_lights_through_the_migration() {
+        use canvas_proto::layout::LedSlice;
+        use canvas_proto::scene::{Arrangement, Light};
+
+        let held = LightsFile {
+            schema_version: LIGHTS_SCHEMA,
+            lights: vec![
+                Light {
+                    id: "openrgb:board#z0p1".into(),
+                    device_id: canvas_proto::DeviceId("openrgb:board".into()),
+                    zone_index: 0,
+                    leds: Some(LedSlice { start: 0, count: 10 }),
+                    name: Some("Intake".into()),
+                    arrangement: Arrangement::Ring,
+                    reversed: true,
+                },
+                Light {
+                    id: "openrgb:board#z0p2".into(),
+                    device_id: canvas_proto::DeviceId("openrgb:board".into()),
+                    zone_index: 0,
+                    leds: Some(LedSlice { start: 10, count: 20 }),
+                    name: Some("Exhaust".into()),
+                    arrangement: Arrangement::Strip,
+                    reversed: false,
+                },
+            ],
+        };
+        // The layouts place the whole zone, as a 0.13 bundle does: the migration can only make a
+        // whole-zone light, so the two split lights are the bundle's own data.
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "Gaming", vec![bundle_placed("openrgb:board", 0)])],
+        };
+        let dir = temp_home("held-lights");
+        import_bundle(&dir, &bundle_of(layouts, Some(held), None), &[bundle_board()]).unwrap();
+
+        let lights = read_lights(&dir);
+        let intake = lights.lights.iter().find(|l| l.id == "openrgb:board#z0p1").expect(
+            "the bundle's split light survives the migration",
+        );
+        assert_eq!(intake.name.as_deref(), Some("Intake"), "its label survives");
+        assert_eq!(intake.leds, Some(LedSlice { start: 0, count: 10 }), "its slice survives");
+        assert_eq!(intake.arrangement, Arrangement::Ring, "its arrangement survives");
+        assert!(intake.reversed, "its reversed flag survives");
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z0p2"), "the second slice survives too");
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z0"), "the layout's own light is there");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
