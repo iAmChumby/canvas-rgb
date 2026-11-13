@@ -70,6 +70,7 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 8_000", "open: 8 s ceiling on two 2 s load budgets (the import's parse and the rescan's, #56)"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),
+    ("canvas-daemon/tests/cli_import.rs", "took < DROPPED_CONNECT_WINDOW", "the property: only a run that failed before the daemon could take the request (a connect the CLI gave up on in 5 s) is repeated; a run that waited out the CLI's 120 s limit is another fault and must not be repeated (#328)"),
     ("canvas-html/tests/effects.rs", "started.elapsed().as_millis() <= 2_000", "hang guard: a frame after a runaway loop must not be stuck as well; 2 s"),
     ("canvas-html/tests/effects.rs", "elapsed.as_millis() < 30 * canvas_html::FRAME_BUDGET_MS as u128", "hang guard: 30 frames against 30 frame budgets of the engine"),
 ];

@@ -28,10 +28,13 @@
 //!   The CLI bounds a request now (5 s to connect, 120 s in all) and reports a failed
 //!   request as "nothing answers on", so a dropped connect is exactly that message.
 //!
-//! A run that ends that way is repeated, up to [`CLI_ATTEMPTS`] times, with each repeat
-//! written to stderr. It is the machine's network stack, not the daemon and not a wrong
-//! port: the CLI's own port check passed, the fake is still listening, and a repeat sends
-//! the same file, which the daemon imports under the same name.
+//! A run that ends that way, and ends inside [`DROPPED_CONNECT_WINDOW`], is repeated up to
+//! [`CLI_ATTEMPTS`] times, with each repeat written to stderr. That window matters: a run
+//! that reached the fake and waited out the CLI's whole 120 s limit is a different fault,
+//! and repeating it is the twenty-minute hang again. It is the machine's network stack, not
+//! the daemon and not a wrong port: the CLI's own port check passed (a dead or foreign
+//! listener would have been refused before the request), the fake is still listening, and a
+//! repeat sends the same file, which the daemon imports under the same name.
 
 use std::io::Read;
 use std::path::{Path, PathBuf};
@@ -61,6 +64,10 @@ const FAKE_LIFETIME: Duration = Duration::from_secs(600);
 /// system gives up on a dropped connect after about 21 s, and the CLI gives up after 5 s, so
 /// eight attempts cover two such windows.
 const CLI_ATTEMPTS: u32 = 8;
+/// The window a failed run must end in to count as a dropped connect. A connect the CLI
+/// gave up on ends within its 5 s bound; a daemon that took the request and never answered
+/// ends at the CLI's 120 s bound, and repeating that would be the twenty-minute hang again.
+const DROPPED_CONNECT_WINDOW: Duration = Duration::from_secs(15);
 /// What the CLI prints, with exit code 2, when its request failed (`cli.rs`, `NotRunning`).
 const CONNECT_DROPPED: &str = "nothing answers on";
 
@@ -218,8 +225,12 @@ impl Drop for FakeApi {
 fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
     let mut attempt = 1;
     loop {
-        let (code, stdout, stderr) = run_cli_once(home, args);
-        if code == 2 && stderr.contains(CONNECT_DROPPED) && attempt < CLI_ATTEMPTS {
+        let (code, stdout, stderr, took) = run_cli_once(home, args);
+        // Only a run that ended before the daemon could have taken the request is retried.
+        let dropped_connect = code == 2
+            && stderr.contains(CONNECT_DROPPED)
+            && took < DROPPED_CONNECT_WINDOW;
+        if dropped_connect && attempt < CLI_ATTEMPTS {
             eprintln!(
                 "cli_import: attempt {attempt} of {CLI_ATTEMPTS}: the machine dropped the connect: {}",
                 stderr.trim()
@@ -231,8 +242,9 @@ fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
     }
 }
 
-/// One CLI run, ended after [`CLI_LIMIT`] at the latest.
-fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
+/// One CLI run, ended after [`CLI_LIMIT`] at the latest. The duration it returns is from the
+/// spawn to the exit, so a connect the machine dropped can be told from a slow answer.
+fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String, Duration) {
     let mut child = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
         .args(args)
         .env("CANVAS_RGB_HOME", home)
@@ -273,6 +285,7 @@ fn run_cli_once(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String)
         status.code().unwrap_or(-1),
         out.join().unwrap_or_default(),
         err.join().unwrap_or_default(),
+        started.elapsed(),
     )
 }
 
