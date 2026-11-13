@@ -992,14 +992,14 @@ pub fn validate_bundle_rated(
 /// Refuses a bundle whose scenes cannot be made valid. The bundle's scenes are repaired on the
 /// way in (a light in two groups, an empty group, an `active` that names nothing), and what the
 /// repair cannot fix is a validation error here, before anything is written.
+///
+/// There is no check on `active` here: [`crate::scenes::repair`] always leaves it naming a scene
+/// (it makes the default scene when there is none), so only the repair's own guarantee holds it.
 fn validate_bundle_scenes(bundle: &ExportBundle, devices: &[DeviceInfo]) -> Result<(), ImportError> {
     let Some(scenes) = &bundle.scenes else {
         return Ok(());
     };
     let (lights, scenes, _) = prepared_scenes(bundle.lights.as_ref(), scenes, devices);
-    if !scenes.scenes.iter().any(|s| s.id == scenes.active) {
-        return Err(ImportError::Scenes(format!("the active scene {} names no scene", scenes.active)));
-    }
     for scene in &scenes.scenes {
         canvas_proto::scene::validate_scene(scene, &lights.lights)
             .map_err(|e| ImportError::Scenes(format!("scene {}: {e}", scene.id)))?;
@@ -2014,6 +2014,48 @@ power = "running"
         let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the placed zone is a light");
         assert_eq!(kb.arrangement, Arrangement::Grid, "the first list's devices decide the arrangement");
         assert_eq!(read_scenes(&dir).scenes[0].name, "Gaming");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nit (review 323): a 0.13 import over an existing `scenes.json` replaces the owner's scenes,
+    /// as it replaces the layouts they were migrated from. The pre-import snapshot holds the old
+    /// ones.
+    #[test]
+    fn a_0_13_import_replaces_the_existing_scenes() {
+        use canvas_proto::scene::Scene;
+
+        let dir = temp_home("replace-scenes");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let mine = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "mine".into(),
+            scenes: vec![Scene {
+                id: "mine".into(),
+                name: "Mine".into(),
+                rev: 5,
+                groups: vec![bundle_group("g", &["openrgb:board#z0"])],
+            }],
+        };
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        write_json(&dir.join(SCENES_FILE), &mine).unwrap();
+
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "Imported", vec![bundle_placed("openrgb:board", 1)])],
+        };
+        import_bundle(&dir, &bundle_of(layouts, None, None), &[bundle_board()]).unwrap();
+
+        let scenes = read_scenes(&dir);
+        assert_eq!(scenes.scenes.len(), 1);
+        assert_eq!(scenes.scenes[0].name, "Imported", "the bundle's layout is the scene now");
+        assert_eq!(scenes.active, "a", "and it is the active one");
+        // The layout's zone is a light, and the old scene file is not what the store loads next.
+        let lights = read_lights(&dir);
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z1"), "the layout's light is added");
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.scenes, scenes, "no migration is held: the scenes are on disk");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }

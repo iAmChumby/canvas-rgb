@@ -331,6 +331,8 @@ pub async fn config_import(
         let balances = crate::api::devices::white_balance_map(&app.store.read().await.config);
         app.engine.set_white_balance(balances);
         app.stacks.set_fps(settings.fps);
+        // The engine is not told about the imported scenes: the scene API and the engine's scene
+        // path arrive in Task 6, and until then only the layout is applied here, as before.
         if let Some(layout) = app.active_layout().await {
             let devices = app.devices.read().await.clone();
             app.set_layout(&layout, &devices);
