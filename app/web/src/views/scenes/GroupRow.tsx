@@ -1,14 +1,18 @@
 "use client";
 
 import type { CSSProperties } from "react";
+import { useRef, useState } from "react";
 import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button } from "@/components/Button";
 import { InlineSkeleton } from "@/components/Skeleton";
+import { Popover } from "@/components/Popover";
 import { Slider } from "@/components/Slider";
+import { EffectPicker } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
+import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
 
 const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
@@ -80,6 +84,8 @@ export interface GroupRowProps {
   /** Its place in the scene, for its accent. */
   index: number;
   open?: boolean;
+  /** The scene's data: the row's own changes go through it. */
+  use: UseScene;
   onOpen: (groupId: string) => void;
   onBrightness: (groupId: string, n: number) => void;
 }
@@ -88,7 +94,8 @@ export interface GroupRowProps {
  * One group: its live LEDs, the largest thing in the row, then what it plays, how its lights
  * share it, and its brightness. From 1180 px the row is one line (name, LEDs, effect, mode,
  * fader); below that it is two (name and LEDs, then effect and controls). A failed group says so
- * on a line of its own under the row.
+ * on a line of its own under the row. The effect's name opens the picker: it is the way to
+ * change what the group plays.
  */
 export function GroupRow({
   group,
@@ -100,11 +107,14 @@ export function GroupRow({
   failed,
   index,
   open,
+  use,
   onOpen,
   onBrightness,
 }: GroupRowProps) {
   const off = group.plays.type === "off";
   const ModeIcon = group.mode === "flow_across" ? ArrowsHorizontal : CopySimple;
+  const [picking, setPicking] = useState(false);
+  const pickerAnchor = useRef<HTMLButtonElement>(null);
   return (
     <article
       className={s.row}
@@ -131,11 +141,14 @@ export function GroupRow({
       </div>
       <div className={s.controls}>
         <Button
+          ref={pickerAnchor}
           className={s.effect}
           icon={off ? <Moon size={16} /> : <Sparkle size={16} />}
           aria-label={`${group.name} plays ${effectName}`}
+          aria-haspopup="true"
+          aria-expanded={picking}
           title={effectId && !off ? `${effectName} (${effectId})` : undefined}
-          onClick={() => onOpen(group.id)}
+          onClick={() => setPicking((v) => !v)}
         >
           <span className="one-line">{effectName}</span>
         </Button>
@@ -156,6 +169,15 @@ export function GroupRow({
           </span>
         </div>
       </div>
+      <Popover
+        anchor={pickerAnchor}
+        open={picking}
+        onClose={() => setPicking(false)}
+        label={`What ${group.name} plays`}
+        className={s.pickerPopover}
+      >
+        <EffectPicker groupId={group.id} use={use} onClose={() => setPicking(false)} />
+      </Popover>
       {failed && (
         <p className={s.failure} role="alert">
           <WarningCircle size={16} weight="fill" aria-hidden="true" />

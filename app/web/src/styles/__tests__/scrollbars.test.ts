@@ -122,6 +122,8 @@ const SCROLL_PANES = [
   ".frame",
   ".strip",
   ".moreList",
+  ".addRows",
+  ".sheetBody",
 ];
 
 /**

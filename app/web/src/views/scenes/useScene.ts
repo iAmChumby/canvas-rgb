@@ -215,6 +215,16 @@ const BLANK_VIEW: View = {
   live: {},
 };
 
+/**
+ * How one change is taken. A change the owner made is on the undo stack; a change the page made
+ * to show something (the effect picker's preview) is not: it is put back when the preview ends,
+ * and an Undo must not land on it.
+ */
+export interface EditOptions {
+  /** The change is a preview: it goes to the daemon and on the screen, but not on the undo stack. */
+  transient?: boolean;
+}
+
 export interface UseScene {
   scene: Scene | null;
   scenes: Scene[];
@@ -223,12 +233,14 @@ export interface UseScene {
   /** How each group of the active scene is doing. */
   states: GroupState[];
   /** Applies `change` to a copy of the scene at once, then saves the whole scene. `label` names the change for the page. */
-  edit(change: (draft: Scene) => void, label: string): void;
+  edit(change: (draft: Scene) => void, label: string, options?: EditOptions): void;
   setProps(groupId: string, props: Props): void;
   setBrightness(groupId: string, n: number): void;
   setActive(id: string): void;
   create(name: string, copyOf?: string): void;
   remove(id: string): void;
+  /** A scene's own name, whether or not it is the one playing. */
+  renameScene(id: string, name: string): void;
   undo(): void;
   redo(): void;
   canUndo: boolean;
@@ -552,7 +564,7 @@ export function useScene(): UseScene {
 
   /** Puts `next` on screen and on its way to the daemon. */
   const edit = useCallback(
-    (change: (draft: Scene) => void, label: string) => {
+    (change: (draft: Scene) => void, label: string, options?: EditOptions) => {
       const active = known.current.activeId;
       if (!active) return;
       const pending = outgoing.current.get(active);
@@ -563,10 +575,14 @@ export function useScene(): UseScene {
       const id = ++changeSeq.current;
       const entry: Change = { id, apply: change, label };
       outgoing.current.set(active, { scene: next, changes: [...(pending?.changes ?? []), entry] });
-      const h = history.current;
-      h.past.push({ scene: clone(current), label, changeId: id });
-      if (h.past.length > HISTORY_DEPTH) h.past.shift();
-      h.future = [];
+      // A preview is not the owner's decision: it goes to the lights, but the Undo stack keeps
+      // the step before it, so an Undo never lands on a picture that was only a preview.
+      if (!options?.transient) {
+        const h = history.current;
+        h.past.push({ scene: clone(current), label, changeId: id });
+        if (h.past.length > HISTORY_DEPTH) h.past.shift();
+        h.future = [];
+      }
       publish();
       void flush();
     },
@@ -959,11 +975,37 @@ export function useScene(): UseScene {
   );
 
   const setActive = useCallback((id: string) => run(() => api.scenes.setActive(id)), [run]);
+  /**
+   * A new scene, and it plays: the owner made it to use it, not to keep it on a shelf. The daemon
+   * makes the scene but leaves the old one playing, so the new one is set here.
+   */
   const create = useCallback(
-    (name: string, copyOf?: string) => run(() => api.scenes.create(copyOf ? { name, copy_of: copyOf } : { name })),
+    (name: string, copyOf?: string) =>
+      run(async () => {
+        const made = await api.scenes.create(copyOf ? { name, copy_of: copyOf } : { name });
+        await api.scenes.setActive(made.id);
+      }),
     [run],
   );
   const remove = useCallback((id: string) => run(() => api.scenes.remove(id)), [run]);
+  /**
+   * A scene's own name. The scene need not be the active one, so this goes to the scene's own
+   * route with the revision it was read at; a scene another window changed in between is refused
+   * and the name stays as it was.
+   */
+  const renameScene = useCallback(
+    (id: string, name: string) => {
+      const clean = name.trim();
+      if (!clean) return;
+      run(async () => {
+        const answer = await api.scenes.list();
+        const scene = answer.scenes.find((s) => s.id === id);
+        if (!scene) throw new ApiFailure(404, "not_found", `there is no scene with the id ${id}`);
+        await api.scenes.put(id, { scene: { ...scene, name: clean }, expected_rev: scene.rev });
+      });
+    },
+    [run],
+  );
 
   // The scene on screen: what this window changed, else the newest the daemon has, with the
   // live values laid over the group they belong to.
@@ -988,6 +1030,7 @@ export function useScene(): UseScene {
     setActive,
     create,
     remove,
+    renameScene,
     undo,
     redo,
     canUndo: ownsHistory && view.canUndo,

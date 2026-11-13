@@ -1,16 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowClockwise, ArrowCounterClockwise, Plus, SquaresFour } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, DotsThree, Plus, SquaresFour } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { Skeleton, InlineSkeleton } from "@/components/Skeleton";
 import { notify } from "@/components/Notify";
+import { NameField } from "@/components/NameField";
+import { Popover } from "@/components/Popover";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { effectMissing, effectNameOf } from "@/lib/status";
 import { retryScenes, useSnap } from "@/lib/store";
+import { AddDevices } from "@/views/scenes/AddDevices";
 import { GroupRow, UnassignedRow, type LightsState } from "@/views/scenes/GroupRow";
+import { GroupSheet, Sheet } from "@/views/scenes/GroupSheet";
 import { LightFeedContext } from "@/views/scenes/LedRun";
 import { NewLightNotice } from "@/views/scenes/NewLightNotice";
 import { SceneStrip } from "@/views/scenes/SceneStrip";
@@ -58,8 +62,19 @@ export function ScenesView() {
   const scenesError = useSnap((st) => st.scenesError);
   const retrying = useSnap((st) => st.pending.includes("scenes"));
   const [openId, setOpenId] = useState<string | null>(null);
+  const [sheetStep, setSheetStep] = useState<"group" | "name" | "effect">("group");
+  const [making, setMaking] = useState(false);
+  const [renaming, setRenaming] = useState(false);
+  const [sceneName, setSceneName] = useState("");
+  const [sceneMenu, setSceneMenu] = useState(false);
+  const [newSceneName, setNewSceneName] = useState(false);
   const noticeRef = useRef<HTMLDivElement>(null);
-  const { scene, unassigned, error } = use;
+  const sceneMenuAnchor = useRef<HTMLButtonElement>(null);
+  /** The id a group made here gets. */
+  const groupSeq = useRef(0);
+  /** The active scene before this render: a new scene is the one that changed it. */
+  const lastActive = useRef<string | null>(null);
+  const { scene, unassigned, error, undo, redo } = use;
 
   const byId = useMemo(() => new Map((lights ?? []).map((l) => [l.light.id, l])), [lights]);
   const rowLights = useMemo(() => {
@@ -99,6 +114,31 @@ export function ScenesView() {
     if (error) notify(error, "down");
   }, [error]);
 
+  // Ctrl+Z and Ctrl+Shift+Z are the undo and redo of every change on this page. A key in a text
+  // field is the field's own: the browser undoes the typing there.
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (!event.ctrlKey && !event.metaKey) return;
+      const where = event.target as HTMLElement | null;
+      if (where && (where.tagName === "INPUT" || where.tagName === "TEXTAREA" || where.isContentEditable)) {
+        return;
+      }
+      const key = event.key.toLowerCase();
+      if (key === "z") {
+        event.preventDefault();
+        if (event.shiftKey) redo();
+        else undo();
+        return;
+      }
+      if (key === "y") {
+        event.preventDefault();
+        redo();
+      }
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [redo, undo]);
+
   const addFresh = (groupId: string) => {
     const ids = fresh.map((l) => l.light.id);
     use.edit((draft) => {
@@ -116,10 +156,61 @@ export function ScenesView() {
     el.focus({ preventScroll: true });
   };
 
-  const newScene = () => {
+  /** A new scene is a copy of the one that plays, and it plays at once. */
+  const newScene = (empty: boolean) => {
     if (!scene) return;
+    setNewSceneName(true);
+    if (empty) use.create("New scene");
     // A scene's name is at most 40 characters; the copy keeps room for " copy".
-    use.create(`${[...scene.name].slice(0, 35).join("")} copy`, scene.id);
+    else use.create(`${[...scene.name].slice(0, 35).join("")} copy`, scene.id);
+  };
+
+  // The new scene is the one that became active: its name goes into edit.
+  const activeId = scene?.id ?? null;
+  useEffect(() => {
+    const before = lastActive.current;
+    lastActive.current = activeId;
+    if (!newSceneName || !activeId || activeId === before) return;
+    setNewSceneName(false);
+    setSceneName(scene?.name ?? "");
+    setRenaming(true);
+  }, [activeId, newSceneName, scene]);
+
+  const commitSceneName = (name: string) => {
+    const clean = name.trim();
+    setRenaming(false);
+    if (!scene || !clean || clean === scene.name) return;
+    use.renameScene(scene.id, clean);
+  };
+
+  /** An id no group of the scene has. */
+  const freshGroupId = (): string => {
+    const taken = new Set((scene?.groups ?? []).map((g) => g.id));
+    let id = "";
+    do {
+      groupSeq.current += 1;
+      id = `g-new-${groupSeq.current}`;
+    } while (taken.has(id));
+    return id;
+  };
+
+  /** A device was picked for the group being made: the group exists and plays from now on. */
+  const onPicked = (lightId: string) => {
+    const id = freshGroupId();
+    const name = `Group ${(scene?.groups.length ?? 0) + 1}`;
+    use.edit((draft) => {
+      draft.groups.push({
+        id,
+        name,
+        members: [lightId],
+        plays: { type: "off" },
+        mode: "flow_across",
+        brightness: 100,
+      });
+    }, "Make a group");
+    setMaking(false);
+    setSheetStep("name");
+    setOpenId(id);
   };
 
   const state = scene
@@ -141,18 +232,29 @@ export function ScenesView() {
         contextBusy={state === "loading"}
         context={
           scene ? (
-            <span className="rd-scenes-context">
-              <b>{scene.name}</b>
-              {groups.length === 0 ? (
-                <span className="rd-scenes-counts"> · no groups yet</span>
-              ) : (
-                <span className="rd-scenes-counts">
-                  {" "}
-                  · {groups.length} {groups.length === 1 ? "group" : "groups"}
-                  {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
-                </span>
-              )}
-            </span>
+            renaming ? (
+              <NameField
+                value={sceneName}
+                label="The name of this scene"
+                placeholder="Scene name"
+                onChange={setSceneName}
+                onEnter={() => commitSceneName(sceneName)}
+                onEscape={() => setRenaming(false)}
+              />
+            ) : (
+              <span className="rd-scenes-context">
+                <b>{scene.name}</b>
+                {groups.length === 0 ? (
+                  <span className="rd-scenes-counts"> · no groups yet</span>
+                ) : (
+                  <span className="rd-scenes-counts">
+                    {" "}
+                    · {groups.length} {groups.length === 1 ? "group" : "groups"}
+                    {lightsState === "ready" ? ` · ${totalLeds} LEDs` : ""}
+                  </span>
+                )}
+              </span>
+            )
           ) : state === "loading" ? (
             <span className="rd-scenes-context">
               <InlineSkeleton width="22ch" />
@@ -170,15 +272,78 @@ export function ScenesView() {
           icon={<ArrowCounterClockwise size={18} />}
           size="sm"
           disabled={!use.canUndo}
-          onClick={use.undo}
+          onClick={undo}
         />
         <IconButton
           label="Redo"
           icon={<ArrowClockwise size={18} />}
           size="sm"
           disabled={!use.canRedo}
-          onClick={use.redo}
+          onClick={redo}
         />
+        <Button
+          ref={sceneMenuAnchor}
+          className={s.iconKey}
+          aria-label="More about this scene"
+          aria-haspopup="true"
+          aria-expanded={sceneMenu}
+          icon={<DotsThree size={18} weight="bold" />}
+          onClick={() => setSceneMenu((v) => !v)}
+        />
+        <Popover
+          anchor={sceneMenuAnchor}
+          open={sceneMenu}
+          onClose={() => setSceneMenu(false)}
+          label="More about this scene"
+          className={s.sheetMenu}
+        >
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!scene}
+            onClick={() => {
+              setSceneMenu(false);
+              if (!scene) return;
+              setSceneName(scene.name);
+              setRenaming(true);
+            }}
+          >
+            Rename
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!scene}
+            onClick={() => {
+              setSceneMenu(false);
+              newScene(false);
+            }}
+          >
+            Duplicate
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!scene}
+            onClick={() => {
+              setSceneMenu(false);
+              newScene(true);
+            }}
+          >
+            New empty scene
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            disabled={!scene || use.scenes.length <= 1}
+            onClick={() => {
+              setSceneMenu(false);
+              if (scene) use.remove(scene.id);
+            }}
+          >
+            Delete
+          </Button>
+        </Popover>
       </PageActions>
 
       <SceneStrip
@@ -188,7 +353,7 @@ export function ScenesView() {
         canCopy={state === "ready"}
         fresh={scene ? fresh.length : 0}
         onSet={use.setActive}
-        onNew={newScene}
+        onNew={() => newScene(false)}
         onJumpToNew={jumpToNotice}
       />
 
@@ -228,7 +393,11 @@ export function ScenesView() {
                   failed={use.states.find((x) => x.id === g.id)?.failed ?? null}
                   index={i}
                   open={openId === g.id}
-                  onOpen={(id) => setOpenId((cur) => (cur === id ? null : id))}
+                  use={use}
+                  onOpen={(id) => {
+                    setSheetStep("group");
+                    setOpenId((cur) => (cur === id ? null : id));
+                  }}
                   onBrightness={use.setBrightness}
                 />
               );
@@ -249,16 +418,35 @@ export function ScenesView() {
               />
             )}
             <div className={s.newGroup}>
-              <Button
-                icon={<Plus size={16} />}
-                disabled
-                title="Pick the devices first. The group sheet arrives next."
-              >
+              <Button icon={<Plus size={16} />} onClick={() => setMaking(true)}>
                 New group
               </Button>
             </div>
           </div>
         </LoadFrame>
+
+        {openId && (
+          <GroupSheet
+            key={openId}
+            groupId={openId}
+            use={use}
+            lights={lights ?? []}
+            initial={sheetStep}
+            onClose={() => setOpenId(null)}
+          />
+        )}
+        {making && (
+          <Sheet title="New group" onClose={() => setMaking(false)}>
+            <p className={s.sheetLead}>Which devices go in it?</p>
+            <AddDevices
+              groupId="new"
+              lights={lights ?? []}
+              use={use}
+              onClose={() => setMaking(false)}
+              onPicked={onPicked}
+            />
+          </Sheet>
+        )}
       </LightFeedContext.Provider>
     </div>
   );

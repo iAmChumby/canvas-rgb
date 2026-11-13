@@ -95,6 +95,7 @@ function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, 
     setActive: spy("setActive"),
     create: spy("create"),
     remove: spy("remove"),
+    renameScene: spy("renameScene"),
     undo: spy("undo"),
     redo: spy("redo"),
     canUndo: false,
@@ -324,5 +325,39 @@ describe("the Scenes page", () => {
     const first = screen.getAllByRole("link")[0] as HTMLElement;
     expect(first.textContent).toContain("Scenes");
     expect(document.body.textContent).not.toMatch(/layout/i);
+  });
+
+  it("the last scene's Delete is disabled", () => {
+    const one = clone(DEMO_SCENES.scenes[0] as Scene);
+    mount(fake({ scene: one, scenes: [one] }));
+    fireEvent.click(screen.getByRole("button", { name: "More about this scene" }));
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a scene that is not the last one can be deleted", () => {
+    mount(fake());
+    fireEvent.click(screen.getByRole("button", { name: "More about this scene" }));
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect((del as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Ctrl+Z calls undo and Ctrl+Shift+Z calls redo", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    expect(use.calls.undo).toEqual([[]]);
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true, shiftKey: true });
+    expect(use.calls.redo).toEqual([[]]);
+  });
+
+  it("no control is labelled Save or Revert: every change is undoable", () => {
+    mount(fake());
+    const names = [...document.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
+    expect(names).not.toContain("Save");
+    expect(names).not.toContain("Revert");
+    const labels = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label"));
+    expect(labels).not.toContain("Save");
+    expect(labels).not.toContain("Revert");
   });
 });
