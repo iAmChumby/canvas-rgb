@@ -84,18 +84,22 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
 /// the effects folder, stacks (`stack:<name>`) from `stacks.json`, and everything else from the
 /// built-in registry.
 ///
+/// `group` is the group the effect plays in: a stack resolves its layers in that group's
+/// canvas. `None` for the legacy layout, until the layout is gone (Task 12).
+///
 /// Returns an error when the id is unknown or the effect fails to build.
 pub fn create_effect(
     user: &Arc<user_effects::UserEffects>,
     stacks: &crate::stacks::Stacks,
     id: &str,
+    group: Option<&str>,
 ) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
     if let Some(stack) = stacks.get(id) {
         let structure = crate::stack::structure_hash(&crate::stack::structure(&stack, &|id| {
             user.source_and_file_name(id).map(|(source, _)| source.to_string())
         }));
         let live = stacks.live_for(&stack, &structure);
-        let effect = crate::stack::StackEffect::new(
+        let mut effect = crate::stack::StackEffect::new(
             &stack,
             leaf_builder(user),
             Arc::clone(&live),
@@ -104,9 +108,12 @@ pub fn create_effect(
         .with_clock(stacks.clock())
         .with_fps(stacks.fps_handle())
         .with_status_sink(stacks.status_sink());
+        if let Some(group) = group {
+            effect = effect.with_group(group);
+        }
         // The engine is about to run this stack: record the structure it was built from, so a
         // save-then-activate with the same structure reuses it instead of rebuilding.
-        stacks.note_running(&stack.id, &structure, live);
+        stacks.note_running(&stack.id, &structure, live, group);
         return Ok(Box::new(effect));
     }
     match user.create(id) {
@@ -169,7 +176,7 @@ pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(),
         let id = id.to_string();
         let props = props.clone();
         tokio::task::spawn_blocking(move || {
-            let mut effect = create_effect(&app.user_effects, &app.stacks, &id)?;
+            let mut effect = create_effect(&app.user_effects, &app.stacks, &id, None)?;
             // Mark the init as a guarded effect call so the panic hook logs a panic
             // here as a caught one; the panic still becomes the apply error below.
             canvas_core::effect_guard::run_guarded(|| effect.init(&props));
@@ -217,6 +224,14 @@ pub async fn apply_built(
 
     app.engine.set_effect(effect, props);
     Ok(())
+}
+
+/// The builder a takeover makes its instances with: the effect with this id, built again for
+/// each group the takeover lands on. A stack resolves its layers in that group's canvas.
+pub fn takeover_builder(app: &Arc<App>, id: &str) -> crate::scenes::EffectBuilder {
+    let app = Arc::clone(app);
+    let id = id.to_string();
+    Arc::new(move |group| create_effect(&app.user_effects, &app.stacks, &id, Some(group)))
 }
 
 /// Devices the daemon never sends frames to, matched on the HID path inside the device id.

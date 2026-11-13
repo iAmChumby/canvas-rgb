@@ -83,7 +83,7 @@ async fn response(app: &App) -> ScenesResponse {
 
 /// Replaces the scene with `new`'s id and saves. On a failed save the old scene is back and the
 /// error says why. Returns the scene it replaced.
-async fn replace_saved(app: &App, new: Scene) -> ApiResult<Scene> {
+pub(crate) async fn replace_saved(app: &App, new: Scene) -> ApiResult<Scene> {
     let mut store = app.store.write().await;
     let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == new.id) else {
         return Err(ApiFailure::not_found(format!("no scene with the id {}", new.id)));
@@ -193,8 +193,14 @@ pub async fn put_scene(
     fit_group_props(&app, &mut new)?;
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
-        let _replace = crate::draft::hold_for_replace(&app).await;
-        scenes::apply_group_change(&app, &lock, &old, &new).await;
+        let replace = crate::draft::hold_for_replace(&app).await;
+        if replace.ended_takeover() {
+            // Something held the lights: the whole scene goes on again, so the group the
+            // takeover was on plays the scene's effect and not the takeover's.
+            replace.end_takeover(&app, true).await;
+        } else {
+            scenes::apply_group_change(&app, &lock, &old, &new).await;
+        }
     }
     Ok(Json(new))
 }
@@ -268,6 +274,9 @@ pub async fn delete_scene(
 }
 
 /// `PUT /api/v1/scenes/active`.
+///
+/// The scene that is set must be able to run: a scene with more HTML groups than a scene may
+/// have is refused, before the lights change.
 pub async fn put_active(
     State(app): State<Arc<App>>,
     Json(request): Json<SceneActivePut>,
@@ -275,9 +284,12 @@ pub async fn put_active(
     let lock = app.scene.lock().await;
     {
         let mut store = app.store.write().await;
-        if !store.scenes.scenes.iter().any(|s| s.id == request.id) {
+        let Some(scene) = store.scenes.scenes.iter().find(|s| s.id == request.id) else {
             return Err(ApiFailure::not_found(format!("no scene with the id {}", request.id)));
-        }
+        };
+        // The scene must not run more HTML groups than a scene may: it is about to be on the
+        // lights.
+        scenes::check_html_limit(&app, scene).map_err(ApiFailure::validation)?;
         let before = std::mem::replace(&mut store.scenes.active, request.id.clone());
         if let Err(e) = store.save_scenes() {
             store.scenes.active = before;
@@ -299,6 +311,10 @@ fn group_index(scene: &Scene, group: &str) -> ApiResult<usize> {
 }
 
 /// `PATCH /api/v1/scenes/{id}/groups/{group}/props`.
+///
+/// The scene order, then the draft gate: the order every route takes. A group a takeover holds
+/// keeps the draft; the change is in the scene, and the takeover's restore puts the scene back
+/// with the change.
 pub async fn patch_group_props(
     State(app): State<Arc<App>>,
     Path((id, group)): Path<(String, String)>,
@@ -306,6 +322,7 @@ pub async fn patch_group_props(
 ) -> ApiResult<Json<Scene>> {
     crate::api::effects::check_props_caps(&patch)?;
     let lock = app.scene.lock().await;
+    let _gate = app.draft.gate().lock().await;
     let old = find_scene(&app, &id).await?;
     let at = group_index(&old, &group)?;
     let Plays::Effect { effect, props: current } = &old.groups[at].plays else {
@@ -335,6 +352,10 @@ pub async fn patch_group_props(
 }
 
 /// `PUT /api/v1/scenes/{id}/groups/{group}/brightness`.
+///
+/// The scene order, then the draft gate: the order every route takes. A group a takeover holds
+/// keeps the draft; the change is in the scene, and the takeover's restore puts the scene back
+/// with the change.
 pub async fn put_group_brightness(
     State(app): State<Arc<App>>,
     Path((id, group)): Path<(String, String)>,
@@ -344,6 +365,7 @@ pub async fn put_group_brightness(
         return Err(ApiFailure::validation(format!("brightness is 0 to {GROUP_BRIGHTNESS_MAX}")));
     }
     let lock = app.scene.lock().await;
+    let _gate = app.draft.gate().lock().await;
     let old = find_scene(&app, &id).await?;
     let at = group_index(&old, &group)?;
     let mut new = old.clone();
@@ -409,14 +431,32 @@ pub async fn plan_activation(
 }
 
 /// Saves and applies what [`plan_activation`] planned.
+///
+/// `full` puts the whole scene on again instead of the groups that changed: the caller uses it
+/// when something held the lights, so the group it was on plays the scene's effect. The guard
+/// does that apply ([`crate::draft::ReplaceGuard::end_takeover`]), and it does the same when
+/// the save fails, so a takeover is never left on the lights with nothing owning it.
 pub async fn commit_activation(
     app: &Arc<App>,
     lock: &SceneLock<'_>,
     planned: (Scene, Scene),
+    full: bool,
+    replace: &crate::draft::ReplaceGuard<'_>,
 ) -> ApiResult<()> {
     let (old, new) = planned;
-    replace_saved(app, new.clone()).await?;
-    scenes::apply_group_change(app, lock, &old, &new).await;
+    if let Err(error) = replace_saved(app, new.clone()).await {
+        // The save failed: the takeover is still on the lights and nothing owns it. The guard
+        // puts the scene back before the error goes out.
+        replace.fail(app).await;
+        return Err(error);
+    }
+    if full {
+        // The whole scene goes on again: the group the takeover was on plays the scene's
+        // effect and not the takeover's.
+        replace.end_takeover(app, false).await;
+    } else {
+        scenes::apply_group_change(app, lock, &old, &new).await;
+    }
     Ok(())
 }
 

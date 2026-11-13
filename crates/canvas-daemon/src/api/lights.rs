@@ -142,7 +142,15 @@ pub async fn patch_light(
 
     // The engine follows: a new arrangement or direction is a new plan for the light's group.
     if replan && saved {
-        crate::scenes::apply_active(&app, false).await;
+        // The scene order, then the draft gate: the order every route takes.
+        let lock = app.scene.lock().await;
+        let _gate = app.draft.gate().lock().await;
+        // A takeover (a draft, the onboarding greeting) holds the lights: the scene is not put
+        // over it. The change is saved, and it lands when the takeover ends, because its restore
+        // applies the active scene.
+        if !app.scene.is_taken_over() {
+            crate::scenes::apply_with(&app, &lock, false).await;
+        }
     } else {
         app.scene.notify();
     }
