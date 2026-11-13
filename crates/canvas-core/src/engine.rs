@@ -1,12 +1,15 @@
-//! The render loop: one thread, a fixed-step timer, and the state the loop owns.
+﻿//! The render loop: one thread, a fixed-step timer, and the state the loop owns.
 //!
 //! Threading model:
 //! - The public `Engine` handle owns a `Mutex<State>` and a `Condvar`.
 //! - A single background thread does the rendering. It waits on the condvar when it
 //!   has nothing to do (parked or paused) and sleeps until the next tick when it is
 //!   running.
-//! - Callers (`set_fps`, `set_layout`, ...) mutate the state under the lock and nudge
+//! - Callers (`set_fps`, `set_scene`, ...) mutate the state under the lock and nudge
 //!   the condvar so the thread reacts immediately.
+//!
+//! The engine runs scenes only (#310): there is one canvas per group, one effect per group,
+//! and no layout, single active effect or render plan.
 
 use std::collections::{HashMap, VecDeque};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -16,18 +19,14 @@ use std::time::{Duration, Instant};
 use canvas_proto::api::Power;
 use canvas_proto::color::{warmth_gains, Rgb8, WhiteBalance};
 use canvas_proto::device::{DeviceId, DeviceInfo};
-use canvas_proto::layout::{Layout, SamplingMode};
-use canvas_proto::props::{InputNeeds, Props};
+use canvas_proto::props::Props;
 use canvas_proto::scene::Light;
 use canvas_proto::traits::{
-    Canvas, Effect, Engine, EngineGroup, EngineSettings, FrameSink, GroupState, InputSource,
+    Effect, Engine, EngineGroup, EngineSettings, FrameSink, GroupState, InputSource,
     LightPreviewSink, PreviewSink, RenderStats,
 };
 use tracing::{info, warn};
 
-use crate::geometry::{self, LayoutPlan};
-use crate::preview;
-use crate::sampling;
 use crate::scene_engine::{FrameParams, GroupSlot, SceneRunner, SceneState};
 use crate::timer::FrameTimer;
 
@@ -43,8 +42,6 @@ pub(crate) fn guarded_call<R>(f: impl FnOnce() -> R) -> Result<R, Box<dyn std::a
 /// Frame rate limits, from the spine.
 const FPS_MIN: u32 = canvas_proto::consts::FPS_MIN;
 const FPS_MAX: u32 = canvas_proto::consts::FPS_MAX;
-/// The preview stream never exceeds this rate.
-const PREVIEW_MAX_FPS: u32 = canvas_proto::consts::PREVIEW_MAX_FPS;
 
 /// How long the parked thread waits before re-checking its state. It is woken
 /// immediately by any state change, so this is only a safety net against a missed
@@ -69,19 +66,14 @@ struct State {
     /// #50: each device's white-balance gains. Behind an `Arc` so the render thread's
     /// per-frame snapshot is a pointer copy.
     white_balance: Arc<HashMap<DeviceId, [f32; 3]>>,
-    /// The active layout's precomputed sample plan.
-    plan: Option<LayoutPlan>,
-    /// Bumped whenever `plan` is replaced, so the render thread knows to pick it up.
-    plan_generation: u64,
-    /// Device topology, so the plan can be rebuilt when a zone changes size.
+    /// Device topology, so a scene's lights can be resolved to zones.
     devices: Vec<DeviceInfo>,
     /// Sinks, in the order their devices appear in the plan.
     sinks: Vec<SinkEntry>,
     preview: Option<Arc<dyn PreviewSink>>,
     /// Scenes: where the editor's live LEDs go.
     light_preview: Option<Arc<dyn LightPreviewSink>>,
-    /// Scenes: the running scene. `Some` is scene mode (after `set_scene`); `set_layout` makes
-    /// it `None` again and the layout path runs.
+    /// Scenes: the running scene. The engine runs scenes only (#310).
     scene: Option<SceneState>,
     /// Scenes: the next generation to give an effect. Unique for the engine's whole life, so
     /// an effect that was in flight when its slot was replaced can never be put back.
@@ -89,25 +81,6 @@ struct State {
     /// Scenes: the next scene generation.
     scene_counter: u64,
     input_source: Option<Arc<dyn InputSource>>,
-    /// The active effect. `None` means "paint nothing" (a black canvas).
-    effect: Option<Box<dyn Effect>>,
-    /// True when the active effect panicked in `init`/`update`/`schema` and must not be
-    /// called again until `set_effect` replaces it (#99). The canvas keeps the last good
-    /// frame while the effect is skipped.
-    effect_panicked: bool,
-    /// Bumped whenever the effect is replaced, so the render thread knows that the
-    /// effect it is drawing with has been superseded.
-    effect_generation: u64,
-    /// The props the active effect was last initialised with. When these differ from
-    /// [`pending_props`], the render thread re-initialises the effect before the next
-    /// frame.
-    props: Props,
-    /// The props the caller asked for, applied on the next frame.
-    pending_props: Props,
-    /// Whether `pending_props` still needs to be applied.
-    props_dirty: bool,
-    /// When the effect was activated; `Inputs.time` counts from here.
-    effect_started: Option<Instant>,
     /// Frame counter.
     frames_rendered: u64,
     /// True while the loop is parked (running, but nothing consumes frames).
@@ -150,8 +123,6 @@ impl State {
             brightness: settings.brightness.min(100),
             warmth: warmth_gains(f32::from(settings.warmth)),
             white_balance: Arc::new(HashMap::new()),
-            plan: None,
-            plan_generation: 0,
             devices: Vec::new(),
             sinks: Vec::new(),
             preview: None,
@@ -160,13 +131,6 @@ impl State {
             scene_effect_counter: 0,
             scene_counter: 0,
             input_source: None,
-            effect: None,
-            effect_panicked: false,
-            effect_generation: 0,
-            props: Props::new(),
-            pending_props: Props::new(),
-            props_dirty: false,
-            effect_started: None,
             frames_rendered: 0,
             parked: false,
             recent: VecDeque::new(),
@@ -386,7 +350,9 @@ impl CoreEngine {
         self.state
             .lock()
             .unwrap_or_else(|e| e.into_inner())
-            .effect_panicked
+            .scene
+            .as_ref()
+            .is_some_and(|scene| scene.groups.iter().any(|g| g.failed.is_some()))
     }
 }
 
@@ -422,123 +388,6 @@ pub(crate) fn report_effect_panic(effect: &dyn Effect, phase: &str, payload: &Bo
 }
 
 impl Engine for CoreEngine {
-    fn set_layout(&self, layout: Layout, devices: Vec<DeviceInfo>) {
-        let sampling = layout.sampling;
-        let scale_percent = layout.render_scale.percent();
-        let plan = geometry::build_plan(&layout, &devices);
-        let summary = plan.summary();
-        let device_count = plan.device_count();
-        // The scene ends here, and its effects are dropped behind the guard, outside the
-        // lock, exactly like `set_scene` drops the scene it replaces: an effect's `Drop` is
-        // effect code, and a panic in it must not take the caller or the lock down.
-        let old = {
-            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let state = &mut *guard;
-            // The layout path runs again: scene mode ends.
-            let old = state.scene.take();
-            state.devices = devices;
-            state.plan = Some(plan);
-            state.plan_generation = state.plan_generation.wrapping_add(1);
-            // Sinks may have arrived before the layout did; keep their LED counts in
-            // sync with the now-known topology.
-            for sink in state.sinks.iter_mut() {
-                sink.led_count = state
-                    .devices
-                    .iter()
-                    .find(|d| d.id == sink.device_id)
-                    .map(|d| d.led_count())
-                    .unwrap_or(sink.led_count);
-            }
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            old
-        };
-        self.wake();
-        if let Some(old) = old {
-            self.drop_effects(old.groups.into_iter().filter_map(|g| g.effect));
-        }
-        info!(
-            devices = device_count,
-            ?sampling,
-            scale = scale_percent,
-            "layout applied; sample regions recomputed: {summary}"
-        );
-    }
-
-    fn set_effect(&self, effect: Box<dyn Effect>, props: &Props) {
-        let mut effect = effect;
-        // #99: an initialising panic must not take the calling thread (or, when the new
-        // effect is handed to the render thread, the render thread) down with it. The
-        // effect is installed as stopped, so the loop skips it until it is replaced.
-        let init_panicked = match guarded_call(|| effect.init(props)) {
-            Ok(()) => false,
-            Err(payload) => {
-                report_effect_panic(effect.as_ref(), "init", &payload);
-                self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                true
-            }
-        };
-        // Finding 3: the replaced effect's `Drop` is effect code too. Take it out
-        // under the lock but drop it after the lock, behind the guard, so a panicking
-        // drop can neither kill this thread nor hold the state lock while it unwinds.
-        let old = {
-            let mut state = self.state.lock().unwrap_or_else(|e| e.into_inner());
-            let old = state.effect.take();
-            state.effect = Some(effect);
-            state.effect_panicked = init_panicked;
-            state.effect_generation = state.effect_generation.wrapping_add(1);
-            state.effect_started = Some(Instant::now());
-            state.props = props.clone();
-            state.pending_props = props.clone();
-            state.props_dirty = false;
-            state.wake_generation = state.wake_generation.wrapping_add(1);
-            old
-        };
-        self.wake();
-        if let Some(old) = old {
-            if guarded_call(|| drop(old)).is_err() {
-                let _ = self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                warn!("a replaced effect panicked in Drop; it was already superseded");
-            }
-        }
-        info!("effect activated");
-    }
-
-    fn set_props(&self, props: &Props) {
-        // The effect may be in the render thread's hands right now, so the new props
-        // are queued and applied at the start of the next frame.
-        let mut panicked: Option<(String, String)> = None;
-        self.mutate(|state| {
-            state.pending_props = props.clone();
-            state.props_dirty = true;
-            // If the effect is idle in the state, initialise it right away; there is
-            // no frame in flight to race with. A stopped effect is never called again
-            // until it is replaced (#99).
-            if state.effect_panicked {
-                return;
-            }
-            if let Some(effect) = state.effect.as_mut() {
-                let outcome = guarded_call(|| effect.init(props));
-                match outcome {
-                    Ok(()) => {
-                        state.props = props.clone();
-                        state.props_dirty = false;
-                    }
-                    Err(payload) => {
-                        // Leave `props_dirty` set: the render thread clears it without
-                        // calling the stopped effect again.
-                        state.effect_panicked = true;
-                        let effect_id = effect_id_guarded(effect.as_ref());
-                        panicked = Some((effect_id, panic_text(&payload)));
-                    }
-                }
-            }
-        });
-        if let Some((effect_id, message)) = panicked {
-            self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            tracing::error!(effect_id = %effect_id, phase = "init", message = %message, "an effect panicked; it will not be called again until a new effect is set");
-        }
-    }
-
     fn set_fps(&self, fps: u32) {
         let clamped = fps.clamp(FPS_MIN, FPS_MAX);
         if clamped != fps {
@@ -853,80 +702,20 @@ pub fn spawn(settings: EngineSettings) -> Arc<dyn Engine> {
     Arc::clone(&spawn_core(settings)) as Arc<dyn Engine>
 }
 
-/// The state the render thread keeps between frames, so the hot path allocates
-/// nothing per frame.
-struct LoopBuffers {
-    canvas: Canvas,
-    /// One `Vec<Rgb8>` per device in the plan.
-    device_colors: Vec<Vec<Rgb8>>,
-    /// Scratch buffer for one zone's LED colors.
-    zone_colors: Vec<Rgb8>,
-    /// Scratch buffer for the preview's packed RGB.
-    preview_bytes: Vec<u8>,
-}
-
 /// The render thread.
+///
+/// It runs scenes only (#310): one canvas per group, one effect per group. A state with no
+/// scene (before the daemon hands one over) renders nothing and keeps the loop's beat, so a
+/// pause, a park and the measured fps still behave.
 fn render_loop(engine: Arc<CoreEngine>) {
     {
         let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
         state.render_thread_id = Some(platform::current_thread_id());
     }
     let mut timer = FrameTimer::new();
-    let mut buffers = LoopBuffers {
-        canvas: Canvas::with_scale(1.0),
-        device_colors: Vec::new(),
-        zone_colors: Vec::new(),
-        preview_bytes: Vec::new(),
-    };
-    let mut plan = LayoutPlan::default();
-    let mut plan_generation = u64::MAX;
-    let mut sampling_mode = SamplingMode::AreaAverage;
-    // Device id -> index into `plan.devices`, rebuilt when the plan changes.
-    let mut device_index: std::collections::HashMap<DeviceId, usize> =
-        std::collections::HashMap::new();
     let mut last_frame_at = Instant::now();
-    let mut last_preview_at = Instant::now();
     // The power state the thread last saw, so the resume can be logged.
     let mut last_power = Power::Running;
-    // The effect generation the render thread last ran with, and whether that effect
-    // has delivered a good frame. A panicked tick after a good frame delivers nothing:
-    // `FrameSink` is a one-way channel into a bounded writer task
-    // (`crates/canvas-daemon/src/state.rs` `DeviceSink`), so skipping a submit leaves the
-    // device showing what it was last sent (OpenRGB custom mode persists;
-    // `crates/canvas-adapters/src/openrgb.rs`; Royuan holds `last_color`,
-    // `crates/canvas-adapters/src/royuan.rs`), and the preview's `try_send` leaves the
-    // client showing its last frame (`state.rs` `WebsocketPreview`). That makes the check
-    // free when a panic never happens: no snapshot buffer, no per-tick copy, only a flag
-    // the loop already reads. A panicked tick before this generation's first good frame
-    // delivers black instead (#99, findings 1-3).
-    //
-    // On `set_effect` the generation bumps and this render thread clears the canvas when
-    // it picks up the new generation: a new effect never starts from the previous
-    // effect's frame (trails accumulate, see findings 3), and a new effect that panics
-    // before a good frame shows black, never the previous effect's colours.
-    let mut seen_generation = u64::MAX;
-    let mut delivered_good_frame = false;
-    // The last good colours of every device, kept so a device that needs a frame again
-    // gets it (#145): a resume from a pause, a resume from sleep, a sink that was added
-    // while the effect was stopped. Without it the delivery stays stopped until another
-    // effect is picked, and the lights keep the frame they had (or black, after the
-    // pause) while the adapter's keepalive and resume re-send never run
-    // (`crates/canvas-adapters/src/openrgb.rs`).
-    //
-    // The copy is refreshed on every good frame, so it is the last good frame and not an
-    // old one. `clone_from` reuses the destination's capacity, so the good path stays
-    // allocation-free; the copy is a memcpy of the device's colours, next to nothing
-    // compared with the sampling of the whole canvas.
-    //
-    // It is emptied when the effect is replaced: a new effect never starts from the
-    // previous effect's frame (#99, finding 3), and its first frame is the one that is
-    // kept.
-    let mut last_good: Vec<Vec<Rgb8>> = Vec::new();
-    // The device every saved frame belongs to, in the same order as `last_good`. The
-    // frames are keyed by the device and not by the position of the device in the
-    // plan, so a plan that lists the same devices in another order keeps every
-    // device's own frame.
-    let mut last_good_ids: Vec<DeviceId> = Vec::new();
     // Scene mode (Scenes, #310): the render thread's canvases, plans and buffers.
     let mut scene_runner = SceneRunner::new();
 
@@ -1018,300 +807,9 @@ fn render_loop(engine: Arc<CoreEngine>) {
             last_frame_at = Instant::now();
         }
 
-        // Scene mode: one effect per group. The layout path below does not run.
-        if render_scene_frame(&engine, &mut scene_runner, &mut last_frame_at) {
-            timer.sleep_until_next(fps);
-            continue;
-        }
-
-        // Take the effect out of the state for the duration of the frame, so the API
-        // thread is never blocked by a long effect update.
-        let (
-            effect,
-            effect_generation,
-            effect_panicked,
-            pending_props,
-            brightness,
-            warmth,
-            white_balance,
-            preview_on,
-            input_source,
-            effect_start,
-            pending_sink,
-            pending_resume,
-        ) = {
-            let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            // Pick up a new plan only when the layout actually changed.
-            if state.plan_generation != plan_generation {
-                plan_generation = state.plan_generation;
-                if let Some(p) = state.plan.clone() {
-                    sampling_mode = p.sampling;
-                    buffers.canvas = Canvas::with_scale(p.scale);
-                    device_index.clear();
-                    for (i, d) in p.devices.iter().enumerate() {
-                        device_index.insert(d.device_id.clone(), i);
-                    }
-                    plan = p;
-                }
-                // The saved frames belong to the old plan (#145): they are keyed by
-                // the device they were drawn for, so a plan that lists the same
-                // devices in another order keeps every device's own frame. A frame
-                // of a device that changed its LED count is the wrong length, so it
-                // goes.
-                remap_last_good(&plan, &mut last_good, &mut last_good_ids);
-            }
-            // `schema` used to be read here under the lock; it is effect code and
-            // runs unguarded below (#99), so it moved below, outside the lock.
-            // Props requested while this frame's effect was in flight are applied
-            // before the next update.
-            let pending_props = if state.props_dirty {
-                state.props_dirty = false;
-                state.props = state.pending_props.clone();
-                Some(state.pending_props.clone())
-            } else {
-                None
-            };
-            (
-                state.effect.take(),
-                state.effect_generation,
-                state.effect_panicked,
-                pending_props,
-                state.brightness,
-                state.warmth,
-                Arc::clone(&state.white_balance),
-                state.preview.is_some(),
-                state.input_source.clone(),
-                state.effect_started,
-                state.pending_sink,
-                state.pending_resume,
-            )
-        };
-
-        // A new effect starts from a black canvas, never the previous effect's frame
-        // or a half-drawn torn canvas (finding 3). The generation only changes in
-        // `set_effect`, which also bumps it for an effect that panics in `init` on the
-        // caller thread, so a replacement that panics before a good frame shows black.
-        if effect_generation != seen_generation {
-            seen_generation = effect_generation;
-            delivered_good_frame = false;
-            // The saved frames belong to the previous effect (#145): the new effect's
-            // first good frame is the one that is kept, never the old one.
-            for saved in last_good.iter_mut() {
-                saved.clear();
-            }
-            for pixel in buffers.canvas.pixels.iter_mut() {
-                *pixel = [0.0, 0.0, 0.0];
-            }
-        }
-
-        // ---- draw ------------------------------------------------------------
-        let frame_start = Instant::now();
-        let dt = frame_start.duration_since(last_frame_at).as_secs_f32();
-        last_frame_at = frame_start;
-
-        // Every effect call runs behind a guard (#99): a panicking effect is logged
-        // once per instance and skipped until `set_effect` replaces it, and the
-        // canvas below keeps the last good frame (black before the first one).
-        let mut panicked = effect_panicked;
-        let mut needs = InputNeeds::default();
-        if let Some(e) = effect.as_ref() {
-            if !panicked {
-                let outcome = guarded_call(|| e.schema().needs);
-                match outcome {
-                    Ok(needs_now) => needs = needs_now,
-                    Err(payload) => {
-                        panicked = true;
-                        report_effect_panic(e.as_ref(), "schema", &payload);
-                        engine
-                            .effect_panics
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            }
-        }
-
-        let inputs = build_inputs(needs, &input_source, effect_start);
-
-        if let Some(mut e) = effect {
-            if !panicked {
-                let mut step_panicked = false;
-                if let Some(props) = pending_props {
-                    let outcome = guarded_call(|| e.init(&props));
-                    if let Err(payload) = outcome {
-                        step_panicked = true;
-                        report_effect_panic(e.as_ref(), "init", &payload);
-                        engine
-                            .effect_panics
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                if !step_panicked {
-                    let canvas = &mut buffers.canvas;
-                    let inputs_ref = &inputs;
-                    let outcome = guarded_call(|| {
-                        e.update(dt, &mut *canvas, inputs_ref);
-                    });
-                    if let Err(payload) = outcome {
-                        step_panicked = true;
-                        report_effect_panic(e.as_ref(), "update", &payload);
-                        engine
-                            .effect_panics
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-                panicked = step_panicked || panicked;
-            }
-            // Put the effect back, unless a newer one was activated while this one
-            // was drawing; in that case the newer one wins. The drop of a superseded
-            // effect is effect code too: guard it so a panicking `drop` cannot kill
-            // the render thread.
-            let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            if state.effect.is_none() && state.effect_generation == effect_generation {
-                state.effect = Some(e);
-                state.effect_panicked = panicked;
-            } else {
-                drop(state);
-                let _ = guarded_call(|| drop(e));
-            }
-        }
-
-        // ---- sample ----------------------------------------------------------
-        // A panicked tick samples nothing: the canvas is half-drawn. It re-delivers
-        // the last good colours per device (black before the first good frame).
-        let brightness_factor = f32::from(brightness) / 100.0;
-
-        buffers.device_colors.clear();
-        buffers.device_colors.resize(plan.devices.len(), Vec::new());
-        if panicked {
-            if !delivered_good_frame {
-                // No good frame yet for this generation: black, never a leftover.
-                for (device_index, device) in plan.devices.iter().enumerate() {
-                    let device_colors = &mut buffers.device_colors[device_index];
-                    device_colors.clear();
-                    device_colors.resize(device.led_count as usize, Rgb8::BLACK);
-                }
-            }
-        } else {
-        for (device_index, device) in plan.devices.iter().enumerate() {
-            let device_colors = &mut buffers.device_colors[device_index];
-            device_colors.clear();
-            for zone in &device.zones {
-                if !zone.placed {
-                    // An unplaced or invisible zone is black, never sampled.
-                    device_colors.resize(device_colors.len() + zone.leds.len(), Rgb8::BLACK);
-                    continue;
-                }
-                sampling::sample_leds(
-                    &buffers.canvas.pixels,
-                    buffers.canvas.width,
-                    buffers.canvas.height,
-                    &zone.leds,
-                    sampling_mode,
-                    &mut buffers.zone_colors,
-                );
-                device_colors.extend_from_slice(&buffers.zone_colors);
-            }
-            // A frame has exactly one color per LED of the device. The plan's LED
-            // count comes from the device topology, so a zone that changed size
-            // between the layout and the device list cannot shorten the frame.
-            device_colors.resize(device.led_count as usize, Rgb8::BLACK);
-            // Apply the brightness, the warmth stage and this device's white balance
-            // (#50) to the sampled colors, as one gain per channel.
-            let balance = white_balance.get(&device.device_id).copied().unwrap_or([1.0; 3]);
-            let gain = [0, 1, 2].map(|i| brightness_factor * warmth[i] * balance[i]);
-            if gain.iter().any(|g| *g < 1.0) {
-                for c in device_colors.iter_mut() {
-                    let f = c.to_f32();
-                    *c = Rgb8::from_f32([f[0] * gain[0], f[1] * gain[1], f[2] * gain[2]]);
-                }
-            }
-            // Keep this device's last good colours (#145): a device that needs a frame
-            // again (a resume, a sink that was added) gets them. `clone_from` reuses the
-            // destination's capacity, so the good path allocates nothing.
-            last_good[device_index].clone_from(device_colors);
-        }
-        delivered_good_frame = true;
-        }
-
-        // A panicked tick after a good frame delivers nothing (see `delivered_good_frame`
-        // at the top of the loop): the lights keep the last frame they were sent, and the
-        // preview client keeps the last frame it received. Black before a good frame is
-        // the only panicked delivery.
-        let deliver = !panicked || !delivered_good_frame;
-        // Something needs a frame again while the delivery is stopped (#145): a resume
-        // from a pause, a resume from sleep, or a sink that was added. The last good
-        // frame goes out then, so a device is never left on a stale or black frame, and
-        // the adapter's keepalive and resume re-send run again
-        // (`crates/canvas-adapters/src/openrgb.rs`).
-        let redeliver = !deliver && (pending_resume || pending_sink);
-        if !deliver {
-            // Skip to bookkeeping: no sink submit, no preview submit.
-            if redeliver {
-                let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-                redeliver_last_good(&mut state, &last_good, &device_index, &mut scene_runner);
-                state.pending_sink = false;
-                state.pending_resume = false;
-            }
-        } else {
-        // ---- deliver ---------------------------------------------------------
-        {
-            let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            for sink in state.sinks.iter_mut() {
-                // The sink takes ownership of the colors, so the buffer is moved out
-                // rather than copied. `FrameSink::submit` takes a `Vec`, so one
-                // allocation per device per frame is inherent to the trait.
-                let colors = match device_index.get(&sink.device_id).copied() {
-                    Some(i) => std::mem::replace(
-                        &mut buffers.device_colors[i],
-                        Vec::with_capacity(sink.led_count as usize),
-                    ),
-                    // A sink can arrive a frame before the plan that knows its device:
-                    // it gets black, at its full length, never an empty frame.
-                    None => black_frame(sink),
-                };
-                // A device with no known LEDs (its layout has not arrived) gets nothing: an empty
-                // frame is rejected by every adapter and only fills the log.
-                if colors.is_empty() {
-                    continue;
-                }
-                // The frame the device is sent now is the frame a fade starts from, in
-                // layout mode too: a fade that follows layout mode blends from what the
-                // strip is showing, not from the scene that ended before it.
-                scene_runner.record_sent(&sink.device_id, &colors);
-                sink.sink.submit(colors);
-            }
-            // Every sink has this frame now, the new ones included.
-            state.pending_sink = false;
-            state.pending_resume = false;
-        }
-
-        // ---- preview ---------------------------------------------------------
-        if preview_on {
-            let state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            if let Some(sink) = state.preview.clone() {
-                // Rate-limit the preview to PREVIEW_MAX_FPS.
-                let interval = Duration::from_nanos(1_000_000_000 / u64::from(PREVIEW_MAX_FPS));
-                if frame_start.duration_since(last_preview_at) >= interval {
-                    // A panicked tick reaches here only before a good frame, and then
-                    // there is nothing to show: skip the preview rather than post a
-                    // black downscale.
-                    if !panicked {
-                        let (w, h) = preview::downscale_rgb(
-                            &buffers.canvas.pixels,
-                            buffers.canvas.width,
-                            buffers.canvas.height,
-                            &mut buffers.preview_bytes,
-                        );
-                        sink.submit(w, h, buffers.preview_bytes.clone());
-                        last_preview_at = frame_start;
-                    }
-                }
-            }
-        }
-        }
-
-        // ---- bookkeeping -----------------------------------------------------
-        finish_frame(&engine, frame_start);
+        // One frame of the scene. A state with no scene renders nothing (the daemon hands a
+        // scene over before it adds a sink), and the loop keeps its beat.
+        render_scene_frame(&engine, &mut scene_runner, &mut last_frame_at);
 
         // ---- sleep to the next tick ------------------------------------------
         timer.sleep_until_next(fps);
@@ -1320,7 +818,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
     info!("render thread exiting");
 }
 
-/// The bookkeeping that ends every frame, layout mode and scene mode alike.
+/// The bookkeeping that ends every frame.
 fn finish_frame(engine: &CoreEngine, frame_start: Instant) {
     let frame_time_ms = frame_start.elapsed().as_secs_f32() * 1000.0;
     {
@@ -1339,7 +837,7 @@ fn finish_frame(engine: &CoreEngine, frame_start: Instant) {
 }
 
 /// One frame of scene mode (Scenes, #310). Returns false, having done nothing, when the engine
-/// is in layout mode.
+/// has no scene to run.
 ///
 /// The lock is held to take each group's effect out and to put it back, never while an effect
 /// runs: the API threads (`set_group_props`, `set_group_effect`) are never blocked by a long
@@ -1385,12 +883,12 @@ fn render_scene_frame(
         let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
         let superseded = match state.scene.as_mut() {
             Some(scene) => scene.put_back(runner.done()),
-            // The scene ended while the frame ran (`set_layout`): the effects have nowhere
+            // The scene was replaced while the frame ran (`set_scene`): the effects have nowhere
             // to go back to. They are dropped behind the guard, outside the lock, like
             // every other replaced effect: an effect's `Drop` is effect code.
             None => runner.done().drain(..).filter_map(|item| item.effect).collect(),
         };
-        // `set_layout` ended scene mode during the frame: the frame is stale, nothing is sent.
+        // `set_scene` replaced the scene during the frame: the frame is stale, nothing is sent.
         if state.scene.is_some() {
             for sink in state.sinks.iter_mut() {
                 // A frame the runner built for another LED count than the sink has now is
@@ -1399,8 +897,7 @@ fn render_scene_frame(
                 else {
                     // The device is not in the scene at all: the sink gets a black frame of
                     // its own length, never nothing, so a strip whose device dropped goes
-                    // dark instead of holding the colours it was last sent. Layout mode
-                    // does the same for a sink whose device the plan does not know.
+                    // dark instead of holding the colours it was last sent.
                     if !runner.knows_device(&sink.device_id) && sink.led_count > 0 {
                         // The black frame is recorded as the frame the sink was sent: the
                         // strip is dark, so a fade that follows blends from black and not
@@ -1432,39 +929,6 @@ fn render_scene_frame(
     true
 }
 
-/// Moves the saved frames onto the new plan (#145).
-///
-/// The frames are keyed by the device they were drawn for, so a plan that lists the
-/// same devices in another order keeps every device's own frame: without this, a
-/// re-layout that swapped two devices of the same LED count sent each device the
-/// other's frame.
-///
-/// A frame whose device left the plan is dropped, and so is one whose device changed
-/// its LED count: it is the wrong length for the device now.
-fn remap_last_good(
-    plan: &LayoutPlan,
-    last_good: &mut Vec<Vec<Rgb8>>,
-    last_good_ids: &mut Vec<DeviceId>,
-) {
-    let mut ids: Vec<DeviceId> = Vec::with_capacity(plan.devices.len());
-    let mut frames: Vec<Vec<Rgb8>> = Vec::with_capacity(plan.devices.len());
-    for device in &plan.devices {
-        let mut frame = Vec::new();
-        let old = last_good_ids.iter().position(|id| id == &device.device_id);
-        if let Some(old) = old {
-            if let Some(saved) = last_good.get(old) {
-                if saved.len() == device.led_count as usize {
-                    frame.clone_from(saved);
-                }
-            }
-        }
-        ids.push(device.device_id.clone());
-        frames.push(frame);
-    }
-    *last_good = frames;
-    *last_good_ids = ids;
-}
-
 /// Writes one black frame to every sink.
 ///
 /// The black frame is recorded as the frame the sink was sent: the strip is dark after
@@ -1482,65 +946,6 @@ fn write_black(state: &mut State, runner: &mut SceneRunner) {
 /// the frame by value, so this is one allocation per send, like every other frame.
 fn black_frame(sink: &SinkEntry) -> Vec<Rgb8> {
     vec![Rgb8::BLACK; sink.led_count as usize]
-}
-
-/// Sends the last good frame to every sink again (#145).
-///
-/// A panicked effect stops the delivery (#99), so a device that needs a frame again (a
-/// resume from a pause, a resume from sleep, a sink that was added) would keep the frame
-/// it was last sent, or the black frame the pause wrote, until another effect is picked.
-/// The last good colours go out instead; black when the effect never drew one.
-///
-/// The frame is copied here, not moved: the saved copy stays for the next time. It is
-/// recorded as the frame the sink was sent, so a fade that follows blends from what the
-/// strip is showing.
-fn redeliver_last_good(
-    state: &mut State,
-    last_good: &[Vec<Rgb8>],
-    device_index: &std::collections::HashMap<DeviceId, usize>,
-    runner: &mut SceneRunner,
-) {
-    for sink in state.sinks.iter_mut().filter(|s| s.led_count > 0) {
-        let led_count = sink.led_count as usize;
-        let saved = device_index
-            .get(&sink.device_id)
-            .copied()
-            .and_then(|i| last_good.get(i))
-            .filter(|frame| frame.len() == led_count);
-        let colors = match saved {
-            Some(frame) => frame.clone(),
-            // The effect never drew a frame for this device, or the plan changed under
-            // it: black, at the device's full length, never an empty frame.
-            None => black_frame(sink),
-        };
-        runner.record_sent(&sink.device_id, &colors);
-        sink.sink.submit(colors);
-    }
-}
-
-/// Builds the effect's `Inputs`, pulling capture data only when the effect asks.
-fn build_inputs(
-    needs: InputNeeds,
-    input_source: &Option<Arc<dyn InputSource>>,
-    effect_started: Option<Instant>,
-) -> canvas_proto::traits::Inputs {
-    let screen = if needs.screen {
-        input_source.as_ref().and_then(|s| s.screen())
-    } else {
-        None
-    };
-    let audio = if needs.audio {
-        input_source.as_ref().and_then(|s| s.audio())
-    } else {
-        None
-    };
-    canvas_proto::traits::Inputs {
-        time: effect_started
-            .map(|s| s.elapsed().as_secs_f64())
-            .unwrap_or(0.0),
-        screen,
-        audio,
-    }
 }
 
 /// The platform bits the engine needs from the operating system.

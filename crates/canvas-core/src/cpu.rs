@@ -1,6 +1,6 @@
-//! Checks that the parked and paused loops cost (almost) no CPU.
+﻿//! Checks that the parked and paused loops cost (almost) no CPU.
 //!
-//! The spec budgets "Paused: daemon CPU mean ≤ 0.05%". The engine is one thread of
+//! The spec budgets "Paused: daemon CPU mean â‰¤ 0.05%". The engine is one thread of
 //! the daemon, so it has to be cheaper than that.
 //!
 //! Two tests read that budget, in two ways:
@@ -183,11 +183,40 @@ impl canvas_proto::traits::FrameSink for NullSink {
     fn submit(&self, _colors: Vec<canvas_proto::Rgb8>) {}
 }
 
+/// An effect that paints its group's canvas one colour.
+struct SolidEffect;
+
+impl canvas_proto::traits::Effect for SolidEffect {
+    fn schema(&self) -> canvas_proto::props::PropertySchema {
+        canvas_proto::props::PropertySchema {
+            id: "cpu_solid".into(),
+            name: "CPU Solid".into(),
+            description: "Paints the canvas one colour.".into(),
+            needs: canvas_proto::props::InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &canvas_proto::props::Props) {}
+
+    fn update(
+        &mut self,
+        _dt: f32,
+        canvas: &mut canvas_proto::traits::Canvas,
+        _inputs: &canvas_proto::traits::Inputs,
+    ) {
+        canvas.fill([1.0, 0.0, 0.0]);
+    }
+}
+
 #[test]
 fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
     use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-    use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
-    use canvas_proto::traits::Engine;
+    use canvas_proto::props::Props;
+    use canvas_proto::scene::{GroupMode, Light};
+    use canvas_proto::traits::{Engine, EngineGroup};
 
     // This engine runs, so it asks the system for a 1 ms timer (`timeBeginPeriod`, `timer.rs`).
     // That setting is system-wide, so it is in force for the whole machine while this test
@@ -201,7 +230,8 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
     });
     let thread_id = render_thread_id(&engine);
 
-    // 600 LEDs over six linear zones, the shape of a real desk.
+    // 600 LEDs over six linear zones, the shape of a real desk: one light per zone, all of
+    // them in one group, which is what the scene path renders.
     let zones: Vec<ZoneInfo> = (0..6)
         .map(|index| ZoneInfo {
             index,
@@ -225,34 +255,31 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
         zones,
         connected: true,
     };
-    let layout = Layout {
-        id: "cpu".into(),
-        name: "cpu".into(),
-        render_scale: RenderScale::P100,
-        sampling: SamplingMode::AreaAverage,
-        zones: (0..6)
-            .map(|index| PlacedZone {
-                device_id: DeviceId("cpu".into()),
-                zone_index: index,
-                x: index as f32 * 53.0,
-                y: 0.0,
-                width: 53.0,
-                height: 200.0,
-                rotation_deg: 0.0,
-                reversed: false,
-                visible: true,
-                shape: ZoneShape::Auto,
-                label: None,
-                leds: None,
-                part: None,
-                locked: false,
-            })
-            .collect(),
-        effect: None,
-        case_form: canvas_proto::layout::CaseForm::None,
-        landmarks: Vec::new(),
-    };
-    engine.set_layout(layout, vec![device]);
+    let lights: Vec<Light> = (0..6)
+        .map(|index| Light {
+            id: format!("cpu#z{index}"),
+            device_id: DeviceId("cpu".into()),
+            zone_index: index,
+            leds: None,
+            name: Some(format!("zone{index}")),
+            arrangement: canvas_proto::scene::Arrangement::Strip,
+            reversed: false,
+        })
+        .collect();
+    let members: Vec<String> = lights.iter().map(|l| l.id.clone()).collect();
+    engine.set_scene(
+        lights,
+        vec![device],
+        vec![EngineGroup {
+            id: "all".into(),
+            members,
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+            effect: Some(Box::new(SolidEffect)),
+            props: Props::new(),
+        }],
+        false,
+    );
     engine.add_sink(DeviceId("cpu".into()), Arc::new(NullSink));
 
     // Let the loop reach steady state.
@@ -278,3 +305,4 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
     );
     engine.shutdown();
 }
+
