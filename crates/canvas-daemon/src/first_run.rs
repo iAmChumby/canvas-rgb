@@ -670,6 +670,36 @@ pub fn place_missing_zones(layout: &mut Layout, devices: &[DeviceInfo]) -> usize
     added
 }
 
+/// A saved `Point` shape on a matrix zone becomes the zone's own map (`Auto`).
+///
+/// `Point` lights every LED of the zone with the whole box, which is what a one-LED zone
+/// looked like: that is the shape the first run wrote for this keyboard while it reported a
+/// single LED (#312). The keyboard reports 128 keys now, so a saved `Point` made every key one
+/// colour. A matrix zone's map is its per-key shape (`default_shape` returns `Auto` for one).
+///
+/// Runs on every device list and is idempotent: once the shape is `Auto` nothing changes.
+/// Returns how many placements changed. A person who wants a matrix zone as one blob of light
+/// picks `Point` again in the editor, where `Auto` says which shape it draws.
+pub fn repair_point_on_matrix(layout: &mut Layout, devices: &[DeviceInfo]) -> usize {
+    let mut repaired = 0;
+    for placement in &mut layout.zones {
+        if placement.shape != ZoneShape::Point {
+            continue;
+        }
+        let zone = devices
+            .iter()
+            .find(|d| d.id == placement.device_id)
+            .and_then(|d| d.zones.iter().find(|z| z.index == placement.zone_index));
+        let Some(zone) = zone else { continue };
+        // One LED is a point whatever the kind says: there is no shape to get wrong.
+        if matches!(zone.kind, ZoneKind::Matrix { .. }) && zone.led_count > 1 {
+            placement.shape = ZoneShape::Auto;
+            repaired += 1;
+        }
+    }
+    repaired
+}
+
 /// How long the device list must hold still before the first run trusts it: longer than
 /// one supervisor refresh (5 s), so a device still being detected shows up first.
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(6);
@@ -1024,6 +1054,113 @@ mod tests {
                 assert!(!overlap, "{a:?} overlaps {b:?}");
             }
         }
+    }
+
+    /// A keyboard that reports one matrix zone of 128 keys, as the ROYUAN adapter does (#312).
+    fn matrix_keyboard() -> DeviceInfo {
+        let mut board = device("ROYUAN MonsGeek Keyboard", DeviceKind::Keyboard, 128);
+        board.id = DeviceId("royuan:3151:4015".into());
+        let map = (0..128).map(Some).collect();
+        board.zones[0] = ZoneInfo {
+            index: 0,
+            name: "Keyboard".into(),
+            kind: ZoneKind::Matrix { width: 22, height: 6, map },
+            led_count: 128,
+            min_leds: 128,
+            max_leds: 128,
+            resizable: false,
+        };
+        board
+    }
+
+    /// A layout with nothing on it, as the tests below build one.
+    fn empty_layout() -> Layout {
+        Layout {
+            id: "default".into(),
+            name: "Default".into(),
+            render_scale: Default::default(),
+            sampling: Default::default(),
+            zones: Vec::new(),
+            effect: None,
+            case_form: Default::default(),
+            landmarks: Vec::new(),
+        }
+    }
+
+    /// The saved layout of an install from before #312: its keyboard was one LED, so the first
+    /// run saved `Point`, and every one of the 128 keys then sampled the whole box.
+    fn layout_saved_as_a_point(shape: ZoneShape) -> (Layout, DeviceInfo) {
+        let board = matrix_keyboard();
+        let mut layout = empty_layout();
+        layout.zones.push(PlacedZone {
+            device_id: board.id.clone(),
+            zone_index: 0,
+            x: 14.0,
+            y: 158.0,
+            width: 110.0,
+            height: 30.0,
+            rotation_deg: 0.0,
+            reversed: false,
+            visible: true,
+            shape,
+            label: None,
+            leds: None,
+            part: None,
+            locked: false,
+        });
+        (layout, board)
+    }
+
+    #[test]
+    fn a_point_saved_for_a_one_led_keyboard_becomes_the_key_grid() {
+        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
+        // Before the repair every key samples the same box: one colour across the keyboard.
+        let flat = canvas_core::geometry::build_plan(&layout, std::slice::from_ref(&board));
+        let leds = &flat.devices[0].zones[0].leds;
+        assert_eq!(leds.len(), 128);
+        assert_eq!(leds.iter().filter(|l| l.bounds == leds[0].bounds).count(), 128, "one rect each");
+
+        assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&board)), 1);
+        assert_eq!(layout.zones[0].shape, ZoneShape::Auto, "the matrix zone's own map");
+
+        // And every key now samples its own key of the grid.
+        let grid = canvas_core::geometry::build_plan(&layout, std::slice::from_ref(&board));
+        let leds = &grid.devices[0].zones[0].leds;
+        assert_eq!(leds.len(), 128);
+        assert_eq!(leds.iter().filter(|l| l.bounds == leds[0].bounds).count(), 1, "a key each");
+        assert_eq!(repair_point_on_matrix(&mut layout, &[board]), 0, "and only once");
+    }
+
+    #[test]
+    fn a_point_on_a_zone_that_is_still_one_led_stays_a_point() {
+        let mut mouse = device("Mouse", DeviceKind::Mouse, 1);
+        mouse.zones[0].kind = ZoneKind::Single;
+        let mut layout = empty_layout();
+        layout.zones.push(PlacedZone {
+            device_id: mouse.id.clone(),
+            zone_index: 0,
+            x: 1.0,
+            y: 1.0,
+            width: 10.0,
+            height: 10.0,
+            rotation_deg: 0.0,
+            reversed: false,
+            visible: true,
+            shape: ZoneShape::Point,
+            label: None,
+            leds: None,
+            part: None,
+            locked: false,
+        });
+        assert_eq!(repair_point_on_matrix(&mut layout, &[mouse]), 0);
+        assert_eq!(layout.zones[0].shape, ZoneShape::Point, "one LED is a point");
+    }
+
+    #[test]
+    fn another_shape_on_a_matrix_zone_is_left_alone() {
+        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Strip);
+        assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&board)), 0);
+        assert_eq!(layout.zones[0].shape, ZoneShape::Strip, "a strip on a matrix is a choice");
     }
 
     #[test]

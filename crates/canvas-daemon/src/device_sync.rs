@@ -28,15 +28,24 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     *app.devices.write().await = devices.clone();
     *app.openrgb.write().await = LinkState::Connected;
     // After the first run, a zone that appears (a late device, a header that got its LEDs) is
-    // placed instead of staying black.
+    // placed instead of staying black, and a shape saved for a zone that has since changed is
+    // repaired (a point on a matrix zone, #312).
     {
         let mut store = app.store.write().await;
         if store.config.first_run_done {
-            let added = store
-                .active_layout_mut()
-                .map_or(0, |layout| crate::first_run::place_missing_zones(layout, &devices));
-            if added > 0 {
-                tracing::info!(added, "new zones were placed on the canvas");
+            let mut placed = 0;
+            let mut repaired = 0;
+            if let Some(layout) = store.active_layout_mut() {
+                placed = crate::first_run::place_missing_zones(layout, &devices);
+                repaired = crate::first_run::repair_point_on_matrix(layout, &devices);
+            }
+            if placed > 0 {
+                tracing::info!(placed, "new zones were placed on the canvas");
+            }
+            if repaired > 0 {
+                tracing::info!(repaired, "a zone saved as a point on a matrix now uses its own grid");
+            }
+            if placed + repaired > 0 {
                 if let Err(e) = store.save_layouts() {
                     tracing::warn!(error = %e, "could not save the layouts");
                 }
