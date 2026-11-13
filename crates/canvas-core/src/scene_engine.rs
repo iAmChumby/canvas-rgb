@@ -47,8 +47,8 @@ use crate::sampling;
 pub const SCENE_RENDER_SCALE: f32 = 0.25;
 
 /// How a light's LEDs read their group's canvas in scene mode: the mean of the pixels the LED's
-/// cell covers. It is fixed, not a setting. It is the mode the benchmark timed, the most
-/// expensive of the three, so the cost numbers hold for it.
+/// cell covers. It is fixed, not a setting. It is the mode the benchmarks timed, so the cost
+/// numbers hold for it; what the other two modes cost is unmeasured.
 pub const SCENE_SAMPLING: SamplingMode = SamplingMode::AreaAverage;
 
 /// The light preview (the editor's live LEDs) never exceeds this rate.

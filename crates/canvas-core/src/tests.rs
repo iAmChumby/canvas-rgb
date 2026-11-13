@@ -2677,6 +2677,41 @@ mod scene {
         }
     }
 
+    /// Task 4 gate: the planner's samples are in the logical 320x200 canvas, the group's canvas
+    /// is `SCENE_RENDER_SCALE` of that (80x50). Without the scaling every LED past the first
+    /// quarter of the run clamps to the last column and the gradient collapses to one colour.
+    #[test]
+    fn a_12_and_36_led_flow_across_group_spreads_the_gradient_over_all_48_leds() {
+        let engine = spawn(settings(60));
+        let devices = vec![device(
+            "d0",
+            vec![zone(0, ZoneKind::Linear, 12), zone(1, ZoneKind::Linear, 36)],
+        )];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d0".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d0"), slice_light("d0", 1, 0, 36)],
+            devices,
+            vec![group("a", &["d0#z0", "d0#z1s0"], Some(Box::new(GradientEffect)))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || {
+            sink.last().is_some_and(|f| f.len() == 48 && f[0].r > 200)
+        }));
+        let frame = sink.last().expect("a frame");
+        // Red falls from the first LED to the last, one step at a time over the whole run.
+        assert!(frame[0].r > 230, "the first LED is red: {frame:?}");
+        assert!(frame[47].r < 25, "the last LED is blue: {frame:?}");
+        assert!((90..=165).contains(&frame[24].r), "the middle LED is half way: {frame:?}");
+        assert!(
+            frame.windows(2).all(|w| w[1].r <= w[0].r),
+            "red never rises along the run: {frame:?}"
+        );
+        let distinct = frame.iter().map(|c| c.r).collect::<std::collections::BTreeSet<_>>().len();
+        assert!(distinct >= 30, "{distinct} distinct values over 48 LEDs: {frame:?}");
+        engine.shutdown();
+    }
+
     #[test]
     fn a_member_naming_no_light_or_an_absent_device_is_skipped() {
         let (engine, devices, a, _b) = two_devices();

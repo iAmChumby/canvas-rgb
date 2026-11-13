@@ -273,8 +273,8 @@ fn bench(name: &str, html: Option<(&str, &str)>) {
         }
         let worst = p95s.iter().copied().fold(f32::MIN, f32::max);
         println!(
-            "{name} | {k} HTML | worst p95 of {RUNS} runs {worst:.3} ms | {} the {BAR_MS} ms bar in all {RUNS} runs",
-            if clean { "at or under" } else { "OVER" },
+            "{name} | {k} HTML | worst p95 of {RUNS} runs {worst:.3} ms | {} the {BAR_MS} ms bar",
+            if clean { "at or under, in all runs," } else { "OVER, in at least one run," },
         );
         // The largest k that fits: every smaller k fits too.
         if clean && largest_ok.map_or(k == ks[0], |last| last + 1 == k) {
