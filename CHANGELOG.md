@@ -11,6 +11,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Scenes: several effects at once, one per group of devices (#310)
 ### Fixed
 
+- Scenes: a fade starts from the colours the strip is showing. A fade that follows a pause, or that follows a device leaving the scene, blends from the black the strip was sent, not from the colours it was showing before (#310)
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
 
 ## [0.13.1] - 2026-11-11

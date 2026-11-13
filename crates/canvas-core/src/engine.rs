@@ -57,6 +57,9 @@ struct SinkEntry {
     sink: Arc<dyn FrameSink>,
     /// LED count of the device; a frame has exactly this many colors.
     led_count: u32,
+    /// The black frame this sink is sent when its device is not in the scene. The buffer
+    /// is reused, so the frame is not built in a fresh allocation every frame.
+    black: Vec<Rgb8>,
 }
 
 /// Everything the render thread reads and the API mutates.
@@ -588,6 +591,7 @@ impl Engine for CoreEngine {
                 device_id: device_id.clone(),
                 sink,
                 led_count,
+                black: Vec::new(),
             });
             // The new sink has no frame yet. A panicked effect stops the delivery, so the
             // render thread re-sends the last good frame when it sees this (#145).
@@ -982,7 +986,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
             // The black frame on the pause transition is written once, here.
             if state.pending_black {
                 state.pending_black = false;
-                write_black(&state);
+                write_black(&mut state, &mut scene_runner);
                 info!("paused: wrote one black frame to every sink");
             }
             // Wait until the state changes. The generation counter closes the race
@@ -1248,7 +1252,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
             // Skip to bookkeeping: no sink submit, no preview submit.
             if redeliver {
                 let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-                redeliver_last_good(&state, &last_good, &device_index);
+                redeliver_last_good(&mut state, &last_good, &device_index, &mut scene_runner);
                 state.pending_sink = false;
                 state.pending_resume = false;
             }
@@ -1256,7 +1260,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
         // ---- deliver ---------------------------------------------------------
         {
             let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
-            for sink in &state.sinks {
+            for sink in state.sinks.iter_mut() {
                 // The sink takes ownership of the colors, so the buffer is moved out
                 // rather than copied. `FrameSink::submit` takes a `Vec`, so one
                 // allocation per device per frame is inherent to the trait.
@@ -1267,7 +1271,7 @@ fn render_loop(engine: Arc<CoreEngine>) {
                     ),
                     // A sink can arrive a frame before the plan that knows its device:
                     // it gets black, at its full length, never an empty frame.
-                    None => vec![Rgb8::BLACK; sink.led_count as usize],
+                    None => black_frame(sink),
                 };
                 // A device with no known LEDs (its layout has not arrived) gets nothing: an empty
                 // frame is rejected by every adapter and only fills the log.
@@ -1392,7 +1396,7 @@ fn render_scene_frame(
         };
         // `set_layout` ended scene mode during the frame: the frame is stale, nothing is sent.
         if state.scene.is_some() {
-            for sink in &state.sinks {
+            for sink in state.sinks.iter_mut() {
                 // A frame the runner built for another LED count than the sink has now is
                 // dropped, never sent: a resize lands between two frames, not inside one.
                 let Some(colors) = runner.take_frame(&sink.device_id, sink.led_count as usize)
@@ -1402,7 +1406,12 @@ fn render_scene_frame(
                     // dark instead of holding the colours it was last sent. Layout mode
                     // does the same for a sink whose device the plan does not know.
                     if !runner.knows_device(&sink.device_id) && sink.led_count > 0 {
-                        sink.sink.submit(vec![Rgb8::BLACK; sink.led_count as usize]);
+                        // The black frame is recorded as the frame the sink was sent: the
+                        // strip is dark, so a fade that follows blends from black and not
+                        // from the colours the device had before it left the scene.
+                        let frame = black_frame(sink);
+                        runner.record_sent(&sink.device_id, &frame);
+                        sink.sink.submit(frame);
                     }
                     continue;
                 };
@@ -1461,10 +1470,27 @@ fn remap_last_good(
 }
 
 /// Writes one black frame to every sink.
-fn write_black(state: &State) {
-    for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
-        sink.sink.submit(vec![Rgb8::BLACK; sink.led_count as usize]);
+///
+/// The black frame is recorded as the frame the sink was sent: the strip is dark after
+/// this, so a fade that follows blends from black and not from the colours the scene
+/// had before the pause.
+fn write_black(state: &mut State, runner: &mut SceneRunner) {
+    for sink in state.sinks.iter_mut().filter(|s| s.led_count > 0) {
+        let frame = black_frame(sink);
+        runner.record_sent(&sink.device_id, &frame);
+        sink.sink.submit(frame);
     }
+}
+
+/// The black frame a sink is sent, at the sink's own LED count.
+///
+/// The sink's own buffer holds the frame, so it is not built in a fresh allocation every
+/// frame. The copy the sink takes ownership of is the one allocation
+/// [`FrameSink::submit`] asks for, like every other frame.
+fn black_frame(sink: &mut SinkEntry) -> Vec<Rgb8> {
+    sink.black.clear();
+    sink.black.resize(sink.led_count as usize, Rgb8::BLACK);
+    sink.black.clone()
 }
 
 /// Sends the last good frame to every sink again (#145).
@@ -1474,13 +1500,16 @@ fn write_black(state: &State) {
 /// it was last sent, or the black frame the pause wrote, until another effect is picked.
 /// The last good colours go out instead; black when the effect never drew one.
 ///
-/// The frame is copied here, not moved: the saved copy stays for the next time.
+/// The frame is copied here, not moved: the saved copy stays for the next time. It is
+/// recorded as the frame the sink was sent, so a fade that follows blends from what the
+/// strip is showing.
 fn redeliver_last_good(
-    state: &State,
+    state: &mut State,
     last_good: &[Vec<Rgb8>],
     device_index: &std::collections::HashMap<DeviceId, usize>,
+    runner: &mut SceneRunner,
 ) {
-    for sink in state.sinks.iter().filter(|s| s.led_count > 0) {
+    for sink in state.sinks.iter_mut().filter(|s| s.led_count > 0) {
         let led_count = sink.led_count as usize;
         let saved = device_index
             .get(&sink.device_id)
@@ -1491,8 +1520,9 @@ fn redeliver_last_good(
             Some(frame) => frame.clone(),
             // The effect never drew a frame for this device, or the plan changed under
             // it: black, at the device's full length, never an empty frame.
-            None => vec![Rgb8::BLACK; led_count],
+            None => black_frame(sink),
         };
+        runner.record_sent(&sink.device_id, &colors);
         sink.sink.submit(colors);
     }
 }
