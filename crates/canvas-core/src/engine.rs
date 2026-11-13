@@ -1274,6 +1274,10 @@ fn render_loop(engine: Arc<CoreEngine>) {
                 if colors.is_empty() {
                     continue;
                 }
+                // The frame the device is sent now is the frame a fade starts from, in
+                // layout mode too: a fade that follows layout mode blends from what the
+                // strip is showing, not from the scene that ended before it.
+                scene_runner.record_sent(&sink.device_id, &colors);
                 sink.sink.submit(colors);
             }
             // Every sink has this frame now, the new ones included.
@@ -1400,6 +1404,8 @@ fn render_scene_frame(
                     continue;
                 };
                 if !colors.is_empty() {
+                    // The frame the device is sent now is the frame a fade starts from.
+                    runner.record_sent(&sink.device_id, &colors);
                     sink.sink.submit(colors);
                 }
             }

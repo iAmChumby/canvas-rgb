@@ -2208,6 +2208,7 @@ mod scene {
 
     const RED: Rgb8 = Rgb8::new(255, 0, 0);
     const BLUE: Rgb8 = Rgb8::new(0, 0, 255);
+    const GREEN: Rgb8 = Rgb8::new(0, 255, 0);
 
     /// A recording light-preview sink.
     #[derive(Default)]
@@ -2888,6 +2889,62 @@ mod scene {
         assert!(
             all(&frame, Rgb8::BLACK),
             "the device is gone: it goes dark, never lit: {frame:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// #310 review 3: a fade blends from each device's last sent frame, whatever mode
+    /// sent it. Scene, then layout mode, then a scene with a fade: the fade starts from
+    /// the layout's frame, never from the old scene's.
+    #[test]
+    fn a_fade_after_layout_mode_blends_from_the_layouts_last_frame() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+
+        // Scene A: blue.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([0.0, 0.0, 1.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, BLUE))));
+
+        // Layout mode: red.
+        engine.set_layout(
+            layout(
+                vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+                SamplingMode::AreaAverage,
+                RenderScale::P100,
+            ),
+            devices.clone(),
+        );
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+        let before = sink.frame_count() as usize;
+
+        // Scene B with a fade: the first frames blend from the layout's red.
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([0.0, 1.0, 0.0]))],
+            true,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, GREEN))));
+        let frames = sink.all_frames();
+        let after = &frames[before..];
+        assert!(
+            !after.iter().any(|f| all(f, BLUE)),
+            "the fade never shows the old scene's blue: {after:?}"
+        );
+        assert!(
+            after.iter().any(|f| f[0].r > 0 && f[0].g > 0),
+            "a frame between the layout's red and the new green: {after:?}"
         );
         engine.shutdown();
     }

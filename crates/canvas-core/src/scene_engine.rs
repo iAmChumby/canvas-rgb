@@ -253,7 +253,8 @@ pub(crate) struct SceneRunner {
     groups: Vec<RunGroup>,
     devices: Vec<DeviceBuf>,
     device_index: HashMap<DeviceId, usize>,
-    /// The frames last produced, after every stage, for a fade to start from.
+    /// The frames last sent to a device's sink, whatever mode sent them. A fade starts
+    /// from these.
     last_sent: HashMap<DeviceId, Vec<Rgb8>>,
     fade: Option<Fade>,
     last_light_preview_at: Option<Instant>,
@@ -322,10 +323,25 @@ impl SceneRunner {
         let light_frame = self.light_frame(params);
         self.apply_global_stages(params);
         self.apply_fade(params.dt);
-        for device in &self.devices {
-            self.last_sent.entry(device.id.clone()).or_default().clone_from(&device.frame);
-        }
         FrameOutput { done, light_frame, panics }
+    }
+
+    /// Records a frame that was sent to a device's sink, whatever mode sent it.
+    ///
+    /// A fade blends from the frame the device was last sent, not from the frame the last
+    /// scene produced: layout mode's frames go here too, so a fade that follows layout
+    /// mode starts from what the strip is showing and not from a scene that ended long
+    /// ago. The copy reuses its capacity, so the steady state allocates nothing.
+    pub fn record_sent(&mut self, device: &DeviceId, frame: &[Rgb8]) {
+        match self.last_sent.get_mut(device) {
+            Some(saved) => {
+                saved.clear();
+                saved.extend_from_slice(frame);
+            }
+            None => {
+                self.last_sent.insert(device.clone(), frame.to_vec());
+            }
+        }
     }
 
     /// Takes a device's finished frame for its sink. `None` when the runner has no frame for
