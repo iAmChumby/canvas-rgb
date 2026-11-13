@@ -263,6 +263,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
               <Button
                 variant="primary"
                 size="sm"
+                className={s.sheetNext}
                 onClick={() => {
                   commitName(name);
                   setStep("effect");

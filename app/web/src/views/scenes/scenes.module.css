@@ -755,13 +755,17 @@
 .sheetStep {
   display: flex;
   flex-direction: column;
-  align-items: flex-start;
   gap: var(--s3);
 }
 
 .sheetStep > :global(.name-field),
 .sheetStep > :global(.text-in) {
   width: 100%;
+}
+
+/* The key that goes on to the next step: a key, not a bar across the sheet. */
+.sheetNext {
+  align-self: flex-start;
 }
 
 .sheetLead {
