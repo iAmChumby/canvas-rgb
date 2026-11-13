@@ -17,6 +17,8 @@ pub mod geometry;
 mod preview;
 pub mod sampling;
 pub(crate) mod scene_engine;
+/// The scene canvas's scale and sampling, which the daemon's stack masks must match.
+pub use scene_engine::{SCENE_RENDER_SCALE, SCENE_SAMPLING};
 mod timer;
 
 #[cfg(test)]
