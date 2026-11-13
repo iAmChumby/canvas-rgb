@@ -85,7 +85,9 @@ export function StatusStrip({
 
   // What is playing.
   const now = playing(status, effects);
-  useTrackRunningPreset(status?.active_effect ?? null);
+  // With scenes the strip names the scene, so no one effect's preset belongs after it.
+  const presetId = status?.active_scene ? null : (status?.active_effect ?? null);
+  useTrackRunningPreset(presetId);
   const list = problems(status, offline);
   const tone: Tone = list[0]?.tone ?? "ok";
   // On a phone the row has room for the link's name, not for the whole sentence. The full
@@ -94,7 +96,9 @@ export function StatusStrip({
   const fullText = list[0]?.text ?? ALL_GOOD;
   const markText = list[0] ? (phone ? (list[0].short ?? list[0].text) : list[0].text) : ALL_GOOD;
   // The swatch's own name, for the widths where the effect's name is dropped from the row.
-  const swatchLabel = now.name === "—" ? "Nothing is running" : now.name;
+  // Before the daemon has answered there is nothing to name: the row says why, never a bare dash.
+  const nowName = status ? now.name : offline ? "Offline" : "Connecting";
+  const swatchLabel = nowName === "—" ? "Nothing is running" : nowName;
   // Each link and what it is doing: the panel shows them all, one after another.
   const linkList = links(status, offline);
 
@@ -136,8 +140,8 @@ export function StatusStrip({
           />
           <span className="strip-now-text">
             <span className="strip-effect-name">
-              {now.name}
-              <RunningPresetName effectId={status?.active_effect ?? null} />
+              {nowName}
+              <RunningPresetName effectId={presetId} />
             </span>
             {now.detail && (
               <span className="strip-now-detail" data-count={now.count ? "true" : "false"}>

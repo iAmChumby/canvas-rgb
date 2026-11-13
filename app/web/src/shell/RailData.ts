@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo } from "react";
+import { effectNameOf } from "@/lib/status";
 import { useSnap } from "@/lib/store";
 import { usePeripheralCount } from "@/shell/peripheralCount";
 
@@ -15,8 +16,13 @@ import { usePeripheralCount } from "@/shell/peripheralCount";
 export interface RailValues {
   /** The active scene's name. */
   scene: string | null;
-  /** The running effect's name. */
+  /**
+   * The running effect's name, for a daemon without scenes. With scenes every group plays its own
+   * effect, so there is no one effect to name: the Effects row says nothing rather than show the
+   * playing effect as if it were the one picked on that page.
+   */
   effect: string | null;
+
   /** The lights are paused. */
   paused: boolean;
   /** The devices that are connected, and how many there are. */
@@ -45,10 +51,8 @@ export function useRailData(): RailValues {
       status?.active_scene?.name ?? scenes?.scenes.find((x) => x.id === scenes.active)?.name ?? null;
 
     // The status names the active effect; the effects list names it.
-    const effectId = status?.active_effect ?? null;
-    const effect = effectId
-      ? (effects?.find((e) => e.id === effectId)?.name ?? effectId)
-      : null;
+    const effectId = status?.active_scene ? null : (status?.active_effect ?? null);
+    const effect = effectId ? effectNameOf(effects, effectId) : null;
 
     const deviceCounts = devices
       ? { connected: devices.filter((d) => d.connected).length, total: devices.length }

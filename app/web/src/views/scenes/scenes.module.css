@@ -13,9 +13,47 @@
 
 .page {
   gap: var(--s3);
+  /* On a wide window the rows stop and the column is centred: past this the LED recess would be
+     a black void between the run and the controls. */
+  width: 100%;
+  max-width: 1400px;
+  margin-inline: auto;
 }
 
 /* ---------- the scene keys ---------- */
+
+/* The strip scrolls sideways when the keys outrun the window; a fade on each edge that has more
+   behind it says so, since the bars are hidden everywhere. */
+.stripFrame {
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.fadeStart,
+.fadeEnd {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 36px;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+.fadeStart {
+  left: 0;
+  background: linear-gradient(to right, var(--g1), transparent);
+}
+
+.fadeEnd {
+  right: 0;
+  background: linear-gradient(to left, var(--g1), transparent);
+}
+
+.stripFrame[data-start="true"] .fadeStart,
+.stripFrame[data-end="true"] .fadeEnd {
+  opacity: 1;
+}
 
 .strip {
   display: flex;
@@ -306,52 +344,61 @@
   padding-top: var(--s1);
 }
 
-/* The notice for a new light sits at the foot of the scrolling list and stays in view when the
-   list is long. It is after every row, so nothing above it moves when it arrives. */
+/* The notice for a new light is the first thing in the list, in the flow: it covers no row, and a
+   keyboard reaches it right after the scene keys. */
 .notice {
-  position: sticky;
-  bottom: 0;
-  z-index: 1;
-  padding-top: var(--s2);
-  background: var(--g1);
+  flex: none;
 }
 
+/* The keys wrap: every key is on screen at every width, none behind a hidden scroll. */
 .noticeKeys {
   display: inline-flex;
   flex-wrap: wrap;
   gap: var(--s2);
+  min-width: 0;
+  max-width: 100%;
 }
 
-/* The keys are a row of their own in a narrow box: one line that scrolls sideways, so the notice
-   stays two lines tall over the rows instead of a stack of five. */
+.noticeKeys > button {
+  max-width: 100%;
+}
+
+/* The menu of the other groups: one key a row. */
+.moreMenu {
+  width: max-content;
+  min-width: 200px;
+  max-width: min(320px, calc(100vw - 16px));
+  padding: var(--s2);
+}
+
+.moreList {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 2px;
+  max-height: 260px;
+  overflow-y: auto;
+}
+
+.moreList > button {
+  justify-content: flex-start;
+}
+
 @container page (max-width: 520px) {
-  .noticeKeys {
-    display: flex;
-    flex-wrap: nowrap;
-    max-width: 100%;
-    overflow-x: auto;
-    scrollbar-width: none;
-    padding-bottom: 3px;
-  }
-
-  .noticeKeys::-webkit-scrollbar {
-    display: none;
-  }
-
-  .noticeKeys > * {
-    flex: none;
-  }
-
   /* The banner's action box must be able to be narrower than its keys, or it grows past the window. */
   .notice :global(.banner-actions) {
     min-width: 0;
     max-width: 100%;
+    margin-left: 0;
   }
+}
 
-  .noticeKeys {
-    min-width: 0;
-    width: 100%;
-  }
+/* The title of the page's error panel is a title like the others: sans, not the panel head's mono. */
+.frame :global(.panel-title) {
+  color: var(--ink);
+  font: 600 var(--t16) / 1.2 var(--fu);
+  letter-spacing: 0;
+  text-transform: none;
 }
 
 /* ---------- placeholders ---------- */
@@ -424,17 +471,17 @@
 
 /* A phone scrolls the document, so the keys stick to the top of it instead. */
 @media (max-width: 720px) {
-  .strip {
+  .stripFrame {
     position: sticky;
     top: 0;
     z-index: 2;
     margin: calc(var(--s3) * -1) calc(var(--s3) * -1) 0;
-    padding: var(--s3) var(--s3) var(--s2);
     background: var(--g1);
   }
 
-  .notice {
-    bottom: calc(60px + var(--s2));
+  .strip {
+    margin: 0;
+    padding: var(--s3) var(--s3) var(--s2);
   }
 
   .frame {
@@ -447,7 +494,60 @@
 
 @media (prefers-reduced-motion: reduce) {
   .row,
-  .row::before {
+  .row::before,
+  .fadeStart,
+  .fadeEnd {
     transition: none;
+  }
+}
+
+/* ---------- the status strip, while this page is open ---------- */
+
+/* The page's context line is the scene's name and what is in it. The name ellipsizes; the counts
+   give way first. */
+:global(.rd-scenes-context) {
+  display: inline-flex;
+  align-items: baseline;
+  min-width: 0;
+  max-width: 100%;
+}
+
+:global(.rd-scenes-context) > b {
+  display: block;
+  min-width: 0;
+  max-width: 32ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+:global(.rd-scenes-counts) {
+  flex: none;
+  white-space: pre;
+}
+
+/* Between a phone and a wide window the strip has room for the scene's name and for the mark's
+   words, and the page's own keys are two icons: the context stays (the strip's rule drops it below
+   1100 for pages with more keys), and the dot that stood for "now playing" is gone, since the name
+   is already there. Nothing in the strip is a bare dot or a bare tick. */
+@media (min-width: 721px) and (max-width: 1279px) {
+  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-now) {
+    display: none;
+  }
+
+  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-mark-text) {
+    display: inline;
+    padding-left: var(--s1);
+  }
+}
+
+@media (min-width: 721px) and (max-width: 1099px) {
+  :global(.strip-inner):has(:global(.rd-actions)) :global(.rd-context):has(:global(.rd-scenes-context)) {
+    display: block;
+  }
+
+  /* Below 1100 the counts are the first thing to go: the name and the state matter more. */
+  :global(.rd-scenes-counts) {
+    display: none;
   }
 }

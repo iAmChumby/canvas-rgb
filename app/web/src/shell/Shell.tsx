@@ -19,15 +19,7 @@ import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { links, playingLine } from "@/lib/status";
 import { useTakeover } from "@/views/editor/takeover";
 import { StripSlotsProvider } from "@/shell/PageHeader";
-
-const PAGE_PATHS: Record<string, string> = {
-  scenes: "/",
-  effects: "/effects/",
-  devices: "/devices/",
-  fans: "/fans/",
-  settings: "/settings/",
-  updates: "/updates/",
-};
+import { PAGE_PATHS } from "@/shell/pagePaths";
 
 /**
  * The persistent frame: left rail (a bottom bar on narrow screens), the status strip, the

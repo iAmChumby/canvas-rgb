@@ -4,6 +4,7 @@ import type { CSSProperties } from "react";
 import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button } from "@/components/Button";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import type { Group } from "@/proto/Group";
@@ -15,6 +16,12 @@ const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 /** The mode in the owner's words (spec "Language"). */
 export const MODE_WORDS = { flow_across: "flow across", each_its_own: "each its own" } as const;
 
+/** Whether the daemon's list of lights has been read: a row cannot count what it has not seen. */
+export type LightsState = "ready" | "loading" | "failed";
+
+/** What a row says in place of its devices while the lights are unknown. */
+export const FAILURE_GONE = "This effect is no longer installed.";
+
 /** "3 devices" or the one device's own name; the LED total goes beside it. */
 export function memberSummary(lights: LightView[]): { who: string; leds: number; away: number } {
   const leds = lights.reduce((n, l) => n + l.led_count, 0);
@@ -24,8 +31,26 @@ export function memberSummary(lights: LightView[]): { who: string; leds: number;
   return { who, leds, away };
 }
 
-/** One line under a name: who is in the row, how many LEDs, and how many are away. */
-function Summary({ lights }: { lights: LightView[] }) {
+/**
+ * One line under a name: who is in the row, how many LEDs, and how many are away. While the
+ * lights are being read, or could not be, it says that: never "0 devices".
+ */
+function Summary({ lights, state }: { lights: LightView[]; state: LightsState }) {
+  if (state === "loading") {
+    return (
+      <span className={`${s.summary} fig`} aria-busy="true">
+        <InlineSkeleton width="9ch" />
+        <InlineSkeleton width="7ch" />
+      </span>
+    );
+  }
+  if (state === "failed") {
+    return (
+      <span className={`${s.summary} fig`}>
+        <span className={s.away}>Devices not read</span>
+      </span>
+    );
+  }
   const { who, leds, away } = memberSummary(lights);
   return (
     <span className={`${s.summary} fig`}>
@@ -42,8 +67,14 @@ export interface GroupRowProps {
   group: Group;
   /** The group's lights, in member order. A member the daemon no longer lists is left out. */
   lights: LightView[];
-  /** The name of the effect it plays, or "Off". */
+  /** The name of the effect it plays, or "Off". Never the effect's raw id. */
   effectName: string;
+  /** The effect's id, for the key's tooltip only. */
+  effectId?: string;
+  /** The effect is no longer installed: the failure line says so in words. */
+  missing?: boolean;
+  /** Whether the lights are read: `lights` is only meaningful when it is "ready". */
+  lightsState?: LightsState;
   /** Why the group is dark, from the daemon; null while it runs. */
   failed: string | null;
   /** Its place in the scene, for its accent. */
@@ -59,7 +90,19 @@ export interface GroupRowProps {
  * fader); below that it is two (name and LEDs, then effect and controls). A failed group says so
  * on a line of its own under the row.
  */
-export function GroupRow({ group, lights, effectName, failed, index, open, onOpen, onBrightness }: GroupRowProps) {
+export function GroupRow({
+  group,
+  lights,
+  effectName,
+  effectId,
+  missing = false,
+  lightsState = "ready",
+  failed,
+  index,
+  open,
+  onOpen,
+  onBrightness,
+}: GroupRowProps) {
   const off = group.plays.type === "off";
   const ModeIcon = group.mode === "flow_across" ? ArrowsHorizontal : CopySimple;
   return (
@@ -76,13 +119,12 @@ export function GroupRow({ group, lights, effectName, failed, index, open, onOpe
         variant="ghost"
         className={s.who}
         aria-label={`Open ${group.name}`}
-        aria-expanded={open ? true : undefined}
         onClick={() => onOpen(group.id)}
       >
         <span className={s.name} data-testid="group-name">
           {group.name}
         </span>
-        <Summary lights={lights} />
+        <Summary lights={lights} state={lightsState} />
       </Button>
       <div className={s.runWell}>
         <LedRun lights={lights} label={runLabel(group.name, lights)} />
@@ -92,6 +134,7 @@ export function GroupRow({ group, lights, effectName, failed, index, open, onOpe
           className={s.effect}
           icon={off ? <Moon size={16} /> : <Sparkle size={16} />}
           aria-label={`${group.name} plays ${effectName}`}
+          title={effectId && !off ? `${effectName} (${effectId})` : undefined}
           onClick={() => onOpen(group.id)}
         >
           <span className="one-line">{effectName}</span>
@@ -116,8 +159,10 @@ export function GroupRow({ group, lights, effectName, failed, index, open, onOpe
       {failed && (
         <p className={s.failure} role="alert">
           <WarningCircle size={16} weight="fill" aria-hidden="true" />
+          {/* A missing effect is said in the owner's words; the daemon's own sentence, which can
+              carry the effect's id, is the tooltip. */}
           <span className={s.failureText} title={failed}>
-            {failed}
+            {missing ? FAILURE_GONE : failed}
           </span>
         </p>
       )}
@@ -126,12 +171,12 @@ export function GroupRow({ group, lights, effectName, failed, index, open, onOpe
 }
 
 /** The lights no group holds: dark by definition, so the row has no effect and no controls. */
-export function UnassignedRow({ lights }: { lights: LightView[] }) {
+export function UnassignedRow({ lights, lightsState = "ready" }: { lights: LightView[]; lightsState?: LightsState }) {
   return (
     <article className={s.row} data-testid="unassigned-row" data-unassigned="true" aria-label="Unassigned">
       <div className={`${s.who} ${s.whoStatic}`}>
         <span className={s.name}>Unassigned</span>
-        <Summary lights={lights} />
+        <Summary lights={lights} state={lightsState} />
       </div>
       <div className={s.runWell}>
         <LedRun lights={lights} label={runLabel("Unassigned", lights)} />

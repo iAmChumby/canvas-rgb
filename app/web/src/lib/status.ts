@@ -99,29 +99,60 @@ export function problems(status: Status | null, offline: boolean): Problem[] {
   return out;
 }
 
+/** What a group's effect is called when the effects list does not hold it. */
+export const MISSING_EFFECT = "Missing effect";
+
+/** "html:glow-remo" as a reading name: the kind prefix off, words split, each capitalised. */
+export function readableEffectId(id: string): string {
+  const bare = id.replace(/^[a-z]+:/i, "").replace(/[-_]+/g, " ").trim();
+  if (!bare) return MISSING_EFFECT;
+  return bare
+    .split(/\s+/)
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .join(" ");
+}
+
 /**
- * What is playing, in words: the effect's name and how many devices it is on. This is the
- * same words the strip shows.
+ * An effect's name for a reader. The effects list names it; a list that has not arrived yet gives
+ * a readable form of the id (so nothing flashes "missing" while it loads); a list that arrived
+ * without it means the effect is gone, and the words say so. The raw id is never the answer: it
+ * belongs in a tooltip.
+ */
+export function effectNameOf(effects: EffectSummary[] | null, id: string): string {
+  const found = effects?.find((e) => e.id === id);
+  if (found) return found.name;
+  return effects === null ? readableEffectId(id) : MISSING_EFFECT;
+}
+
+/** The effects list has arrived and does not hold `id`: the effect is no longer installed. */
+export function effectMissing(effects: EffectSummary[] | null, id: string): boolean {
+  return effects !== null && !effects.some((e) => e.id === id);
+}
+
+/**
+ * What is playing, in words. With scenes it is the active scene's name and how many devices are
+ * lit; a daemon without scenes names the layout's effect. This is the same words the strip shows.
  */
 export function playing(
   status: Status | null,
   effects: EffectSummary[] | null,
 ): { name: string; detail: string; count: boolean } {
   if (!status) return { name: "—", detail: "", count: false };
-  // A daemon with scenes names the effects every group of the active scene plays; one without
-  // names the layout's single effect.
-  if (!status.active_layout && !status.active_scene) return { name: "No layout yet", detail: "", count: false };
-  const nameOf = (id: string) => effects?.find((e) => e.id === id)?.name ?? id;
+  if (!status.active_layout && !status.active_scene) return { name: "No scene yet", detail: "", count: false };
+  const scene = status.active_scene?.name ?? null;
   const effectName = status.active_scene
-    ? (status.active_effects ?? []).map(nameOf).join(", ")
+    ? (status.active_effects ?? []).map((id) => effectNameOf(effects, id)).join(", ")
     : status.active_effect
-      ? nameOf(status.active_effect)
+      ? effectNameOf(effects, status.active_effect)
       : "";
-  if (!effectName) return { name: "Nothing is running", detail: "", count: false };
-  if (status.power === "paused") return { name: effectName, detail: "paused", count: false };
-  if (status.parked) return { name: effectName, detail: "idle", count: false };
+  // A scene is named even when every group of it is off.
+  const name = scene ?? effectName;
+  if (!name) return { name: "Nothing is running", detail: "", count: false };
+  if (scene && !effectName) return { name: scene, detail: "all off", count: false };
+  if (status.power === "paused") return { name, detail: "paused", count: false };
+  if (status.parked) return { name, detail: "idle", count: false };
   const n = status.devices_connected;
-  return { name: effectName, detail: `on ${n} ${n === 1 ? "device" : "devices"}`, count: true };
+  return { name, detail: `on ${n} ${n === 1 ? "device" : "devices"}`, count: true };
 }
 
 /** The playing line as one sentence: "Spiral on 5 devices". */

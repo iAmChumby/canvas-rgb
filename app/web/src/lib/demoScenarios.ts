@@ -302,11 +302,13 @@ export function applyLayoutScenarios(layouts: Layout[], active: string): { layou
 //   groups-20     a 20-group scene "Stage" is active, on twenty-four more lights
 //   long-names    the active scene and its first group carry 40-character names
 //   new-light     a light appears that no group holds, and the page has not seen it before
+//   heavy         with groups-20: every Stage light has 600 LEDs (the page's worst case for paint cost)
 
 export const GROUPS_0 = "groups-0";
 export const GROUPS_20 = "groups-20";
 export const LONG_NAMES = "long-names";
 export const NEW_LIGHT = "new-light";
+export const HEAVY = "heavy";
 
 /** The id the scene token names, if any. */
 function sceneToken(): string | null {
@@ -338,7 +340,7 @@ export function applySceneScenarios(
   if (has(GROUPS_20)) {
     const effects = ["aurora", "rainbow_wave", "breathing", "spiral", "fire", "white"];
     const extra = Array.from({ length: 24 }, (_, i) =>
-      demoStrip(`demo:stage-${i + 1}`, `Stage light ${i + 1}`, 8 + ((i * 5) % 29)),
+      demoStrip(`demo:stage-${i + 1}`, `Stage light ${i + 1}`, has(HEAVY) ? 600 : 8 + ((i * 5) % 29)),
     );
     all.push(...extra);
     const groups: Group[] = extra.slice(0, 20).map((l, i) => ({

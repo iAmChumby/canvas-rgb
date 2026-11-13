@@ -65,9 +65,63 @@ function hsv(h: number, s: number, v: number): [number, number, number] {
   return [Math.round(f(5) * 255), Math.round(f(3) * 255), Math.round(f(1) * 255)];
 }
 
+type Rgb = [number, number, number];
+
+/** A smooth stand-in for noise: a few sines at unrelated rates, 0..1. */
+function wobble(x: number, t: number, seed: number): number {
+  return (
+    0.5 +
+    0.25 * Math.sin(x * 9.1 + t * 2.3 + seed) +
+    0.15 * Math.sin(x * 21.7 - t * 3.7 + seed * 1.7) +
+    0.1 * Math.sin(x * 47.3 + t * 6.1 + seed * 2.9)
+  );
+}
+
+/** A number from an effect id, so an effect the demo has no picture for still gets its own colour. */
+function seedOf(id: string): number {
+  let h = 0;
+  for (let i = 0; i < id.length; i += 1) h = (h * 31 + id.charCodeAt(i)) % 360;
+  return h;
+}
+
 /**
- * The demo's colours for every light: a group that plays something runs a hue along its lights,
- * a group set to Off and a light in no group stay black.
+ * What an effect looks like at one LED, in the demo: `p` is the LED's place along its run
+ * (0..1, the whole group's run when the lights flow across, each light's own when each plays its
+ * own copy), `t` the time in seconds. Each id the demo's scenes use has its own picture, so the
+ * page never draws a rainbow for "White".
+ */
+function paint(effect: string, p: number, t: number, gi: number): Rgb {
+  switch (effect) {
+    case "white":
+      // Static, a touch warm.
+      return [255, 246, 232];
+    case "fire": {
+      const f = wobble(p, t, gi);
+      return hsv(6 + 34 * f, 1, 0.45 + 0.55 * f);
+    }
+    case "aurora": {
+      const f = wobble(p * 0.9, t * 0.35, gi);
+      return hsv(150 + 120 * f, 0.8, 0.35 + 0.65 * f);
+    }
+    case "breathing": {
+      // The whole run breathes together, in one colour.
+      const b = 0.5 + 0.5 * Math.sin((t / 4) * Math.PI * 2);
+      return hsv(190 + gi * 23, 0.9, 0.15 + 0.85 * b);
+    }
+    case "rainbow_wave":
+      return hsv(p * 360 + t * 70, 1, 1);
+    case "spiral":
+      return hsv(p * 720 + t * 110, 0.9, 0.5 + 0.5 * Math.sin(p * 18 - t * 4) ** 2);
+    default:
+      return hsv(seedOf(effect) + p * 140 + t * 30, 0.85, 0.9);
+  }
+}
+
+/**
+ * The demo's colours for every light: a group that plays an effect shows that effect, a group set
+ * to Off, a group whose effect is gone and a light in no group stay black. A group that flows
+ * across draws one picture over all its LEDs in order; one set to "each its own" draws the whole
+ * picture on every light.
  */
 export function demoLightColours(seconds: number): Map<string, Uint8Array> {
   const snap = getSnap();
@@ -77,16 +131,18 @@ export function demoLightColours(seconds: number): Map<string, Uint8Array> {
   const counts = new Map((snap.lights ?? []).map((l) => [l.light.id, l.led_count]));
   for (const [gi, group] of (active?.groups ?? []).entries()) {
     const failed = scenes?.group_states.some((s) => s.id === group.id && s.failed);
-    const lit = group.plays.type === "effect" && !failed;
+    const effect = group.plays.type === "effect" && !failed ? group.plays.effect : null;
+    const total = group.members.reduce((n, id) => n + (counts.get(id) ?? 0), 0);
+    const level = group.brightness / 100;
     let along = 0;
     for (const light of group.members) {
       const n = counts.get(light) ?? 0;
       const rgb = new Uint8Array(n * 3);
-      if (lit) {
+      if (effect) {
         for (let i = 0; i < n; i += 1) {
-          const hue = (gi * 67 + (along + i) * 9 + seconds * 40) % 360;
-          const [r, g, b] = hsv(hue, 0.85, (group.brightness / 100) * 0.95);
-          rgb.set([r, g, b], i * 3);
+          const p = group.mode === "flow_across" ? (along + i) / Math.max(1, total) : i / Math.max(1, n);
+          const [r, g, b] = paint(effect, p, seconds, gi);
+          rgb.set([Math.round(r * level), Math.round(g * level), Math.round(b * level)], i * 3);
         }
       }
       out.set(light, rgb);
