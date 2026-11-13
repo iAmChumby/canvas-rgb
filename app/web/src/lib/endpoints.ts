@@ -106,6 +106,12 @@ export const api = {
   activateEffect: (id: string, body: ActivateEffect) =>
     request<unknown>("POST", routes.effectActivate(id), body),
   patchActiveProps: (props: Props) => request<unknown>("PATCH", routes.effectActiveProps, props),
+  /**
+   * An effect's starting values: what the next group to play it starts from. A group that already
+   * plays the effect keeps its own values; no scene changes.
+   */
+  patchEffectDefaults: (id: string, props: Props) =>
+    request<unknown>("PATCH", routes.effectDefaults(id), props),
   setFavorite: (id: string, body: SetFavorite) =>
     request<unknown>("PUT", routes.effectFavorite(id), body),
   /** Saves the values as a user preset of the effect. */

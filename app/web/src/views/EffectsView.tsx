@@ -9,7 +9,6 @@ import {
   MagnifyingGlass,
   MonitorPlay,
   PencilSimple,
-  Play,
   Plus,
   SquaresFour,
   Star,
@@ -18,7 +17,7 @@ import {
   Warning,
   Waveform,
 } from "@phosphor-icons/react";
-import { Button, ButtonLink, FileButton, IconButton, Swap } from "@/components/Button";
+import { Button, ButtonLink, FileButton, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { Panel } from "@/components/Panel";
@@ -37,6 +36,7 @@ import { PresetStrip } from "@/views/PresetStrip";
 import { EffectEditor, type EffectEditorHandle, type EditorTarget, type SavedEffect } from "@/views/effects/EffectEditor";
 import { NewEffectChooser } from "@/views/effects/NewEffectChooser";
 import { StackBuilder } from "@/views/effects/StackBuilder";
+import { PlayOn } from "@/views/effects/PlayOn";
 import { useStackParam } from "@/lib/stackRoute";
 import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
@@ -67,7 +67,20 @@ export function EffectsView() {
   const effectsError = useSnap((s) => s.effectsError);
   const failed = useSnap((s) => s.effectsFailed);
   const status = useSnap((s) => s.status);
-  const activeId = useSnap((s) => s.status?.active_effect ?? null);
+  // With scenes every group plays its own effect, so "running" is any group of the active scene.
+  const activeEffects = useMemo(
+    () =>
+      status?.active_effects ??
+      (status?.active_effect ? [status.active_effect] : []),
+    [status],
+  );
+  const activeId = activeEffects[0] ?? null;
+  // The groups "Play on …" offers: the active scene's, in its order.
+  const scenesAnswer = useSnap((s) => s.scenes);
+  const groups = useMemo(
+    () => scenesAnswer?.scenes.find((s) => s.id === scenesAnswer.active)?.groups ?? [],
+    [scenesAnswer],
+  );
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("effects"));
   const [filter, setFilter] = useState<"all" | "favorites">("all");
@@ -171,20 +184,9 @@ export function EffectsView() {
     pendingFor.current = null;
     if (!id || Object.keys(batch).length === 0) return;
     try {
-      if (getSnap().status?.active_effect === id) {
-        await api.patchActiveProps(batch);
-      } else {
-        // The first edit to a stopped effect starts it, with the edited values on top. The
-        // Activate button is the control that starts the effect, so it shows the wait for the
-        // activation this edit asked for.
-        startActivating();
-        try {
-          await api.activateEffect(id, { props: batch, preset: null });
-          await refreshAll();
-        } finally {
-          endActivating();
-        }
-      }
+      // The Effects page's controls are the effect's starting values: what the next group to
+      // play it starts from. A group that already plays it keeps its own values.
+      await api.patchEffectDefaults(id, batch);
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
       clearWrite(id);
     } catch (e) {
@@ -245,13 +247,18 @@ export function EffectsView() {
   const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
   const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
 
-  const activate = async (preset: string | null) => {
+  const activate = async (onGroups: string[] | null = null, preset: string | null = null) => {
     if (!selectedId) return;
     const id = selectedId;
     clearWrite(id);
     startActivating();
     try {
-      await api.activateEffect(id, { props: {}, preset });
+      await api.activateEffect(id, {
+        props: {},
+        preset,
+        // No group named is every group: a daemon from before scenes has no groups to name.
+        ...(onGroups && onGroups.length > 0 ? { groups: onGroups } : {}),
+      });
       await refreshAll();
       // One pulse once the effect is on the lights (issue #187, rule 6): it
       // fires only here, after the daemon confirmed — never from `running`,
@@ -612,8 +619,8 @@ export function EffectsView() {
   const stale = loaded !== null && loaded.id !== selectedId;
   const running = selectedId !== null && selectedId === activeId;
   const needsInput = detail ? detail.schema.needs.screen || detail.schema.needs.audio : false;
-  // Nothing can run until there is a layout.
-  const noLayout = status !== null && !status.active_layout;
+  // Nothing can run until there is a scene with a group to play on.
+  const noScene = status !== null && !status.active_scene;
 
   // Which preset the values on screen mean, and whether they have moved off it. The rail and the
   // strip read it from the same place.
@@ -787,20 +794,20 @@ export function EffectsView() {
 
   const detailNormal = (
     <div className="stack">
-      {noLayout && (
+      {noScene && (
         <EmptyState
           icon={<SquaresFour size={24} />}
-          title="No layout to run on yet"
+          title="No scene to run on yet"
           action={
             <ButtonLink href="/" variant="primary" size="sm">
-              Open the Layout
+              Open Scenes
             </ButtonLink>
           }
         >
           The effects are still here, ready for one.
         </EmptyState>
       )}
-      {!(noLayout && !detail) && (
+      {!(noScene && !detail) && (
       <LoadFrame
         className="stack"
         state={detail ? "ready" : readError ? "error" : "loading"}
@@ -842,16 +849,16 @@ export function EffectsView() {
                     <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
                   </div>
                 </div>
-                <Button
-                  ref={applyPulseEl}
-                  variant={running ? "default" : "primary"}
+                <PlayOn
+                  effect={detail.schema.id}
+                  groups={groups}
+                  html={selectedId?.startsWith("html:") ?? false}
+                  running={running}
                   busy={activating}
-                  disabled={running || stale}
-                  onClick={() => void activate(null)}
-                  icon={<Play size={14} weight="fill" />}
-                >
-                  <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
-                </Button>
+                  disabled={stale}
+                  pulseRef={applyPulseEl}
+                  onPlay={(names) => void activate(names)}
+                />
               </div>
               <Chip
                 className="rd-eff-fav"
@@ -970,17 +977,17 @@ export function EffectsView() {
                   >
                     Edit stack
                   </Button>
-                  <Button
-                    ref={applyPulseSheetEl}
-                    variant="default"
-                    size="sm"
+                  <PlayOn
+                    effect={detail.schema.id}
+                    groups={groups}
+                    html={false}
+                    running={running}
                     busy={activating}
-                    disabled={running || stale}
-                    onClick={() => void activate(null)}
-                    icon={<Play size={14} weight="fill" />}
-                  >
-                    <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
-                  </Button>
+                    disabled={stale}
+                    size="sm"
+                    pulseRef={applyPulseSheetEl}
+                    onPlay={(names) => void activate(names)}
+                  />
                 </div>
               </div>
             ) : (
@@ -989,6 +996,9 @@ export function EffectsView() {
                 values={values}
                 onChange={onChange}
               />
+            )}
+            {!isStack && (
+              <p className="mute eff-starting-values">Starting values. A group keeps its own.</p>
             )}
             {(shownWriteError ?? readError) && (
               <p className="error-line" style={{ marginTop: 8 }}>{shownWriteError ?? readError}</p>

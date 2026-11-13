@@ -3258,6 +3258,66 @@ button.chip:hover {
   line-height: 1.4;
 }
 
+/* Play on …: the groups of the active scene, and every group as one choice. */
+.play-on-anchor {
+  display: inline-flex;
+  min-width: 0;
+}
+
+.play-on {
+  gap: var(--s2);
+  min-width: 232px;
+}
+
+.play-on-head {
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+.play-on-note {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.play-on-list {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  max-height: 46vh;
+  overflow: auto;
+}
+
+.play-on-row {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: 32px;
+  padding: 0 var(--s1);
+  border-radius: var(--r-sm);
+  font-size: var(--t14);
+}
+
+.play-on-row:hover {
+  background: var(--hover);
+}
+
+.play-on-count {
+  margin-left: auto;
+  font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
+  font-size: var(--t14);
+}
+
+/* The one line under an effect's controls: they are starting values, not a group's own. */
+.eff-starting-values {
+  margin: 10px 0 0;
+  font-size: var(--t14);
+}
+
 /* New effect: a copy first, a blank second (D2.3). */
 .eff-choose {
   display: flex;
@@ -3695,6 +3755,44 @@ button.chip:hover {
 /* The shape of the zone (linear, single, matrix) under its name, as the list showed it before. */
 .rd-devices .rd-zone .rd-zone-shape {
   font-size: var(--t14);
+}
+
+/* A light's row: its name, strip or ring, and the other way round. It sits under the device
+   row or under the zone row the light belongs to, indented the same. */
+.rd-devices .rd-light-row {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-height: 40px;
+  padding: var(--s1) var(--s4) var(--s1) calc(var(--s4) + var(--s8) + var(--s3));
+  border-top: 1px dashed var(--line);
+}
+
+.rd-light-key {
+  flex: none;
+  font-size: var(--t14);
+}
+
+.rd-light-name {
+  min-width: 0;
+  max-width: 34ch;
+}
+
+.rd-light-turn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: auto;
+  font-size: var(--t14);
+}
+
+.rd-light-error {
+  flex-basis: 100%;
+}
+
+.rd-devices .rd-dev-row + .rd-light-row {
+  padding-left: var(--s4);
 }
 
 /* A device that reports no zones: its message and Try again under the row. */
