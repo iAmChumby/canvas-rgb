@@ -16,6 +16,10 @@ use std::sync::Arc;
 use crate::api::{ApiFailure, ApiResult};
 use crate::state::App;
 
+/// The biggest light patch the route reads. A patch carries a name of at most [`GROUP_NAME_MAX`]
+/// characters, an arrangement and a flag, so this is far more than it needs.
+const PATCH_BODY_LIMIT: usize = 16 * 1024;
+
 /// `GET /api/v1/lights`.
 ///
 /// Every light of `lights.json`, in file order, with the LED count it has now and whether its
@@ -52,14 +56,16 @@ fn led_count(light: &Light, zone: &ZoneInfo) -> u32 {
     }
 }
 
-/// The owner's name, else the device and zone name. With no device to name, the light's id,
-/// which is the only thing that still identifies it.
+/// The owner's name, else the device and zone name. A device that is here but has no such zone
+/// still names the light, by the device's own name. With no device to name, the light's id, which
+/// is the only thing that still identifies it.
 fn label(light: &Light, device: Option<&DeviceInfo>, zone: Option<&ZoneInfo>) -> String {
     if let Some(name) = light.name.as_deref().map(str::trim).filter(|name| !name.is_empty()) {
         return name.to_string();
     }
     match (device, zone) {
         (Some(device), Some(zone)) => format!("{} {}", device.name, zone.name),
+        (Some(device), None) => device.name.clone(),
         _ => light.id.clone(),
     }
 }
@@ -68,16 +74,23 @@ fn label(light: &Light, device: Option<&DeviceInfo>, zone: Option<&ZoneInfo>) ->
 ///
 /// `name` left out is unchanged, `name: null` clears it, a string renames the light (trimmed; an
 /// empty or over-long one is a 422). `arrangement` and `reversed` are set when given. The change
-/// is saved before it is answered, so a refused save changes nothing and answers 503.
+/// is saved before it is answered, so a refused save changes nothing and answers 503. A patch
+/// that changes nothing is answered without writing the file.
 pub async fn patch_light(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
-    Json(patch): Json<LightPatch>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> ApiResult<Json<LightView>> {
+    // The body is read as bytes, so a body that is not a patch is answered with the API's own
+    // error shape (an unknown arrangement, say), not axum's plain text.
+    let bytes = crate::api::limited_body(body, PATCH_BODY_LIMIT)?;
+    let patch: LightPatch = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiFailure::validation(format!("the body is not a light patch: {e}")))?;
+
     let devices = app.devices.read().await.clone();
     // A rename changes nothing the engine plays; an arrangement or a direction does.
     let replan = patch.arrangement.is_some() || patch.reversed.is_some();
-    let changed = {
+    let (light, saved) = {
         let mut store = app.store.write().await;
         let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
             return Err(ApiFailure::not_found(format!("no light with the id {id}")));
@@ -114,22 +127,28 @@ pub async fn patch_light(
                 light.reversed = reversed;
             }
         }
-        if let Err(e) = store.save_lights() {
-            store.lights.lights[index] = before;
-            return Err(ApiFailure::service_unavailable(format!(
-                "the light was not changed: {e}"
-            )));
+        // A patch that changes nothing leaves the file alone: the light on disk is still right.
+        let saved = store.lights.lights[index] != before;
+        if saved {
+            if let Err(e) = store.save_lights() {
+                store.lights.lights[index] = before;
+                return Err(ApiFailure::service_unavailable(format!(
+                    "the light was not changed: {e}"
+                )));
+            }
         }
-        store.lights.lights[index].clone()
+        (store.lights.lights[index].clone(), saved)
     };
 
     // The engine follows: a new arrangement or direction is a new plan for the light's group.
-    if replan {
+    if replan && saved {
         crate::scenes::apply_active(&app, false).await;
     } else {
         app.scene.notify();
     }
 
-    tracing::info!(light = %changed.id, "a light was changed");
-    Ok(Json(view(&changed, &devices)))
+    if saved {
+        tracing::info!(light = %light.id, "a light was changed");
+    }
+    Ok(Json(view(&light, &devices)))
 }
