@@ -68,10 +68,12 @@ const MODE_USER_PICTURE: u8 = 13;
 
 /// The slot a key has in a picture: the matrix runs down each column, six rows to a column.
 ///
-/// `row` 0 is the top row. The slot is `col * 6 + row`. Which key sits at which row and column
-/// is per board (the table in `docs/adapters.md`).
-pub fn key_slot(row: usize, col: usize) -> usize {
-    col * KEY_ROWS + row
+/// `row` 0 is the top row. The slot is `col * 6 + row`; `None` for a row past the sixth or a
+/// position past the last slot (a row of 6 would alias the next column). Which key sits at
+/// which row and column is per board (the table in `docs/adapters.md`).
+pub fn key_slot(row: usize, col: usize) -> Option<usize> {
+    let slot = col.checked_mul(KEY_ROWS)?.checked_add(row)?;
+    (row < KEY_ROWS && slot < PER_KEY_SLOTS).then_some(slot)
 }
 
 /// The row and column of a slot, the inverse of [`key_slot`].
@@ -86,7 +88,8 @@ fn complement(sum: u32) -> u8 {
 
 /// One report of the stored-picture upload: report `page` (0 to 6) of `frame`.
 ///
-/// `frame` holds the colour of each slot in slot order; slots past its end go out black.
+/// `frame` holds the colour of each slot in slot order; slots past its end go out black, and
+/// colours past slot 127 are dropped.
 /// Layout of the 65 bytes (index 0 is the report id): `[0]` 0x00, `[1]` 0x0C, `[2]` 0x00,
 /// `[3]` 0x80 and `[4]` 0x01 (the length 384, little-endian), `[5]` page, `[6]` and `[7]`
 /// 0x00, `[8]` checksum over `[1..=7]`, `[9..]` up to 56 bytes of R, G, B per slot, in slot
@@ -761,19 +764,42 @@ mod tests {
 
     #[test]
     fn slots_run_down_each_column() {
-        assert_eq!(key_slot(0, 0), 0);
-        assert_eq!(key_slot(5, 0), 5);
-        assert_eq!(key_slot(0, 1), 6);
+        assert_eq!(key_slot(0, 0), Some(0));
+        assert_eq!(key_slot(5, 0), Some(5));
+        assert_eq!(key_slot(0, 1), Some(6));
         // The two keys confirmed on a FUN60 Pro by the monsgeek-rgb notes (A = 9, B = 40) are the
         // second column's home-row key and the seventh column's bottom-letter-row key.
         assert_eq!(slot_position(9), (3, 1));
         assert_eq!(slot_position(40), (4, 6));
         for slot in 0..PER_KEY_SLOTS {
             let (row, col) = slot_position(slot);
-            assert_eq!(key_slot(row, col), slot);
+            assert_eq!(key_slot(row, col), Some(slot));
             assert!(col < KEY_COLS);
         }
         assert_eq!(KEY_COLS, 22);
+    }
+
+    #[test]
+    fn a_key_outside_the_matrix_has_no_slot() {
+        // A seventh row would alias the next column's top key.
+        assert_eq!(key_slot(KEY_ROWS, 0), None);
+        // Column 21 holds slots 126 and 127 only.
+        assert_eq!(key_slot(1, 21), Some(127));
+        assert_eq!(key_slot(2, 21), None);
+        assert_eq!(key_slot(0, KEY_COLS), None);
+        assert_eq!(key_slot(0, usize::MAX), None);
+    }
+
+    #[test]
+    fn per_key_report_drops_colours_past_the_last_slot() {
+        let mut frame = vec![Rgb8::new(9, 9, 9); PER_KEY_SLOTS];
+        frame[PER_KEY_SLOTS - 1] = Rgb8::new(1, 2, 3);
+        let exact = per_key_reports(&frame);
+        frame.extend([Rgb8::new(200, 100, 50); 10]);
+        assert_eq!(per_key_reports(&frame), exact, "colours past slot 127 change no byte");
+        // Slot 127 is the last 3 of page 6's 48 data bytes; the rest of the report is zero.
+        assert_eq!(&exact[6][9 + 45..9 + 48], &[1, 2, 3]);
+        assert!(exact[6][9 + 48..].iter().all(|b| *b == 0));
     }
 
     #[tokio::test]

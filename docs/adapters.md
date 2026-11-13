@@ -201,25 +201,29 @@ does not send them yet (#312).
   evidenced.** The one open-source per-key project for this vendor id says "No such protocol was
   identified" and "The official MonsGeek software never transmitted continuous RGB framebuffer updates"
   (source: https://github.com/Lightning-13/monsgeek-rgb/blob/main/docs/limitations.md, lines 9 to 22; it
-  tested a FUN60 Pro, PIDs 502F and 5026, and names no other board).
+  was "verified only with the MonsGeek FUN60 Pro", line 90, whose PIDs 502F and 5026 are in its protocol.md,
+  lines 18 to 19).
 - **A stored picture: sources show it.** Seven `SET_USERPIC` (`0x0C`) reports upload 128 colours, and light
   mode 13 ("User Picture") shows them. The upload lands in the keyboard's flash (source:
   https://github.com/dniminenn/sharkfin/blob/master/docs/PROTOCOL.md, lines 521 to 558). The vendor's own web
   app offers per-key colour the same way: its light table has `LightUserPicture` with 3 to 5 numbered patterns
   and `LightScreenColor` (source: https://app.monsgeek.com/js/index.1e076e39.js, the strings
   `LightUserPicture` and `LightScreenColor`).
-- **Live per-key streaming exists only on patched firmware.** `LED_STREAM` (`0xE8`, 18 keys a report, pages 0
+- **The only documented live per-key command is patch-only.** `LED_STREAM` (`0xE8`, 18 keys a report, pages 0
   to 6, `0xFF` commit) is added by a firmware patch and stock firmware does not recognise it (source:
   https://github.com/echtzeit-solutions/monsgeek-akko-linux/blob/master/docs/PROTOCOL.md, lines 559 to 568).
-  Flashing firmware is out of scope for canvas-rgb.
+  Flashing firmware is out of scope for canvas-rgb. Whether stock firmware on PID `4015` has another live
+  per-key path: UNKNOWN. No source tests this PID.
 - **What canvas-rgb sends today is a whole-board colour.** `direct_mode_report` is `SET_LEDPARAM` (`0x07`)
-  with light mode `0x15` = 21, "Screen Sync", and `color_report` is `SET_SCREEN_COLOR` (`0x0E`), one RGB for
-  the whole board (source: the echtzeit PROTOCOL.md above, lines 418 and 685; the checksums recompute in the
+  with light mode `0x15` = 21, "Screen Sync", and `color_report` is `SET_SCREEN_COLOR` (`0x0E`), "Send RGB
+  for screen sync mode", one RGB that canvas-rgb uses for the whole board (source: the echtzeit PROTOCOL.md
+  above, lines 418 and 685; the checksums recompute in the
   tests `direct_mode_bytes` and `color_bytes_and_checksums`). The sources document no per-key form of `0x0E`.
 
-So the answer for this firmware family: **per-key colour is a stored picture, not a stream.** The sources
-give a driver no path to moving per-key lighting. Whether PID `4015` accepts the picture upload at all is
-UNKNOWN until the device check in the last subsection.
+So the answer from the sources: **the only per-key path documented on stock firmware is a stored picture,
+not a stream.** They give a driver no path to moving per-key lighting, and none of them tested PID `4015`.
+Whether this keyboard accepts the picture upload at all is UNKNOWN until the device check in the last
+subsection; one project calls it blocked on another board (below).
 
 ### Family and framing
 
@@ -231,7 +235,8 @@ UNKNOWN until the device check in the last subsection.
   boards share `3151:4015`"). Which of those boards this keyboard is: UNKNOWN (the reads below settle it).
 - Vendor interface 2, usage page `0xFFFF`, usage `0x0002`, feature reports with report id 0, 64 bytes of
   payload and 65 on the wire with the id first (source: echtzeit PROTOCOL.md, lines 66 to 85 and 277 to 285).
-  `royuan.rs` opens exactly this (`checked on the device`: the whole-board colour works today, per #311).
+  `royuan.rs` opens exactly this. That the whole-board colour works on Luke's keyboard is stated in the #311
+  issue text; it was not re-run for this section.
 - Checksum `0xFF - (sum & 0xFF)`. "Bit7" stores it in payload byte 7 over bytes 0 to 6; "Bit8" in byte 8 over
   bytes 0 to 7 (source: sharkfin PROTOCOL.md, lines 124 to 131; sharkfin
   `app/src-tauri/src/protocol/mod.rs`, lines 16 to 36). The tables below number the 65-byte report, so
@@ -255,7 +260,9 @@ on every report except byte 5 (the page) and byte 8 (its checksum).
 | 8 | `0x72 - page` | Bit7 checksum over bytes 1 to 7: `0xFF - (0x0C + 0x80 + 0x01 + page)` |
 | 9 to 64 | colours | picture bytes `page * 56 ..`, 56 a page; page 6 carries the last 48, the rest is zero |
 
-The picture is 128 slots, 3 bytes each in R, G, B order, slot `s` at picture bytes `3s .. 3s + 3`. Slot 9 is
+The picture is 128 slots, 3 bytes each in R, G, B order, slot `s` at picture bytes `3s .. 3s + 3`. A frame
+shorter than 128 colours is padded with black; colours past slot 127 are dropped (the test
+`per_key_report_drops_colours_past_the_last_slot`). Slot 9 is
 bytes 27 to 29, in page 0. `GET_USERPIC` (`0x8C`) returns stale data and cannot confirm a write (source:
 sharkfin PROTOCOL.md, lines 521 and 544). The test `per_key_report_bytes_and_checksum_for_a_known_frame`
 pins the bytes for a frame with slot 9 red and slot 40 blue.
@@ -263,14 +270,17 @@ pins the bytes for a frame with slot 9 red and slot 40 blue.
 **The sources that differ.** The FUN60 Pro notes describe another header, `0C 00 FF page length apply 00
 checksum`, with 378 bytes (126 slots), 56 data bytes a report, 42 in the last and the apply bit `1` on report 6
 (source: https://github.com/Lightning-13/monsgeek-rgb/blob/main/docs/protocol.md, lines 71 to 142). Sharkfin
-files that shape under the other firmware family, "gen2", and warns that "Sending the yc500 header on gen2 is
+files that shape (its "chunk length" field, protocol.md line 128) under the other firmware family, "gen2", and warns that "Sending the yc500 header on gen2 is
 a live write" (PROTOCOL.md lines 526 to 533 and 1099 to 1100). The 4015 boards are in sharkfin's yc500 list,
 so **try the sharkfin header first** and the FUN60 Pro shape second, never both in one session.
 
 A third project's upload did nothing on a board with PID `5002` ("every guessed frame is a no-op"). Its script
 sent a header it had guessed (`0C page 00 ...`, 18 keys a report), which matches neither source above
 (source: https://github.com/roziscoding/akko-5075-rgb/blob/main/userpic.ts, lines 5 and 32, and README.md
-lines 349 to 354). It is no evidence that a correct upload fails, and its board is not a 4015.
+lines 349 to 354). Its README concludes "Per-key RGB - BLOCKED on stock firmware. SET_USERPIC (0x0C) is
+silently ignored" (lines 349 to 351). Its header was a guess and its board is not a 4015, so this does not
+show that a correct upload fails; it is the one source that reports the stored picture not working on stock
+firmware, and the device check settles it for this keyboard.
 
 ### Showing it: light mode 13
 
@@ -282,15 +292,15 @@ lines 349 to 354). It is no evidence that a correct upload fails, and its board 
 | 2 | `0x0D` | mode 13, "User Picture" |
 | 3 | `0x03` | speed as the yc500 wire counts it (host speed 2) |
 | 4 | `0x04` | brightness 4 |
-| 5 | `0x00` | high nibble = picture slot 0, low nibble 0 |
-| 6 | `0x00` | R, replaced by the firmware in this mode |
+| 5 | `0x00` | 0; the yc500 user picture has no slot byte (sharkfin PROTOCOL.md lines 294 to 296) |
+| 6 | `0x00` | R; the app sends 0 here; what the firmware does with it is UNKNOWN |
 | 7, 8 | `0xC8 0xC8` | G and B; the app sends `(0, 200, 200)` in this mode |
 | 9 | `0x54` | Bit8 checksum over bytes 1 to 8 |
 
 Source: sharkfin `app/src-tauri/examples/paint_probe.rs` lines 62 to 80 and `protocol/mod.rs` lines 885 to
 907. The FUN60 Pro packet is `07 0D 04 04 00 00 C8 C8 53`, one speed step different (source: Lightning-13
-protocol.md, lines 51 to 67). Sharkfin's yc500 wire speed runs 1 to 5 and the FUN60 Pro's 0 to 4 (PROTOCOL.md
-lines 253 to 255), so each is the other's value shifted by one. Try the sharkfin one.
+protocol.md, lines 51 to 67). Sharkfin's yc500 wire speed runs 1 to 5 and its gen2 family's 0 to 4 (PROTOCOL.md
+lines 253 to 255); that the FUN60 Pro counts like gen2 is an inference, UNKNOWN. Try the sharkfin one.
 
 After the upload the keyboard stays in mode 13. canvas-rgb's own mode is `direct_mode_report`
 (`00 07 15 04 04 07 00 00 00 D4`); sending it hands the board back to canvas-rgb.
@@ -345,8 +355,9 @@ table for another board.
 - **If a driver ever uploads:** pages at least 100 ms apart and uploads at least 10 s apart, one picture per
   change a person made, never one per animation frame. These are the cadences that survived, not a measured
   limit; the limit is UNKNOWN.
-- The `0x0E` whole-board colour is not an upload. `royuan_probe` sends it at 30 fps with a 1 s keepalive, the
-  sources give no rate for it, and `checked on the device` covers only that the existing probe works.
+- The `0x0E` whole-board colour is not an upload. `royuan_probe` sends it about 30 times a second (a 33 ms
+  sleep, `crates/canvas-adapters/examples/royuan_probe.rs`); the adapter resends it at least once a second
+  (`KEEPALIVE` in `royuan.rs`). The sources give no rate for it.
 
 ### Device check for Luke (queued, not run)
 
