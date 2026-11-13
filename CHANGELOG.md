@@ -8,6 +8,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
+- Scenes: several effects at once, one per group of devices (#310)
 - Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
 ### Fixed
 

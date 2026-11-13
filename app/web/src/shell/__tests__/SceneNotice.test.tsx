@@ -4,8 +4,8 @@ import { StandingNotices } from "@/shell/GlobalBanners";
 import { patchSnap } from "@/lib/store";
 import type { Status } from "@/proto/Status";
 
-// The standing notices: the SignalRGB conflict, the zone panel and the "there is no layout yet"
-// notice. The Layout page is where a layout is made, so the notice does not stand there: it
+// The standing notices: the SignalRGB conflict, the zone panel and the "there is no scene yet"
+// notice. The Scenes page is where scenes are, so the notice does not stand there: it
 // would say it twice and push the page down when it arrives.
 
 const { pathRef } = vi.hoisted(() => ({ pathRef: { current: "/" } }));
@@ -28,36 +28,36 @@ afterEach(() => {
   cleanup();
 });
 
-/** A status with no layout, which is what makes the notice stand. */
-function noLayout(): Status {
+/** A status with no scene, which is what makes the notice stand. */
+function noScene(): Status {
   return {
-    active_layout: null,
+    active_scene: null,
     conflicts: [],
     show_zone_panel: false,
   } as unknown as Status;
 }
 
-describe("the notice that there is no layout yet", () => {
-  it("does not stand on the Layout page: that page says it in its own frame", () => {
+describe("the notice that there is no scene yet", () => {
+  it("does not stand on the Scenes page: that page says it in its own frame", () => {
     pathRef.current = "/";
-    patchSnap({ status: noLayout() });
+    patchSnap({ status: noScene() });
     render(<StandingNotices />);
-    expect(screen.queryByText("There is no layout yet")).toBeNull();
-    expect(screen.queryByText("Open the Layout")).toBeNull();
+    expect(screen.queryByText("There is no scene yet")).toBeNull();
+    expect(screen.queryByText("Open Scenes")).toBeNull();
   });
 
-  it("stands on the other pages, with the way to the Layout", () => {
+  it("stands on the other pages, with the way to Scenes", () => {
     pathRef.current = "/effects/";
-    patchSnap({ status: noLayout() });
+    patchSnap({ status: noScene() });
     render(<StandingNotices />);
-    expect(screen.getByText("There is no layout yet")).toBeTruthy();
-    expect(screen.getByText("Open the Layout")).toBeTruthy();
+    expect(screen.getByText("There is no scene yet")).toBeTruthy();
+    expect(screen.getByText("Open Scenes")).toBeTruthy();
   });
 
-  it("stands on no page while there is a layout", () => {
+  it("stands on no page while there is a scene", () => {
     pathRef.current = "/effects/";
-    patchSnap({ status: { ...noLayout(), active_layout: "desk" } });
+    patchSnap({ status: { ...noScene(), active_scene: { id: "gaming", name: "Gaming" } } });
     render(<StandingNotices />);
-    expect(screen.queryByText("There is no layout yet")).toBeNull();
+    expect(screen.queryByText("There is no scene yet")).toBeNull();
   });
 });

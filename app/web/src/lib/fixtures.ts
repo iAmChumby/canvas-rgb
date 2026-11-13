@@ -722,8 +722,14 @@ export const zoneLightId = (deviceId: string, zone: number): string => `${device
 /** The demo's lights: one per zone of every device, as the daemon's first scenes sync makes them. */
 export const DEMO_LIGHTS: LightView[] = DEVICES.flatMap((device) =>
   device.zones.map((zone): LightView => {
-    const arrangement: Arrangement =
-      zone.kind.type === "single" ? "single" : zone.kind.type === "matrix" ? "grid" : "strip";
+    // A fan is a ring: the owner's choice, set on the Devices row (a migrated zone keeps its shape).
+    const arrangement: Arrangement = device.id.startsWith("openrgb:fan-hub-")
+      ? "ring"
+      : zone.kind.type === "single"
+        ? "single"
+        : zone.kind.type === "matrix"
+          ? "grid"
+          : "strip";
     return {
       light: {
         id: zoneLightId(device.id, zone.index),

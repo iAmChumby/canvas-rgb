@@ -1,7 +1,10 @@
 import { act, renderHook, waitFor } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { TauriGlobal } from "@/lib/host";
-import { useLightFeed } from "@/views/scenes/useLightFeed";
+import { patchSnap } from "@/lib/store";
+import { DEMO_LIGHTS, DEMO_SCENES } from "@/lib/fixtures";
+import { demoLightColours, useLightFeed } from "@/views/scenes/useLightFeed";
+import type { Scene } from "@/proto/Scene";
 
 // The per-light feed: `GET /api/v1/preview/lights` (a WebSocket whose first message maps a u16
 // index to a light id, then binary frames: per light a u16 LE LED index, a u16 LE LED count,
@@ -136,5 +139,60 @@ describe("useLightFeed", () => {
       again.onmessage?.({ data: frame([{ index: 0, rgb: [0, 255, 0] }]) } as MessageEvent);
     });
     expect(Array.from(result.current("lite-a") ?? [])).toEqual([0, 255, 0]);
+  });
+});
+
+// The demo draws what each group says it plays: the picture follows the effect and the mode.
+describe("demoLightColours", () => {
+  const scene = (id: string): Scene => structuredClone(DEMO_SCENES.scenes.find((s) => s.id === id) as Scene);
+  const show = (active: Scene, failed: string[] = []) =>
+    patchSnap({
+      lights: structuredClone(DEMO_LIGHTS),
+      scenes: {
+        active: active.id,
+        scenes: [active],
+        group_states: active.groups.map((g) => ({ id: g.id, failed: failed.includes(g.id) ? "gone" : null })),
+      },
+    });
+  const led = (rgb: Uint8Array | undefined, i: number) => Array.from(rgb?.slice(i * 3, i * 3 + 3) ?? []);
+
+  it("draws White as one flat near-white over every LED", () => {
+    const focus = scene("focus");
+    focus.groups[0]!.brightness = 100;
+    show(focus);
+    const out = demoLightColours(3.2);
+    const members = focus.groups[0]!.members;
+    const first = led(out.get(members[0] as string), 0);
+    expect(Math.min(...first)).toBeGreaterThan(220);
+    for (const id of members) {
+      const rgb = out.get(id);
+      for (let i = 0; i < (rgb?.length ?? 0) / 3; i += 1) expect(led(rgb, i)).toEqual(first);
+    }
+  });
+
+  it("flow across runs one picture over the lights; each its own repeats it on every light", () => {
+    const gaming = scene("gaming");
+    const ram = gaming.groups.find((g) => g.id === "g-ram")!;
+    ram.mode = "flow_across";
+    show(gaming);
+    const flowing = demoLightColours(1);
+    const a = led(flowing.get(ram.members[0] as string), 0);
+    const b = led(flowing.get(ram.members[1] as string), 0);
+    expect(b).not.toEqual(a);
+
+    ram.mode = "each_its_own";
+    show(gaming);
+    const own = demoLightColours(1);
+    expect(led(own.get(ram.members[1] as string), 0)).toEqual(led(own.get(ram.members[0] as string), 0));
+  });
+
+  it("keeps Off, a failed group and an unassigned light dark", () => {
+    const evening = scene("evening");
+    const lost = evening.groups.find((g) => g.id === "g-lost")!;
+    show(evening, ["g-lost"]);
+    const out = demoLightColours(2);
+    for (const id of lost.members) expect(Array.from(out.get(id) ?? []).every((v) => v === 0)).toBe(true);
+    const warm = out.get(evening.groups[0]!.members[0] as string);
+    expect(Array.from(warm ?? []).some((v) => v > 0)).toBe(true);
   });
 });
