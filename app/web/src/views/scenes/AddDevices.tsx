@@ -126,16 +126,18 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked, onEmptied 
 
   return (
     <div className={s.addList} data-testid="add-devices">
-      <section className={s.addSection} aria-label="In this group">
-        <h3 className={s.pickerHeading}>In this group</h3>
-        <ul className={s.addRows}>
-          {mine.length === 0 ? (
-            <li className={s.addEmpty}>This group has no devices yet.</li>
-          ) : (
-            mine.map((l) => row(l, "In this group", true))
-          )}
-        </ul>
-      </section>
+      {groupId !== "new" && (
+        <section className={s.addSection} aria-label="In this group">
+          <h3 className={s.pickerHeading}>In this group</h3>
+          <ul className={s.addRows}>
+            {mine.length === 0 ? (
+              <li className={s.addEmpty}>This group has no devices yet.</li>
+            ) : (
+              mine.map((l) => row(l, "In this group", true))
+            )}
+          </ul>
+        </section>
+      )}
       <section className={s.addSection} aria-label="In other groups">
         <h3 className={s.pickerHeading}>In other groups</h3>
         <ul className={s.addRows}>

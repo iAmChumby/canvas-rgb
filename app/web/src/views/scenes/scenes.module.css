@@ -933,7 +933,8 @@
   opacity: 0.55;
 }
 
-/* The picture: the effect's own frame, as a wide strip. */
+/* The picture: the effect's own frame, as a wide band of it. The picture keeps its own shape and
+   the band shows its middle: a strip, not a squashed picture. */
 .pickStrip {
   display: flex;
   align-items: center;
@@ -947,10 +948,20 @@
 }
 
 .pickStrip :global(.thumb) {
+  display: flex;
+  align-items: center;
+  justify-content: center;
   width: 100%;
   height: 100%;
   border: 0;
   border-radius: 0;
+  overflow: hidden;
+}
+
+.pickStrip :global(.thumb canvas) {
+  flex: none;
+  width: 100%;
+  height: auto;
 }
 
 .pickText {
