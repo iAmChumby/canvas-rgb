@@ -31,6 +31,17 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     // placed instead of staying black.
     {
         let mut store = app.store.write().await;
+        // Scenes: every zone with LEDs is a light. A new one joins no group; one whose device
+        // went away stays, so it keeps its place when the device returns (the id is built from
+        // the device id, never the adapter index).
+        let store = &mut *store;
+        let new_lights = crate::scenes::sync_lights(&mut store.lights, &devices);
+        if !new_lights.is_empty() {
+            tracing::info!(added = new_lights.len(), "new lights were added");
+            if let Err(e) = store.save_lights() {
+                tracing::warn!(error = %e, "could not save the lights");
+            }
+        }
         if store.config.first_run_done {
             let added = store
                 .active_layout_mut()

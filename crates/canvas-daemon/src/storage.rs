@@ -12,6 +12,9 @@ use canvas_proto::config::{
 };
 use canvas_proto::fans::{validate_hot_limits, validate_profile, FanValidationError, HotLimitError};
 use canvas_proto::layout::Layout;
+use canvas_proto::scene::{
+    LightsFile, ScenesFile, LIGHTS_FILE, LIGHTS_SCHEMA, SCENES_FILE, SCENES_SCHEMA,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
@@ -124,7 +127,7 @@ macro_rules! impl_schema_version {
     };
 }
 
-impl_schema_version!(ConfigFile, LayoutsFile, ZonesFile, EffectsFile, FansFile);
+impl_schema_version!(ConfigFile, LayoutsFile, ZonesFile, EffectsFile, FansFile, LightsFile, ScenesFile);
 
 impl SchemaVersioned for canvas_proto::stack::StackFile {
     fn schema_version(&self) -> u32 {
@@ -236,6 +239,11 @@ pub fn prune_snapshots() {
 pub struct Store {
     pub config: ConfigFile,
     pub layouts: LayoutsFile,
+    /// The hardware map (`lights.json`): one light per zone, or per run of one. Scenes (0.14.0).
+    pub lights: LightsFile,
+    /// The scenes (`scenes.json`): named sets of groups, one active. Migrated from `layouts`
+    /// once, when this file is absent; the layouts stay as the old path reads them until Task 12.
+    pub scenes: ScenesFile,
     pub zones: ZonesFile,
     pub effects: EffectsFile,
     /// The numeric display configs (`displays.json`). A display is driven only while it has one.
@@ -253,6 +261,8 @@ impl Default for Store {
         Self {
             config: ConfigFile::default(),
             layouts: default_layouts(),
+            lights: crate::scenes::empty_lights(),
+            scenes: crate::scenes::default_scenes(&crate::scenes::empty_lights()),
             zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
             effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
             displays: DisplaysFile::default(),
@@ -341,9 +351,23 @@ impl Store {
                 None
             });
 
+        let scenes_existed = home.join(SCENES_FILE).exists();
+        let lights_value: Option<LightsFile> = read_parsed(&home.join(LIGHTS_FILE), LIGHTS_SCHEMA, LIGHTS_FILE)
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "lights.json could not be read");
+                None
+            });
+        let scenes_value: Option<ScenesFile> = read_parsed(&home.join(SCENES_FILE), SCENES_SCHEMA, SCENES_FILE)
+            .unwrap_or_else(|e| {
+                tracing::error!(error = %e, "scenes.json could not be read");
+                None
+            });
+
         let mut store = Store {
             config: config_value.unwrap_or_default(),
-            layouts: layouts_value.unwrap_or_else(default_layouts),
+            lights: lights_value.unwrap_or_else(crate::scenes::empty_lights),
+            scenes: Store::default().scenes,
+            layouts: layouts_value.clone().unwrap_or_else(default_layouts),
             zones: zones_value.unwrap_or_else(|| Store::default().zones),
             effects: effects_value.unwrap_or_else(|| Store::default().effects),
             displays: displays_value.unwrap_or_default(),
@@ -355,7 +379,53 @@ impl Store {
             store.config.schema_version = CONFIG_SCHEMA;
         }
         store.ensure_layouts();
+        store.load_scenes(scenes_value, scenes_existed, layouts_value.as_ref());
         store
+    }
+
+    /// Settles `lights` and `scenes` after the files are read.
+    ///
+    /// - `scenes.json` read fine: it is repaired (a light in two groups, an empty group, an
+    ///   `active` naming nothing) and the repair is saved.
+    /// - It existed but would not read (it was quarantined): the default scene holds every light.
+    /// - It is absent and `layouts.json` was read: the layouts migrate, once
+    ///   ([`crate::scene_migration::run`]).
+    /// - Both absent: the default scene, in memory only. Nothing exists to preserve, and the
+    ///   first device list gives the lights.
+    ///
+    /// Never writes `layouts.json`.
+    fn load_scenes(&mut self, scenes: Option<ScenesFile>, existed: bool, layouts: Option<&LayoutsFile>) {
+        match (scenes, existed, layouts) {
+            (Some(mut scenes), _, _) => {
+                let changes = crate::scenes::repair(&mut scenes, &self.lights);
+                if !changes.is_empty() {
+                    for change in &changes {
+                        tracing::warn!("scenes.json was repaired: {change}");
+                    }
+                    self.scenes = scenes;
+                    crate::logging::warn_if_err("the repaired scenes.json could not be saved", self.save_scenes());
+                } else {
+                    self.scenes = scenes;
+                }
+            }
+            (None, true, _) => {
+                tracing::error!("scenes.json was damaged; the default scene holds every light");
+                self.scenes = crate::scenes::default_scenes(&self.lights);
+                crate::logging::warn_if_err("the default scenes.json could not be saved", self.save_scenes());
+            }
+            (None, false, Some(layouts)) => {
+                // A layouts file from before Poison became a user effect names it `poison`; the
+                // scenes are built from the ids the daemon uses today.
+                let mut layouts = layouts.clone();
+                crate::migration::migrate_poison(&mut layouts, &mut self.effects.clone());
+                let (lights, scenes) = crate::scene_migration::run(&self.home, &layouts, &[]);
+                self.lights = lights;
+                self.scenes = scenes;
+            }
+            (None, false, None) => {
+                self.scenes = crate::scenes::default_scenes(&self.lights);
+            }
+        }
     }
 
     /// Makes sure there is always an active layout to write scale and sampling into.
@@ -385,6 +455,14 @@ impl Store {
 
     pub fn save_layouts(&self) -> std::io::Result<()> {
         write_json(&self.home.join(LAYOUTS_FILE), &self.layouts)
+    }
+
+    pub fn save_lights(&self) -> std::io::Result<()> {
+        write_json(&self.home.join(LIGHTS_FILE), &self.lights)
+    }
+
+    pub fn save_scenes(&self) -> std::io::Result<()> {
+        write_json(&self.home.join(SCENES_FILE), &self.scenes)
     }
 
     pub fn save_zones(&self) -> std::io::Result<()> {
