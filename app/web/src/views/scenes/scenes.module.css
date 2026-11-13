@@ -155,6 +155,8 @@
   margin-left: calc(var(--s2) * -1);
   padding-left: var(--s2);
   background: var(--g1);
+  /* the strip's trailing padding is not the pin's: keys that slide behind it must not show there */
+  box-shadow: var(--s1) 0 0 0 var(--g1);
 }
 
 .strip button.plusKey {
