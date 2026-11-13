@@ -870,6 +870,37 @@ describe("useScene", () => {
     expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(2);
   });
 
+  it("a colour write that did not land is not taken for another window's colour", async () => {
+    // A colour is a `#rrggbb` string on the wire, so two colours must not compare equal.
+    const groupId = gaming().groups[0]?.id ?? "";
+    const mine = withProps(groupId, { tint: { type: "color", value: "#ff0000" } }, gaming().rev);
+    const other = withProps(groupId, { tint: { type: "color", value: "#00ff00" } }, gaming().rev + 1);
+    api.scenes.list.mockResolvedValueOnce(oneScene(mine)).mockResolvedValue(oneScene(other));
+    api.scenes.patchGroupProps.mockRejectedValue(
+      new ApiFailure(0, "unreachable", "canvas-rgb did not answer."),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, { tint: { type: "color", value: "#ff0000" } });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    // The read found the other window's green, not this window's red: a conflict, said out loud,
+    // and the red is not taken for saved.
+    expect(result.current.error).toBe("Changed in another window");
+    const plays = result.current.scene?.groups[0]?.plays;
+    expect(plays?.type === "effect" ? plays.props.tint : undefined).toEqual({
+      type: "color",
+      value: "#00ff00",
+    });
+  });
+
   it("each kind gets its own three tries: one kind's failures do not refuse the other", async () => {
     api.scenes.patchGroupProps.mockRejectedValue(new ApiFailure(500, "http", "the daemon said no"));
     api.scenes.putGroupBrightness.mockRejectedValue(new ApiFailure(500, "http", "the daemon said no"));

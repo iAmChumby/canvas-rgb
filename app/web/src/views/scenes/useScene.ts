@@ -85,9 +85,31 @@ type LostAnswer =
   /** The daemon is still on the rev the write was sent on: the write did not land. */
   | null;
 
-/** One prop value as text, so two of them compare by what they say and not by their key order. */
+/**
+ * One prop value as text, so two of them compare by what they say and not by their key order.
+ *
+ * The `switch` names every kind of `PropValue`: a new kind fails the typecheck here, instead of
+ * falling into a `String()` that would make two different values of it compare equal.
+ */
 function propText(value: PropValue): string {
-  return `${value.type}:${String(value.value)}`;
+  switch (value.type) {
+    // An `Rgb8` is its `#rrggbb` string on the wire (`crates/canvas-proto/src/color.rs`).
+    case "color":
+      return `color:${value.value}`;
+    case "choice":
+      return `choice:${value.value}`;
+    case "bool":
+      return `bool:${value.value ? "true" : "false"}`;
+    // A number, a hue and an angle are numbers: two of them are the same only when they are.
+    case "number":
+    case "hue":
+    case "angle":
+      return `${value.type}:${value.value}`;
+    default: {
+      const unknown: never = value;
+      return unknown;
+    }
+  }
 }
 
 /**
