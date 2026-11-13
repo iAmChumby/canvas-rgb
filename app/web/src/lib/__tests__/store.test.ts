@@ -154,6 +154,23 @@ describe("the store's answers", () => {
     await refreshScenes();
     expect(api.scenes.list).toHaveBeenCalledTimes(2);
   });
+
+  it("asks the scene routes again when the daemon restarted without a failed read", async () => {
+    // A daemon restarted inside one poll gap answers every read, so no read fails, and a rebuilt
+    // dev daemon keeps its version: only its frame count starts again from zero. The version
+    // starts fresh here, so the test does not depend on an earlier one's gate.
+    api.status.mockResolvedValue({ ...STATUS, version: "0.14.1", frames_rendered: 1_000_000 });
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+
+    // The next read is answered by the daemon that replaced it: same version, frames from zero.
+    api.status.mockResolvedValue({ ...STATUS, version: "0.14.1", frames_rendered: 40 });
+    await refreshStatus();
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+  });
 });
 
 /**
