@@ -1,14 +1,16 @@
-//! canvas-rgb engine: the canvas, the layout → per-LED sample regions, the sampling,
-//! the render loop, parking, pause, brightness and the preview downscale.
+//! canvas-rgb engine: the canvas, the layout → per-LED sample regions, the scenes'
+//! arrangement planner, the sampling, the render loop, parking, pause, brightness and the
+//! preview downscale.
 //!
 //! The engine owns one thread. It renders at a fixed step (10..=60 fps), parks when
 //! nothing consumes frames, and writes one black frame when it is paused.
 //!
 //! The public surface is [`spawn`], which returns the [`canvas_proto::Engine`] handle
-//! the daemon drives. [`geometry`] and [`sampling`] are public because the daemon's stack
-//! compositor resolves a layer's area from the same sample plan the engine samples with
-//! (`canvas-daemon`'s `stack` module); nothing else is.
+//! the daemon drives. [`geometry`], [`arrangement`] and [`sampling`] are public because
+//! the daemon's stack compositor resolves a layer's area from the same sample plan the
+//! engine samples with (`canvas-daemon`'s `stack` module); nothing else is.
 
+pub mod arrangement;
 mod engine;
 pub mod effect_guard;
 pub mod geometry;
