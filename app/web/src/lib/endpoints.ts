@@ -34,6 +34,16 @@ import type { PeripheralRow } from "@/lib/peripherals";
 import type { LayoutsResponse } from "@/proto/LayoutsResponse";
 import type { Layout } from "@/proto/Layout";
 import type { SetActiveLayout } from "@/proto/SetActiveLayout";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { Scene } from "@/proto/Scene";
+import type { SceneCreate } from "@/proto/SceneCreate";
+import type { ScenePut } from "@/proto/ScenePut";
+import type { SceneActivePut } from "@/proto/SceneActivePut";
+import type { GroupBrightnessPut } from "@/proto/GroupBrightnessPut";
+import type { LightsResponse } from "@/proto/LightsResponse";
+import type { LightView } from "@/proto/LightView";
+import type { LightPatch } from "@/proto/LightPatch";
+import type { FlashRequest } from "@/proto/FlashRequest";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
@@ -170,6 +180,34 @@ export const api = {
   putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),
   putActiveLayout: (body: SetActiveLayout) =>
     request<LayoutsResponse>("PUT", routes.layoutActive, body),
+
+  scenes: {
+    /** Every scene, the active one's id and how its groups are doing. */
+    list: () => request<ScenesResponse>("GET", routes.scenes),
+    /** A new scene: a copy of `copy_of`, or one group of every light set to Off. */
+    create: (body: SceneCreate) => request<Scene>("POST", routes.scenes, body),
+    /** Replaces a scene whole. 409 (the current scene in the body) when `expected_rev` is stale. */
+    put: (id: string, body: ScenePut) => request<Scene>("PUT", routes.scene(id), body),
+    /** 409 for the last scene. */
+    remove: (id: string) => request<unknown>("DELETE", routes.scene(id)),
+    /** Sets a scene, with a fade. */
+    setActive: (id: string) =>
+      request<ScenesResponse>("PUT", routes.sceneActive, { id } satisfies SceneActivePut),
+    /** New values for one group's effect, no rebuild. Saved; answers the scene with its new rev. */
+    patchGroupProps: (sceneId: string, groupId: string, props: Props) =>
+      request<Scene>("PATCH", routes.groupProps(sceneId, groupId), props),
+    /** One group's brightness. Saved; answers the scene with its new rev. */
+    putGroupBrightness: (sceneId: string, groupId: string, brightness: number) =>
+      request<Scene>("PUT", routes.groupBrightness(sceneId, groupId), {
+        brightness,
+      } satisfies GroupBrightnessPut),
+  },
+  lights: {
+    list: () => request<LightsResponse>("GET", routes.lights),
+    patch: (id: string, body: LightPatch) => request<LightView>("PATCH", routes.light(id), body),
+    /** The named lights white and every other LED black; `stop` ends it. */
+    flash: (body: FlashRequest) => request<unknown>("POST", routes.lightsFlash, body),
+  },
 
   fans: () => request<FansStatus>("GET", routes.fans),
   /** The user's "don't exceed" temperatures, one per kind of source (`null` = automatic). */
