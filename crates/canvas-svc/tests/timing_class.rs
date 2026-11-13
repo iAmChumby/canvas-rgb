@@ -81,6 +81,7 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
 /// inside a loop that polls to a deadline. "open" means the sleep stands in for a state the code is
 /// expected to reach in time, which a stalled runner can miss: a real sibling, not yet fixed.
 const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
+    ("canvas-daemon/src/scene_migration.rs", "sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of the file shows as a new mtime; a slower runner only widens the gap"),
     ("attack_shark_x6/hid_cache.rs", "sleep(Duration::from_millis(350))", "safe: sleeps past a 300 ms TTL; a slower runner only ages the cache more"),
     ("canvas-adapters/tests/adapters_tests.rs", "sleep(Duration::from_millis(1700))", "safe: sleeps past the repeat interval; slowness only passes it further"),
     ("canvas-core/src/cpu.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop that waits for the engine to park, with a 10 s deadline"),

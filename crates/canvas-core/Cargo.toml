@@ -11,8 +11,9 @@ canvas-proto.workspace = true
 tracing.workspace = true
 
 [dev-dependencies]
-# The scenes whole-frame benchmark runs the real engine with the effect library and the HTML
-# runtime. Neither depends on canvas-core, so there is no cycle and the traits are the same ones.
+# The scenes benchmark measures what a frame with many groups costs, so it needs the
+# effect library and the HTML runtime. Neither depends on canvas-core, so there is no
+# cycle and the traits are the same ones.
 canvas-effects.workspace = true
 canvas-html.workspace = true
 

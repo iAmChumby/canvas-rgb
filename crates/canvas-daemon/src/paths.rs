@@ -102,5 +102,17 @@ pub fn read_optional(path: &Path) -> Option<Vec<u8>> {
     }
 }
 
+/// Reads a file and tells "absent" from "could not read": `Ok(None)` when it does not exist,
+/// `Err` for any other failure (a sharing violation, a permission denial). The scenes files use
+/// this so a read error never looks like a missing file, which would be replaced by a default.
+/// [`read_optional`] keeps its old behaviour for every other file.
+pub fn read_checked(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Where snapshots live and how many are kept (G10).
 pub const SNAPSHOTS_KEPT: usize = BACKUPS_KEPT;
