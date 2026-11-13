@@ -2167,8 +2167,7 @@ async fn the_config_is_exported_and_imported() {
 }
 
 #[tokio::test]
-async fn an_import_with_a_fan_value_below_the_floor_is_refused() {
-    let (router, _app, _home) = build();
+async fn an_import_with_a_fan_value_below_the_floor_is_refused() {    let (router, _app, _home) = build();
     let bad = serde_json::json!({
         "schema_version": 1,
         "exported_at": "2026-10-26T00:00:00Z",
@@ -2196,6 +2195,110 @@ async fn an_import_with_a_fan_value_below_the_floor_is_refused() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Review 323 S5: the config import and export, driven through the routes. The route hands the
+/// daemon's devices to the migration, so a 0.13 bundle's matrix zone becomes a Grid light (with no
+/// devices it could only be a Strip), and the export carries the scenes the import wrote.
+#[tokio::test]
+async fn a_0_13_import_migrates_with_the_devices_and_the_export_carries_the_scenes() {
+    use canvas_proto::config::{EffectsFile, ExportBundle, LayoutsFile, ZonesFile};
+    use canvas_proto::device::{DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
+    use canvas_proto::layout::{CaseForm, Layout, PlacedZone, ZoneShape};
+    use canvas_proto::scene::Arrangement;
+
+    /// A keyboard with one 2-LED matrix zone.
+    fn keyboard() -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId("openrgb:kb".into()),
+            name: "Keyboard".into(),
+            vendor: "v".into(),
+            kind: canvas_proto::device::DeviceKind::Keyboard,
+            adapter: "openrgb".into(),
+            adapter_index: 1,
+            serial: String::new(),
+            location: String::new(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "Keys".into(),
+                kind: ZoneKind::Matrix { width: 2, height: 1, map: vec![Some(0), Some(1)] },
+                led_count: 2,
+                min_leds: 0,
+                max_leds: 2,
+                resizable: false,
+            }],
+            connected: true,
+        }
+    }
+
+    let (router, app, home) = build();
+    *app.devices.write().await = vec![keyboard()];
+
+    // A 0.13 bundle: layouts only, no lights and no scenes.
+    let layouts = LayoutsFile {
+        schema_version: canvas_proto::config::LAYOUTS_SCHEMA,
+        active: "a".into(),
+        layouts: vec![Layout {
+            id: "a".into(),
+            name: "Gaming".into(),
+            render_scale: Default::default(),
+            sampling: Default::default(),
+            zones: vec![PlacedZone {
+                device_id: DeviceId("openrgb:kb".into()),
+                zone_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+                rotation_deg: 0.0,
+                reversed: false,
+                visible: true,
+                shape: ZoneShape::Auto,
+                label: None,
+                leds: None,
+                part: None,
+                locked: false,
+            }],
+            effect: None,
+            case_form: CaseForm::None,
+            landmarks: Vec::new(),
+        }],
+    };
+    let bundle = ExportBundle {
+        schema_version: canvas_proto::config::EXPORT_SCHEMA,
+        exported_at: "2026-11-12T00:00:00Z".into(),
+        app_version: "0.13.0".into(),
+        settings: canvas_proto::config::Settings::default(),
+        layouts,
+        zones: ZonesFile { schema_version: canvas_proto::config::ZONES_SCHEMA, sizes: Default::default() },
+        effects: EffectsFile { schema_version: canvas_proto::config::EFFECTS_SCHEMA, ..EffectsFile::default() },
+        fans: canvas_proto::config::FansFile::default(),
+        displays: Vec::new(),
+        stacks: Vec::new(),
+        lights: None,
+        scenes: None,
+    };
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &serde_json::to_string(&bundle).unwrap()))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The migration ran with the route's device list: the keyboard's zone is a Grid light, not a
+    // Strip one, and the scene carries the layout's name.
+    let lights: canvas_proto::scene::LightsFile =
+        serde_json::from_slice(&std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).unwrap())
+            .expect("the import wrote lights.json");
+    let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the keyboard's zone is a light");
+    assert_eq!(kb.arrangement, Arrangement::Grid, "the daemon's devices reached the migration");
+    assert_eq!(app.store.read().await.scenes.scenes[0].name, "Gaming", "the store the route swapped in holds the scenes");
+
+    // The export carries the scenes and the lights the import wrote.
+    let response = router.oneshot(request("GET", routes::CONFIG_EXPORT)).await.expect("the router answers");
+    let exported = json(response).await;
+    assert_eq!(exported["scenes"]["scenes"][0]["name"], "Gaming", "the export carries the scenes: {exported}");
+    assert_eq!(exported["lights"]["lights"][0]["id"], "openrgb:kb#z0", "and the lights");
 }
 
 #[tokio::test]
