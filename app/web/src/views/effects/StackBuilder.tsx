@@ -366,6 +366,12 @@ export function StackBuilder({
         onCancelClash={() => saver.setClash(null)}
       />
 
+      {groupParam && !group && (
+        <p className="rule rule-warn" role="status">
+          That group is not in the active scene.
+        </p>
+      )}
+
       {load.phase === "error" ? (
         <div className="rd-stack-body" data-library={libraryMode}>
           <div className="rd-stack-main">

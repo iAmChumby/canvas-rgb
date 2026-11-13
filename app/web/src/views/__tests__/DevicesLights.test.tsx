@@ -40,6 +40,18 @@ afterEach(() => {
 });
 
 describe("a light's row on Devices", () => {
+  it("says a light with no LEDs is not sized, not zero LEDs", async () => {
+    window.history.replaceState({}, "", "/devices/?state=complete");
+    await act(async () => {
+      await refreshAll();
+    });
+    render(<DevicesView />);
+    await screen.findAllByTestId("device-card");
+    expect(screen.getAllByText("Not sized").length).toBeGreaterThan(0);
+    expect(document.body.textContent).not.toMatch(/\b0 LEDs\b/);
+    expect(document.body.textContent).not.toMatch(/\b0–240\b/);
+  });
+
   it("sets ring and reversed through the lights route", async () => {
     window.history.replaceState({}, "", "/devices/");
     await act(async () => {

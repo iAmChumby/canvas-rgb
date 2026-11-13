@@ -65,7 +65,7 @@ function labelRoom(b: LabelBox, stageW: number): number {
   const room = labelEnd(b) ? (b.x + b.width) * unit : (CANVAS_W - b.x) * unit;
   // A whole-canvas frame's label sits at the stage's top-left, under the Make rectangle key:
   // it stops before the key instead of running beneath it (a 390 stage is 340 px wide).
-  const cap = labelInside(b) ? Math.max(80, stageW - 118) : 260;
+  const cap = labelInside(b) ? Math.max(80, stageW - 150) : 260;
   return Math.max(48, Math.min(cap, Math.floor(room - 4)));
 }
 

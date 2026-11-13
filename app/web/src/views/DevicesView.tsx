@@ -619,7 +619,13 @@ export function DevicesView() {
                   {one && <ZoneStrip zone={one} />}
                   {one && (
                     <span className="zone-strip-count">
-                      <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
+                      {one.led_count === 0 ? (
+                        <span className="mute">Not sized</span>
+                      ) : (
+                        <>
+                          <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
+                        </>
+                      )}
                     </span>
                   )}
                   {(() => {
@@ -697,8 +703,14 @@ export function DevicesView() {
                         </span>
                         <ZoneStrip zone={z} />
                         <span className="zone-strip-count">
-                          <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
-                          {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
+                          {z.led_count === 0 ? (
+                            <span className="mute">Not sized</span>
+                          ) : (
+                            <>
+                              <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
+                              {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
+                            </>
+                          )}
                         </span>
                         <span className="zone-strip-size">
                           {z.resizable && (

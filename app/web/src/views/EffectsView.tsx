@@ -74,13 +74,25 @@ export function EffectsView() {
       (status?.active_effect ? [status.active_effect] : []),
     [status],
   );
-  const activeId = activeEffects[0] ?? null;
   // The groups "Play on …" offers: the active scene's, in its order.
   const scenesAnswer = useSnap((s) => s.scenes);
-  const groups = useMemo(
-    () => scenesAnswer?.scenes.find((s) => s.id === scenesAnswer.active)?.groups ?? [],
+  const scenesError = useSnap((s) => s.scenesError);
+  const groupsKnown = scenesAnswer !== null || scenesError !== null;
+  const activeScene = useMemo(
+    () => scenesAnswer?.scenes.find((s) => s.id === scenesAnswer.active) ?? null,
     [scenesAnswer],
   );
+  const groups = activeScene?.groups ?? [];
+  const playedGroups = useMemo(
+    () => groups.filter((g) => g.plays.type === "effect"),
+    [groups],
+  );
+  const playingIds = useMemo(
+    () => new Set(playedGroups.flatMap((g) => (g.plays.type === "effect" ? [g.plays.effect] : []))),
+    [playedGroups],
+  );
+  const firstPlaying = playedGroups[0]?.plays.type === "effect" ? playedGroups[0].plays.effect : null;
+  const activeId = firstPlaying ?? activeEffects[0] ?? null;
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("effects"));
   const [filter, setFilter] = useState<"all" | "favorites">("all");
@@ -103,6 +115,32 @@ export function EffectsView() {
   const setSelectedId = setPicked;
   const [loaded, setLoaded] = useState<{ id: string; detail: EffectDetail } | null>(null);
   const [values, setValues] = useState<Values>({});
+  // A stack counts as an HTML effect when one of its layers is one (the daemon's
+  // `stack_has_html`): Play on then offers one group at a time.
+  const [htmlStack, setHtmlStack] = useState<{ name: string; html: boolean } | null>(null);
+  const stackName = selectedId?.startsWith("stack:") ? selectedId.slice("stack:".length) : null;
+  const stackHtml = stackName !== null && htmlStack?.name === stackName ? htmlStack.html : false;
+  useEffect(() => {
+    if (!stackName) return;
+    let stop = false;
+    api
+      .stack(stackName)
+      .then((detail) => {
+        if (stop) return;
+        setHtmlStack({
+          name: stackName,
+          html: detail.stack.layers.some((layer) => layer.effect.startsWith("html:")),
+        });
+      })
+      .catch(() => {
+        // The stack builder says why its own read failed; here the stack is played like one
+        // effect and the daemon refuses a second HTML group if it must.
+        if (!stop) setHtmlStack({ name: stackName, html: false });
+      });
+    return () => {
+      stop = true;
+    };
+  }, [stackName]);
   // The detail read's error and a write's error are separate: a successful read clears
   // only the read error, so it cannot hide a failed write's message (#156).
   const [readError, setReadError] = useState<string | null>(null);
@@ -651,7 +689,20 @@ export function EffectsView() {
   // is never blank; the Activate button waits for the real one.
   const detail = loaded ? loaded.detail : null;
   const stale = loaded !== null && loaded.id !== selectedId;
-  const running = selectedId !== null && selectedId === activeId;
+  /** The groups of the active scene that play this effect, by name. */
+  const playingHere =
+    selectedId === null
+      ? []
+      : playedGroups.flatMap((g) =>
+          g.plays.type === "effect" && g.plays.effect === selectedId ? [g.name] : [],
+        );
+  // A daemon without scenes has no groups to read: its one active effect is the running one.
+  const running =
+    selectedId !== null &&
+    (playingHere.length > 0 ||
+      (scenesAnswer === null && activeEffects.includes(selectedId)));
+  const isPlaying = (id: string) =>
+    playingIds.has(id) || (scenesAnswer === null && activeEffects.includes(id));
   const needsInput = detail ? detail.schema.needs.screen || detail.schema.needs.audio : false;
   // Nothing can run until there is a scene with a group to play on.
   const noScene = status !== null && !status.active_scene;
@@ -799,7 +850,7 @@ export function EffectsView() {
                   </span>
                   {html && <Chip html>HTML</Chip>}
                   {stackEffect && <Chip className="chip-stack">Stack</Chip>}
-                  {e.id === activeId && (
+                  {isPlaying(e.id) && (
                     <span className="effect-card-badge">
                       <span className="effect-card-badge-dot" aria-hidden="true" />
                       running
@@ -886,8 +937,9 @@ export function EffectsView() {
                 <PlayOn
                   effect={detail.schema.id}
                   groups={groups}
-                  html={selectedId?.startsWith("html:") ?? false}
-                  running={running}
+                  playing={playingHere}
+                  groupsKnown={groupsKnown}
+                  html={(selectedId?.startsWith("html:") ?? false) || stackHtml}
                   busy={activating}
                   disabled={stale}
                   pulseRef={applyPulseEl}
@@ -1014,8 +1066,9 @@ export function EffectsView() {
                   <PlayOn
                     effect={detail.schema.id}
                     groups={groups}
-                    html={false}
-                    running={running}
+                    playing={playingHere}
+                    groupsKnown={groupsKnown}
+                    html={stackHtml}
                     busy={activating}
                     disabled={stale}
                     size="sm"

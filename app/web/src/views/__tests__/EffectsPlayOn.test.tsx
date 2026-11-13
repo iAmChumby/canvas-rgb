@@ -6,6 +6,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
+import { ApiFailure } from "@/lib/errors";
 import { getSnap, patchSnap, refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -23,7 +24,7 @@ vi.mock("next/link", () => ({
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
-const URL = "/effects/?state=html";
+const URL = "/effects/?state=html,stack";
 
 beforeAll(() => {
   // The demo backend reads its scenario once, on its first answer: every test uses this URL.
@@ -56,12 +57,12 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-function group(id: string, name: string): Group {
+function group(id: string, name: string, plays?: string): Group {
   return {
     id,
     name,
     members: ["openrgb:strip-1#z0"],
-    plays: { type: "off" },
+    plays: plays ? { type: "effect", effect: plays, props: {} } : { type: "off" },
     mode: "flow_across",
     brightness: 100,
   };
@@ -105,7 +106,7 @@ async function mount(active: string) {
 
 describe("Play on …", () => {
   it("opens the effect and group a scene asked for, and offers the way back", async () => {
-    window.history.replaceState({}, "", "/effects/?effect=aurora&group=g-case&state=html");
+    window.history.replaceState({}, "", "/effects/?effect=aurora&group=g-case&state=html,stack");
     await act(async () => {
       await refreshAll();
     });
@@ -162,6 +163,147 @@ describe("Play on …", () => {
       fireEvent.click(within(dialog).getByRole("button", { name: "Play" }));
     });
     await waitFor(() => expect(spy).toHaveBeenCalledWith("aurora", { props: {}, preset: null, groups: ["Memory"] }));
+  });
+
+  it("plays an effect that is already on one group on another group too", async () => {
+    window.history.replaceState({}, "", URL);
+    await mount("aurora");
+    patchSnap({
+      scenes: scenesWith([
+        group("g-case", "Case fans", "aurora"),
+        group("g-ram", "Memory"),
+        group("g-gpu", "Graphics card"),
+        group("g-desk", "Cooler and desk"),
+      ]),
+    });
+    const play = await screen.findByRole("button", { name: "Playing on 1 of 4 · Play on …" });
+    expect(play.getAttribute("aria-disabled")).toBeNull();
+    fireEvent.click(play);
+    const dialog = await screen.findByRole("dialog", { name: "Play on" });
+    // The group already playing it is ticked, marked, and cannot be unticked.
+    const caseFans = within(dialog).getByRole("checkbox", { name: "Case fans" });
+    expect(caseFans.getAttribute("aria-checked")).toBe("true");
+    expect(caseFans.getAttribute("aria-disabled")).toBe("true");
+    fireEvent.click(caseFans);
+    expect(caseFans.getAttribute("aria-checked")).toBe("true");
+    expect(within(dialog).getByText("Playing")).toBeTruthy();
+    const spy = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
+    fireEvent.click(within(dialog).getByRole("checkbox", { name: "Memory" }));
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Play" }));
+    });
+    // Only the group that was picked: the playing group keeps its own values.
+    await waitFor(() => expect(spy).toHaveBeenCalledWith("aurora", { props: {}, preset: null, groups: ["Memory"] }));
+  });
+
+  it("opens on every group and sends every name when nothing is changed", async () => {
+    window.history.replaceState({}, "", URL);
+    await mount("aurora");
+    patchSnap({
+      scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory"), group("g-gpu", "Graphics card")]),
+    });
+    const play = await screen.findByRole("button", { name: "Play on …" });
+    const spy = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
+    fireEvent.click(play);
+    const dialog = await screen.findByRole("dialog", { name: "Play on" });
+    expect(within(dialog).getByRole("checkbox", { name: "Every group" }).getAttribute("aria-checked")).toBe("true");
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Play" }));
+    });
+    await waitFor(() =>
+      expect(spy).toHaveBeenCalledWith("aurora", {
+        props: {},
+        preset: null,
+        groups: ["Case fans", "Memory", "Graphics card"],
+      }),
+    );
+  });
+
+  it("shows the daemon's message when it refuses a second HTML group", async () => {
+    window.history.replaceState({}, "", URL);
+    await mount("aurora");
+    patchSnap({
+      scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]),
+    });
+    const spy = vi
+      .spyOn(api, "activateEffect")
+      .mockRejectedValue(
+        new ApiFailure(422, "validation", "at most 1 group of a scene may play an HTML effect (a stack with an HTML layer counts); 2 do"),
+      );
+    const play = await screen.findByRole("button", { name: "Play on …" });
+    fireEvent.click(play);
+    const dialog = await screen.findByRole("dialog", { name: "Play on" });
+    await act(async () => {
+      fireEvent.click(within(dialog).getByRole("button", { name: "Play" }));
+    });
+    await waitFor(() => expect(spy).toHaveBeenCalled());
+    expect(
+      (await screen.findByText(/at most 1 group of a scene may play an HTML effect/)).textContent,
+    ).toContain("2 do");
+  });
+
+  it("marks a stack with an HTML layer as one HTML effect", async () => {
+    window.history.replaceState({}, "", "/effects/?state=complete,stack");
+    await act(async () => {
+      await refreshAll();
+    });
+    patchSnap({
+      status: {
+        ...getSnap().status!,
+        active_scene: { id: "s", name: "Scene" },
+        active_effect: "stack:Sunset glow",
+        active_effects: ["stack:Sunset glow"],
+      },
+      scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]),
+    });
+    vi.spyOn(api, "stack").mockResolvedValue({
+      stack: { id: "stack:Sunset glow", layers: [{ effect: "html:fixture-sample" }] },
+      layers: [],
+    } as never);
+    render(
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <StripSlot kind="actions" />
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Sunset glow" })).toBeTruthy();
+    const play = (await screen.findAllByRole("button", { name: "Play on …" }))[0]!;
+    fireEvent.click(play);
+    const dialog = await screen.findByRole("dialog", { name: "Play on" });
+    expect(await within(dialog).findByText("One HTML effect at a time")).toBeTruthy();
+    expect(within(dialog).queryByRole("checkbox", { name: "Every group" })).toBeNull();
+  });
+
+  it("still plays on everything when the daemon has no scenes", async () => {
+    window.history.replaceState({}, "", URL);
+    await act(async () => {
+      await refreshAll();
+    });
+    patchSnap({
+      scenes: null,
+      scenesError: "404 no scene route",
+      status: {
+        ...getSnap().status!,
+        active_scene: null,
+        active_effect: "aurora",
+        active_effects: ["aurora"],
+      },
+    });
+    render(
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <StripSlot kind="actions" />
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    const spy = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
+    const play = await screen.findByRole("button", { name: "Play" });
+    expect(play.getAttribute("aria-disabled")).toBeNull();
+    await act(async () => {
+      fireEvent.click(play);
+    });
+    await waitFor(() => expect(spy).toHaveBeenCalledWith("aurora", { props: {}, preset: null }));
   });
 
   it("an HTML effect in a two-group scene offers single groups only", async () => {

@@ -2749,6 +2749,8 @@ button.chip:hover {
       padding: var(--s2);
     }
 
+    /* The starting-values line is one more row than the inspector had at this size; the property
+       rows give it the room back, so nothing scrolls at 1280x860. */
     .rd-effects .rd-eff-inspector .panel-head {
       margin-bottom: var(--s2);
     }
@@ -2764,6 +2766,22 @@ button.chip:hover {
 
     .rd-effects .preset-note {
       margin-top: 0;
+    }
+  }
+
+  /* A short window (1024x768): one more notch, so the Properties panel ends inside the
+     inspector's height and the starting-values line costs no scroll. */
+  @container page (max-height: 700px) {
+    .rd-effects .rd-eff-inspector {
+      gap: var(--s1);
+    }
+
+    .rd-effects .rd-eff-inspector .panel {
+      padding: var(--s1) var(--s2);
+    }
+
+    .rd-effects .rd-eff-inspector .prop-item {
+      min-height: 32px;
     }
   }
 }
@@ -3269,6 +3287,21 @@ button.chip:hover {
 /* Play on …: the groups of the active scene, and every group as one choice. */.play-on-anchor {
   display: inline-flex;
   min-width: 0;
+  max-width: 100%;
+}
+
+/* The key's words shorten with an ellipsis when the inspector is narrow: the popover still names
+   every group, and the count in the label still says how many are playing. */
+.play-on-anchor .btn {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.play-on-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* The phone sheet's way back to the group it came from. */
@@ -3324,10 +3357,17 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* A group that already plays the effect: marked, and its box cannot be unticked here. */
+.play-on-playing {
+  color: var(--ok);
+  font-size: var(--t14);
+}
+
 /* The one line under an effect's controls: they are starting values, not a group's own. */
 .eff-starting-values {
-  margin: 10px 0 0;
+  margin: 6px 0 0;
   font-size: var(--t14);
+  line-height: 1.3;
 }
 
 /* New effect: a copy first, a blank second (D2.3). */
@@ -7625,6 +7665,18 @@ button.chip:hover {
 .rd-stack-side {
   gap: var(--s3);
   overflow: hidden;
+}
+
+/* The picked layer's panel takes the height that is left and scrolls its own body; the presets
+   below it keep their height. At 1440x900 the presets used to be pushed past the bottom of the
+   window by the inspector's full length. */
+.rd-stacks .rd-stack-side > .rd-layer-edit {
+  flex: 1 1 auto;
+  min-height: 180px;
+}
+
+.rd-stacks .rd-stack-side > .panel:not(.rd-layer-edit) {
+  flex: 0 0 auto;
 }
 
 /* The live picture: the panel keeps its head and foot, the canvas takes the rest. */

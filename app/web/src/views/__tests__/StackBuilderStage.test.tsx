@@ -8,6 +8,8 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
+import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
+import { canvasWith } from "@/lib/__tests__/groupCanvasFixture";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 vi.mock("@/lib/stackPreview", async (importOriginal) => {
@@ -124,6 +126,17 @@ function dragOn(el: HTMLElement, from: [number, number], to: [number, number]) {
   });
 }
 
+const zoneLayer = {
+  id: "l1",
+  name: "Layer l1",
+  effect: "solid",
+  props: {},
+  area: { kind: "zone", device: "kb:1", zone: 2 },
+  blend: "normal",
+  opacity: 100,
+  visible: true,
+} as const;
+
 describe("the stage", () => {
   it("draws the group it is tuning and names it", async () => {
     await refreshAll();
@@ -156,6 +169,48 @@ describe("the stage", () => {
     const modes = within(picker).getAllByRole("radio").map((el) => el.textContent);
     expect(modes).toEqual(["Whole canvas", "Device", "Rectangle"]);
     expect(within(picker).queryByRole("radio", { name: "Zone" })).toBeNull();
+  });
+
+  it("keeps a saved zone area as a zone, and says which one", async () => {
+    const canvas = canvasWith([
+      { id: "kb:1#z2", label: "Keyboard · Zone 3", device: "kb:1", zone: 2, x: 0, y: 0, width: 100, height: 50 },
+    ]);
+    const onUse = vi.fn();
+    render(
+      <StackAreaPicker
+        layer={zoneLayer}
+        canvas={canvas}
+        devices={null}
+        onUse={onUse}
+        onClose={() => undefined}
+      />,
+    );
+    const picker = await screen.findByRole("dialog", { name: "Area for Layer l1" });
+    const zone = within(picker).getByRole("radio", { name: "Zone" });
+    expect(zone.getAttribute("aria-checked")).toBe("true");
+    expect(within(picker).getAllByText("Keyboard · Zone 3").length).toBeGreaterThan(0);
+    fireEvent.click(within(picker).getByRole("button", { name: "Use this area" }));
+    expect(onUse).toHaveBeenCalledWith({ kind: "zone", device: "kb:1", zone: 2 });
+  });
+
+  it("says when the group the builder was opened for is not in the scene", async () => {
+    await refreshAll();
+    window.history.replaceState(
+      {},
+      "",
+      "/effects/?stack=Sunset%20glow&state=complete,stack&group=gone",
+    );
+    render(
+      <StripSlotsProvider>
+        <div className="strip-slots">
+          <StripSlot kind="title" />
+          <StripSlot kind="actions" />
+        </div>
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    await screen.findByTestId("stack-builder");
+    expect(await screen.findByText("That group is not in the active scene.")).toBeTruthy();
   });
 
   it("draws a frame for every visible layer, and only the picked one is the solid frame", async () => {
