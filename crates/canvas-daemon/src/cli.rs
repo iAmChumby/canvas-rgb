@@ -6,11 +6,29 @@
 
 use clap::{Args, Parser, Subcommand, ValueEnum};
 use std::collections::BTreeMap;
+use std::time::Duration;
 
 use canvas_proto::peripheral::PeripheralAccess;
 use canvas_proto::traits::Effect;
 
 use crate::peer;
+
+/// The most a request may take to reach the daemon. The tray's client uses the same 5 s
+/// (`app/src-tauri/src/api.rs`): the API is on the loopback, so anything slower is down.
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
+
+/// The most one request may take in all, so a daemon that accepts a connection and never
+/// answers cannot hang the command (#328: an import sat for twenty minutes). An import is
+/// parsed and installed by the daemon, so this is far more than a status read needs.
+const REQUEST_LIMIT: Duration = Duration::from_secs(120);
+
+/// How often a request that could not reach the daemon is made, and the pause between the
+/// attempts. Nothing was sent by a failed connect, so a repeat cannot act twice; the machine
+/// drops loopback connects under load, and the operating system spends about 21 s on one
+/// before giving up (#328). Three attempts of [`CONNECT_TIMEOUT`] each, plus the pauses, stay
+/// under 20 s in all.
+const CONNECT_ATTEMPTS: u32 = 3;
+const CONNECT_RETRY_PAUSE: Duration = Duration::from_millis(250);
 /// The CLI's commands.
 #[derive(Debug, Parser)]
 #[command(name = "canvas-rgb", version, about = "canvas-rgb: lighting and fan control")]
@@ -674,12 +692,18 @@ pub fn write_tile_sheet(path: &std::path::Path, body: &[u8]) -> Result<(), Strin
 /// A CLI error.
 #[derive(Debug, thiserror::Error)]
 pub enum CliError {
+    /// Nothing answered: the daemon is not running, or the port refused the connection.
+    /// Nothing was sent, so the token is safe.
     #[error("the daemon is not running (nothing answers on {0})")]
     NotRunning(String),
     /// The daemon is not running, or the port is held by another program: the API token
     /// is not sent to it.
     #[error("{0}")]
     NotTrusted(String),
+    /// The connection was made, and the daemon did not answer inside its request limit. The
+    /// request may have reached it: whether it acted is not known (#328).
+    #[error("{0}")]
+    NoAnswer(String),
     #[error("the API returned {status}: {message}")]
     Api { status: u16, message: String },
     #[error("{0}")]
@@ -702,11 +726,90 @@ impl CliError {
     /// The exit code for this error.
     pub fn exit_code(&self) -> i32 {
         match self {
-            CliError::NotRunning(_) | CliError::NotTrusted(_) => 2,
+            CliError::NotRunning(_) | CliError::NotTrusted(_) | CliError::NoAnswer(_) => 2,
             CliError::Api { .. } => 1,
             CliError::Other(_) => 1,
         }
     }
+}
+
+/// What a single request ended with, before it is turned into a message.
+enum Attempt {
+    /// The request never got an answer: nothing connected, or no reply inside the limit. The
+    /// error is kept whole so a connect failure can be told from the rest and repeated.
+    NoReply(ureq::Error),
+    /// The daemon answered, and the answer is an error for the caller.
+    Answer(CliError),
+}
+
+/// What a failed request means, and what the command says about it (#328).
+///
+/// Three cases, because they are three different things to a person:
+///
+/// - nothing answered (a refused connection, or no connection inside [`CONNECT_TIMEOUT`]):
+///   the daemon is not running, and nothing was sent;
+/// - the connection was made and the daemon did not answer inside `limit`: the daemon is
+///   there but stuck, and whether it acted is not known;
+/// - anything else keeps the transport's own text.
+fn transport_error(error: ureq::Error, base: &str, limit: Option<Duration>) -> CliError {
+    if is_connect_failure(&error) {
+        return CliError::NotRunning(base.to_string());
+    }
+    match error {
+        // A phase timeout is the limit firing: the daemon took the connection and did not
+        // answer inside it.
+        ureq::Error::Timeout(_) => CliError::NoAnswer(format!(
+            "the daemon did not answer within {} ({base})",
+            limit_text(limit)
+        )),
+        other => CliError::Other(other.to_string()),
+    }
+}
+
+/// True when the request never reached anything: no connection was made, so nothing was
+/// sent. Only this failure is safe to try again, and only this one is "the daemon is not
+/// running". A reset or a timeout while a request is in flight is a different thing: the
+/// daemon may have acted, so it is not repeated.
+fn is_connect_failure(error: &ureq::Error) -> bool {
+    match error {
+        ureq::Error::Timeout(ureq::Timeout::Connect) => true,
+        ureq::Error::ConnectionFailed => true,
+        ureq::Error::Io(cause) => matches!(
+            cause.kind(),
+            std::io::ErrorKind::ConnectionRefused
+                | std::io::ErrorKind::NotConnected
+                | std::io::ErrorKind::AddrNotAvailable
+                | std::io::ErrorKind::HostUnreachable
+                | std::io::ErrorKind::NetworkUnreachable
+        ),
+        _ => false,
+    }
+}
+
+/// A request limit as a message: "120 s", or "300 ms" for a test's short one.
+fn limit_text(limit: Option<Duration>) -> String {
+    match limit {
+        Some(limit) if limit.as_secs() > 0 => format!("{} s", limit.as_secs()),
+        Some(limit) => format!("{} ms", limit.as_millis()),
+        None => "its limit".to_string(),
+    }
+}
+
+/// The HTTP agent every command uses. 4xx and 5xx come back as responses, so the API's own
+/// message is shown; and every request is bounded, so one that cannot reach the daemon or is
+/// never answered fails instead of waiting on the machine (#328).
+fn bounded_agent() -> ureq::Agent {
+    bounded_agent_with(CONNECT_TIMEOUT, REQUEST_LIMIT)
+}
+
+/// As [`bounded_agent`], with the limits a test needs to reach them in a second.
+fn bounded_agent_with(connect: Duration, global: Duration) -> ureq::Agent {
+    ureq::Agent::config_builder()
+        .http_status_as_error(false)
+        .timeout_connect(Some(connect))
+        .timeout_global(Some(global))
+        .build()
+        .into()
 }
 
 /// The API client the commands use.
@@ -745,15 +848,42 @@ impl Client {
                 token_path.display()
             )));
         }
-        let agent = ureq::Agent::config_builder()
-            .http_status_as_error(false)
-            .build()
-            .into();
+        let agent = bounded_agent();
         Ok(Self { base, token, agent })
     }
 
     /// Sends a request and returns the body.
+    ///
+    /// A connect failure is tried again, up to [`CONNECT_ATTEMPTS`] times: nothing was sent, so
+    /// a repeat cannot act twice, and the machine drops loopback connects under load (#328).
+    /// Every other failure is reported at once.
     pub fn request(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+        let limit = self.agent.config().timeouts().global;
+        let mut attempt = 1;
+        loop {
+            match self.attempt(method, path, body) {
+                Ok(answer) => return Ok(answer),
+                Err(Attempt::Answer(error)) => return Err(error),
+                Err(Attempt::NoReply(error)) => {
+                    if is_connect_failure(&error) && attempt < CONNECT_ATTEMPTS {
+                        eprintln!(
+                            "canvas-rgb: could not reach the daemon at {}; trying again (attempt {} of {})",
+                            self.base, attempt, CONNECT_ATTEMPTS
+                        );
+                        attempt += 1;
+                        std::thread::sleep(CONNECT_RETRY_PAUSE);
+                        continue;
+                    }
+                    return Err(transport_error(error, &self.base, limit));
+                }
+            }
+        }
+    }
+
+    /// One request, with no repeat: send it, read the whole body, and turn the answer into a
+    /// value. A transport failure comes back whole, so [`Client::request`] can tell a connect
+    /// failure (safe to repeat: nothing was sent) from a reply that never came.
+    fn attempt(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, Attempt> {
         let url = format!("{}{}", self.base.trim_end_matches('/'), path);
         let auth = format!("Bearer {}", self.token);
 
@@ -792,30 +922,30 @@ impl Client {
                 .send(text.as_bytes()),
             ("DELETE", None) => self.agent.delete(&url).header("Authorization", &auth).call(),
             (other, _) => {
-                return Err(CliError::Other(format!("unsupported HTTP method {other}")));
+                return Err(Attempt::Answer(CliError::Other(format!(
+                    "unsupported HTTP method {other}"
+                ))));
             }
         };
 
-        match response {
-            Ok(mut response) => {
-                let status = response.status().as_u16();
-                let text = response.body_mut().read_to_string().unwrap_or_default();
-                if status >= 400 {
-                    // The API answers with `{ "error": ..., "message": ... }`.
-                    let message = serde_json::from_str::<serde_json::Value>(&text)
-                        .ok()
-                        .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
-                        .unwrap_or(text);
-                    return Err(CliError::Api { status, message });
-                }
-                if text.trim().is_empty() {
-                    return Ok(serde_json::Value::Null);
-                }
-                serde_json::from_str(&text).or(Ok(serde_json::Value::String(text)))
-            }
-            // The connection failed: the daemon is not running.
-            Err(_) => Err(CliError::NotRunning(self.base.clone())),
+        let mut response = response.map_err(Attempt::NoReply)?;
+
+        let status = response.status().as_u16();
+        // A body that cannot be read is a failed request, never an empty answer: half an answer
+        // is not an answer (#328).
+        let text = response.body_mut().read_to_string().map_err(Attempt::NoReply)?;
+        if status >= 400 {
+            // The API answers with `{ "error": ..., "message": ... }`.
+            let message = serde_json::from_str::<serde_json::Value>(&text)
+                .ok()
+                .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
+                .unwrap_or(text);
+            return Err(Attempt::Answer(CliError::Api { status, message }));
         }
+        if text.trim().is_empty() {
+            return Ok(serde_json::Value::Null);
+        }
+        serde_json::from_str(&text).or(Ok(serde_json::Value::String(text)))
     }
 }
 
@@ -1308,6 +1438,135 @@ mod tests {
         assert_eq!(key, "color");
         assert_eq!(value, "#ff0000");
         assert!(parse_prop_pair("nope").is_err());
+    }
+
+    /// #328: a request that cannot reach the daemon, or is never answered, used to wait on
+    /// the operating system's own timeout (about 21 s for a dropped connect) or for ever.
+    /// The bounds are what end that wait, so they are pinned here.
+    #[test]
+    fn the_client_bounds_every_request_so_a_wedged_daemon_cannot_hang_it() {
+        let timeouts = bounded_agent().config().timeouts();
+        assert_eq!(timeouts.connect, Some(CONNECT_TIMEOUT));
+        assert_eq!(timeouts.global, Some(REQUEST_LIMIT));
+    }
+
+    /// A client for the transport tests: the port is the subject, so the ownership check in
+    /// `Client::new` (which needs a listener named `canvas-rgbd.exe`) is not on the path.
+    fn client_for(port: u16, agent: ureq::Agent) -> Client {
+        Client {
+            base: format!("http://127.0.0.1:{port}"),
+            token: "0123456789abcdef".to_string(),
+            agent,
+        }
+    }
+
+    /// A port nothing listens on, for a refused connect.
+    fn closed_port() -> u16 {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        drop(listener);
+        port
+    }
+
+    /// Runs `answer` on the first connection to `listener`, and gives up if nothing connects
+    /// within 2 s. A client whose whole budget covers the connect can give up before it
+    /// connects, and a thread blocked in `accept` would then hold the test's `join` for ever.
+    fn serve_once(
+        listener: std::net::TcpListener,
+        answer: impl FnOnce(std::net::TcpStream) + Send + 'static,
+    ) -> std::thread::JoinHandle<()> {
+        std::thread::spawn(move || {
+            listener.set_nonblocking(true).expect("the listener is non-blocking");
+            let started = std::time::Instant::now();
+            while started.elapsed() < Duration::from_secs(2) {
+                if let Ok((stream, _)) = listener.accept() {
+                    answer(stream);
+                    return;
+                }
+                std::thread::sleep(Duration::from_millis(5));
+            }
+        })
+    }
+
+    /// #328: nothing answered, so nothing was sent, and the message says that -- never that
+    /// the daemon timed out.
+    #[test]
+    fn a_refused_connect_says_the_daemon_is_not_running() {
+        let port = closed_port();
+        let error = client_for(port, bounded_agent())
+            .request("GET", "/api/v1/status", None)
+            .expect_err("nothing listens there");
+        assert_eq!(
+            error.to_string(),
+            format!("the daemon is not running (nothing answers on http://127.0.0.1:{port})")
+        );
+        assert_eq!(error.exit_code(), 2);
+    }
+
+    /// #328: the OS spends about 21 s on a dropped connect before giving up. The CLI's own
+    /// connect limit is what ends that wait, and its failure is the "not running" one.
+    #[test]
+    fn a_connect_timeout_says_the_daemon_is_not_running() {
+        let error = transport_error(
+            ureq::Error::Timeout(ureq::Timeout::Connect),
+            "http://127.0.0.1:9430",
+            Some(REQUEST_LIMIT),
+        );
+        assert!(!matches!(error, CliError::NoAnswer(_)), "{error}");
+        assert!(matches!(error, CliError::NotRunning(_)), "{error}");
+        assert_eq!(
+            error.to_string(),
+            "the daemon is not running (nothing answers on http://127.0.0.1:9430)"
+        );
+    }
+
+    /// #328: a daemon that took the connection and did not answer is a different fault from
+    /// one that is not running, and the message names the limit that ended the wait.
+    #[test]
+    fn a_silent_daemon_says_it_did_not_answer_within_the_limit() {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        // Take the connection and answer nothing at all, for longer than the client's budget.
+        let server = serve_once(listener, |stream| {
+            std::thread::sleep(Duration::from_secs(2));
+            drop(stream);
+        });
+        let agent = bounded_agent_with(CONNECT_TIMEOUT, Duration::from_millis(300));
+        let error = client_for(port, agent)
+            .request("GET", "/api/v1/status", None)
+            .expect_err("the daemon never answered");
+        assert!(
+            error.to_string().contains("did not answer within 300 ms"),
+            "{error}"
+        );
+        assert!(matches!(error, CliError::NoAnswer(_)), "{error}");
+        assert_eq!(error.exit_code(), 2);
+        server.join().ok();
+    }
+
+    /// #328: a body that cannot be read is a failed command, not an empty answer. The limit
+    /// makes a body cut short reachable, so it must not read as a 2xx with no content.
+    #[test]
+    fn a_body_that_cannot_be_read_fails_the_command() {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind an ephemeral port");
+        let port = listener.local_addr().expect("the local address").port();
+        let server = serve_once(listener, |mut stream| {
+            let mut request = [0u8; 1024];
+            let _ = stream.read(&mut request);
+            // Promise 100 bytes and send 5, then close.
+            let _ = stream.write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\nshort");
+        });
+        let error = client_for(port, bounded_agent())
+            .request("GET", "/api/v1/status", None)
+            .expect_err("the body was cut short");
+        assert_ne!(error.exit_code(), 0);
+        assert!(
+            !error.to_string().starts_with("the daemon is not running"),
+            "the connection was made: {error}"
+        );
+        assert!(error.to_string().contains("io"), "the transport's own text: {error}");
+        server.join().ok();
     }
 
     #[test]
