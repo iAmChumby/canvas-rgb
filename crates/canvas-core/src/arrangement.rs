@@ -548,7 +548,7 @@ mod tests {
 
     #[test]
     fn a_grid_light_maps_only_the_leds_of_its_slice() {
-        let map: Vec<Option<u32>> = (0..16).map(|i| Some(i)).collect();
+        let map: Vec<Option<u32>> = (0..16).map(Some).collect();
         let devices =
             vec![device("d0", vec![zone(0, ZoneKind::Matrix { width: 4, height: 4, map }, 16)])];
         let mut sliced = light("a", "d0", 0, Arrangement::Grid);
@@ -597,6 +597,44 @@ mod tests {
                             "{what}"
                         );
                     }
+                }
+            }
+        }
+    }
+
+    /// The same property on a real matrix zone, so the grid's own cells are checked too:
+    /// on a linear zone a Grid light falls back to a strip and never reaches that code.
+    #[test]
+    fn every_matrix_sample_stays_inside_the_canvas() {
+        for (cols, rows) in [(1u32, 1u32), (2, 2), (3, 5), (10, 10), (17, 17), (25, 12)] {
+            let n = cols * rows;
+            if n > 300 {
+                continue;
+            }
+            // The zone's own map: cell (row, col) holds the LED of that number.
+            let map: Vec<Option<u32>> = (0..n).map(Some).collect();
+            let devices = vec![device(
+                "d0",
+                vec![zone(0, ZoneKind::Matrix { width: cols, height: rows, map }, n)],
+            )];
+            let mut light = light("a", "d0", 0, Arrangement::Grid);
+            light.reversed = n % 2 == 0;
+            for mode in [GroupMode::FlowAcross, GroupMode::EachItsOwn] {
+                let plan = build_group_plan(
+                    &ids(&["a"]),
+                    mode,
+                    std::slice::from_ref(&light),
+                    &devices,
+                );
+                for led in &plan.lights[0].leds {
+                    let [x0, y0, x1, y1] = led.bounds;
+                    let what = format!("{cols}x{rows} {mode:?} {led:?}");
+                    assert!(x0 >= 0.0 && x1 <= CANVAS_WIDTH as f32, "{what}");
+                    assert!(y0 >= 0.0 && y1 <= CANVAS_HEIGHT as f32, "{what}");
+                    assert!(x1 - x0 >= 1.0, "{what}");
+                    assert!(y1 - y0 >= 1.0, "{what}");
+                    assert!(led.center_x >= 0.0 && led.center_x <= CANVAS_WIDTH as f32, "{what}");
+                    assert!(led.center_y >= 0.0 && led.center_y <= CANVAS_HEIGHT as f32, "{what}");
                 }
             }
         }
