@@ -931,6 +931,68 @@ describe("useScene", () => {
     expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
   });
 
+  it("after a conflict, undo takes back the kept edit and never the other window's change", async () => {
+    const other = gaming();
+    other.name = "Gaming (other window)";
+    other.rev = 9;
+    const otherAnswer: ScenesResponse = {
+      active: other.id,
+      scenes: DEMO_SCENES.scenes.map((s) => (s.id === other.id ? other : s)),
+      group_states: other.groups.map((g) => ({ id: g.id, failed: null })),
+    };
+    // The first read is this window's; the read after the refusal waits, so the second edit lands
+    // while the daemon's scene is being read.
+    let release!: (value: ScenesResponse) => void;
+    api.scenes.list
+      .mockResolvedValueOnce(answer())
+      .mockImplementationOnce(
+        () =>
+          new Promise<ScenesResponse>((resolve) => {
+            release = resolve;
+          }),
+      )
+      .mockResolvedValue(otherAnswer);
+    api.scenes.put.mockRejectedValueOnce(new ApiFailure(409, "conflict", "the scene changed"));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "First";
+      }, "Rename");
+    });
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "Second";
+      }, "Rename again");
+    });
+    release(otherAnswer);
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(2));
+
+    // Undo takes back the kept edit: the other window's scene comes back, with the other window's name.
+    act(() => {
+      result.current.undo();
+    });
+    expect(api.scenes.put).toHaveBeenCalledTimes(3);
+    const [, undone] = api.scenes.put.mock.calls[2] as [string, { scene: Scene; expected_rev: number }];
+    expect(undone.scene.name).toBe("Gaming (other window)");
+
+    // Nothing of this window is left to take back: a second undo sends nothing, so the other
+    // window's rename stays.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    act(() => {
+      result.current.undo();
+    });
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+    });
+    expect(api.scenes.put).toHaveBeenCalledTimes(3);
+  });
+
   it("a failed write leaves nothing on the undo stack", async () => {
     api.scenes.put.mockRejectedValueOnce(new ApiFailure(500, "http", "the daemon said no"));
     const { result } = renderHook(() => useScene());

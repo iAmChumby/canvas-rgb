@@ -192,6 +192,17 @@ function withChanges(scene: Scene, changes: Change[]): Scene {
   return next;
 }
 
+/** One undo step per change, each restoring the scene as it stood just before that change. */
+function undoStepsFor(base: Scene, changes: Change[]): Entry[] {
+  const steps: Entry[] = [];
+  const state = clone(base);
+  for (const c of changes) {
+    steps.push({ scene: clone(state), label: c.label, changeId: c.id });
+    c.apply(state);
+  }
+  return steps;
+}
+
 /** The newer of what the daemon says and what a write of this window returned, for one scene. */
 function newest(server: Scene | null, saved: Scene | null, id: string | null): Scene | null {
   if (saved && saved.id === id && (!server || saved.rev > server.rev)) return saved;
@@ -444,11 +455,10 @@ export function useScene(): UseScene {
           const serverScene = getSnap().scenes?.scenes.find((s) => s.id === sceneId) ?? null;
           if (later.length > 0 && serverScene) {
             outgoing.current.set(sceneId, { scene: withChanges(serverScene, later), changes: later });
-            history.current.past.push({
-              scene: clone(serverScene),
-              label: later[0]!.label,
-              changeId: later[0]!.id,
-            });
+            // The kept edits get undo steps of their own, from the daemon's scene. The steps that
+            // the edits made while the answer was read pushed are dropped: they start from the old
+            // scene, and undoing one would take back the other window's change.
+            history.current = { ...history.current, past: undoStepsFor(serverScene, later), future: [] };
             error.current = CONFLICT_MESSAGE;
             publish();
             continue;
