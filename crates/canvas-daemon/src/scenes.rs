@@ -301,6 +301,11 @@ pub struct SceneRuntime {
     changed: tokio::sync::watch::Sender<u64>,
     /// How many effects the scene path has built, so a test can tell a rebuild from a keep.
     builds: std::sync::atomic::AtomicU64,
+    /// How many takeovers have landed: the generation of the takeover on the lights.
+    ///
+    /// A guard that is dropped with its debt unpaid compares this with what it saw: a takeover
+    /// that landed after it holds the lights now, and its own end puts the scene back.
+    takeovers: std::sync::atomic::AtomicU64,
     /// The editor windows watching the lights, and the one engine sink that feeds them all.
     pub feed: LightFeed,
 }
@@ -323,6 +328,7 @@ impl Default for SceneRuntime {
             applied: Mutex::new(None),
             changed: tokio::sync::watch::channel(0).0,
             builds: std::sync::atomic::AtomicU64::new(0),
+            takeovers: std::sync::atomic::AtomicU64::new(0),
             feed: LightFeed::default(),
         }
     }
@@ -354,6 +360,21 @@ impl SceneRuntime {
     /// Records what the engine holds.
     pub fn set_held(&self, held: Held) {
         *self.held.lock().unwrap_or_else(|e| e.into_inner()) = held;
+    }
+
+    /// Records that a takeover landed: what the engine holds, and the groups it took over.
+    ///
+    /// The generation goes up, so a guard that is dropped with its debt unpaid can tell that
+    /// something else holds the lights now: that takeover's own end puts the scene back, and
+    /// the guard must not put the scene over it.
+    pub fn land_takeover(&self, held: Held) {
+        self.takeovers.fetch_add(1, Ordering::SeqCst);
+        self.set_held(held);
+    }
+
+    /// The generation of the takeover on the lights: how many takeovers have landed.
+    pub fn takeover_generation(&self) -> u64 {
+        self.takeovers.load(Ordering::SeqCst)
     }
 
     /// Takes the order. Held across a route's read, write and apply.
@@ -1058,7 +1079,7 @@ pub async fn apply_takeover(
         app.engine.set_scene(lights, devices, vec![group], false);
         app.inputs.apply_needs(schema.needs);
         // The engine's groups are not the store's now: a scene change takes the whole scene.
-        app.scene.set_held(Held {
+        app.scene.land_takeover(Held {
             groups: vec![TAKEOVER_GROUP.to_string()],
             takeover: target.clone(),
         });
@@ -1095,7 +1116,7 @@ pub async fn apply_takeover(
             app.engine.set_group_effect(&group, Some(made), props);
         }
         app.inputs.apply_needs(needs);
-        app.scene.set_held(Held { groups: scene_groups, takeover: target.clone() });
+        app.scene.land_takeover(Held { groups: scene_groups, takeover: target.clone() });
         app.scene.notify();
         return Ok(target);
     }
@@ -1130,7 +1151,7 @@ pub async fn apply_takeover(
         Ok((Ok(()), failures)) => {
             // The groups whose effect could not be built are dark, and the API says so.
             *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
-            app.scene.set_held(Held { groups: scene_groups, takeover: target.clone() });
+            app.scene.land_takeover(Held { groups: scene_groups, takeover: target.clone() });
             app.scene.notify();
             Ok(target)
         }

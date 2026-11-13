@@ -1465,6 +1465,51 @@ async fn a_panic_after_the_guard_ends_the_takeover_on_the_engine() {
     shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
 }
 
+/// A takeover that lands while the guard's debt is unpaid is not put over by the guard's
+/// apply: the new takeover holds the lights, and its own end puts the scene back.
+#[tokio::test]
+async fn a_new_takeover_is_not_put_over_by_the_dropped_guard() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // A route that takes the guard and then waits: the gate is held, and the guard is dropped
+    // when the route goes away.
+    let app = rig.app.clone();
+    let route = tokio::spawn(async move {
+        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
+        std::future::pending::<()>().await;
+    });
+    // The guard was taken: the draft is gone.
+    wait_until(|| !rig.app.draft.is_active()).await;
+
+    // A new takeover lands while the route still holds the gate: the guard's apply must not
+    // put the scene over it. The takeover's effect is a draft's, so the lights show green.
+    let user = fake_builder();
+    let builder: canvas_daemon::scenes::EffectBuilder =
+        Arc::new(move |_group| user("draft:new", ""));
+    let target = canvas_daemon::scenes::apply_takeover(
+        &rig.app,
+        "draft:new",
+        &Props::new(),
+        None,
+        builder,
+    )
+    .await
+    .expect("the takeover lands");
+    assert_eq!(target, vec!["takeover".to_string()]);
+
+    // The route goes away: the guard is dropped with the debt unpaid.
+    route.abort();
+
+    // The new takeover still holds the lights: the guard's apply did not put the scene over it.
+    wait_until(|| rig.app.scene.held().takeover == vec!["takeover".to_string()]).await;
+    shows(&rig.a, rgb(GREEN), "the new takeover is on the lights").await;
+}
+
 /// The legacy path (no scene on the lights): an activation whose effect cannot start answers
 /// the error and says so in the log, the way the layout route does.
 #[tokio::test]

@@ -1021,6 +1021,11 @@ pub struct ReplaceGuard<'a> {
     /// True when the takeover was ended on the engine. The full apply is the only thing that
     /// clears the flag, so the guard remembers that it was paid.
     settled: std::sync::atomic::AtomicBool,
+    /// The generation of the takeover this guard ended.
+    ///
+    /// A takeover that lands after this one holds the lights now: its own end puts the scene
+    /// back, and the guard's apply must not put the scene over it.
+    takeover_generation: u64,
     /// The draft that was dropped here. If the caller's own apply then fails, the engine is
     /// left showing a draft nothing owns, so the guard can put this slot's prior effect back
     /// (or black, with a note) instead (D95.4.5, test 12).
@@ -1103,9 +1108,21 @@ impl Drop for ReplaceGuard<'_> {
             return;
         }
         let app = Arc::clone(&self._app);
+        let generation = self.takeover_generation;
         match tokio::runtime::Handle::try_current() {
             Ok(handle) => {
                 handle.spawn(async move {
+                    // The draft gate, and nothing else: the lock order holds (a route takes
+                    // the scene order and then the gate; a restore takes the gate alone).
+                    let _gate = app.draft.gate().lock().await;
+                    if app.scene.takeover_generation() != generation {
+                        // Something else holds the lights now: its own end puts the scene back,
+                        // and the scene must not go over it.
+                        tracing::info!(
+                            "the takeover that ended here is not the one on the lights: the scene was not put back"
+                        );
+                        return;
+                    }
                     tracing::warn!(
                         "the takeover ended on the engine: the route went away before it could"
                     );
@@ -1169,12 +1186,14 @@ fn take_guard<'a>(
     // Something held the lights: the engine's groups are the takeover's, and the caller has to
     // put the whole scene on again.
     let ended_takeover = app.scene.is_taken_over();
+    let takeover_generation = app.scene.takeover_generation();
     ReplaceGuard {
         _gate: gate,
         _app: Arc::clone(app),
         dropped: dropped.is_some(),
         ended_takeover,
         settled: std::sync::atomic::AtomicBool::new(false),
+        takeover_generation,
         dropped_slot: dropped,
     }
 }

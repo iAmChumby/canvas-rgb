@@ -38,6 +38,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Effects: the onboarding greeting is put back by a scene save, an activation or a layout switch: it never stays on the lights after something else was chosen (#310)
 - Effects: a scene that cannot be built leaves its groups dark and names the failure, instead of leaving the lights on what was there before (#310)
 - Effects: a draft that is replaced while the browser goes away no longer stays on the lights: the scene goes back on them when the request is dropped or the daemon trips over it (#310)
+- Effects: a draft that arrives while the editor's request is being replaced is not put over by the scene: it keeps the lights until it ends (#310)
 
 ## [0.13.1] - 2026-11-11
 
