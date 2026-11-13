@@ -681,7 +681,9 @@
 .sheetRoot {
   position: fixed;
   inset: 0;
-  z-index: 45;
+  /* Under the popovers (40) and the tooltips (60 and up): a list that drops from a key inside
+     the sheet has to open above the sheet, not behind it. */
+  z-index: 35;
 }
 
 .sheetScrim {
@@ -739,10 +741,13 @@
   font: 600 var(--t16) / 1.2 var(--fu);
 }
 
-/* The body scrolls: the sheet is as tall as the window, whatever the group holds. */
+/* The body scrolls: the sheet is as tall as the window, whatever the group holds. It never
+   scrolls sideways: a tooltip beside a key at the right edge would widen it, and the browser
+   would then scroll the content out of view when that key takes the focus. */
 .sheetBody {
   flex: 1 1 auto;
   min-height: 0;
+  overflow-x: hidden;
   overflow-y: auto;
   padding: var(--s4);
 }
@@ -750,7 +755,13 @@
 .sheetStep {
   display: flex;
   flex-direction: column;
+  align-items: flex-start;
   gap: var(--s3);
+}
+
+.sheetStep > :global(.name-field),
+.sheetStep > :global(.text-in) {
+  width: 100%;
 }
 
 .sheetLead {
@@ -799,6 +810,16 @@
   text-align: right;
 }
 
+/* A tooltip inside the sheet hangs to the left of its key. A bubble that hangs to the right of a
+   key near the sheet's edge would widen the sheet's scroll area, and the browser would then
+   scroll the sheet sideways to show the key that took the focus. A bubble that is shown is moved
+   by the tooltip's own code, which keeps it inside the window and inside the sheet. */
+.sheetBody :global(.tip-bubble) {
+  left: auto;
+  right: 0;
+  transform: none;
+}
+
 /* A block of the sheet: the effect's controls, its presets, its devices. */
 .sheetBlock {
   margin-top: var(--s5);
@@ -824,7 +845,14 @@
 
 /* The menu of the sheet and of the scene: one key a row. */
 .sheetMenu {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
   min-width: 190px;
+}
+
+.sheetMenu > button {
+  justify-content: flex-start;
 }
 
 /* ---------- the effect picker ---------- */
@@ -930,6 +958,11 @@
   color: var(--mute);
   font-size: var(--t14);
   line-height: 1.3;
+}
+
+/* The picker's own way out: a key, not a line of text. */
+.pickerClose {
+  align-self: flex-start;
 }
 
 /* The picker in a popover under a row's effect key: wider than the usual list. */

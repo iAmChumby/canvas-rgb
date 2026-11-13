@@ -128,6 +128,7 @@ export function GroupRow({
       <Button
         variant="ghost"
         className={s.who}
+        data-testid="group-open"
         aria-label={`Open ${group.name}`}
         onClick={() => onOpen(group.id)}
       >

@@ -88,7 +88,7 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked }: AddDevic
   );
 
   return (
-    <div className={s.addList}>
+    <div className={s.addList} data-testid="add-devices">
       <ul className={s.addRows} aria-label="The devices you can add">
         {lights.map((light) => {
           const id = light.light.id;
@@ -123,7 +123,7 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked }: AddDevic
         })}
       </ul>
       {lights.length === 0 && <p className={s.memberEmpty}>No devices have been found yet.</p>}
-      <Button variant="ghost" size="sm" onClick={onClose}>
+      <Button variant="ghost" size="sm" className={s.pickerClose} onClick={onClose}>
         Close
       </Button>
     </div>

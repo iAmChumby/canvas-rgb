@@ -19,6 +19,7 @@ import { NameField } from "@/components/NameField";
 import { Popover } from "@/components/Popover";
 import { Segmented } from "@/components/Segmented";
 import { Slider } from "@/components/Slider";
+import { useFocusTrap } from "@/components/useFocusTrap";
 import { api } from "@/lib/endpoints";
 import { fillDefaults } from "@/lib/presetMatch";
 import { effectNameOf } from "@/lib/status";
@@ -67,10 +68,18 @@ export function Sheet({
   children: ReactNode;
 }) {
   const phone = useMediaQuery("(max-width: 720px)");
+  const panel = useRef<HTMLElement>(null);
+  useFocusTrap({ panelRef: panel, capture: false, onEscape: onClose });
   return (
     <div className={s.sheetRoot}>
       <div className={s.sheetScrim} onClick={onClose} aria-hidden="true" />
-      <section className={s.sheet} role="dialog" aria-label={title}>
+      <section
+        className={s.sheet}
+        role="dialog"
+        aria-label={title}
+        data-testid="group-sheet"
+        ref={panel}
+      >
         <header className={s.sheetHead}>
           <IconButton
             label={phone ? "Back" : "Close"}
@@ -101,6 +110,29 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   const [adding, setAdding] = useState(false);
   const menuAnchor = useRef<HTMLButtonElement>(null);
   const addAnchor = useRef<HTMLButtonElement>(null);
+  const panel = useRef<HTMLElement>(null);
+
+  // Escape closes the sheet, one step at a time: a list that drops from one of its own keys
+  // first, then the step, then the sheet itself.
+  useFocusTrap({
+    panelRef: panel,
+    capture: false,
+    onEscape: () => {
+      if (menu) {
+        setMenu(false);
+        return;
+      }
+      if (adding) {
+        setAdding(false);
+        return;
+      }
+      if (step !== "group") {
+        setStep("group");
+        return;
+      }
+      onClose();
+    },
+  });
 
   const effectId = group?.plays.type === "effect" ? group.plays.effect : null;
   /** The count that asks for the effect's detail again: its presets change under the sheet. */
@@ -142,7 +174,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   return (
     <div className={s.sheetRoot}>
       <div className={s.sheetScrim} onClick={onClose} aria-hidden="true" />
-      <section className={s.sheet} role="dialog" aria-label={group.name} data-step={step}>
+      <section className={s.sheet} role="dialog" aria-label={group.name} data-testid="group-sheet" data-step={step} ref={panel}>
         <header className={s.sheetHead}>
           <IconButton
             label={phone ? "Back" : "Close"}
@@ -256,6 +288,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
               <div className={s.sheetRow}>
                 <Button
                   className={s.sheetEffect}
+                  data-testid="sheet-effect"
                   icon={effectId ? <Sparkle size={16} /> : <Moon size={16} />}
                   onClick={() => setStep("effect")}
                 >
@@ -316,6 +349,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                   <Button
                     ref={addAnchor}
                     size="sm"
+                    data-testid="sheet-add-devices"
                     icon={<Sparkle size={14} />}
                     aria-haspopup="true"
                     aria-expanded={adding}

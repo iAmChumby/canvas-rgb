@@ -205,7 +205,7 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   const entries = effects ?? [];
 
   return (
-    <div className={s.picker} role="group" aria-label="What this group plays">
+    <div className={s.picker} role="group" aria-label="What this group plays" data-testid="effect-picker">
       {htmlBlocked && (
         <p className={s.pickerNote}>
           {HTML_ONE_AT_A_TIME}: {htmlOwner?.name} plays one already.
@@ -255,10 +255,15 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
           ? `The lights show ${highlight === OFF ? "nothing" : (entries.find((e) => e.id === highlight)?.name ?? highlight)}.`
           : "Point at an effect to see it on the lights."}
       </p>
-      <Button variant="ghost" size="sm" onClick={() => {
-        restore();
-        onClose();
-      }}>
+      <Button
+        variant="ghost"
+        size="sm"
+        className={s.pickerClose}
+        onClick={() => {
+          restore();
+          onClose();
+        }}
+      >
         Close
       </Button>
     </div>

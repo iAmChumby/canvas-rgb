@@ -199,6 +199,8 @@ export function ScenesView() {
     const id = freshGroupId();
     const name = `Group ${(scene?.groups.length ?? 0) + 1}`;
     use.edit((draft) => {
+      // A light is in one group: the group it was in lets it go.
+      for (const g of draft.groups) g.members = g.members.filter((m) => m !== lightId);
       draft.groups.push({
         id,
         name,
@@ -284,6 +286,7 @@ export function ScenesView() {
         <Button
           ref={sceneMenuAnchor}
           className={s.iconKey}
+          data-testid="scene-menu"
           aria-label="More about this scene"
           aria-haspopup="true"
           aria-expanded={sceneMenu}
@@ -418,7 +421,7 @@ export function ScenesView() {
               />
             )}
             <div className={s.newGroup}>
-              <Button icon={<Plus size={16} />} onClick={() => setMaking(true)}>
+              <Button data-testid="new-group" icon={<Plus size={16} />} onClick={() => setMaking(true)}>
                 New group
               </Button>
             </div>
