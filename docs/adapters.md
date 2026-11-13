@@ -360,13 +360,19 @@ table for another board.
 - **What the adapter does (#312, `crates/canvas-adapters/src/royuan.rs`).** A frame that holds within one
   step per channel for the still window is uploaded; the window is 2 s at first, doubles each time a shown
   picture is abandoned sooner than 30 s after it appeared (up to 10 min), and goes back to 2 s after a
-  picture that stayed a minute. The picture already in the flash is shown again with light mode 13 and not
-  written again when the new still is within a step of it. At most 12 uploads go out in any rolling hour,
-  and past that a still keeps the whole-board colour until the oldest upload leaves the hour: a picture is
-  384 bytes, so 12 an hour is about 3.5 kB, and the 10-minute window alone allows six. The upload gap, the
-  hour's count and the still window belong to the flash, so a reconnect does not reset them, and what the
-  flash holds is remembered across one. An upload abandoned before its last page leaves a torn picture, so
-  the next still writes all seven pages and light mode 13 is never sent for a torn one.
+  picture that stayed a minute. A started upload is always finished, so a moving frame never leaves a torn
+  picture in the flash: it ends the picture on show instead. The picture already in the flash is shown again
+  with light mode 13 and not written again when the new still is within a step of it. At most 4 attempts go
+  out in a rolling hour and 24 in a rolling day (about 8.8k a year, against a flash rated near 100k erase
+  cycles per sector); an attempt counts from before its first page, so a keyboard that refuses every page
+  is bounded the same way. Past the caps a still keeps the whole-board colour until a slot frees. The
+  attempts and the picture's hash are kept in `royuan-stills.json` under the daemon's user directory, so a
+  restart neither resets the caps nor rewrites a picture the flash holds; a missing or unreadable file
+  counts as unknown picture and spends the caps for ten minutes (closed, not open). An upload abandoned
+  before its last page (a disconnect, a resume, an identify) leaves the flash unknown, so the next still
+  writes all seven pages and light mode 13 is never sent for a torn one. Whether the firmware also persists
+  `SET_LEDPARAM` reports (light mode 13 and the direct-mode report) to flash is not stated by any source:
+  UNKNOWN. If it does, those writes are not counted here.
 - **The whole-board colour keeps streaming through the pages**, and stops when light mode 13 goes out about
   3 s later. **What the board shows during those pages is UNKNOWN**: the `0x0E` stream should keep it lit,
   but no device check has watched one. The check below settles it.

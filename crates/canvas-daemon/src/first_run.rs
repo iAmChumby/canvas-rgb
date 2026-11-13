@@ -670,20 +670,29 @@ pub fn place_missing_zones(layout: &mut Layout, devices: &[DeviceInfo]) -> usize
     added
 }
 
-/// A saved `Point` shape on a matrix zone becomes the zone's own map (`Auto`).
+/// The one zone whose kind changed under a saved placement: the ROYUAN keyboard's (#312).
 ///
-/// `Point` lights every LED of the zone with the whole box, which is what a one-LED zone
-/// looked like: that is the shape the first run wrote for this keyboard while it reported a
-/// single LED (#312). The keyboard reports 128 keys now, so a saved `Point` made every key one
-/// colour. A matrix zone's map is its per-key shape (`default_shape` returns `Auto` for one).
+/// It reported a single LED, so the first run saved `Point` for it; it reports a 128-key matrix
+/// now, and `Point` makes every key sample the whole box. No other zone is touched: a `Point` on
+/// another matrix zone is the owner's own choice.
+const REPAIRED_ZONE: (&str, u32) = ("royuan:3151:4015", 0);
+
+/// The stale `Point` on the keyboard's zone becomes the zone's own map (`Auto`).
 ///
-/// Runs on every device list and is idempotent: once the shape is `Auto` nothing changes.
-/// Returns how many placements changed. A person who wants a matrix zone as one blob of light
-/// picks `Point` again in the editor, where `Auto` says which shape it draws.
+/// `Point` lights every LED of the zone with the whole box, which is what a one-LED zone looked
+/// like: that is the shape the first run wrote for this keyboard while it reported a single LED
+/// (#312). The keyboard reports 128 keys now, so a saved `Point` made every key one colour. A
+/// matrix zone's map is its per-key shape (`default_shape` returns `Auto` for one).
+///
+/// Returns how many placements changed. Called once per install, through
+/// [`repair_point_on_matrix_once`].
 pub fn repair_point_on_matrix(layout: &mut Layout, devices: &[DeviceInfo]) -> usize {
     let mut repaired = 0;
     for placement in &mut layout.zones {
         if placement.shape != ZoneShape::Point {
+            continue;
+        }
+        if placement.device_id.0 != REPAIRED_ZONE.0 || placement.zone_index != REPAIRED_ZONE.1 {
             continue;
         }
         let zone = devices
@@ -696,6 +705,26 @@ pub fn repair_point_on_matrix(layout: &mut Layout, devices: &[DeviceInfo]) -> us
             placement.shape = ZoneShape::Auto;
             repaired += 1;
         }
+    }
+    repaired
+}
+
+/// Runs [`repair_point_on_matrix`] once and records it in `marker` (#312 review).
+///
+/// `marker` is a small file under the daemon's user directory. It is written even when nothing
+/// was repaired, so a `Point` the owner picks on the keyboard's zone later is kept: only the
+/// stale shape saved before #312 is repaired, once.
+pub fn repair_point_on_matrix_once(
+    layout: &mut Layout,
+    devices: &[DeviceInfo],
+    marker: &std::path::Path,
+) -> usize {
+    if marker.exists() {
+        return 0;
+    }
+    let repaired = repair_point_on_matrix(layout, devices);
+    if let Err(e) = crate::storage::write_atomic(marker, b"{\"point_on_matrix\": true}\n") {
+        tracing::warn!(error = %e, "the one-off layout repair could not be recorded");
     }
     repaired
 }
@@ -1161,6 +1190,34 @@ mod tests {
         let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Strip);
         assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&board)), 0);
         assert_eq!(layout.zones[0].shape, ZoneShape::Strip, "a strip on a matrix is a choice");
+    }
+
+    #[test]
+    fn a_point_on_another_matrix_zone_is_the_owners_choice() {
+        // Only the keyboard's zone changed from one LED to a matrix in #312. A 128-LED panel
+        // that has always been a matrix may show one blob of light on purpose.
+        let mut panel = matrix_keyboard();
+        panel.id = DeviceId("openrgb:panel".into());
+        let (mut layout, _) = layout_saved_as_a_point(ZoneShape::Point);
+        layout.zones[0].device_id = panel.id.clone();
+        assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&panel)), 0);
+        assert_eq!(layout.zones[0].shape, ZoneShape::Point, "not the keyboard's zone");
+    }
+
+    #[test]
+    fn the_repair_runs_once_and_records_it() {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-repairs-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let marker = dir.join("layout-repairs.json");
+        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
+        assert_eq!(repair_point_on_matrix_once(&mut layout, std::slice::from_ref(&board), &marker), 1);
+        assert!(marker.exists(), "the run is recorded");
+        assert_eq!(layout.zones[0].shape, ZoneShape::Auto);
+        // A `Point` the owner picks afterwards is kept: the repair never runs again.
+        layout.zones[0].shape = ZoneShape::Point;
+        assert_eq!(repair_point_on_matrix_once(&mut layout, &[board], &marker), 0);
+        assert_eq!(layout.zones[0].shape, ZoneShape::Point, "a later choice stands");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

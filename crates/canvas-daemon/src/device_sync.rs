@@ -35,9 +35,11 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         if store.config.first_run_done {
             let mut placed = 0;
             let mut repaired = 0;
+            let marker = crate::paths::repairs_marker_in(&store.home);
             if let Some(layout) = store.active_layout_mut() {
                 placed = crate::first_run::place_missing_zones(layout, &devices);
-                repaired = crate::first_run::repair_point_on_matrix(layout, &devices);
+                repaired =
+                    crate::first_run::repair_point_on_matrix_once(layout, &devices, &marker);
             }
             if placed > 0 {
                 tracing::info!(placed, "new zones were placed on the canvas");
