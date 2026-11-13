@@ -2196,3 +2196,538 @@ fn a_re_layout_with_the_devices_in_another_order_keeps_each_device_s_own_frame()
     }
     engine.shutdown();
 }
+
+// ---------------------------------------------------------------------------
+// Scenes (0.14.0, #310): one effect per group, merged per device
+// ---------------------------------------------------------------------------
+
+mod scene {
+    use super::*;
+    use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light, SCENE_FADE_MS};
+    use canvas_proto::traits::{Engine, EngineGroup, LightFrame, LightPreviewSink};
+
+    const RED: Rgb8 = Rgb8::new(255, 0, 0);
+    const BLUE: Rgb8 = Rgb8::new(0, 0, 255);
+
+    /// A recording light-preview sink.
+    #[derive(Default)]
+    struct RecordingLights {
+        frames: Mutex<Vec<LightFrame>>,
+    }
+
+    impl RecordingLights {
+        fn new() -> Arc<Self> {
+            Arc::new(Self::default())
+        }
+        fn last(&self) -> Option<LightFrame> {
+            self.frames.lock().unwrap_or_else(|e| e.into_inner()).last().cloned()
+        }
+        fn count(&self) -> usize {
+            self.frames.lock().unwrap_or_else(|e| e.into_inner()).len()
+        }
+    }
+
+    impl LightPreviewSink for RecordingLights {
+        fn submit(&self, frame: LightFrame) {
+            self.frames.lock().unwrap_or_else(|e| e.into_inner()).push(frame);
+        }
+    }
+
+    /// A device with one linear zone of `leds` LEDs.
+    fn strip_device(id: &str, leds: u32) -> DeviceInfo {
+        device(id, vec![zone(0, ZoneKind::Linear, leds)])
+    }
+
+    /// The light that is the whole of zone 0 of device `id`.
+    fn light_of(id: &str) -> Light {
+        let device_id = DeviceId(id.to_string());
+        Light {
+            id: zone_light_id(&device_id, 0),
+            device_id,
+            zone_index: 0,
+            leds: None,
+            name: None,
+            arrangement: Arrangement::Strip,
+            reversed: false,
+        }
+    }
+
+    /// A light that is a run of zone `zone` of device `id`.
+    fn slice_light(id: &str, zone: u32, start: u32, count: u32) -> Light {
+        let device_id = DeviceId(id.to_string());
+        Light {
+            id: format!("{id}#z{zone}s{start}"),
+            device_id,
+            zone_index: zone,
+            leds: Some(LedSlice { start, count }),
+            name: None,
+            arrangement: Arrangement::Strip,
+            reversed: false,
+        }
+    }
+
+    fn group(id: &str, members: &[&str], effect: Option<Box<dyn Effect>>) -> EngineGroup {
+        EngineGroup {
+            id: id.to_string(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+            effect,
+            props: Props::new(),
+        }
+    }
+
+    fn solid(color: [f32; 3]) -> Option<Box<dyn Effect>> {
+        Some(Box::new(SolidEffect::new(color, Arc::new(AtomicBool::new(false)))))
+    }
+
+    /// Two devices `d1`, `d2` of 12 LEDs, each with its own sink.
+    fn two_devices() -> (Arc<dyn Engine>, Vec<DeviceInfo>, Arc<RecordingSink>, Arc<RecordingSink>) {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12), strip_device("d2", 12)];
+        let a = RecordingSink::new();
+        let b = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), a.clone());
+        engine.add_sink(DeviceId("d2".into()), b.clone());
+        (engine, devices, a, b)
+    }
+
+    fn lights_d1_d2() -> Vec<Light> {
+        vec![light_of("d1"), light_of("d2")]
+    }
+
+    fn all(frame: &[Rgb8], color: Rgb8) -> bool {
+        frame.iter().all(|c| *c == color)
+    }
+
+    #[test]
+    fn two_groups_play_two_effects_at_once() {
+        let (engine, devices, a, b) = two_devices();
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![
+                group("a", &["d1#z0"], solid([1.0, 0.0, 0.0])),
+                group("b", &["d2#z0"], solid([0.0, 0.0, 1.0])),
+            ],
+            false,
+        );
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || {
+                a.last().is_some_and(|f| all(&f, RED)) && b.last().is_some_and(|f| all(&f, BLUE))
+            }),
+            "a = {:?}, b = {:?}",
+            a.last(),
+            b.last()
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn lights_of_two_groups_on_one_device_merge_into_one_frame() {
+        let engine = spawn(settings(60));
+        let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 24)])];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d0".into()), sink.clone());
+        engine.set_scene(
+            vec![slice_light("d0", 0, 0, 12), slice_light("d0", 0, 12, 12)],
+            devices,
+            vec![
+                group("a", &["d0#z0s0"], solid([1.0, 0.0, 0.0])),
+                group("b", &["d0#z0s12"], solid([0.0, 0.0, 1.0])),
+            ],
+            false,
+        );
+        let mut want = vec![RED; 12];
+        want.extend(vec![BLUE; 12]);
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| f == want)),
+            "last = {:?}",
+            sink.last()
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn leds_no_group_owns_are_black() {
+        let engine = spawn(settings(60));
+        // Zone 0 has 8 LEDs nobody owns; the light is the first 12 of zone 1's 20.
+        let devices = vec![device(
+            "d0",
+            vec![zone(0, ZoneKind::Linear, 8), zone(1, ZoneKind::Linear, 20)],
+        )];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d0".into()), sink.clone());
+        engine.set_scene(
+            vec![slice_light("d0", 1, 0, 12)],
+            devices,
+            vec![group("a", &["d0#z1s0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || {
+            sink.last().is_some_and(|f| f.len() == 28 && f[8] == RED)
+        }));
+        let frame = sink.last().expect("a frame");
+        assert!(all(&frame[..8], Rgb8::BLACK), "zone 0 is nobody's: {frame:?}");
+        assert!(all(&frame[8..20], RED), "the light's 12 LEDs: {frame:?}");
+        assert!(all(&frame[20..], Rgb8::BLACK), "the rest of zone 1 is nobody's: {frame:?}");
+        engine.shutdown();
+    }
+
+    #[test]
+    fn a_group_set_to_off_is_black() {
+        let (engine, devices, a, b) = two_devices();
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![group("a", &["d1#z0"], None), group("b", &["d2#z0"], solid([0.0, 0.0, 1.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || b.last().is_some_and(|f| all(&f, BLUE))));
+        let frame = a.last().expect("device a still gets frames");
+        assert_eq!(frame.len(), 12);
+        assert!(all(&frame, Rgb8::BLACK));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn group_brightness_multiplies_with_global() {
+        let engine = spawn(settings(60));
+        engine.set_brightness(50);
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let mut g = group("a", &["d1#z0"], solid([200.0 / 255.0; 3]));
+        g.brightness = 50;
+        engine.set_scene(vec![light_of("d1")], devices, vec![g], false);
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 3));
+        let frame = sink.last().expect("a frame");
+        for c in &frame {
+            for channel in [c.r, c.g, c.b] {
+                assert!((49..=51).contains(&channel), "200 x 50% x 50% is 50, got {frame:?}");
+            }
+        }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn a_panicking_group_goes_dark_and_reports_while_the_other_keeps_running() {
+        let (engine, devices, a, b) = two_devices();
+        let updates = Arc::new(AtomicU32::new(0));
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![
+                group("a", &["d1#z0"], Some(Box::new(PanicUpdateEffect { updates: updates.clone() }))),
+                group("b", &["d2#z0"], solid([0.0, 0.0, 1.0])),
+            ],
+            false,
+        );
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || {
+                engine.group_states().iter().any(|s| s.id == "a" && s.failed.is_some())
+            }),
+            "the panic is reported: {:?}",
+            engine.group_states()
+        );
+        let states = engine.group_states();
+        let failed = states.iter().find(|s| s.id == "a").and_then(|s| s.failed.clone());
+        assert!(
+            failed.is_some_and(|t| t.contains("update boom")),
+            "the text of the panic: {states:?}"
+        );
+        assert!(states.iter().find(|s| s.id == "b").is_some_and(|s| s.failed.is_none()));
+        // The other group keeps running; the failed one is dark and never called again.
+        let frames_b = b.frame_count();
+        assert!(wait_until(FIRST_FRAME_WAIT, || b.frame_count() > frames_b + 5));
+        assert!(b.last().is_some_and(|f| all(&f, BLUE)));
+        assert!(a.last().is_some_and(|f| all(&f, Rgb8::BLACK)));
+        assert_eq!(updates.load(Ordering::Acquire), 1, "a failed group is not called again");
+        engine.shutdown();
+    }
+
+    #[test]
+    fn replacing_a_failed_groups_effect_clears_the_failure() {
+        let (engine, devices, a, _b) = two_devices();
+        let updates = Arc::new(AtomicU32::new(0));
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![
+                group("a", &["d1#z0"], Some(Box::new(PanicUpdateEffect { updates }))),
+                group("b", &["d2#z0"], solid([0.0, 0.0, 1.0])),
+            ],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || {
+            engine.group_states().iter().any(|s| s.id == "a" && s.failed.is_some())
+        }));
+        engine.set_group_effect("a", solid([1.0, 0.0, 0.0]), &Props::new());
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || a.last().is_some_and(|f| all(&f, RED))),
+            "the new effect plays: {:?}",
+            a.last()
+        );
+        assert!(
+            engine.group_states().iter().all(|s| s.failed.is_none()),
+            "{:?}",
+            engine.group_states()
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn set_group_props_reaches_only_that_group() {
+        let (engine, devices, a, _b) = two_devices();
+        let inits_a = Arc::new(AtomicU32::new(0));
+        let inits_b = Arc::new(AtomicU32::new(0));
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![
+                group("a", &["d1#z0"], Some(Box::new(CountingEffect { inits: inits_a.clone() }))),
+                group("b", &["d2#z0"], Some(Box::new(CountingEffect { inits: inits_b.clone() }))),
+            ],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || a.frame_count() > 2));
+        let (before_a, before_b) = (inits_a.load(Ordering::Acquire), inits_b.load(Ordering::Acquire));
+        engine.set_group_props("a", &Props::new());
+        let frames = a.frame_count();
+        assert!(wait_until(FIRST_FRAME_WAIT, || a.frame_count() > frames + 3));
+        assert_eq!(inits_a.load(Ordering::Acquire), before_a + 1, "group a re-initialised");
+        assert_eq!(inits_b.load(Ordering::Acquire), before_b, "group b did not");
+        engine.shutdown();
+    }
+
+    #[test]
+    fn set_scene_with_fade_blends_then_settles() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+        let before = sink.frame_count() as usize;
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([0.0, 0.0, 1.0]))],
+            true,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, BLUE))));
+        let frames = sink.all_frames();
+        let mid = frames[before..]
+            .iter()
+            .any(|f| f[0].r > 0 && f[0].r < 255 && f[0].b > 0 && f[0].b < 255);
+        assert!(mid, "a frame between the old red and the new blue: {:?}", &frames[before..]);
+        // The fade ends on the new scene and stays there: from the first all-new frame on, every
+        // frame is all new (the fade is SCENE_FADE_MS long and the frames below outlast it).
+        let settled = frames.len();
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() as usize > settled + 10));
+        let frames = sink.all_frames();
+        let first_blue = frames[before..].iter().position(|f| all(f, BLUE)).expect("settled") + before;
+        assert!(
+            frames[first_blue..].iter().all(|f| all(f, BLUE)),
+            "after {SCENE_FADE_MS} ms the scene is the new one: {:?}",
+            &frames[first_blue..]
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn set_scene_without_fade_cuts() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+        let before = sink.frame_count() as usize;
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([0.0, 0.0, 1.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, BLUE))));
+        for frame in &sink.all_frames()[before..] {
+            assert!(all(frame, RED) || all(frame, BLUE), "no blended frame on a cut: {frame:?}");
+        }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn light_preview_carries_each_lights_colours_before_global_brightness() {
+        let engine = spawn(settings(60));
+        engine.set_brightness(50);
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let lights = RecordingLights::new();
+        engine.set_light_preview(Some(lights.clone()));
+        let g = group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]));
+        engine.set_scene(vec![light_of("d1")], devices, vec![g], false);
+        assert!(wait_until(FIRST_FRAME_WAIT, || lights.count() > 0 && sink.frame_count() > 0));
+        let preview = lights.last().expect("a light frame");
+        let (id, colours) = &preview.lights[0];
+        assert_eq!(id, "d1#z0");
+        assert_eq!(colours.len(), 12);
+        assert!(colours.iter().all(|c| *c == RED), "before the global stage: {colours:?}");
+        let device_frame = sink.last().expect("a frame");
+        assert!(
+            device_frame.iter().all(|c| (127..=129).contains(&c.r)),
+            "after it: {device_frame:?}"
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn light_preview_is_rate_limited() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let lights = RecordingLights::new();
+        engine.set_light_preview(Some(lights.clone()));
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || lights.count() > 0));
+        let (l0, s0) = (lights.count(), sink.frame_count());
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > s0 + 60));
+        let previews = lights.count() - l0;
+        let frames = (sink.frame_count() - s0) as usize;
+        // 60 fps against a 15 fps cap: about a quarter of the frames, never half.
+        assert!(previews * 2 < frames, "{previews} previews for {frames} frames");
+        engine.shutdown();
+    }
+
+    /// Review Focus 2: a zone's LED count changes while its light is in a group.
+    #[test]
+    fn resize_rebuilds_plan_without_stale_frame() {
+        let engine = spawn(settings(60));
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            vec![strip_device("d1", 12)],
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| f.len() == 12)));
+        engine.set_scene(
+            vec![light_of("d1")],
+            vec![strip_device("d1", 20)],
+            vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        let seen = sink.frame_count() as usize;
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() as usize > seen + 5));
+        let frames = sink.all_frames();
+        for frame in &frames[seen..] {
+            assert_eq!(frame.len(), 20, "a frame after the resize has the new length");
+            assert!(all(frame, RED), "and every LED of it plays: {frame:?}");
+        }
+        engine.shutdown();
+    }
+
+    #[test]
+    fn flow_across_shows_one_gradient_over_two_lights_and_each_its_own_repeats_it() {
+        for (mode, flows) in [(GroupMode::FlowAcross, true), (GroupMode::EachItsOwn, false)] {
+            let (engine, devices, a, b) = two_devices();
+            let mut g = group("a", &["d1#z0", "d2#z0"], Some(Box::new(GradientEffect)));
+            g.mode = mode;
+            engine.set_scene(lights_d1_d2(), devices, vec![g], false);
+            // The first frames can predate the effect's first draw; wait for the gradient.
+            assert!(wait_until(FIRST_FRAME_WAIT, || {
+                a.frame_count() > 3
+                    && b.frame_count() > 3
+                    && a.last().is_some_and(|f| f[0].r > 200)
+                    && b.last().is_some_and(|f| f[0].r > 0 || f[11].r > 0 || f[11].b > 0)
+            }));
+            let (fa, fb) = (a.last().unwrap(), b.last().unwrap());
+            if flows {
+                // One gradient: red falls along d1 and goes on falling along d2.
+                assert!(fa[0].r > 230, "the left edge is red: {fa:?}");
+                assert!(fb[11].r < 25, "the right edge is blue: {fb:?}");
+                assert!(fa.iter().all(|c| c.r >= 115), "d1 holds the left half: {fa:?}");
+                assert!(fb.iter().all(|c| c.r <= 140), "d2 holds the right half: {fb:?}");
+                let seam = i32::from(fa[11].r) - i32::from(fb[0].r);
+                assert!(seam.abs() < 40, "the seam is smooth: {fa:?} {fb:?}");
+            } else {
+                // Each its own: both lights show the whole gradient.
+                assert!(fa[0].r > 230 && fb[0].r > 230, "{fa:?} {fb:?}");
+                assert!(fa[11].r < 25 && fb[11].r < 25, "{fa:?} {fb:?}");
+            }
+            engine.shutdown();
+        }
+    }
+
+    #[test]
+    fn a_member_naming_no_light_or_an_absent_device_is_skipped() {
+        let (engine, devices, a, _b) = two_devices();
+        engine.set_scene(
+            // d2's light is declared, but its device is not in the list.
+            lights_d1_d2(),
+            devices.into_iter().take(1).collect(),
+            vec![group("a", &["nope", "d2#z0", "d1#z0"], solid([1.0, 0.0, 0.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || a.last().is_some_and(|f| all(&f, RED))));
+        engine.shutdown();
+    }
+
+    #[test]
+    fn group_states_lists_every_group_in_scene_order_and_is_empty_outside_scene_mode() {
+        let (engine, devices, _a, _b) = two_devices();
+        assert!(engine.group_states().is_empty());
+        engine.set_scene(
+            lights_d1_d2(),
+            devices,
+            vec![group("b", &["d2#z0"], solid([0.0, 0.0, 1.0])), group("a", &["d1#z0"], None)],
+            false,
+        );
+        let ids: Vec<String> = engine.group_states().into_iter().map(|s| s.id).collect();
+        assert_eq!(ids, vec!["b".to_string(), "a".to_string()]);
+        engine.shutdown();
+    }
+
+    #[test]
+    fn set_layout_after_set_scene_switches_back_to_the_layout() {
+        let (engine, devices, a, _b) = two_devices();
+        engine.set_scene(
+            lights_d1_d2(),
+            devices.clone(),
+            vec![group("a", &["d1#z0"], solid([0.0, 0.0, 1.0]))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || a.last().is_some_and(|f| all(&f, BLUE))));
+        let lay = layout(
+            vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+            SamplingMode::AreaAverage,
+            RenderScale::P100,
+        );
+        engine.set_layout(lay, devices);
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || a.last().is_some_and(|f| all(&f, RED))));
+        assert!(engine.group_states().is_empty(), "layout mode has no groups");
+        engine.shutdown();
+    }
+}

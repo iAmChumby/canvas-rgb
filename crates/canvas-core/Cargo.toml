@@ -10,5 +10,11 @@ publish = false
 canvas-proto.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+# The scenes whole-frame benchmark runs the real engine with the effect library and the HTML
+# runtime. Neither depends on canvas-core, so there is no cycle and the traits are the same ones.
+canvas-effects.workspace = true
+canvas-html.workspace = true
+
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Media", "Win32_System_Threading"] }

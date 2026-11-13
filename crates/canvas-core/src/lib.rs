@@ -16,12 +16,15 @@ pub mod effect_guard;
 pub mod geometry;
 mod preview;
 pub mod sampling;
+pub mod scene_engine;
 mod timer;
 
 #[cfg(test)]
 mod bench;
 #[cfg(all(test, windows))]
 mod cpu;
+#[cfg(test)]
+mod scene_frame_bench;
 #[cfg(test)]
 mod tests;
 
