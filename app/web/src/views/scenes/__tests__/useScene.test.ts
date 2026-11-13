@@ -87,6 +87,7 @@ beforeEach(() => {
   api.scenes.putGroupBrightness.mockImplementation(async (_id: string, groupId: string, brightness: number) =>
     liveAnswer(gaming(), groupId, undefined, brightness),
   );
+  api.lights.list.mockResolvedValue({ lights: clone(DEMO_LIGHTS) });
   patchSnap({ scenes: null, scenesError: null, lights: clone(DEMO_LIGHTS), lightsError: null });
 });
 
@@ -447,6 +448,58 @@ describe("useScene", () => {
     expect(body.scene.groups[0]?.brightness).toBe(42);
   });
 
+  it("a save that waits for a live write carries the rev that write answered", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // The live write answers only when the test says so.
+    let release!: (scene: Scene) => void;
+    api.scenes.putGroupBrightness.mockImplementationOnce(
+      () =>
+        new Promise<Scene>((resolve) => {
+          release = resolve;
+        }),
+    );
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setBrightness(groupId, 42);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(1);
+
+    // The user edits while the live write is still out.
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "Renamed";
+      }, "Rename");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    // The save waits for the live write: it goes out after it, not with a rev the daemon has
+    // already left behind.
+    expect(api.scenes.put).not.toHaveBeenCalled();
+
+    // The live write answers with the scene and its new rev.
+    await act(async () => {
+      release(liveAnswer(gaming(), groupId, undefined, 42));
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    const [, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
+    // The rev the live write answered with, so the save cannot 409 against this window's own
+    // live write.
+    expect(body.expected_rev).toBe(8);
+    expect(body.scene.rev).toBe(8);
+    // The live value goes with the save: it is not reverted.
+    expect(body.scene.groups[0]?.brightness).toBe(42);
+    // The save goes out once: a save that goes out twice would fight its own answer.
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+  });
   it("an edit that has not gone out goes out when the scene switches", async () => {
     // The first write hangs: the second edit waits behind it.
     let release!: () => void;
