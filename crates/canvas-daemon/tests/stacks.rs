@@ -10,7 +10,7 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::stack::{
-    self, blend_pixel, html_budget, AreaMap, Clock, LeafBuilder, LiveMap, Mask, StackEffect,
+    self, blend_pixel, html_budget, AreaMap, AreaMaps, Clock, LeafBuilder, LiveMap, Mask, StackEffect,
 };
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, StackLayerState};
@@ -123,6 +123,12 @@ fn harness_in(
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
     let store = canvas_daemon::storage::Store::at(&home.path);
+    let mut store = store;
+    // The scene a draft takes over from (Scenes, 0.14.0: the prior is the active scene) and
+    // the light it holds.
+    let (lights, scenes) = common::a_scene("solid", &Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(
@@ -654,8 +660,11 @@ fn live_for(stack: &Stack) -> Arc<std::sync::RwLock<LiveMap>> {
     Arc::new(std::sync::RwLock::new(LiveMap::from_stack(stack, 1)))
 }
 
-fn areas_for(layout: &Layout, devices: &[DeviceInfo]) -> Arc<std::sync::RwLock<AreaMap>> {
-    Arc::new(std::sync::RwLock::new(AreaMap::build(layout, devices, 1)))
+fn areas_for(layout: &Layout, devices: &[DeviceInfo]) -> Arc<std::sync::RwLock<AreaMaps>> {
+    Arc::new(std::sync::RwLock::new(AreaMaps {
+        layout: Some(AreaMap::build(layout, devices, 1)),
+        ..AreaMaps::default()
+    }))
 }
 
 // ---------------------------------------------------------------- devices and layouts
@@ -1175,6 +1184,7 @@ async fn a_layer_saved_with_a_display_name_runs_that_effect() {
         &harness.app.user_effects,
         &harness.app.stacks,
         "stack:Firey",
+        None,
     )
     .expect("the stack builds");
     effect.init(&Props::new());
@@ -1520,7 +1530,10 @@ fn a_moved_part_paints_at_its_new_place_without_a_rebuild() {
     );
     let builds = Arc::new(AtomicUsize::new(0));
     let clock = ManualClock::new();
-    let areas = Arc::new(std::sync::RwLock::new(AreaMap::build(&first, &devices, 1)));
+    let areas = Arc::new(std::sync::RwLock::new(AreaMaps {
+        layout: Some(AreaMap::build(&first, &devices, 1)),
+        ..AreaMaps::default()
+    }));
     let mut effect = StackEffect::new(
         &stack,
         paint_leaves(Arc::new(AtomicU64::new(0)), builds.clone(), [1.0, 0.0, 0.0], None),
@@ -1538,7 +1551,8 @@ fn a_moved_part_paints_at_its_new_place_without_a_rebuild() {
     let moved = layout(vec![placed("d", 0, 200.0, 100.0, 40.0, 20.0)], RenderScale::P100, SamplingMode::AreaAverage);
     {
         let mut book = canvas_daemon::stack::write_recovering(&areas);
-        *book = AreaMap::build(&moved, &devices, 2);
+        book.layout = Some(AreaMap::build(&moved, &devices, 2));
+        book.version = 2;
     }
     effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
     assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the old place is black");
@@ -1773,7 +1787,7 @@ async fn the_props_guard_and_the_two_delete_routes() {
         .unwrap();
     assert_eq!(in_use.status(), StatusCode::CONFLICT);
     let message = json(in_use).await["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.contains("Default"), "the active layout is named: {message}");
+    assert!(message.contains("Everything"), "the scene that plays it is named: {message}");
 
     let forced = harness
         .router
@@ -1790,13 +1804,17 @@ async fn the_props_guard_and_the_two_delete_routes() {
     let store = harness.app.store.read().await;
     assert!(!store.effects.presets.contains_key("stack:Guarded"));
     assert!(!store.effects.favorites.iter().any(|f| f == "stack:Guarded"));
-    assert_eq!(harness.engine.effect_id.lock().unwrap().clone(), Some("solid".to_string()));
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        None,
+        "the group of the scene that played the deleted stack is dark"
+    );
 }
 
 // ================================================================ test 12
 
 #[tokio::test]
-async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back() {
+async fn a_layout_switch_during_a_draft_puts_the_scene_back() {
     let harness = build("t12");
     // The active layout runs Solid; another layout names an effect that does not exist.
     {
@@ -1852,7 +1870,7 @@ async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back()
         assert_eq!(draft.status(), StatusCode::OK);
         assert!(harness.app.draft.is_active());
 
-        // The switch: the draft ends, its new effect fails, and the prior effect goes back.
+        // The switch: the draft ends and the scene goes back on the lights.
         let switched = harness
             .router
             .clone()
@@ -1869,11 +1887,12 @@ async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back()
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("solid".to_string()),
-        "the draft's prior effect went back on the lights"
+        "the scene's group plays the scene's effect again"
     );
+    // The scene went back on the lights: the takeover is over and the scene plays.
     assert!(
-        log.text().contains("prior effect went back"),
-        "the log says what happened: {}",
+        log.text().contains("the scene went back"),
+        "the log says the scene went back: {}",
         log.text()
     );
 }
@@ -2432,7 +2451,7 @@ fn add_html(harness: &Harness, file: &str, html: &str) {
     harness.app.user_effects.rescan(&harness.folder);
 }
 
-/// Puts Solid on the lights and names it on the active layout: what a draft takes over from.
+/// Puts Solid on the lights and names it on the active scene: what a draft takes over from.
 async fn prior_is_solid(harness: &Harness) {
     {
         let mut store = harness.app.store.write().await;
@@ -2440,6 +2459,14 @@ async fn prior_is_solid(harness: &Harness) {
             id: "solid".into(),
             props: Props::new(),
         });
+        if let Some(scene) = store.scenes.scenes.first_mut() {
+            if let Some(group) = scene.groups.first_mut() {
+                group.plays = canvas_proto::scene::Plays::Effect {
+                    effect: "solid".into(),
+                    props: Props::new(),
+                };
+            }
+        }
     }
     canvas_daemon::apply_effect(&harness.app, "solid", &Props::new())
         .await
@@ -2477,8 +2504,8 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
         canvas_proto::consts::PREVIEW_MAX_FPS
     );
     assert_eq!(harness.preview_engine.fps.load(Ordering::SeqCst), 15);
-    // The layout reached it as it reached the main engine.
-    assert!(harness.preview_engine.layout.lock().unwrap().is_some());
+    // The group it shows reached it as the layout reached the main engine.
+    assert!(!harness.preview_engine.scene.lock().unwrap().is_empty());
     // This harness does not run the daemon's startup, so it does not wire the capture
     // into the engines: neither engine has an input source here. The daemon's startup
     // does wire it (#1); see `tests/capture_wiring.rs`.
@@ -2580,7 +2607,7 @@ async fn a_preview_put_is_superseded_by_a_newer_epoch_or_sequence_and_delete_cle
     assert!(harness.app.stack_preview.watermark().is_none());
     assert_eq!(
         harness.preview_engine.effect_id.lock().unwrap().clone(),
-        Some("solid".to_string()),
+        None,
         "the preview engine no longer shows the stack"
     );
     assert_eq!(*harness.preview_engine.props.lock().unwrap(), canvas_daemon::draft::black());
@@ -2792,13 +2819,97 @@ async fn a_stack_draft_builds_once_across_its_values_and_a_save() {
     assert_eq!(activated.status(), StatusCode::OK);
     assert_eq!(
         builds.load(Ordering::SeqCst),
-        1,
-        "Save with the same structure reused the running effect"
+        2,
+        "the stack moved from the takeover group to the scene's group, so it was built again"
     );
     assert!(!harness.app.draft.is_active(), "an activate drops the draft");
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("stack:Session".to_string())
+    );
+}
+
+/// The props the group that plays the stack runs with.
+fn stack_group_props(harness: &Harness, id: &str) -> Props {
+    let scene = harness.engine.scene.lock().unwrap().clone();
+    scene
+        .iter()
+        .find(|(_, effect, _)| effect.as_deref() == Some(id))
+        .map(|(_, _, props)| props.clone())
+        .unwrap_or_default()
+}
+
+/// A stack that is already running takes its new values on the group that plays it: while a
+/// scene runs, the legacy path's one effect is never touched.
+#[tokio::test]
+async fn a_running_stack_takes_its_new_values_on_the_group_that_plays_it() {
+    let (user, builds) = counting_user(None);
+    let harness = build_with("t11-reuse", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    // The scene is on the lights: the groups are what play.
+    canvas_daemon::scenes::apply_active(&harness.app, false).await;
+
+    // The stack is saved with a value and played on the scene's group.
+    let mut saved = stack("stack:Reuse", vec![layer("l1", "html:Tinted")]);
+    saved.layers[0].props.insert("tint".into(), tint("#ff0000"));
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let activated = harness
+        .router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "stack:Reuse"),
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    let built = builds.load(Ordering::SeqCst);
+    assert_eq!(
+        stack_group_props(&harness, "stack:Reuse").get("l1.tint"),
+        Some(&tint("#ff0000")),
+        "the group plays the stack with its value"
+    );
+    let legacy_calls = harness
+        .engine
+        .set_props_calls
+        .load(std::sync::atomic::Ordering::SeqCst);
+
+    // The same stack with another value: it is running, so it is reused and not rebuilt.
+    saved.layers[0].props.insert("tint".into(), tint("#00ff00"));
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let activated = harness
+        .router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "stack:Reuse"),
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        built,
+        "the running stack was not rebuilt"
+    );
+
+    // The value is on the group that plays the stack, and the legacy path's one effect is
+    // untouched: the scene does not run it.
+    assert_eq!(
+        stack_group_props(&harness, "stack:Reuse").get("l1.tint"),
+        Some(&tint("#00ff00")),
+        "the group has the new value"
+    );
+    assert_eq!(
+        harness
+            .engine
+            .set_props_calls
+            .load(std::sync::atomic::Ordering::SeqCst),
+        legacy_calls,
+        "the legacy path's one effect was not given the stack's values"
     );
 }
 
@@ -4262,6 +4373,7 @@ async fn a_file_with_a_mask_that_does_not_resolve_keeps_the_mask_and_draws_unmas
         &harness.app.user_effects,
         &harness.app.stacks,
         "stack:HandMask",
+        None,
     )
     .expect("the stack builds");
     effect.init(&Props::new());

@@ -2032,6 +2032,12 @@ async fn the_onboarding_effects_are_hidden_from_the_list_but_activate() {
 fn build_with_engine() -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome) {
     let home = TempHome::new();
     let store = canvas_daemon::storage::Store::at(&home.path);
+    let mut store = store;
+    // The scene the onboarding effect takes over from (Scenes, 0.14.0: the prior is the active
+    // scene).
+    let (lights, scenes) = common::a_scene("solid", &canvas_proto::props::Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let app = Arc::new(App::new(

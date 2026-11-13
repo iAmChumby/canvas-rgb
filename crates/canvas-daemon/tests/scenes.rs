@@ -11,12 +11,12 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, ScenePut, ScenesResponse, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::props::{PropValue, Props};
+use canvas_proto::props::{PropValue, Props, PropertySchema};
 use canvas_proto::scene::{
     Arrangement, Group, GroupMode, Light, LightsFile, Plays, Scene, ScenesFile, LIGHTS_SCHEMA,
     SCENES_SCHEMA,
 };
-use canvas_proto::traits::{Engine, EngineSettings, FrameSink};
+use canvas_proto::traits::{Canvas, Effect, Engine, EngineSettings, FrameSink, Inputs};
 use canvas_proto::Rgb8;
 use common::FakeAdapter;
 use std::sync::{Arc, Mutex};
@@ -147,6 +147,8 @@ fn group(id: &str, members: &[&str], effect: &str, props: Props) -> Group {
 const RED: (u8, u8, u8) = (200, 0, 0);
 const BLUE: (u8, u8, u8) = (0, 0, 200);
 const GREEN: (u8, u8, u8) = (0, 200, 0);
+/// The colour the activation test gives the effect it activates: nothing else paints it.
+const MAGENTA: (u8, u8, u8) = (255, 0, 255);
 
 fn rgb(c: (u8, u8, u8)) -> Rgb8 {
     Rgb8::new(c.0, c.1, c.2)
@@ -177,6 +179,104 @@ fn scenes_file() -> ScenesFile {
     }
 }
 
+/// The source of the saved user effect the rig's user effects hold.
+const MINE: &str = "<html><body>the saved effect</body></html>";
+/// The source of the saved user effect that asks for the audio capture.
+const AUDIO: &str = "<html><body>the audio effect</body></html>";
+/// A source no saved effect has: a draft of it plays on every light.
+const UNUSED: &str = "<html><body>an effect nobody saved</body></html>";
+
+/// An effect that paints one colour, whatever it is.
+struct Solid {
+    colour: Rgb8,
+    schema: PropertySchema,
+    /// When this is set and armed, the schema panics: the effect is found (its schema was
+    /// built when the rig was made) and cannot be built any more.
+    panic: Option<Arc<std::sync::atomic::AtomicBool>>,
+}
+
+impl Effect for Solid {
+    fn schema(&self) -> PropertySchema {
+        if let Some(flag) = &self.panic {
+            if flag.load(std::sync::atomic::Ordering::SeqCst) {
+                panic!("the effect's schema panicked");
+            }
+        }
+        self.schema.clone()
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        let c = self.colour;
+        canvas.fill([c.r as f32 / 255.0, c.g as f32 / 255.0, c.b as f32 / 255.0]);
+    }
+}
+
+/// The builder the rig's effects and drafts use: a draft paints green, the saved effect it
+/// takes over paints red, and an effect whose id says it is an audio one asks for the audio
+/// capture.
+fn fake_builder() -> canvas_daemon::user_effects::Builder {
+    fake_builder_with_panic(None)
+}
+
+/// The builder that panics in the schema when the flag is armed: the effect is found (its
+/// schema was built when the rig was made) and cannot be built any more.
+fn fake_builder_with_panic(
+    panic: Option<Arc<std::sync::atomic::AtomicBool>>,
+) -> canvas_daemon::user_effects::Builder {
+    Arc::new(move |id: &str, _source: &str| {
+        let colour = if id.starts_with("draft:") { rgb(GREEN) } else { rgb(RED) };
+        let needs = canvas_proto::InputNeeds {
+            audio: id.contains("audio"),
+            ..Default::default()
+        };
+        let schema = PropertySchema {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            needs,
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        };
+        Ok(Box::new(Solid { colour, schema, panic: panic.clone() }) as Box<dyn Effect>)
+    })
+}
+
+/// The scenes the draft tests use: the left group plays the saved user effect, the right one a
+/// solid colour.
+fn draft_scenes_file() -> ScenesFile {
+    ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![
+            Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("left", &["fake:a#z0"], "html:mine", Props::new()),
+                    group("right", &["fake:b#z0"], "solid", color(BLUE)),
+                ],
+            },
+            Scene {
+                id: "other".into(),
+                name: "Other".into(),
+                rev: 1,
+                groups: vec![group("all", &["fake:a#z0", "fake:b#z0"], "solid", color(GREEN))],
+            },
+        ],
+    }
+}
+
+/// The scenes the stack guard test uses: the scene that is not active plays the stack.
+fn stack_scenes_file() -> ScenesFile {
+    let mut scenes = draft_scenes_file();
+    scenes.scenes[1].groups = vec![group("all", &["fake:a#z0"], "stack:Glow", Props::new())];
+    scenes
+}
+
 struct Rig {
     router: axum::Router,
     app: Arc<App>,
@@ -186,6 +286,9 @@ struct Rig {
 }
 
 /// The daemon's state around a real engine and the two devices, with `scenes` active.
+///
+/// The user effects and the drafts are fakes: a draft paints green and the saved effect it
+/// takes over paints red, so a test knows the picture it sees.
 async fn rig_with(scenes: ScenesFile) -> Rig {
     rig_in(scenes, &[]).await
 }
@@ -200,6 +303,15 @@ async fn rig_in(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
 
 /// The rig before start-up has run: the engine has its device sinks and nothing else.
 async fn rig_unstarted(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
+    rig_unstarted_with(scenes, html, fake_builder()).await
+}
+
+/// [`rig_unstarted`] with the builder the rig's effects and drafts use.
+async fn rig_unstarted_with(
+    scenes: ScenesFile,
+    html: &[(&str, &str)],
+    builder: canvas_daemon::user_effects::Builder,
+) -> Rig {
     let home = TempHome::new();
     let effects = home.path.join("effects");
     std::fs::create_dir_all(&effects).expect("the effects folder is created");
@@ -225,6 +337,14 @@ async fn rig_unstarted(scenes: ScenesFile, html: &[(&str, &str)]) -> Rig {
         tx,
     );
     app.effects_dir = effects.clone();
+    // The saved user effect the draft tests take over: its source is `MINE`, so a draft of
+    // that source is that effect.
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
+        builder.clone(),
+        &[("mine", MINE), ("audio", AUDIO)],
+    ));
+    // The drafts are built by the same fake, so a draft's picture is known.
+    app.draft = canvas_daemon::draft::Draft::with_builder(Arc::new(|| Duration::ZERO), builder);
     app.user_effects.rescan(&effects);
     let app = Arc::new(app);
     *app.devices.write().await = vec![device(A), device(B)];
@@ -286,6 +406,18 @@ async fn shows_after(sink: &Rec, since: usize, want: Rgb8, what: &str) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("{what}: no frame after #{since} showed {want:?}");
+}
+
+/// Waits (real time) until `check` is true, for at most ten seconds.
+async fn wait_until(mut check: impl FnMut() -> bool) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if check() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("the condition did not come true");
 }
 
 /// Waits (real time) until `sink`'s newest frame has `leds` LEDs that are all `want`.
@@ -468,6 +600,946 @@ async fn setting_a_scene_changes_what_the_fake_devices_show() {
     assert_eq!(rig.app.store.read().await.scenes.active, "other");
     let (status, _) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "nope" }))).await;
     assert_eq!(status, StatusCode::NOT_FOUND);
+}
+
+// ---------------------------------------------------------------- takeovers
+
+/// A draft plays on the groups of the active scene that play its effect.
+#[tokio::test]
+async fn a_draft_plays_on_the_groups_that_play_its_effect() {
+    let rig = rig_with(draft_scenes_file()).await;
+    shows(&rig.a, rgb(RED), "the saved effect plays").await;
+    shows(&rig.b, rgb(BLUE), "the other group plays").await;
+    // The draft is the saved effect's own source, so it plays where that effect plays.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft plays on the group that plays its effect").await;
+    shows(&rig.b, rgb(BLUE), "the other group keeps its own effect").await;
+}
+
+/// A draft of an effect no group plays goes on one temporary group of every light.
+#[tokio::test]
+async fn a_draft_for_an_unused_effect_plays_on_every_light() {
+    let rig = rig_with(draft_scenes_file()).await;
+    shows(&rig.a, rgb(RED), "before").await;
+    shows(&rig.b, rgb(BLUE), "before").await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft plays on every light").await;
+    shows(&rig.b, rgb(GREEN), "the draft plays on every light").await;
+}
+
+/// Stopping a draft puts the active scene back.
+#[tokio::test]
+async fn stopping_a_draft_restores_the_active_scene() {
+    let rig = rig_with(draft_scenes_file()).await;
+    shows(&rig.a, rgb(RED), "before").await;
+    shows(&rig.b, rgb(BLUE), "before").await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on").await;
+    let (status, answer) = send(&rig, "DELETE", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(RED), "the active scene is back").await;
+    shows(&rig.b, rgb(BLUE), "the active scene is back").await;
+}
+
+/// A stack a group of any scene plays is not deleted without `?force=true`, and the refusal
+/// names the scenes it is in.
+#[tokio::test]
+async fn a_stack_played_by_a_group_in_an_inactive_scene_cannot_be_deleted() {
+    let rig = rig_with(stack_scenes_file()).await;
+    // The stack is saved first: the delete route answers 404 for a stack that is not there.
+    let stack = serde_json::json!({
+        "id": "stack:Glow",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "solid", "area": { "kind": "canvas" } }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Glow", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // The scene that plays it is not the active one, and the guard still refuses.
+    assert_eq!(rig.app.store.read().await.scenes.active, "main");
+    let (status, answer) = send(&rig, "DELETE", "/api/v1/stacks/stack:Glow", None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("Other"), "the refusal names the scene: {message}");
+    assert!(rig.app.stacks.get("stack:Glow").is_some(), "the stack is still there");
+    // With the force it goes, and the group that played it is dark.
+    let (status, answer) = send(&rig, "DELETE", "/api/v1/stacks/stack:Glow?force=true", None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(rig.app.stacks.get("stack:Glow").is_none(), "the stack is gone");
+}
+
+/// A draft that moves from the takeover group to a group of the scene lands on that group: the
+/// engine holds the takeover group, and an effect for a group it does not have is dropped.
+#[tokio::test]
+async fn a_draft_that_moves_to_a_scene_group_lands_on_that_group() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // The first draft is of an effect no group plays: it lands on the takeover group, and
+    // every light follows it.
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on every light").await;
+    shows(&rig.b, rgb(GREEN), "the draft is on every light").await;
+
+    // The next draft is of the effect the left group plays: it lands on that group, and the
+    // other group keeps its own effect.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft plays on the group that plays its effect").await;
+    shows(&rig.b, rgb(BLUE), "the other group keeps its own effect").await;
+}
+
+/// Identify is a sink-level override: it does not take the lights away from a draft, and
+/// stopping it does not put the scene back over the draft.
+#[tokio::test]
+async fn identify_during_a_draft_leaves_the_draft_on_the_lights() {
+    let rig = rig_with(draft_scenes_file()).await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on the lights").await;
+
+    // The identify flashes one light: it overrides what the engine sends.
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        routes::LIGHTS_FLASH,
+        Some(serde_json::json!({ "lights": ["fake:a#z0"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The identify stops: the draft is still the thing on the lights.
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        routes::LIGHTS_FLASH,
+        Some(serde_json::json!({ "lights": ["fake:a#z0"], "stop": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.draft.snapshot().is_some(),
+        "the draft is still the draft: the identify did not end it"
+    );
+    assert!(
+        !rig.app.scene.held().takeover.is_empty(),
+        "the draft still holds the lights: the identify did not put the scene back over it"
+    );
+}
+
+/// A stack draft's first instance resolves its areas in the group it lands on.
+#[tokio::test]
+async fn a_stack_draft_resolves_its_areas_in_the_group_it_lands_on() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A stack with a layer over the device of the left group.
+    let stack = serde_json::json!({
+        "id": "stack:Area",
+        "layers": [{
+            "id": "l1",
+            "name": "l1",
+            "effect": "solid",
+            "area": { "kind": "device", "device": "fake:a" },
+        }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Area", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The draft of that stack: no group plays it, so it lands on the takeover group of every
+    // light, and its areas resolve in that group's plan.
+    let body = serde_json::json!({
+        "stack": {
+            "id": "stack:Area",
+            "layers": [{
+                "id": "l1",
+                "name": "l1",
+                "effect": "solid",
+                "area": { "kind": "device", "device": "fake:a" },
+            }],
+        },
+        "epoch": "0123456789abcdef",
+        "seq": 1,
+        "props": {},
+    });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.stacks.running_group().as_deref(),
+        Some(canvas_daemon::scenes::TAKEOVER_GROUP),
+        "the draft's stack resolves in the takeover group's plan"
+    );
+}
+
+/// A stack with an HTML layer cannot be saved while another group of the scene plays HTML: the
+/// scene would run more HTML groups than it may.
+#[tokio::test]
+async fn a_stack_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() {
+    let mut scenes = draft_scenes_file();
+    // The left group plays a stack, the right one an HTML effect: the scene is at the limit.
+    scenes.scenes[0].groups[0].plays =
+        Plays::Effect { effect: "stack:Html".into(), props: Props::new() };
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "html:mine".into(), props: Props::new() };
+    let rig = rig_with(scenes).await;
+    // The stack is saved first: it has no HTML layer yet.
+    let stack = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "solid" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // Now it has an HTML layer: the scene would run two HTML groups.
+    let stack = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("HTML"), "the refusal says why: {message}");
+}
+
+/// The first run sizes the JARGB headers: the zones it sized are lights now, and they join the
+/// first-run scene, so they are lit and not dark.
+#[tokio::test]
+async fn the_sized_jargb_headers_join_the_first_run_scene() {
+    let home = TempHome::new();
+    // The MSI header, with a zone that has no LEDs yet.
+    let mut header = device("fake:MSI B850 Mystic Light");
+    header.name = "MSI B850 Mystic Light".into();
+    header.zones[0].name = "JARGB1".into();
+    header.zones[0].led_count = 0;
+    header.zones[0].min_leds = 0;
+    header.zones[0].max_leds = 0;
+
+    let mut store = canvas_daemon::storage::Store::at(&home.path);
+    // The first-run scene: the default one, with no light yet: the header had no LEDs when the
+    // scene was made.
+    store.lights = canvas_proto::scene::LightsFile {
+        schema_version: LIGHTS_SCHEMA,
+        lights: Vec::new(),
+    };
+    store.scenes = canvas_daemon::scenes::default_scenes(&store.lights);
+    let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
+        fps: 30,
+        power: canvas_proto::api::Power::Running,
+        brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    // The adapter the daemon holds has the header in it.
+    let adapter = FakeAdapter::default();
+    *adapter.devices.lock().unwrap() = vec![header.clone()];
+    let mut app = App::new(
+        store,
+        engine,
+        Box::new(adapter),
+        TOKEN.to_string(),
+        "0.0.0-test".to_string(),
+        tx,
+    );
+    app.user_effects = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
+        fake_builder(),
+        &[("mine", MINE)],
+    ));
+    let app = Arc::new(app);
+    *app.devices.write().await = vec![header.clone()];
+
+    // The first run sizes the header: the zone gets LEDs, and the light joins the scene.
+    let counts = canvas_daemon::first_run::JargbCounts {
+        source: canvas_daemon::first_run::CountSource::Unknown,
+        counts: vec![12],
+    };
+    let sized = canvas_daemon::first_run::size_headers(&app, &[header.clone()], &counts).await;
+    assert_eq!(sized[0].zones[0].led_count, 12, "the header was sized");
+
+    let store = app.store.read().await;
+    assert_eq!(
+        store.lights.lights.len(),
+        1,
+        "the sized header is a light now: {:?}",
+        store.lights.lights
+    );
+    let scene = canvas_daemon::scenes::active_scene(&store.scenes);
+    assert_eq!(
+        scene.groups[0].members,
+        vec![store.lights.lights[0].id.clone()],
+        "and it joins the first run's group"
+    );
+}
+
+/// A draft on one group keeps the capture the other groups need: the captures are set, not
+/// merged, so the needs of every group the engine holds have to be in them.
+#[tokio::test]
+async fn a_draft_on_one_group_keeps_the_capture_the_other_groups_need() {
+    let mut scenes = draft_scenes_file();
+    // The right group plays the built-in effect that asks for the audio capture.
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "audio_spectrum".into(), props: Props::new() };
+    let rig = rig_with(scenes).await;
+    assert!(rig.app.inputs.audio_needed(), "the audio effect asks for the capture");
+
+    // The draft of the effect the left group plays: it lands on that group alone.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.inputs.audio_needed(),
+        "the group that plays the audio effect still needs the capture"
+    );
+}
+
+/// A change to a group a draft holds is saved, and the draft keeps the lights: the change
+/// lands when the draft ends, because its restore applies the active scene.
+#[tokio::test]
+async fn a_group_brightness_during_a_draft_keeps_the_draft_on_the_lights() {
+    let rig = rig_with(draft_scenes_file()).await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on the lights").await;
+
+    // The brightness of the left group changes while the draft holds the lights.
+    let path = route(routes::GROUP_BRIGHTNESS, &[("id", "main"), ("group", "left")]);
+    let (status, answer) = send(&rig, "PUT", &path, Some(serde_json::json!({ "brightness": 20 }))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // The draft still holds the lights: the takeover is on, and the slot is there.
+    assert!(
+        !rig.app.scene.held().takeover.is_empty(),
+        "the draft still holds the lights: {:?}",
+        rig.app.scene.held()
+    );
+    assert!(rig.app.draft.snapshot().is_some(), "the draft is still the draft");
+    assert_eq!(
+        stored(&rig, "main").await.groups[0].brightness,
+        20,
+        "the change is saved"
+    );
+
+    // The draft ends: the scene comes back with the change.
+    let (status, _) = send(&rig, "DELETE", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK);
+    // The scene is back, and the group is at 20 %: the red of the saved effect, dimmed.
+    shows(&rig.a, Rgb8::new(40, 0, 0), "the scene is back with the change").await;
+    shows(&rig.b, rgb(BLUE), "the scene is back").await;
+    assert_eq!(stored(&rig, "main").await.groups[0].brightness, 20, "with the change");
+}
+
+/// The same, for a change of a group's effect: the draft holds the lights until it ends.
+#[tokio::test]
+async fn a_group_props_change_during_a_draft_keeps_the_draft_on_the_lights() {
+    let rig = rig_with(draft_scenes_file()).await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on the lights").await;
+
+    let path = route(routes::GROUP_PROPS, &[("id", "main"), ("group", "left")]);
+    let (status, answer) = send(&rig, "PATCH", &path, Some(serde_json::json!(color(GREEN)))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        !rig.app.scene.held().takeover.is_empty(),
+        "the draft still holds the lights: {:?}",
+        rig.app.scene.held()
+    );
+    assert!(rig.app.draft.snapshot().is_some(), "the draft is still the draft");
+
+    let (status, _) = send(&rig, "DELETE", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK);
+    shows(&rig.b, rgb(BLUE), "the scene is back").await;
+}
+
+/// The same, for a light's arrangement: the scene is not rebuilt over the draft.
+#[tokio::test]
+async fn a_light_patch_during_a_draft_keeps_the_draft_on_the_lights() {
+    let rig = rig_with(draft_scenes_file()).await;
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on the lights").await;
+
+    let (status, answer) = send(
+        &rig,
+        "PATCH",
+        "/api/v1/lights/fake:a%23z0",
+        Some(serde_json::json!({ "reversed": true })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        !rig.app.scene.held().takeover.is_empty(),
+        "the draft still holds the lights: {:?}",
+        rig.app.scene.held()
+    );
+    assert!(rig.app.draft.snapshot().is_some(), "the draft is still the draft");
+
+    let (status, _) = send(&rig, "DELETE", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK);
+    shows(&rig.b, rgb(BLUE), "the scene is back").await;
+}
+
+/// A stack with an HTML layer is refused when the scene it would land on is at the limit: the
+/// draft's own layers count, not the saved stack's.
+#[tokio::test]
+async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() {
+    let mut scenes = draft_scenes_file();
+    // The left group plays a stack, the right one an HTML effect: the scene is at the limit.
+    scenes.scenes[0].groups[0].plays =
+        Plays::Effect { effect: "stack:Html".into(), props: Props::new() };
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "html:mine".into(), props: Props::new() };
+    let rig = rig_with(scenes).await;
+    // The stack is saved first: it has no HTML layer yet.
+    let stack = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "solid" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // A draft of it with an HTML layer: the scene would run two HTML groups.
+    let body = serde_json::json!({
+        "stack": {
+            "id": "stack:Html",
+            "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
+        },
+        "epoch": "0123456789abcdef",
+        "seq": 1,
+        "props": {},
+    });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("HTML"), "the refusal says why: {message}");
+}
+
+/// A stack with an HTML layer is refused when a scene that is not the active one plays it beside
+/// another HTML group: that scene would run two when the owner sets it.
+#[tokio::test]
+async fn a_stack_with_an_html_layer_is_refused_when_another_scene_plays_it() {
+    let mut scenes = draft_scenes_file();
+    // The scene that is not active plays the stack beside an HTML effect.
+    scenes.scenes[1].groups = vec![
+        group("all", &["fake:a#z0"], "stack:Html", Props::new()),
+        group("other", &["fake:b#z0"], "html:mine", Props::new()),
+    ];
+    let rig = rig_with(scenes).await;
+    let stack = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(
+        answer["message"].as_str().unwrap_or_default().contains("HTML"),
+        "{answer}"
+    );
+}
+
+/// A scene that would run more HTML groups than a scene may is refused before it is set.
+#[tokio::test]
+async fn setting_a_scene_that_runs_too_many_html_groups_is_refused() {
+    let mut scenes = draft_scenes_file();
+    // The scene that is not active runs two HTML groups.
+    scenes.scenes[1].groups = vec![
+        group("all", &["fake:a#z0"], "html:mine", Props::new()),
+        group("other", &["fake:b#z0"], "html:audio", Props::new()),
+    ];
+    let rig = rig_with(scenes).await;
+    let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(
+        answer["message"].as_str().unwrap_or_default().contains("HTML"),
+        "{answer}"
+    );
+    assert_eq!(rig.app.store.read().await.scenes.active, "main", "the scene did not change");
+}
+
+/// A takeover that moves to a group of the scene goes on the whole scene again: the groups
+/// whose effect cannot be built are dark, and the daemon says so.
+#[tokio::test]
+async fn a_re_land_records_the_group_whose_effect_could_not_be_built() {
+    let mut scenes = draft_scenes_file();
+    // The right group plays an effect that is not there.
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "no-such-effect".into(), props: Props::new() };
+    let rig = rig_with(scenes).await;
+    // The first draft lands on the takeover group.
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    // The next draft lands on a group of the scene: the whole scene goes on again.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let failures = rig.app.scene.failures();
+    assert!(failures.contains_key("right"), "the group that could not be built is named: {failures:?}");
+    // What landed: the scene's groups, with the takeover on the one the draft landed on.
+    let held = rig.app.scene.held();
+    assert_eq!(held.groups, vec!["left".to_string(), "right".to_string()]);
+    assert_eq!(held.takeover, vec!["left".to_string()]);
+}
+
+/// The scenes the takeover tests use: the left group plays the saved effect (the draft's
+/// target), the right one the built-in effect that asks for the audio capture.
+fn takeover_scenes_file() -> ScenesFile {
+    let mut scenes = draft_scenes_file();
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "audio_spectrum".into(), props: Props::new() };
+    scenes
+}
+
+/// A draft on the group of the scene that plays the saved effect: the takeover lands on that
+/// group, not on the takeover group of every light.
+async fn draft_on_a_scene_group(rig: &Rig) {
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows(&rig.a, rgb(GREEN), "the draft is on the group that plays its effect").await;
+    assert_eq!(
+        rig.app.scene.held().takeover,
+        vec!["left".to_string()],
+        "the draft took that group over"
+    );
+}
+
+/// The needs of a scene: what every group of it needs from the screen and the audio capture.
+///
+/// This is what the daemon's `needs_of(scene)` says about a scene, worked out here so the test
+/// does not depend on the daemon's own helper to check the daemon's own helper.
+fn scene_needs(rig: &Rig, scene: &Scene) -> canvas_proto::InputNeeds {
+    let mut needs = canvas_proto::InputNeeds::default();
+    for group in &scene.groups {
+        let Plays::Effect { effect, .. } = &group.plays else { continue };
+        let Some(schema) = canvas_daemon::api::effects::find_schema(
+            &rig.app.user_effects,
+            &rig.app.stacks,
+            effect,
+        ) else {
+            continue;
+        };
+        needs.screen |= schema.needs.screen;
+        needs.audio |= schema.needs.audio;
+    }
+    needs
+}
+
+/// After a route that ended the draft: the group the draft was on plays the scene's effect
+/// again, the draft is gone, the takeover is over, and the captures are the scene's.
+async fn assert_the_draft_ended(rig: &Rig) {
+    shows(&rig.a, rgb(RED), "the scene's effect plays on the group the draft held").await;
+    assert!(rig.app.draft.snapshot().is_none(), "the draft is gone");
+    assert!(rig.app.scene.held().takeover.is_empty(), "the takeover is over");
+    let scene = stored(rig, "main").await;
+    let needs = scene_needs(rig, &scene);
+    assert_eq!(
+        rig.app.inputs.audio_needed(),
+        needs.audio,
+        "the capture is the one the scene's groups need"
+    );
+}
+
+/// A save that changes another group ends the draft on the engine: the group the draft was on
+/// plays the scene's effect again.
+#[tokio::test]
+async fn a_scene_put_over_a_draft_ends_the_draft_on_the_engine() {
+    let rig = rig_with(takeover_scenes_file()).await;
+    draft_on_a_scene_group(&rig).await;
+
+    // The save changes only the other group.
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[1].brightness = 20;
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) =
+        send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_draft_ended(&rig).await;
+}
+
+/// An activation of another group ends the draft on the engine.
+#[tokio::test]
+async fn an_activation_over_a_draft_ends_the_draft_on_the_engine() {
+    let rig = rig_with(takeover_scenes_file()).await;
+    draft_on_a_scene_group(&rig).await;
+
+    let body = serde_json::json!({ "props": {}, "preset": null, "groups": ["right"] });
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_draft_ended(&rig).await;
+}
+
+/// An activation that changes nothing ends the draft on the engine too.
+#[tokio::test]
+async fn an_activation_that_changes_nothing_ends_the_draft_on_the_engine() {
+    let rig = rig_with(takeover_scenes_file()).await;
+    draft_on_a_scene_group(&rig).await;
+
+    // The same effect on the same group, with the same values: nothing changes.
+    let body = serde_json::json!({ "props": {}, "preset": null, "groups": ["left"] });
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "html:mine"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_draft_ended(&rig).await;
+}
+
+/// The legacy layout switch ends the draft on the engine: the scene plays, and the captures
+/// are the ones the scene's groups need.
+#[tokio::test]
+async fn a_layout_switch_over_a_draft_ends_the_draft_on_the_engine() {
+    let rig = rig_with(takeover_scenes_file()).await;
+    draft_on_a_scene_group(&rig).await;
+
+    let active = rig.app.store.read().await.layouts.active.clone();
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        routes::LAYOUT_ACTIVE,
+        Some(serde_json::json!({ "id": active })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_draft_ended(&rig).await;
+}
+
+/// The props route does not end the editor's draft: the draft is the editor's unsaved work,
+/// and its props are changed with PUT /effects/draft. The route answers a conflict and writes
+/// nothing.
+#[tokio::test]
+async fn the_active_props_route_is_refused_while_a_draft_holds_the_lights() {
+    let rig = rig_with(takeover_scenes_file()).await;
+    draft_on_a_scene_group(&rig).await;
+    let before = stored(&rig, "main").await;
+
+    let (status, answer) = send(
+        &rig,
+        "PATCH",
+        routes::EFFECT_ACTIVE_PROPS,
+        Some(serde_json::json!({ "color": { "type": "color", "value": "#00ff00" } })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert!(
+        answer["message"].as_str().unwrap_or_default().contains("draft"),
+        "the message names the draft route: {answer}"
+    );
+    // Nothing changed: the draft still holds the lights and the scene is as it was.
+    assert!(rig.app.draft.snapshot().is_some(), "the draft is still the draft");
+    assert_eq!(
+        rig.app.scene.held().takeover,
+        vec!["left".to_string()],
+        "the draft still holds the group"
+    );
+    assert_eq!(stored(&rig, "main").await, before, "the scene is not written");
+}
+
+/// A change to the group the draft is on leaves the draft alone: the draft holds the lights
+/// and its change lands when the draft ends.
+#[tokio::test]
+async fn a_change_to_the_group_the_draft_holds_leaves_the_draft_alone() {
+    let rig = rig_with(takeover_scenes_file()).await;
+    draft_on_a_scene_group(&rig).await;
+
+    // The props of the group the draft is on.
+    let path = route(routes::GROUP_PROPS, &[("id", "main"), ("group", "left")]);
+    let (status, answer) = send(&rig, "PATCH", &path, Some(serde_json::json!(color(GREEN)))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.held().takeover,
+        vec!["left".to_string()],
+        "the draft still holds the group"
+    );
+    assert!(rig.app.draft.snapshot().is_some(), "the draft is still the draft");
+}
+
+/// A takeover whose build fails leaves the engine and the failures it had: the partial map of
+/// the failed build is not written over them.
+#[tokio::test]
+async fn a_failed_takeover_leaves_the_failures_it_had() {
+    let mut scenes = takeover_scenes_file();
+    // The right group plays an effect that is not there: it is dark, and the API says so.
+    scenes.scenes[0].groups[1].plays =
+        Plays::Effect { effect: "not_an_effect".into(), props: Props::new() };
+    let rig = rig_with(scenes).await;
+    let before = rig.app.scene.failures();
+    assert!(before.contains_key("right"), "the dark group is named: {before:?}");
+
+    // A draft of an effect nobody saved: it holds the takeover group, so the takeover that
+    // follows lands on a group of the scene and the whole scene goes on again.
+    let body = serde_json::json!({ "html": UNUSED, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The takeover's build fails: nothing lands, and the failures are the ones the engine had.
+    let builder: canvas_daemon::scenes::EffectBuilder =
+        Arc::new(|_group| Err("the effect could not be built".to_string()));
+    let error =
+        canvas_daemon::scenes::apply_takeover(&rig.app, "html:mine", &Props::new(), None, builder)
+            .await;
+    assert!(error.is_err(), "the takeover failed: {error:?}");
+    assert_eq!(rig.app.scene.failures(), before, "the failures are the ones the engine had");
+}
+
+/// The onboarding greeting holds the lights: a takeover with no draft behind it.
+async fn greeting_on_the_lights(rig: &Rig) {
+    let body = serde_json::json!({ "props": {}, "preset": null });
+    let (status, answer) = send(
+        rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "onboard-hello"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.held().takeover,
+        vec!["takeover".to_string()],
+        "the greeting holds the lights"
+    );
+}
+
+/// After a route that ended the greeting: the takeover is over.
+async fn assert_the_greeting_ended(rig: &Rig) {
+    assert!(rig.app.scene.held().takeover.is_empty(), "the takeover is over");
+}
+
+/// An activation ends the greeting on the engine: the scene plays again.
+#[tokio::test]
+async fn an_activation_ends_the_greeting_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    greeting_on_the_lights(&rig).await;
+
+    let body = serde_json::json!({
+        "props": { "color": { "type": "color", "value": "#ff00ff" } },
+        "preset": null,
+        "groups": ["left"],
+    });
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_greeting_ended(&rig).await;
+    shows(&rig.a, rgb(MAGENTA), "the group plays the effect it was given").await;
+}
+
+/// A scene save ends the greeting on the engine: the scene plays again.
+#[tokio::test]
+async fn a_scene_save_ends_the_greeting_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    greeting_on_the_lights(&rig).await;
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[1].brightness = 20;
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let (status, answer) =
+        send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_greeting_ended(&rig).await;
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A layout switch ends the greeting on the engine: the scene plays again.
+#[tokio::test]
+async fn a_layout_switch_ends_the_greeting_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    greeting_on_the_lights(&rig).await;
+
+    let active = rig.app.store.read().await.layouts.active.clone();
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        routes::LAYOUT_ACTIVE,
+        Some(serde_json::json!({ "id": active })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_the_greeting_ended(&rig).await;
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A route that fails after it ended a takeover puts the scene back on the lights: a takeover
+/// is never left there with nothing owning it.
+#[tokio::test]
+async fn a_failed_activation_after_a_draft_puts_the_scene_back() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // The store cannot write the scenes: the save fails.
+    std::fs::create_dir_all(rig.home.path.join("scenes.json")).expect("the scenes file is blocked");
+
+    // The activation ends the draft and then fails to save the scene.
+    let body = serde_json::json!({ "props": {}, "preset": null, "groups": ["left"] });
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+        Some(body),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+
+    // The scene is back on the lights and the takeover is over.
+    assert!(rig.app.scene.held().takeover.is_empty(), "the takeover is over");
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A route that goes away after the guard ended the takeover still ends it on the engine: the
+/// guard's drop puts the scene back on the lights.
+#[tokio::test]
+async fn a_route_that_goes_away_ends_the_takeover_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // The client goes away: the request is dropped at the first await it cannot finish, which
+    // is the apply's build, after the guard took the takeover.
+    let dropped = tokio::time::timeout(
+        Duration::ZERO,
+        send_on(
+            &rig.router,
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "solid"),
+            Some(serde_json::json!({
+                "props": { "color": { "type": "color", "value": "#ff00ff" } },
+                "preset": null,
+                "groups": ["left"],
+            })),
+        ),
+    )
+    .await;
+    assert!(dropped.is_err(), "the request was dropped");
+    assert!(!rig.app.draft.is_active(), "the guard was taken before the drop");
+
+    // The guard's drop put the scene back on the lights: the takeover is over.
+    wait_until(|| rig.app.scene.held().takeover.is_empty()).await;
+    shows(&rig.a, rgb(MAGENTA), "the scene plays the effect it was given").await;
+}
+
+/// A panic between the guard and the answer still ends the takeover on the engine: the guard's
+/// drop puts the scene back on the lights.
+#[tokio::test]
+async fn a_panic_after_the_guard_ends_the_takeover_on_the_engine() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // A route that takes the guard and then panics: the guard is dropped with the debt unpaid.
+    let app = rig.app.clone();
+    let task = tokio::spawn(async move {
+        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
+        panic!("the route panicked after the guard");
+    });
+    assert!(task.await.is_err(), "the task panicked");
+
+    // The guard's drop put the scene back on the lights: the takeover is over.
+    wait_until(|| rig.app.scene.held().takeover.is_empty()).await;
+    shows(&rig.a, rgb(RED), "the scene's effect plays again").await;
+}
+
+/// A takeover that lands while the guard's debt is unpaid is not put over by the guard's
+/// apply: the new takeover holds the lights, and its own end puts the scene back.
+#[tokio::test]
+async fn a_new_takeover_is_not_put_over_by_the_dropped_guard() {
+    let rig = rig_with(draft_scenes_file()).await;
+    // A draft holds the lights.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(!rig.app.scene.held().takeover.is_empty(), "the draft holds the lights");
+
+    // A route that takes the guard and then waits: the gate is held, and the guard is dropped
+    // when the route goes away.
+    let app = rig.app.clone();
+    let route = tokio::spawn(async move {
+        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
+        std::future::pending::<()>().await;
+    });
+    // The guard was taken: the draft is gone.
+    wait_until(|| !rig.app.draft.is_active()).await;
+
+    // A new takeover lands while the route still holds the gate: the guard's apply must not
+    // put the scene over it. The takeover's effect is a draft's, so the lights show green.
+    let user = fake_builder();
+    let builder: canvas_daemon::scenes::EffectBuilder =
+        Arc::new(move |_group| user("draft:new", ""));
+    let target = canvas_daemon::scenes::apply_takeover(
+        &rig.app,
+        "draft:new",
+        &Props::new(),
+        None,
+        builder,
+    )
+    .await
+    .expect("the takeover lands");
+    assert_eq!(target, vec!["takeover".to_string()]);
+
+    // The route goes away: the guard is dropped with the debt unpaid.
+    route.abort();
+
+    // The new takeover still holds the lights: the guard's apply did not put the scene over it.
+    wait_until(|| rig.app.scene.held().takeover == vec!["takeover".to_string()]).await;
+    shows(&rig.a, rgb(GREEN), "the new takeover is on the lights").await;
+}
+
+/// The legacy path (no scene on the lights): an activation whose effect cannot start answers
+/// the error and says so in the log, the way the layout route does.
+#[tokio::test]
+async fn an_activation_that_cannot_start_answers_the_error() {
+    let flag = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    // The rig before start-up: no scene is on the lights, so the legacy path runs.
+    let rig = rig_unstarted_with(
+        draft_scenes_file(),
+        &[],
+        fake_builder_with_panic(Some(Arc::clone(&flag))),
+    )
+    .await;
+    // The effect is found (its schema was built with the rig) and cannot be built any more.
+    flag.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let log = common::LogBuf::default();
+    let _guard = log.install();
+    let (status, answer) = send(
+        &rig,
+        "POST",
+        &routes::EFFECT_ACTIVATE.replace("{id}", "html:mine"),
+        Some(serde_json::json!({ "props": {}, "preset": null, "groups": ["left"] })),
+    )
+    .await;
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{answer}");
+    let text = log.text();
+    assert!(
+        text.contains("did not start"),
+        "the log says the effect did not start: {text}"
+    );
 }
 
 // ---------------------------------------------------------------- one group
