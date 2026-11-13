@@ -1046,6 +1046,15 @@ fn refuse_unreadable_scenes_files(home: &Path) -> Result<(), ImportError> {
     Ok(())
 }
 
+/// Removes `path` when it is there. A missing file is not an error: the caller wants it gone.
+fn remove_if_there(path: &Path) -> std::io::Result<()> {
+    match std::fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        Err(e) => Err(e),
+    }
+}
+
 /// Writes a validated bundle over the daemon's own files. `devices` is the daemon's current
 /// device list, which a 0.13 bundle's layouts are migrated with.
 pub fn import_bundle(
@@ -1058,6 +1067,11 @@ pub fn import_bundle(
 
 /// Like [`import_bundle`], with the rated maxima the service last reported for the
 /// hot-limit check. The import route passes them from the last fans status when known.
+///
+/// A 0.13 bundle (no scenes) replaces the machine's own scenes, as it replaces the layouts they
+/// came from: they are migrated from the bundle's layouts with the device list in hand, or, with
+/// no list yet, held as the pending migration and finished by the first one.
+/// `layouts.json` is written from the bundle, as the old layout import has always done.
 pub fn import_bundle_rated(
     home: &Path,
     bundle: &ExportBundle,
@@ -1110,12 +1124,22 @@ pub fn import_bundle_rated(
     // pending migration holds `lights.json` (labels, slices and `reversed` survive). The scenes
     // code path below writes nothing to `layouts.json`: the old layout import still writes it from
     // the bundle until Task 12, exactly as it did before.
+    //
+    // With no device list yet, a bundle with no scenes cannot be migrated: a 0.13 bundle imported
+    // in the first seconds of a start would guess every arrangement (`Strip`) and refuse a matrix
+    // zone's Grid. It is held instead: `lights`/`scenes.json` are left as a bundle with no scenes
+    // leaves them, so the store that loads next holds the pending migration (as an absent
+    // `scenes.json` means) and the first device list finishes it (`Store::finish_scenes`).
     let (lights, scenes, repairs) = match &bundle.scenes {
-        Some(scenes) => prepared_scenes(bundle.lights.as_ref(), scenes, devices),
+        Some(scenes) => {
+            let (lights, scenes, repairs) = prepared_scenes(bundle.lights.as_ref(), scenes, devices);
+            (Some(lights), Some(scenes), repairs)
+        }
+        None if devices.is_empty() => (bundle.lights.clone(), None, Vec::new()),
         None => {
             let held = bundle.lights.clone().unwrap_or_else(crate::scenes::empty_lights);
             let (lights, scenes) = Store::build_scenes(&held, Some(&layouts), devices);
-            (lights, scenes, Vec::new())
+            (Some(lights), Some(scenes), Vec::new())
         }
     };
     for change in &repairs {
@@ -1134,8 +1158,18 @@ pub fn import_bundle_rated(
     write_json(&home.join(ZONES_FILE), &zones)?;
     write_json(&home.join(EFFECTS_FILE), &effects)?;
     write_json(&home.join(DISPLAYS_FILE), &displays)?;
-    write_json(&home.join(LIGHTS_FILE), &lights)?;
-    write_json(&home.join(SCENES_FILE), &scenes)?;
+    // The bundle's own hardware map, when it has one; otherwise the machine's `lights.json` is
+    // left as it is and becomes the held lights of the migration the next load holds.
+    if let Some(lights) = &lights {
+        write_json(&home.join(LIGHTS_FILE), lights)?;
+    }
+    match &scenes {
+        Some(scenes) => write_json(&home.join(SCENES_FILE), scenes)?,
+        // Held for the first device list: no scenes.json, so the store that loads next migrates
+        // from the layouts this import just wrote, with the devices it has then. The pre-import
+        // snapshot above holds the scenes file this replaces.
+        None => remove_if_there(&home.join(SCENES_FILE))?,
+    }
     // The stacks replace the saved ones like the other files; a bundle from before stacks has
     // none and leaves none behind. The route validates them before it gets here.
     crate::stacks::write_file(home, &bundle.stacks)?;
@@ -1953,6 +1987,33 @@ power = "running"
         let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
         assert_eq!(bundle.lights, Some(lights), "the lights.json held on disk is exported");
         assert_eq!(bundle.scenes, None, "there is no scenes.json to export");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should-fix 4 (review 323): a 0.13 bundle imported before the first device list does not
+    /// migrate with no devices. It is held as the store's pending migration, with the device wait
+    /// the load path uses, and the first list finishes it: a matrix zone becomes a Grid, where a
+    /// migration with no devices could only make a Strip.
+    #[test]
+    fn a_0_13_import_with_no_devices_waits_for_the_first_list() {
+        use canvas_proto::scene::Arrangement;
+
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "Gaming", vec![bundle_placed("openrgb:kb", 0)])],
+        };
+        let dir = temp_home("import-held");
+        import_bundle(&dir, &bundle_of(layouts, None, None), &[]).unwrap();
+
+        assert!(!dir.join(SCENES_FILE).exists(), "no scenes are written with no devices to place them");
+        let mut store = Store::load_from(&dir);
+        assert!(store.scenes_pending.is_some(), "the import is held as the pending migration");
+        assert!(store.finish_scenes(&[bundle_board(), bundle_kb()]), "the first device list finishes it");
+        let lights = read_lights(&dir);
+        let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the placed zone is a light");
+        assert_eq!(kb.arrangement, Arrangement::Grid, "the first list's devices decide the arrangement");
+        assert_eq!(read_scenes(&dir).scenes[0].name, "Gaming");
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
