@@ -30,6 +30,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { getSnap, patchSnap, refreshLights, refreshScenes, useSnap } from "@/lib/store";
+import type { Group } from "@/proto/Group";
 import type { GroupState } from "@/proto/GroupState";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
@@ -68,6 +69,28 @@ interface Live {
 /** The two kinds of live write a group has. */
 type LiveKind = "props" | "brightness";
 
+/** What a live write's lost answer left behind, read from the daemon's own scene. */
+type LostAnswer =
+  /** The daemon is one rev on and holds what was sent: the write landed, only its answer was lost. */
+  | { landed: Scene }
+  /** The rev moved on without what was sent: another window saved in between. */
+  | { conflict: Scene }
+  /** The daemon is still on the rev the write was sent on: the write did not land. */
+  | null;
+
+/**
+ * True when `group` holds the values a live write sent. The daemon fits a props patch to the
+ * effect's schema, so it may keep its own value for a key: the key being there is what says the
+ * merge happened. A brightness is stored as it was sent.
+ */
+function holdsValue(group: Group, kind: LiveKind, written: Props | number): boolean {
+  if (kind === "brightness") return group.brightness === written;
+  const plays = group.plays;
+  if (plays.type !== "effect") return false;
+  const sent = written as Props;
+  return Object.keys(sent).every((key) => plays.props[key] !== undefined);
+}
+
 /** One change this window made that the daemon has not confirmed yet. */
 interface Change {
   /** Numbers the change, so a failed write can take its own off the undo stack. */
@@ -100,8 +123,8 @@ interface GroupLive {
   version: Record<LiveKind, number>;
   /** When each kind was last sent, so a kind waits its 60 ms. */
   sentAt: Record<LiveKind, number>;
-  /** Live writes of this group that failed in a row. */
-  failures: number;
+  /** Live writes of each kind that failed in a row. One kind's failures never refuse the other. */
+  failures: Record<LiveKind, number>;
   /** A write for this group is on its way. */
   sending: boolean;
   /** The timer that sends the next value. */
@@ -626,6 +649,34 @@ export function useScene(): UseScene {
     for (const groupId of [...live.current.keys()]) void sendLiveRef.current(groupId);
   }, []);
 
+  /**
+   * Reads the scene after a live write's answer was lost, and says what became of the write. A
+   * write can reach the daemon and be saved while its answer is lost (a dropped connection, a
+   * timeout): taking the next answer for another window's save would drop the user's unsent draft.
+   */
+  const afterLostAnswer = useCallback(
+    async (
+      sceneId: string,
+      groupId: string,
+      kind: LiveKind,
+      sentRev: number | null,
+      written: Props | number,
+    ): Promise<LostAnswer> => {
+      if (sentRev === null) return null;
+      await refreshScenes();
+      const scene = getSnap().scenes?.scenes.find((s) => s.id === sceneId) ?? null;
+      // The read did not answer, or answered from the scene the write was sent on: the write did
+      // not land, and the retry is an ordinary one.
+      if (!scene || scene.rev <= sentRev) return null;
+      // The rev moved more than this write would move it, or the group does not hold what was
+      // sent: another window saved in between.
+      const group = scene.groups.find((g) => g.id === groupId);
+      if (scene.rev > sentRev + 1 || !group || !holdsValue(group, kind, written)) return { conflict: scene };
+      return { landed: scene };
+    },
+    [],
+  );
+
   /** Sends the live values of one group that are waiting. */
   const sendLive = useCallback(
     async (key: string) => {
@@ -697,6 +748,10 @@ export function useScene(): UseScene {
       } catch (e) {
         failure = e;
       }
+      // A write whose answer was lost may have landed all the same. The scene says which: it is
+      // read before the live write is let go, so no whole-scene save can move the rev while it is
+      // out, and the answer it finds is taken as this write's own or another window's save.
+      const lost = failure ? await afterLostAnswer(g.sceneId, groupId, kind, sentRev, written) : null;
       g.sending = false;
       liveBusy.current -= 1;
       if (liveBusy.current === 0) {
@@ -704,11 +759,27 @@ export function useScene(): UseScene {
         liveWaiters.current = [];
         for (const resolve of waiters) resolve();
       }
-      if (failure) {
+      if (!failure) {
+        g.failures[kind] = 0;
+        publish();
+      } else if (lost && "landed" in lost) {
+        // The write landed; only its answer was lost. It is taken as any other answer is: the
+        // scene, its rev and the value go to the draft, and the value is not sent again.
+        g.failures[kind] = 0;
+        adoptLive(lost.landed, groupId, kind, version, written);
+        error.current = null;
+        publish();
+      } else if (lost && "conflict" in lost) {
+        liveConflict(lost.conflict, groupId, kind, version);
+      } else {
         // The write did not land. The value that came while it was out still goes: a failed
         // write must not take the next value with it.
-        g.failures += 1;
-        if (g.failures < LIVE_FAILURES) {
+        g.failures[kind] += 1;
+        // A page or a scene that is going away asks for the values without the 60 ms wait. A
+        // refused write must not answer that by sending its retries back to back: they wait
+        // their throttle like any other write.
+        g.hurry = false;
+        if (g.failures[kind] < LIVE_FAILURES) {
           // Try again after the throttle, with the value that did not land, unless the user has
           // moved on since (then the newer value is the one that goes).
           if (kind === "props") {
@@ -717,21 +788,23 @@ export function useScene(): UseScene {
             g.queued.brightness = written as number;
           }
         } else {
-          // Three tries in a row failed. The refused values leave the queue and the screen, so
-          // nothing shows as saved that is not, and no later save carries them. The error stays.
-          g.queued = {};
-          g.shown = {};
+          // Three tries in a row failed. The value that failed leaves the queue and the screen, so
+          // nothing shows as saved that is not, and no later save carries it. A value the user
+          // moved on to since was never tried, and the other kind was not tried either: both stay,
+          // with tries of their own. The error stays.
+          g.failures[kind] = 0;
+          if (g.version[kind] === version) {
+            delete g.queued[kind];
+            delete g.shown[kind];
+          }
         }
         fail(messageOf(failure));
-      } else {
-        g.failures = 0;
-        publish();
       }
       // The values that came while this write was out go next, one write at a time.
       kickLive();
       retireIfIdle(key, g);
     },
-    [adoptLive, fail, knownRev, kickLive, liveConflict, publish, retireIfIdle],
+    [adoptLive, afterLostAnswer, fail, knownRev, kickLive, liveConflict, publish, retireIfIdle],
   );
 
   useEffect(() => {
@@ -754,15 +827,16 @@ export function useScene(): UseScene {
           queued: {},
           version: { props: 0, brightness: 0 },
           sentAt: { props: now, brightness: now },
-          failures: 0,
+          failures: { props: 0, brightness: 0 },
           sending: false,
           timer: null,
           hurry: false,
         };
         live.current.set(key, g);
       }
-      // The user moved again: the group tries again, whatever came before.
-      g.failures = 0;
+      // The user moved this kind again: it tries again, whatever came before. The other kind's
+      // failures are its own.
+      g.failures[kind] = 0;
       g.version[kind] += 1;
       if (kind === "props") {
         const props = value as Props;

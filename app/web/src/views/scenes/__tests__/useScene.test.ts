@@ -662,6 +662,183 @@ describe("useScene", () => {
     expect(result.current.scene?.name).toBe("Gaming (other window)");
   });
 
+  it("a live write whose answer was lost is not taken for another window's save", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // A daemon of this test's own: every write it takes is saved and moves its rev one on, and
+    // every read answers the scene it holds.
+    const held = gaming();
+    let applied = 0;
+    const apply = (props: Props): Scene => {
+      const group = held.groups.find((g) => g.id === groupId);
+      if (group && group.plays.type === "effect") {
+        group.plays = { ...group.plays, props: { ...group.plays.props, ...props } };
+      }
+      held.rev += 1;
+      applied += 1;
+      return clone(held);
+    };
+    api.scenes.list.mockImplementation(async () => ({
+      active: held.id,
+      scenes: [clone(held)],
+      group_states: held.groups.map((g) => ({ id: g.id, failed: null })),
+    }));
+    // The first write reaches the daemon and is saved; its answer is lost on the way back.
+    let lost = true;
+    api.scenes.patchGroupProps.mockImplementation(async (_id: string, _group: string, props: Props) => {
+      const answer = apply(props);
+      if (lost) {
+        lost = false;
+        throw new TypeError("Failed to fetch");
+      }
+      return answer;
+    });
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(42));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(200);
+    });
+
+    // The write that landed is not sent again, and no other window is named.
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+    expect(applied).toBe(1);
+    expect(result.current.error).toBeNull();
+    expect(result.current.scene?.rev).toBe(8);
+    const shownPlays = result.current.scene?.groups[0]?.plays;
+    expect(shownPlays?.type === "effect" ? shownPlays.props.amount : undefined).toEqual({
+      type: "number",
+      value: 42,
+    });
+
+    // The next save continues from the rev the read found: it neither 409s against this window's
+    // own write nor drops the edit.
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Renamed";
+      }, "Rename");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+    const [, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
+    expect(body.expected_rev).toBe(8);
+    expect(body.scene.name).toBe("Renamed");
+  });
+
+  it("each kind gets its own three tries: one kind's failures do not refuse the other", async () => {
+    api.scenes.patchGroupProps.mockRejectedValue(new ApiFailure(500, "http", "the daemon said no"));
+    api.scenes.putGroupBrightness.mockRejectedValue(new ApiFailure(500, "http", "the daemon said no"));
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(1));
+      result.current.setBrightness(groupId, 42);
+    });
+    // Three tries of each kind, a throttle window apart. A count shared by both kinds would take
+    // the brightness value off the screen and out of the queue on the props value's last try,
+    // though the brightness value had a try of its own left.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1000);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(3);
+    expect(result.current.error).toBe("the daemon said no");
+  });
+
+  it("a value of the other kind that was never tried survives a kind's third failure", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // Every props write stays out until the test refuses it, so a brightness value can be queued
+    // and never tried while the props value is being refused.
+    const held: Array<(e: unknown) => void> = [];
+    api.scenes.patchGroupProps.mockImplementation(
+      () =>
+        new Promise<Scene>((_resolve, reject) => {
+          held.push(reject);
+        }),
+    );
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(1));
+    });
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(60);
+      });
+      expect(held.length).toBe(attempt + 1);
+      if (attempt === 2) {
+        // The user moves the brightness while the third props try is out: it waits, never tried.
+        act(() => {
+          result.current.setBrightness(groupId, 42);
+        });
+      }
+      await act(async () => {
+        held[attempt]?.(new ApiFailure(500, "http", "the daemon said no"));
+        await vi.advanceTimersByTimeAsync(0);
+      });
+    }
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(3);
+
+    // The props value that failed is gone; the brightness value, never tried, still goes.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(1);
+    const call = api.scenes.putGroupBrightness.mock.calls[0] as [string, string, number];
+    expect(call[2]).toBe(42);
+    expect(result.current.scene?.groups[0]?.brightness).toBe(42);
+  });
+
+  it("a write left at unmount that is refused retries on the throttle, not back to back", async () => {
+    const { result, unmount } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    // The first write stays out until the test refuses it.
+    let refuse!: (e: unknown) => void;
+    api.scenes.patchGroupProps.mockImplementationOnce(
+      () =>
+        new Promise<Scene>((_resolve, reject) => {
+          refuse = reject;
+        }),
+    );
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setProps(groupId, number(1));
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+
+    // The page goes away, and the write on its way is refused.
+    unmount();
+    await act(async () => {
+      refuse(new ApiFailure(500, "http", "the daemon said no"));
+      await vi.advanceTimersByTimeAsync(1);
+    });
+    // The retry waits its 60 ms like any other write: leaving the page does not make it go back
+    // to back.
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.patchGroupProps).toHaveBeenCalledTimes(2);
+  });
+
   it("a live value of one scene is never saved into another scene that has the same group id", async () => {
     const first = gaming();
     const second = clone(first);
