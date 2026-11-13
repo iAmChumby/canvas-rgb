@@ -35,11 +35,13 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         if store.config.first_run_done {
             let mut placed = 0;
             let mut repaired = 0;
+            let mut record_repair = false;
             let marker = crate::paths::repairs_marker_in(&store.home);
             if let Some(layout) = store.active_layout_mut() {
                 placed = crate::first_run::place_missing_zones(layout, &devices);
-                repaired =
-                    crate::first_run::repair_point_on_matrix_once(layout, &devices, &marker);
+                let pass = crate::first_run::repair_point_on_matrix_once(layout, &devices, &marker);
+                repaired = pass.repaired;
+                record_repair = pass.record;
             }
             if placed > 0 {
                 tracing::info!(placed, "new zones were placed on the canvas");
@@ -48,9 +50,20 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
                 tracing::info!(repaired, "a zone saved as a point on a matrix now uses its own grid");
             }
             if placed + repaired > 0 {
-                if let Err(e) = store.save_layouts() {
-                    tracing::warn!(error = %e, "could not save the layouts");
+                match store.save_layouts() {
+                    Ok(()) => {}
+                    Err(e) => {
+                        tracing::warn!(error = %e, "could not save the layouts");
+                        // The repair is not on the disk, so the one run is not spent: the next
+                        // device list tries again (#312 review pass 3, S4).
+                        record_repair = false;
+                    }
                 }
+            }
+            // The marker is the record that the repair ran. It is only written with the keyboard
+            // in the list and the layout it changed saved.
+            if record_repair {
+                crate::first_run::record_repair(&marker);
             }
         }
     }

@@ -709,24 +709,41 @@ pub fn repair_point_on_matrix(layout: &mut Layout, devices: &[DeviceInfo]) -> us
     repaired
 }
 
-/// Runs [`repair_point_on_matrix`] once and records it in `marker` (#312 review).
+/// The result of one pass of the one-off repair (#312 review pass 3, S4).
+pub struct RepairPass {
+    /// How many placements changed.
+    pub repaired: usize,
+    /// True when the keyboard was in the device list and the marker is not there yet: the caller
+    /// records the run once the layout it changed is saved.
+    pub record: bool,
+}
+
+/// Runs [`repair_point_on_matrix`] once and says whether the run may be recorded.
 ///
-/// `marker` is a small file under the daemon's user directory. It is written even when nothing
-/// was repaired, so a `Point` the owner picks on the keyboard's zone later is kept: only the
-/// stale shape saved before #312 is repaired, once.
+/// The marker is only recorded when the keyboard was actually in the device list: a device list
+/// read before the keyboard enumerates must not spend the one run, or every key would stay one
+/// colour for good (#312 review pass 3, S4). The caller records it after saving the layout, so a
+/// failed save does not lose the repair either.
 pub fn repair_point_on_matrix_once(
     layout: &mut Layout,
     devices: &[DeviceInfo],
     marker: &std::path::Path,
-) -> usize {
-    if marker.exists() {
-        return 0;
+) -> RepairPass {
+    if marker.exists() || !devices.iter().any(|d| d.id.0 == REPAIRED_ZONE.0) {
+        return RepairPass { repaired: 0, record: false };
     }
-    let repaired = repair_point_on_matrix(layout, devices);
-    if let Err(e) = crate::storage::write_atomic(marker, b"{\"point_on_matrix\": true}\n") {
-        tracing::warn!(error = %e, "the one-off layout repair could not be recorded");
+    RepairPass { repaired: repair_point_on_matrix(layout, devices), record: true }
+}
+
+/// Records that the one-off repair ran, in `marker`. Returns whether it was written.
+pub fn record_repair(marker: &std::path::Path) -> bool {
+    match crate::storage::write_atomic(marker, b"{\"point_on_matrix\": true}\n") {
+        Ok(()) => true,
+        Err(e) => {
+            tracing::warn!(error = %e, "the one-off layout repair could not be recorded");
+            false
+        }
     }
-    repaired
 }
 
 /// How long the device list must hold still before the first run trusts it: longer than
@@ -1210,13 +1227,34 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         let marker = dir.join("layout-repairs.json");
         let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
-        assert_eq!(repair_point_on_matrix_once(&mut layout, std::slice::from_ref(&board), &marker), 1);
-        assert!(marker.exists(), "the run is recorded");
+        let pass = repair_point_on_matrix_once(&mut layout, std::slice::from_ref(&board), &marker);
+        assert_eq!((pass.repaired, pass.record), (1, true), "the keyboard is here, so the run counts");
+        assert!(record_repair(&marker), "the run is recorded");
+        assert!(marker.exists());
         assert_eq!(layout.zones[0].shape, ZoneShape::Auto);
         // A `Point` the owner picks afterwards is kept: the repair never runs again.
         layout.zones[0].shape = ZoneShape::Point;
-        assert_eq!(repair_point_on_matrix_once(&mut layout, &[board], &marker), 0);
+        let pass = repair_point_on_matrix_once(&mut layout, &[board], &marker);
+        assert_eq!((pass.repaired, pass.record), (0, false));
         assert_eq!(layout.zones[0].shape, ZoneShape::Point, "a later choice stands");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_missing_keyboard_does_not_spend_the_one_repair() {
+        // The first device list after an update can arrive before the keyboard enumerates.
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-repairs-miss-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let marker = dir.join("layout-repairs.json");
+        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
+        let pass = repair_point_on_matrix_once(&mut layout, &[], &marker);
+        assert_eq!((pass.repaired, pass.record), (0, false), "no keyboard, no run");
+        assert!(!marker.exists(), "and nothing recorded");
+        assert_eq!(layout.zones[0].shape, ZoneShape::Point);
+        // The next list has the keyboard, and the repair happens then.
+        let pass = repair_point_on_matrix_once(&mut layout, &[board], &marker);
+        assert_eq!((pass.repaired, pass.record), (1, true));
+        assert_eq!(layout.zones[0].shape, ZoneShape::Auto);
         let _ = std::fs::remove_dir_all(&dir);
     }
 
