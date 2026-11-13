@@ -963,15 +963,12 @@ fn props_from_image(img: &[u8]) -> Result<Props, String> {
     }
     // The button map of the active profile.
     let decoded = codec::decode_profile(img, active)?;
-    for slot in 0..codec::MAP_SLOTS {
+    for (slot, &mask) in decoded.map.iter().enumerate().take(codec::MAP_SLOTS) {
         if slot >= codec::EXTRA_BUTTON_FIRST {
             // The four extra buttons are in the per-profile sections.
             continue;
         }
-        props.insert(
-            button_key(slot),
-            PropValue::Choice(codec::button_target(decoded.map[slot]).to_string()),
-        );
+        props.insert(button_key(slot), PropValue::Choice(codec::button_target(mask).to_string()));
     }
     Ok(props)
 }

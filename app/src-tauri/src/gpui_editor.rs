@@ -1284,15 +1284,13 @@ mod tests {
     /// The stand-in editor: the example the tests run as the GPUI editor.
     fn fake_editor() -> PathBuf {
         let exe = std::env::current_exe().unwrap();
-        // .../target/debug/deps/<test>.exe -> .../target/debug/examples/fake_gpui_editor.exe
-        let dir = exe.parent().unwrap().parent().unwrap();
-        let path = dir.join("examples").join(format!("fake_gpui_editor{}", EXE_SUFFIX));
-        assert!(
-            path.is_file(),
-            "the stand-in editor was not built: {}",
-            path.display()
-        );
-        path
+        let name = format!("fake_gpui_editor{}", EXE_SUFFIX);
+        // The test binary sits in `target/debug/deps/` (Cargo before 1.100) or deeper, in
+        // `target/debug/build/<package>/<hash>/out/` (1.100's build-dir layout); the example is
+        // in `target/debug/examples/` either way. Walk up until a folder holds it.
+        let path = exe.ancestors().map(|dir| dir.join("examples").join(&name)).find(|p| p.is_file());
+        assert!(path.is_some(), "the stand-in editor was not built (looked above {})", exe.display());
+        path.unwrap()
     }
 
     /// The stand-in editor, with the environment the test gives it.

@@ -178,9 +178,10 @@ pub mod routes {
     pub const SCENE: &str = "/api/v1/scenes/{id}";
     /// `PUT` [`super::SceneActivePut`]: sets a scene (with a fade).
     pub const SCENE_ACTIVE: &str = "/api/v1/scenes/active";
-    /// `PATCH` with a `Props` body: new values for one group's effect, no rebuild.
+    /// `PATCH` with a `Props` body: new values for one group's effect, no rebuild. Saved, and the
+    /// scene's `rev` goes up by one; answers the whole [`crate::scene::Scene`] with its new `rev`.
     pub const GROUP_PROPS: &str = "/api/v1/scenes/{id}/groups/{group}/props";
-    /// `PUT` [`super::GroupBrightnessPut`].
+    /// `PUT` [`super::GroupBrightnessPut`]. As [`GROUP_PROPS`]: saved, `rev` + 1, answers the scene.
     pub const GROUP_BRIGHTNESS: &str = "/api/v1/scenes/{id}/groups/{group}/brightness";
     /// `GET` [`super::LightsResponse`].
     pub const LIGHTS: &str = "/api/v1/lights";
