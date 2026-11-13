@@ -686,3 +686,57 @@ async fn the_wait_timer_writes_the_scenes_when_a_placed_device_never_arrives() {
 fn layouts_file_untouched(home: &TempHome, layouts: &canvas_proto::config::LayoutsFile) -> bool {
     std::fs::read(home.path.join("layouts.json")).unwrap() == serde_json::to_vec(layouts).unwrap()
 }
+
+// ---------------------------------------------------------------- the lights API follows the engine
+
+/// `PATCH /lights/{id}` (the lights builder's route) re-applies the scene: reversing the light
+/// that plays a static left-to-right gradient puts the blue end first.
+#[tokio::test]
+async fn light_patch_renames_and_sets_ring_and_the_engine_follows() {
+    let mut props = Props::new();
+    props.insert("color1".into(), PropValue::Color(Rgb8::new(255, 0, 0)));
+    props.insert("color2".into(), PropValue::Color(Rgb8::new(0, 0, 255)));
+    props.insert("angle".into(), PropValue::Angle(0.0));
+    props.insert("scroll_speed".into(), PropValue::Number(0.0));
+    let mut scenes = scenes_file();
+    scenes.scenes[0].groups = vec![group("solo", &["fake:a#z0"], "gradient", props)];
+    let rig = rig_with(scenes).await;
+
+    let start = Instant::now();
+    let first = |rig: &Rig| rig.a.last().filter(|f| f.len() == LEDS as usize).map(|f| (f[0], f[f.len() - 1]));
+    loop {
+        if first(&rig).is_some_and(|(head, tail)| head.r > head.b && tail.b > tail.r) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "the gradient never ran red to blue: {:?}", first(&rig));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    let path = route(routes::LIGHT, &[("id", "fake:a%23z0")]);
+    let body = serde_json::json!({ "name": "Desk strip", "reversed": true });
+    let (status, answer) = send(&rig, "PATCH", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["label"], "Desk strip");
+    let stored = rig.app.store.read().await.lights.lights[0].clone();
+    assert_eq!((stored.name.as_deref(), stored.reversed), (Some("Desk strip"), true));
+    let start = Instant::now();
+    loop {
+        if first(&rig).is_some_and(|(head, tail)| head.b > head.r && tail.r > tail.b) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "the engine never followed the patch: {:?}", first(&rig));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+
+    // A ring reads the gradient round a circle: the strip's red and blue ends are gone.
+    let (status, _) = send(&rig, "PATCH", &path, Some(serde_json::json!({ "arrangement": "ring" }))).await;
+    assert_eq!(status, StatusCode::OK);
+    let start = Instant::now();
+    loop {
+        if first(&rig).is_some_and(|(head, tail)| head.b < 255 && tail.r < 200 && head.r > 0 && tail.b > 0) {
+            break;
+        }
+        assert!(start.elapsed() < Duration::from_secs(20), "the engine never read the light as a ring: {:?}", first(&rig));
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}

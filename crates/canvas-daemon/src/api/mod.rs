@@ -11,6 +11,7 @@ pub mod editor;
 pub mod effects;
 pub mod fans;
 pub mod layouts;
+pub mod lights;
 pub mod output;
 pub mod peripherals;
 pub mod preview;
@@ -90,6 +91,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::GROUP_PROPS, patch(scenes::patch_group_props))
         .route(routes::GROUP_BRIGHTNESS, put(scenes::put_group_brightness))
         .route(routes::LIGHTS_FLASH, post(scenes::flash_lights))
+        .route(routes::LIGHTS, get(lights::list_lights))
+        .route(routes::LIGHT, patch(lights::patch_light))
         .route(routes::STACKS, get(stacks::list_stacks))
         .route(
             routes::STACK_PREVIEW,
