@@ -600,3 +600,89 @@ async fn a_device_list_puts_the_daemon_in_scene_mode() {
     shows(&a, rgb(RED), "A").await;
     shows(&b, rgb(BLUE), "B").await;
 }
+
+// ---------------------------------------------------------------- the migration wait (Task 5 left it UNKNOWN)
+
+fn placed(id: &str, x: f32) -> canvas_proto::layout::PlacedZone {
+    use canvas_proto::layout::{PlacedZone, ZoneShape};
+    PlacedZone {
+        device_id: DeviceId(id.to_string()),
+        zone_index: 0,
+        x,
+        y: 0.0,
+        width: 160.0,
+        height: 200.0,
+        rotation_deg: 0.0,
+        reversed: false,
+        visible: true,
+        shape: ZoneShape::Auto,
+        label: None,
+        leds: None,
+        part: None,
+        locked: false,
+    }
+}
+
+/// `apply_devices` with a device the layouts place missing from the list: the migration waits, the
+/// timer fires 60 s after the first list on tokio's paused clock, and `lights.json` and
+/// `scenes.json` are written from the layouts and the devices present.
+#[tokio::test(start_paused = true)]
+async fn the_wait_timer_writes_the_scenes_when_a_placed_device_never_arrives() {
+    use canvas_proto::layout::{CaseForm, Layout, RenderScale, SamplingMode};
+    let home = TempHome::new();
+    let layouts = canvas_proto::config::LayoutsFile {
+        schema_version: canvas_proto::config::LAYOUTS_SCHEMA,
+        active: "desk".into(),
+        layouts: vec![Layout {
+            id: "desk".into(),
+            name: "Desk".into(),
+            render_scale: RenderScale::P100,
+            sampling: SamplingMode::AreaAverage,
+            zones: vec![placed(A, 0.0), placed("fake:gone", 160.0)],
+            effect: None,
+            case_form: CaseForm::None,
+            landmarks: Vec::new(),
+        }],
+    };
+    std::fs::write(home.path.join("layouts.json"), serde_json::to_vec(&layouts).unwrap()).unwrap();
+    let mut store = canvas_daemon::storage::Store::load_from(&home.path);
+    assert!(store.scenes_pending.is_some(), "no scenes.json: the migration is held");
+    store.config.first_run_done = true;
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(
+        store,
+        Arc::new(common::FakeEngine::default()),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.0.0-test".to_string(),
+        tx,
+    ));
+
+    canvas_daemon::device_sync::apply_devices(&app, vec![device(A)]).await;
+    assert!(app.store.read().await.scenes_pending.is_some(), "fake:gone is placed and absent: it waits");
+    assert!(!home.path.join("scenes.json").exists() && !home.path.join("lights.json").exists());
+
+    tokio::time::sleep(Duration::from_secs(30)).await;
+    assert!(app.store.read().await.scenes_pending.is_some(), "30 s in, still waiting");
+
+    // Past the 60 s wait (plus the timer's 50 ms): the timer settles it with the devices present.
+    tokio::time::sleep(Duration::from_secs(31)).await;
+    for _ in 0..20 {
+        if app.store.read().await.scenes_pending.is_none() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    let store = app.store.read().await;
+    assert!(store.scenes_pending.is_none(), "the timer wrote the scenes");
+    assert!(home.path.join("scenes.json").exists() && home.path.join("lights.json").exists());
+    let ids: Vec<&str> = store.lights.lights.iter().map(|l| l.id.as_str()).collect();
+    assert!(ids.contains(&"fake:a#z0") && ids.contains(&"fake:gone#z0"), "{ids:?}");
+    let scene = canvas_daemon::scenes::active_scene(&store.scenes);
+    assert_eq!(scene.name, "Desk");
+    assert!(layouts_file_untouched(&home, &layouts));
+}
+
+fn layouts_file_untouched(home: &TempHome, layouts: &canvas_proto::config::LayoutsFile) -> bool {
+    std::fs::read(home.path.join("layouts.json")).unwrap() == serde_json::to_vec(layouts).unwrap()
+}

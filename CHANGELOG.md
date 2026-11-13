@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Scenes: several effects at once, one per group of devices (#310)
+
 ## [0.13.1] - 2026-11-11
 
 ### Fixed

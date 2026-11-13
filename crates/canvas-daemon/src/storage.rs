@@ -342,6 +342,12 @@ pub struct Store {
 /// gives it a chance to arrive first. After it, the migration runs with the devices present.
 pub const SCENES_DEVICE_WAIT: Duration = Duration::from_secs(60);
 
+/// The clock the held scenes migration measures its wait on. It is tokio's, so a test can pause
+/// and advance it; outside a paused runtime it is the system clock.
+pub fn clock() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
 /// A scenes migration waiting for the first device list.
 #[derive(Debug, Clone)]
 pub struct PendingScenes {
@@ -641,7 +647,7 @@ impl Store {
     ///
     /// Refuses while `lights.json` or `scenes.json` is blocked (could not be read at load).
     pub fn finish_scenes(&mut self, devices: &[DeviceInfo]) -> bool {
-        self.finish_scenes_at(devices, Instant::now())
+        self.finish_scenes_at(devices, clock())
     }
 
     /// While the migration waits for a placed device, the time left on that wait, once: the caller

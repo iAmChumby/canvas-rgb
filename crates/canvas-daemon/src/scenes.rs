@@ -941,6 +941,30 @@ pub(crate) mod tests {
         assert_eq!(ids, vec!["a", "a-2"]);
     }
 
+    /// A group playing a stack whose layers include HTML counts as HTML (the scene's HTML limit).
+    #[test]
+    fn a_stack_with_an_html_layer_counts_as_an_html_group() {
+        let play = |id: &str, effect: &str| Group {
+            plays: Plays::Effect { effect: effect.into(), props: Props::new() },
+            ..group(id, &["x"])
+        };
+        let scene = Scene {
+            id: "s".into(),
+            name: "S".into(),
+            rev: 1,
+            groups: vec![
+                play("a", "html:ink"),
+                play("b", "stack:glow"),
+                play("c", "stack:plain"),
+                play("d", "aurora"),
+                group("e", &["y"]),
+            ],
+        };
+        let has_html = |id: &str| id == "stack:glow";
+        assert_eq!(html_group_count(&scene, &has_html), 2, "the html: group and the stack with an HTML layer");
+        assert_eq!(html_group_count(&scene, &|_| false), 1);
+    }
+
     #[test]
     fn ids_are_slugs_with_a_numeric_suffix_when_taken() {
         assert_eq!(slug("Living room!"), "living-room");
