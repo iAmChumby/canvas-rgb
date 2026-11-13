@@ -190,7 +190,9 @@ impl SceneState {
 /// One group's effect coming back from the frame.
 pub(crate) struct GroupDone {
     id: String,
-    effect: Option<Box<dyn Effect>>,
+    /// The effect coming back. The caller drops it behind the guard when it has nowhere
+    /// to put it.
+    pub(crate) effect: Option<Box<dyn Effect>>,
     effect_generation: u64,
     /// The text of a panic in this frame, if the effect panicked.
     failure: Option<String>,

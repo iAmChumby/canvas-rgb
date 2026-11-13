@@ -2300,6 +2300,39 @@ mod scene {
         frame.iter().all(|c| *c == color)
     }
 
+    /// An effect that panics in `update` and again in `Drop` (#310 review 1).
+    ///
+    /// The `update` panic marks the group failed, and a failed group keeps its effect in
+    /// the scene's state (the render thread does not take it out again). The effect is
+    /// therefore in the state when the scene ends, which is what `set_layout` drops.
+    struct FailingEffectThatPanicsInDrop;
+
+    impl Effect for FailingEffectThatPanicsInDrop {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test_fail_and_panic_in_drop".into(),
+                name: "Test Fail And Panic In Drop".into(),
+                description: "Panics in update and in Drop.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+            panic!("update boom");
+        }
+    }
+
+    impl Drop for FailingEffectThatPanicsInDrop {
+        fn drop(&mut self) {
+            panic!("drop boom");
+        }
+    }
+
     #[test]
     fn two_groups_play_two_effects_at_once() {
         let (engine, devices, a, b) = two_devices();
@@ -2763,6 +2796,58 @@ mod scene {
         );
         assert!(wait_until(FIRST_FRAME_WAIT, || a.last().is_some_and(|f| all(&f, RED))));
         assert!(engine.group_states().is_empty(), "layout mode has no groups");
+        engine.shutdown();
+    }
+
+    /// #310 review 1: `set_layout` ends the scene, and the scene's effects drop behind the
+    /// guard, outside the state lock, exactly like `set_scene` does. An effect whose `Drop`
+    /// panics must not take the caller down, and the engine must keep rendering.
+    #[test]
+    fn set_layout_drops_the_scene_effects_outside_the_lock_and_the_engine_keeps_rendering() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices.clone(),
+            vec![group(
+                "a",
+                &["d1#z0"],
+                Some(Box::new(FailingEffectThatPanicsInDrop)),
+            )],
+            false,
+        );
+        // The group failed, so the effect stays in the scene's state: the render thread
+        // does not take a failed group's effect out again.
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || {
+                engine.group_states().iter().any(|s| s.id == "a" && s.failed.is_some())
+            }),
+            "the group failed: {:?}",
+            engine.group_states()
+        );
+        let before = sink.frame_count();
+
+        // The effect panics when it is dropped. The call must return.
+        let lay = layout(
+            vec![placed("d1", 0, 0.0, 0.0, 320.0, 200.0)],
+            SamplingMode::AreaAverage,
+            RenderScale::P100,
+        );
+        engine.set_layout(lay, devices);
+
+        // And the engine keeps rendering: the layout path delivers frames.
+        engine.set_effect(
+            Box::new(SolidEffect::new([1.0, 0.0, 0.0], Arc::new(AtomicBool::new(false)))),
+            &Props::new(),
+        );
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > before + 5),
+            "the engine kept rendering: {} frames",
+            sink.frame_count()
+        );
+        assert!(sink.last().is_some_and(|f| all(&f, RED)), "the layout renders red");
         engine.shutdown();
     }
 }

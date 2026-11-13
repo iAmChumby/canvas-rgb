@@ -428,9 +428,14 @@ impl Engine for CoreEngine {
         let plan = geometry::build_plan(&layout, &devices);
         let summary = plan.summary();
         let device_count = plan.device_count();
-        self.mutate(|state| {
+        // The scene ends here, and its effects are dropped behind the guard, outside the
+        // lock, exactly like `set_scene` drops the scene it replaces: an effect's `Drop` is
+        // effect code, and a panic in it must not take the caller or the lock down.
+        let old = {
+            let mut guard = self.state.lock().unwrap_or_else(|e| e.into_inner());
+            let state = &mut *guard;
             // The layout path runs again: scene mode ends.
-            state.scene = None;
+            let old = state.scene.take();
             state.devices = devices;
             state.plan = Some(plan);
             state.plan_generation = state.plan_generation.wrapping_add(1);
@@ -444,7 +449,13 @@ impl Engine for CoreEngine {
                     .map(|d| d.led_count())
                     .unwrap_or(sink.led_count);
             }
-        });
+            state.wake_generation = state.wake_generation.wrapping_add(1);
+            old
+        };
+        self.wake();
+        if let Some(old) = old {
+            self.drop_effects(old.groups.into_iter().filter_map(|g| g.effect));
+        }
         info!(
             devices = device_count,
             ?sampling,
@@ -1367,7 +1378,10 @@ fn render_scene_frame(
         let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
         let superseded = match state.scene.as_mut() {
             Some(scene) => scene.put_back(output.done),
-            None => Vec::new(),
+            // The scene ended while the frame ran (`set_layout`): the effects have nowhere
+            // to go back to. They are dropped behind the guard, outside the lock, like
+            // every other replaced effect: an effect's `Drop` is effect code.
+            None => output.done.into_iter().filter_map(|item| item.effect).collect(),
         };
         // `set_layout` ended scene mode during the frame: the frame is stale, nothing is sent.
         if state.scene.is_some() {
