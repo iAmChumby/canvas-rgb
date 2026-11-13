@@ -50,6 +50,9 @@ const EMPTY_STATES: GroupState[] = [];
 
 const clone = <T,>(value: T): T => structuredClone(value);
 
+/** The key of one group's live values. Two scenes can name the same group id, so the scene is part of it. */
+const liveKey = (sceneId: string, groupId: string): string => JSON.stringify([sceneId, groupId]);
+
 /** One group's live values the daemon has not confirmed yet. */
 interface Live {
   props?: Props;
@@ -81,6 +84,8 @@ interface Pending {
 interface GroupLive {
   /** The scene the group belongs to. */
   sceneId: string;
+  /** The group the values belong to. */
+  groupId: string;
   /** The values on screen that the daemon has not confirmed. */
   shown: Live;
   /** The newest value of each kind that waits to go. */
@@ -158,7 +163,7 @@ function overlayOn(scene: Scene, values: Record<string, Live>): Scene {
   return {
     ...scene,
     groups: scene.groups.map((g) => {
-      const l = values[g.id];
+      const l = values[liveKey(scene.id, g.id)];
       if (!l) return g;
       return {
         ...g,
@@ -376,8 +381,8 @@ export function useScene(): UseScene {
     return () => {
       mounted.current = false;
       // The last live value goes out even when the page goes away.
-      for (const [groupId, g] of [...groups]) {
-        flushLive(groupId, g);
+      for (const g of [...groups.values()]) {
+        flushLive(g.groupId, g);
       }
     };
   }, [flushLive]);
@@ -387,9 +392,9 @@ export function useScene(): UseScene {
     // One scene's history never outlives a switch to another scene.
     if (history.current.sceneId !== (activeId ?? "")) {
       // The live values of the scene that goes go to that scene, not to the new one.
-      for (const [groupId, g] of [...live.current]) {
-        flushLive(groupId, g);
-        live.current.delete(groupId);
+      for (const [key, g] of [...live.current]) {
+        flushLive(g.groupId, g);
+        live.current.delete(key);
       }
       // A write that has not gone out yet stays in the queue: it belongs to the scene that is
       // going, and it goes out there.
@@ -576,8 +581,8 @@ export function useScene(): UseScene {
   }, []);
 
   /** The values on screen are the daemon's once its answer is in, unless the user moved on since. */
-  const settleShown = useCallback((groupId: string, kind: LiveKind, version: number) => {
-    const g = live.current.get(groupId);
+  const settleShown = useCallback((sceneId: string, groupId: string, kind: LiveKind, version: number) => {
+    const g = live.current.get(liveKey(sceneId, groupId));
     if (g && g.version[kind] === version) {
       if (kind === "props") delete g.shown.props;
       else delete g.shown.brightness;
@@ -596,7 +601,7 @@ export function useScene(): UseScene {
       const h = history.current;
       if (h.sceneId === answer.id) history.current = { ...h, past: [], future: [] };
       adoptScene(answer);
-      settleShown(groupId, kind, version);
+      settleShown(answer.id, groupId, kind, version);
       error.current = CONFLICT_MESSAGE;
       publish();
     },
@@ -616,7 +621,7 @@ export function useScene(): UseScene {
           scene: adoptGroup(pending.scene, answer, groupId, kind, written),
         });
       }
-      settleShown(groupId, kind, version);
+      settleShown(answer.id, groupId, kind, version);
     },
     [adoptScene, settleShown],
   );
@@ -628,9 +633,10 @@ export function useScene(): UseScene {
 
   /** Sends the live values of one group that are waiting. */
   const sendLive = useCallback(
-    async (groupId: string) => {
-      const g = live.current.get(groupId);
+    async (key: string) => {
+      const g = live.current.get(key);
       if (!g) return;
+      const groupId = g.groupId;
       // The daemon has refused this group's writes three times in a row: the value waits for the
       // next move of the slider, which resets the count.
       if (g.failures >= LIVE_FAILURES) return;
@@ -644,7 +650,7 @@ export function useScene(): UseScene {
         // write now would answer a scene one rev behind it. The value waits.
         g.timer = setTimeout(() => {
           g.timer = null;
-          void sendLiveRef.current(groupId);
+          void sendLiveRef.current(key);
         }, LIVE_RETRY_MS);
         return;
       }
@@ -663,7 +669,7 @@ export function useScene(): UseScene {
         const wait = Math.max(0, Math.min(...waits));
         g.timer = setTimeout(() => {
           g.timer = null;
-          void sendLiveRef.current(groupId);
+          void sendLiveRef.current(key);
         }, wait);
         return;
       }
@@ -725,11 +731,13 @@ export function useScene(): UseScene {
     (groupId: string, kind: LiveKind, value: Props | number) => {
       const scene = base();
       if (!scene) return;
-      let g = live.current.get(groupId);
-      if (!g || g.sceneId !== scene.id) {
+      const key = liveKey(scene.id, groupId);
+      let g = live.current.get(key);
+      if (!g) {
         const now = Date.now();
         g = {
           sceneId: scene.id,
+          groupId,
           shown: {},
           queued: {},
           version: { props: 0, brightness: 0 },
@@ -738,7 +746,7 @@ export function useScene(): UseScene {
           sending: false,
           timer: null,
         };
-        live.current.set(groupId, g);
+        live.current.set(key, g);
       }
       // The user moved again: the group tries again, whatever came before.
       g.failures = 0;
@@ -754,7 +762,7 @@ export function useScene(): UseScene {
       }
       publish();
       // The write goes when the group's turn comes; the last value always goes.
-      void sendLiveRef.current(groupId);
+      void sendLiveRef.current(key);
     },
     [base, publish],
   );

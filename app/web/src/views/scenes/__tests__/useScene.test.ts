@@ -659,6 +659,122 @@ describe("useScene", () => {
     expect(result.current.scene?.name).toBe("Gaming (other window)");
   });
 
+  it("a live value of one scene is never saved into another scene that has the same group id", async () => {
+    const first = gaming();
+    const second = clone(first);
+    second.id = "scene-two";
+    second.name = "Second";
+    const groupId = first.groups[0]?.id ?? "";
+    const original = first.groups[0]?.brightness ?? -1;
+    api.scenes.list.mockResolvedValue({
+      active: first.id,
+      scenes: [first, second],
+      group_states: first.groups.map((g) => ({ id: g.id, failed: null })),
+    });
+
+    // This window's first save is out until the test lets it land.
+    let release!: () => void;
+    api.scenes.put.mockImplementationOnce(
+      () =>
+        new Promise<Scene>((resolve) => {
+          release = () => resolve({ ...clone(first), name: "First, saved", rev: first.rev + 1 });
+        }),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "First, edited";
+      }, "Rename");
+    });
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "First, edited again";
+      }, "Rename again");
+    });
+
+    // The other scene becomes active, and this window sets the brightness of the group that has
+    // the same id in that scene.
+    act(() => {
+      patchSnap({ scenes: { active: second.id, scenes: [first, second], group_states: [] } });
+    });
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setBrightness(groupId, 17);
+    });
+
+    // The first save is answered. The edit that waited behind it goes out on the first scene.
+    await act(async () => {
+      release();
+      await vi.advanceTimersByTimeAsync(100);
+    });
+
+    expect(api.scenes.put).toHaveBeenCalledTimes(2);
+    const [id, body] = api.scenes.put.mock.calls[1] as [string, { scene: Scene; expected_rev: number }];
+    expect(id).toBe(first.id);
+    expect(body.scene.groups[0]?.brightness).toBe(original);
+  });
+
+  it("a live value of one scene is not sent in a save of another scene that has the same group id", async () => {
+    const first = gaming();
+    const second = clone(first);
+    second.id = "scene-two";
+    second.name = "Second";
+    const groupId = first.groups[0]?.id ?? "";
+    api.scenes.list.mockResolvedValue({
+      active: first.id,
+      scenes: [first, second],
+      group_states: first.groups.map((g) => ({ id: g.id, failed: null })),
+    });
+
+    // The brightness write of the first scene stays out until the test lets it land.
+    let release!: () => void;
+    api.scenes.putGroupBrightness.mockImplementationOnce(
+      () =>
+        new Promise<Scene>((resolve) => {
+          release = () => resolve(liveAnswer(first, groupId, undefined, 17));
+        }),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setBrightness(groupId, 17);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(60);
+    });
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(1);
+
+    // The other scene becomes active before the write lands, then the write lands.
+    act(() => {
+      patchSnap({ scenes: { active: second.id, scenes: [first, second], group_states: [] } });
+    });
+    await act(async () => {
+      release();
+      await vi.advanceTimersByTimeAsync(20);
+    });
+
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "Second, edited";
+      }, "Rename");
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10);
+    });
+
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+    const [id, body] = api.scenes.put.mock.calls[0] as [string, { scene: Scene; expected_rev: number }];
+    expect(id).toBe(second.id);
+    expect(body.scene.groups[0]?.brightness).toBe(second.groups[0]?.brightness);
+  });
+
   it("an edit that has not gone out goes out when the scene switches", async () => {
     // The first write hangs: the second edit waits behind it.
     let release!: () => void;
