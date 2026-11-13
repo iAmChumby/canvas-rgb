@@ -78,4 +78,27 @@ export const routes = {
   // WebSocket; binary frames: u16 LE width, u16 LE height, width*height*3 RGB bytes.
   // Browsers cannot set headers on a WebSocket: pass the token as `?token=`.
   preview: "/api/v1/preview",
+  // Scenes (0.14.0). GET ScenesResponse; POST SceneCreate.
+  scenes: "/api/v1/scenes",
+  // PUT ScenePut (409 with the current scene on a stale expected_rev, 422 on a broken rule); DELETE (409 for the last).
+  scene: (id: string) => `/api/v1/scenes/${encodeURIComponent(id)}`,
+  // PUT SceneActivePut: sets a scene, with a fade.
+  sceneActive: "/api/v1/scenes/active",
+  // PATCH Props: one group's effect values, no rebuild. Saved; the scene's rev goes up by one;
+  // answers the whole Scene with its new rev.
+  groupProps: (scene: string, group: string) =>
+    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/props`,
+  // PUT GroupBrightnessPut. As groupProps: saved, rev + 1, answers the scene.
+  groupBrightness: (scene: string, group: string) =>
+    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/brightness`,
+  // GET LightsResponse.
+  lights: "/api/v1/lights",
+  // PATCH LightPatch.
+  light: (id: string) => `/api/v1/lights/${encodeURIComponent(id)}`,
+  // POST FlashRequest.
+  lightsFlash: "/api/v1/lights/flash",
+  // WebSocket: a JSON index message, then binary frames (per light u16 LE index, u16 LE count, RGB).
+  previewLights: "/api/v1/preview/lights",
+  // PATCH Props: an effect's starting values.
+  effectDefaults: (id: string) => `/api/v1/effects/${encodeURIComponent(id)}/defaults`,
 } as const;
