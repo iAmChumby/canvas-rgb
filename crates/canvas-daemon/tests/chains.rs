@@ -1,5 +1,7 @@
-//! The chain routes (#338, Task 7a): `GET /api/v1/chains`, and a setup session's start, light,
-//! cancel and empty, with the header's earlier length put back when the session ends short.
+//! The chain routes (#338, Tasks 7a and 7b): `GET /api/v1/chains`, a setup session's start,
+//! light, cancel and empty, with the header's earlier length put back when the session ends
+//! short, and the commit that writes the parts, their groups and the header's length together or
+//! leaves everything as it was.
 //!
 //! The rig is the one `tests/devices_rescan.rs` uses: the real OpenRGB adapter on the fake OpenRGB
 //! server, the daemon's own supervisor (`device_sync::supervise_app`), a temporary home and a
@@ -15,22 +17,29 @@ use axum::http::{Request, StatusCode};
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_daemon::api;
-use canvas_daemon::chain_records::{read_restore, RestoreRecord};
-use canvas_daemon::state::App;
-use canvas_daemon::storage::Store;
-use canvas_proto::api::{
-    routes, ChainSetupState, ChainsResponse, LightView, SetupEmpty, SetupStarted,
+use canvas_daemon::chain_plan::plan_commit;
+use canvas_daemon::chain_records::{
+    read_intent, read_restore, write_intent, write_restore, IntentRecord, RestoreRecord,
 };
-use canvas_proto::config::ZonesFile;
+use canvas_daemon::scenes::Held;
+use canvas_daemon::state::App;
+use canvas_daemon::storage::{snapshot, Store};
+use canvas_proto::api::{
+    routes, ChainSetupState, ChainsResponse, LightView, SetupCommit, SetupCommitted, SetupEmpty,
+    SetupPart, SetupStarted,
+};
+use canvas_proto::config::{ZonesFile, ZONES_FILE};
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
+use canvas_proto::layout::LedSlice;
 use canvas_proto::scene::{
-    zone_light_id, Arrangement, ChainState, Group, GroupMode, Light, LightsFile, Plays, Scene,
-    ScenesFile, CHAIN_RESTORE_FILE, LIGHTS_SCHEMA, SCENES_SCHEMA,
+    part_light_id, zone_light_id, Arrangement, ChainPartKind, ChainState, Group, GroupMode, Light,
+    LightsFile, Plays, Scene, ScenesFile, CHAIN_INTENT_FILE, CHAIN_RESTORE_FILE, LIGHTS_FILE,
+    LIGHTS_SCHEMA, SCENES_FILE, SCENES_SCHEMA,
 };
 use canvas_proto::traits::FrameSink;
 use canvas_proto::{DeviceId, Rgb8};
 use common::FakeEngine;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tower::ServiceExt;
@@ -169,15 +178,21 @@ impl Drop for Rig {
     }
 }
 
+/// A temp home of its own for one test.
+fn temp_home(name: &str) -> PathBuf {
+    let home =
+        std::env::temp_dir().join(format!("canvas-rgb-chains-{name}-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("the temp directory is created");
+    home
+}
+
 /// An app whose adapter is the real OpenRGB adapter on the fake server, with the daemon's
 /// supervisor running. With `saved`, `zones.json` holds first run's sizes (120 and 60), so the
 /// supervisor re-applies them at connect; without it the file has no entry, as when first run never
 /// sized the header.
 async fn rig(name: &str, server: FakeOpenRgbServer, saved: bool) -> Rig {
-    let home =
-        std::env::temp_dir().join(format!("canvas-rgb-chains-{name}-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).expect("the temp directory is created");
+    let home = temp_home(name);
     let mut store = Store::at(&home);
     // The first run is its own test; here the devices are placed the way it leaves them.
     store.config.first_run_done = true;
@@ -193,6 +208,25 @@ async fn rig(name: &str, server: FakeOpenRgbServer, saved: bool) -> Rig {
         };
         store.save_zones().expect("zones.json");
     }
+    build_rig(home, store, server).await
+}
+
+/// A rig whose store is loaded from what the test wrote, as the daemon loads it at start: used for
+/// a home a crash left behind. The first run is marked done, as it would be on a real one.
+async fn rig_prepared(
+    name: &str,
+    server: FakeOpenRgbServer,
+    prepare: impl FnOnce(&Path),
+) -> Rig {
+    let home = temp_home(name);
+    prepare(&home);
+    let mut store = Store::load_from(&home);
+    store.config.first_run_done = true;
+    build_rig(home, store, server).await
+}
+
+/// The app and its supervisor, over a store the caller built.
+async fn build_rig(home: PathBuf, store: Store, server: FakeOpenRgbServer) -> Rig {
     let sizes = store.zones.sizes.clone();
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
@@ -863,4 +897,576 @@ async fn a_rescan_during_a_session_does_not_resize_the_header_back() {
     // The header is still the setup's: a light request still lands.
     let (status, _) = light(&rig, 0, &answer.session).await;
     assert_eq!(status, StatusCode::OK);
+}
+
+// ---------------------------------------------------------------------------------------------
+// Task 7b: the commit, all or nothing
+// ---------------------------------------------------------------------------------------------
+
+/// What the seven parts of the board's first header add up to.
+const FINAL: u32 = 96;
+
+fn commit_path(zone: u32) -> String {
+    routes::CHAIN_SETUP_COMMIT.replace("{device}", BOARD).replace("{zone}", &zone.to_string())
+}
+
+fn part_id(n: u32) -> String {
+    part_light_id(&DeviceId(BOARD.into()), 0, n)
+}
+
+fn part_ids(count: u32) -> Vec<String> {
+    (1..=count).map(part_id).collect()
+}
+
+/// The board's first header set up as seven fans: an even split of the 96 LEDs the flow shows.
+fn seven_parts() -> Vec<SetupPart> {
+    [14, 14, 14, 14, 14, 13, 13]
+        .iter()
+        .enumerate()
+        .map(|(index, leds)| SetupPart {
+            name: format!("Fan {}", index + 1),
+            kind: ChainPartKind::Fan,
+            leds: *leds,
+        })
+        .collect()
+}
+
+/// The same 96 LEDs set up again as six parts: the first six parts keep their place.
+fn six_parts() -> Vec<SetupPart> {
+    (1..=6)
+        .map(|index| SetupPart {
+            name: format!("Fan {index}"),
+            kind: ChainPartKind::Fan,
+            leds: FINAL / 6,
+        })
+        .collect()
+}
+
+async fn commit(
+    rig: &Rig,
+    zone: u32,
+    session: &str,
+    parts: &[SetupPart],
+) -> (StatusCode, serde_json::Value) {
+    let body = SetupCommit { session: session.into(), parts: parts.to_vec() };
+    send(rig, "POST", &commit_path(zone), Some(&serde_json::to_string(&body).expect("a commit body")))
+        .await
+}
+
+async fn committed(rig: &Rig, zone: u32, session: &str, parts: &[SetupPart]) -> SetupCommitted {
+    let (status, body) = commit(rig, zone, session, parts).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_value(body).expect("a commit answer")
+}
+
+fn read_lights(home: &Path) -> LightsFile {
+    let bytes = std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json");
+    serde_json::from_slice(&bytes).expect("lights.json parses")
+}
+
+fn read_scenes(home: &Path) -> ScenesFile {
+    let bytes = std::fs::read(home.join(SCENES_FILE)).expect("scenes.json");
+    serde_json::from_slice(&bytes).expect("scenes.json parses")
+}
+
+fn read_zones(home: &Path) -> ZonesFile {
+    let bytes = std::fs::read(home.join(ZONES_FILE)).expect("zones.json");
+    serde_json::from_slice(&bytes).expect("zones.json parses")
+}
+
+/// Writes the lights and scenes the rig was built with, so a failed commit has files to leave as
+/// they were.
+async fn save_rig_files(rig: &Rig) {
+    let store = rig.app.store.read().await;
+    store.save_lights().expect("lights.json");
+    store.save_scenes().expect("scenes.json");
+}
+
+/// A header's lights as the file holds them, in chain order.
+fn zone_parts(lights: &LightsFile, zone: u32) -> Vec<Light> {
+    let mut parts: Vec<Light> = lights
+        .lights
+        .iter()
+        .filter(|light| light.device_id.0 == BOARD && light.zone_index == zone)
+        .cloned()
+        .collect();
+    parts.sort_by_key(|part| part.leds.map_or(0, |slice| slice.start));
+    parts
+}
+
+/// The lists and groups a commit made: one `run` per part, 1-based.
+fn run_of(index: u32) -> LedSlice {
+    let start = [0, 14, 28, 42, 56, 70, 83][index as usize - 1];
+    let count = [14, 14, 14, 14, 14, 13, 13][index as usize - 1];
+    LedSlice { start, count }
+}
+
+/// Review Focus 3, the happy path: one raise at the start and one resize at the commit, and no
+/// other resize over the whole setup.
+#[tokio::test]
+async fn commit_resizes_exactly_twice_over_a_whole_setup() {
+    let rig = rig("commit-twice", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let before = rig.server.resize_count(0);
+    let setup = started(&rig, 0).await;
+    assert!(
+        wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await,
+        "the header was never raised"
+    );
+
+    let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
+
+    assert_eq!(answer.final_leds, FINAL);
+    assert_eq!(
+        rig.server.resize_count(0),
+        before + 2,
+        "one raise and one final length, and nothing else"
+    );
+    assert_eq!(rig.server.zone_leds(0, 0), Some(FINAL), "the header ends at the parts' sum");
+}
+
+/// The commit writes the three files together: the parts, the groups that hold them in chain
+/// order, and the header's length in `zones.json`.
+#[tokio::test]
+async fn commit_writes_parts_groups_and_zone_size_together() {
+    let rig = rig("commit-files", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+
+    let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
+
+    let lights = read_lights(&rig.home);
+    let made = zone_parts(&lights, 0);
+    assert_eq!(made.iter().map(|part| part.id.clone()).collect::<Vec<_>>(), part_ids(7));
+    for (index, part) in seven_parts().iter().enumerate() {
+        assert_eq!(made[index].name.as_deref(), Some(part.name.as_str()), "part {}", index + 1);
+        assert_eq!(made[index].kind, Some(part.kind), "part {}", index + 1);
+        assert_eq!(made[index].leds, Some(run_of(index as u32 + 1)), "part {}", index + 1);
+        assert_eq!(made[index].arrangement, Arrangement::Ring, "a fan is a ring");
+    }
+    let record = lights
+        .chains
+        .iter()
+        .find(|record| record.device_id.0 == BOARD && record.zone_index == 0)
+        .expect("the chain record is written");
+    assert_eq!(record.state, ChainState::SetUp);
+
+    let scenes = read_scenes(&rig.home);
+    let mut expected = part_ids(7);
+    expected.push("openrgb:mb#z1".into());
+    expected.push("openrgb:ram#z0".into());
+    assert_eq!(
+        scenes.scenes[0].groups[0].members, expected,
+        "the parts take the whole-zone light's place in the group, in chain order"
+    );
+
+    let zones = read_zones(&rig.home);
+    assert_eq!(zones.sizes[BOARD][&0], FINAL, "zones.json holds the parts' sum");
+    assert_eq!(zones.sizes[BOARD][&1], SECOND_EARLIER, "the other header keeps its length");
+    assert_eq!(
+        rig.app.zones.read().await.get(BOARD).and_then(|sizes| sizes.get(&0)),
+        Some(&FINAL),
+        "the sizes the supervisor reads hold the final length too"
+    );
+
+    assert_eq!(answer.lights.len(), 7);
+    assert_eq!(
+        answer.lights.iter().map(|part| part.light.id.clone()).collect::<Vec<_>>(),
+        part_ids(7),
+        "the answer names the parts in chain order"
+    );
+    assert_eq!(answer.lights[0].led_count, 14);
+    assert_eq!(answer.lights[6].led_count, 13);
+}
+
+/// The setup ends with the commit: the hold and the session go, and the scene plays on the new
+/// parts again.
+#[tokio::test]
+async fn commit_ends_the_hold_and_the_scene_plays_again() {
+    let rig = rig("commit-ends", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+
+    committed(&rig, 0, &setup.session, &seven_parts()).await;
+
+    assert!(rig.app.zone_holds.read().await.is_empty(), "the hold is dropped");
+    assert!(rig.app.identify.setup_session().is_none(), "the session ended");
+    assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record is deleted");
+    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent record is deleted");
+
+    // The scene was handed the new parts, so the engine paints them from now on.
+    let scene_lights = rig.engine.scene_lights.lock().unwrap().clone();
+    let ids: Vec<String> = scene_lights.iter().map(|light| light.id.clone()).collect();
+    for id in part_ids(7) {
+        assert!(ids.contains(&id), "the engine's scene does not name {id}: {ids:?}");
+    }
+
+    // The gate is gone: an engine frame reaches the header again. The board now has 96 + 60 LEDs.
+    let sink = sink_of(&rig, BOARD).await.expect("the board has a frame sink");
+    sink.submit(vec![Rgb8::WHITE; 156]);
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            let colors = rig.server.colors(0);
+            colors.len() == 156 && colors.iter().all(|color| *color == Rgb8::WHITE)
+        })
+        .await,
+        "the engine's frames never reached the lights again: {:?}",
+        rig.server.colors(0)
+    );
+}
+
+/// Review Focus 3: a resize the device refuses leaves everything as it was, and the session open
+/// so the same commit can be tried again.
+#[tokio::test]
+async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
+    let rig = rig("commit-resize-fails", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let lights_before = std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json");
+    let scenes_before = std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json");
+    let zones_before = std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    rig.server.fail_resizes(true);
+
+    let (status, body) = commit(&rig, 0, &setup.session, &seven_parts()).await;
+
+    assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(message.contains("no reply"), "the answer carries the device's own error: {body}");
+    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent is deleted: nothing was written");
+    assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record stays for the session");
+    assert_eq!(
+        rig.app.identify.setup_session().as_deref(),
+        Some(setup.session.as_str()),
+        "the session stays open for a retry"
+    );
+    assert!(!rig.app.zone_holds.read().await.is_empty(), "the header is still the setup's");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(300), "the failed resize changed no length");
+    assert_eq!(std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json"), lights_before);
+    assert_eq!(std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json"), scenes_before);
+    assert_eq!(std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json"), zones_before);
+    assert_eq!(chain_state(&rig, 0).await, None, "no chain record was written");
+    assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 1, "the whole-zone light is still it");
+
+    // The retry the open session allows: the same commit lands.
+    rig.server.fail_resizes(false);
+    let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
+    assert_eq!(answer.final_leds, FINAL);
+    assert_eq!(rig.server.zone_leds(0, 0), Some(FINAL));
+    assert_eq!(chain_state(&rig, 0).await, Some(ChainState::SetUp));
+}
+
+/// Review Focus 3: a store write that fails after the resize puts the files and the header back,
+/// and the session stays open for a retry.
+#[tokio::test]
+async fn a_failed_store_write_resizes_back_and_leaves_the_files() {
+    let rig = rig("commit-store-fails", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let lights_before = std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json");
+    let scenes_before = std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json");
+    let zones_before = std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    // The store refuses its writes, as it does when a file could not be read at start.
+    rig.app.store.write().await.lights_blocked = true;
+
+    let (status, body) = commit(&rig, 0, &setup.session, &seven_parts()).await;
+
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{body}");
+    let message = body["message"].as_str().unwrap_or_default();
+    assert!(message.contains("lights.json"), "the answer names the write that failed: {body}");
+    assert_eq!(std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json"), lights_before);
+    assert_eq!(std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json"), scenes_before);
+    assert_eq!(std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json"), zones_before);
+    assert_eq!(rig.server.zone_leds(0, 0), Some(EARLIER), "the header is back at its earlier length");
+    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent is deleted");
+    assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record stays for the session");
+    assert_eq!(
+        rig.app.identify.setup_session().as_deref(),
+        Some(setup.session.as_str()),
+        "the session stays open for a retry"
+    );
+    assert!(rig.app.zone_holds.read().await.is_empty(), "nothing is held raised any more");
+    let lights = rig.app.store.read().await.lights.clone();
+    assert_eq!(lights.chains, Vec::new(), "memory is put back: no chain record");
+    assert_eq!(zone_parts(&lights, 0).len(), 1, "memory is put back: the whole-zone light");
+    assert_eq!(lights, read_lights(&rig.home), "memory and the file agree");
+
+    // The retry: with the store able to write, the same commit lands.
+    rig.app.store.write().await.lights_blocked = false;
+    let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
+    assert_eq!(answer.final_leds, FINAL);
+    assert_eq!(rig.server.zone_leds(0, 0), Some(FINAL));
+    assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 7);
+}
+
+/// When the rollback itself fails, both records stay for the next start to replay; nothing here
+/// pretends the rollback happened.
+#[tokio::test]
+async fn a_failed_rollback_keeps_both_records() {
+    let rig = rig("commit-rollback-fails", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let lights_before = std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json");
+    let scenes_before = std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json");
+    let zones_before = std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    rig.app.store.write().await.lights_blocked = true;
+    // The final resize is held back, so the snapshot the commit names can be damaged while the
+    // commit is between that resize and its store write: a snapshot that cannot be read is a
+    // rollback that cannot run.
+    rig.server.delay_resizes(1_500);
+    let router = rig.router.clone();
+    let path = commit_path(0);
+    let body = serde_json::to_string(&SetupCommit {
+        session: setup.session.clone(),
+        parts: seven_parts(),
+    })
+    .expect("a commit body");
+    let pending = tokio::spawn(async move { router.oneshot(request("POST", &path, Some(&body))).await });
+
+    let named = wait_until(Duration::from_secs(30), || rig.home.join(CHAIN_INTENT_FILE).exists()).await;
+    assert!(named, "the commit never wrote its intent");
+    let intent = read_intent(&rig.home).expect("the intent record");
+    let folder = canvas_daemon::paths::backups_dir_in(&rig.home).join(&intent.snapshot);
+    assert!(folder.join(LIGHTS_FILE).exists(), "the snapshot holds the lights it would put back");
+    std::fs::remove_file(folder.join(LIGHTS_FILE)).expect("the snapshot's lights.json goes");
+    std::fs::create_dir(folder.join(LIGHTS_FILE)).expect("a folder takes its place");
+
+    let response = tokio::time::timeout(Duration::from_secs(60), pending)
+        .await
+        .expect("the commit answers")
+        .expect("the request task ends")
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert!(rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent stays: the rollback did not run");
+    assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record stays too");
+    // The store's own rollback still put memory and the two files it had changed back, so the
+    // owner's files are as they were even though the snapshot could not be read.
+    assert_eq!(std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json"), lights_before);
+    assert_eq!(std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json"), scenes_before);
+    assert_eq!(std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json"), zones_before);
+    assert_eq!(rig.app.store.read().await.lights.chains, Vec::new(), "no chain record was kept");
+    assert!(
+        !rig.app.zone_holds.read().await.is_empty(),
+        "the unfinished setup still holds its header"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await,
+        "the setup's hold no longer keeps the header: {:?}",
+        rig.server.zone_leds(0, 0)
+    );
+}
+
+/// Review Focus 3: a daemon start that finds an intent record undoes the interrupted commit: the
+/// files come back from the snapshot, the store reloads them, and the header returns to its
+/// earlier length.
+#[tokio::test]
+async fn start_up_rolls_back_a_leftover_intent() {
+    let device = DeviceId(BOARD.into());
+    let before_lights = rig_lights();
+    let before_scenes = rig_scenes(&before_lights.lights);
+    let before_zones = ZonesFile {
+        schema_version: canvas_proto::config::ZONES_SCHEMA,
+        sizes: std::collections::BTreeMap::from([(
+            BOARD.to_string(),
+            std::collections::BTreeMap::from([(0, EARLIER), (1, SECOND_EARLIER)]),
+        )]),
+    };
+    let plan = plan_commit(&before_lights, &before_scenes, &device, 0, &seven_parts(), 300)
+        .expect("the plan fits");
+    let final_leds = plan.final_leds;
+    let written_lights = before_lights.clone();
+    let written_scenes = before_scenes.clone();
+    let written_zones = before_zones.clone();
+    let prepare = move |home: &Path| {
+        // The files as they were before the interrupted commit.
+        std::fs::write(home.join(LIGHTS_FILE), serde_json::to_vec_pretty(&written_lights).unwrap())
+            .unwrap();
+        std::fs::write(home.join(SCENES_FILE), serde_json::to_vec_pretty(&written_scenes).unwrap())
+            .unwrap();
+        std::fs::write(home.join(ZONES_FILE), serde_json::to_vec_pretty(&written_zones).unwrap())
+            .unwrap();
+        let snapshot = snapshot(home, "before-chain-setup").expect("the commit's snapshot");
+        let name = snapshot.file_name().unwrap().to_str().unwrap().to_string();
+        // The commit got as far as the resize and the three writes, then the daemon died.
+        std::fs::write(home.join(LIGHTS_FILE), serde_json::to_vec_pretty(&plan.lights).unwrap())
+            .unwrap();
+        std::fs::write(home.join(SCENES_FILE), serde_json::to_vec_pretty(&plan.scenes).unwrap())
+            .unwrap();
+        let after_zones = ZonesFile {
+            schema_version: canvas_proto::config::ZONES_SCHEMA,
+            sizes: std::collections::BTreeMap::from([(
+                BOARD.to_string(),
+                std::collections::BTreeMap::from([(0, final_leds), (1, SECOND_EARLIER)]),
+            )]),
+        };
+        std::fs::write(home.join(ZONES_FILE), serde_json::to_vec_pretty(&after_zones).unwrap())
+            .unwrap();
+        write_intent(
+            home,
+            &IntentRecord {
+                device_id: DeviceId(BOARD.into()),
+                zone_index: 0,
+                restore_leds: EARLIER,
+                final_leds,
+                snapshot: name,
+            },
+        )
+        .expect("the intent record");
+        write_restore(
+            home,
+            &RestoreRecord { device_id: DeviceId(BOARD.into()), zone_index: 0, leds: EARLIER },
+        )
+        .expect("the restore record");
+    };
+    // The header is at the length the interrupted commit set, with no hold: a restart has none.
+    let rig = rig_prepared("leftover-intent", fake(final_leds).await, prepare).await;
+
+    assert!(
+        wait_until(Duration::from_secs(60), || rig.server.zone_leds(0, 0) == Some(EARLIER)).await,
+        "start-up never put the header back: {:?}",
+        rig.server.zone_leds(0, 0)
+    );
+    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent is deleted");
+    assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record is deleted");
+    assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 1, "lights.json is the earlier one");
+    assert_eq!(read_lights(&rig.home), before_lights);
+    assert_eq!(read_scenes(&rig.home), before_scenes);
+    assert_eq!(read_zones(&rig.home), before_zones);
+    assert!(
+        wait_for(Duration::from_secs(30), || async {
+            let store = rig.app.store.read().await;
+            store.lights == before_lights && store.scenes == before_scenes
+        })
+        .await,
+        "the store did not reload the files the rollback put back"
+    );
+    assert_eq!(
+        rig.app.zones.read().await.get(BOARD).and_then(|sizes| sizes.get(&0)),
+        Some(&EARLIER),
+        "the supervisor's sizes are the restored ones"
+    );
+    assert_eq!(chain_state(&rig, 0).await, None, "the chain is not set up any more");
+    let answer = chains(&rig).await;
+    assert_eq!(answer.chains[0].leds, EARLIER);
+    assert_eq!(answer.chains[0].state, ChainSetupState::NotSetUp);
+}
+
+/// Review Focus 4 in the files: setting the same chain up again with fewer parts keeps the ids by
+/// position and drops the vanished part from every group.
+#[tokio::test]
+async fn setting_up_again_keeps_part_identity_in_the_files() {
+    let rig = rig("commit-again", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let first = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    committed(&rig, 0, &first.session, &seven_parts()).await;
+    assert_eq!(part_ids(7), zone_parts(&read_lights(&rig.home), 0).iter().map(|p| p.id.clone()).collect::<Vec<_>>());
+
+    let second = started(&rig, 0).await;
+    assert_eq!(second.restore_to, FINAL, "the re-setup starts from the length it has");
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    committed(&rig, 0, &second.session, &six_parts()).await;
+
+    let lights = read_lights(&rig.home);
+    let made = zone_parts(&lights, 0);
+    assert_eq!(made.len(), 6);
+    assert_eq!(
+        made.iter().map(|part| part.id.clone()).collect::<Vec<_>>(),
+        part_ids(6),
+        "the parts keep their ids by position"
+    );
+    assert_eq!(made.iter().map(|part| part.name.clone().unwrap()).collect::<Vec<_>>(),
+        (1..=6).map(|n| format!("Fan {n}")).collect::<Vec<_>>());
+    let scenes = read_scenes(&rig.home);
+    let members = &scenes.scenes[0].groups[0].members;
+    assert!(!members.contains(&part_id(7)), "the vanished part left every group: {members:?}");
+    let mut expected = part_ids(6);
+    expected.push("openrgb:mb#z1".into());
+    expected.push("openrgb:ram#z0".into());
+    assert_eq!(*members, expected, "the first six keep their place in the group");
+    assert_eq!(read_zones(&rig.home).sizes[BOARD][&0], FINAL);
+}
+
+/// A stale session is a 409 and changes nothing: no resize, no file, no record.
+#[tokio::test]
+async fn commit_with_a_stale_session_is_a_409_and_changes_nothing() {
+    let rig = rig("commit-stale", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let lights_before = std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json");
+    let scenes_before = std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json");
+    let zones_before = std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let resizes = rig.server.resize_count(0);
+
+    let (status, body) = commit(&rig, 0, "stale", &seven_parts()).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(rig.server.resize_count(0), resizes, "the stale commit resized nothing");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(300), "the header is still the setup's");
+    assert_eq!(std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json"), lights_before);
+    assert_eq!(std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json"), scenes_before);
+    assert_eq!(std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json"), zones_before);
+    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "no intent was written");
+    assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "the setup's record is untouched");
+    assert_eq!(
+        rig.app.identify.setup_session().as_deref(),
+        Some(setup.session.as_str()),
+        "the open setup is untouched"
+    );
+}
+
+/// The commit saves while a takeover holds the lights, and the scene lands when the takeover ends.
+#[tokio::test]
+async fn commit_during_a_takeover_saves_and_lands_when_the_takeover_ends() {
+    let rig = rig("commit-takeover", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    // A takeover holds the lights, as the editor's draft does.
+    rig.app
+        .scene
+        .land_takeover(Held { groups: vec!["all".into()], takeover: vec!["all".into()] });
+
+    let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
+
+    assert_eq!(answer.final_leds, FINAL);
+    assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 7, "the files landed");
+    assert_eq!(chain_state(&rig, 0).await, Some(ChainState::SetUp));
+    assert!(rig.app.zone_holds.read().await.is_empty(), "the hold is dropped");
+    assert!(rig.app.identify.setup_session().is_none(), "the session ended");
+    let during: Vec<String> =
+        rig.engine.scene_lights.lock().unwrap().iter().map(|light| light.id.clone()).collect();
+    assert!(
+        !during.iter().any(|id| id == &part_id(1)),
+        "the scene was not put over the takeover: {during:?}"
+    );
+
+    // The takeover ends the way the editor's own restore ends it: the active scene goes on.
+    canvas_daemon::scenes::restore_active(&rig.app).await;
+    let landed = wait_for(Duration::from_secs(30), || async {
+        rig.engine.scene_lights.lock().unwrap().iter().any(|light| light.id == part_id(1))
+    })
+    .await;
+    assert!(landed, "the committed parts never reached the scene after the takeover ended");
+    let sink = sink_of(&rig, BOARD).await.expect("the board has a frame sink");
+    sink.submit(vec![Rgb8::WHITE; 156]);
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            let colors = rig.server.colors(0);
+            colors.len() == 156 && colors.iter().all(|color| *color == Rgb8::WHITE)
+        })
+        .await,
+        "the lights stayed dark after the takeover ended: {:?}",
+        rig.server.colors(0)
+    );
 }

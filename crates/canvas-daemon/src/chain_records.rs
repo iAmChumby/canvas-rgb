@@ -99,6 +99,13 @@ pub fn restore_files_from_snapshot(home: &Path, snapshot: &str) -> io::Result<()
     Ok(())
 }
 
+/// The files half of undoing an interrupted commit: puts `lights.json`, `scenes.json` and
+/// `zones.json` back as the intent's snapshot holds them, and touches nothing else. The store in
+/// memory is the caller's to reload from the same files.
+pub fn rollback_files(home: &Path, intent: &IntentRecord) -> io::Result<()> {
+    restore_files_from_snapshot(home, &intent.snapshot)
+}
+
 /// Reads one of the two records. A file that is there but does not parse is left exactly as it
 /// is: it is the only copy of what a crash interrupted, and a rewrite would lose it.
 fn read_record<T: DeserializeOwned>(home: &Path, name: &str) -> Option<T> {
