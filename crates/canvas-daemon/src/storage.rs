@@ -11,12 +11,16 @@ use canvas_proto::config::{
     ZONES_SCHEMA, CONFIG_SCHEMA,
 };
 use canvas_proto::fans::{validate_hot_limits, validate_profile, FanValidationError, HotLimitError};
-use canvas_proto::layout::Layout;
+use canvas_proto::scene::{
+    LightsFile, ScenesFile, LIGHTS_FILE, LIGHTS_SCHEMA, SCENES_FILE, SCENES_SCHEMA,
+};
 use serde::de::DeserializeOwned;
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+
+use canvas_proto::device::DeviceInfo;
 
 use crate::displays::{DisplaysFile, DISPLAYS_FILE, DISPLAYS_SCHEMA};
 use crate::paths;
@@ -78,13 +82,24 @@ pub fn read_parsed<T: DeserializeOwned + SchemaVersioned>(
     let Some(bytes) = paths::read_optional(path) else {
         return Ok(None);
     };
+    parse_bytes(path, &bytes, schema_version, expected)
+}
+
+/// The parse half of [`read_parsed`], for bytes already read: a file that parses and has the
+/// right schema yields `Ok(Some)`; one that does not is moved aside and yields `Ok(None)`.
+fn parse_bytes<T: DeserializeOwned + SchemaVersioned>(
+    path: &Path,
+    bytes: &[u8],
+    schema_version: u32,
+    expected: &str,
+) -> Result<Option<T>, StorageError> {
     let parsed: Result<T, _> = if path.extension().is_some_and(|e| e == "toml") {
-        match std::str::from_utf8(&bytes) {
+        match std::str::from_utf8(bytes) {
             Ok(text) => toml::from_str(text).map_err(|e| e.to_string()),
             Err(e) => Err(e.to_string()),
         }
     } else {
-        serde_json::from_slice(&bytes).map_err(|e| e.to_string())
+        serde_json::from_slice(bytes).map_err(|e| e.to_string())
     };
     match parsed {
         Ok(value) => {
@@ -109,6 +124,75 @@ pub fn read_parsed<T: DeserializeOwned + SchemaVersioned>(
     }
 }
 
+/// What reading a file that must not be mistaken for an absent one found.
+enum Loaded<T> {
+    /// The file does not exist.
+    Absent,
+    /// The file exists but could not be read (or could not be moved aside): it stays where it is
+    /// and nothing is written over it.
+    Unreadable,
+    /// The file did not parse or had the wrong schema, and was moved aside as `*.corrupt`.
+    Quarantined,
+    Parsed(T),
+}
+
+/// [`read_parsed`] for the scenes files: tells absent from unreadable, and logs the path of a
+/// read error. [`paths::read_optional`], which maps every error to "absent", stays as it is for
+/// the other files.
+fn load_checked<T: DeserializeOwned + SchemaVersioned>(
+    path: &Path,
+    schema_version: u32,
+    expected: &str,
+) -> Loaded<T> {
+    let bytes = match paths::read_checked(path) {
+        Ok(Some(bytes)) => bytes,
+        Ok(None) => return Loaded::Absent,
+        Err(e) => {
+            tracing::error!(
+                path = %path.display(), error = %e,
+                "{expected} exists but could not be read; it is left alone and nothing is written over it"
+            );
+            return Loaded::Unreadable;
+        }
+    };
+    match parse_bytes(path, &bytes, schema_version, expected) {
+        Ok(Some(value)) => Loaded::Parsed(value),
+        Ok(None) => Loaded::Quarantined,
+        Err(e) => {
+            tracing::error!(path = %path.display(), error = %e, "{expected} could not be moved aside; it is left alone");
+            Loaded::Unreadable
+        }
+    }
+}
+
+/// Reads `layouts.json` for the 0.14.0 migration, and only for it.
+///
+/// The file is never written and never moved aside: one log line (with the file's name, never the
+/// absolute path) says why it was not a source, and the scenes start from the first-run migration.
+/// `None` when it is absent, unreadable or from another schema.
+fn read_layouts_read_only(path: &Path) -> Option<LayoutsFile> {
+    let bytes = paths::read_optional(path)?;
+    match serde_json::from_slice::<LayoutsFile>(&bytes) {
+        Ok(value) if value.schema_version == LAYOUTS_SCHEMA => Some(value),
+        Ok(value) => {
+            tracing::warn!(
+                file = LAYOUTS_FILE,
+                found = value.schema_version,
+                expected = LAYOUTS_SCHEMA,
+                "layouts.json is from another schema; it is not migrated and is left as it is"
+            );
+            None
+        }
+        Err(e) => {
+            tracing::error!(
+                file = LAYOUTS_FILE, error = %e,
+                "layouts.json could not be read; it is not migrated and is left as it is"
+            );
+            None
+        }
+    }
+}
+
 /// A document that carries a schema version.
 pub trait SchemaVersioned {
     fn schema_version(&self) -> u32;
@@ -124,7 +208,7 @@ macro_rules! impl_schema_version {
     };
 }
 
-impl_schema_version!(ConfigFile, LayoutsFile, ZonesFile, EffectsFile, FansFile);
+impl_schema_version!(ConfigFile, LayoutsFile, ZonesFile, EffectsFile, FansFile, LightsFile, ScenesFile);
 
 impl SchemaVersioned for canvas_proto::stack::StackFile {
     fn schema_version(&self) -> u32 {
@@ -160,7 +244,6 @@ pub fn quarantine(path: &Path) -> std::io::Result<()> {
     std::fs::rename(path, target)
 }
 
-/// A sortable timestamp for snapshot folder names: `20261026-141530`.
 pub fn timestamp() -> String {
     let secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -192,6 +275,10 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         "layouts.json",
         "zones.json",
         "effects.json",
+        // The scenes files (§ review 323 B1): an import writes both, so a bundle that lacks a
+        // split light or carries damaged scenes must leave the old ones recoverable.
+        LIGHTS_FILE,
+        SCENES_FILE,
         canvas_proto::stack::STACKS_FILE,
         DISPLAYS_FILE,
         PERIPHERALS_FILE,
@@ -235,7 +322,23 @@ pub fn prune_snapshots() {
 #[derive(Debug, Clone)]
 pub struct Store {
     pub config: ConfigFile,
-    pub layouts: LayoutsFile,
+    /// The hardware map (`lights.json`): one light per zone, or per run of one. Scenes (0.14.0).
+    pub lights: LightsFile,
+    /// The scenes (`scenes.json`): named sets of groups, one active. Migrated from `layouts.json`
+    /// once, when this file is absent; the layouts are only read for that migration.
+    pub scenes: ScenesFile,
+    /// Set while the scenes are held in memory only: `scenes.json` was absent (or quarantined),
+    /// so the first device list migrates the layouts (or makes the first-run scene) with the real
+    /// devices and writes both files ([`Store::finish_scenes`]). Nothing is written before that.
+    pub scenes_pending: Option<PendingScenes>,
+    /// `lights.json` exists but could not be read at load. It is never written over.
+    pub lights_blocked: bool,
+    /// `scenes.json` (or the `layouts.json` it would migrate from) exists but could not be read at
+    /// load. It is never written over.
+    pub scenes_blocked: bool,
+    /// A failed save of `lights.json` after new lights were found is logged once (while the
+    /// migration is pending every list would otherwise repeat it); a success clears it.
+    pub lights_save_warned: bool,
     pub zones: ZonesFile,
     pub effects: EffectsFile,
     /// The numeric display configs (`displays.json`). A display is driven only while it has one.
@@ -248,11 +351,63 @@ pub struct Store {
     pub home: PathBuf,
 }
 
+/// How long a held migration waits, after the first non-empty device list, for every device the
+/// layouts place to show up. A keyboard whose HID discover fails is left out of the first list
+/// (`composite.rs`), and a zone of an absent device can only be guessed from the layout; the wait
+/// gives it a chance to arrive first. After it, the migration runs with the devices present.
+pub const SCENES_DEVICE_WAIT: Duration = Duration::from_secs(60);
+
+/// The clock the held scenes migration measures its wait on. It is tokio's, so a test can pause
+/// and advance it; outside a paused runtime it is the system clock.
+pub fn clock() -> Instant {
+    tokio::time::Instant::now().into_std()
+}
+
+/// A scenes migration waiting for the first device list.
+#[derive(Debug, Clone)]
+pub struct PendingScenes {
+    /// The saved layouts to migrate (Poison already renamed), or `None` for a first run.
+    pub layouts: Option<LayoutsFile>,
+    /// The lights `lights.json` held at load (empty when it was absent): they keep their
+    /// settings through the migration. The in-memory placeholder lights are not these.
+    pub held_lights: LightsFile,
+    /// The `before-scenes` snapshot is taken once, however many lists it takes to write.
+    pub snapshotted: bool,
+    /// When the first non-empty device list arrived: the wait for the placed devices runs from it.
+    pub first_list_at: Option<Instant>,
+    /// The wait for a placed device is logged once, not on every list.
+    pub logged_waiting: bool,
+    /// A timer to settle the wait has been started. The supervisor sends a list only when the
+    /// devices change, so a device that stays absent sends none: without the timer the wait would
+    /// never end.
+    pub deadline_armed: bool,
+}
+
+impl PendingScenes {
+    /// The ids of the devices the layouts place, in first-seen order.
+    fn placed_devices(&self) -> Vec<&canvas_proto::DeviceId> {
+        let mut ids: Vec<&canvas_proto::DeviceId> = Vec::new();
+        for layout in self.layouts.iter().flat_map(|l| &l.layouts) {
+            for placed in &layout.zones {
+                if !ids.contains(&&placed.device_id) {
+                    ids.push(&placed.device_id);
+                }
+            }
+        }
+        ids
+    }
+}
+
 impl Default for Store {
     fn default() -> Self {
         Self {
             config: ConfigFile::default(),
-            layouts: default_layouts(),
+            lights: crate::scenes::empty_lights(),
+            scenes: crate::scenes::default_scenes(&crate::scenes::empty_lights()),
+            scenes_pending: None,
+            lights_blocked: false,
+            scenes_blocked: false,
+            lights_save_warned: false,
             zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
             effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
             displays: DisplaysFile::default(),
@@ -271,11 +426,15 @@ impl Store {
 }
 
 /// The layouts a fresh install starts from: one empty layout called "Default".
+///
+/// Used by the tests that need a 0.13-era `layouts.json` or bundle to migrate from; the daemon
+/// never makes one.
+#[cfg(test)]
 pub fn default_layouts() -> LayoutsFile {
     LayoutsFile {
         schema_version: LAYOUTS_SCHEMA,
         active: "default".into(),
-        layouts: vec![Layout {
+        layouts: vec![canvas_proto::layout::Layout {
             id: "default".into(),
             name: "Default".into(),
             render_scale: Default::default(),
@@ -315,11 +474,7 @@ impl Store {
                     clamp_settings(&mut c.settings);
                     c
                 });
-        let layouts_value: Option<LayoutsFile> = read_parsed(&layouts, LAYOUTS_SCHEMA, "layouts.json")
-            .unwrap_or_else(|e| {
-                tracing::error!(error = %e, "layouts.json could not be read");
-                None
-            });
+        let layouts_value: Option<LayoutsFile> = read_layouts_read_only(&layouts);
         let zones_value: Option<ZonesFile> = read_parsed(&zones, ZONES_SCHEMA, "zones.json")
             .unwrap_or_else(|e| {
                 tracing::error!(error = %e, "zones.json could not be read");
@@ -341,9 +496,17 @@ impl Store {
                 None
             });
 
+        let lights_value: Loaded<LightsFile> = load_checked(&home.join(LIGHTS_FILE), LIGHTS_SCHEMA, LIGHTS_FILE);
+        let scenes_value: Loaded<ScenesFile> = load_checked(&home.join(SCENES_FILE), SCENES_SCHEMA, SCENES_FILE);
+
         let mut store = Store {
             config: config_value.unwrap_or_default(),
-            layouts: layouts_value.unwrap_or_else(default_layouts),
+            lights: crate::scenes::empty_lights(),
+            scenes: Store::default().scenes,
+            scenes_pending: None,
+            lights_blocked: false,
+            scenes_blocked: false,
+            lights_save_warned: false,
             zones: zones_value.unwrap_or_else(|| Store::default().zones),
             effects: effects_value.unwrap_or_else(|| Store::default().effects),
             displays: displays_value.unwrap_or_default(),
@@ -354,37 +517,312 @@ impl Store {
         if store.config.schema_version != CONFIG_SCHEMA {
             store.config.schema_version = CONFIG_SCHEMA;
         }
-        store.ensure_layouts();
+        store.load_scenes(lights_value, scenes_value, layouts_value.as_ref());
         store
     }
 
+    /// Settles `lights` and `scenes` after the files are read. Writes at most a repair of a
+    /// `scenes.json` that read fine; never `layouts.json`.
+    ///
+    /// - `scenes.json` or `lights.json` exists but could not be read is not absent: it is left
+    ///   alone, the store runs on an in-memory default, and nothing is written to it (see
+    ///   `lights_blocked`, `scenes_blocked`).
+    /// - `scenes.json` read fine: it is repaired (see [`crate::scenes::repair`]) and the repair is
+    ///   saved.
+    /// - `scenes.json` is absent: nothing is written here. The migration is held
+    ///   in memory ([`PendingScenes`]: from `layouts.json` when it could be read, else the
+    ///   first-run scene) and runs on the first device list, so the real devices decide
+    ///   arrangements and zero-LED zones ([`Store::finish_scenes`]).
+    /// - `layouts.json` could not be used: it is left exactly as it is (bytes and mtime
+    ///   untouched), the log names it, and the migration is the first-run one. It does not block
+    ///   the scenes: a file the owner has to move by hand is worse than starting from the devices.
+    fn load_scenes(
+        &mut self,
+        lights: Loaded<LightsFile>,
+        scenes: Loaded<ScenesFile>,
+        layouts: Option<&LayoutsFile>,
+    ) {
+        match lights {
+            Loaded::Parsed(lights) => self.lights = lights,
+            Loaded::Unreadable => self.lights_blocked = true,
+            Loaded::Absent | Loaded::Quarantined => {}
+        }
+        match scenes {
+            Loaded::Parsed(mut scenes) => {
+                let changes = crate::scenes::repair(&mut scenes, &self.lights);
+                for change in &changes {
+                    tracing::warn!("scenes.json was repaired: {change}");
+                }
+                self.scenes = scenes;
+                if !changes.is_empty() {
+                    crate::logging::warn_if_err("the repaired scenes.json could not be saved", self.save_scenes());
+                }
+            }
+            Loaded::Unreadable => {
+                self.scenes_blocked = true;
+                self.scenes = crate::scenes::default_scenes(&self.lights);
+            }
+            // A lights file that could not be read is left alone, and the scenes wait: every
+            // light they would name comes from it.
+            Loaded::Absent | Loaded::Quarantined if self.lights_blocked => {
+                self.scenes_blocked = true;
+                self.scenes = crate::scenes::default_scenes(&self.lights);
+            }
+            Loaded::Absent | Loaded::Quarantined => {
+                // A layouts file that could not be used is not a source, and it must not leave the
+                // machine unable to edit a scene until the owner moves it by hand: it is left byte
+                // for byte as it is (no rename, no rewrite — the reader logged it) and the
+                // migration is the first-run one, from the devices the first list reports.
+                // A layouts file from before Poison became a user effect names it `poison`; the
+                // scenes are built from the ids the daemon uses today. The effects half of the
+                // rename runs on the store's own `effects.json` at start (`migration`).
+                let layouts = layouts.map(|l| {
+                    let mut l = l.clone();
+                    crate::migration::migrate_poison(&mut l, &mut EffectsFile::default());
+                    l
+                });
+                let held_lights = self.lights.clone();
+                let (lights, scenes) = Self::build_scenes(&held_lights, layouts.as_ref(), &[]);
+                self.lights = lights;
+                self.scenes = scenes;
+                self.scenes_pending = Some(PendingScenes {
+                    layouts,
+                    held_lights,
+                    snapshotted: false,
+                    first_list_at: None,
+                    logged_waiting: false,
+                    deadline_armed: false,
+                });
+            }
+        }
+    }
+
+    /// The lights and scenes a migration makes: the lights already held, plus the ones the
+    /// layouts (or, on a first run, the devices) bring.
+    ///
+    /// A migrated light replaces a held one of the same id (in the held one's place). While the
+    /// migration is pending a held light is a placeholder: `lights.json` as `sync_lights` left it,
+    /// with a default arrangement and no label, so the layout's label, arrangement and `reversed`
+    /// win. No edit can exist before the files are written: the scene routes refuse while the
+    /// migration is pending, and so do `save_lights` and `save_scenes`.
+    ///
+    /// An import with lights and no scenes also comes through here (bundle → migration): the
+    /// bundle's lights are what it holds, so a split light's label, slice and `reversed` flag are
+    /// not lost to a migration that can only re-derive whole-zone lights.
+    pub(crate) fn build_scenes(
+        held: &LightsFile,
+        layouts: Option<&LayoutsFile>,
+        devices: &[DeviceInfo],
+    ) -> (LightsFile, ScenesFile) {
+        let (migrated, scenes) = crate::scene_migration::migrate(layouts, devices);
+        let mut lights = held.clone();
+        for light in migrated.lights {
+            match lights.lights.iter_mut().find(|l| l.id == light.id) {
+                Some(held) => *held = light,
+                None => lights.lights.push(light),
+            }
+        }
+        let scenes = match layouts {
+            Some(_) => scenes,
+            // The first-run scene holds every light, the ones already held included.
+            None => crate::scenes::default_scenes(&lights),
+        };
+        (lights, scenes)
+    }
+
+    /// Runs the held scenes migration with the first device list: migrates with the real devices,
+    /// takes the `before-scenes` snapshot, writes `lights.json` and `scenes.json`, and clears
+    /// `scenes_pending`. Returns true when the files were written. Never writes `layouts.json`.
+    ///
+    /// An empty list waits for the next one: with no devices there are no lights to group, and a
+    /// first-run `Everything` made now would hold none. A failed write keeps the migration
+    /// pending: the next list tries again, and so does the wait's timer (`device_sync`), every
+    /// 30 s, when no new list comes.
+    ///
+    /// It also waits until every device the layouts place has appeared in a list, or until
+    /// [`SCENES_DEVICE_WAIT`] has passed since the first non-empty list (the clock is the `now` of
+    /// [`Store::finish_scenes_at`]). After the wait it migrates with the devices present, and a zone
+    /// of an absent device becomes a light from the layout's own data: its label, its shape (as
+    /// `arrangement_of`: a ring stays a ring, a grid shape is a grid, a point is a single, anything
+    /// else a strip), `reversed` and slice. It has LEDs unless the layout gives it a slice of no
+    /// LEDs: the layouts only place a zone that had LEDs when it was placed (`first_run.rs`
+    /// skips `led_count == 0`), so a whole-zone placement is the evidence that it has some. The
+    /// layout does not record a zone's kind, so an absent device's matrix or single zone placed
+    /// `Auto` becomes a strip; the light keeps it until the owner changes it in Devices (a single
+    /// LED reads the same point either way).
+    ///
+    /// Refuses while `lights.json` or `scenes.json` is blocked (could not be read at load).
+    pub fn finish_scenes(&mut self, devices: &[DeviceInfo]) -> bool {
+        self.finish_scenes_at(devices, clock())
+    }
+
+    /// While the migration waits for a placed device, the time left on that wait, once: the caller
+    /// starts one timer that runs [`Store::finish_scenes`] again when it ends. `None` when nothing
+    /// waits (no migration held, no list yet) or the timer is already running.
+    pub fn scenes_deadline_to_arm(&mut self, now: Instant) -> Option<Duration> {
+        let pending = self.scenes_pending.as_mut()?;
+        let first = pending.first_list_at?;
+        if pending.deadline_armed {
+            return None;
+        }
+        pending.deadline_armed = true;
+        Some(SCENES_DEVICE_WAIT.saturating_sub(now.saturating_duration_since(first)))
+    }
+
+    /// [`Store::finish_scenes`] with the clock passed in, so a test drives the wait.
+    pub fn finish_scenes_at(&mut self, devices: &[DeviceInfo], now: Instant) -> bool {
+        if self.lights_blocked || self.scenes_blocked || devices.is_empty() {
+            return false;
+        }
+        let Some(pending) = self.scenes_pending.as_mut() else {
+            return false;
+        };
+        let first_list_at = *pending.first_list_at.get_or_insert(now);
+        let absent: Vec<String> = pending
+            .placed_devices()
+            .into_iter()
+            .filter(|id| !devices.iter().any(|d| &d.id == *id))
+            .map(|id| id.0.clone())
+            .collect();
+        if !absent.is_empty() {
+            let waited = now.saturating_duration_since(first_list_at);
+            if waited < SCENES_DEVICE_WAIT {
+                if !pending.logged_waiting {
+                    pending.logged_waiting = true;
+                    tracing::info!(
+                        absent = ?absent,
+                        wait_secs = SCENES_DEVICE_WAIT.as_secs(),
+                        "the scenes wait for the devices the layouts place before they migrate"
+                    );
+                }
+                return false;
+            }
+            tracing::warn!(
+                absent = ?absent,
+                "these devices never showed up; their zones are migrated from the layouts alone"
+            );
+        }
+        if !pending.snapshotted {
+            pending.snapshotted = true;
+            crate::logging::warn_if_err(
+                "the snapshot before the scenes migration could not be taken; it goes on without one",
+                snapshot(&self.home, "before-scenes"),
+            );
+        }
+        let layouts = pending.layouts.clone();
+        let (lights, scenes) = Self::build_scenes(&pending.held_lights, layouts.as_ref(), devices);
+        let wrote_lights = crate::logging::warn_if_err(
+            "lights.json could not be written",
+            write_json(&self.home.join(LIGHTS_FILE), &lights),
+        );
+        let wrote_scenes = crate::logging::warn_if_err(
+            "scenes.json could not be written",
+            write_json(&self.home.join(SCENES_FILE), &scenes),
+        );
+        tracing::info!(
+            from_layouts = layouts.as_ref().map_or(0, |l| l.layouts.len()),
+            lights = lights.lights.len(),
+            scenes = scenes.scenes.len(),
+            "the scenes were made from the first device list"
+        );
+        self.lights = lights;
+        self.scenes = scenes;
+        if wrote_lights.is_some() && wrote_scenes.is_some() {
+            self.scenes_pending = None;
+            true
+        } else {
+            false
+        }
+    }
+
     /// Makes sure there is always an active layout to write scale and sampling into.
-    pub fn ensure_layouts(&mut self) {
-        if self.layouts.layouts.is_empty() {
-            self.layouts.layouts = Store::default().layouts.layouts;
+    /// Makes the first-run scene hold every light again.
+    ///
+    /// The first run sizes the JARGB headers: the zones it sized are lights now, and the scene
+    /// the migration made holds the lights it knew then. The first-run scene is one scene with
+    /// one group holding every light, so it is made again with the lights there are now: the
+    /// owner just installed the app, and every light plays. A scene the owner made is left
+    /// alone: its groups are theirs.
+    ///
+    /// Returns true when the scene was changed.
+    pub fn refresh_first_run_scene(&mut self) -> bool {
+        let default = crate::scenes::default_scenes(&self.lights);
+        let first_run =
+            self.scenes.scenes.len() == 1 && self.scenes.scenes[0].id == default.scenes[0].id;
+        if !first_run {
+            return false;
         }
-        if !self.layouts.layouts.iter().any(|l| l.id == self.layouts.active) {
-            self.layouts.active = self.layouts.layouts[0].id.clone();
+        let members: Vec<canvas_proto::scene::LightId> =
+            self.lights.lights.iter().map(|light| light.id.clone()).collect();
+        let mut groups = self.scenes.scenes[0].groups.clone();
+        if groups.is_empty() {
+            // The scene was made when there was no light at all, so it has no group. The group
+            // that holds every light is made now.
+            groups = default.scenes[0].groups.clone();
+            if groups.is_empty() {
+                return false;
+            }
+        } else if groups[0].members == members {
+            return false;
+        } else {
+            groups[0].members = members;
         }
+        self.scenes.scenes[0].groups = groups;
+        true
     }
 
-    /// The active layout, if it exists.
-    pub fn active_layout(&self) -> Option<&Layout> {
-        self.layouts.layouts.iter().find(|l| l.id == self.layouts.active)
-    }
-
-    /// The active layout, mutable.
-    pub fn active_layout_mut(&mut self) -> Option<&mut Layout> {
-        let id = self.layouts.active.clone();
-        self.layouts.layouts.iter_mut().find(|l| l.id == id)
+    /// Adds a light for every zone with LEDs that has none, and saves when any was added. A save
+    /// that fails (the migration is pending, or a file is blocked) is logged once, not on every
+    /// device list.
+    pub fn sync_lights_from(&mut self, devices: &[DeviceInfo]) -> usize {
+        let new_lights = crate::scenes::sync_lights(&mut self.lights, devices);
+        if !new_lights.is_empty() {
+            tracing::info!(added = new_lights.len(), "new lights were added");
+            match self.save_lights() {
+                Ok(()) => self.lights_save_warned = false,
+                Err(e) if !self.lights_save_warned => {
+                    self.lights_save_warned = true;
+                    tracing::warn!(error = %e, "could not save the lights (said once until a save works)");
+                }
+                Err(_) => {}
+            }
+        }
+        new_lights.len()
     }
 
     pub fn save_config(&self) -> std::io::Result<()> {
         write_toml(&self.home.join(CONFIG_FILE), &self.config)
     }
 
-    pub fn save_layouts(&self) -> std::io::Result<()> {
-        write_json(&self.home.join(LAYOUTS_FILE), &self.layouts)
+    /// Refuses while the file could not be read at load, or while the scenes are only in memory
+    /// ([`Store::finish_scenes`] writes them first).
+    ///
+    /// Also refuses while `scenes.json` is blocked: a session that cannot read the scenes holds
+    /// whole-zone lights only, and writing them would drop split members on the next load.
+    pub fn save_lights(&self) -> std::io::Result<()> {
+        self.may_write_scenes_files(LIGHTS_FILE, self.lights_blocked || self.scenes_blocked)?;
+        write_json(&self.home.join(LIGHTS_FILE), &self.lights)
+    }
+
+    /// Refuses while the file could not be read at load, or while the scenes are only in memory
+    /// ([`Store::finish_scenes`] writes them first).
+    pub fn save_scenes(&self) -> std::io::Result<()> {
+        self.may_write_scenes_files(SCENES_FILE, self.scenes_blocked)?;
+        write_json(&self.home.join(SCENES_FILE), &self.scenes)
+    }
+
+    fn may_write_scenes_files(&self, name: &str, blocked: bool) -> std::io::Result<()> {
+        if blocked {
+            return Err(std::io::Error::other(format!(
+                "{name} (or the scenes it belongs with) could not be read at start, so it is not written"
+            )));
+        }
+        if self.scenes_pending.is_some() {
+            return Err(std::io::Error::other(format!(
+                "{name} waits for the first device list before it is written"
+            )));
+        }
+        Ok(())
     }
 
     pub fn save_zones(&self) -> std::io::Result<()> {
@@ -405,7 +843,6 @@ impl Store {
 
     pub fn save_all(&self) -> std::io::Result<()> {
         self.save_config()?;
-        self.save_layouts()?;
         self.save_zones()?;
         self.save_effects()?;
         self.save_displays()?;
@@ -428,18 +865,51 @@ pub fn load_fans_last(home: &Path) -> Option<FansFile> {
 /// the last config the daemon pushed.
 pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
     let store = Store::load_from(home);
+    let (lights, scenes) = scenes_for_export(&store);
     ExportBundle {
         schema_version: EXPORT_SCHEMA,
         exported_at: chrono_like_timestamp(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
         settings: store.config.settings.clone(),
-        layouts: store.layouts.clone(),
+        layouts: LayoutsFile { schema_version: LAYOUTS_SCHEMA, active: String::new(), layouts: Vec::new() },
         zones: store.zones.clone(),
         effects: store.effects.clone(),
         fans,
         displays: store.displays.displays.clone(),
         stacks: crate::stacks::read_file(home).stacks,
+        lights,
+        scenes,
     }
+}
+
+/// The lights and scenes a bundle carries: only what the store really holds.
+///
+/// - A file that could not be read at load (`lights_blocked`, `scenes_blocked`) is left out. The
+///   in-memory value beside it is a default (an empty lights file, a one-`Everything` scenes file),
+///   and an import would write that default over the target's real data: a fabricated scene or
+///   whole-zone-only lights are never exported. The other file still goes in where it is real.
+/// - While the migration is pending, `scenes.json` does not exist, so no scenes are exported. The
+///   lights do: `lights.json` as it was held at load, which the importing machine holds through its
+///   own migration (a first run with no file yet exports neither).
+/// - Otherwise both are the store's own.
+pub fn scenes_for_export(store: &Store) -> (Option<LightsFile>, Option<ScenesFile>) {
+    let lights = if store.lights_blocked {
+        None
+    } else if let Some(pending) = &store.scenes_pending {
+        (!pending.held_lights.lights.is_empty()).then(|| pending.held_lights.clone())
+    } else if store.lights.lights.is_empty() {
+        // An empty in-memory file is the default made when `lights.json` was absent: exporting it
+        // would replace the target's real lights with nothing.
+        None
+    } else {
+        Some(store.lights.clone())
+    };
+    let scenes = if store.scenes_blocked || store.scenes_pending.is_some() {
+        None
+    } else {
+        Some(store.scenes.clone())
+    };
+    (lights, scenes)
 }
 
 /// Why an import was refused.
@@ -457,6 +927,10 @@ pub enum ImportError {
     Displays(String),
     #[error("settings refused: {0}")]
     Settings(String),
+    #[error("scenes refused: {0}")]
+    Scenes(String),
+    #[error("a file the import would replace could not be read: {0}")]
+    Blocked(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
 }
@@ -499,7 +973,7 @@ pub fn validate_settings(settings: &canvas_proto::config::Settings) -> Result<()
 
 /// Validates an export bundle. Fan values below the floors are refused.
 pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
-    validate_bundle_rated(bundle, None, None)
+    validate_bundle_rated(bundle, &[], None, None)
 }
 
 /// Validates an export bundle, with the rated maxima the service last reported
@@ -509,6 +983,7 @@ pub fn validate_bundle(bundle: &ExportBundle) -> Result<(), ImportError> {
 /// real ones on receipt.
 pub fn validate_bundle_rated(
     bundle: &ExportBundle,
+    devices: &[DeviceInfo],
     rated_cpu_max_c: Option<f32>,
     rated_gpu_max_c: Option<f32>,
 ) -> Result<(), ImportError> {
@@ -527,23 +1002,138 @@ pub fn validate_bundle_rated(
             return Err(ImportError::Displays(format!("two configs for {}", display.device.0)));
         }
     }
+    validate_bundle_scenes(bundle, devices)?;
     Ok(())
 }
 
-/// Writes a validated bundle over the daemon's own files.
-pub fn import_bundle(home: &Path, bundle: &ExportBundle) -> Result<(), ImportError> {
-    import_bundle_rated(home, bundle, None, None)
+/// Refuses a bundle whose scenes cannot be made valid. The bundle's scenes are repaired on the
+/// way in (a light in two groups, an empty group, an `active` that names nothing), and what the
+/// repair cannot fix is a validation error here, before anything is written.
+///
+/// There is no check on `active` here: [`crate::scenes::repair`] always leaves it naming a scene
+/// (it makes the default scene when there is none), so only the repair's own guarantee holds it.
+fn validate_bundle_scenes(bundle: &ExportBundle, devices: &[DeviceInfo]) -> Result<(), ImportError> {
+    let Some(scenes) = &bundle.scenes else {
+        return Ok(());
+    };
+    let before = scenes;
+    let (lights, scenes, _) = prepared_scenes(bundle.lights.as_ref(), scenes, devices);
+    // A member the repair had to drop on a device that IS known (a split light of a bundle exported
+    // without its lights file) would be lost without a word: refuse and name it instead, so the owner
+    // can export again with the lights. A member naming no known device is debris; repair drops it.
+    let known_devices: std::collections::HashSet<&str> =
+        lights.lights.iter().map(|l| l.device_id.0.as_str()).collect();
+    let kept: std::collections::HashSet<&str> = scenes
+        .scenes
+        .iter()
+        .flat_map(|s| s.groups.iter().flat_map(|g| g.members.iter().map(String::as_str)))
+        .collect();
+    let mut lost: Vec<&str> = before
+        .scenes
+        .iter()
+        .flat_map(|s| s.groups.iter().flat_map(|g| g.members.iter().map(String::as_str)))
+        .filter(|m| !kept.contains(m))
+        .filter(|m| m.split_once('#').is_some_and(|(device, _)| known_devices.contains(device)))
+        .collect();
+    lost.sort_unstable();
+    lost.dedup();
+    if !lost.is_empty() {
+        return Err(ImportError::Scenes(format!(
+            "the bundle's scenes name lights of known devices that it does not carry and this machine does not have: {}",
+            lost.join(", ")
+        )));
+    }
+    for scene in &scenes.scenes {
+        canvas_proto::scene::validate_scene(scene, &lights.lights)
+            .map_err(|e| ImportError::Scenes(format!("scene {}: {e}", scene.id)))?;
+    }
+    Ok(())
+}
+
+/// The lights and scenes a bundle's `scenes` half is written as: the bundle's own, with the schema
+/// versions this daemon writes, repaired (see [`crate::scenes::repair`]) so every scene passes
+/// [`canvas_proto::scene::validate_scene`]. Returns what the repair changed, for the log.
+///
+/// A bundle with scenes and no (or an empty) lights file is one exported while its `lights.json`
+/// was missing: the lights are rebuilt from `devices` with [`crate::scenes::sync_lights`] first, so
+/// the scenes' whole-zone members are known lights again and the repair does not drop them. A
+/// member the devices do not bring back is still dropped, and the scenes are refused only if that
+/// leaves one invalid.
+fn prepared_scenes(
+    lights: Option<&LightsFile>,
+    scenes: &ScenesFile,
+    devices: &[DeviceInfo],
+) -> (LightsFile, ScenesFile, Vec<String>) {
+    let mut lights = lights.cloned().unwrap_or_else(crate::scenes::empty_lights);
+    if lights.lights.is_empty() && !devices.is_empty() {
+        crate::scenes::sync_lights(&mut lights, devices);
+    }
+    lights.schema_version = LIGHTS_SCHEMA;
+    let mut scenes = scenes.clone();
+    scenes.schema_version = SCENES_SCHEMA;
+    let changes = crate::scenes::repair(&mut scenes, &lights);
+    (lights, scenes, changes)
+}
+
+/// Refuses an import while `lights.json` or `scenes.json` exists but cannot be read.
+///
+/// That is exactly the state [`Store::load_from`] holds as blocked (`lights_blocked`,
+/// `scenes_blocked`): the store promises never to write over such a file, and the import writes
+/// both. The check reads nothing and moves nothing; it only asks whether the file can be read.
+fn refuse_unreadable_scenes_files(home: &Path) -> Result<(), ImportError> {
+    for name in [LIGHTS_FILE, SCENES_FILE] {
+        match paths::read_checked(&home.join(name)) {
+            Err(e) => return Err(ImportError::Blocked(format!("{name} could not be read ({e})"))),
+            // A file that is there but does not parse is one the load could not move aside
+            // (`Loaded::Unreadable`): the store holds it as blocked, so the import must not write
+            // over it either.
+            Ok(Some(text)) => {
+                let parses = if name == LIGHTS_FILE {
+                    serde_json::from_slice::<LightsFile>(&text).is_ok()
+                } else {
+                    serde_json::from_slice::<ScenesFile>(&text).is_ok()
+                };
+                if !parses {
+                    return Err(ImportError::Blocked(format!("{name} is there but could not be read as a {name}")));
+                }
+            }
+            Ok(None) => {}
+        }
+    }
+    Ok(())
+}
+
+/// Writes a validated bundle over the daemon's own files. `devices` is the daemon's current
+/// device list, which a 0.13 bundle's layouts are migrated with.
+pub fn import_bundle(
+    home: &Path,
+    bundle: &ExportBundle,
+    devices: &[DeviceInfo],
+) -> Result<(), ImportError> {
+    import_bundle_rated(home, bundle, devices, None, None)
 }
 
 /// Like [`import_bundle`], with the rated maxima the service last reported for the
 /// hot-limit check. The import route passes them from the last fans status when known.
+///
+/// A 0.13 bundle (no scenes) replaces the machine's own scenes, as it replaces the layouts they
+/// came from: they are migrated from the bundle's layouts with the device list in hand and both
+/// files are written here, so a restart right after the import loads the bundle's scenes and not
+/// this machine's. The bundle's layouts are never written to `layouts.json` (0.14.0 keeps that
+/// file read-only), and nothing reads it back for the import.
 pub fn import_bundle_rated(
     home: &Path,
     bundle: &ExportBundle,
+    devices: &[DeviceInfo],
     rated_cpu_max_c: Option<f32>,
     rated_gpu_max_c: Option<f32>,
 ) -> Result<(), ImportError> {
-    validate_bundle_rated(bundle, rated_cpu_max_c, rated_gpu_max_c)?;
+    // The store never writes over a scenes file it could not read at load (`lights_blocked`,
+    // `scenes_blocked`); an import must not either. It refuses here, before the snapshot and
+    // before the first write, so a machine with a locked or unreadable file is left as it was
+    // instead of half imported (§ review 323 B1).
+    refuse_unreadable_scenes_files(home)?;
+    validate_bundle_rated(bundle, devices, rated_cpu_max_c, rated_gpu_max_c)?;
     // A snapshot before the import so a bad import is recoverable (G10).
     crate::logging::warn_if_err("the pre-import snapshot could not be taken; the import goes on without one", snapshot(home, "pre-import"));
 
@@ -575,6 +1165,31 @@ pub fn import_bundle_rated(
     // to the user effect, as they do on a normal start.
     crate::migration::migrate_poison(&mut layouts, &mut effects);
 
+    // The scenes (0.14.0). A bundle that carries them replaces `lights.json` and `scenes.json`,
+    // repaired so every scene passes `validate_scene`; a 0.13 bundle carries layouts only and is
+    // migrated here, with THIS machine's current devices, so a matrix zone placed `Auto` becomes a
+    // Grid here and a Strip on a machine that cannot see the keyboard. A bundle with lights and no
+    // scenes still has its own hardware map: those lights are held through the migration, as the
+    // pending migration holds `lights.json` (labels, slices and `reversed` survive). Nothing here
+    // writes `layouts.json`: 0.14.0 leaves that file as it found it, and nothing reads it back
+    // for this import either.
+    //
+    // An import writes `scenes.json` and `lights.json` itself, whatever the device list holds: a
+    // restart right after it loads what it wrote. Holding the migration for the first device list
+    // would leave this machine's own `layouts.json` as the only source a restart could find, and
+    // that is not the bundle's.
+    let (lights, scenes, repairs) = match &bundle.scenes {
+        Some(scenes) => prepared_scenes(bundle.lights.as_ref(), scenes, devices),
+        None => {
+            let held = bundle.lights.clone().unwrap_or_else(crate::scenes::empty_lights);
+            let (lights, scenes) = Store::build_scenes(&held, Some(&layouts), devices);
+            (lights, scenes, Vec::new())
+        }
+    };
+    for change in &repairs {
+        tracing::warn!("the imported scenes.json was repaired: {change}");
+    }
+
     let mut fans = bundle.fans.clone();
     fans.schema_version = canvas_proto::config::FANS_SCHEMA;
 
@@ -583,10 +1198,13 @@ pub fn import_bundle_rated(
     let displays = DisplaysFile { schema_version: DISPLAYS_SCHEMA, displays: bundle.displays.clone() };
 
     write_toml(&home.join(CONFIG_FILE), &config)?;
-    write_json(&home.join(LAYOUTS_FILE), &layouts)?;
     write_json(&home.join(ZONES_FILE), &zones)?;
     write_json(&home.join(EFFECTS_FILE), &effects)?;
     write_json(&home.join(DISPLAYS_FILE), &displays)?;
+    // The bundle's own hardware map, when it has one, or the lights the migration made from its
+    // layouts: what the next start loads is what this import wrote.
+    write_json(&home.join(LIGHTS_FILE), &lights)?;
+    write_json(&home.join(SCENES_FILE), &scenes)?;
     // The stacks replace the saved ones like the other files; a bundle from before stacks has
     // none and leaves none behind. The route validates them before it gets here.
     crate::stacks::write_file(home, &bundle.stacks)?;
@@ -817,6 +1435,8 @@ power = "running"
             fans: canvas_proto::config::FansFile::default(),
             displays: Vec::new(),
             stacks: Vec::new(),
+            lights: None,
+            scenes: None,
         };
         assert!(validate_bundle(&bundle(Settings::default())).is_ok());
         for bad in [
@@ -864,8 +1484,10 @@ power = "running"
             fans: canvas_proto::config::FansFile::default(),
             displays: Vec::new(),
             stacks: Vec::new(),
+            lights: None,
+            scenes: None,
         };
-        import_bundle(&dir, &bundle).unwrap();
+        import_bundle(&dir, &bundle, &[]).unwrap();
         let loaded = Store::load_from(&dir);
         assert_eq!(loaded.config.settings.brightness, 7, "the import's settings land");
         assert_eq!(
@@ -892,16 +1514,790 @@ power = "running"
         );
         let bundle = ExportBundle { schema_version: EXPORT_SCHEMA, fans: export.fans, ..export };
         assert!(
-            validate_bundle_rated(&bundle, Some(95.0), None).is_ok(),
+            validate_bundle_rated(&bundle, &[], Some(95.0), None).is_ok(),
             "85 °C is inside the 95 °C part's settable range"
         );
         assert!(
-            validate_bundle_rated(&bundle, None, None).is_err(),
+            validate_bundle_rated(&bundle, &[], None, None).is_err(),
             "85 °C is past the fallback 89 °C ceiling gap"
         );
         assert!(
             validate_bundle(&bundle).is_err(),
             "the fallback path refuses 85 °C"
         );
+    }
+
+    /// A temp home of its own for the bundle tests.
+    fn temp_home(tag: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("canvas-rgb-bundle-{tag}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    fn bundle_zone(index: u32, leds: u32) -> canvas_proto::device::ZoneInfo {
+        canvas_proto::device::ZoneInfo {
+            index,
+            name: format!("Zone {index}"),
+            kind: canvas_proto::device::ZoneKind::Linear,
+            led_count: leds,
+            min_leds: 0,
+            max_leds: 64,
+            resizable: false,
+        }
+    }
+
+    fn bundle_device(id: &str, zones: Vec<canvas_proto::device::ZoneInfo>) -> DeviceInfo {
+        DeviceInfo {
+            id: canvas_proto::DeviceId(id.into()),
+            name: id.into(),
+            vendor: "v".into(),
+            kind: canvas_proto::device::DeviceKind::Other,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: String::new(),
+            location: String::new(),
+            zones,
+            connected: true,
+        }
+    }
+
+    /// A board with a 30-LED strip and a 20-LED strip.
+    fn bundle_board() -> DeviceInfo {
+        bundle_device("openrgb:board", vec![bundle_zone(0, 30), bundle_zone(1, 20)])
+    }
+
+    /// A keyboard with one 2-LED matrix zone.
+    fn bundle_kb() -> DeviceInfo {
+        let mut kb = bundle_device(
+            "openrgb:kb",
+            vec![canvas_proto::device::ZoneInfo {
+                kind: canvas_proto::device::ZoneKind::Matrix {
+                    width: 2,
+                    height: 1,
+                    map: vec![Some(0), Some(1)],
+                },
+                ..bundle_zone(0, 2)
+            }],
+        );
+        kb.adapter_index = 1;
+        kb
+    }
+
+    fn bundle_placed(device: &str, zone: u32) -> canvas_proto::layout::PlacedZone {
+        canvas_proto::layout::PlacedZone {
+            device_id: canvas_proto::DeviceId(device.into()),
+            zone_index: zone,
+            x: 0.0,
+            y: 0.0,
+            width: 10.0,
+            height: 10.0,
+            rotation_deg: 0.0,
+            reversed: false,
+            visible: true,
+            shape: canvas_proto::layout::ZoneShape::Auto,
+            label: None,
+            leds: None,
+            part: None,
+            locked: false,
+        }
+    }
+
+    fn bundle_layout(id: &str, name: &str, zones: Vec<canvas_proto::layout::PlacedZone>) -> canvas_proto::layout::Layout {
+        canvas_proto::layout::Layout {
+            id: id.into(),
+            name: name.into(),
+            render_scale: Default::default(),
+            sampling: Default::default(),
+            zones,
+            effect: None,
+            case_form: canvas_proto::layout::CaseForm::None,
+            landmarks: Vec::new(),
+        }
+    }
+
+    fn bundle_of(
+        layouts: LayoutsFile,
+        lights: Option<LightsFile>,
+        scenes: Option<ScenesFile>,
+    ) -> ExportBundle {
+        ExportBundle {
+            schema_version: EXPORT_SCHEMA,
+            exported_at: "2026-11-12T00:00:00Z".into(),
+            app_version: "0.13.0".into(),
+            settings: Settings::default(),
+            layouts,
+            zones: ZonesFile { schema_version: ZONES_SCHEMA, sizes: BTreeMap::new() },
+            effects: EffectsFile { schema_version: EFFECTS_SCHEMA, ..Default::default() },
+            fans: canvas_proto::config::FansFile::default(),
+            displays: Vec::new(),
+            stacks: Vec::new(),
+            lights,
+            scenes,
+        }
+    }
+
+    fn read_lights(home: &Path) -> LightsFile {
+        serde_json::from_slice(&std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json is written")).unwrap()
+    }
+
+    /// `layouts.json` is read for the 0.14.0 migration and for nothing else: the daemon's own save
+    /// helpers, the held migration and an import all leave its bytes and its mtime alone, and
+    /// nothing renames it (#316 B3, Task 12).
+    #[test]
+    fn no_daemon_path_writes_or_renames_layouts_json() {
+        let dir = temp_home("layouts-read-only");
+        let layouts = default_layouts();
+        std::fs::write(dir.join(LAYOUTS_FILE), serde_json::to_vec(&layouts).unwrap()).unwrap();
+        let path = dir.join(LAYOUTS_FILE);
+        let before = (
+            std::fs::read(&path).unwrap(),
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+        );
+        // The clock has to be able to move: a writer that puts the same bytes back leaves the
+        // mtime different, and the assert at the end is what sees it.
+        std::thread::sleep(std::time::Duration::from_millis(30));
+
+        // The load reads it for the migration.
+        let mut store = Store::load_from(&dir);
+        assert_eq!(store.scenes.scenes[0].name, "Default", "the migration read the layout");
+        // The writers a settings change, a save-all and the first device list go through.
+        store.save_all().unwrap();
+        assert!(store.finish_scenes(&[bundle_board()]), "the first device list writes the scenes");
+        // An export reads the store, and an import (a 0.14 bundle with scenes) writes its files.
+        let bundle = export_bundle(&dir, FansFile::default());
+        let _ = bundle;
+        import_bundle(&dir, &bundle_of(default_layouts(), None, None), &[bundle_board()]).unwrap();
+
+        let after = (
+            std::fs::read(&path).unwrap(),
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+        );
+        assert_eq!(after, before, "layouts.json is untouched: the same bytes and the same mtime");
+        let renamed = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with("layouts.json."))
+            .count();
+        assert_eq!(renamed, 0, "nothing renamed layouts.json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of #337: a `layouts.json` that cannot be read used to block every scene write on
+    /// every start until the owner moved the file by hand. It is not a source any more: the
+    /// migration is the first-run one, from the devices the first list reports, and the file is
+    /// left byte for byte as it was found.
+    #[test]
+    fn a_corrupt_layouts_file_falls_back_to_the_devices_and_is_left_alone() {
+        let dir = temp_home("corrupt-layouts-fallback");
+        std::fs::write(dir.join(LAYOUTS_FILE), b"{ not json").unwrap();
+        let path = dir.join(LAYOUTS_FILE);
+        let before = (
+            std::fs::read(&path).unwrap(),
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+        );
+
+        let mut store = Store::load_from(&dir);
+        assert!(!store.scenes_blocked, "a layouts file that does not parse does not block the scenes");
+        assert!(store.scenes_pending.is_some(), "the migration is the first-run one, held for the devices");
+        assert!(store.finish_scenes(&[bundle_board()]), "the first device list writes the files");
+        assert!(!store.scenes_blocked, "the files are written, so nothing blocks them");
+
+        let lights = read_lights(&dir);
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z0"), "the devices are the lights");
+        let scenes = read_scenes(&dir);
+        assert_eq!(scenes.scenes.len(), 1, "the first-run scene holds every light");
+        assert_eq!(scenes.scenes[0].name, "Everything");
+        assert!(scenes.scenes[0].groups[0].members.iter().any(|m| m == "openrgb:board#z0"));
+
+        assert_eq!(std::fs::read(&path).unwrap(), before.0, "layouts.json keeps its bytes");
+        assert_eq!(
+            std::fs::metadata(&path).unwrap().modified().unwrap(),
+            before.1,
+            "layouts.json keeps its mtime"
+        );
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("layouts.json.")).count(),
+            0,
+            "nothing renamed it"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The other half: when `scenes.json` is there, a `layouts.json` that does not parse changes
+    /// nothing at all.
+    #[test]
+    fn a_corrupt_layouts_file_leaves_the_scenes_it_finds_alone() {
+        let dir = temp_home("corrupt-layouts-with-scenes");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let scenes = crate::scenes::default_scenes(&lights);
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        write_json(&dir.join(SCENES_FILE), &scenes).unwrap();
+        std::fs::write(dir.join(LAYOUTS_FILE), b"{ not json").unwrap();
+        let scenes_path = dir.join(SCENES_FILE);
+        let before = (
+            std::fs::read(&scenes_path).unwrap(),
+            std::fs::metadata(&scenes_path).unwrap().modified().unwrap(),
+        );
+
+        let store = Store::load_from(&dir);
+
+        assert_eq!(store.scenes, scenes, "the scenes.json it found is the scenes it holds");
+        assert!(!store.scenes_blocked);
+        assert!(store.scenes_pending.is_none(), "nothing waits: the scenes are on disk");
+        assert_eq!(
+            (
+                std::fs::read(&scenes_path).unwrap(),
+                std::fs::metadata(&scenes_path).unwrap().modified().unwrap(),
+            ),
+            before,
+            "scenes.json is not written"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    fn read_scenes(home: &Path) -> ScenesFile {
+        serde_json::from_slice(&std::fs::read(home.join(SCENES_FILE)).expect("scenes.json is written")).unwrap()
+    }
+
+    fn bundle_group(id: &str, members: &[&str]) -> canvas_proto::scene::Group {
+        canvas_proto::scene::Group {
+            id: id.into(),
+            name: id.into(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            plays: canvas_proto::scene::Plays::Off,
+            mode: canvas_proto::scene::GroupMode::FlowAcross,
+            brightness: 100,
+        }
+    }
+
+    /// A 0.13 bundle carries only layouts. The import makes lights and scenes from them, and still
+    /// writes `layouts.json` the way the old layout import does (Task 12 removes that).
+    #[test]
+    fn a_0_13_bundle_imports_as_scenes() {
+        let dir = temp_home("import-0-13");
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![
+                bundle_layout("a", "Gaming", vec![bundle_placed("openrgb:board", 0), bundle_placed("openrgb:board", 1)]),
+                bundle_layout("b", "Quiet", vec![bundle_placed("openrgb:board", 1)]),
+            ],
+        };
+        let bundle = bundle_of(layouts, None, None);
+        let json = serde_json::to_string(&bundle).unwrap();
+        assert!(!json.contains("\"scenes\""), "a 0.13 bundle carries no scenes: {json}");
+
+        import_bundle(&dir, &bundle, &[bundle_board()]).unwrap();
+
+        let lights = read_lights(&dir);
+        let scenes = read_scenes(&dir);
+        assert_eq!(lights.lights.len(), 2);
+        let names: Vec<&str> = scenes.scenes.iter().map(|s| s.name.as_str()).collect();
+        assert_eq!(names, vec!["Gaming", "Quiet"]);
+        assert_eq!(scenes.active, "a", "the active layout is the active scene");
+        for scene in &scenes.scenes {
+            canvas_proto::scene::validate_scene(scene, &lights.lights).expect("every imported scene is valid");
+        }
+        // Nothing writes `layouts.json` any more (Task 12): the bundle's layouts were read for
+        // the migration and no file was created or renamed.
+        assert!(!dir.join(LAYOUTS_FILE).exists(), "no layouts.json is written");
+        assert_eq!(
+            std::fs::read_dir(&dir).unwrap().filter_map(|e| e.ok()).filter(|e| e.file_name().to_string_lossy().starts_with("layouts.json")).count(),
+            0,
+            "no layouts.json and no rename of one"
+        );
+        // What the daemon loads next is exactly what the import wrote.
+        let store = Store::load_from(&dir);
+        assert_eq!(store.lights, lights);
+        assert_eq!(store.scenes, scenes);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 0.14 bundle carries both files: export takes them from the store and import writes them
+    /// back unchanged, groups, modes, brightnesses and revisions included.
+    #[test]
+    fn a_0_14_bundle_round_trips_lights_and_scenes() {
+        use canvas_proto::scene::{Group, GroupMode, Plays, Scene, ScenesFile, SCENES_SCHEMA};
+
+        let from = temp_home("round-trip-from");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let scenes = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "evening".into(),
+            scenes: vec![Scene {
+                id: "evening".into(),
+                name: "Evening".into(),
+                rev: 4,
+                groups: vec![
+                    Group {
+                        id: "intake".into(),
+                        name: "Intake".into(),
+                        members: vec!["openrgb:board#z0".into()],
+                        plays: Plays::Off,
+                        mode: GroupMode::EachItsOwn,
+                        brightness: 60,
+                    },
+                    Group {
+                        id: "exhaust".into(),
+                        name: "Exhaust".into(),
+                        members: vec!["openrgb:board#z1".into()],
+                        plays: Plays::Effect { effect: "aurora".into(), props: Default::default() },
+                        mode: GroupMode::FlowAcross,
+                        brightness: 100,
+                    },
+                ],
+            }],
+        };
+        write_json(&from.join(LIGHTS_FILE), &lights).unwrap();
+        write_json(&from.join(SCENES_FILE), &scenes).unwrap();
+        // No layouts.json: the store is settled and exports the scenes as they are.
+        let bundle = export_bundle(&from, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights.as_ref(), Some(&lights), "the export carries lights.json");
+        assert_eq!(bundle.scenes.as_ref(), Some(&scenes), "the export carries scenes.json");
+
+        let to = temp_home("round-trip-to");
+        import_bundle(&to, &bundle, &[]).unwrap();
+        let loaded = Store::load_from(&to);
+        assert_eq!(loaded.lights, lights);
+        assert_eq!(loaded.scenes, scenes);
+        let _ = std::fs::remove_dir_all(&from);
+        let _ = std::fs::remove_dir_all(&to);
+    }
+
+    /// A bundle whose scenes are damaged is repaired on the way in, and the repairs are logged.
+    /// One that cannot be made valid is refused as a validation error, and nothing is written.
+    #[test]
+    fn an_import_with_a_broken_scene_is_repaired_or_refused() {
+        use canvas_proto::scene::{Group, Plays, Scene, ScenesFile, SCENES_SCHEMA};
+
+        let dir = temp_home("broken-scene");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let damage = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "gone".into(),
+            scenes: vec![Scene {
+                id: "s".into(),
+                name: "S".into(),
+                rev: 2,
+                groups: vec![
+                    bundle_group("a", &["openrgb:board#z0"]),
+                    // The same light again, and one that names no light.
+                    bundle_group("b", &["openrgb:board#z0", "nowhere#z0"]),
+                    // No members at all.
+                    bundle_group("empty", &[]),
+                ],
+            }],
+        };
+        let bundle = bundle_of(default_layouts(), Some(lights.clone()), Some(damage));
+
+        let (result, text) = crate::test_logs::captured(|| import_bundle(&dir, &bundle, &[]));
+        result.expect("a repairable scene imports");
+        let scenes = read_scenes(&dir);
+        assert_eq!(scenes.active, "s", "the active scene that named nothing now names the scene");
+        assert_eq!(scenes.scenes[0].groups.len(), 1, "{scenes:?}");
+        assert_eq!(scenes.scenes[0].groups[0].id, "a", "the first group keeps the light");
+        assert_eq!(scenes.scenes[0].groups[0].members, vec!["openrgb:board#z0".to_string()]);
+        assert_eq!(scenes.scenes[0].rev, 2, "a repair keeps the revision");
+        canvas_proto::scene::validate_scene(&scenes.scenes[0], &read_lights(&dir).lights).unwrap();
+        assert!(text.contains("repaired"), "the import logs the repair: {text}");
+
+        // A scene whose members name no light, in a bundle with no lights file, cannot be made
+        // valid: it is a validation error, and nothing is written.
+        let refused_home = temp_home("broken-scene-refused");
+        let nameless = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "s".into(),
+            scenes: vec![Scene {
+                id: "s".into(),
+                name: "S".into(),
+                rev: 1,
+                groups: vec![Group {
+                    plays: Plays::Off,
+                    ..bundle_group("a", &["nowhere#z0"])
+                }],
+            }],
+        };
+        let refused = bundle_of(default_layouts(), None, Some(nameless));
+        assert!(
+            matches!(validate_bundle(&refused), Err(ImportError::Scenes(_))),
+            "a scene that names no light is refused before anything is written"
+        );
+        assert!(import_bundle(&refused_home, &refused, &[]).is_err());
+        assert!(!refused_home.join(SCENES_FILE).exists(), "a refused import writes no scenes.json");
+        assert!(!refused_home.join(LIGHTS_FILE).exists());
+        let _ = std::fs::remove_dir_all(&dir);
+        let _ = std::fs::remove_dir_all(&refused_home);
+    }
+
+    /// The migration of a 0.13 bundle runs with the daemon's CURRENT devices: a matrix zone placed
+    /// `Auto` becomes a Grid light here and a Strip one on a machine without the keyboard.
+    #[test]
+    fn a_0_13_bundle_migrates_with_the_current_devices() {
+        use canvas_proto::scene::Arrangement;
+
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "A", vec![bundle_placed("openrgb:kb", 0)])],
+        };
+        let bundle = bundle_of(layouts, None, None);
+
+        let with_keyboard = temp_home("migrate-with-kb");
+        import_bundle(&with_keyboard, &bundle, &[bundle_board(), bundle_kb()]).unwrap();
+        let lights = read_lights(&with_keyboard);
+        let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the keyboard's zone is a light");
+        assert_eq!(kb.arrangement, Arrangement::Grid, "the current device list says it is a matrix");
+
+        let without = temp_home("migrate-without-kb");
+        import_bundle(&without, &bundle, &[bundle_board()]).unwrap();
+        let lights = read_lights(&without);
+        let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the placed zone is still a light");
+        assert_eq!(kb.arrangement, Arrangement::Strip, "with no device list there is nothing that says matrix");
+        let _ = std::fs::remove_dir_all(&with_keyboard);
+        let _ = std::fs::remove_dir_all(&without);
+    }
+
+    /// Blocker 1 (review 323): the snapshot taken before an import carries every file the import
+    /// writes over, `lights.json` and `scenes.json` included. A bundle whose lights lack a split
+    /// light loses it on the import; the snapshot is the only way back.
+    #[test]
+    fn the_pre_import_snapshot_keeps_the_lights_and_scenes() {
+        let dir = temp_home("snapshot-scenes");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        write_json(&dir.join(SCENES_FILE), &crate::scenes::default_scenes(&lights)).unwrap();
+
+        let snap = snapshot(&dir, "before-import").expect("the snapshot is taken");
+
+        assert!(snap.join(LIGHTS_FILE).exists(), "the snapshot keeps lights.json");
+        assert!(snap.join(SCENES_FILE).exists(), "the snapshot keeps scenes.json");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Blocker 1 (review 323): an import never writes over a scenes file the store holds as
+    /// blocked (it exists but cannot be read), and it refuses before writing anything at all.
+    #[test]
+    fn an_import_refuses_a_scenes_file_it_could_not_read() {
+        for name in [SCENES_FILE, LIGHTS_FILE] {
+            let dir = temp_home("blocked-import");
+            // A directory where the file belongs: it exists, and no read returns a file.
+            std::fs::create_dir_all(dir.join(name)).unwrap();
+            let bundle = bundle_of(default_layouts(), None, None);
+
+            let err = import_bundle(&dir, &bundle, &[bundle_board()]).expect_err("the import is refused");
+
+            let text = err.to_string();
+            assert!(
+                text.contains(name) && text.contains("could not be read"),
+                "the refusal names {name} and says it could not be read: {text}"
+            );
+            assert!(!dir.join(LAYOUTS_FILE).exists(), "nothing was written before the refusal");
+            assert!(!dir.join(ZONES_FILE).exists(), "nothing was written before the refusal");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Should-fix 1 (review 323): a bundle with lights and no scenes migrates its layouts with the
+    /// bundle's own lights held, as `Store::build_scenes` does. Re-deriving the lights from the
+    /// layouts alone loses a split light's label, its slice and its `reversed` flag.
+    #[test]
+    fn a_bundle_with_lights_and_no_scenes_keeps_its_lights_through_the_migration() {
+        use canvas_proto::layout::LedSlice;
+        use canvas_proto::scene::{Arrangement, Light};
+
+        let held = LightsFile {
+            schema_version: LIGHTS_SCHEMA,
+            lights: vec![
+                Light {
+                    id: "openrgb:board#z0p1".into(),
+                    device_id: canvas_proto::DeviceId("openrgb:board".into()),
+                    zone_index: 0,
+                    leds: Some(LedSlice { start: 0, count: 10 }),
+                    name: Some("Intake".into()),
+                    arrangement: Arrangement::Ring,
+                    reversed: true,
+                },
+                Light {
+                    id: "openrgb:board#z0p2".into(),
+                    device_id: canvas_proto::DeviceId("openrgb:board".into()),
+                    zone_index: 0,
+                    leds: Some(LedSlice { start: 10, count: 20 }),
+                    name: Some("Exhaust".into()),
+                    arrangement: Arrangement::Strip,
+                    reversed: false,
+                },
+            ],
+        };
+        // The layouts place the whole zone, as a 0.13 bundle does: the migration can only make a
+        // whole-zone light, so the two split lights are the bundle's own data.
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "Gaming", vec![bundle_placed("openrgb:board", 0)])],
+        };
+        let dir = temp_home("held-lights");
+        import_bundle(&dir, &bundle_of(layouts, Some(held), None), &[bundle_board()]).unwrap();
+
+        let lights = read_lights(&dir);
+        let intake = lights.lights.iter().find(|l| l.id == "openrgb:board#z0p1").expect(
+            "the bundle's split light survives the migration",
+        );
+        assert_eq!(intake.name.as_deref(), Some("Intake"), "its label survives");
+        assert_eq!(intake.leds, Some(LedSlice { start: 0, count: 10 }), "its slice survives");
+        assert_eq!(intake.arrangement, Arrangement::Ring, "its arrangement survives");
+        assert!(intake.reversed, "its reversed flag survives");
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z0p2"), "the second slice survives too");
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z0"), "the layout's own light is there");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Should-fix 2 (review 323): a bundle with scenes and no lights file (or an empty one) is
+    /// importable. Its lights are rebuilt from the current devices before the repair, so the
+    /// members name real lights; a bundle exported while `lights.json` was missing comes back.
+    /// It is refused only when the devices do not cover the members either.
+    #[test]
+    fn a_bundle_with_scenes_and_no_lights_is_rebuilt_from_the_devices() {
+        use canvas_proto::scene::Scene;
+
+        let scenes = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "s".into(),
+            scenes: vec![Scene {
+                id: "s".into(),
+                name: "S".into(),
+                rev: 1,
+                groups: vec![bundle_group("a", &["openrgb:board#z0"])],
+            }],
+        };
+        let bundle = bundle_of(default_layouts(), None, Some(scenes.clone()));
+
+        let dir = temp_home("scenes-no-lights");
+        import_bundle(&dir, &bundle, &[bundle_board()]).expect("the devices bring the lights back");
+        let lights = read_lights(&dir);
+        assert!(
+            lights.lights.iter().any(|l| l.id == "openrgb:board#z0"),
+            "the member's light was rebuilt from the device"
+        );
+        assert_eq!(read_scenes(&dir), scenes, "the scene is imported as it was");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // The same bundle on a machine with no devices still names no light: refused, and
+        // nothing is written.
+        let refused = temp_home("scenes-no-lights-refused");
+        assert!(import_bundle(&refused, &bundle, &[]).is_err());
+        assert!(!refused.join(SCENES_FILE).exists());
+        let _ = std::fs::remove_dir_all(&refused);
+    }
+
+    /// Should-fix 3 (review 323): an export never carries the in-memory default. `lights.json` or
+    /// `scenes.json` that could not be read is left out of the bundle, and the scenes the store
+    /// holds only in memory are not exported either: the file is on disk, the bundle names the
+    /// real one or none.
+    #[test]
+    fn the_export_omits_a_file_the_store_could_not_read() {
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let scenes = crate::scenes::default_scenes(&lights);
+
+        // scenes.json exists but cannot be read: the scenes stay out of the bundle, and the
+        // real lights go in. A default scene would replace the target's scenes on import.
+        let dir = temp_home("export-scenes-blocked");
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        std::fs::create_dir_all(dir.join(SCENES_FILE)).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.scenes_blocked, "the store holds the file as blocked");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.scenes, None, "a blocked scenes file is not exported as a made-up default");
+        assert_eq!(bundle.lights, Some(lights.clone()), "the real lights are exported");
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // lights.json exists but cannot be read: the lights stay out (the bundle's scenes are
+        // rebuilt from the importing machine's devices), and the real scenes go in.
+        let dir = temp_home("export-lights-blocked");
+        write_json(&dir.join(SCENES_FILE), &scenes).unwrap();
+        std::fs::create_dir_all(dir.join(LIGHTS_FILE)).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.lights_blocked, "the store holds the file as blocked");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights, None, "a blocked lights file is not exported as an empty one");
+        assert_eq!(bundle.scenes, Some(scenes.clone()), "the real scenes are exported");
+
+        // While the migration is pending, the lights on disk are what the store holds, and no
+        // scenes exist yet: the bundle carries the lights and no scenes, so the import migrates
+        // its layouts with them held.
+        let dir = temp_home("export-pending");
+        write_json(&dir.join(LAYOUTS_FILE), &default_layouts()).unwrap();
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.scenes_pending.is_some(), "the migration is held");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights, Some(lights), "the lights.json held on disk is exported");
+        assert_eq!(bundle.scenes, None, "there is no scenes.json to export");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verify round (review 323): a scenes file that is there but does not parse is one the load
+    /// could not move aside; the store holds it as blocked, so the import refuses it too.
+    #[test]
+    fn an_import_refuses_a_scenes_file_that_does_not_parse() {
+        for name in [SCENES_FILE, LIGHTS_FILE] {
+            let dir = temp_home("unparsed-import");
+            std::fs::write(dir.join(name), b"{ not json").unwrap();
+            let bundle = bundle_of(default_layouts(), None, None);
+            let err = import_bundle(&dir, &bundle, &[bundle_board()]).expect_err("the import is refused");
+            assert!(err.to_string().contains(name), "the refusal names {name}: {err}");
+            assert_eq!(std::fs::read(dir.join(name)).unwrap(), b"{ not json", "the file is untouched");
+            assert!(!dir.join(LAYOUTS_FILE).exists(), "nothing was written before the refusal");
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    /// Verify round (review 323): with no lights.json the store holds an empty default; the export
+    /// leaves it out instead of carrying an empty lights file over the target's real one.
+    #[test]
+    fn the_export_never_carries_the_empty_default_lights() {
+        let dir = temp_home("export-no-lights-file");
+        std::fs::create_dir_all(dir.join(SCENES_FILE)).unwrap();
+        let store = Store::load_from(&dir);
+        assert!(store.lights.lights.is_empty() && !store.lights_blocked, "the default, not a blocked file");
+        let bundle = export_bundle(&dir, canvas_proto::config::FansFile::default());
+        assert_eq!(bundle.lights, None, "an empty default is not exported");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Verify round (review 323): a bundle whose scenes name a light neither the bundle nor this
+    /// machine has is refused with the light named, never imported with the member dropped.
+    #[test]
+    fn an_import_that_would_drop_a_member_is_refused_and_names_it() {
+        use canvas_proto::scene::Scene;
+        let scenes = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "s".into(),
+            scenes: vec![Scene {
+                id: "s".into(),
+                name: "S".into(),
+                rev: 1,
+                groups: vec![bundle_group("a", &["openrgb:board#z0", "openrgb:board#z0p2"])],
+            }],
+        };
+        let bundle = bundle_of(default_layouts(), None, Some(scenes));
+        let dir = temp_home("drop-member");
+        let err = import_bundle(&dir, &bundle, &[bundle_board()]).expect_err("refused");
+        assert!(err.to_string().contains("openrgb:board#z0p2"), "the lost light is named: {err}");
+        assert!(!dir.join(SCENES_FILE).exists(), "nothing was written");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Review of #337: an import writes what it migrated. With no device list in hand the
+    /// arrangements it guesses are the ones that stay (a matrix zone is a Strip here), and a
+    /// restart right after loads them. It used to remove `scenes.json` and leave the migration to
+    /// the next start, which read this machine's own `layouts.json` and dropped the bundle's
+    /// layouts entirely.
+    #[test]
+    fn a_0_13_import_with_no_devices_writes_the_scenes_and_a_restart_keeps_them() {
+        use canvas_proto::scene::Arrangement;
+
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "Gaming", vec![bundle_placed("openrgb:kb", 0)])],
+        };
+        let dir = temp_home("import-no-devices");
+        // The machine's own old layouts: what the next start used to migrate from.
+        let mine = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "mine".into(),
+            layouts: vec![bundle_layout("mine", "Mine", vec![bundle_placed("openrgb:board", 0)])],
+        };
+        write_json(&dir.join(LAYOUTS_FILE), &mine).unwrap();
+        let mine_bytes = std::fs::read(dir.join(LAYOUTS_FILE)).unwrap();
+
+        import_bundle(&dir, &bundle_of(layouts, None, None), &[]).unwrap();
+
+        let scenes = read_scenes(&dir);
+        assert_eq!(scenes.scenes.len(), 1);
+        assert_eq!(scenes.scenes[0].name, "Gaming", "the bundle's layout is the scene the import wrote");
+        let lights = read_lights(&dir);
+        let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the placed zone is a light");
+        assert_eq!(kb.arrangement, Arrangement::Strip, "with no devices, a matrix zone is the guess it keeps");
+        assert!(!lights.lights.iter().any(|l| l.id.starts_with("openrgb:board")), "the machine's own layouts are not the source");
+        assert_eq!(std::fs::read(dir.join(LAYOUTS_FILE)).unwrap(), mine_bytes, "layouts.json is not written");
+
+        // A restart: the scenes on disk are the import's, and nothing waits for a list.
+        let store = Store::load_from(&dir);
+        assert_eq!(store.scenes, scenes, "a restart right after the import keeps the imported scenes");
+        assert!(store.scenes_pending.is_none(), "nothing is held");
+        assert!(!store.scenes_blocked);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// A 0.13 bundle naming `poison` is migrated as it comes in (`migrate_poison` runs on the
+    /// bundle's layouts before the scenes are made): the scenes it writes play `html:poison`.
+    #[test]
+    fn a_0_13_import_renames_poison_in_the_scenes_it_writes() {
+        use canvas_proto::scene::Plays;
+
+        let mut layout = bundle_layout("a", "Gaming", vec![bundle_placed("openrgb:board", 0)]);
+        layout.effect = Some(canvas_proto::layout::ActiveEffect {
+            id: crate::migration::LEGACY_POISON_ID.into(),
+            props: Default::default(),
+        });
+        let layouts = LayoutsFile { schema_version: LAYOUTS_SCHEMA, active: "a".into(), layouts: vec![layout] };
+        let dir = temp_home("import-poison");
+        import_bundle(&dir, &bundle_of(layouts, None, None), &[bundle_board()]).unwrap();
+
+        let scenes = read_scenes(&dir);
+        match &scenes.scenes[0].groups[0].plays {
+            Plays::Effect { effect, .. } => assert_eq!(effect, "html:poison", "the id the daemon uses today"),
+            other => panic!("the scene plays the migrated effect: {other:?}"),
+        }
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Nit (review 323): a 0.13 import over an existing `scenes.json` replaces the owner's scenes,
+    /// as it replaces the layouts they were migrated from. The pre-import snapshot holds the old
+    /// ones.
+    #[test]
+    fn a_0_13_import_replaces_the_existing_scenes() {
+        use canvas_proto::scene::Scene;
+
+        let dir = temp_home("replace-scenes");
+        let mut lights = crate::scenes::empty_lights();
+        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
+        let mine = ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "mine".into(),
+            scenes: vec![Scene {
+                id: "mine".into(),
+                name: "Mine".into(),
+                rev: 5,
+                groups: vec![bundle_group("g", &["openrgb:board#z0"])],
+            }],
+        };
+        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
+        write_json(&dir.join(SCENES_FILE), &mine).unwrap();
+
+        let layouts = LayoutsFile {
+            schema_version: LAYOUTS_SCHEMA,
+            active: "a".into(),
+            layouts: vec![bundle_layout("a", "Imported", vec![bundle_placed("openrgb:board", 1)])],
+        };
+        import_bundle(&dir, &bundle_of(layouts, None, None), &[bundle_board()]).unwrap();
+
+        let scenes = read_scenes(&dir);
+        assert_eq!(scenes.scenes.len(), 1);
+        assert_eq!(scenes.scenes[0].name, "Imported", "the bundle's layout is the scene now");
+        assert_eq!(scenes.active, "a", "and it is the active one");
+        // The layout's zone is a light, and the old scene file is not what the store loads next.
+        let lights = read_lights(&dir);
+        assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z1"), "the layout's light is added");
+        let loaded = Store::load_from(&dir);
+        assert_eq!(loaded.scenes, scenes, "no migration is held: the scenes are on disk");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

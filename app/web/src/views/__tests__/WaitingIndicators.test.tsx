@@ -20,6 +20,7 @@ const { api, frames } = vi.hoisted(() => {
   const api = {
     effect: vi.fn(),
     patchActiveProps: vi.fn(),
+    patchEffectDefaults: vi.fn(),
     activateEffect: vi.fn(),
     setFavorite: vi.fn(),
     deleteEffect: vi.fn(),
@@ -107,7 +108,24 @@ beforeEach(() => {
     effects: [{ id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false }],
     effectsError: null,
     effectsFailed: [],
-    status: { active_effect: "aurora", active_layout: "layout" } as unknown as Status,
+    status: {
+      active_effects: ["aurora"],
+      active_scene: { id: "s", name: "Scene" },
+    } as unknown as Status,
+    scenes: {
+      active: "s",
+      scenes: [
+        {
+          id: "s",
+          name: "Scene",
+          rev: 1,
+          groups: [
+            { id: "g", name: "Everything", members: [], plays: { type: "off" }, mode: "flow_across", brightness: 100 },
+          ],
+        },
+      ],
+      group_states: [],
+    },
     pending: [],
   });
 });
@@ -142,7 +160,7 @@ describe("the stack builder's preview canvas", () => {
     return render(
       <Stage
         stack={{ id: "stack:T", layers: [layer] }}
-        layout={null}
+        canvas={null}
         devices={null}
         picked={null}
         parts={false}
@@ -260,17 +278,16 @@ describe("the Import button", () => {
   });
 });
 
-describe("an edit to a stopped effect", () => {
-  it("starts it through the Activate path, which shows the busy wait until it lands", async () => {
-    // The effect is stopped: every write activates it first.
-    patchSnap({ status: { active_effect: null, active_layout: "layout" } as unknown as Status });
-    let land: () => void = () => undefined;
-    api.activateEffect.mockImplementation(
-      () =>
-        new Promise<void>((resolve) => {
-          land = resolve;
-        }),
-    );
+describe("an edit to an effect", () => {
+  it("writes the starting values through the defaults route and never starts it", async () => {
+    // The effect is stopped: an edit changes what the next group starts from, nothing more.
+    patchSnap({
+      status: {
+        active_effects: [],
+        active_scene: { id: "s", name: "Scene" },
+      } as unknown as Status,
+    });
+    api.patchEffectDefaults.mockImplementation(() => new Promise<void>(() => undefined));
     vi.useRealTimers();
     render(
       <StripSlotsProvider>
@@ -286,19 +303,12 @@ describe("an edit to a stopped effect", () => {
     fireEvent.blur(speed);
 
     await advance(60); // the write debounce
-    expect(api.activateEffect).toHaveBeenCalledTimes(1);
-    const activate = screen.getByRole("button", { name: "Activate" });
-    expect(activate.getAttribute("aria-busy")).toBe("true");
-    expect(spinnerIn(activate)).toBeNull();
-
-    await advance(LOAD_DELAY_MS);
-    expect(spinnerIn(activate)).not.toBeNull();
-
-    await act(async () => {
-      land();
-      await vi.advanceTimersByTimeAsync(0);
-    });
-    expect(activate.getAttribute("aria-busy")).toBeNull();
-    expect(spinnerIn(activate)).toBeNull();
+    expect(api.patchEffectDefaults).toHaveBeenCalledTimes(1);
+    expect(api.patchEffectDefaults).toHaveBeenCalledWith("aurora", { speed: { type: "number", value: 55 } });
+    expect(api.activateEffect).not.toHaveBeenCalled();
+    expect(api.patchActiveProps).not.toHaveBeenCalled();
+    // The Activate path is the reader's own: it never waits for this write.
+    const play = screen.getByRole("button", { name: "Play" });
+    expect(play.getAttribute("aria-busy")).toBeNull();
   });
 });

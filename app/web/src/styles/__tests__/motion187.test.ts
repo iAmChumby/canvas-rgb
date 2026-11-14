@@ -10,7 +10,6 @@ const tokens = read("src/styles/tokens.css");
 const app = read("src/styles/app.css");
 const motion = read("src/styles/motion.css");
 const hardware = read("src/styles/hardware.css");
-const desk = read("src/views/desk.module.css");
 const effectsView = read("src/views/EffectsView.tsx");
 const presetStrip = read("src/views/PresetStrip.tsx");
 const statusStrip = read("src/shell/StatusStrip.tsx");
@@ -56,7 +55,6 @@ describe("motion tokens (#187)", () => {
     expectTokenDriven(blockOf(motion, ".icon-swap-out"), ".icon-swap-out");
     expectTokenDriven(blockOf(app, ".color-wipe"), ".color-wipe");
     expectTokenDriven(blockOf(app, ".picker-preview.wipe"), ".picker-preview.wipe");
-    expectTokenDriven(blockOf(desk, ".desk .zone[data-settling=\"true\"]"), ".desk .zone[data-settling]");
   });
 });
 
@@ -93,13 +91,12 @@ describe("rules 1 + 2: popovers grow from and close into their trigger (#187)", 
   });
 });
 
-describe("rules 3 + 4: rubber-band, and no easing while held (#187)", () => {
-  it("a held part has no transition, so it follows the pointer exactly", () => {
-    expect(desk).toMatch(/\.desk \.zone\[data-dragging="true"\]\s*\{\s*transition:\s*none/);
-  });
-
-  it("the settle after release eases on the house curve and a token duration", () => {
-    expect(desk).toMatch(/\[data-settling="true"\][^}]*transition:[^}]*var\(--dur\)[^}]*var\(--ease\)/s);
+describe("rules 3 + 4: rubber-band (#187)", () => {
+  it("the rubber-band maths is the iOS curve (lib/rubberBand.ts)", () => {
+    // The stylesheet side of the held-drag rule lived in the desk canvas, which Layout took with
+    // it (#310). The curve itself is proved in lib/__tests__/rubberBand.test.ts; the editor's
+    // sliders and dials still use it.
+    expect(read("src/lib/rubberBand.ts")).toMatch(/export function rubberBand/);
   });
 });
 
@@ -159,7 +156,7 @@ describe("reduced motion covers every new motion (#187)", () => {
   it("no new keyframe animation bypasses the reduce block by naming its own duration outside a token", () => {
     // Every animation declaration the issue adds names a var(--dur*) token, which the
     // reduce block zeroes through animation-duration.
-    for (const css of [app, motion, desk]) {
+    for (const css of [app, motion]) {
       for (const m of css.matchAll(/animation:\s*([a-z-]+)\s+(\S+)\s+(\S+)/g)) {
         const name = m[1] ?? "";
         const dur = m[2] ?? "";

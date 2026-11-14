@@ -14,7 +14,7 @@ import { areaName, statusWords } from "@/views/effects/stackDraft";
 import type { DragState } from "@/lib/dragSession";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { StackLayerStatus } from "@/proto/StackLayerStatus";
@@ -25,7 +25,7 @@ export function LayerList({
   statuses,
   schemas,
   effects,
-  layout,
+  canvas,
   devices,
   drag,
   isLifted,
@@ -51,7 +51,7 @@ export function LayerList({
   statuses: Record<string, StackLayerStatus>;
   schemas: Record<string, PropertySchema | null>;
   effects: EffectSummary[] | null;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   drag: DragState;
   isLifted: () => boolean;
@@ -190,7 +190,7 @@ export function LayerList({
                   </span>
                 )}
                 <span className={`layer-meta${words ? " layer-warn" : ""}`}>
-                  {words ?? `${blendOf(layer.blend)} ${layer.opacity}% · ${areaName(layer.area, layout, devices)}`}
+                  {words ?? `${blendOf(layer.blend)} ${layer.opacity}% · ${areaName(layer.area, canvas, devices)}`}
                 </span>
               </span>
               {!layer.mask && (

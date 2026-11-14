@@ -27,56 +27,63 @@ pub type DeviceSinks = tokio::sync::Mutex<HashMap<DeviceId, JoinHandle<()>>>;
 pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     *app.devices.write().await = devices.clone();
     *app.openrgb.write().await = LinkState::Connected;
-    // After the first run, a zone that appears (a late device, a header that got its LEDs) is
-    // placed instead of staying black, and a shape saved for a zone that has since changed is
-    // repaired (a point on a matrix zone, #312).
+    // After the first run, a zone that appears (a late device, a header that got its LEDs) is a
+    // light of its own; no group holds it until the owner adds it.
+    let scenes_deadline;
     {
         let mut store = app.store.write().await;
-        if store.config.first_run_done {
-            let mut placed = 0;
-            let mut repaired = 0;
-            let mut record_repair = false;
-            let marker = crate::paths::repairs_marker_in(&store.home);
-            if let Some(layout) = store.active_layout_mut() {
-                placed = crate::first_run::place_missing_zones(layout, &devices);
-                let pass = crate::first_run::repair_point_on_matrix_once(layout, &devices, &marker);
-                repaired = pass.repaired;
-                record_repair = pass.record;
-            }
-            if placed > 0 {
-                tracing::info!(placed, "new zones were placed on the canvas");
-            }
-            if repaired > 0 {
-                tracing::info!(repaired, "a zone saved as a point on a matrix now uses its own grid");
-            }
-            if placed + repaired > 0 {
-                match store.save_layouts() {
-                    Ok(()) => {}
-                    Err(e) => {
-                        tracing::warn!(error = %e, "could not save the layouts");
-                        // The repair is not on the disk, so the one run is not spent: the next
-                        // device list tries again (#312 review pass 3, S4).
-                        record_repair = false;
-                    }
-                }
-            }
-            // The marker is the record that the repair ran. It is only written with the keyboard
-            // in the list and the layout it changed saved.
-            if record_repair {
-                crate::first_run::record_repair(&marker);
-            }
+        // Scenes: every zone with LEDs is a light. A new one joins no group; one whose device
+        // went away stays, so it keeps its place when the device returns (the id is built from
+        // the device id, never the adapter index).
+        let store = &mut *store;
+        // The first device list settles a held scenes migration (spec "Storage and migration"):
+        // arrangements and zero-LED zones come from the real devices, not from a guess at load.
+        if store.finish_scenes(&devices) {
+            tracing::info!("scenes.json and lights.json were written from the first device list");
         }
+        scenes_deadline = store.scenes_deadline_to_arm(crate::storage::clock());
+        store.sync_lights_from(&devices);
     }
-    // The engine needs the new devices and the zone sizes.
-    if let Some(layout) = app.active_layout().await {
-        app.set_layout(&layout, &devices);
-        app.stacks.publish_areas(&layout, &devices);
+    // A placed device that never arrives sends no new list, so the wait is settled by a timer,
+    // with the devices known when it ends.
+    if let Some(wait) = scenes_deadline {
+        let app = Arc::clone(app);
+        tokio::spawn(settle_scenes_wait(app, wait));
     }
     sync_device_sinks(app, &devices).await;
+    // The scene follows the devices: a zone that came or went, a count that changed. A list that
+    // changes nothing the engine was handed rebuilds nothing.
+    crate::scenes::apply_for_devices(app).await;
     // The first run waits for the devices. It can take a while, so it runs on its own task and
     // the supervisor goes on reading.
     let first_run = Arc::clone(app);
     tokio::spawn(async move { crate::first_run::maybe_run(&first_run).await });
+}
+
+/// How long the timer waits between tries when the scenes could not be written at the deadline.
+const SCENES_RETRY: std::time::Duration = std::time::Duration::from_secs(30);
+
+/// Ends the wait for the devices the layouts place: at the deadline, and every [`SCENES_RETRY`]
+/// after a write that failed, it runs the migration with the device list known at that moment
+/// (read under the store lock, so a list that just arrived is never missed). It stops when the
+/// scenes are written, when nothing is pending, or when a scenes file is blocked (that waits for
+/// Luke, not for time).
+async fn settle_scenes_wait(app: Arc<App>, wait: std::time::Duration) {
+    tokio::time::sleep(wait + std::time::Duration::from_millis(50)).await;
+    loop {
+        {
+            let mut store = app.store.write().await;
+            if store.scenes_pending.is_none() || store.lights_blocked || store.scenes_blocked {
+                return;
+            }
+            let devices = app.devices.read().await.clone();
+            if store.finish_scenes(&devices) {
+                tracing::info!("scenes.json and lights.json were written when the wait for the devices ended");
+                return;
+            }
+        }
+        tokio::time::sleep(SCENES_RETRY).await;
+    }
 }
 
 /// Gives every connected device a frame sink in the engine: a bounded(1) channel into a writer

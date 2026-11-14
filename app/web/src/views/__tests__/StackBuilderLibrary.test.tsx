@@ -6,7 +6,8 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
-import { refreshAll } from "@/lib/store";
+import { getSnap, refreshAll } from "@/lib/store";
+import { lightsUnder, wholeLightsCanvas } from "@/lib/groupCanvas";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -89,6 +90,24 @@ const layerNames = () =>
     .map((row) => row.querySelector(".layer-name")?.textContent ?? "")
     .filter(Boolean);
 const live = () => document.querySelector(".rd-live")?.textContent ?? "";
+
+/** The builder's canvas: every light, as one flow-across group. */
+function builderCanvas() {
+  const snap = getSnap();
+  return wholeLightsCanvas(snap.lights ?? [], snap.devices ?? []);
+}
+
+/** The label of the light a canvas point belongs to. */
+function labelAt(x: number, y: number): string {
+  return lightsUnder(builderCanvas(), { x, y })[0]?.label ?? "";
+}
+
+/** The name of the first device in the group. */
+function firstDeviceName(): string {
+  const snap = getSnap();
+  const id = builderCanvas().deviceIds[0];
+  return snap.devices?.find((device) => device.id === id)?.name ?? "";
+}
 const tile = (name: string) => screen.getByRole("button", { name: `Add ${name}` });
 const rowOf = (name: string) =>
   [...document.querySelectorAll<HTMLElement>(".layer-row")].find(
@@ -132,13 +151,13 @@ describe("the keyboard sensor", () => {
     expect(live()).toBe(
       "Lifted Solid. Left and Right pick where it goes, Up and Down pick a place in the list; Enter drops it, Escape cancels.",
     );
-    // The first target is the whole canvas; the first device on the desk is next.
+    // The first target is the whole canvas; the first device in the group is next.
     act(() => void fireEvent.keyDown(window, { key: "ArrowRight" }));
-    expect(live()).toBe("Arctic Liquid Freezer III.");
+    expect(live()).toBe(`${firstDeviceName()}.`);
     act(() => void fireEvent.keyDown(window, { key: "Enter" }));
     await waitFor(() => expect(rows()).toHaveLength(4));
-    expect(live()).toBe("Solid added to Arctic Liquid Freezer III.");
-    expect(rowOf("Solid").querySelector(".layer-meta")?.textContent).toContain("Arctic Liquid Freezer III");
+    expect(live()).toBe(`Solid added to ${firstDeviceName()}.`);
+    expect(rowOf("Solid").querySelector(".layer-meta")?.textContent).toContain(firstDeviceName());
   });
 
   it("cancels on Escape and changes nothing", async () => {
@@ -191,16 +210,22 @@ describe("the pointer sensor", () => {
     act(() => void fireEvent.pointerMove(window, { ...mouse, clientX: px(71), clientY: atY(173), shiftKey: true }));
     // The ghost follows the pointer, and the live region names the zone.
     expect(document.querySelector(".rd-drag-ghost")?.textContent).toContain("Solid");
-    await waitFor(() => expect(live()).toBe("ROYUAN MonsGeek Keyboard · Zone 1."));
+    await waitFor(() => expect(live()).toBe(`${labelAt(71, 173)}.`));
     act(() => void fireEvent.pointerUp(window, { ...mouse, buttons: 0, clientX: px(71), clientY: atY(173) }));
     await waitFor(() => expect(rows()).toHaveLength(4));
-    expect(rowOf("Solid").querySelector(".layer-meta")?.textContent).toContain("ROYUAN MonsGeek Keyboard · Zone 1");
+    expect(rowOf("Solid").querySelector(".layer-meta")?.textContent).toContain(labelAt(71, 173));
     expect(document.querySelector(".rd-drag-ghost")).toBeNull();
   });
 
-  it("makes a new rectangle on empty picture, centred under the pointer", async () => {
+  it("makes a new rectangle from the keyboard's own target", async () => {
     await openBuilder();
-    dragTileTo(px(200), atY(100));
+    const solid = tile("Solid");
+    solid.focus();
+    act(() => void fireEvent.keyDown(solid, { key: " " }));
+    // Right cycles to the rectangle after the canvas and the group's devices; Left wraps to it.
+    act(() => void fireEvent.keyDown(window, { key: "ArrowLeft" }));
+    expect(live()).toBe("New rectangle.");
+    act(() => void fireEvent.keyDown(window, { key: "Enter" }));
     await waitFor(() => expect(rows()).toHaveLength(4));
     const meta = rowOf("Solid").querySelector(".layer-meta")?.textContent ?? "";
     expect(meta).toContain("Rectangle 120 × 80");

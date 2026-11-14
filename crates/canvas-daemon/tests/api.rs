@@ -254,66 +254,6 @@ async fn a_preflight_from_an_unknown_origin_is_refused() {
 }
 
 #[tokio::test]
-async fn the_fps_outside_the_range_is_refused_with_422() {
-    let (router, _app, _home) = build();
-    let response = router
-        .oneshot(request_with_body("PATCH", routes::RENDER, r#"{"fps":5}"#))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
-    let body = json(response).await;
-    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
-    assert_eq!(error.error, canvas_proto::api::error_codes::VALIDATION);
-}
-
-#[tokio::test]
-async fn the_fps_changes_live() {
-    let (router, app, _home) = build();
-    let response = router
-        .oneshot(request_with_body("PATCH", routes::RENDER, r#"{"fps":20}"#))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    assert_eq!(body.get("fps").and_then(|v| v.as_u64()), Some(20));
-
-    // The engine was told, without a restart.
-    let engine = app.engine.clone();
-    assert_eq!(engine.stats().fps_measured, 0.0);
-    // The setting was persisted in the store.
-    let fps = app.store.read().await.config.settings.fps;
-    assert_eq!(fps, 20);
-}
-
-#[tokio::test]
-async fn the_scale_and_sampling_round_trip_through_the_active_layout() {
-    let (router, _app, _home) = build();
-    // Set the scale and the sampling.
-    let response = router
-        .clone()
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::RENDER,
-            r#"{"scale":50,"sampling":"bilinear"}"#,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    assert_eq!(body.get("scale").and_then(|v| v.as_u64()), Some(50));
-    assert_eq!(body.get("sampling").and_then(|v| v.as_str()), Some("bilinear"));
-
-    // Read them back.
-    let response = router
-        .oneshot(request("GET", routes::RENDER))
-        .await
-        .expect("the router answers");
-    let body = json(response).await;
-    assert_eq!(body.get("scale").and_then(|v| v.as_u64()), Some(50));
-    assert_eq!(body.get("sampling").and_then(|v| v.as_str()), Some("bilinear"));
-}
-
-#[tokio::test]
 async fn the_output_can_be_paused_and_resumed() {
     let (router, _app, _home) = build();
     let response = router
@@ -1876,17 +1816,21 @@ async fn an_unknown_effect_is_a_404() {
 }
 
 #[tokio::test]
-async fn the_layouts_are_listed_with_an_active_one() {
+async fn the_layout_routes_are_gone() {
     let (router, _app, _home) = build();
+    for path in ["/api/v1/layouts", "/api/v1/layouts/default"] {
+        let response = router
+            .clone()
+            .oneshot(request("GET", path))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::NOT_FOUND, "{path} is gone (#310)");
+    }
     let response = router
-        .oneshot(request("GET", routes::LAYOUTS))
+        .oneshot(request_with_body("PUT", "/api/v1/layouts/active", r#"{"id":"x"}"#))
         .await
         .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-    let body = json(response).await;
-    assert!(body.get("active").and_then(|v| v.as_str()).is_some());
-    let layouts = body.get("layouts").and_then(|v| v.as_array()).expect("the layout list");
-    assert!(!layouts.is_empty());
+    assert_eq!(response.status(), StatusCode::NOT_FOUND, "the active layout route is gone (#310)");
 }
 
 #[tokio::test]
@@ -2021,10 +1965,13 @@ async fn the_onboarding_effects_are_hidden_from_the_list_but_activate() {
             .await
             .expect("the router answers");
         assert_eq!(response.status(), StatusCode::OK, "{id} activates");
-        // The onboarding effects are transient: the layout keeps its own effect.
+        // The onboarding effects are transient: no scene group is left playing one.
         let store = app.store.read().await;
-        let active = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-        assert_eq!(active, None, "{id} is never saved as the layout's effect");
+        let plays = store.scenes.scenes.iter().flat_map(|s| s.groups.iter()).any(|g| {
+            matches!(&g.plays, canvas_proto::scene::Plays::Effect { effect, .. } if effect == id)
+        });
+        assert!(!plays, "{id} is never saved as a group's effect");
+        assert!(!store.effects.saved.contains_key(id), "{id} has no saved values");
     }
 }
 
@@ -2032,6 +1979,12 @@ async fn the_onboarding_effects_are_hidden_from_the_list_but_activate() {
 fn build_with_engine() -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome) {
     let home = TempHome::new();
     let store = canvas_daemon::storage::Store::at(&home.path);
+    let mut store = store;
+    // The scene the onboarding effect takes over from (Scenes, 0.14.0: the prior is the active
+    // scene).
+    let (lights, scenes) = common::a_scene("solid", &canvas_proto::props::Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let app = Arc::new(App::new(
@@ -2069,11 +2022,18 @@ async fn an_onboarding_effect_restores_the_previous_effect_and_is_never_saved() 
     assert!(app.transient.is_pending());
     {
         let store = app.store.read().await;
-        let saved = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
-        assert_eq!(saved.as_deref(), Some("rainbow_wave"));
+        let saved = store.scenes.scenes.iter().flat_map(|s| s.groups.iter()).find_map(|g| {
+            match &g.plays {
+                canvas_proto::scene::Plays::Effect { effect, .. } if effect == "rainbow_wave" => {
+                    Some(effect.clone())
+                }
+                _ => None,
+            }
+        });
+        assert_eq!(saved.as_deref(), Some("rainbow_wave"), "the scene still plays rainbow-wave");
         assert!(!store.effects.saved.contains_key("onboard-hello"));
     }
-    let on_disk = std::fs::read_to_string(home.path.join("layouts.json")).unwrap_or_default()
+    let on_disk = std::fs::read_to_string(home.path.join("scenes.json")).unwrap_or_default()
         + &std::fs::read_to_string(home.path.join("effects.json")).unwrap_or_default();
     assert!(!on_disk.contains("onboard-"), "no onboard-* id reaches the files");
 
@@ -2167,8 +2127,7 @@ async fn the_config_is_exported_and_imported() {
 }
 
 #[tokio::test]
-async fn an_import_with_a_fan_value_below_the_floor_is_refused() {
-    let (router, _app, _home) = build();
+async fn an_import_with_a_fan_value_below_the_floor_is_refused() {    let (router, _app, _home) = build();
     let bad = serde_json::json!({
         "schema_version": 1,
         "exported_at": "2026-10-26T00:00:00Z",
@@ -2196,6 +2155,110 @@ async fn an_import_with_a_fan_value_below_the_floor_is_refused() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+}
+
+/// Review 323 S5: the config import and export, driven through the routes. The route hands the
+/// daemon's devices to the migration, so a 0.13 bundle's matrix zone becomes a Grid light (with no
+/// devices it could only be a Strip), and the export carries the scenes the import wrote.
+#[tokio::test]
+async fn a_0_13_import_migrates_with_the_devices_and_the_export_carries_the_scenes() {
+    use canvas_proto::config::{EffectsFile, ExportBundle, LayoutsFile, ZonesFile};
+    use canvas_proto::device::{DeviceId, DeviceInfo, ZoneInfo, ZoneKind};
+    use canvas_proto::layout::{CaseForm, Layout, PlacedZone, ZoneShape};
+    use canvas_proto::scene::Arrangement;
+
+    /// A keyboard with one 2-LED matrix zone.
+    fn keyboard() -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId("openrgb:kb".into()),
+            name: "Keyboard".into(),
+            vendor: "v".into(),
+            kind: canvas_proto::device::DeviceKind::Keyboard,
+            adapter: "openrgb".into(),
+            adapter_index: 1,
+            serial: String::new(),
+            location: String::new(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "Keys".into(),
+                kind: ZoneKind::Matrix { width: 2, height: 1, map: vec![Some(0), Some(1)] },
+                led_count: 2,
+                min_leds: 0,
+                max_leds: 2,
+                resizable: false,
+            }],
+            connected: true,
+        }
+    }
+
+    let (router, app, home) = build();
+    *app.devices.write().await = vec![keyboard()];
+
+    // A 0.13 bundle: layouts only, no lights and no scenes.
+    let layouts = LayoutsFile {
+        schema_version: canvas_proto::config::LAYOUTS_SCHEMA,
+        active: "a".into(),
+        layouts: vec![Layout {
+            id: "a".into(),
+            name: "Gaming".into(),
+            render_scale: Default::default(),
+            sampling: Default::default(),
+            zones: vec![PlacedZone {
+                device_id: DeviceId("openrgb:kb".into()),
+                zone_index: 0,
+                x: 0.0,
+                y: 0.0,
+                width: 10.0,
+                height: 10.0,
+                rotation_deg: 0.0,
+                reversed: false,
+                visible: true,
+                shape: ZoneShape::Auto,
+                label: None,
+                leds: None,
+                part: None,
+                locked: false,
+            }],
+            effect: None,
+            case_form: CaseForm::None,
+            landmarks: Vec::new(),
+        }],
+    };
+    let bundle = ExportBundle {
+        schema_version: canvas_proto::config::EXPORT_SCHEMA,
+        exported_at: "2026-11-12T00:00:00Z".into(),
+        app_version: "0.13.0".into(),
+        settings: canvas_proto::config::Settings::default(),
+        layouts,
+        zones: ZonesFile { schema_version: canvas_proto::config::ZONES_SCHEMA, sizes: Default::default() },
+        effects: EffectsFile { schema_version: canvas_proto::config::EFFECTS_SCHEMA, ..EffectsFile::default() },
+        fans: canvas_proto::config::FansFile::default(),
+        displays: Vec::new(),
+        stacks: Vec::new(),
+        lights: None,
+        scenes: None,
+    };
+    let response = router
+        .clone()
+        .oneshot(request_with_body("POST", routes::CONFIG_IMPORT, &serde_json::to_string(&bundle).unwrap()))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The migration ran with the route's device list: the keyboard's zone is a Grid light, not a
+    // Strip one, and the scene carries the layout's name.
+    let lights: canvas_proto::scene::LightsFile =
+        serde_json::from_slice(&std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).unwrap())
+            .expect("the import wrote lights.json");
+    let kb = lights.lights.iter().find(|l| l.id == "openrgb:kb#z0").expect("the keyboard's zone is a light");
+    assert_eq!(kb.arrangement, Arrangement::Grid, "the daemon's devices reached the migration");
+    assert_eq!(app.store.read().await.scenes.scenes[0].name, "Gaming", "the store the route swapped in holds the scenes");
+
+    // The export carries the scenes and the lights the import wrote.
+    let response = router.oneshot(request("GET", routes::CONFIG_EXPORT)).await.expect("the router answers");
+    let exported = json(response).await;
+    assert_eq!(exported["scenes"]["scenes"][0]["name"], "Gaming", "the export carries the scenes: {exported}");
+    assert_eq!(exported["lights"]["lights"][0]["id"], "openrgb:kb#z0", "and the lights");
 }
 
 #[tokio::test]
@@ -3273,14 +3336,15 @@ fn preset_names(body: &serde_json::Value) -> Vec<String> {
 #[tokio::test]
 async fn a_preset_is_applied_on_the_defaults_not_on_the_saved_values() {
     // D9.1. Before the fix the saved values (here speed 77, set by a patch) were laid over the
-    // preset, so applying a one-key preset kept the speed of the last session.
+    // preset, so applying a one-key preset kept the speed of the last session. The saved values
+    // are the effect's starting values now (`PATCH /effects/{id}/defaults`).
     let (router, _app, engine, _home) = build_with_engine();
     let (status, _) = send(&router, "POST", "/api/v1/effects/aurora/activate", serde_json::json!({})).await;
     assert_eq!(status, StatusCode::OK);
     let (status, _) = send(
         &router,
         "PATCH",
-        "/api/v1/effects/active/props",
+        "/api/v1/effects/aurora/defaults",
         serde_json::json!({ "speed": num(77.0), "bands": num(5.0) }),
     )
     .await;
@@ -3733,8 +3797,8 @@ async fn preset_props_are_fitted_to_the_schema_and_capped() {
 #[tokio::test]
 async fn a_saved_hue_for_the_gradient_angle_is_listed_and_used_as_the_same_degrees() {
     // A gradient saved before the angle kind existed stores its angle as a hue. The fitter must
-    // read it as the same degrees, both when the preset is listed and when it is used â€” not
-    // silently drop it and let the 90Â° default show.
+    // read it as the same degrees, both when the preset is listed and when it is used — not
+    // silently drop it and let the 90° default show.
     let (router, _app, _home) = build();
     let (status, _) = send(
         &router,

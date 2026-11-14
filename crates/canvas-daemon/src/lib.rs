@@ -25,6 +25,8 @@ pub mod peer;
 pub mod peripherals;
 pub mod pipe_client;
 pub mod power;
+pub mod scene_migration;
+pub mod scenes;
 pub mod preview;
 pub mod state;
 pub mod stack;
@@ -39,7 +41,6 @@ pub mod writer;
 #[cfg(test)]
 pub(crate) mod test_logs;
 
-use canvas_proto::props::Props;
 use std::sync::Arc;
 
 use crate::state::App;
@@ -82,18 +83,22 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
 /// the effects folder, stacks (`stack:<name>`) from `stacks.json`, and everything else from the
 /// built-in registry.
 ///
+/// `group` is the group the effect plays in: a stack resolves its layers in that group's
+/// canvas. `None` when no group is running the effect (a preview, or a test of the effect alone).
+///
 /// Returns an error when the id is unknown or the effect fails to build.
 pub fn create_effect(
     user: &Arc<user_effects::UserEffects>,
     stacks: &crate::stacks::Stacks,
     id: &str,
+    group: Option<&str>,
 ) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
     if let Some(stack) = stacks.get(id) {
         let structure = crate::stack::structure_hash(&crate::stack::structure(&stack, &|id| {
             user.source_and_file_name(id).map(|(source, _)| source.to_string())
         }));
         let live = stacks.live_for(&stack, &structure);
-        let effect = crate::stack::StackEffect::new(
+        let mut effect = crate::stack::StackEffect::new(
             &stack,
             leaf_builder(user),
             Arc::clone(&live),
@@ -102,9 +107,12 @@ pub fn create_effect(
         .with_clock(stacks.clock())
         .with_fps(stacks.fps_handle())
         .with_status_sink(stacks.status_sink());
+        if let Some(group) = group {
+            effect = effect.with_group(group);
+        }
         // The engine is about to run this stack: record the structure it was built from, so a
         // save-then-activate with the same structure reuses it instead of rebuilding.
-        stacks.note_running(&stack.id, &structure, live);
+        stacks.note_running(&stack.id, &structure, live, group);
         return Ok(Box::new(effect));
     }
     match user.create(id) {
@@ -155,66 +163,12 @@ pub(crate) fn panic_payload_text(payload: &Box<dyn std::any::Any + Send>) -> Str
     }
 }
 
-/// Creates the effect and hands it to the engine, starting and stopping the captures to
-/// match what the effect needs.
-///
-/// Returns an error when the effect id is unknown.
-pub async fn apply_effect(app: &Arc<App>, id: &str, props: &Props) -> Result<(), String> {
-    // Loading an HTML effect runs its scripts (up to 2 s of CPU), so it must not run on an
-    // async worker.
-    let effect = {
-        let app = Arc::clone(app);
-        let id = id.to_string();
-        let props = props.clone();
-        tokio::task::spawn_blocking(move || {
-            let mut effect = create_effect(&app.user_effects, &app.stacks, &id)?;
-            // Mark the init as a guarded effect call so the panic hook logs a panic
-            // here as a caught one; the panic still becomes the apply error below.
-            canvas_core::effect_guard::run_guarded(|| effect.init(&props));
-            Ok::<_, String>(effect)
-        })
-        .await
-        .map_err(|e| format!("the effect load task failed: {e}"))??
-    };
-
-    apply_built(app, effect, props).await
-}
-
-/// Hands an effect that is already built to the engine, starting and stopping the captures to
-/// match what it needs.
-///
-/// [`apply_effect`] builds an effect from its id and comes here; the editor's draft
-/// ([`crate::draft`]) builds its own HTML and comes here too. Nothing is saved: the caller
-/// owns what, if anything, the effect means to the store.
-pub async fn apply_built(
-    app: &Arc<App>,
-    effect: Box<dyn canvas_proto::traits::Effect>,
-    props: &Props,
-) -> Result<(), String> {
-    // Finding 4: `schema()` is effect code. Guard it once and reuse the result, so a
-    // panicking schema is an apply error, never a crash.
-    let schema = match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        canvas_core::effect_guard::run_guarded(|| effect.schema())
-    })) {
-        Ok(schema) => schema,
-        Err(payload) => {
-            return Err(format!(
-                "the effect's schema panicked: {}",
-                panic_payload_text(&payload)
-            ));
-        }
-    };
-    // The captures follow the effect's `needs`.
-    app.inputs.apply_needs(schema.needs);
-
-    // Anything that is not a stack means no stack is on the engine: whatever was running is
-    // gone, and a later activation of it must build again.
-    if !schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-        app.stacks.clear_running();
-    }
-
-    app.engine.set_effect(effect, props);
-    Ok(())
+/// The builder a takeover makes its instances with: the effect with this id, built again for
+/// each group the takeover lands on. A stack resolves its layers in that group's canvas.
+pub fn takeover_builder(app: &Arc<App>, id: &str) -> crate::scenes::EffectBuilder {
+    let app = Arc::clone(app);
+    let id = id.to_string();
+    Arc::new(move |group| create_effect(&app.user_effects, &app.stacks, &id, Some(group)))
 }
 
 /// Devices the daemon never sends frames to, matched on the HID path inside the device id.

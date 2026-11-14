@@ -3,8 +3,8 @@
 // The builder's page strip (#257 phase 4), moved out of StackBuilder.tsx unchanged: the back key,
 // the stack's name and layer count, Unsaved, Revert and Save.
 
-import { ArrowCounterClockwise, ArrowLeft, FloppyDisk } from "@phosphor-icons/react";
-import { Button, IconButton } from "@/components/Button";
+import { ArrowCounterClockwise, ArrowLeft, FilmSlate, FloppyDisk } from "@phosphor-icons/react";
+import { Button, ButtonLink, IconButton } from "@/components/Button";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import type { RefObject } from "react";
 
@@ -15,6 +15,8 @@ export function BuilderHeader({
   dirty,
   saveState,
   canSave,
+  groupHref,
+  groupName,
   backRef,
   onBack,
   onRevert,
@@ -26,6 +28,9 @@ export function BuilderHeader({
   dirty: boolean;
   saveState: "idle" | "saving";
   canSave: boolean;
+  /** The Scenes page's open group, when the builder was opened from it. */
+  groupHref?: string | null;
+  groupName?: string | null;
   backRef: RefObject<HTMLSpanElement | null>;
   onBack: () => void;
   onRevert: () => void;
@@ -41,12 +46,34 @@ export function BuilderHeader({
           </span>
         }
         leading={
-          <span ref={backRef}>
+          <span ref={backRef} className="rd-stacks-leading">
             <IconButton label="Back to the effects" size="sm" icon={<ArrowLeft size={16} />} onClick={onBack} />
+            {narrow && groupHref && (
+              <ButtonLink
+                href={groupHref}
+                variant="ghost"
+                size="sm"
+                icon={<FilmSlate size={16} />}
+                label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+              >
+                <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+              </ButtonLink>
+            )}
           </span>
         }
       />
       <PageActions>
+        {!narrow && groupHref && (
+          <ButtonLink
+            href={groupHref}
+            variant="ghost"
+            size="sm"
+            icon={<ArrowLeft size={14} />}
+            label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+          >
+            <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+          </ButtonLink>
+        )}
         {/* On a phone the strip carries one key: Save, as an icon with its name (D95.5.7). The
             word Unsaved and Revert are desktop keys: the phone's way out asks Save or Discard. */}
         {!narrow && dirty && <span className="mute rd-unsaved">Unsaved</span>}

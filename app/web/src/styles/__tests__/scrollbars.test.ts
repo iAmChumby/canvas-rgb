@@ -61,7 +61,6 @@ const STYLES = [
   "src/styles/update.css",
   "src/styles/tokens.css",
   // The CSS modules hold three panes of their own; their class names are hashed, so the shared
-  // rule reaches them the only way it can: through the element itself.
   "src/views/desk.module.css",
   "src/views/editor/onboarding.module.css",
 ];
@@ -114,18 +113,24 @@ const SCROLL_PANES = [
   ".cmdk-list",
   ".effect-sheet",
   ".preset-chips",
-  ".toolbarRow",
-  ".nowPicker",
   ".fixedList",
   ".chain",
   ".panel",
+  ".frame",
+  ".strip",
+  ".moreList",
+  ".play-on-list",
+  '.rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main',
+  '.rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main',
+  ".sheetBody",
 ];
 
 /**
- * The bars that hide themselves on purpose: the Peripherals key row and the preset keys on a
- * phone scroll sideways with no bar at all. Every one of them has to say so here.
+ * The bars that hide themselves on purpose: the Peripherals key row, the preset keys on a phone
+ * and the Scenes page's scene keys scroll sideways with no bar at all (a fade on the edge says so).
+ * Every one of them has to say so here.
  */
-const HIDDEN_ON_PURPOSE = [".rd-peri-keys", ".preset-chips"];
+const HIDDEN_ON_PURPOSE = [".rd-peri-keys", ".preset-chips", ".strip"];
 
 const THUMB = "var(--scroll-thumb) var(--scroll-track)";
 const THUMB_HOVER = "var(--scroll-thumb-hover) var(--scroll-track)";

@@ -15,9 +15,6 @@ pub const HOME_ENV: &str = "CANVAS_RGB_HOME";
 /// The keyboard's still bookkeeping (#312), under [`home`].
 pub const ROYUAN_STILLS_FILE: &str = "royuan-stills.json";
 
-/// The marker for the one-off layout repairs (#312), under [`home`].
-pub const REPAIRS_FILE: &str = "layout-repairs.json";
-
 /// The daemon's user directory: `%APPDATA%\canvas-rgb`, or `$CANVAS_RGB_HOME`.
 pub fn home() -> PathBuf {
     match std::env::var_os(HOME_ENV) {
@@ -95,16 +92,6 @@ pub fn royuan_stills_file() -> PathBuf {
     home().join(ROYUAN_STILLS_FILE)
 }
 
-/// The marker that records the one-off layout repairs that have run.
-pub fn repairs_marker() -> PathBuf {
-    repairs_marker_in(&home())
-}
-
-/// The same marker, inside a given home directory.
-pub fn repairs_marker_in(home: &Path) -> PathBuf {
-    home.join(REPAIRS_FILE)
-}
-
 /// The backups folder inside a given home directory.
 pub fn backups_dir_in(home: &Path) -> PathBuf {
     home.join(BACKUPS_DIR)
@@ -121,6 +108,18 @@ pub fn read_optional(path: &Path) -> Option<Vec<u8>> {
         Ok(bytes) => Some(bytes),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(_) => None,
+    }
+}
+
+/// Reads a file and tells "absent" from "could not read": `Ok(None)` when it does not exist,
+/// `Err` for any other failure (a sharing violation, a permission denial). The scenes files use
+/// this so a read error never looks like a missing file, which would be replaced by a default.
+/// [`read_optional`] keeps its old behaviour for every other file.
+pub fn read_checked(path: &Path) -> std::io::Result<Option<Vec<u8>>> {
+    match std::fs::read(path) {
+        Ok(bytes) => Ok(Some(bytes)),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(e) => Err(e),
     }
 }
 

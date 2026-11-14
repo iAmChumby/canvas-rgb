@@ -29,13 +29,13 @@ pub struct ApiConfig {
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct NavigatePayload {
-    /// `"layout" | "effects" | "devices" | "fans" | "settings" | "updates"` ([`EDITOR_PAGES`])
+    /// `"scenes" | "effects" | "devices" | "fans" | "settings" | "updates"` ([`EDITOR_PAGES`])
     pub page: String,
 }
 
 /// The pages a navigate request may name: exactly the ones the React editor routes
 /// (`app/web/src/shell/Shell.tsx` `PAGE_PATHS`). The GPUI editor accepts the same set.
-pub const EDITOR_PAGES: &[&str] = &["layout", "effects", "devices", "fans", "settings", "updates"];
+pub const EDITOR_PAGES: &[&str] = &["scenes", "effects", "devices", "fans", "settings", "updates"];
 
 // Editor choice and update channel (#202, #203). The tray keeps them in [`TRAY_PREFS_FILE`].
 
@@ -128,7 +128,7 @@ mod gpui_ipc_tests {
 
     #[test]
     fn editor_pages_are_the_navigate_pages() {
-        assert_eq!(EDITOR_PAGES, &["layout", "effects", "devices", "fans", "settings", "updates"]);
+        assert_eq!(EDITOR_PAGES, &["scenes", "effects", "devices", "fans", "settings", "updates"]);
     }
 }
 

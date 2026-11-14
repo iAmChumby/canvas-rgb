@@ -551,6 +551,8 @@ dependencies = [
 name = "canvas-core"
 version = "0.13.1"
 dependencies = [
+ "canvas-effects",
+ "canvas-html",
  "canvas-proto",
  "tracing",
  "windows-sys 0.61.2",

@@ -3,7 +3,6 @@
 
 import { describe, expect, it } from "vitest";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
-import type { Layout } from "@/proto/Layout";
 import {
   areaBounds,
   areaName,
@@ -11,45 +10,20 @@ import {
   pointerToCanvas,
   rectFromDrag,
 } from "@/views/effects/stackDraft";
+import { canvasWith } from "@/lib/__tests__/groupCanvasFixture";
 
-const desk: Layout = {
-  id: "desk",
-  name: "Desk",
-  render_scale: 50,
-  sampling: "area_average",
-  case_form: "none",
-  landmarks: [],
-  effect: null,
-  zones: [
-    {
-      device_id: "royuan:3151:4015",
-      zone_index: 0,
-      x: 16,
-      y: 158,
-      width: 110,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "grid", columns: 6 },
-      part: { kind: "keyboard", facing: "viewer", mapped: false },
-      label: "Keyboard",
-    },
-    {
-      device_id: "openrgb:mouse-1",
-      zone_index: 0,
-      x: 136,
-      y: 158,
-      width: 20,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "point" },
-      part: { kind: "mouse", facing: "viewer", mapped: false },
-    },
-  ],
-};
+const desk = canvasWith([
+  {
+    id: "royuan:3151:4015#z0",
+    label: "ROYUAN Keyboard · Keyboard",
+    device: "royuan:3151:4015",
+    zone: 0,
+    x: 16,
+    y: 158,
+    width: 110,
+    height: 30,
+  },
+]);
 
 const devices: DeviceInfo[] = [
   {
@@ -107,16 +81,16 @@ describe("the readout", () => {
     expect(readout.detail).toBe("x 16, y 150");
   });
 
-  it("names a device and a zone, and says when one is not on the desk", () => {
+  it("names a device and a zone, and says when one is not in the group", () => {
     expect(areaReadout({ kind: "canvas" }, desk, devices).title).toBe("Whole canvas");
     expect(areaReadout({ kind: "device", device: "royuan:3151:4015" }, desk, devices).title).toBe("ROYUAN Keyboard");
     expect(areaReadout({ kind: "zone", device: "royuan:3151:4015", zone: 0 }, desk, devices).title).toBe(
       "ROYUAN Keyboard · Keyboard",
     );
-    expect(areaName({ kind: "device", device: "gone" }, desk, devices)).toBe("Not on the desk");
+    expect(areaName({ kind: "device", device: "gone" }, desk, devices)).toBe("Not in this group");
   });
 
-  it("takes a device's area as the union of its placed zones", () => {
+  it("takes a device's area as the union of its lights' boxes", () => {
     const bounds = areaBounds({ kind: "device", device: "royuan:3151:4015" }, desk);
     expect(bounds).toEqual({ x: 16, y: 158, width: 110, height: 30 });
     expect(areaBounds({ kind: "device", device: "gone" }, desk)).toBeNull();

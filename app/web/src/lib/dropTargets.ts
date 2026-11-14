@@ -1,12 +1,12 @@
 // Where a drop lands (#257 phase 2). Everything here is pure: a pointer, the boxes on the page,
-// the desk's layout and the payload say one target —
+// the group's canvas and the payload say one target —
 // Canvas (the whole-canvas strip) | Device | Zone (with Shift) | Rect | StackSlot | Row.
 // The builder's drag session asks this at every move; the keyboard asks the same names, so a
 // pointer and a keyboard can never mean two different things (spec §4).
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
+import { lightsUnder, type GroupCanvas } from "@/lib/groupCanvas";
 import type { StackLayer } from "@/proto/StackLayer";
 import { CANVAS_H, CANVAS_W, layerOnTopAtPoint, pointerToStage, type StageBox } from "@/views/effects/stackDraft";
 
@@ -49,7 +49,7 @@ export interface DropBoxes {
 
 /** A rectangle dropped on empty picture: this size, centred on the pointer (spec §4). */
 export const NEW_RECT = { width: 120, height: 80 } as const;
-/** The smallest a zone counts for a hit: a 1 × 1 zone is still a target. */
+/** The smallest a light's box counts for a hit: a single LED is still a target. */
 const MIN_HIT = 0.5;
 
 const inBox = (point: { x: number; y: number }, box: StageBox | null): boolean =>
@@ -75,23 +75,11 @@ export function rectAtPoint(point: { x: number; y: number }): { x: number; y: nu
   return { x, y, width, height };
 }
 
-/** The visible zones under a canvas point, smallest first: the smallest one wins a pick. */
-function zonesUnder(
-  layout: Layout | null,
-  point: { x: number; y: number },
-): Layout["zones"] {
-  return (layout?.zones ?? [])
-    .filter(
-      (zone) =>
-        zone.visible &&
-        zone.width >= MIN_HIT &&
-        zone.height >= MIN_HIT &&
-        point.x >= zone.x &&
-        point.x <= zone.x + zone.width &&
-        point.y >= zone.y &&
-        point.y <= zone.y + zone.height,
-    )
-    .sort((a, b) => a.width * a.height - b.width * b.height);
+/** The smallest light's box under a canvas point, with its device and zone. */
+function lightUnder(canvas: GroupCanvas | null, point: { x: number; y: number }) {
+  return lightsUnder(canvas, point).find(
+    (light) => light.box.width >= MIN_HIT && light.box.height >= MIN_HIT,
+  );
 }
 
 /** The stack slot a pointer over the layer rows names: an effect goes where the line is drawn. */
@@ -126,14 +114,14 @@ function rowAtPoint(rows: DropRow[], point: { x: number; y: number }): DropTarge
 export function dropTargetAt({
   point,
   boxes,
-  layout,
+  canvas,
   layers,
   payload,
   shift = false,
 }: {
   point: { x: number; y: number };
   boxes: DropBoxes;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   /** The stack's layers, for a mask's hit-test on the picture. */
   layers?: StackLayer[];
   payload: DragPayloadKind;
@@ -142,7 +130,7 @@ export function dropTargetAt({
   if (payload === "mask") {
     if (inBox(point, boxes.stage)) {
       const at = pointerToStage(point.x, point.y, boxes.stage as StageBox);
-      const id = layerOnTopAtPoint(layers ?? [], layout, at);
+      const id = layerOnTopAtPoint(layers ?? [], canvas, at);
       if (!id) return null;
       const index = (layers ?? []).findIndex((layer) => layer.id === id);
       return { kind: "maskLayer", id, index: index < 0 ? 0 : index };
@@ -156,12 +144,11 @@ export function dropTargetAt({
   if (inBox(point, boxes.stage)) {
     const box = boxes.stage as StageBox;
     const at = pointerToStage(point.x, point.y, box);
-    const zones = zonesUnder(layout, at);
-    const first = zones[0];
-    if (first) {
+    const light = lightUnder(canvas, at);
+    if (light) {
       return shift
-        ? { kind: "zone", device: first.device_id, zone: first.zone_index }
-        : { kind: "device", device: first.device_id };
+        ? { kind: "zone", device: light.device_id, zone: light.zone_index }
+        : { kind: "device", device: light.device_id };
     }
     return { kind: "rect", ...rectAtPoint(at) };
   }
@@ -171,7 +158,7 @@ export function dropTargetAt({
 /** One name for every target, for the live region and the ghost's label. */
 export function dropTargetWords(
   target: DropTarget,
-  { layout, devices, layers }: { layout: Layout | null; devices: DeviceInfo[] | null; layers: Pick<StackLayer, "id" | "name">[] },
+  { canvas, devices, layers }: { canvas: GroupCanvas | null; devices: DeviceInfo[] | null; layers: Pick<StackLayer, "id" | "name">[] },
 ): string {
   switch (target.kind) {
     case "canvas":
@@ -179,10 +166,10 @@ export function dropTargetWords(
     case "device":
       return deviceName(devices, target.device);
     case "zone": {
-      const zone = layout?.zones.find(
-        (placed) => placed.device_id === target.device && placed.zone_index === target.zone,
+      const light = canvas?.lights.find(
+        (entry) => entry.device_id === target.device && entry.zone_index === target.zone,
       );
-      return `${deviceName(devices, target.device)} · ${zone?.label ?? `Zone ${target.zone + 1}`}`;
+      return light ? light.label : `${deviceName(devices, target.device)} · Zone ${target.zone + 1}`;
     }
     case "rect":
       return "New rectangle";

@@ -7,14 +7,11 @@
 // To wire this in, the demo backend needs these lines (and the import):
 //
 //   import {
-//     answerDelayMs, applyDeviceScenarios, applyFanScenarios, applyLayoutScenarios,
+//     answerDelayMs, applyDeviceScenarios, applyFanScenarios,
 //     applyStatusScenarios, daemonDown, saveError,
 //   } from "@/lib/demoScenarios";
 //
 //   // in initialState():
-//   devices: applyDeviceScenarios(DEVICES),
-//   layouts: noLayout() ? [] : [{ ...LAYOUT_DESK }],
-//   activeLayout: noLayout() ? "" : LAYOUT_DESK.id,
 //
 //   // in statusNow():
 //   openrgb: openRgbDown() ? "disconnected" : "connected",
@@ -29,8 +26,12 @@
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { FansStatus } from "@/proto/FansStatus";
-import type { Layout } from "@/proto/Layout";
+import type { Group } from "@/proto/Group";
+import type { LightView } from "@/proto/LightView";
+import type { Scene } from "@/proto/Scene";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Status } from "@/proto/Status";
+import { SEEN_LIGHTS_KEY } from "@/lib/seenLights";
 
 /** Why a header was handed back: the chip's own safety, not a request. */
 export const HANDBACK_REASON = "the daemon's safety handback: the chip was too hot to trust";
@@ -38,7 +39,6 @@ export const HANDBACK_REASON = "the daemon's safety handback: the chip was too h
 /** The scenario tokens this file understands, next to the demo's own ones. */
 export const DAEMON_DOWN = "daemon-down";
 export const OPENRGB_DOWN = "openrgb-down";
-export const NO_LAYOUT = "no-layout";
 export const DEVICE_EMPTY = "device-empty";
 export const SLOW = "slow";
 export const SLOW_FPS = "slow-fps";
@@ -79,11 +79,6 @@ export function openRgbDown(): boolean {
 }
 
 /** There is no layout yet: nothing can run. */
-export function noLayout(): boolean {
-  return has(NO_LAYOUT);
-}
-
-/** One device reports no zones. */
 export function deviceEmpty(): boolean {
   return has(DEVICE_EMPTY);
 }
@@ -280,8 +275,88 @@ export function applyDeviceScenarios(devices: DeviceInfo[]): DeviceInfo[] {
   return devices.map((d, i) => (i === 0 ? { ...d, zones: [] } : d));
 }
 
-/** Applies the layout scenarios: there is no layout yet. */
-export function applyLayoutScenarios(layouts: Layout[], active: string): { layouts: Layout[]; active: string } {
-  if (!noLayout()) return { layouts, active };
-  return { layouts: [], active: "" };
+// ---- scenes (0.14.0) ----
+//
+// The Scenes page's states, one token each. The demo's own scenes already show four groups with
+// an unassigned light (Gaming, the default), a group with a device that is not connected (its
+// Memory group) and, in Evening, a group whose effect is gone.
+//
+//   scene:<id>    the active scene is that one (`scene:focus` is one group, `scene:evening` a failed one)
+//   groups-0      the active scene has no group: every light is unassigned
+//   groups-20     a 20-group scene "Stage" is active, on twenty-four more lights
+//   long-names    the active scene and its first group carry 40-character names
+//   new-light     a light appears that no group holds, and the page has not seen it before
+//   heavy         with groups-20: every Stage light has 600 LEDs (the page's worst case for paint cost)
+
+export const GROUPS_0 = "groups-0";
+export const GROUPS_20 = "groups-20";
+export const LONG_NAMES = "long-names";
+export const NEW_LIGHT = "new-light";
+export const HEAVY = "heavy";
+
+/** The id the scene token names, if any. */
+function sceneToken(): string | null {
+  const t = tokens().find((x) => x.startsWith("scene:"));
+  return t ? t.slice("scene:".length) : null;
+}
+
+/** A light on a device of its own: a strip of `leds` LEDs, connected. */
+function demoStrip(id: string, label: string, leds: number): LightView {
+  return {
+    light: { id: `${id}#z0`, device_id: id, zone_index: 0, arrangement: "strip", reversed: false },
+    led_count: leds,
+    connected: true,
+    label,
+  };
+}
+
+/** Applies the scene scenarios to the demo's scenes and lights. */
+export function applySceneScenarios(
+  base: ScenesResponse,
+  lights: LightView[],
+): { scenes: Scene[]; active: string; lights: LightView[] } {
+  const scenes = structuredClone(base.scenes);
+  const all = structuredClone(lights);
+  let active = base.active;
+  const picked = sceneToken();
+  if (picked && scenes.some((s) => s.id === picked)) active = picked;
+
+  if (has(GROUPS_20)) {
+    const effects = ["aurora", "rainbow_wave", "breathing", "spiral", "fire", "white"];
+    const extra = Array.from({ length: 24 }, (_, i) =>
+      demoStrip(`demo:stage-${i + 1}`, `Stage light ${i + 1}`, has(HEAVY) ? 600 : 8 + ((i * 5) % 29)),
+    );
+    all.push(...extra);
+    const groups: Group[] = extra.slice(0, 20).map((l, i) => ({
+      id: `g-stage-${i + 1}`,
+      name: i === 0 ? "Key light" : `Stage group ${i + 1}`,
+      members: [l.light.id],
+      plays: { type: "effect", effect: effects[i % effects.length] ?? "aurora", props: {} },
+      mode: i % 3 === 0 ? "each_its_own" : "flow_across",
+      brightness: 100 - ((i * 7) % 60),
+    }));
+    scenes.push({ id: "stage", name: "Stage", rev: 1, groups });
+    active = "stage";
+  }
+
+  const current = scenes.find((s) => s.id === active);
+  if (current && has(GROUPS_0)) current.groups = [];
+  // The long names are 40 characters on the dot, the most the daemon keeps.
+  if (current && has(LONG_NAMES)) {
+    current.name = [..."Evening wind-down, the whole case on, low"].slice(0, 40).join("");
+    const first = current.groups[0];
+    if (first) first.name = [..."Front intake and the radiator fans, top!"].slice(0, 40).join("");
+  }
+
+  if (has(NEW_LIGHT)) {
+    const lamp = demoStrip("demo:desk-lamp", "Desk lamp", 12);
+    // The page has seen every other light, so only this one is announced.
+    try {
+      window.localStorage.setItem(SEEN_LIGHTS_KEY, JSON.stringify(all.map((l) => l.light.id)));
+    } catch {
+      // The notice may not show: storage is not available here.
+    }
+    all.push(lamp);
+  }
+  return { scenes, active, lights: all };
 }

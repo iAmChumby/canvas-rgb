@@ -146,3 +146,183 @@ async fn run(mut socket: WebSocket, app: Arc<App>, stack_engine: Option<Arc<dyn 
     // an error, and a dropped task all release them the same way.
     tracing::info!(stack = stack_engine.is_some(), "the editor preview disconnected");
 }
+
+// ---------------------------------------------------------------- the per-light feed
+
+/// The query the lights socket carries: the token, as for [`preview`].
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct LightsQuery {
+    #[serde(default)]
+    pub token: Option<String>,
+}
+
+/// `GET /api/v1/preview/lights`.
+///
+/// The first message is JSON mapping a `u16` index to a light id; it is sent again whenever the
+/// scene or the lights change. Then binary messages: per light a `u16 LE` index, a `u16 LE` LED
+/// count and that many RGB triples, at most 15 a second (the engine's rate).
+pub async fn preview_lights(
+    State(app): State<Arc<App>>,
+    Query(query): Query<LightsQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let Some(presented) = query.token.as_deref() else {
+        return crate::api::ApiFailure::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            canvas_proto::api::error_codes::UNAUTHORIZED,
+            "the light preview needs a token",
+        )
+        .into_response();
+    };
+    if !crate::token::constant_time_eq(presented, &app.token) {
+        return crate::api::ApiFailure::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            canvas_proto::api::error_codes::UNAUTHORIZED,
+            "the API token is not valid",
+        )
+        .into_response();
+    }
+    // The place is taken before the upgrade, so a full feed is answered as a plain 503 the page can
+    // read. The guard is dropped when the session ends however it ends, or when the upgrade fails.
+    let Some(watch) = crate::scenes::LightWatch::join(&app) else {
+        return crate::api::ApiFailure::service_unavailable(format!(
+            "{} editor windows already watch the lights; close one first",
+            crate::scenes::LIGHT_FEED_MAX_WATCHERS
+        ))
+        .into_response();
+    };
+    upgrade.on_upgrade(move |socket| run_lights(socket, app, watch))
+}
+
+/// The light ids by index, in the order of `lights.json`.
+async fn light_index(app: &App) -> Vec<String> {
+    app.store.read().await.lights.lights.iter().map(|l| l.id.clone()).collect()
+}
+
+/// The index message: `{"0":"<light id>","1":...}`.
+pub fn index_message(ids: &[String]) -> String {
+    let map: std::collections::BTreeMap<String, &String> =
+        ids.iter().enumerate().map(|(i, id)| (i.to_string(), id)).collect();
+    serde_json::to_string(&map).unwrap_or_else(|_| "{}".into())
+}
+
+/// One binary message for `frame`. A light the index does not hold is left out; the second value
+/// says one was, so the index is sent again first.
+pub fn encode_light_frame(
+    frame: &canvas_proto::traits::LightFrame,
+    ids: &[String],
+) -> (Vec<u8>, bool) {
+    let mut out = Vec::new();
+    let mut missing = false;
+    for (id, colors) in &frame.lights {
+        let Some(index) = ids.iter().position(|known| known == id) else {
+            missing = true;
+            continue;
+        };
+        let count = colors.len().min(usize::from(u16::MAX));
+        out.extend_from_slice(&(index as u16).to_le_bytes());
+        out.extend_from_slice(&(count as u16).to_le_bytes());
+        for color in &colors[..count] {
+            out.extend_from_slice(&[color.r, color.g, color.b]);
+        }
+    }
+    (out, missing)
+}
+
+/// Sends `message`, giving up on a window that does not take it within the feed's send timeout.
+/// `false` when the window is gone or too slow to keep.
+async fn send_in_time(socket: &mut WebSocket, app: &App, message: Message) -> bool {
+    match tokio::time::timeout(app.scene.feed.send_timeout(), socket.send(message)).await {
+        Ok(sent) => sent.is_ok(),
+        Err(_) => {
+            tracing::info!("a light preview window did not read; it was dropped");
+            false
+        }
+    }
+}
+
+async fn run_lights(mut socket: WebSocket, app: Arc<App>, mut watch: crate::scenes::LightWatch) {
+    let mut changed = app.scene.subscribe();
+    let mut ids = light_index(&app).await;
+    tracing::info!("the light preview connected");
+    let mut resend = true;
+    loop {
+        if resend {
+            resend = false;
+            if !send_in_time(&mut socket, &app, Message::Text(index_message(&ids).into())).await {
+                break;
+            }
+        }
+        tokio::select! {
+            frame = watch.recv() => match frame {
+                Ok(frame) => {
+                    let (mut payload, missing) = encode_light_frame(&frame, &ids);
+                    if missing {
+                        // A light the index lacks: a new one. Say so before the frame that names it.
+                        ids = light_index(&app).await;
+                        if !send_in_time(&mut socket, &app, Message::Text(index_message(&ids).into())).await {
+                            break;
+                        }
+                        payload = encode_light_frame(&frame, &ids).0;
+                    }
+                    if !payload.is_empty()
+                        && !send_in_time(&mut socket, &app, Message::Binary(payload.into())).await
+                    {
+                        break;
+                    }
+                }
+                // A slow socket skips ahead; the engine's next frame is the newest one.
+                Err(tokio::sync::broadcast::error::RecvError::Lagged(_)) => {}
+                Err(tokio::sync::broadcast::error::RecvError::Closed) => break,
+            },
+            woke = changed.changed() => {
+                if woke.is_err() {
+                    break;
+                }
+                ids = light_index(&app).await;
+                resend = true;
+            }
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+    // `watch` gives the place back when it drops, here or if this task is cancelled or panics.
+    tracing::info!("the light preview disconnected");
+}
+
+#[cfg(test)]
+mod light_feed_tests {
+    use super::*;
+    use canvas_proto::traits::LightFrame;
+    use canvas_proto::Rgb8;
+
+    #[test]
+    fn the_index_maps_numbers_to_light_ids() {
+        let ids = vec!["a#z0".to_string(), "b#z0".to_string()];
+        let json: serde_json::Value = serde_json::from_str(&index_message(&ids)).unwrap();
+        assert_eq!(json, serde_json::json!({ "0": "a#z0", "1": "b#z0" }));
+    }
+
+    #[test]
+    fn a_frame_is_index_count_then_rgb_per_light() {
+        let ids = vec!["a#z0".to_string(), "b#z0".to_string()];
+        let frame = LightFrame {
+            lights: vec![
+                ("b#z0".into(), vec![Rgb8::new(1, 2, 3), Rgb8::new(4, 5, 6)]),
+                ("a#z0".into(), vec![Rgb8::new(9, 8, 7)]),
+            ],
+        };
+        let (bytes, missing) = encode_light_frame(&frame, &ids);
+        assert!(!missing);
+        assert_eq!(bytes, vec![1, 0, 2, 0, 1, 2, 3, 4, 5, 6, 0, 0, 1, 0, 9, 8, 7]);
+    }
+
+    #[test]
+    fn a_light_the_index_lacks_is_left_out_and_reported() {
+        let frame = LightFrame { lights: vec![("new#z0".into(), vec![Rgb8::WHITE])] };
+        let (bytes, missing) = encode_light_frame(&frame, &["a#z0".to_string()]);
+        assert!(bytes.is_empty() && missing);
+    }
+}

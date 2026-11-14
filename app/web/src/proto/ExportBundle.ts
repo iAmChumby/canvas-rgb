@@ -3,6 +3,8 @@ import type { DisplayConfig } from "./DisplayConfig";
 import type { EffectsFile } from "./EffectsFile";
 import type { FansFile } from "./FansFile";
 import type { LayoutsFile } from "./LayoutsFile";
+import type { LightsFile } from "./LightsFile";
+import type { ScenesFile } from "./ScenesFile";
 import type { Settings } from "./Settings";
 import type { Stack } from "./Stack";
 import type { ZonesFile } from "./ZonesFile";
@@ -22,4 +24,12 @@ displays: Array<DisplayConfig>,
  * HTML files a stack's layers may name, so an imported stack whose layers are HTML shows
  * them `Missing` until those files are imported too.
  */
-stacks: Array<Stack>, };
+stacks: Array<Stack>, 
+/**
+ * `lights.json` (0.14.0). Absent in older bundles: import then migrates their layouts.
+ */
+lights?: LightsFile, 
+/**
+ * `scenes.json` (0.14.0). Absent in older bundles, as `lights`.
+ */
+scenes?: ScenesFile, };
