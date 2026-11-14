@@ -12,7 +12,7 @@ use canvas_proto::fans::FansStatus;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, PreviewSink};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::storage::Store;
@@ -78,6 +78,10 @@ pub struct App {
     /// the saved sizes so its refresh leaves the raise alone. Never written to `zones` or
     /// `zones.json`: the hold ends when the setup drops it.
     pub zone_holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
+    /// Set when the first non-empty device list replayed what a crash left (#338): the chain
+    /// restore record, and the commit rollback that reads an intent record. One replay, however
+    /// many lists follow.
+    pub leftovers_replayed: AtomicBool,
     /// The running effect's preview subscribers (`GET /preview`), so the main engine only runs
     /// while the editor watches.
     pub preview_subs: PreviewRegistry,
@@ -268,6 +272,7 @@ impl App {
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
             zone_holds: Arc::new(tokio::sync::RwLock::new(ZoneHolds::new())),
+            leftovers_replayed: AtomicBool::new(false),
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),
