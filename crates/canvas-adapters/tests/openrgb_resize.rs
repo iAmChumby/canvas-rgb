@@ -95,6 +95,72 @@ async fn a_frame_for_a_controller_being_resized_does_not_reach_openrgb() {
     assert_eq!(server.update_leds_writes(0), 2, "the frame after the resize did not go out");
 }
 
+/// Every RESIZE_ZONE request is counted, for the controller it names and no other.
+#[tokio::test]
+async fn resize_count_counts_each_request() {
+    let server = FakeOpenRgbServer::start(vec![header()]).await.expect("fake server");
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+    adapter.connect().await.expect("connect");
+    adapter.discover().await.expect("a plain discover");
+    let id = DeviceId("openrgb:jar".into());
+
+    assert_eq!(server.resize_count(0), 0, "a resize was counted before any was asked for");
+    adapter.set_zone_size(&id, 0, 12).await.expect("the first resize");
+    assert_eq!(server.resize_count(0), 1, "the first resize was not counted");
+    adapter.set_zone_size(&id, 0, 14).await.expect("the second resize");
+    assert_eq!(server.resize_count(0), 2, "the second resize was not counted");
+    assert_eq!(server.resize_count(1), 0, "a controller that was never sized saw a resize");
+    assert_eq!(server.zone_leds(0, 0), Some(14), "the second resize did not land");
+}
+
+/// A resize the server refuses is still a resize that arrived, and the size stays.
+///
+/// A real OpenRGB that refuses a resize answers nothing (`fail_resizes`): the adapter's
+/// re-read of the list never comes back, so the resize reports an error rather than
+/// pretending it landed.
+#[tokio::test]
+async fn a_failing_resize_returns_an_error_and_keeps_the_size() {
+    let server = FakeOpenRgbServer::start(vec![header()]).await.expect("fake server");
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+    adapter.connect().await.expect("connect");
+    adapter.discover().await.expect("a plain discover");
+    let id = DeviceId("openrgb:jar".into());
+
+    server.fail_resizes(true);
+    let result = adapter.set_zone_size(&id, 0, 12).await;
+    assert!(result.is_err(), "a refused resize reported success: {result:?}");
+    assert_eq!(server.zone_leds(0, 0), Some(8), "a refused resize changed the size");
+    assert_eq!(server.resize_count(0), 1, "the refused resize was not counted");
+
+    // The server answers again: the size never moved, so the next resize still starts at 8.
+    server.fail_resizes(false);
+    assert_eq!(server.zone_leds(0, 0), Some(8), "the size moved after the refusal was cleared");
+}
+
+/// A resize that lands late still lands, and the size is unchanged before it does.
+#[tokio::test]
+async fn a_delayed_resize_still_lands() {
+    let server = FakeOpenRgbServer::start(vec![header()]).await.expect("fake server");
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+    adapter.connect().await.expect("connect");
+    adapter.discover().await.expect("a plain discover");
+    let id = DeviceId("openrgb:jar".into());
+
+    server.delay_resizes(300);
+    let mut resizing = adapter.clone();
+    let resize_id = id.clone();
+    let resize = tokio::spawn(async move { resizing.set_zone_size(&resize_id, 0, 12).await });
+    until("the delayed resize reached OpenRGB", || server.resize_count(0) == 1).await;
+    assert_eq!(server.zone_leds(0, 0), Some(8), "the delayed resize landed before its delay");
+
+    // Other requests keep flowing while the resize waits out its delay.
+    adapter.read_back(&id).await.expect("a colour read while the resize waits");
+
+    until("the delayed resize landed", || server.zone_leds(0, 0) == Some(12)).await;
+    resize.await.expect("its task ends").expect("the delayed resize is accepted");
+    assert_eq!(server.resize_count(0), 1, "the delayed resize was counted more than once");
+}
+
 /// A resize that was cancelled does not skip the frames of that controller forever.
 ///
 /// The client went away in the middle of the PATCH: the resize is dropped before it reads the
