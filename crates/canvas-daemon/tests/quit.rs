@@ -9,7 +9,7 @@
 //! OpenRGB server.
 
 use std::net::TcpListener;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -69,40 +69,49 @@ fn agent() -> ureq::Agent {
         .into()
 }
 
-#[test]
-fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
-    let home = std::env::temp_dir().join(format!("canvas-rgb-quit-test-{}", std::process::id()));
-    let _ = std::fs::remove_dir_all(&home);
-    std::fs::create_dir_all(&home).expect("the temporary home is created");
-    let home = TempHome(home);
+/// How a start ended.
+enum Start {
+    /// The daemon's API answers on this port.
+    Up(KillOnDrop, u16),
+    /// An elevated run cannot start the daemon at all, and stderr says why.
+    Elevated(String),
+    /// The daemon ended before its API answered; this says what it left behind.
+    Ended(String),
+}
 
-    // The API and OpenRGB ports are free ports nothing listens on, so no real daemon or
-    // server is touched (#88). The free port is taken a moment later by the daemon.
+/// Starts the daemon on a fresh free port and waits for its API to answer.
+///
+/// The port is picked by binding `:0` and letting it go (`free_port`), so another process on
+/// a loaded PC can take it before the daemon binds it (#328). That is why a start that ends
+/// early is reported as [`Start::Ended`] and tried again on a fresh port: the verdict this
+/// test reads is about the quit route, not about that race. The wait itself is bounded, so a
+/// daemon that neither answers nor exits fails the test instead of holding it.
+fn start(home: &Path) -> Start {
     let api_port = free_port();
-    let api_base = format!("http://127.0.0.1:{api_port}");
     let config = canvas_proto::config::ConfigFile {
         api_port,
         openrgb_port: free_port(),
         ..Default::default()
     };
     std::fs::write(
-        home.0.join(canvas_proto::config::CONFIG_FILE),
+        home.join(canvas_proto::config::CONFIG_FILE),
         toml::to_string(&config).expect("the config serialises"),
     )
     .expect("the config is written");
 
     let child = Command::new(env!("CARGO_BIN_EXE_canvas-rgbd"))
-        .env("CANVAS_RGB_HOME", &home.0)
-        .env("CANVAS_RGB_OPENRGB", home.0.join("no-such-OpenRGB.exe"))
+        .env("CANVAS_RGB_HOME", home)
+        .env("CANVAS_RGB_OPENRGB", home.join("no-such-OpenRGB.exe"))
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         // stderr goes to a file in the temporary home, so a failed start says why.
-        .stderr(std::fs::File::create(home.0.join("stderr.log")).expect("the stderr file is created"))
+        .stderr(std::fs::File::create(home.join("stderr.log")).expect("the stderr file is created"))
         .spawn()
         .expect("the daemon starts");
     let mut daemon = KillOnDrop(child);
 
     // Wait for the API to answer.
+    let api_base = format!("http://127.0.0.1:{api_port}");
     let agent = agent();
     let started = Instant::now();
     loop {
@@ -112,34 +121,65 @@ fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
             .call()
             .is_ok()
         {
-            break;
+            return Start::Up(daemon, api_port);
         }
         if let Some(status) = daemon.0.try_wait().expect("the child can be polled") {
-            let stderr = std::fs::read_to_string(home.0.join("stderr.log")).unwrap_or_default();
+            let stderr = std::fs::read_to_string(home.join("stderr.log")).unwrap_or_default();
             // An elevated test run (a CI runner is an elevated admin) cannot start the daemon: it
             // refuses an elevated token by design. Then the refusal itself is what is checked.
             if canvas_daemon::elevated::is_elevated() {
                 assert!(!status.success(), "an elevated daemon must exit with an error");
-                let expected = canvas_daemon::elevated::ElevatedError.to_string();
-                assert!(stderr.contains(&expected), "expected the elevation refusal, got: {stderr}");
-                return;
+                return Start::Elevated(stderr);
             }
-            let logs = daemon_logs(&home.0) + &daemon_logs(&canvas_proto::consts::user_log_dir());
-            panic!("the daemon exited before the API answered: {status}
+            let logs = daemon_logs(home) + &daemon_logs(&canvas_proto::consts::user_log_dir());
+            return Start::Ended(format!(
+                "{status}
 --- stderr ---
 {stderr}
 --- logs ---
-{logs}");
+{logs}"
+            ));
         }
         assert!(started.elapsed() < Duration::from_secs(15), "the API did not start in 15 s");
         std::thread::sleep(Duration::from_millis(100));
     }
+}
+
+#[test]
+fn quit_makes_the_daemon_exit_with_code_zero_within_three_seconds() {
+    let home = std::env::temp_dir().join(format!("canvas-rgb-quit-test-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("the temporary home is created");
+    let home = TempHome(home);
+
+    // The API and OpenRGB ports are free ports nothing listens on, so no real daemon or
+    // server is touched (#88). A free port is taken by the daemon a moment later, so one that
+    // another process took first is not this test's verdict (#328).
+    let mut attempt = 1;
+    let (mut daemon, api_port) = loop {
+        match start(&home.0) {
+            Start::Up(daemon, port) => break (daemon, port),
+            Start::Elevated(stderr) => {
+                let expected = canvas_daemon::elevated::ElevatedError.to_string();
+                assert!(stderr.contains(&expected), "expected the elevation refusal, got: {stderr}");
+                return;
+            }
+            Start::Ended(why) if attempt < 3 => {
+                eprintln!("quit: start {attempt} ended before its API answered; a fresh port:");
+                eprintln!("{why}");
+                attempt += 1;
+            }
+            Start::Ended(why) => panic!("the daemon did not start on three free ports:\n{why}"),
+        }
+    };
+    let api_base = format!("http://127.0.0.1:{api_port}");
 
     let token = std::fs::read_to_string(home.0.join(canvas_proto::consts::TOKEN_FILE))
         .expect("the daemon wrote the token file")
         .trim()
         .to_string();
 
+    let agent = agent();
     let response = agent
         .post(&format!("{api_base}/api/v1/quit"))
         .header("Host", HOST_HEADER)

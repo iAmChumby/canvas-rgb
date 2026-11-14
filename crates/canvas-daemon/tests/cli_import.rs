@@ -8,11 +8,40 @@
 //! Nothing here touches the real daemon, the real lights or the owner's configuration:
 //! the token file lives in a temporary home, and the fake API writes down what it was
 //! sent.
+//!
+//! # Bounds (#328)
+//!
+//! Every process this file starts is bounded, so a test here can never hold a build slot
+//! for minutes: one did, for the full 20 minutes of the lock. The fake API ends itself
+//! after [`FAKE_LIFETIME`] if the test dies first, a CLI run is killed at [`CLI_LIMIT`],
+//! and the wait for the fake's port gives up at [`FAKE_START_LIMIT`]. [`CLI_LIMIT`] is
+//! larger than the CLI's own request limit, so a stuck run ends at the CLI's bound first and
+//! the kill here is the backstop.
+//!
+//! The bounds are generous because a loaded PC is slow in two measured ways, both worse
+//! than the work:
+//!
+//! - the fake's image is a copy of this test binary, and one took 36 s to start and bind
+//!   its port while eight other threads kept the cores busy;
+//! - a loopback connect can be dropped by the machine under that load. One CLI request
+//!   in a 30-run loop spent 21.06 s in the connect and then failed with the operating
+//!   system's own timeout (`timeout: connect`, WSAETIMEDOUT) while the fake was up and
+//!   listening; another run of the same loop took 65.9 s to be answered and succeeded.
+//!
+//! The CLI bounds a request now (5 s to connect, 120 s in all) and tries a connect that
+//! failed 3 times, since nothing was sent by a failed connect. This test does not decide on
+//! how long a run took: it runs the command once and reads its verdict. It is the machine's
+//! network stack, not the daemon and not a wrong port -- the CLI's own port check passed (a
+//! dead or foreign listener is refused before the request), and the fake is still the one
+//! listening on the port the child published.
 
-use std::path::PathBuf;
+use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::time::{Duration, Instant};
 
-/// The env var that tells the child process to be the fake API.
+/// The env var that tells the child process to be the fake API. Its value is the path of
+/// the file the child writes its port to, once its listener is bound.
 const FAKE_ENV: &str = "CANVAS_RGB_TEST_FAKE_API";
 /// The env var that tells the child process where to write down the request.
 const LOG_ENV: &str = "CANVAS_RGB_TEST_FAKE_API_LOG";
@@ -20,6 +49,18 @@ const LOG_ENV: &str = "CANVAS_RGB_TEST_FAKE_API_LOG";
 const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef";
 /// The name of the test that becomes the fake API in the child process.
 const SERVER_TEST: &str = "the_fake_api_answers_the_import_route";
+/// The most one CLI run may take, which is more than the CLI's own request limit (120 s plus
+/// its connect attempts), so the CLI's own bound is what ends a stuck run and this kill is the
+/// backstop. A run takes about 1.4 s; the slowest seen on a loaded PC was 65.9 s, and it
+/// succeeded. This is a hang guard, not a performance bar.
+const CLI_LIMIT: Duration = Duration::from_secs(150);
+/// The most the fake API may take to publish its port and answer on it. Starting a copy of
+/// this test binary took 36 s on a loaded PC, so this is a hang guard too.
+const FAKE_START_LIMIT: Duration = Duration::from_secs(90);
+/// How long the fake API keeps serving if the test that started it is killed before it can
+/// stop it. Comfortably longer than the slowest test here, and short enough that a leaked
+/// child cannot sit on a port for the session.
+const FAKE_LIFETIME: Duration = Duration::from_secs(600);
 
 /// A temporary directory that is removed when it is dropped.
 struct TempDir(PathBuf);
@@ -44,13 +85,22 @@ impl Drop for TempDir {
 }
 
 /// The fake API. It only serves in the child process; in the parent it does nothing.
+///
+/// The child binds its port itself (`:0`) and tells the parent which one it got, so no
+/// port is ever picked and then given up before something takes it.
 #[test]
 fn the_fake_api_answers_the_import_route() {
-    let Ok(port) = std::env::var(FAKE_ENV) else {
+    let Ok(port_file) = std::env::var(FAKE_ENV) else {
         return;
     };
-    let port: u16 = port.parse().expect("the port is a number");
     let log = std::env::var(LOG_ENV).expect("the log path");
+
+    // If the test that started this process is killed before it can kill this one, the
+    // fake must not outlive it.
+    std::thread::spawn(|| {
+        std::thread::sleep(FAKE_LIFETIME);
+        std::process::exit(3);
+    });
 
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -82,9 +132,14 @@ fn the_fake_api_answers_the_import_route() {
                 }
             }),
         );
-        let listener = tokio::net::TcpListener::bind(("127.0.0.1", port))
+        let listener = tokio::net::TcpListener::bind(("127.0.0.1", 0))
             .await
             .expect("the fake API binds");
+        let port = listener.local_addr().expect("the local address").port();
+        // Written whole under another name, then renamed, so the parent never reads half.
+        let pending = format!("{port_file}.part");
+        std::fs::write(&pending, port.to_string()).expect("the port is written down");
+        std::fs::rename(&pending, &port_file).expect("the port file is published");
         axum::serve(listener, router).await.expect("the fake API serves");
     });
 }
@@ -97,15 +152,11 @@ struct FakeApi {
 }
 
 impl FakeApi {
-    /// Starts the fake API on a free port and waits until it answers.
+    /// Starts the fake API and waits until it has bound a port and answers on it.
     fn start() -> (Self, u16, PathBuf) {
         let dir = TempDir::new("api");
-        // The port is free now; the child takes it a moment later.
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("a free port");
-        let port = listener.local_addr().expect("the local address").port();
-        drop(listener);
-
         let log = dir.0.join("request.txt");
+        let port_file = dir.0.join("port.txt");
         // The image name is what the CLI's port check looks for.
         let image = dir.0.join("canvas-rgbd.exe");
         let exe = std::env::current_exe().expect("the test binary");
@@ -115,22 +166,39 @@ impl FakeApi {
             .arg("--exact")
             .arg(SERVER_TEST)
             .arg("--nocapture")
-            .env(FAKE_ENV, port.to_string())
+            .env(FAKE_ENV, &port_file)
             .env(LOG_ENV, &log)
             .stdout(Stdio::null())
             .stderr(Stdio::null())
             .spawn()
             .expect("the fake API starts");
 
-        let api = Self { child, dir };
-        // Wait for the port to answer.
-        for _ in 0..200 {
-            if std::net::TcpStream::connect(("127.0.0.1", port)).is_ok() {
-                return (api, port, log);
+        let mut api = Self { child, dir };
+        let port = api.wait_for_port(&port_file);
+        (api, port, log)
+    }
+
+    /// Waits for the child to say which port it bound, and for that port to answer.
+    fn wait_for_port(&mut self, port_file: &Path) -> u16 {
+        let started = Instant::now();
+        loop {
+            if let Ok(text) = std::fs::read_to_string(port_file) {
+                let port: u16 = text.trim().parse().expect("the port file holds a port");
+                let address = std::net::SocketAddr::from(([127, 0, 0, 1], port));
+                // A connect the machine drops costs the operating system's timeout, so this
+                // waits a bounded one at a time.
+                if std::net::TcpStream::connect_timeout(&address, Duration::from_secs(5)).is_ok() {
+                    return port;
+                }
             }
-            std::thread::sleep(std::time::Duration::from_millis(50));
+            if let Some(status) = self.child.try_wait().expect("the fake API can be asked") {
+                panic!("the fake API ended before it answered ({status})");
+            }
+            if started.elapsed() >= FAKE_START_LIMIT {
+                panic!("the fake API did not answer within {FAKE_START_LIMIT:?}");
+            }
+            std::thread::sleep(Duration::from_millis(50));
         }
-        panic!("the fake API never answered on the port");
     }
 }
 
@@ -141,22 +209,68 @@ impl Drop for FakeApi {
     }
 }
 
-/// The CLI's exit code and output for `effects import`.
-fn run_import(home: &std::path::Path, port: u16, file: &std::path::Path) -> (i32, String, String) {
-    let output = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
-        .arg("effects")
-        .arg("import")
-        .arg(file)
-        .arg("--api")
-        .arg(format!("http://127.0.0.1:{port}"))
+/// Runs the CLI with `args` and a temporary home, and returns its exit code, stdout and
+/// stderr. A run that has not ended after [`CLI_LIMIT`] is killed and fails the test.
+///
+/// One run, one verdict: the CLI itself tries a connect that failed (nothing was sent, so it
+/// is safe) and this test does not decide anything on how long the run took (#328).
+fn run_cli(home: &Path, args: &[&std::ffi::OsStr]) -> (i32, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
+        .args(args)
         .env("CANVAS_RGB_HOME", home)
-        .output()
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
         .expect("the CLI runs");
+    // Read both pipes while the child runs, so a full pipe never stalls it.
+    let mut out = child.stdout.take().expect("stdout is piped");
+    let mut err = child.stderr.take().expect("stderr is piped");
+    let out = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = out.read_to_string(&mut text);
+        text
+    });
+    let err = std::thread::spawn(move || {
+        let mut text = String::new();
+        let _ = err.read_to_string(&mut text);
+        text
+    });
+
+    let started = Instant::now();
+    let status = loop {
+        if let Some(status) = child.try_wait().expect("the CLI can be asked") {
+            break status;
+        }
+        if started.elapsed() >= CLI_LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            let stdout = out.join().unwrap_or_default();
+            let stderr = err.join().unwrap_or_default();
+            panic!("the CLI was still running after {CLI_LIMIT:?} and was killed: {stdout} {stderr}");
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
     (
-        output.status.code().unwrap_or(-1),
-        String::from_utf8_lossy(&output.stdout).into_owned(),
-        String::from_utf8_lossy(&output.stderr).into_owned(),
+        status.code().unwrap_or(-1),
+        out.join().unwrap_or_default(),
+        err.join().unwrap_or_default(),
     )
+}
+
+/// The CLI's exit code and output for `effects import <file>` against `port`.
+fn run_import(home: &Path, port: u16, file: &Path) -> (i32, String, String) {
+    run_import_with(home, port, file, &[])
+}
+
+/// As [`run_import`], with extra flags before `--api`.
+fn run_import_with(home: &Path, port: u16, file: &Path, flags: &[&str]) -> (i32, String, String) {
+    let api = format!("http://127.0.0.1:{port}");
+    let mut args: Vec<&std::ffi::OsStr> = vec!["effects".as_ref(), "import".as_ref(), file.as_os_str()];
+    args.extend(flags.iter().map(|flag| -> &std::ffi::OsStr { flag.as_ref() }));
+    args.push("--api".as_ref());
+    args.push(api.as_ref());
+    run_cli(home, &args)
 }
 
 #[test]
@@ -196,17 +310,8 @@ fn the_import_command_sends_the_replace_flag() {
     let effect = home.0.join("spark.html");
     std::fs::write(&effect, "<html></html>").expect("the effect is written");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
-        .arg("effects")
-        .arg("import")
-        .arg(&effect)
-        .arg("--replace")
-        .arg("--api")
-        .arg(format!("http://127.0.0.1:{port}"))
-        .env("CANVAS_RGB_HOME", &home.0)
-        .output()
-        .expect("the CLI runs");
-    assert_eq!(output.status.code().unwrap_or(-1), 0);
+    let (code, stdout, stderr) = run_import_with(&home.0, port, &effect, &["--replace"]);
+    assert_eq!(code, 0, "the command succeeds: {stdout} {stderr}");
 
     let record = std::fs::read_to_string(&log).expect("the request was written down");
     let (_, body) = record.split_once('\n').expect("the record has two parts");
@@ -229,17 +334,8 @@ fn the_import_command_refuses_a_file_over_the_limit() {
     )
     .expect("the effect is written");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
-        .arg("effects")
-        .arg("import")
-        .arg(&effect)
-        .arg("--api")
-        .arg(format!("http://127.0.0.1:{port}"))
-        .env("CANVAS_RGB_HOME", &home.0)
-        .output()
-        .expect("the CLI runs");
-    assert_ne!(output.status.code().unwrap_or(-1), 0);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (code, _stdout, stderr) = run_import(&home.0, port, &effect);
+    assert_ne!(code, 0);
     assert!(
         stderr.contains("the limit is"),
         "the message names the limit: {stderr}"
@@ -259,17 +355,8 @@ fn the_import_command_refuses_a_file_it_cannot_read() {
     std::fs::write(home.0.join("api-token"), TOKEN).expect("the token is written");
     let missing = home.0.join("nope.html");
 
-    let output = Command::new(env!("CARGO_BIN_EXE_canvas-rgb-cli"))
-        .arg("effects")
-        .arg("import")
-        .arg(&missing)
-        .arg("--api")
-        .arg("http://127.0.0.1:1")
-        .env("CANVAS_RGB_HOME", &home.0)
-        .output()
-        .expect("the CLI runs");
-    assert_ne!(output.status.code().unwrap_or(-1), 0);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let (code, _stdout, stderr) = run_import(&home.0, 1, &missing);
+    assert_ne!(code, 0);
     assert!(
         stderr.contains("could not read"),
         "the message says the file is missing: {stderr}"

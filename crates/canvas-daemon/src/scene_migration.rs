@@ -326,6 +326,22 @@ mod tests {
         assert_eq!(by("openrgb:board#z2").arrangement, Arrangement::Single);
     }
 
+    /// A layout from before #312 saved the ROYUAN keyboard as a `Point` (it reported one LED).
+    /// It reports a 128-key matrix now, and main repaired that `Point` once per install; under
+    /// Scenes the migration settles it instead: a zone the devices call a matrix is a grid.
+    #[test]
+    fn a_point_saved_for_the_keyboard_becomes_a_grid_when_it_reports_a_matrix() {
+        let map = (0..128).map(Some).collect();
+        let keyboard =
+            device("royuan:3151:4015", 1, vec![zone(0, ZoneKind::Matrix { width: 22, height: 6, map }, 128)]);
+        let mut point = placed("royuan:3151:4015", 0);
+        point.shape = ZoneShape::Point;
+        let layouts = file("a", vec![layout("a", "A", vec![point], None)]);
+        let (lights, _) = migrate(Some(&layouts), &[keyboard]);
+        assert_eq!(lights.lights.len(), 1);
+        assert_eq!(lights.lights[0].arrangement, Arrangement::Grid, "a key each, not one colour");
+    }
+
     #[test]
     fn a_hidden_zone_is_a_light_in_no_group() {
         let mut hidden = placed("openrgb:board", 1);

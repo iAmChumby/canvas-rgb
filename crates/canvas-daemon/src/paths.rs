@@ -12,6 +12,9 @@ use std::path::{Path, PathBuf};
 /// The environment variable that relocates every user file.
 pub const HOME_ENV: &str = "CANVAS_RGB_HOME";
 
+/// The keyboard's still bookkeeping (#312), under [`home`].
+pub const ROYUAN_STILLS_FILE: &str = "royuan-stills.json";
+
 /// The daemon's user directory: `%APPDATA%\canvas-rgb`, or `$CANVAS_RGB_HOME`.
 pub fn home() -> PathBuf {
     match std::env::var_os(HOME_ENV) {
@@ -81,6 +84,12 @@ pub fn token_file() -> PathBuf {
 
 pub fn backups_dir() -> PathBuf {
     home().join(BACKUPS_DIR)
+}
+
+/// The keyboard's still bookkeeping: the last day's upload attempts and the picture's hash
+/// (#312). The daemon passes this path to the adapter; it is user data, never `%ProgramData%`.
+pub fn royuan_stills_file() -> PathBuf {
+    home().join(ROYUAN_STILLS_FILE)
 }
 
 /// The backups folder inside a given home directory.
