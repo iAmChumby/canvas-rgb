@@ -6,7 +6,6 @@
 
 use crate::device::DeviceInfo;
 use crate::fans::{FanMode, FanProfile, FansStatus};
-use crate::layout::{Layout, RenderScale, SamplingMode};
 use crate::props::{InputNeeds, Preset, Props, PropertySchema};
 use crate::scene::{Arrangement, Light, LightId, Scene};
 use crate::traits::GroupState;
@@ -17,7 +16,6 @@ pub mod routes {
     pub const PREFIX: &str = "/api/v1";
     pub const STATUS: &str = "/api/v1/status";
     pub const OUTPUT: &str = "/api/v1/output";
-    pub const RENDER: &str = "/api/v1/render";
     pub const DEVICES: &str = "/api/v1/devices";
     /// `PATCH` with [`super::PatchZone`].
     pub const DEVICE_ZONE: &str = "/api/v1/devices/{id}/zones/{zone}";
@@ -74,7 +72,7 @@ pub mod routes {
     /// stops it. The editor PUTs every [`crate::consts::DRAFT_HEARTBEAT`] while the draft runs;
     /// the slot ends after [`crate::consts::DRAFT_LEASE`] with no PUT. Nothing about a draft is
     /// saved: the previous effect comes back on Stop, on expiry, or when the daemon restarts.
-    /// An `activate` or a layout switch ends the draft without restoring anything, because the
+    /// An `activate` or a scene switch ends the draft without restoring anything, because the
     /// owner chose something else. A bad PUT (one that does not parse) leaves a running draft
     /// alone. Same body cap as [`EFFECTS_IMPORT`].
     pub const EFFECT_DRAFT: &str = "/api/v1/effects/draft";
@@ -323,25 +321,6 @@ pub struct PatchOutput {
     /// [`crate::consts::WARMTH_MIN`]..=[`crate::consts::WARMTH_OFF`], 422 otherwise.
     #[serde(default)]
     pub warmth: Option<u16>,
-}
-
-/// `GET /render`: fps is global; scale and sampling are the active layout's.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct RenderState {
-    /// 10..=60
-    pub fps: u32,
-    pub scale: RenderScale,
-    pub sampling: SamplingMode,
-}
-
-/// `PATCH /render`: fps changes live; scale and sampling apply to the active layout.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct PatchRender {
-    pub fps: Option<u32>,
-    pub scale: Option<RenderScale>,
-    pub sampling: Option<SamplingMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -779,7 +758,7 @@ pub struct DraftStatus {
     pub lease_ms: u64,
     /// A sentence about the ending, when it needs saying: the prior effect could not be
     /// restored (its file was deleted mid-draft), so the lights are black. Absent when the
-    /// prior, or black for a layout with no effect, went on normally.
+    /// prior, or black for a group with no effect, went on normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub note: Option<String>,
@@ -820,13 +799,6 @@ pub struct ActivateEffect {
 #[ts(export)]
 pub struct SetFavorite {
     pub favorite: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct LayoutsResponse {
-    pub active: String,
-    pub layouts: Vec<Layout>,
 }
 
 /// `PATCH /fans/headers/{h}` body is a [`FanMode`].

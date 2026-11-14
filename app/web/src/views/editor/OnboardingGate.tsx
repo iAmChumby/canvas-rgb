@@ -8,7 +8,7 @@ import { markRedirected, redirectedThisLaunch, shouldOpen } from "@/views/editor
 
 /**
  * The first-launch redirect: opening the app on any page while the daemon says the onboarding
- * is not finished takes the owner to the Layout page, where the onboarding opens by itself. It
+ * is not finished takes the owner to the Scenes page, where the onboarding opens by itself. It
  * happens once per launch, and never after "Set up later". It renders nothing.
  */
 export function OnboardingGate() {
@@ -19,10 +19,10 @@ export function OnboardingGate() {
   useEffect(() => {
     if (!status || redirectedThisLaunch()) return;
     markRedirected();
-    const onLayoutPage = pathname === "/" || pathname === "";
+    const onScenesPage = pathname === "/" || pathname === "";
     // The gate never runs while the code editor is open (the onboarding owns the window), but
     // the guard costs nothing and keeps every navigation behind the one question.
-    if (!onLayoutPage && shouldOpen(status)) {
+    if (!onScenesPage && shouldOpen(status)) {
       requestNavigation(() => {
         // The page change is the app's, not the person's: the "Updated to" toast, which a person's
         // first navigation sends away, must survive it.

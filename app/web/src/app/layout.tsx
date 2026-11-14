@@ -16,7 +16,7 @@ import { RAIL_EARLY_SCRIPT } from "@/lib/railWidth";
 
 export const metadata: Metadata = {
   title: "canvas-rgb",
-  description: "Lighting and fan controller: layout, effects, devices, fans and settings.",
+  description: "Lighting and fan controller: scenes, effects, devices, fans and settings.",
 };
 
 // Runs before first paint. The theme follows Windows by default: with no data-theme attribute the

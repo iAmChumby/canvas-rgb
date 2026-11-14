@@ -38,6 +38,9 @@ fn zone_of<'a>(placed: &PlacedZone, devices: &'a [DeviceInfo]) -> Option<&'a can
         .and_then(|d| d.zones.iter().find(|z| z.index == placed.zone_index))
 }
 
+/// The ROYUAN keyboard's key zone (device id, zone index): one LED before #312, a matrix since.
+const ROYUAN_KEYS: (&str, u32) = ("royuan:3151:4015", 0);
+
 /// The arrangement a placement becomes: a ring stays a ring; a matrix zone is a grid; a single
 /// zone is a single; everything else is a strip. A device list that does not hold the zone
 /// (nothing is connected at the moment of the migration) leaves the placement's own shape to
@@ -53,6 +56,9 @@ fn arrangement_of(placed: &PlacedZone, devices: &[DeviceInfo]) -> Arrangement {
     }
     match placed.shape {
         ZoneShape::Grid { .. } => Arrangement::Grid,
+        // The ROYUAN keyboard reported one LED before #312, so layouts saved then hold a `Point`
+        // for it; its adapter reports a key matrix now, so it is a grid even while unplugged.
+        ZoneShape::Point if (placed.device_id.0.as_str(), placed.zone_index) == ROYUAN_KEYS => Arrangement::Grid,
         ZoneShape::Point => Arrangement::Single,
         _ => Arrangement::Strip,
     }
@@ -340,6 +346,22 @@ mod tests {
         let (lights, _) = migrate(Some(&layouts), &[keyboard]);
         assert_eq!(lights.lights.len(), 1);
         assert_eq!(lights.lights[0].arrangement, Arrangement::Grid, "a key each, not one colour");
+    }
+
+    /// The same keyboard, not plugged in when the migration runs. Its saved `Point` must still
+    /// become a grid: no later step changes a light's arrangement, so a `Single` here would keep
+    /// every key one colour for good (main's one-off repair ran whenever the keyboard appeared).
+    #[test]
+    fn a_point_saved_for_the_keyboard_becomes_a_grid_while_it_is_unplugged() {
+        let mut point = placed("royuan:3151:4015", 0);
+        point.shape = ZoneShape::Point;
+        let mut mouse = placed("openrgb:mouse", 0);
+        mouse.shape = ZoneShape::Point;
+        let layouts = file("a", vec![layout("a", "A", vec![point, mouse], None)]);
+        let (lights, _) = migrate(Some(&layouts), &[]);
+        let by = |id: &str| lights.lights.iter().find(|l| l.id == id).unwrap_or_else(|| panic!("no light {id}"));
+        assert_eq!(by("royuan:3151:4015#z0").arrangement, Arrangement::Grid, "the keyboard is a key grid");
+        assert_eq!(by("openrgb:mouse#z0").arrangement, Arrangement::Single, "any other point stays a single");
     }
 
     #[test]

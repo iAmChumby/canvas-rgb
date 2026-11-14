@@ -204,8 +204,7 @@ pub trait Engine: Send + Sync {
     /// Stops the thread. Does not write anything; callers write black first if wanted.
     fn shutdown(&self);
 
-    // Scenes (0.14.0). After `set_scene` the loop runs one canvas per group; `set_layout`
-    // switches back (kept until Layout is removed).
+    // Scenes (0.14.0). After `set_scene` the loop runs one canvas per group.
 
     /// Runs a scene: `lights` and `devices` give each group's members their LEDs. `fade`
     /// blends the frames last sent into the new scene's over [`crate::scene::SCENE_FADE_MS`].

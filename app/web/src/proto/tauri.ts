@@ -17,4 +17,4 @@ export const CMD_TRAY_PREFS = "tray_prefs";
 export const CMD_SET_EDITOR = "set_editor";
 export const CMD_SET_CHANNEL = "set_channel";
 export const TRAY_PREFS_FILE = "prefs.json";
-export const EDITOR_PAGES = ["layout", "effects", "devices", "fans", "settings", "updates"] as const;
+export const EDITOR_PAGES = ["scenes", "effects", "devices", "fans", "settings", "updates"] as const;

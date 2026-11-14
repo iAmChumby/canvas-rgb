@@ -3,7 +3,6 @@
 export const routes = {
   status: "/api/v1/status",
   output: "/api/v1/output",
-  render: "/api/v1/render",
   devices: "/api/v1/devices",
   deviceZone: (id: string, zone: number) => `/api/v1/devices/${encodeURIComponent(id)}/zones/${zone}`,
   deviceIdentify: (id: string) => `/api/v1/devices/${encodeURIComponent(id)}/identify`,
