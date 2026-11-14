@@ -441,21 +441,20 @@ fn to_io(error: canvas_proto::AdapterError) -> std::io::Error {
 }
 
 /// Applies a resize to the device, as OpenRGB does: a resizable zone takes the size within its
-/// range, and the controller's colours are blanked to the new length. Returns whether the zone
-/// took the size; a zone that cannot resize keeps its own.
+/// range (a zone that cannot resize keeps its own), and the controller's colours are blanked to
+/// the new length. Returns whether the controller exists: OpenRGB announces a new device list
+/// for any resize of a known controller, as this fake did before the delay hook.
 fn apply_resize(state: &mut FakeState, device: u32, zone: usize, leds: u32) -> bool {
     let Some(target) = state.devices.get_mut(device as usize) else {
         return false;
     };
-    let mut applied = false;
     if let Some(zone) = target.info.zones.get_mut(zone) {
         if zone.resizable && zone.min_leds <= zone.max_leds {
             zone.led_count = leds.max(zone.min_leds).min(zone.max_leds);
-            applied = true;
         }
     }
     target.colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; target.info.led_count() as usize];
-    applied
+    true
 }
 
 /// The packet OpenRGB sends with no reply owed, to say the device list changed.
