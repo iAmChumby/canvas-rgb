@@ -8,6 +8,7 @@ import type { EffectSummary } from "@/proto/EffectSummary";
 import type { Arrangement } from "@/proto/Arrangement";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
+import type { ChainView } from "@/proto/ChainView";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { FanProfile } from "@/proto/FanProfile";
@@ -323,9 +324,10 @@ export const DEVICES: DeviceInfo[] = [
     connected: true,
     zones: [
       zone(0, "JAF", { type: "linear" }, 0, 0, 240, true),
-      zone(1, "JARGB 1", { type: "linear" }, 120, 0, 240, true),
-      zone(2, "JARGB 2", { type: "linear" }, 120, 0, 240, true),
-      zone(3, "JARGB 3", { type: "linear" }, 120, 0, 240, true),
+      // The board's ARGB headers drive up to 300 LEDs (the JARGB board's own maximum).
+      zone(1, "JARGB 1", { type: "linear" }, 120, 0, 300, true),
+      zone(2, "JARGB 2", { type: "linear" }, 120, 0, 300, true),
+      zone(3, "JARGB 3", { type: "linear" }, 120, 0, 300, true),
     ],
   },
   {
@@ -557,6 +559,33 @@ export const DEMO_LIGHTS: LightView[] = DEVICES.flatMap((device) =>
 function demoLightIds(...prefixes: string[]): string[] {
   return DEMO_LIGHTS.filter((l) => prefixes.some((p) => l.light.device_id.startsWith(p))).map((l) => l.light.id);
 }
+
+// ---- chains (0.15.0) ----
+
+/**
+ * The demo's chains: one per resizable zone, as `GET /api/v1/chains` lists them before anything
+ * is set up. A header's `parts` is its whole-zone light until the owner describes what is plugged
+ * in. Two scenarios add the other states: `?state=chains` starts with one header set up as seven
+ * fans (`demoScenarios.ts`), and an empty header is what the demo's "Nothing lit up" leaves.
+ */
+export const DEMO_CHAINS: ChainView[] = DEVICES.flatMap((device) =>
+  device.zones
+    .filter((zone) => zone.resizable)
+    .map((zone): ChainView => {
+      const light = DEMO_LIGHTS.find((l) => l.light.id === zoneLightId(device.id, zone.index));
+      return {
+        device_id: device.id,
+        device_name: device.name,
+        zone_index: zone.index,
+        zone_name: zone.name,
+        state: "not_set_up",
+        leds: zone.led_count,
+        min_leds: zone.min_leds,
+        max_leds: zone.max_leds,
+        parts: light ? [light] : [],
+      };
+    }),
+);
 
 const demoGroup = (
   id: string,
