@@ -510,7 +510,12 @@ pub fn spawn_ticker(app: Arc<App>) {
                 }
                 Tick::SetupExpired { ticker_continues } => {
                     tracing::info!("the chain setup ended by timeout ({SETUP_TIMEOUT:?} after the last light request); restoring");
-                    restore(&app).await;
+                    // The same restore a cancel runs: the header's earlier length, the hold, the
+                    // record and the scene (#338). A resize the device refuses keeps the record
+                    // for the next start to replay.
+                    if let Err(e) = crate::api::chains::finish_setup(&app).await {
+                        tracing::warn!(error = %e.message, "the header could not be put back; the restore record stays for the next start");
+                    }
                     if !ticker_continues {
                         return;
                     }

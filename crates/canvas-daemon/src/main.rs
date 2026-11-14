@@ -100,6 +100,10 @@ fn finish(exit: Exit) -> std::process::ExitCode {
 /// The quit path's bounds (G3). The whole path ends well inside `QUIT_DEADLINE`.
 const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const ON_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+/// The chain setup's restore at quit: a resize, a re-read of the list and the scene back. A
+/// restore cut off by this bound leaves `chain-restore.json` on disk, and the next start replays
+/// it; the bound is what leaves the whole quit inside [`QUIT_DEADLINE`].
+const SETUP_RESTORE_LIMIT: std::time::Duration = std::time::Duration::from_millis(400);
 const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
@@ -364,12 +368,28 @@ async fn quit_sequence(app: &Arc<App>, fakes: bool) {
     // The service log has the moment it ended OpenRGB; this is the moment frames last went out (#81).
     app.last_frame.log("the daemon was told to stop");
 
-    // 1. `on_quit`: black, or the last frame left in place.
+    // 1. A chain setup holds a header raised: its earlier length goes back before anything is
+    //    written to the lights (#338). The same restore a cancel runs; a restore the device
+    //    refuses keeps the record, and the next start replays it.
+    match tokio::time::timeout(SETUP_RESTORE_LIMIT, canvas_daemon::api::chains::finish_setup(app))
+        .await
+    {
+        Ok(Ok(_)) => {}
+        Ok(Err(e)) => tracing::warn!(
+            error = %e.message,
+            "the chain setup's restore failed at quit; the restore record stays for the next start"
+        ),
+        Err(_) => tracing::warn!(
+            "the chain setup's restore did not finish in time; the restore record stays for the next start"
+        ),
+    }
+
+    // 2. `on_quit`: black, or the last frame left in place.
     if tokio::time::timeout(ON_QUIT_LIMIT, write_on_quit(app)).await.is_err() {
         tracing::warn!("the on-quit write did not finish in time");
     }
 
-    // 2. Tell the service, if it is up. Fakes mode never opens the real pipe,
+    // 3. Tell the service, if it is up. Fakes mode never opens the real pipe,
     // not even to say goodbye.
     if canvas_daemon::fakes::real_pipe_enabled(fakes) {
         let notice = canvas_daemon::pipe_client::notify_quitting(app);
@@ -378,17 +398,17 @@ async fn quit_sequence(app: &Arc<App>, fakes: bool) {
         }
     }
 
-    // 3. Stop the render loop. Its thread is joined on a blocking thread, so a stuck
+    // 4. Stop the render loop. Its thread is joined on a blocking thread, so a stuck
     // join cannot hold the daemon.
     let engine = app.engine.clone();
     let stop = tokio::task::spawn_blocking(move || engine.shutdown());
     if tokio::time::timeout(ENGINE_STOP_LIMIT, stop).await.is_err() {
         tracing::warn!("the render loop did not stop in time");
     }
-    // The black frame of step 1 counts: this is the last frame the daemon sent before it ended (#81).
+    // The black frame of step 2 counts: this is the last frame the daemon sent before it ended (#81).
     app.last_frame.log("the daemon finished its quit sequence");
 
-    // 4. The OpenRGB server the daemon started.
+    // 5. The OpenRGB server the daemon started.
     kill_openrgb_server(app);
 }
 
