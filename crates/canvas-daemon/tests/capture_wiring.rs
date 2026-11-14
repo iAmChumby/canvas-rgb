@@ -280,6 +280,7 @@ fn run_on_d0(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::traits::Eff
         name: None,
         arrangement: Arrangement::Strip,
         reversed: false,
+        kind: None,
     };
     engine.set_scene(
         vec![light.clone()],

@@ -2011,6 +2011,7 @@ power = "running"
         use canvas_proto::scene::{Arrangement, Light};
 
         let held = LightsFile {
+            chains: Vec::new(),
             schema_version: LIGHTS_SCHEMA,
             lights: vec![
                 Light {
@@ -2021,6 +2022,7 @@ power = "running"
                     name: Some("Intake".into()),
                     arrangement: Arrangement::Ring,
                     reversed: true,
+                    kind: None,
                 },
                 Light {
                     id: "openrgb:board#z0p2".into(),
@@ -2030,6 +2032,7 @@ power = "running"
                     name: Some("Exhaust".into()),
                     arrangement: Arrangement::Strip,
                     reversed: false,
+                    kind: None,
                 },
             ],
         };

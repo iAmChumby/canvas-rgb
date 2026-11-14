@@ -462,8 +462,10 @@ pub fn a_scene(
         name: None,
         arrangement: canvas_proto::scene::Arrangement::Strip,
         reversed: false,
+        kind: None,
     };
     let lights = canvas_proto::scene::LightsFile {
+        chains: Vec::new(),
         schema_version: canvas_proto::scene::LIGHTS_SCHEMA,
         lights: vec![light],
     };

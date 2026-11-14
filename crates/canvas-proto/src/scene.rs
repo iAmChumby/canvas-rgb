@@ -47,6 +47,17 @@ pub const GROUP_BRIGHTNESS_MAX: u8 = 100;
 pub const SCENE_HTML_MAX: usize = 1;
 /// The id prefix of an HTML effect.
 pub const HTML_EFFECT_PREFIX: &str = "html:";
+/// Chain setup (0.15.0): the earlier length of a header held raised by an open setup, beside
+/// `lights.json`. Written before the raise, deleted once the length is back. Start-up replays it.
+pub const CHAIN_RESTORE_FILE: &str = "chain-restore.json";
+/// Chain setup: everything a commit needs to be undone, written before the final resize.
+/// Start-up rolls a leftover one back.
+pub const CHAIN_INTENT_FILE: &str = "chain-intent.json";
+/// The longest a part's name may be, in characters.
+pub const PART_NAME_MAX: usize = GROUP_NAME_MAX;
+/// A setup session ends this long after its last light request (the app re-sends one every
+/// 2 s while it is open).
+pub const SETUP_TIMEOUT_MS: u64 = 6_000;
 
 /// A light's id. Stable across reconnects: it is built from the device id, never from an
 /// adapter index.
@@ -56,6 +67,52 @@ pub type LightId = String;
 /// `p{n}`.
 pub fn zone_light_id(device: &DeviceId, zone: u32) -> LightId {
     format!("{}#z{}", device.0, zone)
+}
+
+/// `"{zone_light_id}p{n}"`: the id of part `n` of a chain, counted from 1 by position along it.
+pub fn part_light_id(device: &DeviceId, zone: u32, n: u32) -> LightId {
+    format!("{}p{}", zone_light_id(device, zone), n)
+}
+
+/// What the owner said is plugged into a chain, part by part.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainPartKind {
+    Fan,
+    Strip,
+    /// Anything else. Kept as its own kind so the owner's answer is never rewritten.
+    Other,
+}
+
+impl ChainPartKind {
+    /// How a part of this kind reads the canvas: a fan is a ring, anything else a strip.
+    pub fn arrangement(self) -> Arrangement {
+        match self {
+            ChainPartKind::Fan => Arrangement::Ring,
+            ChainPartKind::Strip | ChainPartKind::Other => Arrangement::Strip,
+        }
+    }
+}
+
+/// Whether the owner set a header up. A header with no record is not set up.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainState {
+    /// The owner said nothing is plugged in: no light, driven black.
+    Empty,
+    /// Its parts are lights.
+    SetUp,
+}
+
+/// One header's setup state, in `lights.json`.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChainRecord {
+    pub device_id: DeviceId,
+    pub zone_index: u32,
+    pub state: ChainState,
 }
 
 /// How a light's LEDs read the group's canvas inside the light's slot.
@@ -104,6 +161,11 @@ pub struct Light {
     /// The LEDs run the other way.
     #[serde(default)]
     pub reversed: bool,
+    /// What the owner said this part is. `None` for a whole-zone light and for a light from
+    /// before 0.15.0.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<ChainPartKind>,
 }
 
 /// `lights.json`.
@@ -113,11 +175,14 @@ pub struct LightsFile {
     pub schema_version: u32,
     #[serde(default)]
     pub lights: Vec<Light>,
+    /// The headers the owner set up or marked empty (0.15.0). Absent in older files.
+    #[serde(default)]
+    pub chains: Vec<ChainRecord>,
 }
 
 impl Default for LightsFile {
     fn default() -> Self {
-        Self { schema_version: LIGHTS_SCHEMA, lights: Vec::new() }
+        Self { schema_version: LIGHTS_SCHEMA, lights: Vec::new(), chains: Vec::new() }
     }
 }
 
@@ -282,6 +347,7 @@ mod tests {
             name: None,
             arrangement: Arrangement::Strip,
             reversed: false,
+            kind: None,
         }
     }
 
@@ -433,9 +499,61 @@ mod tests {
         l.name = Some("Front fan".into());
         l.arrangement = Arrangement::Ring;
         l.reversed = true;
-        let file = LightsFile { schema_version: LIGHTS_SCHEMA, lights: vec![l, light("b")] };
+        let file = LightsFile { schema_version: LIGHTS_SCHEMA, lights: vec![l, light("b")], chains: Vec::new() };
         let json = serde_json::to_string(&file).unwrap();
         assert!(json.contains(r#""arrangement":"ring""#), "{json}");
+        assert_eq!(serde_json::from_str::<LightsFile>(&json).unwrap(), file);
+    }
+
+    #[test]
+    fn part_light_id_appends_p_and_counts_from_one() {
+        let d = DeviceId("openrgb:mb".into());
+        assert_eq!(part_light_id(&d, 0, 1), "openrgb:mb#z0p1");
+        assert_eq!(part_light_id(&d, 2, 7), "openrgb:mb#z2p7");
+        assert!(part_light_id(&d, 0, 1).starts_with(&zone_light_id(&d, 0)));
+    }
+
+    #[test]
+    fn chain_part_kind_maps_to_arrangement() {
+        assert_eq!(ChainPartKind::Fan.arrangement(), Arrangement::Ring);
+        assert_eq!(ChainPartKind::Strip.arrangement(), Arrangement::Strip);
+        assert_eq!(ChainPartKind::Other.arrangement(), Arrangement::Strip);
+    }
+
+    #[test]
+    fn other_survives_a_round_trip_as_other() {
+        let json = serde_json::to_string(&ChainPartKind::Other).unwrap();
+        assert_eq!(json, r#""other""#);
+        assert_eq!(serde_json::from_str::<ChainPartKind>(&json).unwrap(), ChainPartKind::Other);
+        let mut l = light("a");
+        l.kind = Some(ChainPartKind::Other);
+        let back: Light = serde_json::from_str(&serde_json::to_string(&l).unwrap()).unwrap();
+        assert_eq!(back.kind, Some(ChainPartKind::Other));
+    }
+
+    #[test]
+    fn a_lights_file_without_chains_or_kinds_still_parses() {
+        // An 0.14.0 lights.json.
+        let old = r#"{"schema_version":1,"lights":[{"id":"openrgb:mb#z0","device_id":"openrgb:mb","zone_index":0,"arrangement":"strip"}]}"#;
+        let file: LightsFile = serde_json::from_str(old).unwrap();
+        assert!(file.chains.is_empty());
+        assert_eq!(file.lights[0].kind, None);
+        // A light with no kind writes no kind, so an 0.14.0 reader sees what it wrote.
+        assert!(!serde_json::to_string(&file.lights[0]).unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn chain_records_round_trip() {
+        let file = LightsFile {
+            schema_version: LIGHTS_SCHEMA,
+            lights: vec![light("a")],
+            chains: vec![
+                ChainRecord { device_id: DeviceId("openrgb:mb".into()), zone_index: 0, state: ChainState::SetUp },
+                ChainRecord { device_id: DeviceId("openrgb:mb".into()), zone_index: 1, state: ChainState::Empty },
+            ],
+        };
+        let json = serde_json::to_string(&file).unwrap();
+        assert!(json.contains(r#""state":"set_up""#) && json.contains(r#""state":"empty""#), "{json}");
         assert_eq!(serde_json::from_str::<LightsFile>(&json).unwrap(), file);
     }
 }

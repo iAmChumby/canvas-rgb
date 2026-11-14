@@ -80,7 +80,7 @@ pub fn default_scenes(lights: &LightsFile) -> ScenesFile {
 
 /// An empty lights file.
 pub fn empty_lights() -> LightsFile {
-    LightsFile { schema_version: LIGHTS_SCHEMA, lights: Vec::new() }
+    LightsFile { chains: Vec::new(), schema_version: LIGHTS_SCHEMA, lights: Vec::new() }
 }
 
 /// The light that is a whole zone, with the arrangement its kind starts as.
@@ -93,6 +93,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
         name: None,
         arrangement: Arrangement::default_for(&zone.kind),
         reversed: false,
+        kind: None,
     }
 }
 
@@ -1716,6 +1717,7 @@ pub(crate) mod tests {
     #[test]
     fn html_groups_over_the_limit_are_set_off_in_scene_order() {
         let ls = LightsFile {
+            chains: Vec::new(),
             schema_version: LIGHTS_SCHEMA,
             lights: ["a", "b", "c"].iter().map(|id| Light {
                 id: (*id).into(),
@@ -1725,6 +1727,7 @@ pub(crate) mod tests {
                 name: None,
                 arrangement: Arrangement::Strip,
                 reversed: false,
+                kind: None,
             }).collect(),
         };
         let g = |id: &str, member: &str, effect: &str| Group {

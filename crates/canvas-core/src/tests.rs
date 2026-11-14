@@ -246,6 +246,7 @@ fn a_consumer_that_arrives_between_the_park_decision_and_the_wait_is_not_slept_t
         name: None,
         arrangement: Arrangement::Strip,
         reversed: false,
+        kind: None,
     };
     engine.set_scene(
         vec![light],
@@ -355,6 +356,7 @@ mod scene {
             name: None,
             arrangement: Arrangement::Strip,
             reversed: false,
+            kind: None,
         }
     }
 
@@ -369,6 +371,7 @@ mod scene {
             name: None,
             arrangement: Arrangement::Strip,
             reversed: false,
+            kind: None,
         }
     }
 

@@ -158,11 +158,12 @@ fn light(
         name: name.map(str::to_string),
         arrangement: Arrangement::Strip,
         reversed: false,
+        kind: None,
     }
 }
 
 fn lights_file(lights: Vec<Light>) -> LightsFile {
-    LightsFile { schema_version: LIGHTS_SCHEMA, lights }
+    LightsFile { chains: Vec::new(), schema_version: LIGHTS_SCHEMA, lights }
 }
 
 async fn get_lights(router: axum::Router) -> (StatusCode, serde_json::Value) {
