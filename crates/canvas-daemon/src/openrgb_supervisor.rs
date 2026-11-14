@@ -622,6 +622,54 @@ pub async fn supervise_with_rescans<D, L>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn effective_sizes_overlays_a_hold_on_a_saved_size() {
+        let saved = ZoneSizes::from([(
+            "openrgb:mb".to_string(),
+            BTreeMap::from([(0u32, 120u32), (1u32, 60u32)]),
+        )]);
+        let holds = ZoneHolds::from([(("openrgb:mb".to_string(), 0u32), 300u32)]);
+
+        let effective = effective_sizes(&saved, &holds);
+
+        let mb = effective.get("openrgb:mb").expect("the device is in the sizes");
+        assert_eq!(mb.get(&0), Some(&300), "the hold replaces the saved 120");
+        assert_eq!(mb.get(&1), Some(&60), "the other zone keeps its saved size");
+    }
+
+    #[test]
+    fn effective_sizes_adds_a_hold_the_file_lacks() {
+        let saved = ZoneSizes::from([(
+            "openrgb:dram".to_string(),
+            BTreeMap::from([(0u32, 8u32)]),
+        )]);
+        let holds = ZoneHolds::from([(("openrgb:mb".to_string(), 0u32), 300u32)]);
+
+        let effective = effective_sizes(&saved, &holds);
+
+        assert_eq!(
+            effective.get("openrgb:mb").and_then(|zones| zones.get(&0)),
+            Some(&300),
+            "the held device is added"
+        );
+        assert_eq!(
+            effective.get("openrgb:dram").and_then(|zones| zones.get(&0)),
+            Some(&8),
+            "the saved device is kept"
+        );
+    }
+
+    #[test]
+    fn effective_sizes_with_no_holds_is_the_saved_sizes() {
+        let saved = ZoneSizes::from([(
+            "openrgb:mb".to_string(),
+            BTreeMap::from([(0u32, 120u32)]),
+        )]);
+
+        assert_eq!(effective_sizes(&saved, &ZoneHolds::new()), saved);
+    }
 
     #[test]
     fn the_backoff_grows_from_250ms_to_5s() {

@@ -1,17 +1,24 @@
 //! Chain setup raises a header to its longest length while the owner drags (#338). The OpenRGB
 //! supervisor re-applies every saved zone size each refresh, so a raise on a header that first run
-//! sized to 120 is "wrong" to it. This test runs the real supervisor against the fake server to
-//! settle whether the refresh resizes the raise back.
+//! sized to 120 is "wrong" to it. A setup holds the raised length while it works (`App::zone_holds`,
+//! `canvas_daemon::state::ZoneHolds`), and the supervisor overlays the holds on the saved sizes: a
+//! held zone is left alone, and an unheld one is still resized back.
 
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
 use canvas_daemon::openrgb_supervisor::supervise_with_rescans;
+use canvas_daemon::state::ZoneHolds;
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::traits::DeviceAdapter;
 use canvas_proto::DeviceId;
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
+
+/// The saved size of the header, from the first run.
+const SAVED: u32 = 120;
+/// The length chain setup raises it to while the owner drags.
+const RAISED: u32 = 300;
 
 /// A board with one JARGB header: any size from 0 to 300.
 fn board() -> Vec<DeviceInfo> {
@@ -48,36 +55,134 @@ async fn wait_for(server: &FakeOpenRgbServer, leds: u32, within: Duration) -> bo
     false
 }
 
+/// The real supervisor over the fake server, with the saved 120 and the holds the test chooses.
+struct Harness {
+    server: FakeOpenRgbServer,
+    adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
+    holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
+    stop: tokio::sync::watch::Sender<bool>,
+    task: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for Harness {
+    fn drop(&mut self) {
+        let _ = self.stop.send(true);
+        self.task.abort();
+    }
+}
+
+impl Harness {
+    async fn start(holds: ZoneHolds) -> Self {
+        let server = FakeOpenRgbServer::start(board()).await.expect("fake server");
+        // The test's raise goes through the supervisor's own adapter: the header is one device.
+        let adapter: Box<dyn DeviceAdapter> =
+            Box::new(OpenRgbAdapter::new("127.0.0.1", server.port()));
+        let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
+        let sizes = BTreeMap::from([("openrgb:mb".to_string(), BTreeMap::from([(0u32, SAVED)]))]);
+        let zone_sizes = Arc::new(tokio::sync::RwLock::new(sizes));
+        let holds = Arc::new(tokio::sync::RwLock::new(holds));
+        let (stop, stop_rx) = tokio::sync::watch::channel(false);
+        let task = tokio::spawn(supervise_with_rescans(
+            Arc::clone(&adapter),
+            zone_sizes,
+            Arc::clone(&holds),
+            |_devices| async {},
+            |_link| async {},
+            None,
+            stop_rx,
+        ));
+        Self { server, adapter, holds, stop, task }
+    }
+
+    fn leds(&self) -> Option<u32> {
+        self.server.zone_leds(0, 0)
+    }
+
+    async fn wait_for(&self, leds: u32, within: Duration) -> bool {
+        wait_for(&self.server, leds, within).await
+    }
+
+    /// The raise chain setup does when it starts.
+    async fn raise(&self) {
+        self.adapter
+            .lock()
+            .await
+            .set_zone_size(&DeviceId("openrgb:mb".into()), 0, RAISED)
+            .await
+            .expect("raise");
+    }
+
+    /// The hold chain setup takes while the owner drags.
+    async fn hold(&self) {
+        self.holds.write().await.insert(("openrgb:mb".to_string(), 0), RAISED);
+    }
+
+    /// Drops the hold, as chain setup does when it is done or gives up.
+    async fn release(&self) {
+        self.holds.write().await.remove(&("openrgb:mb".to_string(), 0));
+    }
+}
+
+/// A held raise survives the refresh that used to undo it mid-drag (#338).
 #[tokio::test]
-#[ignore = "proves the clash; flipped by Task 3"]
-async fn the_supervisor_resizes_a_raised_header_back_to_its_saved_size() {
-    let server = FakeOpenRgbServer::start(board()).await.expect("fake server");
-    let adapter: Box<dyn DeviceAdapter> = Box::new(OpenRgbAdapter::new("127.0.0.1", server.port()));
-    let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
-    let sizes = BTreeMap::from([("openrgb:mb".to_string(), BTreeMap::from([(0u32, 120u32)]))]);
-    let zone_sizes = Arc::new(tokio::sync::RwLock::new(sizes));
-    let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
+async fn refresh_does_not_undo_a_held_raise() {
+    let harness = Harness::start(ZoneHolds::new()).await;
+    assert!(harness.wait_for(SAVED, Duration::from_secs(5)).await, "connect applies the saved 120");
 
-    let task = tokio::spawn(supervise_with_rescans(
-        adapter.clone(),
-        zone_sizes,
-        |_devices| async {},
-        |_link| async {},
-        None,
-        stop_rx,
-    ));
+    harness.hold().await;
+    harness.raise().await;
+    assert_eq!(harness.leds(), Some(RAISED), "the raise reached the header");
 
-    assert!(wait_for(&server, 120, Duration::from_secs(5)).await, "connect applies the saved 120");
+    // Past a refresh: the supervisor re-reads the sizes every 5 s.
+    tokio::time::sleep(Duration::from_secs(6)).await;
+    assert_eq!(harness.leds(), Some(RAISED), "the supervisor must leave a held raise alone");
+}
 
-    // The raise chain setup does when it starts.
-    adapter.lock().await.set_zone_size(&DeviceId("openrgb:mb".into()), 0, 300).await.expect("raise");
-    assert_eq!(server.zone_leds(0, 0), Some(300));
+/// OpenRGB forgets SDK resizes when it restarts; a held raise is re-applied on the reconnection.
+#[tokio::test]
+async fn an_openrgb_restart_during_a_hold_reapplies_the_raised_length() {
+    let harness = Harness::start(ZoneHolds::new()).await;
+    assert!(harness.wait_for(SAVED, Duration::from_secs(5)).await, "connect applies the saved 120");
+
+    harness.hold().await;
+    harness.raise().await;
+    assert_eq!(harness.leds(), Some(RAISED), "the raise reached the header");
+
+    harness.server.restart().await;
+    assert_eq!(harness.leds(), Some(0), "OpenRGB forgot the resize when it restarted");
+
+    assert!(
+        harness.wait_for(RAISED, Duration::from_secs(20)).await,
+        "the supervisor re-applies a held raise when it reconnects"
+    );
+}
+
+/// The hold lasts as long as the setup keeps it: without it the saved size comes back.
+#[tokio::test]
+async fn dropping_the_hold_lets_the_saved_size_return() {
+    let harness = Harness::start(ZoneHolds::new()).await;
+    assert!(harness.wait_for(SAVED, Duration::from_secs(5)).await, "connect applies the saved 120");
+
+    harness.hold().await;
+    harness.raise().await;
+    assert_eq!(harness.leds(), Some(RAISED), "the raise reached the header");
+
+    harness.release().await;
+    assert!(
+        harness.wait_for(SAVED, Duration::from_secs(8)).await,
+        "the next refresh applies the saved 120 once the hold is gone"
+    );
+}
+
+/// The old behaviour, for a zone nothing holds: the refresh resizes the raise back (#338).
+#[tokio::test]
+async fn without_a_hold_the_supervisor_still_resizes_back() {
+    let harness = Harness::start(ZoneHolds::new()).await;
+    assert!(harness.wait_for(SAVED, Duration::from_secs(5)).await, "connect applies the saved 120");
+
+    harness.raise().await;
+    assert_eq!(harness.leds(), Some(RAISED), "the raise reached the header");
 
     tokio::time::sleep(Duration::from_secs(6)).await;
-    let after = server.zone_leds(0, 0);
-    println!("zone_leds(0, 0) 6 s after the raise: {after:?}");
-
-    stop_tx.send(true).ok();
-    task.abort();
-    assert_eq!(after, Some(300), "the supervisor must leave a raised header alone");
+    assert_eq!(harness.leds(), Some(SAVED), "an unheld raise is resized back to the saved size");
 }
