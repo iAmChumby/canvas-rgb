@@ -110,6 +110,13 @@ pub async fn start_setup(
     };
     // From here the gate holds the lights: every path below either completes the start or ends
     // the session before it answers.
+    //
+    // The gate counts a ticker as running from here, so one is spawned at once: a failure below
+    // ends the setup and the ticker then finds nothing and stops, instead of the gate believing in
+    // a ticker that never started (which would leave every later identify and flash dark).
+    if start_ticker {
+        crate::identify::spawn_ticker(app.clone());
+    }
     let home = app.store.read().await.home.clone();
     let record = RestoreRecord { device_id: device_id.clone(), zone_index: zone, leds: restore_to };
     // Before the raise: a crash after this point is a header the next start puts back.
@@ -143,9 +150,6 @@ pub async fn start_setup(
         return Err(e);
     }
 
-    if start_ticker {
-        crate::identify::spawn_ticker(app.clone());
-    }
     tracing::info!(
         device = %id, zone, restore_to, raised_to, session = %session,
         "a chain setup opened: the header is raised and held"
@@ -245,7 +249,10 @@ pub async fn finish_setup(app: &Arc<App>) -> Result<u32, ApiFailure> {
     }
     let home = app.store.read().await.home.clone();
     let Some(record) = crate::chain_records::read_restore(&home) else {
-        // Nothing was raised; the scene goes back on the lights all the same.
+        // No readable record: nothing says which length to put back, but nothing may keep the
+        // header raised either. One setup at a time, so every hold is this setup's. The scene goes
+        // back on the lights all the same.
+        app.zone_holds.write().await.clear();
         crate::scenes::apply_for_devices(app).await;
         return Ok(0);
     };

@@ -371,10 +371,16 @@ async fn quit_sequence(app: &Arc<App>, fakes: bool) {
     // 1. A chain setup holds a header raised: its earlier length goes back before anything is
     //    written to the lights (#338). The same restore a cancel runs; a restore the device
     //    refuses keeps the record, and the next start replays it.
-    match tokio::time::timeout(SETUP_RESTORE_LIMIT, canvas_daemon::api::chains::finish_setup(app))
-        .await
-    {
-        Ok(Ok(_)) => {}
+    // Only for an open setup: a quit with none must not spend the deadline on a scene apply.
+    let restore = async {
+        if app.identify.setup_session().is_some() {
+            canvas_daemon::api::chains::finish_setup(app).await.map(|_| ())
+        } else {
+            Ok(())
+        }
+    };
+    match tokio::time::timeout(SETUP_RESTORE_LIMIT, restore).await {
+        Ok(Ok(())) => {}
         Ok(Err(e)) => tracing::warn!(
             error = %e.message,
             "the chain setup's restore failed at quit; the restore record stays for the next start"

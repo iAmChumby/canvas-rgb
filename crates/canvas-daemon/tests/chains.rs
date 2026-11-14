@@ -688,6 +688,35 @@ async fn a_failed_raise_leaves_the_header_and_no_record() {
     assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "no record is left behind");
     assert!(rig.app.zone_holds.read().await.is_empty(), "no hold is left behind");
     assert!(rig.app.identify.setup_session().is_none(), "no session is left behind");
+
+    // The gate must not be left counting a ticker that never ran: a later identify has to be
+    // told to start one, or it would never light anything.
+    let board = DeviceId(BOARD.into());
+    assert!(
+        wait_until(Duration::from_secs(5), || {
+            let needs_ticker = rig.app.identify.start(board.clone(), 0, 0, 1, std::time::Instant::now());
+            rig.app.identify.stop();
+            needs_ticker
+        })
+        .await,
+        "after a failed start the gate still believes a ticker runs: identify would stay dark"
+    );
+}
+
+/// With no readable restore record, ending the setup still drops the hold, so the supervisor can
+/// size the header again.
+#[tokio::test]
+async fn an_unreadable_record_still_drops_the_hold_when_the_setup_ends() {
+    let rig = rig("unreadable-end", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let session = started(&rig, 0).await.session;
+    assert!(!rig.app.zone_holds.read().await.is_empty(), "the setup holds the header");
+    std::fs::write(rig.home.join(CHAIN_RESTORE_FILE), b"{ not json").expect("damage the record");
+
+    let (status, body) = cancel(&rig, 0, &session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(rig.app.zone_holds.read().await.is_empty(), "no hold outlives the setup");
+    assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "an unreadable record is left on disk");
 }
 
 /// Review Focus 2: a crash mid-setup leaves the record and a raised header; the first device list
