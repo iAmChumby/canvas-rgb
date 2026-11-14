@@ -2,7 +2,8 @@
 //! supervisor re-applies every saved zone size each refresh, so a raise on a header that first run
 //! sized to 120 is "wrong" to it. A setup holds the raised length while it works (`App::zone_holds`,
 //! `canvas_daemon::state::ZoneHolds`), and the supervisor overlays the holds on the saved sizes: a
-//! held zone is left alone, and an unheld one is still resized back.
+//! held zone is left alone, and an unheld one is still resized back. No test sleeps through a
+//! refresh: the second, unheld header being resized back shows that one ran.
 
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::OpenRgbAdapter;
@@ -19,8 +20,25 @@ use std::time::Duration;
 const SAVED: u32 = 120;
 /// The length chain setup raises it to while the owner drags.
 const RAISED: u32 = 300;
+/// The saved size of the board's second header, which no setup holds. A refresh that resizes it
+/// back is the proof that a refresh ran, so no test has to sleep through one.
+const OTHER_SAVED: u32 = 60;
+/// What a test raises the second header to.
+const OTHER_RAISED: u32 = 200;
 
-/// A board with one JARGB header: any size from 0 to 300.
+fn jargb(index: u32, name: &str) -> ZoneInfo {
+    ZoneInfo {
+        index,
+        name: name.into(),
+        kind: ZoneKind::Linear,
+        led_count: 0,
+        min_leds: 0,
+        max_leds: 300,
+        resizable: true,
+    }
+}
+
+/// A board with two JARGB headers: any size from 0 to 300.
 fn board() -> Vec<DeviceInfo> {
     vec![DeviceInfo {
         id: DeviceId("openrgb:mb".into()),
@@ -31,23 +49,15 @@ fn board() -> Vec<DeviceInfo> {
         adapter_index: 0,
         serial: "mb".into(),
         location: "usb".into(),
-        zones: vec![ZoneInfo {
-            index: 0,
-            name: "JARGB1".into(),
-            kind: ZoneKind::Linear,
-            led_count: 0,
-            min_leds: 0,
-            max_leds: 300,
-            resizable: true,
-        }],
+        zones: vec![jargb(0, "JARGB1"), jargb(1, "JARGB2")],
         connected: true,
     }]
 }
 
-async fn wait_for(server: &FakeOpenRgbServer, leds: u32, within: Duration) -> bool {
+async fn wait_for(server: &FakeOpenRgbServer, zone: u32, leds: u32, within: Duration) -> bool {
     let end = tokio::time::Instant::now() + within;
     while tokio::time::Instant::now() < end {
-        if server.zone_leds(0, 0) == Some(leds) {
+        if server.zone_leds(0, zone) == Some(leds) {
             return true;
         }
         tokio::time::sleep(Duration::from_millis(50)).await;
@@ -78,7 +88,7 @@ impl Harness {
         let adapter: Box<dyn DeviceAdapter> =
             Box::new(OpenRgbAdapter::new("127.0.0.1", server.port()));
         let adapter = Arc::new(tokio::sync::Mutex::new(adapter));
-        let sizes = BTreeMap::from([("openrgb:mb".to_string(), BTreeMap::from([(0u32, SAVED)]))]);
+        let sizes = BTreeMap::from([("openrgb:mb".to_string(), BTreeMap::from([(0u32, SAVED), (1u32, OTHER_SAVED)]))]);
         let zone_sizes = Arc::new(tokio::sync::RwLock::new(sizes));
         let holds = Arc::new(tokio::sync::RwLock::new(holds));
         let (stop, stop_rx) = tokio::sync::watch::channel(false);
@@ -99,7 +109,22 @@ impl Harness {
     }
 
     async fn wait_for(&self, leds: u32, within: Duration) -> bool {
-        wait_for(&self.server, leds, within).await
+        wait_for(&self.server, 0, leds, within).await
+    }
+
+    /// Waits for the unheld second header to reach `leds`.
+    async fn wait_for_other(&self, leds: u32, within: Duration) -> bool {
+        wait_for(&self.server, 1, leds, within).await
+    }
+
+    /// Raises the second header, which nothing holds.
+    async fn raise_other(&self) {
+        self.adapter
+            .lock()
+            .await
+            .set_zone_size(&DeviceId("openrgb:mb".into()), 1, OTHER_RAISED)
+            .await
+            .expect("raise the other header");
     }
 
     /// The raise chain setup does when it starts.
@@ -132,9 +157,14 @@ async fn refresh_does_not_undo_a_held_raise() {
     harness.hold().await;
     harness.raise().await;
     assert_eq!(harness.leds(), Some(RAISED), "the raise reached the header");
+    harness.raise_other().await;
 
-    // Past a refresh: the supervisor re-reads the sizes every 5 s.
-    tokio::time::sleep(Duration::from_secs(6)).await;
+    // The refresh that resizes the unheld header back is the one that used to undo the held
+    // raise: once it has run, the held header must still be raised.
+    assert!(
+        harness.wait_for_other(OTHER_SAVED, Duration::from_secs(8)).await,
+        "a refresh resizes the unheld header back to its saved size"
+    );
     assert_eq!(harness.leds(), Some(RAISED), "the supervisor must leave a held raise alone");
 }
 
@@ -183,6 +213,8 @@ async fn without_a_hold_the_supervisor_still_resizes_back() {
     harness.raise().await;
     assert_eq!(harness.leds(), Some(RAISED), "the raise reached the header");
 
-    tokio::time::sleep(Duration::from_secs(6)).await;
-    assert_eq!(harness.leds(), Some(SAVED), "an unheld raise is resized back to the saved size");
+    assert!(
+        harness.wait_for(SAVED, Duration::from_secs(8)).await,
+        "an unheld raise is resized back to the saved size"
+    );
 }
