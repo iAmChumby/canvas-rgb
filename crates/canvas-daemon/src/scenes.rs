@@ -10,8 +10,8 @@ use std::collections::HashSet;
 use canvas_proto::device::{DeviceInfo, ZoneInfo};
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
-    zone_light_id, Arrangement, Group, GroupMode, Light, LightId, LightsFile, Plays, Scene,
-    ScenesFile, DEFAULT_GROUP_NAME, DEFAULT_SCENE_NAME, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX,
+    zone_light_id, Arrangement, ChainState, Group, GroupMode, Light, LightId, LightsFile, Plays,
+    Scene, ScenesFile, DEFAULT_GROUP_NAME, DEFAULT_SCENE_NAME, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX,
     LIGHTS_SCHEMA, SCENES_SCHEMA, SCENE_HTML_MAX, SCENE_NAME_MAX, HTML_EFFECT_PREFIX,
 };
 
@@ -103,6 +103,10 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
 /// A zone has a light when any light names its device and zone index, whole or a slice of it, so
 /// a zone the owner split into parts is never given a second whole-zone light.
 ///
+/// A zone the owner answered for in chain setup with nothing plugged in (`ChainState::Empty`,
+/// 0.15.0) gets no light at all: adding one here would put back the whole-zone light the answer
+/// was about. A zone with no record behaves exactly as it did before chains existed.
+///
 /// Only whole-zone lights are made here. A split-zone light (`â€¦p{n}`) is not recreated: if
 /// `lights.json` is lost, a split zone comes back as one whole-zone light, and the slices'
 /// labels, arrangements and `reversed` flags are gone (the files hold the only copy).
@@ -110,6 +114,14 @@ pub fn sync_lights(lights: &mut LightsFile, devices: &[DeviceInfo]) -> Vec<Light
     let mut added = Vec::new();
     for device in devices {
         for zone in device.zones.iter().filter(|z| z.led_count > 0) {
+            let empty = lights.chains.iter().any(|c| {
+                c.device_id == device.id
+                    && c.zone_index == zone.index
+                    && c.state == ChainState::Empty
+            });
+            if empty {
+                continue;
+            }
             let has = lights
                 .lights
                 .iter()
@@ -1845,5 +1857,37 @@ pub(crate) mod tests {
         assert_eq!(slug("  "), "scene");
         assert_eq!(fresh_id("a", ["b"]), "a");
         assert_eq!(fresh_id("a", ["a", "a-2"]), "a-3");
+    }
+
+    /// The owner said the header is empty: the next device list must not add the whole-zone light
+    /// that the owner's answer was about.
+    #[test]
+    fn sync_lights_skips_a_zone_marked_empty() {
+        let mut lights = empty_lights();
+        let board = device("openrgb:mb", 0, vec![zone(0, ZoneKind::Linear, 30), zone(1, ZoneKind::Linear, 12)]);
+        lights.chains.push(canvas_proto::scene::ChainRecord {
+            device_id: DeviceId("openrgb:mb".into()),
+            zone_index: 0,
+            state: canvas_proto::scene::ChainState::Empty,
+        });
+        assert_eq!(sync_lights(&mut lights, &[board]), vec!["openrgb:mb#z1".to_string()]);
+        assert!(lights.lights.iter().all(|l| l.id != "openrgb:mb#z0"));
+    }
+
+    /// A header the owner did not answer for is a light exactly as it was before chains existed.
+    #[test]
+    fn sync_lights_still_adds_a_whole_zone_light_for_a_zone_not_set_up() {
+        let mut lights = empty_lights();
+        let board = device("openrgb:mb", 0, vec![zone(0, ZoneKind::Linear, 30), zone(1, ZoneKind::Linear, 12)]);
+        // Recorded as set up: the rule is about `Empty` alone, so both zones get their light.
+        lights.chains.push(canvas_proto::scene::ChainRecord {
+            device_id: DeviceId("openrgb:mb".into()),
+            zone_index: 0,
+            state: canvas_proto::scene::ChainState::SetUp,
+        });
+        assert_eq!(
+            sync_lights(&mut lights, &[board]),
+            vec!["openrgb:mb#z0".to_string(), "openrgb:mb#z1".to_string()]
+        );
     }
 }
