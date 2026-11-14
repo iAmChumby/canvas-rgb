@@ -213,8 +213,22 @@ are built by `per_key_report`, `per_key_reports` and `user_picture_mode_report` 
 - **The only documented live per-key command is patch-only.** `LED_STREAM` (`0xE8`, 18 keys a report, pages 0
   to 6, `0xFF` commit) is added by a firmware patch and stock firmware does not recognise it (source:
   https://github.com/echtzeit-solutions/monsgeek-akko-linux/blob/master/docs/PROTOCOL.md, lines 559 to 568).
-  Flashing firmware is out of scope for canvas-rgb. Whether stock firmware on PID `4015` has another live
-  per-key path: UNKNOWN. No source tests this PID.
+  That patch is for a different board: the MonsGeek M1 V5 **HE** (magnetic switches), USB `3151:5030`, an
+  Artery AT32F405 ("RY5088") with a ROM DFU recovery mode (source: the same repo, `docs/FIRMWARE_PATCH.md` line 3
+  and `docs/HARDWARE.md` lines 17 to 30). This keyboard is USB `3151:4015`, record `yc3121_m1w_v5_soc` (a Yichip
+  YC3121, non-magnetic), so the patch does not apply to it, and no patch for the YC3121 is published. Flashing
+  firmware is out of scope for canvas-rgb.
+- **The vendor app has no live per-key command either** (`checked`, 2026-11-13: the full `FEA_CMD_*` table in
+  the app's scripts at https://app.monsgeek.com/js/, five device classes). Its lighting commands are
+  `SET_LEDPARAM` (`0x07`), `SET_SLEDPARAM` (`0x08`), `SET_USERPIC` (`0x0C`) and an animation upload,
+  `SET_USERGIFSTART` (`0x18`, one report) then `SET_USERGIF` (`0x19`: page, frame, frame count, frame delay, then
+  56 colour bytes; 7 pages a 128-key frame). The app enables the animation only for boards it flags
+  (`是否支持动态灯效`, false by default), and this board's record (id 1933, "M1 V5") does not set it.
+- **The animation upload does not play on this keyboard** (`checked on the device`, 2026-11-13): a 4-frame
+  animation (solid red, green, blue, white; frame delay 50) was accepted report by report, but light mode 13
+  showed the stored still in slot 1 and old scattered red keys in slots 2 to 5 (options 1 to 4); nothing
+  animated (Luke). `GET_FEATURE_LIST` (`0xE6`) is not implemented (the reply echoes the previous request).
+  So on stock firmware this keyboard has two host paths: the stored still and the whole-board colour.
 - **What canvas-rgb sends today is a whole-board colour.** `direct_mode_report` is `SET_LEDPARAM` (`0x07`)
   with light mode `0x15` = 21, "Screen Sync", and `color_report` is `SET_SCREEN_COLOR` (`0x0E`), "Send RGB
   for screen sync mode", one RGB that canvas-rgb uses for the whole board (source: the echtzeit PROTOCOL.md
