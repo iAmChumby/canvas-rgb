@@ -226,6 +226,8 @@ fn supervisor(adapter: TestAdapter) -> Supervisor {
     let adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>> =
         Arc::new(tokio::sync::Mutex::new(Box::new(adapter)));
     let zones = Arc::new(tokio::sync::RwLock::new(std::collections::BTreeMap::new()));
+    // No setup holds a zone in these tests: the supervisor sizes to the saved sizes only.
+    let holds = Arc::new(tokio::sync::RwLock::new(canvas_daemon::state::ZoneHolds::new()));
     let (tx, rx) = tokio::sync::mpsc::channel(8);
     let (stop, stop_rx) = tokio::sync::watch::channel(false);
     let connecting = Arc::new(AtomicUsize::new(0));
@@ -233,6 +235,7 @@ fn supervisor(adapter: TestAdapter) -> Supervisor {
     let task = tokio::spawn(supervise_with_rescans(
         adapter,
         zones,
+        holds,
         |_devices| async {},
         move |link| {
             if link == canvas_proto::api::LinkState::Connecting {

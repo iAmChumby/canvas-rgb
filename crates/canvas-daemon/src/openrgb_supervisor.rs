@@ -18,6 +18,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use crate::pipe_client::PipeClient;
+use crate::state::{ZoneHolds, ZoneSizes};
 
 /// The backoff bounds for reconnecting to OpenRGB.
 pub const BACKOFF_MIN: Duration = Duration::from_millis(250);
@@ -309,6 +310,20 @@ pub async fn rescan_devices(
     }
 }
 
+/// The sizes the supervisor applies: the saved sizes with each hold the setups took overlaid on
+/// them (#338).
+///
+/// Chain setup raises a header to its longest length while the owner drags; without this the 5 s
+/// refresh reads the raise as an unsaved size and resizes it back mid-drag. A hold is never saved:
+/// it lives in `App::zone_holds` and ends when the setup drops it, and then the saved size returns.
+pub fn effective_sizes(saved: &ZoneSizes, holds: &ZoneHolds) -> ZoneSizes {
+    let mut sizes = saved.clone();
+    for ((device, zone), leds) in holds {
+        sizes.entry(device.clone()).or_default().insert(*zone, *leds);
+    }
+    sizes
+}
+
 /// Re-reads the device list on a live connection. A saved zone size that the device doesn't
 /// have yet (a device that appeared since connect) is applied, then the list is read again.
 async fn refresh_devices(
@@ -391,6 +406,8 @@ pub async fn supervise(
     supervise_with_rescans(
         adapter,
         zone_sizes,
+        // Nothing holds a zone here: this path sizes to the saved sizes only.
+        Arc::new(tokio::sync::RwLock::new(ZoneHolds::new())),
         move |devices| {
             on_devices(devices);
             std::future::ready(())
@@ -475,6 +492,7 @@ fn next_delay(backoff: &mut Backoff, from_rescan: bool) -> Duration {
 pub async fn supervise_with_rescans<D, L>(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
+    holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
     mut on_devices: impl FnMut(Vec<DeviceInfo>) -> D,
     mut on_link: impl FnMut(LinkState) -> L,
     mut rescans: Option<tokio::sync::mpsc::Receiver<Rescan>>,
@@ -494,7 +512,7 @@ pub async fn supervise_with_rescans<D, L>(
         let from_rescan = !waiting.is_empty();
         // Every attempt is "connecting"; `Down` only follows a failure.
         on_link(LinkState::Connecting).await;
-        let sizes = zone_sizes.read().await.clone();
+        let sizes = effective_sizes(&zone_sizes.read().await.clone(), &holds.read().await.clone());
         let (result, cut) = within(waiting.iter().map(|r| r.budget).max(), async {
             let mut guard = adapter.lock().await;
             connect_and_prepare(guard.as_mut(), &sizes).await
@@ -540,7 +558,7 @@ pub async fn supervise_with_rescans<D, L>(
                             // answer: one discovery answers them all, and none of them waits for
                             // another's turn (#233).
                             let mut group = vec![rescan];
-                            let sizes = zone_sizes.read().await.clone();
+                            let sizes = effective_sizes(&zone_sizes.read().await.clone(), &holds.read().await.clone());
                             let (result, cut) = within(group.iter().map(|r| r.budget).max(), async {
                                 let mut guard = adapter.lock().await;
                                 rescan_devices(guard.as_mut(), &sizes).await
@@ -576,9 +594,11 @@ pub async fn supervise_with_rescans<D, L>(
                     if !ticks.is_multiple_of(10) {
                         continue;
                     }
+                    let sizes =
+                        effective_sizes(&zone_sizes.read().await.clone(), &holds.read().await.clone());
                     let refreshed = {
                         let mut guard = adapter.lock().await;
-                        refresh_devices(guard.as_mut(), &zone_sizes.read().await.clone()).await
+                        refresh_devices(guard.as_mut(), &sizes).await
                     };
                     match refreshed {
                         Ok(devices) if device_key(&devices) != last => {
@@ -622,6 +642,54 @@ pub async fn supervise_with_rescans<D, L>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn effective_sizes_overlays_a_hold_on_a_saved_size() {
+        let saved = ZoneSizes::from([(
+            "openrgb:mb".to_string(),
+            BTreeMap::from([(0u32, 120u32), (1u32, 60u32)]),
+        )]);
+        let holds = ZoneHolds::from([(("openrgb:mb".to_string(), 0u32), 300u32)]);
+
+        let effective = effective_sizes(&saved, &holds);
+
+        let mb = effective.get("openrgb:mb").expect("the device is in the sizes");
+        assert_eq!(mb.get(&0), Some(&300), "the hold replaces the saved 120");
+        assert_eq!(mb.get(&1), Some(&60), "the other zone keeps its saved size");
+    }
+
+    #[test]
+    fn effective_sizes_adds_a_hold_the_file_lacks() {
+        let saved = ZoneSizes::from([(
+            "openrgb:dram".to_string(),
+            BTreeMap::from([(0u32, 8u32)]),
+        )]);
+        let holds = ZoneHolds::from([(("openrgb:mb".to_string(), 0u32), 300u32)]);
+
+        let effective = effective_sizes(&saved, &holds);
+
+        assert_eq!(
+            effective.get("openrgb:mb").and_then(|zones| zones.get(&0)),
+            Some(&300),
+            "the held device is added"
+        );
+        assert_eq!(
+            effective.get("openrgb:dram").and_then(|zones| zones.get(&0)),
+            Some(&8),
+            "the saved device is kept"
+        );
+    }
+
+    #[test]
+    fn effective_sizes_with_no_holds_is_the_saved_sizes() {
+        let saved = ZoneSizes::from([(
+            "openrgb:mb".to_string(),
+            BTreeMap::from([(0u32, 120u32)]),
+        )]);
+
+        assert_eq!(effective_sizes(&saved, &ZoneHolds::new()), saved);
+    }
 
     #[test]
     fn the_backoff_grows_from_250ms_to_5s() {

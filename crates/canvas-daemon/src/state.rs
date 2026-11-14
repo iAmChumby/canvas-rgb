@@ -73,6 +73,11 @@ pub struct App {
     ///
     /// Behind an `Arc` so the OpenRGB supervisor can share it with the API handlers.
     pub zones: Arc<tokio::sync::RwLock<ZoneSizes>>,
+    /// The zones a setup holds at a length it raised them to (#338): chain setup raises a header
+    /// to its longest length while the owner drags a slider, and the supervisor overlays these on
+    /// the saved sizes so its refresh leaves the raise alone. Never written to `zones` or
+    /// `zones.json`: the hold ends when the setup drops it.
+    pub zone_holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
     /// The running effect's preview subscribers (`GET /preview`), so the main engine only runs
     /// while the editor watches.
     pub preview_subs: PreviewRegistry,
@@ -167,6 +172,10 @@ pub type FansFile = canvas_proto::config::FansFile;
 /// Zone sizes by device fingerprint, then zone index.
 pub type ZoneSizes = BTreeMap<String, BTreeMap<u32, u32>>;
 
+/// The zones a setup holds at a raised length (#338): device fingerprint and zone index, then the
+/// length the setup raised it to. Only the supervisor reads it, and only for the length of a setup.
+pub type ZoneHolds = BTreeMap<(String, u32), u32>;
+
 impl App {
     /// Builds an app from the pieces the caller supplies, with no numeric displays.
     ///
@@ -258,6 +267,7 @@ impl App {
             frame_lane,
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
+            zone_holds: Arc::new(tokio::sync::RwLock::new(ZoneHolds::new())),
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),
