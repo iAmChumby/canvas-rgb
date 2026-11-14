@@ -147,6 +147,8 @@ pub async fn supervise_app(app: Arc<App>, stop: watch::Receiver<bool>) {
         adapter,
         // The zone sizes are shared with the app, so a resize shows up here.
         zones,
+        // The zones a setup holds raised (#338): the refresh leaves them alone.
+        Arc::clone(&app.zone_holds),
         move |devices| {
             let app = Arc::clone(&for_devices);
             async move { apply_devices(&app, devices).await }
