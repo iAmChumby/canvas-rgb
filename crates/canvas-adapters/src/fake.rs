@@ -42,6 +42,16 @@ struct FakeState {
     frames_while_waiting: u32,
     /// How many `UPDATE_LEDS` packets each controller received.
     led_writes: Vec<u32>,
+    /// How many `RESIZE_ZONE` packets each controller received.
+    resize_writes: Vec<u32>,
+    /// While set, a resize is counted but not applied and no device list is announced, and
+    /// no request is answered either: a real OpenRGB that refuses a resize and goes quiet.
+    failing_resizes: bool,
+    /// How long a resize takes to reach the device; 0 lands it while the request is handled.
+    resize_delay: std::time::Duration,
+    /// Resizes that are waiting out `resize_delay`, with the connection to announce the new
+    /// device list to.
+    pending_resizes: Vec<PendingResize>,
 }
 
 #[derive(Clone, Copy)]
@@ -49,6 +59,15 @@ struct Detection {
     since: std::time::Instant,
     first: std::time::Duration,
     step: std::time::Duration,
+}
+
+#[derive(Clone, Copy)]
+struct PendingResize {
+    connection: u64,
+    device: u32,
+    zone: usize,
+    leds: u32,
+    due: tokio::time::Instant,
 }
 
 impl FakeState {
@@ -126,6 +145,7 @@ impl FakeOpenRgbServer {
         let port = listener.local_addr()?.port();
         let devices: Vec<FakeDevice> = devices.into_iter().map(FakeDevice::new).collect();
         let led_writes = vec![0; devices.len()];
+        let resize_writes = vec![0; devices.len()];
         let state = Arc::new(Mutex::new(FakeState {
             devices,
             detection,
@@ -137,6 +157,10 @@ impl FakeOpenRgbServer {
             outstanding: 0,
             frames_while_waiting: 0,
             led_writes,
+            resize_writes,
+            failing_resizes: false,
+            resize_delay: std::time::Duration::ZERO,
+            pending_resizes: Vec::new(),
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
@@ -168,6 +192,7 @@ impl FakeOpenRgbServer {
         let mut state = guard(&self.state);
         state.devices.push(FakeDevice::new(info));
         state.led_writes.push(0);
+        state.resize_writes.push(0);
     }
 
     /// While `stalled`, the server reads every packet and answers none, as a real OpenRGB does
@@ -230,6 +255,27 @@ impl FakeOpenRgbServer {
         guard(&self.state).devices.get(index as usize).map_or(0, |device| device.custom_mode_writes)
     }
 
+    /// How many `RESIZE_ZONE` packets the controller received. Every request counts, including
+    /// one the server refuses (see [`fail_resizes`](Self::fail_resizes)) and one still waiting
+    /// out its delay (see [`delay_resizes`](Self::delay_resizes)).
+    pub fn resize_count(&self, index: u32) -> u32 {
+        guard(&self.state).resize_writes.get(index as usize).copied().unwrap_or(0)
+    }
+
+    /// While `failing`, a `RESIZE_ZONE` leaves the zone's size alone and announces no device
+    /// list, and the server answers no request: real OpenRGB gives the client silence when it
+    /// refuses a resize, so the adapter's re-read of the list times out and the resize fails.
+    pub fn fail_resizes(&self, failing: bool) {
+        guard(&self.state).failing_resizes = failing;
+    }
+
+    /// How long a resize takes to reach the device, in milliseconds: the zone's new size and
+    /// the device list that announces it land `ms` after the request instead of while it is
+    /// handled. `0` (the default) lands it at once.
+    pub fn delay_resizes(&self, ms: u64) {
+        guard(&self.state).resize_delay = std::time::Duration::from_millis(ms);
+    }
+
     /// Current LED count of zone `zone` on controller `index`.
     pub fn zone_leds(&self, index: u32, zone: u32) -> Option<u32> {
         guard(&self.state).devices.get(index as usize)?.info.zones.get(zone as usize).map(|z| z.led_count)
@@ -237,9 +283,12 @@ impl FakeOpenRgbServer {
 
     /// Simulates OpenRGB restarting: every open connection is dropped, and SDK zone resizes
     /// are forgotten (resizable zones return to their starting size, as real OpenRGB does).
+    /// A resize that had not landed yet never does, and the arrival counts are kept: they are
+    /// the history of this server, not device state.
     pub async fn restart(&self) {
         {
             let mut state = guard(&self.state);
+            state.pending_resizes.clear();
             for device in &mut state.devices {
                 for (zone, initial) in device.info.zones.iter_mut().zip(&device.initial_zone_leds) {
                     zone.led_count = *initial;
@@ -278,6 +327,11 @@ async fn serve(
             tokio::time::sleep(std::time::Duration::from_millis(5)).await;
             continue;
         }
+        // The earliest resize of this connection that is still waiting out its delay.
+        let due = {
+            let state = guard(&state);
+            state.pending_resizes.iter().filter(|resize| resize.connection == connection).map(|resize| resize.due).min()
+        };
         let read = tokio::select! {
             read = stream.read(&mut chunk) => read?,
             changed = release.changed() => {
@@ -295,6 +349,36 @@ async fn serve(
                     stream.write_all(&bytes).await?;
                 }
                 stream.flush().await?;
+                continue;
+            }
+            _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {
+                // The delay is over: the size lands now, and the device list announces it.
+                // Reading and the other branches carry on while a resize waits this out.
+                let bytes = {
+                    let mut state = guard(&state);
+                    let now = tokio::time::Instant::now();
+                    let mut landed = Vec::new();
+                    let mut keeping = Vec::new();
+                    for resize in std::mem::take(&mut state.pending_resizes) {
+                        if resize.connection == connection && resize.due <= now {
+                            landed.push(resize);
+                        } else {
+                            keeping.push(resize);
+                        }
+                    }
+                    state.pending_resizes = keeping;
+                    let mut bytes = Vec::new();
+                    for resize in landed {
+                        if apply_resize(&mut state, resize.device, resize.zone, resize.leds) {
+                            bytes.extend_from_slice(&device_list_updated());
+                        }
+                    }
+                    bytes
+                };
+                if !bytes.is_empty() {
+                    stream.write_all(&bytes).await?;
+                    stream.flush().await?;
+                }
                 continue;
             }
         };
@@ -329,7 +413,7 @@ async fn serve(
                     }
                 }
             }
-            let reply = handle(&state, device, packet_id, &payload);
+            let reply = handle(&state, connection, device, packet_id, &payload);
             if reply.is_empty() {
                 continue;
             }
@@ -356,11 +440,35 @@ fn to_io(error: canvas_proto::AdapterError) -> std::io::Error {
     std::io::Error::new(std::io::ErrorKind::InvalidData, error.to_string())
 }
 
+/// Applies a resize to the device, as OpenRGB does: a resizable zone takes the size within its
+/// range (a zone that cannot resize keeps its own), and the controller's colours are blanked to
+/// the new length. Returns whether the controller exists: OpenRGB announces a new device list
+/// for any resize of a known controller, as this fake did before the delay hook.
+fn apply_resize(state: &mut FakeState, device: u32, zone: usize, leds: u32) -> bool {
+    let Some(target) = state.devices.get_mut(device as usize) else {
+        return false;
+    };
+    if let Some(zone) = target.info.zones.get_mut(zone) {
+        if zone.resizable && zone.min_leds <= zone.max_leds {
+            zone.led_count = leds.max(zone.min_leds).min(zone.max_leds);
+        }
+    }
+    target.colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; target.info.led_count() as usize];
+    true
+}
+
+/// The packet OpenRGB sends with no reply owed, to say the device list changed.
+fn device_list_updated() -> Vec<u8> {
+    encode_packet(0, DEVICE_LIST_UPDATED, &[]).unwrap_or_default()
+}
+
 /// Handles one client packet. Returns the bytes to send back (empty when there is no reply).
-fn handle(state: &Mutex<FakeState>, device: u32, packet_id: u32, payload: &[u8]) -> Vec<u8> {
+fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32, payload: &[u8]) -> Vec<u8> {
     let mut state = guard(state);
     let reply = |device: u32, packet_id: u32, body: &[u8]| encode_packet(device, packet_id, body).unwrap_or_default();
-    if state.stalled && matches!(packet_id, REQUEST_PROTOCOL_VERSION | REQUEST_CONTROLLER_COUNT | REQUEST_CONTROLLER_DATA) {
+    // A resize that fails silences the whole server, the resize packet included: real OpenRGB
+    // gives the client silence rather than a refusal (see `fail_resizes`).
+    if (state.stalled || state.failing_resizes) && is_request(packet_id) {
         state.swallowed += 1;
         return Vec::new();
     }
@@ -399,16 +507,30 @@ fn handle(state: &Mutex<FakeState>, device: u32, packet_id: u32, payload: &[u8])
             Vec::new()
         }
         RESIZE_ZONE => {
+            if let Some(count) = state.resize_writes.get_mut(device as usize) {
+                *count += 1;
+            }
+            if state.failing_resizes {
+                // Counted, and that is all: the size stays and no device list follows.
+                return Vec::new();
+            }
             if let (Some(zone_bytes), Some(size_bytes)) = (payload.get(..4), payload.get(4..8)) {
                 let zone = u32::from_le_bytes([zone_bytes[0], zone_bytes[1], zone_bytes[2], zone_bytes[3]]) as usize;
                 let leds = u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]);
-                if let Some(target) = state.devices.get_mut(device as usize) {
-                    if let Some(zone) = target.info.zones.get_mut(zone) {
-                        if zone.resizable && zone.min_leds <= zone.max_leds {
-                            zone.led_count = leds.max(zone.min_leds).min(zone.max_leds);
-                        }
-                    }
-                    target.colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; target.info.led_count() as usize];
+                let delay = state.resize_delay;
+                if !delay.is_zero() {
+                    // The size lands after the delay, announced then; the request itself is
+                    // over, so the other requests keep flowing in the meantime.
+                    state.pending_resizes.push(PendingResize {
+                        connection,
+                        device,
+                        zone,
+                        leds,
+                        due: tokio::time::Instant::now() + delay,
+                    });
+                    return Vec::new();
+                }
+                if apply_resize(&mut state, device, zone, leds) {
                     // OpenRGB sends no reply to RESIZEZONE; it announces the new device list.
                     return reply(0, DEVICE_LIST_UPDATED, &[]);
                 }
