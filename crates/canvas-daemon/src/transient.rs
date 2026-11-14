@@ -183,7 +183,7 @@ mod tests {
         let gate = crate::identify::IdentifyGate::default();
         let now = Instant::now();
         assert!(!holds_lights(&gate), "nothing holds the lights: the restore is due");
-        assert!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s1".into(), now));
+        assert!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s1".into(), now).is_some());
         assert!(holds_lights(&gate), "the setup is open: the restore waits");
         assert!(gate.end_setup("s1"));
         assert!(!holds_lights(&gate), "the setup ended: the restore is due again");
