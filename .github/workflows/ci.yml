@@ -18,8 +18,10 @@ concurrency:
 #
 #   changes      which areas a pull request touches (dorny/paths-filter)
 #   versions     every copy of the version matches Cargo.toml
-#   editor       the editor builds, the phone nav measures right, the editor's tests pass
-#   rust         clippy is clean, the workspace's tests pass
+#   editor       the editor builds, the phone nav measures right
+#   editor-tests the editor's own tests pass (vitest, on Linux)
+#   clippy       clippy is clean
+#   rust         the workspace's tests pass
 #   rust-release the paint effects and the stock tiles meet their frame budget
 #   installer    the installer's own tests pass
 #   dependencies the dependency gate (unchanged)
@@ -149,12 +151,12 @@ jobs:
         run: pwsh -NoProfile -File tools/set-version.ps1 -Check
 
   editor:
-    # The editor's build, the phone's bottom nav and the editor's own tests.
+    # The editor's build and the phone's bottom nav. The editor's own tests are editor-tests.
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.editor == 'true'
     # The app is Windows-only, and the nav check measures a real browser's layout: it has always
     # run on the Windows runner, and moving it would change the browser the measurement is taken
-    # in. The runner choice does not shorten the run either: the Rust job is the longest one.
+    # in.
     runs-on: windows-latest
     timeout-minutes: 20
     steps:
@@ -183,12 +185,69 @@ jobs:
         timeout-minutes: 5
         run: node tools/nav-check.mjs
 
+  editor-tests:
+    # The editor's own tests (vitest, jsdom), in parallel with the editor's build. jsdom has no
+    # layout and no OS of its own, so these do not need the Windows runner; the real-browser
+    # measurement stays in the editor job. On windows-latest the suite took about five minutes
+    # after the build; on one ubuntu-latest runner it still took over four (most of it importing
+    # modules and starting jsdom, which is CPU-bound), so it is split by file across two runners
+    # that run alongside the build.
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.editor == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      # Both halves always finish, so a red run lists every failing file, not only the first half's.
+      fail-fast: false
+      matrix:
+        shard: [1, 2]
+    name: editor-tests (${{ matrix.shard }}/2)
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+
+      - name: Install the editor's packages
+        working-directory: app/web
+        run: npm ci
+
       - name: Test the editor
         working-directory: app/web
-        run: npm test # vitest, jsdom
+        run: npm test -- --shard=${{ matrix.shard }}/2 # vitest, jsdom
+
+  clippy:
+    # Clippy, in its own job so it runs alongside the tests instead of before them. A check build
+    # shares nothing with the test build, so splitting them adds no compile time to either.
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
+    # windows-latest: the Windows-only crates (canvas-svc, canvas-core's cpu module) only compile
+    # there, and clippy has to see them.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          components: clippy
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Its own cache: the check build's metadata, apart from the test build's objects.
+          shared-key: clippy
+          cache-on-failure: true
+
+      # --locked everywhere: the build uses the versions in Cargo.lock and fails when the
+      # lock file and the manifests disagree, instead of quietly moving the lock file (#167).
+      - name: Clippy
+        run: cargo clippy --locked --workspace --all-targets -- -D warnings
 
   rust:
-    # Clippy and the workspace's tests.
+    # The workspace's tests.
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
     # windows-latest: the workspace has Windows-only crates (canvas-svc drives the Windows
@@ -197,12 +256,18 @@ jobs:
     # A ceiling, not a target: the job takes about six minutes with a warm cache. A test that
     # hangs would otherwise hold the runner for the six hours GitHub allows.
     timeout-minutes: 30
+    env:
+      # Line tables only, not full debug info, in the test build. Most of the test build is
+      # compiling and linking the workspace's own crates (the cache holds only the dependencies),
+      # and full debug info makes every object and every PDB the linker writes several times
+      # larger. A panic's backtrace still names the file and line. The variable is part of the
+      # rust-cache key, so the cache under the old key is not reused with the new setting.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
+      CARGO_PROFILE_TEST_DEBUG: line-tables-only
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
-        with:
-          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
         with:
@@ -217,11 +282,7 @@ jobs:
           # next run to compile every crate from scratch again.
           cache-on-failure: true
 
-      # --locked everywhere: the build uses the versions in Cargo.lock and fails when the
-      # lock file and the manifests disagree, instead of quietly moving the lock file (#167).
-      - name: Clippy
-        run: cargo clippy --locked --workspace --all-targets -- -D warnings
-
+      # --locked: see the clippy job.
       # cargo test, not cargo nextest: nextest runs every test in its own process and every
       # test binary at once, and this suite has real-time tests that do not hold up under that
       # load (the boot colour watch window, the resume guard, the stack preview). Measured on
@@ -350,7 +411,7 @@ jobs:
   # when a job it needs failed or was cancelled. A job that was skipped is not a failure: a
   # pull request that touches one area skips the jobs for the others, and that is a green run.
   ci-ok:
-    needs: [changes, versions, editor, rust, rust-release, installer, dependencies, changelog]
+    needs: [changes, versions, editor, editor-tests, clippy, rust, rust-release, installer, dependencies, changelog]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
