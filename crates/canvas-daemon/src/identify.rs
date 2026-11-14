@@ -10,12 +10,19 @@
 //! It ends on `stop: true`, on a newer identify replacing it, or [`WATCHDOG`] after the last
 //! request, so a closed window can never leave the PC dark. Ending restores the normal
 //! frames: the engine's next frame when running, one black frame when paused.
+//!
+//! A chain setup rides the same override with its own state: the owner is building a chain by
+//! hand, so one zone of one device is lit in several colours at once ([`crate::identify::Run`]
+//! carries no colour, and widening it would change every identify caller). Every other LED is
+//! black, and the setup's frames outrank a flash. It ends when its session ends, or
+//! [`SETUP_TIMEOUT`] after the last light request, and the ticker restores on that end.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
-use canvas_proto::api::Power;
+use canvas_proto::api::{Power, SetupRun};
+use canvas_proto::scene::SETUP_TIMEOUT_MS;
 use canvas_proto::{DeviceId, DeviceInfo, Rgb8};
 
 use crate::state::App;
@@ -29,6 +36,8 @@ pub const TICK: Duration = Duration::from_millis(100);
 pub const TARGET: Rgb8 = Rgb8::WHITE;
 /// How long after the last `active: true` an onboarding session ends by itself.
 pub const SESSION_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long after the last light request a chain setup ends by itself (the spine's number).
+pub const SETUP_TIMEOUT: Duration = Duration::from_millis(SETUP_TIMEOUT_MS);
 
 /// The id prefix of devices whose adapter lights the whole device (the ROYUAN keyboard).
 const WHOLE_DEVICE_PREFIX: &str = "royuan:";
@@ -49,9 +58,30 @@ struct Target {
     last_request: Instant,
 }
 
+/// A chain setup: one zone of one device, lit in several colours until it ends.
+///
+/// The runs are the spine's [`SetupRun`] (LED indexes inside the zone) and the device and zone
+/// are the setup's own: a light request names neither, because the route that opened the setup
+/// already chose them.
+#[derive(Debug, Clone)]
+struct Setup {
+    /// The device whose zone is open.
+    device: DeviceId,
+    /// The zone that is open: every run's indexes are inside it.
+    zone: u32,
+    /// The LEDs the last light request named, in their own colours.
+    runs: Vec<SetupRun>,
+    /// The id the setup answers to: a request from any other session changes nothing.
+    session: String,
+    /// When the last `start_setup`/`set_runs` arrived; [`SETUP_TIMEOUT`] runs from here.
+    last_request: Instant,
+}
+
 #[derive(Default)]
 struct Inner {
     target: Option<Target>,
+    /// The chain setup while one is open; one at a time.
+    setup: Option<Setup>,
     /// The last `active: true` of an onboarding session; `Some` while it holds the lights.
     session_last: Option<Instant>,
     /// The writer channel of every device the daemon drives.
@@ -68,6 +98,10 @@ pub enum Tick {
     Frames(Vec<(DeviceId, Vec<Rgb8>)>),
     /// The watchdog ended the override.
     Expired,
+    /// The setup's timeout ended it: the ticker restores the chain. Always reported, even when an
+    /// onboarding session still holds the lights; `ticker_continues` says whether the ticker
+    /// keeps running for it (true) or stops here (false).
+    SetupExpired { ticker_continues: bool },
 }
 
 /// What happened to one frame of the override (#81).
@@ -133,12 +167,69 @@ impl IdentifyGate {
     /// True while the engine's frames must not reach the devices.
     pub fn is_active(&self) -> bool {
         let inner = self.lock();
-        inner.target.is_some() || inner.session_last.is_some()
+        inner.target.is_some() || inner.session_last.is_some() || inner.setup.is_some()
+    }
+
+    /// True while an onboarding session or a chain setup holds the lights: the transient restore
+    /// waits for both, so a greeting never lands in the middle of either.
+    pub fn holds_lights(&self) -> bool {
+        let inner = self.lock();
+        inner.session_last.is_some() || inner.setup.is_some()
     }
 
     /// True while an onboarding session holds the lights.
     pub fn session_active(&self) -> bool {
         self.lock().session_last.is_some()
+    }
+
+    /// Opens a chain setup on one zone of one device.
+    ///
+    /// `None` when a setup is already open, on any zone of any device: one setup at a time, so
+    /// two windows cannot fight over the lights. `Some(true)` means the caller starts the ticker;
+    /// `Some(false)` means one is already running.
+    ///
+    /// The setup takes the lights: an identify or flash target that was showing ends here, so
+    /// nothing outlives the setup and its timeout always reaches the ticker.
+    pub fn start_setup(&self, device: DeviceId, zone: u32, session: String, now: Instant) -> Option<bool> {
+        let mut inner = self.lock();
+        if inner.setup.is_some() {
+            return None;
+        }
+        inner.target = None;
+        inner.setup = Some(Setup { device, zone, runs: Vec::new(), session, last_request: now });
+        let start = !inner.ticker_running;
+        inner.ticker_running = true;
+        Some(start)
+    }
+
+    /// Replaces the setup's runs with what the last light request named, and renews its timeout.
+    ///
+    /// False when no setup is open, or the setup belongs to another session: a stale window
+    /// changes nothing, neither its runs nor its timeout.
+    pub fn set_runs(&self, session: &str, runs: Vec<SetupRun>, now: Instant) -> bool {
+        let mut inner = self.lock();
+        let Some(setup) = inner.setup.as_mut() else { return false };
+        if setup.session != session {
+            return false;
+        }
+        setup.runs = runs;
+        setup.last_request = now;
+        true
+    }
+
+    /// Ends this session's setup. True when one was open; another session's id ends nothing.
+    pub fn end_setup(&self, session: &str) -> bool {
+        let mut inner = self.lock();
+        if inner.setup.as_ref().is_some_and(|setup| setup.session == session) {
+            inner.setup = None;
+            return true;
+        }
+        false
+    }
+
+    /// The open setup's session id, if any.
+    pub fn setup_session(&self) -> Option<String> {
+        self.lock().setup.as_ref().map(|setup| setup.session.clone())
     }
 
     /// Starts or renews the onboarding session. Returns `(was_new, start_ticker)`.
@@ -169,9 +260,15 @@ impl IdentifyGate {
     /// Sets (or replaces) the target as several runs at once: the lights flash (Scenes) names every
     /// light of the lights it was asked for. Each run is at least one LED. Same watchdog, same
     /// ticker. Returns true when the caller must start the ticker.
+    ///
+    /// While a chain setup is open the request is refused (false, no target): the setup holds the
+    /// lights, and a target set now would outlive it.
     pub fn start_runs(&self, runs: Vec<Run>, now: Instant) -> bool {
         let runs = runs.into_iter().map(|r| Run { count: r.count.max(1), ..r }).collect();
         let mut inner = self.lock();
+        if inner.setup.is_some() {
+            return false;
+        }
         inner.target = Some(Target { runs, last_request: now });
         let start = !inner.ticker_running;
         inner.ticker_running = true;
@@ -186,9 +283,18 @@ impl IdentifyGate {
     /// One ticker step at `now`: the frames to send, or the end of the override.
     pub fn tick(&self, now: Instant, devices: &[DeviceInfo]) -> Tick {
         let mut inner = self.lock();
-        if inner.target.is_none() && inner.session_last.is_none() {
+        if inner.target.is_none() && inner.session_last.is_none() && inner.setup.is_none() {
             inner.ticker_running = false;
             return Tick::Idle;
+        }
+        // The setup's own timeout. Its end is its own answer: the ticker restores on it, and
+        // the setup is cleared so the tick after it is idle.
+        let setup_ended = inner
+            .setup
+            .as_ref()
+            .is_some_and(|setup| now.saturating_duration_since(setup.last_request) >= SETUP_TIMEOUT);
+        if setup_ended {
+            inner.setup = None;
         }
         if inner.target.as_ref().is_some_and(|t| now.saturating_duration_since(t.last_request) >= WATCHDOG) {
             inner.target = None;
@@ -196,11 +302,20 @@ impl IdentifyGate {
         if inner.session_last.is_some_and(|l| now.saturating_duration_since(l) >= SESSION_TIMEOUT) {
             inner.session_last = None;
         }
-        if inner.target.is_none() && inner.session_last.is_none() {
+        let others = inner.target.is_some() || inner.session_last.is_some();
+        if setup_ended {
+            // Reported even when an onboarding session still holds the lights: the chain must
+            // be put back whatever else is showing.
+            if !others {
+                inner.ticker_running = false;
+            }
+            return Tick::SetupExpired { ticker_continues: others };
+        }
+        if !others && inner.setup.is_none() {
             inner.ticker_running = false;
             return Tick::Expired;
         }
-        Tick::Frames(frames(inner.target.as_ref(), devices))
+        Tick::Frames(frames(inner.target.as_ref(), inner.setup.as_ref(), devices))
     }
 
     /// Sends frames to the registered writers. A full channel drops the frame; the next
@@ -246,18 +361,35 @@ impl IdentifyGate {
     }
 }
 
-/// Every device's frame under this target: black everywhere but the target run.
-fn frames(target: Option<&Target>, devices: &[DeviceInfo]) -> Vec<(DeviceId, Vec<Rgb8>)> {
+/// Every device's frame under this target or setup: black everywhere but the lit runs.
+///
+/// A setup's frames win over a flash: while one is open the target is not drawn at all, so a
+/// Scenes flash cannot light over what the owner is setting up.
+fn frames(
+    target: Option<&Target>,
+    setup: Option<&Setup>,
+    devices: &[DeviceInfo],
+) -> Vec<(DeviceId, Vec<Rgb8>)> {
     devices
         .iter()
         .filter(|d| d.connected)
         .map(|d| {
             let mut colors = vec![Rgb8::BLACK; d.led_count() as usize];
-            for run in target.iter().flat_map(|t| &t.runs).filter(|r| d.id == r.device) {
-                if d.id.0.starts_with(WHOLE_DEVICE_PREFIX) {
-                    colors.fill(TARGET);
-                } else if let Some(range) = run_of(d, run) {
-                    colors[range].fill(TARGET);
+            if let Some(setup) = setup {
+                if d.id == setup.device {
+                    for run in &setup.runs {
+                        if let Some(range) = run_of(d, setup.zone, run.start, run.count) {
+                            colors[range].fill(run.color);
+                        }
+                    }
+                }
+            } else {
+                for run in target.iter().flat_map(|t| &t.runs).filter(|r| d.id == r.device) {
+                    if d.id.0.starts_with(WHOLE_DEVICE_PREFIX) {
+                        colors.fill(TARGET);
+                    } else if let Some(range) = run_of(d, run.zone, run.led, run.count) {
+                        colors[range].fill(TARGET);
+                    }
                 }
             }
             (d.id.clone(), colors)
@@ -265,16 +397,16 @@ fn frames(target: Option<&Target>, devices: &[DeviceInfo]) -> Vec<(DeviceId, Vec
         .collect()
 }
 
-/// The range of the device's frame the target lights, clamped to its zone.
-fn run_of(device: &DeviceInfo, target: &Run) -> Option<std::ops::Range<usize>> {
+/// The range of the device's frame a run lights, clamped to its zone.
+fn run_of(device: &DeviceInfo, zone: u32, led: u32, count: u32) -> Option<std::ops::Range<usize>> {
     let mut offset = 0u32;
-    for zone in &device.zones {
-        if zone.index == target.zone {
-            let start = target.led.min(zone.led_count);
-            let end = target.led.saturating_add(target.count).min(zone.led_count);
+    for info in &device.zones {
+        if info.index == zone {
+            let start = led.min(info.led_count);
+            let end = led.saturating_add(count).min(info.led_count);
             return (start < end).then(|| (offset + start) as usize..(offset + end) as usize);
         }
-        offset += zone.led_count;
+        offset += info.led_count;
     }
     None
 }
@@ -376,6 +508,13 @@ pub fn spawn_ticker(app: Arc<App>) {
                     restore(&app).await;
                     return;
                 }
+                Tick::SetupExpired { ticker_continues } => {
+                    tracing::info!("the chain setup ended by timeout ({SETUP_TIMEOUT:?} after the last light request); restoring");
+                    restore(&app).await;
+                    if !ticker_continues {
+                        return;
+                    }
+                }
             }
         }
     });
@@ -397,7 +536,9 @@ pub async fn restore(app: &Arc<App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use canvas_proto::api::SetupRun;
     use canvas_proto::device::{DeviceKind, ZoneInfo, ZoneKind};
+    use canvas_proto::scene::SETUP_TIMEOUT_MS;
 
     fn zone(index: u32, leds: u32) -> ZoneInfo {
         ZoneInfo {
@@ -658,6 +799,196 @@ mod tests {
         let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
         assert_eq!(pushed[0].outcome, PushOutcome::Dropped(DropReason::Full));
         assert_eq!(pushed[0].device, id);
+    }
+
+    /// A chip's LED index inside its zone, its own length and colour: the zone that is open
+    /// decides where the run lands, so the request never names a device (#338).
+    #[test]
+    fn a_setup_lights_each_run_in_its_own_colour_and_blacks_everything_else() {
+        let (gate, devices, t0) = setup();
+        let red = Rgb8::new(255, 0, 0);
+        let green = Rgb8::new(0, 255, 0);
+        assert!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s1".into(), t0).is_some());
+        assert!(gate.set_runs(
+            "s1",
+            vec![
+                SetupRun { start: 0, count: 2, color: red },
+                SetupRun { start: 4, count: 3, color: green },
+            ],
+            t0
+        ));
+        let frames = frames_of(gate.tick(t0, &devices));
+        let board = &frames.iter().find(|(id, _)| id.0 == "openrgb:board").unwrap().1;
+        let ram = &frames.iter().find(|(id, _)| id.0 == "openrgb:ram").unwrap().1;
+        assert_eq!(board.len(), 30);
+        assert_eq!(lit(board), vec![0, 1, 4, 5, 6]);
+        assert!(board[..2].iter().all(|c| *c == red), "the first run's own colour: {:?}", &board[..2]);
+        assert!(board[4..7].iter().all(|c| *c == green), "the second run's own colour: {:?}", &board[4..7]);
+        assert!(ram.iter().all(|c| *c == Rgb8::BLACK), "the other devices are black");
+    }
+
+    /// The run is an LED index inside the zone: past the zone's end it stops there, and a run
+    /// that starts past the end lights nothing rather than reaching another zone.
+    #[test]
+    fn runs_are_clamped_to_the_zone() {
+        let (gate, devices, t0) = setup();
+        let red = Rgb8::new(255, 0, 0);
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
+        assert!(gate.set_runs("s", vec![SetupRun { start: 8, count: 5, color: red }], t0));
+        let board = frames_of(gate.tick(t0, &devices)).remove(0).1;
+        assert_eq!(lit(&board), vec![8, 9], "LEDs 8..13 of a 10-LED zone stop at its end");
+        assert!(gate.set_runs("s", vec![SetupRun { start: 12, count: 2, color: red }], t0));
+        let board = frames_of(gate.tick(t0, &devices)).remove(0).1;
+        assert!(lit(&board).is_empty(), "a run past the zone lights nothing: {:?}", lit(&board));
+    }
+
+    /// The session id is what one setup uses to find itself: another id changes nothing, so a
+    /// window that was closed and reopened cannot light over the setup that replaced it.
+    #[test]
+    fn a_stale_session_id_changes_nothing() {
+        let (gate, devices, t0) = setup();
+        let red = Rgb8::new(255, 0, 0);
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "current".into(), t0);
+        assert!(!gate.set_runs("stale", vec![SetupRun { start: 0, count: 2, color: red }], t0));
+        assert!(!gate.end_setup("stale"), "a stale session ends nothing");
+        assert_eq!(gate.setup_session().as_deref(), Some("current"));
+        let board = frames_of(gate.tick(t0, &devices)).remove(0).1;
+        assert!(lit(&board).is_empty(), "the stale request lit nothing");
+
+        // No setup at all: a light request has nothing to light.
+        let (closed, _, t1) = setup();
+        assert!(!closed.set_runs("current", vec![SetupRun { start: 0, count: 1, color: red }], t1));
+        assert!(closed.setup_session().is_none());
+        assert!(!closed.end_setup("current"));
+    }
+
+    /// The setup ends by itself when the last request is older than the spine's timeout, and
+    /// the end is what the ticker turns into a restore.
+    #[test]
+    fn the_setup_times_out_after_the_last_light_request() {
+        let (gate, devices, t0) = setup();
+        let red = Rgb8::new(255, 0, 0);
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
+        gate.set_runs("s", vec![SetupRun { start: 0, count: 2, color: red }], t0);
+        assert!(gate.is_active());
+        assert!(matches!(
+            gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS - 1), &devices),
+            Tick::Frames(_)
+        ));
+        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired { ticker_continues: false });
+        assert!(!gate.is_active(), "engine frames flow again");
+        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::Idle);
+    }
+
+    /// Every request renews the timeout, so a window that keeps asking keeps the setup open.
+    #[test]
+    fn every_light_request_renews_the_timeout() {
+        let (gate, devices, t0) = setup();
+        let red = Rgb8::new(255, 0, 0);
+        let runs = vec![SetupRun { start: 0, count: 2, color: red }];
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
+        assert!(gate.set_runs("s", runs, t0 + Duration::from_secs(5)));
+        assert!(
+            matches!(gate.tick(t0 + Duration::from_secs(6), &devices), Tick::Frames(_)),
+            "the last request was 1 s ago, not 6"
+        );
+        assert_eq!(gate.tick(t0 + Duration::from_secs(11), &devices), Tick::SetupExpired { ticker_continues: false });
+    }
+
+    /// The expiry is asked for once, and it clears the setup: the ticker restores on it.
+    #[test]
+    fn session_expiry_ends_the_hold_and_asks_for_the_restore() {
+        let (gate, devices, t0) = setup();
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
+        gate.set_runs("s", vec![SetupRun { start: 0, count: 2, color: Rgb8::WHITE }], t0);
+        assert!(gate.holds_lights());
+        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired { ticker_continues: false });
+        assert!(!gate.holds_lights());
+        assert!(!gate.is_active());
+        assert!(gate.setup_session().is_none(), "the setup is cleared");
+        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::Idle);
+
+        // A setup takes the lights from an identify that was showing, so nothing outlives it.
+        let (both, devices, t1) = setup();
+        assert!(both.start(DeviceId("openrgb:board".into()), 0, 0, 2, t1));
+        assert_eq!(both.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t1), Some(false));
+        assert_eq!(
+            both.tick(t1 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices),
+            Tick::SetupExpired { ticker_continues: false }
+        );
+        assert!(!both.is_active(), "the identify ended when the setup took the lights");
+    }
+
+    /// One setup at a time: a second `start` for another zone (or device) is refused, and the
+    /// open one keeps its session.
+    #[test]
+    fn a_second_start_for_another_zone_is_refused_while_one_is_open() {
+        let (gate, _, t0) = setup();
+        let board = DeviceId("openrgb:board".into());
+        assert!(gate.start_setup(board.clone(), 0, "first".into(), t0).is_some());
+        assert!(gate.start_setup(board.clone(), 1, "second".into(), t0).is_none(), "another zone is refused");
+        assert!(
+            gate.start_setup(DeviceId("openrgb:ram".into()), 0, "third".into(), t0).is_none(),
+            "another device is refused too"
+        );
+        assert_eq!(gate.setup_session().as_deref(), Some("first"));
+        assert!(gate.end_setup("first"));
+        assert!(gate.start_setup(board, 1, "second".into(), t0).is_some(), "the zone is free once the setup ended");
+        assert_eq!(gate.setup_session().as_deref(), Some("second"));
+    }
+
+    /// A Scenes flash while the owner is setting a chain on: the setup's own colours stay, and
+    /// the flash does not light over them.
+    #[test]
+    fn a_flash_during_a_setup_does_not_light_over_it() {
+        let (gate, devices, t0) = setup();
+        let red = Rgb8::new(255, 0, 0);
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
+        gate.set_runs("s", vec![SetupRun { start: 0, count: 2, color: red }], t0);
+        gate.start(DeviceId("openrgb:ram".into()), 0, 0, 8, t0);
+        let frames = frames_of(gate.tick(t0, &devices));
+        let board = &frames.iter().find(|(id, _)| id.0 == "openrgb:board").unwrap().1;
+        let ram = &frames.iter().find(|(id, _)| id.0 == "openrgb:ram").unwrap().1;
+        assert_eq!(lit(board), vec![0, 1]);
+        assert!(board[..2].iter().all(|c| *c == red), "the setup's colour stays: {:?}", &board[..2]);
+        assert!(ram.iter().all(|c| *c == Rgb8::BLACK), "the flash lights nothing over the setup");
+    }
+
+    /// The setup's end reaches the ticker even while an onboarding session still holds the
+    /// lights, and the ticker keeps running for the session (#338).
+    #[test]
+    fn a_setup_expiry_is_reported_while_an_onboarding_session_is_open() {
+        let (gate, devices, t0) = setup();
+        gate.start_session(t0);
+        assert_eq!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0), Some(false));
+        let at = t0 + Duration::from_millis(SETUP_TIMEOUT_MS);
+        gate.start_session(at);
+        assert_eq!(gate.tick(at, &devices), Tick::SetupExpired { ticker_continues: true });
+        assert!(gate.setup_session().is_none());
+        assert!(gate.is_active(), "the session still holds the lights");
+        assert!(matches!(gate.tick(at, &devices), Tick::Frames(_)), "the ticker goes on for the session");
+    }
+
+    /// A flash asked for during a setup is refused: it would outlive the setup.
+    #[test]
+    fn a_flash_cannot_start_while_a_setup_is_open() {
+        let (gate, devices, t0) = setup();
+        assert_eq!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0), Some(true));
+        assert!(!gate.start(DeviceId("openrgb:ram".into()), 0, 0, 8, t0), "no second ticker, no target");
+        assert_eq!(
+            gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices),
+            Tick::SetupExpired { ticker_continues: false },
+            "nothing the flash asked for outlives the setup"
+        );
+        assert!(!gate.is_active());
+    }
+
+    /// Opening a setup while the identify ticker runs asks for no second ticker.
+    #[test]
+    fn a_setup_opened_while_the_ticker_runs_asks_for_no_second_one() {
+        let (gate, _, t0) = setup();
+        assert!(gate.start(DeviceId("openrgb:board".into()), 0, 0, 2, t0), "the identify starts the ticker");
+        assert_eq!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0), Some(false));
     }
 
     /// A writer that is gone drops the frame, and its sink is removed (#87): the device is
