@@ -192,8 +192,9 @@ From `CLAUDE.md` in the repo root:
 Researched for #311, then checked on Luke's keyboard on 2026-11-13 ("Checked on the device", below). **Only the lines tagged `checked on the device` were run on it.** Every line is tagged
 `checked on the device` or `source: <URL>`. A source's claim is the source's, not ours. The reports
 are built by `per_key_report`, `per_key_reports` and `user_picture_mode_report` in
-`crates/canvas-adapters/src/royuan.rs`, and the fake keyboard in that file's tests decodes them. `write_frame`
-does not send them yet (#312).
+`crates/canvas-adapters/src/royuan.rs`, and the fake keyboard in that file's tests decodes them.
+`write_frame` sends them for a still, when the effect holds still and the flash's budget allows
+(#312).
 
 ### What the keyboard can do
 
@@ -212,8 +213,22 @@ does not send them yet (#312).
 - **The only documented live per-key command is patch-only.** `LED_STREAM` (`0xE8`, 18 keys a report, pages 0
   to 6, `0xFF` commit) is added by a firmware patch and stock firmware does not recognise it (source:
   https://github.com/echtzeit-solutions/monsgeek-akko-linux/blob/master/docs/PROTOCOL.md, lines 559 to 568).
-  Flashing firmware is out of scope for canvas-rgb. Whether stock firmware on PID `4015` has another live
-  per-key path: UNKNOWN. No source tests this PID.
+  That patch is for a different board: the MonsGeek M1 V5 **HE** (magnetic switches), USB `3151:5030`, an
+  Artery AT32F405 ("RY5088") with a ROM DFU recovery mode (source: the same repo, `docs/FIRMWARE_PATCH.md` line 3
+  and `docs/HARDWARE.md` lines 17 to 30). This keyboard is USB `3151:4015`, record `yc3121_m1w_v5_soc` (a Yichip
+  YC3121, non-magnetic), so the patch does not apply to it, and no patch for the YC3121 is published. Flashing
+  firmware is out of scope for canvas-rgb.
+- **The vendor app has no live per-key command either** (`checked`, 2026-11-13: the full `FEA_CMD_*` table in
+  the app's scripts at https://app.monsgeek.com/js/, five device classes). Its lighting commands are
+  `SET_LEDPARAM` (`0x07`), `SET_SLEDPARAM` (`0x08`), `SET_USERPIC` (`0x0C`) and an animation upload,
+  `SET_USERGIFSTART` (`0x18`, one report) then `SET_USERGIF` (`0x19`: page, frame, frame count, frame delay, then
+  56 colour bytes; 7 pages a 128-key frame). The app enables the animation only for boards it flags
+  (`是否支持动态灯效`, false by default), and this board's record (id 1933, "M1 V5") does not set it.
+- **The animation upload does not play on this keyboard** (`checked on the device`, 2026-11-13): a 4-frame
+  animation (solid red, green, blue, white; frame delay 50) was accepted report by report, but light mode 13
+  showed the stored still in slot 1 and old scattered red keys in slots 2 to 5 (options 1 to 4); nothing
+  animated (Luke). `GET_FEATURE_LIST` (`0xE6`) is not implemented (the reply echoes the previous request).
+  So on stock firmware this keyboard has two host paths: the stored still and the whole-board colour.
 - **What canvas-rgb sends today is a whole-board colour.** `direct_mode_report` is `SET_LEDPARAM` (`0x07`)
   with light mode `0x15` = 21, "Screen Sync", and `color_report` is `SET_SCREEN_COLOR` (`0x0E`), "Send RGB
   for screen sync mode", one RGB that canvas-rgb uses for the whole board (source: the echtzeit PROTOCOL.md
@@ -356,6 +371,42 @@ table for another board.
 - **If a driver ever uploads:** pages at least 100 ms apart and uploads at least 10 s apart, one picture per
   change a person made, never one per animation frame. These are the cadences that survived, not a measured
   limit; the limit is UNKNOWN.
+- **What the adapter does (#312, `crates/canvas-adapters/src/royuan.rs`).** A frame that holds within one
+  step per channel for the still window is uploaded; the window is 2 s at first, doubles each time a shown
+  picture is abandoned sooner than 30 s after it appeared (up to 10 min), and goes back to 2 s after a
+  picture that stayed a minute. A started upload is always finished, so a moving frame never leaves a torn
+  picture in the flash: it ends the picture on show instead. The picture already in the flash is shown again
+  with light mode 13 and not written again when the new still is within a step of it. At most 4 attempts go
+  out in a rolling hour and 24 in a rolling day (about 8.8k a year, against a flash rated near 100k erase
+  cycles per sector), and an attempt counts from before its first page, so a keyboard that refuses every
+  page is bounded the same way; past the caps a still keeps the whole-board colour until a slot frees.
+  An attempt is saved to the file, durably, *before* page 0 goes out: a write that fails stops every upload
+  for the rest of the run, because an attempt that is not on the disk must never reach the flash. The saved
+  hash is cleared before page 0 and set again once page 6 lands, so a crash half way through the pages never
+  shows the old picture on the next start. The attempts (wall-clock Unix milliseconds) and the hash are kept
+  in `royuan-stills.json` under the daemon's user directory, so a restart neither resets the caps nor
+  rewrites a picture the flash holds. A file that is not there at all (a first run, or one someone deleted)
+  counts as unknown picture and waits ten minutes; a file that is there but unparsable, incomplete or
+  clock-skewed has lost its history, so no picture is written for a day (closed, not open), and a stamp from
+  the past-the-clock future counts as now. An upload abandoned before its last page (a disconnect, a resume,
+  an identify) leaves the flash unknown, so the next still writes all seven pages and light mode 13 is never
+  sent for a torn one.
+- **Mode reports are bounded (#312 review passes 3 and 4).** A report is skipped when the board is already in that
+  mode on this connection. Entering light mode 13 is capped at 12 entries in a rolling hour (the stamps are kept in
+  the file, so a crash loop cannot exceed it), and that cap is the *only* report a budget refuses: the report that
+  takes a picture off the board and the direct report on a (re)connect are always sent, because refusing them is
+  what would leave a wrong picture on the board. Past the cap the board stays in direct mode and the whole-board
+  colour streams, and no upload starts unless the board is confirmed in direct mode on this connection. What the
+  driver knows about the board's mode is only ever "a send returned Ok": every resume makes it unknown and sends the
+  mode again (one report per wake, bounded only by the OS's event rate), and so does any mode report whose send
+  returned an error, because that report may have landed. The composite reopens a keyboard that keeps dropping on a
+  wait that doubles from 5 s to 5 min while it drops within 30 s of connecting, and starts again from 5 s once it
+  stays up five minutes. Whether the firmware persists `SET_LEDPARAM` reports (light mode 13 and the direct-mode
+  report) to flash is not stated by any source: UNKNOWN. If it does, the entries are the ones that matter, and they
+  are capped.
+- **The whole-board colour keeps streaming through the pages**, and stops when light mode 13 goes out about
+  3 s later. During the pages the board stays lit with the streamed colour (`checked on the device`,
+  2026-11-13, below).
 - The `0x0E` whole-board colour is not an upload. `royuan_probe` sends it about 30 times a second (a 33 ms
   sleep, `crates/canvas-adapters/examples/royuan_probe.rs`); the adapter resends it at least once a second
   (`KEEPALIVE` in `royuan.rs`). The sources give no rate for it.
@@ -394,6 +445,14 @@ paused, Luke watching the keyboard.
   direct-mode report was not shown (the board stayed dark); the same report sent every 33 ms for 2 s was (white,
   then black). The adapter streams at the engine's rate and resends at least every second, so canvas-rgb
   should be unaffected (UNKNOWN: not run on the device with the adapter itself); a one-shot tool must stream.
+- **The adapter itself, end to end** (`checked on the device`, 2026-11-13, PR #326's `RoyuanAdapter` driven by a
+  scratch example at 30 fps, still counter in a throwaway file): a still horizontal rainbow streamed as one colour,
+  one upload went out after the still window (all seven pages acknowledged, the picture hash stored), the board
+  stayed lit through the pages, and light mode 13 then showed the rainbow left to right (Luke, yes). When the frame
+  changed (solid red, green, blue, one second each) the board left the picture and followed the colour (Luke, yes);
+  the light mode read after a run that ended mid-movement was `0x15` (direct). Green then blue as whole-board
+  colours showed green then blue (Luke, yes), so `0x0E` takes R, G, B in that order. A moving rainbow shows as one
+  nearly constant colour in direct mode (its mean barely changes), which is easy to mistake for the picture.
 - **Restore** (`checked on the device`): direct mode, then the streamed whole-board colour: the board followed
   white then black (Luke, yes). The mode read after the restore was taken after the first (single-report)
   restore, not after the streamed one.
@@ -432,6 +491,14 @@ the probe's, no source guarantees them):
 
 **Do not test frame rate.** In sharkfin's test a fast upload loop killed a keyboard's control endpoint until a
 re-plug.
+
+**The upload window (#312).** No agent has watched a picture upload with the adapter running, so what the board
+shows during the ~3 s of pages is UNKNOWN. With canvas-rgb running and an effect that holds still, change
+something so a new picture is written (switch to a still effect, or move the layout), then leave the frame
+alone: the adapter writes the seven pages about three seconds after the effect settles. One yes/no for Luke,
+who sees the keys: **while the new picture is being written, does the keyboard stay lit with the moving
+colours instead of going dark or flickering?** Yes: the whole-board colour does cover the window. No: report
+what it did, because the adapter may have to hold the last colour instead.
 
 ## Checklist
 

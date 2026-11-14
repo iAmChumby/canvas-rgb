@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
+
 ### Fixed
 
 - `canvas-rgb`: a command that cannot reach the daemon, or is never answered, now fails with a message that says which it was instead of waiting on the machine: a request gives up after 5 s to connect and 120 s in all, a connect that failed is tried three times (nothing was sent), a daemon that took the connection and went quiet says it did not answer within the limit, and an answer that cannot be read is a failure rather than an empty success (#328)
