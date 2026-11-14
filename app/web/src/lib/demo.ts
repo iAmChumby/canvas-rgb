@@ -5,12 +5,13 @@
 //
 // The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
 // be seen in a plain browser: `?state=daemon-down|openrgb-down|device-empty|slow|
-// save-error|handback:<header id>`.
+// save-error|handback:<header id>|chains`.
 
 import { ApiFailure } from "@/lib/errors";
 import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
 import {
   answerDelayMs,
+  applyChainScenarios,
   applyDeviceScenarios,
   applyFanScenarios,
   applySceneScenarios,
@@ -36,6 +37,7 @@ import {
   INITIAL_SETTINGS,
   ONBOARD_EFFECTS,
   isHiddenEffect,
+  DEMO_CHAINS,
   DEMO_LIGHTS,
   DEMO_SCENES,
   demoSceneProblem,
@@ -54,6 +56,13 @@ import type { ScenePut } from "@/proto/ScenePut";
 import type { SceneCreate } from "@/proto/SceneCreate";
 import type { LightView } from "@/proto/LightView";
 import type { LightPatch } from "@/proto/LightPatch";
+import type { ChainView } from "@/proto/ChainView";
+import type { SetupCommit } from "@/proto/SetupCommit";
+import type { SetupCommitted } from "@/proto/SetupCommitted";
+import type { SetupEmpty } from "@/proto/SetupEmpty";
+import type { SetupLight } from "@/proto/SetupLight";
+import type { SetupRun } from "@/proto/SetupRun";
+import type { SetupStarted } from "@/proto/SetupStarted";
 import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
@@ -129,6 +138,11 @@ interface DemoState {
   scenes: Scene[];
   activeScene: string;
   lights: LightView[];
+  /** Every resizable header and what is plugged into it (0.15.0). */
+  chains: ChainView[];
+  /** The chain setup session open now: the daemon holds one at a time. */
+  setup: { session: string; restore_to: number; runs: SetupRun[] } | null;
+  setupCounter: number;
   fanModes: Record<string, FanMode>;
   fanFloor: number;
   fanHotLimits: HotLimits;
@@ -278,6 +292,11 @@ function initialState(): DemoState {
   }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   const stacks = seededStacks(s, effects);
+  const chainScenarios = applyChainScenarios(
+    DEMO_CHAINS.map((chain) => structuredClone(chain)),
+    sceneScenarios.lights,
+    sceneScenarios.scenes,
+  );
   return {
     settings: { ...INITIAL_SETTINGS },
     onboardingComplete: onboarded,
@@ -289,9 +308,12 @@ function initialState(): DemoState {
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
-    scenes: sceneScenarios.scenes,
+    scenes: chainScenarios.scenes,
     activeScene: sceneScenarios.active,
-    lights: sceneScenarios.lights,
+    lights: chainScenarios.lights,
+    chains: chainScenarios.chains,
+    setup: null,
+    setupCounter: 0,
     fanModes,
     fanFloor: 20,
     fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },
@@ -909,6 +931,156 @@ function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown)
     return view;
   }
   return fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
+}
+
+// ---- chains (0.15.0) ----
+
+/** The zone's lights as the daemon lists them: the whole-zone light, or its parts. */
+function zoneLights(s: DemoState, chain: ChainView): LightView[] {
+  return s.lights.filter(
+    (l) => l.light.device_id === chain.device_id && l.light.zone_index === chain.zone_index,
+  );
+}
+
+/**
+ * Puts the zone's lights in the lights list and in every group of every scene the way a commit
+ * does: the parts in chain order stand where the zone's light stood, and each part takes the place
+ * of the part at its position. A part that no longer exists leaves its group.
+ */
+function replaceZoneLights(s: DemoState, chain: ChainView, parts: LightView[]): void {
+  const before = zoneLights(s, chain);
+  const oldIds = before.map((l) => l.light.id);
+  const anchor = oldIds[0] ?? `${chain.device_id}#z${chain.zone_index}`;
+  const ids = parts.map((part) => part.light.id);
+  s.lights = s.lights.flatMap((l) => {
+    if (!oldIds.includes(l.light.id)) return [l];
+    return l.light.id === anchor ? parts : [];
+  });
+  for (const scene of s.scenes) {
+    for (const group of scene.groups) {
+      group.members = group.members.flatMap((id) => {
+        if (id === anchor) return ids;
+        const at = oldIds.indexOf(id);
+        if (at < 0) return [id];
+        const next = ids[at];
+        return next ? [next] : [];
+      });
+    }
+  }
+}
+
+/** The session a light or an ending names, or a 409: the daemon ends one that has gone stale. */
+function checkSession(s: DemoState, body: { session: string }): void {
+  if (!body || typeof body.session !== "string") fail(422, "validation", "a setup request names its session");
+  if (!s.setup || s.setup.session !== body.session) {
+    fail(409, "conflict", "the setup session has ended; open the header again");
+  }
+}
+
+function chainsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
+  const bad = (): never => fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
+  if (seg.length === 1 && method === "GET") return { chains: s.chains };
+
+  const chain = s.chains.find(
+    (c) => c.device_id === seg[1] && c.zone_index === Number(seg[2] ?? NaN),
+  );
+  if (!chain) fail(404, "not_found", `no resizable header ${seg[1] ?? ""} zone ${seg[2] ?? ""}`);
+  if (seg[3] !== "setup") return bad();
+
+  if (seg.length === 4) {
+    if (method === "POST") {
+      // One session at a time, as the daemon: another header's setup must be left first.
+      if (s.setup) fail(409, "conflict", "another header is being set up; finish or leave it first");
+      s.setupCounter += 1;
+      const session = `demo-setup-${s.setupCounter}`;
+      s.setup = { session, restore_to: chain.leds, runs: [] };
+      const answer: SetupStarted = {
+        session,
+        restore_to: chain.leds,
+        raised_to: chain.max_leds,
+      };
+      return answer;
+    }
+    if (method === "DELETE") {
+      checkSession(s, body as SetupEmpty);
+      s.setup = null;
+      return { ok: true };
+    }
+    return bad();
+  }
+
+  const step = seg[4];
+  if (step === "light" && method === "POST") {
+    const light = body as SetupLight;
+    checkSession(s, light);
+    if (s.setup) s.setup.runs = light.runs;
+    // A test page can read the runs the flow asked for: `window.__chainLight = []` before it.
+    (globalThis as { __chainLight?: unknown[] }).__chainLight?.push({ at: Date.now(), runs: light.runs });
+    return { ok: true };
+  }
+
+  if (step === "commit" && method === "POST") {
+    const commit = body as SetupCommit;
+    checkSession(s, commit);
+    if (commit.parts.length === 0) fail(422, "validation", "a chain needs at least one part");
+    let total = 0;
+    commit.parts.forEach((part, i) => {
+      if (part.leds < 1) fail(422, "validation", `part ${i + 1} has no LEDs`);
+      if ([...part.name].length > 40) {
+        fail(422, "validation", `the name of part ${i + 1} is over 40 characters`);
+      }
+      total += part.leds;
+    });
+    if (total > chain.max_leds) {
+      fail(422, "validation", `${total} LEDs is above the ${chain.max_leds} this header drives`);
+    }
+    // `?state=chain-error`: the resize the daemon would make fails, in the device's own words.
+    if (scenario().has("chain-error")) {
+      fail(500, "internal", "the header could not be resized: OpenRGB did not answer");
+    }
+    let start = 0;
+    const parts: LightView[] = commit.parts.map((part, i) => {
+      const view: LightView = {
+        light: {
+          id: `${chain.device_id}#z${chain.zone_index}p${i + 1}`,
+          device_id: chain.device_id,
+          zone_index: chain.zone_index,
+          leds: { start, count: part.leds },
+          name: part.name,
+          arrangement: part.kind === "fan" ? "ring" : "strip",
+          reversed: false,
+          kind: part.kind,
+        },
+        led_count: part.leds,
+        connected: true,
+        label: part.name,
+      };
+      start += part.leds;
+      return view;
+    });
+    replaceZoneLights(s, chain, parts);
+    chain.state = "set_up";
+    chain.leds = total;
+    chain.parts = parts;
+    s.setup = null;
+    const answer: SetupCommitted = { lights: parts, final_leds: total };
+    return answer;
+  }
+
+  if (step === "empty" && method === "POST") {
+    const empty = body as SetupEmpty;
+    checkSession(s, empty);
+    const restore = s.setup?.restore_to ?? chain.leds;
+    // An empty header is not a light: it goes back to its length and its LEDs are removed.
+    replaceZoneLights(s, chain, []);
+    chain.state = "empty";
+    chain.leds = restore;
+    chain.parts = [];
+    s.setup = null;
+    return { ok: true };
+  }
+
+  return bad();
 }
 
 // ---- effects ----
@@ -1838,6 +2010,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
 
   if (head === "scenes") return scenesRoute(s, method, seg, body);
   if (head === "lights") return lightsRoute(s, method, seg, body);
+  if (head === "chains") return chainsRoute(s, method, seg, body);
 
 
   if (head === "fans") {

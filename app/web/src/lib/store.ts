@@ -14,6 +14,7 @@ import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { FailedEffect } from "@/proto/FailedEffect";
 import type { LightView } from "@/proto/LightView";
+import type { ChainView } from "@/proto/ChainView";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
@@ -43,6 +44,9 @@ let scenesUnsupported = false;
 
 /** The daemon answered 404 for the light routes: it is older than the lights. Same rule. */
 let lightsUnsupported = false;
+
+/** The daemon answered 404 for the chain routes: it is older than the chains. Same rule. */
+let chainsUnsupported = false;
 
 /** The daemon's version the last time it answered. */
 let daemonVersion = "";
@@ -85,6 +89,9 @@ export interface Snap {
   /** Every light the daemon keeps, with what the editor shows beside it. */
   lights: LightView[] | null;
   lightsError: string | null;
+  /** Every resizable header and what is plugged into it (0.15.0). Null until the daemon answers. */
+  chains: ChainView[] | null;
+  chainsError: string | null;
   settings: Settings | null;
   settingsError: string | null;
   displays: DisplayStatus[] | null;
@@ -114,6 +121,8 @@ let snap: Snap = {
   scenesError: null,
   lights: null,
   lightsError: null,
+  chains: null,
+  chainsError: null,
   settings: null,
   settingsError: null,
   displays: null,
@@ -256,6 +265,7 @@ export async function refreshStatus(n?: number): Promise<void> {
       daemonVersion = status.version;
       scenesUnsupported = false;
       lightsUnsupported = false;
+      chainsUnsupported = false;
     }
   } catch (e) {
     if (!isNewest("status", req)) return;
@@ -371,6 +381,24 @@ export async function refreshLights(n?: number): Promise<void> {
   }
 }
 
+export async function refreshChains(n?: number): Promise<void> {
+  // A daemon without the chain routes is not asked again until its version changes. A Try
+  // again brings its own number: the user asked for it, so it goes out.
+  if (chainsUnsupported && n === undefined) return;
+  const req = n ?? beginRequest("chains");
+  try {
+    const chains = (await api.chains.list()).chains;
+    if (!isNewest("chains", req)) return;
+    markAnswered("chains", req);
+    patchSnap({ chains, chainsError: null });
+  } catch (e) {
+    if (!isNewest("chains", req)) return;
+    markAnswered("chains", req);
+    if (e instanceof ApiFailure && e.status === 404) chainsUnsupported = true;
+    patchSnap({ chainsError: messageOf(e) });
+  }
+}
+
 export async function refreshSettings(n?: number): Promise<void> {
   const req = n ?? beginRequest("settings");
   try {
@@ -446,6 +474,7 @@ export async function refreshAll(): Promise<void> {
     refreshEffects(),
     refreshScenes(),
     refreshLights(),
+    refreshChains(),
     refreshSettings(),
     refreshDisplays(),
   ]);
@@ -479,6 +508,7 @@ export function startSync(): () => void {
     void refreshEffects();
     void refreshScenes();
     void refreshLights();
+    void refreshChains();
     void refreshSettings();
     void refreshDisplays();
   };

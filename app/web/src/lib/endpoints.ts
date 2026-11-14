@@ -1,7 +1,8 @@
 // Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
 // shapes from the generated proto types; nothing here re-declares an API type.
 
-import { request, requestBinary, type RequestOptions } from "@/lib/api";
+import { apiConfig, request, requestBinary, type RequestOptions } from "@/lib/api";
+import { isDemo } from "@/lib/host";
 import { routes } from "@/proto/routes";
 import type { Status } from "@/proto/Status";
 import type { OutputState } from "@/proto/OutputState";
@@ -39,6 +40,12 @@ import type { LightsResponse } from "@/proto/LightsResponse";
 import type { LightView } from "@/proto/LightView";
 import type { LightPatch } from "@/proto/LightPatch";
 import type { FlashRequest } from "@/proto/FlashRequest";
+import type { ChainsResponse } from "@/proto/ChainsResponse";
+import type { SetupStarted } from "@/proto/SetupStarted";
+import type { SetupLight } from "@/proto/SetupLight";
+import type { SetupEmpty } from "@/proto/SetupEmpty";
+import type { SetupCommit } from "@/proto/SetupCommit";
+import type { SetupCommitted } from "@/proto/SetupCommitted";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
@@ -67,6 +74,42 @@ import type { AudioTestState } from "@/proto/AudioTestState";
 
 /** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
 const ONBOARDING_SESSION = "/api/v1/onboarding/session";
+
+/**
+ * The chain routes (`routes::CHAINS`, `routes::CHAIN_SETUP*`). `proto/routes.ts` mirrors the
+ * spine by hand and does not carry them yet, so they are spelled here, as the onboarding session
+ * above is.
+ */
+const CHAINS = "/api/v1/chains";
+/** `POST` starts a session on one header, `DELETE` cancels it. `{zone}` is the zone index. */
+const chainSetup = (device: string, zone: number): string =>
+  `${CHAINS}/${encodeURIComponent(device)}/${zone}/setup`;
+
+/**
+ * Cancels a session with a request the browser finishes even when the page is already going:
+ * closing the window must put the header's length back. `keepalive` is a `fetch` option and the
+ * shared `request` carries only the caller's abort signal, so this one path takes the address and
+ * the token from the tray itself. Nothing is read from the answer, and a failure is quiet: the
+ * page is closing, and the daemon ends a session on its own timeout anyway.
+ */
+async function cancelAndLeave(path: string, body: SetupEmpty): Promise<void> {
+  if (isDemo()) {
+    await request<unknown>("DELETE", path, body).catch(() => undefined);
+    return;
+  }
+  try {
+    const config = await apiConfig();
+    await fetch(config.base_url + path, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      keepalive: true,
+    });
+  } catch {
+    // The window is going; the daemon ends the session by its own timeout.
+  }
+}
 
 export const api = {
   status: () => request<Status>("GET", routes.status),
@@ -200,6 +243,30 @@ export const api = {
     patch: (id: string, body: LightPatch) => request<LightView>("PATCH", routes.light(id), body),
     /** The named lights white and every other LED black; `stop` ends it. */
     flash: (body: FlashRequest) => request<unknown>("POST", routes.lightsFlash, body),
+  },
+  chains: {
+    /** Every resizable header and what is set up on it (a daemon without the routes answers 404). */
+    list: () => request<ChainsResponse>("GET", CHAINS),
+    /** Holds the lights, raises the header to its maximum and opens a session. */
+    start: (device: string, zone: number) =>
+      request<SetupStarted>("POST", chainSetup(device, zone)),
+    /** The coloured runs to show. Also the heartbeat: a session ends 6 s after the last one. */
+    light: (device: string, zone: number, body: SetupLight) =>
+      request<unknown>("POST", `${chainSetup(device, zone)}/light`, body),
+    /**
+     * Ends the session and puts the length back. `keepalive` finishes the request even when the
+     * page goes away with it, which is what a closed window is.
+     */
+    cancel: (device: string, zone: number, body: SetupEmpty, opts?: { keepalive?: boolean }) =>
+      opts?.keepalive
+        ? cancelAndLeave(chainSetup(device, zone), body)
+        : request<unknown>("DELETE", chainSetup(device, zone), body),
+    /** Nothing is plugged into this header: it is marked empty rather than set up. */
+    empty: (device: string, zone: number, body: SetupEmpty) =>
+      request<unknown>("POST", `${chainSetup(device, zone)}/empty`, body),
+    /** Resizes to the parts' LEDs and saves them, all or nothing; answers the new lights. */
+    commit: (device: string, zone: number, body: SetupCommit) =>
+      request<SetupCommitted>("POST", `${chainSetup(device, zone)}/commit`, body),
   },
 
   fans: () => request<FansStatus>("GET", routes.fans),
