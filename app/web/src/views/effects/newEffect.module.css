@@ -1,0 +1,242 @@
+/*
+ * New effect: the menu's three keys, the device step's keys, and the pattern's own page.
+ *
+ * The look is the hardware layer's: a key is a flat face on a short skirt, a well is a recess, a
+ * count is a figure in mono. Nothing here moves the page: the menu is a popover (a portal, no
+ * room taken), and every row keeps its height whether or not a sentence is in it.
+ */
+
+/* ---------- the menu: three keys under the New effect key ---------- */
+
+.menu {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  width: 264px;
+}
+
+.menuKey {
+  width: 100%;
+  justify-content: flex-start;
+  gap: 10px;
+  padding: 9px 10px;
+  text-align: left;
+}
+
+.menuText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.menuName {
+  font-size: var(--t15);
+  font-weight: 600;
+}
+
+/* The one line under each key's name: what that choice makes. */
+.menuNote {
+  font-family: var(--fm);
+  font-size: var(--t14);
+  color: var(--mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* ---------- the tile: a pattern drawn as its own dots ---------- */
+
+/*
+ * The dots are laid out in a 168 × 105 box (16:10, the gallery tile's shape) and the drawing is
+ * scaled to whatever box it is put in, so one component serves the gallery, the inspector's head
+ * and the device step. No background of its own: it sits in a well or a card preview.
+ */
+.tile {
+  display: block;
+  width: 100%;
+  height: 100%;
+  overflow: visible;
+}
+
+/* ---------- the device step ---------- */
+
+.choose {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+.chooseHead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+}
+
+.chooseWho {
+  flex: 1 1 auto;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.chooseTitle {
+  margin: 0;
+  font-size: var(--t20);
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.chooseHint {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.chooseGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(268px, 1fr));
+  gap: var(--s2);
+  align-content: start;
+}
+
+/* One key per kind of device: its dots as a recess, its name, and what it is. */
+.row {
+  display: grid;
+  grid-template-columns: 56px minmax(0, 1fr);
+  align-items: center;
+  gap: var(--s3);
+  width: 100%;
+  min-height: 56px;
+  padding: var(--s2);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background-color: var(--raised);
+  box-shadow: 0 var(--skirt-h) 0 var(--skirt);
+  color: var(--ink);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+  transition:
+    background-color var(--release, 240ms) var(--ease),
+    border-color var(--release, 240ms) var(--ease),
+    box-shadow var(--release, 240ms) var(--ease);
+}
+
+.row:hover:not(:disabled) {
+  background-color: color-mix(in oklab, var(--raised) 90%, var(--ink));
+}
+
+.row:active:not(:disabled) {
+  background-color: color-mix(in oklab, var(--raised) 94%, black);
+  box-shadow: 0 0 0 var(--skirt);
+  transition-duration: var(--press-in, 60ms);
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+.row:disabled {
+  cursor: default;
+  opacity: 0.5;
+  box-shadow: none;
+}
+
+/* A kind with nothing plugged in is still offered, and reads dimmed: it is a device that is not
+   here just now, not a device the owner cannot choose. */
+.row[data-unplugged="true"] {
+  opacity: 0.72;
+}
+
+/* The device's shape, all off: an LED that is not lit is a socket, not a colour. */
+.rowWell {
+  display: grid;
+  place-items: center;
+  width: 56px;
+  height: 35px;
+  padding: 2px;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.rowText {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+}
+
+.rowName {
+  font-size: var(--t15);
+  font-weight: 600;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* The kind and the count, on one line: mono, so a figure never shifts the words beside it. */
+.rowLine {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  min-width: 0;
+  font-family: var(--fm);
+  font-size: var(--t14);
+  color: var(--mute);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.rowCount {
+  color: var(--dim);
+}
+
+.rowProblem {
+  color: var(--warn);
+}
+
+/* ---------- a pattern's own page: the name, then the editor ---------- */
+
+.page {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+}
+
+.pageHead {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  min-height: 34px;
+}
+
+/* The name is a field in the head's own room: the row keeps 34px whether the pattern is new. */
+.pageField {
+  flex: 0 1 320px;
+  min-width: 0;
+}
+
+/* A phone's sheet scrolls: the page gives the device a windowful of room, so the dots are not
+   squeezed into a 120px well. */
+@media (max-width: 720px) {
+  .page {
+    min-height: 74dvh;
+  }
+
+  .pageField {
+    flex: 1 1 auto;
+  }
+}

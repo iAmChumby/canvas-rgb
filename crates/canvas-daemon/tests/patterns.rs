@@ -658,7 +658,8 @@ async fn delete_is_refused_while_any_scene_plays_it_and_names_the_scenes() {
     let message = answer["message"].as_str().unwrap_or_default();
     assert!(message.contains("Main"), "the refusal names Main: {message}");
     assert!(message.contains("Other"), "and Other: {message}");
-    assert!(message.contains("force"), "and says how to force it: {message}");
+    assert!(message.contains("Delete it anyway"), "and says what a forced delete does: {message}");
+    assert!(!message.contains("?force"), "in the owner's words, not the route's: {message}");
     assert!(rig.app.patterns.get("pattern:Intake").is_some(), "it is still there");
 }
 

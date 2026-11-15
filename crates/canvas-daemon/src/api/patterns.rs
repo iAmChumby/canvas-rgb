@@ -101,9 +101,11 @@ pub async fn delete_pattern(
     let named_by = crate::scenes::scenes_playing(&app, &pattern.id).await;
     if !named_by.is_empty() && !query.force {
         let names: Vec<String> = named_by.iter().map(|(_, name)| name.clone()).collect();
+        // The editor shows this sentence as it is, so it is in the owner's words: the pattern's
+        // name, the scenes, and what a forced delete does.
+        let name = pattern.id.strip_prefix(canvas_proto::pattern::PATTERN_ID_PREFIX).unwrap_or(&pattern.id);
         return Err(ApiFailure::conflict(format!(
-            "{} is played by a group of {}; delete it with ?force=true and that group will go dark",
-            pattern.id,
+            "{name} plays in {}. Delete it anyway and the groups that play it go dark.",
             names.join(", ")
         )));
     }
