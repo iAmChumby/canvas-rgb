@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The sidebar strip shows the colours your lights are really showing, not a white picture, and the previous and next effect buttons rest when your groups play different effects (#379)
+
 ## [0.16.0] - 2026-11-15
 
 ### Added
