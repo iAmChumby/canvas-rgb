@@ -24,6 +24,7 @@ import { useLightFeed } from "@/views/scenes/useLightFeed";
 import { useScene } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
 import { Onboarding } from "@/views/editor/Onboarding";
+import { ChainTakeover } from "@/views/chain/ChainTakeover";
 import { shouldOpen } from "@/views/editor/flow";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
@@ -261,8 +262,12 @@ export function ScenesView() {
     );
   }
 
+  // The header setup is offered once the hello is behind the owner: it is a takeover over this
+  // page, so the lights and the groups are still the thing behind the question.
   return (
-    <div className={`rd-page ${s.page}`}>
+    <>
+      <ChainTakeover />
+      <div className={`rd-page ${s.page}`}>
       <PageTitle
         title="Scenes"
         contextBusy={state === "loading"}
@@ -489,6 +494,7 @@ export function ScenesView() {
           </Sheet>
         )}
       </LightFeedContext.Provider>
-    </div>
+      </div>
+    </>
   );
 }

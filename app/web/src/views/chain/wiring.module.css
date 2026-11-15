@@ -1,0 +1,201 @@
+/*
+ * The chain's wiring: the takeover that offers a header setup over Scenes, and the Devices row
+ * that shows one header and starts its flow again.
+ *
+ * The takeover is a plain dim over the page (the `--scrim` token, no blur and no gradient) with
+ * the flow's own instrument standing in it, so the Scenes page and the lights are still the thing
+ * behind the question. The row is a flat strip of the Devices list: a mono small-caps label, the
+ * header's name, its state and one key; under it the parts, in one well, like the flow's own list.
+ * Every colour is a token except a part's own colour, which is the colour its LEDs show.
+ */
+
+/* ---------- the takeover ---------- */
+
+.takeover {
+  position: fixed;
+  inset: 0;
+  z-index: 40;
+  display: flex;
+  overflow: auto;
+  background: var(--scrim);
+  animation: takeoverIn var(--dur-enter) var(--ease) both;
+}
+
+@keyframes takeoverIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+/* ---------- one header on Devices ---------- */
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s2) var(--s4) var(--s3) calc(var(--s4) + var(--s8));
+  border-top: 1px dashed var(--line);
+}
+
+.head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  min-width: 0;
+}
+
+.kicker {
+  flex: none;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.zone {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ink);
+  font-size: var(--t15);
+  font-weight: 600;
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+/* The key keeps the right edge of the row and never moves: it holds its own width. */
+.key {
+  display: flex;
+  flex: none;
+  margin-left: auto;
+}
+
+.empty {
+  margin: 0;
+  padding-left: 2px;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+/* ---------- the parts of a set-up header: one well, one line each ---------- */
+
+.parts {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+  list-style: none;
+}
+
+.part {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: var(--s2) var(--s3);
+  border-bottom: 1px solid var(--line);
+  transition: background-color var(--dur) var(--ease);
+}
+
+.part:last-child {
+  border-bottom: 0;
+}
+
+.part[data-busy="true"] {
+  background: var(--hover);
+}
+
+.chip {
+  flex: none;
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  background: var(--c);
+}
+
+.partWho {
+  display: flex;
+  flex: 1 1 140px;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.partName {
+  min-width: 0;
+  max-width: 24ch;
+  justify-content: flex-start;
+  text-align: left;
+}
+
+.partLeds {
+  flex: none;
+  font-family: var(--fm);
+  font-size: var(--t14);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.partKind {
+  display: flex;
+  flex: none;
+  min-width: 0;
+}
+
+.partTurn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: auto;
+  font-size: var(--t14);
+}
+
+.partError {
+  flex-basis: 100%;
+}
+
+/* The flow, opened inline under its own row. It keeps its own frame; the row only gives it room. */
+.setup {
+  border-top: 1px dashed var(--line);
+  padding-top: var(--s2);
+}
+
+/* ---------- a phone in the hand ---------- */
+
+@media (max-width: 720px) {
+  .row {
+    padding-left: var(--s4);
+  }
+
+  .partTurn {
+    margin-left: 0;
+  }
+
+  /* The words of the switch would crowd the keys: the switch keeps its accessible name. */
+  .partTurn > :global(.mute) {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .takeover {
+    animation: none;
+  }
+}
+
+:global(html[data-motion="reduced"]) .takeover {
+  animation: none;
+}

@@ -36,6 +36,7 @@ import type { WhiteBalance } from "@/proto/WhiteBalance";
 import type { WhiteBalances } from "@/proto/WhiteBalances";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
+import { ChainRow } from "@/views/chain/ChainRow";
 import { IdentifyWalker } from "@/views/editor/IdentifyWalker";
 import { PageTitle } from "@/shell/PageHeader";
 
@@ -384,6 +385,9 @@ export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
   const lights = useSnap((s) => s.lights);
+  // Every resizable header and what is plugged into it (0.15.0). A header with several parts is
+  // one of these; its row is `ChainRow`, and the per-zone light controls are for the rest.
+  const chains = useSnap((s) => s.chains);
   // How many lights the daemon has already counted: the placeholder draws as many cards.
   const counted = useSnap((s) => s.status?.devices_connected ?? 0);
   // How many devices the daemon has, connected or not. The status route knows the total, so the
@@ -597,6 +601,10 @@ export function DevicesView() {
             const one = d.zones.length === 1 ? d.zones[0] : null;
             const lightOf = (zoneIndex: number) =>
               lights?.find((l) => l.light.device_id === d.id && l.light.zone_index === zoneIndex);
+            // A resizable header the daemon lists is drawn by its chain row, whatever state it is
+            // in: a set-up header has one light per part, which the per-zone controls cannot say.
+            const chainOf = (zoneIndex: number) =>
+              chains?.find((c) => c.device_id === d.id && c.zone_index === zoneIndex);
             return (
               <section
                 key={d.id}
@@ -673,7 +681,9 @@ export function DevicesView() {
                   </span>
                 </div>
 
-                {one && lightOf(one.index) && (
+                {one && chainOf(one.index) && <ChainRow chain={chainOf(one.index)!} />}
+
+                {one && !chainOf(one.index) && lightOf(one.index) && (
                   <LightControls view={lightOf(one.index)!} zone={one} />
                 )}
 
@@ -724,7 +734,11 @@ export function DevicesView() {
                           )}
                         </span>
                       </div>
-                      {lightOf(z.index) && <LightControls view={lightOf(z.index)!} zone={z} />}
+                      {chainOf(z.index) ? (
+                        <ChainRow chain={chainOf(z.index)!} />
+                      ) : lightOf(z.index) ? (
+                        <LightControls view={lightOf(z.index)!} zone={z} />
+                      ) : null}
                     </Fragment>
                   ))}
 
