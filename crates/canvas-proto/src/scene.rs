@@ -294,6 +294,28 @@ pub fn html_groups(scene: &Scene) -> usize {
         .count()
 }
 
+/// Why a `copies` value is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CopiesError {
+    #[error("copies must be at least 1")]
+    Zero,
+    #[error("copies is {copies}; the most is {max}")]
+    AboveMax { copies: u32, max: u32 },
+}
+
+/// Checks a `copies` value an owner wrote (a setup part, #381 #382) and returns what to store:
+/// `None` and `Some(1)` both mean once and are stored as `None`; `Some(0)` and anything above
+/// [`COPIES_MAX`] are refused. Whether `copies` of 2 or more may sit beside other parts of the
+/// same header is the daemon's rule (`plan_commit`), not this one.
+pub fn check_copies(copies: Option<u32>) -> Result<Option<u32>, CopiesError> {
+    match copies {
+        None | Some(1) => Ok(None),
+        Some(0) => Err(CopiesError::Zero),
+        Some(n) if n > COPIES_MAX => Err(CopiesError::AboveMax { copies: n, max: COPIES_MAX }),
+        Some(n) => Ok(Some(n)),
+    }
+}
+
 /// Checks the rules a scene keeps: names fit, group ids are unique, every group has a member,
 /// every member is a known light and no light is in two groups. The HTML-group limit
 /// ([`SCENE_HTML_MAX`]) is not checked here: the daemon owns it, so a scene over the limit stays a
@@ -551,6 +573,20 @@ mod tests {
         assert_eq!(file.lights[0].kind, None);
         // A light with no kind writes no kind, so an 0.14.0 reader sees what it wrote.
         assert!(!serde_json::to_string(&file.lights[0]).unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn check_copies_stores_none_for_once_and_refuses_zero_and_above_the_cap() {
+        assert_eq!(check_copies(None), Ok(None));
+        assert_eq!(check_copies(Some(1)), Ok(None), "once is stored as none");
+        assert_eq!(check_copies(Some(2)), Ok(Some(2)));
+        assert_eq!(check_copies(Some(COPIES_MAX)), Ok(Some(COPIES_MAX)));
+        assert_eq!(check_copies(Some(0)), Err(CopiesError::Zero));
+        assert_eq!(
+            check_copies(Some(COPIES_MAX + 1)),
+            Err(CopiesError::AboveMax { copies: COPIES_MAX + 1, max: COPIES_MAX })
+        );
+        assert_eq!(check_copies(Some(u32::MAX)), Err(CopiesError::AboveMax { copies: u32::MAX, max: COPIES_MAX }));
     }
 
     #[test]
