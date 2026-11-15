@@ -301,7 +301,10 @@ function initialState(): DemoState {
     settings: { ...INITIAL_SETTINGS },
     onboardingComplete: onboarded,
     held: foundOnRescan() ? everyDevice : [],
-    devices: applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
+    devices: chainZoneLengths(
+      applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
+      chainScenarios.chains,
+    ),
     effects,
     stacks,
     favorites,
@@ -947,6 +950,18 @@ function zoneLights(s: DemoState, chain: ChainView): LightView[] {
  * does: the parts in chain order stand where the zone's light stood, and each part takes the place
  * of the part at its position. A part that no longer exists leaves its group.
  */
+/** A commit resizes the header to its parts' LEDs, so the device list reports that length too. */
+function setZoneLeds(devices: DeviceInfo[], chain: ChainView, leds: number): void {
+  const zone = devices.find((d) => d.id === chain.device_id)?.zones.find((z) => z.index === chain.zone_index);
+  if (zone) zone.led_count = leds;
+}
+
+/** A set-up chain's zone has the parts' length (`?state=chains` seeds one as a commit leaves it). */
+function chainZoneLengths(devices: DeviceInfo[], chains: ChainView[]): DeviceInfo[] {
+  for (const chain of chains) if (chain.state === "set_up") setZoneLeds(devices, chain, chain.leds);
+  return devices;
+}
+
 function replaceZoneLights(s: DemoState, chain: ChainView, parts: LightView[]): void {
   const before = zoneLights(s, chain);
   const oldIds = before.map((l) => l.light.id);
@@ -1059,6 +1074,7 @@ function chainsRoute(s: DemoState, method: string, seg: string[], body: unknown)
       return view;
     });
     replaceZoneLights(s, chain, parts);
+    setZoneLeds(s.devices, chain, total);
     chain.state = "set_up";
     chain.leds = total;
     chain.parts = parts;
