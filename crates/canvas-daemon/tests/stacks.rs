@@ -1076,6 +1076,7 @@ async fn a_layer_saved_with_a_display_name_runs_that_effect() {
     let mut effect = canvas_daemon::create_effect(
         &harness.app.user_effects,
         &harness.app.stacks,
+        &harness.app.patterns,
         "stack:Firey",
         None,
     )
@@ -3997,6 +3998,7 @@ async fn a_file_with_a_mask_that_does_not_resolve_keeps_the_mask_and_draws_unmas
     let mut effect = canvas_daemon::create_effect(
         &harness.app.user_effects,
         &harness.app.stacks,
+        &harness.app.patterns,
         "stack:HandMask",
         None,
     )

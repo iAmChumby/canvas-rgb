@@ -23,6 +23,8 @@ pub mod logging;
 pub mod migration;
 pub mod openrgb_supervisor;
 pub mod paths;
+pub mod pattern_effect;
+pub mod patterns;
 pub mod peer;
 pub mod peripherals;
 pub mod pipe_client;
@@ -48,13 +50,19 @@ use std::sync::Arc;
 use crate::state::App;
 
 /// The builder one layer of a stack is built with: the lights' builder, which refuses a `stack:`
-/// id outright so a stack can never contain a stack (D95.4.8).
+/// id outright so a stack can never contain a stack (D95.4.8), and a `pattern:` id, because a
+/// pattern as a layer is a later step (the spec's "Room to grow").
 pub fn leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack::LeafBuilder {
     let user = Arc::clone(user);
     Arc::new(move |id: &str| {
         if id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
             return Err(format!(
                 "{id} is a stack, and a stack cannot contain a stack"
+            ));
+        }
+        if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+            return Err(format!(
+                "{id} is a pattern, and a pattern cannot be a layer of a stack"
             ));
         }
         match user.create(id) {
@@ -74,6 +82,11 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
                 "{id} is a stack, and a stack cannot contain a stack"
             ));
         }
+        if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+            return Err(format!(
+                "{id} is a pattern, and a pattern cannot be a layer of a stack"
+            ));
+        }
         match user.create_for_tile(id) {
             Some(made) => made,
             None => canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}")),
@@ -82,8 +95,8 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
 }
 
 /// A fresh instance of the effect with this id. User HTML effects (`html:<stem>`) come from
-/// the effects folder, stacks (`stack:<name>`) from `stacks.json`, and everything else from the
-/// built-in registry.
+/// the effects folder, stacks (`stack:<name>`) from `stacks.json`, patterns (`pattern:<name>`)
+/// from `patterns.json`, and everything else from the built-in registry.
 ///
 /// `group` is the group the effect plays in: a stack resolves its layers in that group's
 /// canvas. `None` when no group is running the effect (a preview, or a test of the effect alone).
@@ -92,9 +105,19 @@ pub fn tile_leaf_builder(user: &Arc<user_effects::UserEffects>) -> crate::stack:
 pub fn create_effect(
     user: &Arc<user_effects::UserEffects>,
     stacks: &crate::stacks::Stacks,
+    patterns: &crate::patterns::Patterns,
     id: &str,
     group: Option<&str>,
 ) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+    // A pattern is an effect with no picture: the engine reads its colours itself. A pattern a
+    // scene still names but the file no longer holds is an error like a missing effect file, and
+    // only that group goes dark.
+    if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+        let pattern = patterns
+            .get(id)
+            .ok_or_else(|| format!("no pattern with the id {id}"))?;
+        return Ok(Box::new(crate::pattern_effect::PatternEffect::new(pattern)));
+    }
     if let Some(stack) = stacks.get(id) {
         let structure = crate::stack::structure_hash(&crate::stack::structure(&stack, &|id| {
             user.source_and_file_name(id).map(|(source, _)| source.to_string())
@@ -131,11 +154,20 @@ pub fn create_effect(
 /// hands it (see [`crate::thumbnail::render`]). A stack is built from the seeded builders too,
 /// with a live map of its own: a tile may render while another stack runs, and it touches
 /// nothing that runs.
+///
+/// A pattern has no picture: its tile is its dots, drawn by the page from `built_on` and the
+/// frame (the spec's "Being an effect everywhere"), so this answers an error and the tile route
+/// refuses it rather than rendering a black picture.
 pub fn create_effect_for_tile(
     user: &Arc<user_effects::UserEffects>,
     stacks: &crate::stacks::Stacks,
     id: &str,
 ) -> Result<Box<dyn canvas_proto::traits::Effect>, String> {
+    if id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+        return Err(format!(
+            "{id} is a pattern: it has no picture, so it is drawn as its dots"
+        ));
+    }
     if let Some(stack) = stacks.get(id) {
         let live = Arc::new(std::sync::RwLock::new(crate::stack::LiveMap::from_stack(&stack, 1)));
         let effect = crate::stack::StackEffect::new(
@@ -170,7 +202,9 @@ pub(crate) fn panic_payload_text(payload: &Box<dyn std::any::Any + Send>) -> Str
 pub fn takeover_builder(app: &Arc<App>, id: &str) -> crate::scenes::EffectBuilder {
     let app = Arc::clone(app);
     let id = id.to_string();
-    Arc::new(move |group| create_effect(&app.user_effects, &app.stacks, &id, Some(group)))
+    Arc::new(move |group| {
+        create_effect(&app.user_effects, &app.stacks, &app.patterns, &id, Some(group))
+    })
 }
 
 /// Devices the daemon never sends frames to, matched on the HID path inside the device id.

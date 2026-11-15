@@ -233,7 +233,7 @@ fn fit_group_props(app: &App, scene: &mut Scene) -> Result<(), ApiFailure> {
         if effect.starts_with(STACK_ID_PREFIX) {
             continue;
         }
-        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, effect) {
             *props = crate::api::effects::fit_props_to_schema(&schema, std::mem::take(props), "the group");
         }
     }
@@ -333,7 +333,7 @@ pub async fn patch_group_props(
             "{effect} is a stack; change its values in the stack builder, not with this route"
         )));
     }
-    let patch = match crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+    let patch = match crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, effect) {
         Some(schema) => crate::api::effects::fit_props_to_schema(&schema, patch, "the group"),
         None => patch,
     };
