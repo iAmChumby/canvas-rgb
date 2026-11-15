@@ -110,6 +110,34 @@ impl LogBuf {
     }
 }
 
+/// The lines every thread of this test binary logs, installed once as the process's global
+/// subscriber.
+///
+/// [`LogBuf::install`] is a scoped subscriber: it sees the thread that called it. A line a spawned
+/// task logs (the OpenRGB supervisor replaying a record, the identify ticker) reaches a global
+/// subscriber only, which is why a test that reads one uses this instead.
+pub fn global_logs() -> LogBuf {
+    static GLOBAL: Once = Once::new();
+    static SLOT: Mutex<Option<LogBuf>> = Mutex::new(None);
+    GLOBAL.call_once(|| {
+        let logs = LogBuf::default();
+        let sink = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_ansi(false)
+            .with_max_level(tracing::Level::TRACE)
+            .with_writer(move || sink.clone())
+            .finish();
+        // A global subscriber can be set once. If something else got there first this records
+        // nothing, and a test that reads it says so rather than passing.
+        let _ = tracing::subscriber::set_global_default(subscriber);
+        *SLOT.lock().unwrap_or_else(|e| e.into_inner()) = Some(logs);
+    });
+    SLOT.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .clone()
+        .unwrap_or_default()
+}
+
 /// A test engine that records what it was told.
 pub struct FakeEngine {
     pub effect_id: Mutex<Option<String>>,
@@ -129,6 +157,11 @@ pub struct FakeEngine {
     /// The scene the engine was handed (Scenes, 0.14.0): every group, with the id of the
     /// effect it plays and the props it runs with.
     pub scene: Mutex<Vec<(String, Option<String>, Props)>>,
+    /// The lights of the scene the engine was last handed, in order: the hardware map the engine
+    /// paints.
+    pub scene_lights: Mutex<Vec<canvas_proto::scene::Light>>,
+    /// Every group's members of the scene the engine was last handed, in group order.
+    pub scene_members: Mutex<Vec<Vec<String>>>,
     /// When this is not zero, `set_scene` panics instead of recording the scene.
     pub panic_on_set_scene: AtomicU32,
     /// How many times `set_scene` has panicked: a test waits on this, not on the slot (#282).
@@ -153,6 +186,8 @@ impl Default for FakeEngine {
             shutdown: AtomicU32::new(0),
             stats: Mutex::new(RenderStats::default()),
             scene: Mutex::new(Vec::new()),
+            scene_lights: Mutex::new(Vec::new()),
+            scene_members: Mutex::new(Vec::new()),
             panic_on_set_scene: AtomicU32::new(0),
             set_scene_panics: AtomicU32::new(0),
         }
@@ -211,7 +246,7 @@ impl Engine for FakeEngine {
     // plays, so a test reads "what is running" the same way as before the scene mode.
     fn set_scene(
         &self,
-        _lights: Vec<canvas_proto::scene::Light>,
+        lights: Vec<canvas_proto::scene::Light>,
         _devices: Vec<DeviceInfo>,
         groups: Vec<canvas_proto::EngineGroup>,
         _fade: bool,
@@ -222,6 +257,10 @@ impl Engine for FakeEngine {
             self.set_scene_panics.fetch_add(1, Ordering::SeqCst);
             panic!("the engine panicked on set_scene");
         }
+        let members: Vec<Vec<String>> =
+            groups.iter().map(|group| group.members.clone()).collect();
+        *self.scene_members.lock().unwrap() = members;
+        *self.scene_lights.lock().unwrap() = lights;
         let recorded: Vec<(String, Option<String>, Props)> = groups
             .into_iter()
             .map(|group| {
@@ -462,8 +501,10 @@ pub fn a_scene(
         name: None,
         arrangement: canvas_proto::scene::Arrangement::Strip,
         reversed: false,
+        kind: None,
     };
     let lights = canvas_proto::scene::LightsFile {
+        chains: Vec::new(),
         schema_version: canvas_proto::scene::LIGHTS_SCHEMA,
         lights: vec![light],
     };

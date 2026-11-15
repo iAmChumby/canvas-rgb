@@ -124,6 +124,7 @@ fn light(device: &str) -> Light {
         name: None,
         arrangement: Arrangement::Strip,
         reversed: false,
+        kind: None,
     }
 }
 
@@ -319,7 +320,7 @@ async fn rig_unstarted_with(
         std::fs::write(effects.join(name), source).expect("the effect file is written");
     }
     let mut store = canvas_daemon::storage::Store::at(&home.path);
-    store.lights = LightsFile { schema_version: LIGHTS_SCHEMA, lights: vec![light(A), light(B)] };
+    store.lights = LightsFile { chains: Vec::new(), schema_version: LIGHTS_SCHEMA, lights: vec![light(A), light(B)] };
     store.scenes = scenes;
     let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
         fps: 30,
@@ -821,6 +822,7 @@ async fn the_sized_jargb_headers_join_the_first_run_scene() {
     // The first-run scene: the default one, with no light yet: the header had no LEDs when the
     // scene was made.
     store.lights = canvas_proto::scene::LightsFile {
+        chains: Vec::new(),
         schema_version: LIGHTS_SCHEMA,
         lights: Vec::new(),
     };

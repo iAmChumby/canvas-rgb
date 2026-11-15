@@ -7,7 +7,7 @@
 use crate::device::DeviceInfo;
 use crate::fans::{FanMode, FanProfile, FansStatus};
 use crate::props::{InputNeeds, Preset, Props, PropertySchema};
-use crate::scene::{Arrangement, Light, LightId, Scene};
+use crate::scene::{Arrangement, ChainPartKind, Light, LightId, Scene};
 use crate::traits::GroupState;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -140,10 +140,6 @@ pub mod routes {
     /// `POST`, no body: the owner reached the end of the onboarding. Sets
     /// `Status.onboarding_complete`, which stays true.
     pub const ONBOARDING_COMPLETE: &str = "/api/v1/onboarding/complete";
-    /// `POST` with [`super::OnboardingSession`]: the onboarding holds the lights. While a session
-    /// is active every LED is black except what identify lights. The page resends `active: true`
-    /// every ~2 s; the daemon ends the session after 5 s without one, or on `active: false`.
-    pub const ONBOARDING_SESSION: &str = "/api/v1/onboarding/session";
     pub const CONFIG_EXPORT: &str = "/api/v1/config/export";
     pub const CONFIG_IMPORT: &str = "/api/v1/config/import";
     /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
@@ -190,6 +186,18 @@ pub mod routes {
     /// `PATCH` with a `Props` body: an effect's starting values (`EffectsFile.saved`). A group
     /// already playing the effect keeps its own.
     pub const EFFECT_DEFAULTS: &str = "/api/v1/effects/{id}/defaults";
+    /// `GET` [`super::ChainsResponse`]: every resizable header and what is set up on it.
+    pub const CHAINS: &str = "/api/v1/chains";
+    /// `POST` starts a setup session on one header (answers [`super::SetupStarted`]); `DELETE`
+    /// with a [`super::SetupEmpty`] body cancels it and puts the length back. `{device}` is the
+    /// device id, `{zone}` the zone index.
+    pub const CHAIN_SETUP: &str = "/api/v1/chains/{device}/{zone}/setup";
+    /// `POST` [`super::SetupLight`]: the coloured runs to show. Also the session's heartbeat.
+    pub const CHAIN_SETUP_LIGHT: &str = "/api/v1/chains/{device}/{zone}/setup/light";
+    /// `POST` [`super::SetupCommit`]: resize to the parts and save them, all or nothing.
+    pub const CHAIN_SETUP_COMMIT: &str = "/api/v1/chains/{device}/{zone}/setup/commit";
+    /// `POST` [`super::SetupEmpty`]: nothing is plugged into this header.
+    pub const CHAIN_SETUP_EMPTY: &str = "/api/v1/chains/{device}/{zone}/setup/empty";
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -334,12 +342,6 @@ pub struct DevicesResponse {
 #[ts(export)]
 pub struct WhiteBalances {
     pub devices: std::collections::BTreeMap<crate::device::DeviceId, crate::color::WhiteBalance>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct OnboardingSession {
-    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -946,6 +948,11 @@ pub struct LightPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub reversed: Option<bool>,
+    /// What the part is. Setting it sets `arrangement` from it; setting `arrangement` alone
+    /// leaves `kind` as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<ChainPartKind>,
 }
 
 /// `POST` [`routes::LIGHTS_FLASH`].
@@ -956,6 +963,101 @@ pub struct FlashRequest {
     pub lights: Vec<LightId>,
     #[serde(default)]
     pub stop: bool,
+}
+
+/// A header's setup state, as the editor shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainSetupState {
+    NotSetUp,
+    Empty,
+    SetUp,
+}
+
+/// One resizable header.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChainView {
+    pub device_id: crate::device::DeviceId,
+    pub device_name: String,
+    pub zone_index: u32,
+    pub zone_name: String,
+    pub state: ChainSetupState,
+    /// The length the header has now.
+    pub leds: u32,
+    pub min_leds: u32,
+    pub max_leds: u32,
+    /// Its lights in chain order: the parts, or the whole-zone light.
+    pub parts: Vec<LightView>,
+}
+
+/// `GET` [`routes::CHAINS`]: resizable zones only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChainsResponse {
+    pub chains: Vec<ChainView>,
+}
+
+/// `POST` [`routes::CHAIN_SETUP`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupStarted {
+    pub session: String,
+    /// The length the header goes back to if the setup ends without a commit.
+    pub restore_to: u32,
+    /// The length it was raised to: the zone's maximum.
+    pub raised_to: u32,
+}
+
+/// One coloured run, by LED index inside the zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupRun {
+    pub start: u32,
+    pub count: u32,
+    pub color: crate::color::Rgb8,
+}
+
+/// `POST` [`routes::CHAIN_SETUP_LIGHT`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupLight {
+    pub session: String,
+    pub runs: Vec<SetupRun>,
+}
+
+/// One part as the owner described it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupPart {
+    pub name: String,
+    pub kind: ChainPartKind,
+    pub leds: u32,
+}
+
+/// `POST` [`routes::CHAIN_SETUP_COMMIT`]: parts in chain order; their LEDs add up to the final
+/// length.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupCommit {
+    pub session: String,
+    pub parts: Vec<SetupPart>,
+}
+
+/// `POST` [`routes::CHAIN_SETUP_EMPTY`], and the body of a cancel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupEmpty {
+    pub session: String,
+}
+
+/// What a commit made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupCommitted {
+    pub lights: Vec<LightView>,
+    pub final_leds: u32,
 }
 
 /// A scene by id and name, for the status.
@@ -979,6 +1081,9 @@ mod scene_payload_tests {
         let set: LightPatch = serde_json::from_str(r#"{"name":"Top fan","reversed":true}"#).unwrap();
         assert_eq!(set.name, Some(Some("Top fan".into())));
         assert_eq!(set.reversed, Some(true));
+        assert_eq!(set.kind, None);
+        let kind: LightPatch = serde_json::from_str(r#"{"kind":"other"}"#).unwrap();
+        assert_eq!(kind.kind, Some(ChainPartKind::Other));
     }
 
     #[test]

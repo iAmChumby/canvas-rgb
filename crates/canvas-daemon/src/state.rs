@@ -12,7 +12,7 @@ use canvas_proto::fans::FansStatus;
 use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, PreviewSink};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 
 use crate::storage::Store;
@@ -73,6 +73,19 @@ pub struct App {
     ///
     /// Behind an `Arc` so the OpenRGB supervisor can share it with the API handlers.
     pub zones: Arc<tokio::sync::RwLock<ZoneSizes>>,
+    /// The zones a setup holds at a length it raised them to (#338): chain setup raises a header
+    /// to its longest length while the owner drags a slider, and the supervisor overlays these on
+    /// the saved sizes so its refresh leaves the raise alone. Never written to `zones` or
+    /// `zones.json`: the hold ends when the setup drops it.
+    pub zone_holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
+    /// One chain setup step at a time (#338): start, commit, empty and every end of a setup
+    /// (cancel, the timeout, quit) take it first, before any other lock. A cancel that races a
+    /// commit, or the timeout that races a cancel, then runs after it and finds the setup over.
+    pub chain_setup: tokio::sync::Mutex<()>,
+    /// Set when the first non-empty device list replayed what a crash left (#338): the chain
+    /// restore record, and the commit rollback that reads an intent record. One replay, however
+    /// many lists follow.
+    pub leftovers_replayed: AtomicBool,
     /// The running effect's preview subscribers (`GET /preview`), so the main engine only runs
     /// while the editor watches.
     pub preview_subs: PreviewRegistry,
@@ -167,6 +180,10 @@ pub type FansFile = canvas_proto::config::FansFile;
 /// Zone sizes by device fingerprint, then zone index.
 pub type ZoneSizes = BTreeMap<String, BTreeMap<u32, u32>>;
 
+/// The zones a setup holds at a raised length (#338): device fingerprint and zone index, then the
+/// length the setup raised it to. Only the supervisor reads it, and only for the length of a setup.
+pub type ZoneHolds = BTreeMap<(String, u32), u32>;
+
 impl App {
     /// Builds an app from the pieces the caller supplies, with no numeric displays.
     ///
@@ -258,6 +275,9 @@ impl App {
             frame_lane,
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
+            zone_holds: Arc::new(tokio::sync::RwLock::new(ZoneHolds::new())),
+            chain_setup: tokio::sync::Mutex::new(()),
+            leftovers_replayed: AtomicBool::new(false),
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),

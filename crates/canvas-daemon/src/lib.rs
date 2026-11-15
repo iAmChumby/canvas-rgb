@@ -4,6 +4,8 @@ pub mod api;
 pub mod auth;
 pub mod bundle;
 pub mod capture;
+pub mod chain_plan;
+pub mod chain_records;
 pub mod cli;
 pub mod composite;
 pub mod conflict;

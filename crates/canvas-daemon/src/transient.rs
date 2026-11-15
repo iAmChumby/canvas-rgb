@@ -9,6 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
+use crate::identify::IdentifyGate;
 use crate::state::App;
 
 /// How long after the effect's own run the daemon waits for another activate or identify.
@@ -100,8 +101,8 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
             if inner.generation != generation || !inner.pending {
                 return;
             }
-            if app.identify.session_active() {
-                // An onboarding session holds the lights; check again after another grace.
+            if holds_lights(&app.identify) {
+                // A chain setup holds the lights; check again after another grace.
                 drop(inner);
                 spawn_timer(app.clone(), generation, GRACE);
                 return;
@@ -110,6 +111,12 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
         }
         restore_armed(&app, generation).await;
     });
+}
+
+/// Whether the timer must wait instead of restoring: a chain setup holds the lights. A setup is
+/// transient, so the timer asks again after another grace.
+fn holds_lights(identify: &IdentifyGate) -> bool {
+    identify.holds_lights()
 }
 
 /// Puts the active scene back on the lights.
@@ -159,4 +166,24 @@ async fn restore_locked(app: &Arc<App>) {
     }
     crate::scenes::apply_active_ungated(app, false).await;
     tracing::info!("the onboarding effect ended; the active scene is back");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas_proto::DeviceId;
+    use std::time::Instant;
+
+    /// The timer takes this checkpoint after every wait, before it restores: a chain setup in
+    /// progress is the owner still choosing, so the restore waits for it (#338).
+    #[test]
+    fn a_restore_waits_while_a_setup_holds_the_lights() {
+        let gate = crate::identify::IdentifyGate::default();
+        let now = Instant::now();
+        assert!(!holds_lights(&gate), "nothing holds the lights: the restore is due");
+        assert!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s1".into(), now).is_some());
+        assert!(holds_lights(&gate), "the setup is open: the restore waits");
+        assert!(gate.end_setup("s1"));
+        assert!(!holds_lights(&gate), "the setup ended: the restore is due again");
+    }
 }

@@ -538,44 +538,6 @@
   font-family: var(--fm);
 }
 
-/* ---------- the fans: the walker ---------- */
-
-.walker {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--s3);
-  padding: var(--s3) var(--s4);
-  border: 1px solid var(--line-2);
-  border-radius: var(--r-sm);
-  background: var(--sunk);
-}
-
-.walkerNumber {
-  display: flex;
-  align-items: baseline;
-  gap: var(--s2);
-  font-family: var(--fm);
-  font-variant-numeric: tabular-nums;
-}
-
-.walkerLabel {
-  color: var(--mute);
-  font-size: var(--t14);
-}
-
-.walkerBig {
-  font-size: var(--t40);
-  font-weight: 500;
-  line-height: 1;
-  color: var(--live);
-}
-
-.walkerKeys {
-  display: flex;
-  gap: var(--s2);
-}
-
 .holdKey {
   touch-action: manipulation;
 }

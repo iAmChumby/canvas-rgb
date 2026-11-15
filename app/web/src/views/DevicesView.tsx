@@ -36,7 +36,7 @@ import type { WhiteBalance } from "@/proto/WhiteBalance";
 import type { WhiteBalances } from "@/proto/WhiteBalances";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
-import { IdentifyWalker } from "@/views/editor/IdentifyWalker";
+import { ChainRow } from "@/views/chain/ChainRow";
 import { PageTitle } from "@/shell/PageHeader";
 
 const KIND_ICON: Record<DeviceKind, Icon> = {
@@ -158,11 +158,6 @@ function ZoneStrip({ zone }: { zone: ZoneInfo }) {
   );
 }
 
-interface WalkTarget {
-  deviceId: string;
-  zoneIndex: number;
-}
-
 const NEUTRAL: WhiteBalance = { red: 1, green: 1, blue: 1 };
 
 const CHANNELS = [
@@ -183,9 +178,8 @@ function isNeutral(wb: WhiteBalance): boolean {
 }
 
 /**
- * One device's white balance (#50), opened under its row from the row's Balance key, like the
- * Size walker: one gain per LED channel, shown as 0..100 %. Reset is there only while the
- * device is not neutral.
+ * One device's white balance (#50), opened under its row from the row's Balance key: one gain
+ * per LED channel, shown as 0..100 %. Reset is there only while the device is not neutral.
  */
 function WhiteBalanceSection({
   device,
@@ -384,6 +378,9 @@ export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
   const lights = useSnap((s) => s.lights);
+  // Every resizable header and what is plugged into it (0.15.0). A header with several parts is
+  // one of these; its row is `ChainRow`, and the per-zone light controls are for the rest.
+  const chains = useSnap((s) => s.chains);
   // How many lights the daemon has already counted: the placeholder draws as many cards.
   const counted = useSnap((s) => s.status?.devices_connected ?? 0);
   // How many devices the daemon has, connected or not. The status route knows the total, so the
@@ -395,29 +392,6 @@ export function DevicesView() {
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("devices"));
   const openrgb = useSnap((s) => s.status?.openrgb ?? "connected");
-  // The first-run banner links here with ?walk=<device id>. That device's first resizable zone opens
-  // in the walker until the user closes it or picks another zone.
-  const [urlWalk] = useState<string | null>(() =>
-    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("walk"),
-  );
-  const [urlHandled, setUrlHandled] = useState(false);
-  const [choice, setChoice] = useState<WalkTarget | null>(null);
-  const fromUrl: WalkTarget | null = (() => {
-    if (urlHandled || !urlWalk || !devices) return null;
-    const d = devices.find((x) => x.id === urlWalk);
-    // The first header that already reports LEDs: a header that reports none is the fixed
-    // part of the board, not an addressable strip.
-    const z = d?.zones.find((x) => x.resizable && x.led_count > 0) ?? d?.zones.find((x) => x.resizable);
-    return d && z ? { deviceId: d.id, zoneIndex: z.index } : null;
-  })();
-  const walk = choice ?? fromUrl;
-  const setWalk = (next: WalkTarget | null) => {
-    setUrlHandled(true);
-    setChoice(next);
-  };
-
-  const walkDevice = devices?.find((d) => d.id === walk?.deviceId) ?? null;
-  const walkZone = walkDevice?.zones.find((z) => z.index === walk?.zoneIndex) ?? null;
 
   // The white balances, read once when the view mounts (#50); a device not listed is neutral.
   const [whiteBalances, setWhiteBalances] = useState<WhiteBalances | null>(null);
@@ -597,6 +571,10 @@ export function DevicesView() {
             const one = d.zones.length === 1 ? d.zones[0] : null;
             const lightOf = (zoneIndex: number) =>
               lights?.find((l) => l.light.device_id === d.id && l.light.zone_index === zoneIndex);
+            // A resizable header the daemon lists is drawn by its chain row, whatever state it is
+            // in: a set-up header has one light per part, which the per-zone controls cannot say.
+            const chainOf = (zoneIndex: number) =>
+              chains?.find((c) => c.device_id === d.id && c.zone_index === zoneIndex);
             return (
               <section
                 key={d.id}
@@ -658,22 +636,11 @@ export function DevicesView() {
                     <span className="state-dot" aria-hidden="true" />
                     {d.connected ? "connected" : "disconnected"}
                   </span>
-                  {/* A device with one zone has no row of zones under it, so the key that sizes
-                      the zone sits in the device's own row, in the same column as the zone rows'. */}
-                  <span className="zone-strip-size">
-                    {one?.resizable && (
-                      <Button
-                        size="sm"
-                        variant={walk?.deviceId === d.id && walk.zoneIndex === one.index ? "primary" : "default"}
-                        onClick={() => setWalk({ deviceId: d.id, zoneIndex: one.index })}
-                      >
-                        Size
-                      </Button>
-                    )}
-                  </span>
                 </div>
 
-                {one && lightOf(one.index) && (
+                {one && chainOf(one.index) && <ChainRow chain={chainOf(one.index)!} />}
+
+                {one && !chainOf(one.index) && lightOf(one.index) && (
                   <LightControls view={lightOf(one.index)!} zone={one} />
                 )}
 
@@ -712,34 +679,14 @@ export function DevicesView() {
                             </>
                           )}
                         </span>
-                        <span className="zone-strip-size">
-                          {z.resizable && (
-                            <Button
-                              size="sm"
-                              variant={walk?.deviceId === d.id && walk.zoneIndex === z.index ? "primary" : "default"}
-                              onClick={() => setWalk({ deviceId: d.id, zoneIndex: z.index })}
-                            >
-                              Size
-                            </Button>
-                          )}
-                        </span>
                       </div>
-                      {lightOf(z.index) && <LightControls view={lightOf(z.index)!} zone={z} />}
+                      {chainOf(z.index) ? (
+                        <ChainRow chain={chainOf(z.index)!} />
+                      ) : lightOf(z.index) ? (
+                        <LightControls view={lightOf(z.index)!} zone={z} />
+                      ) : null}
                     </Fragment>
                   ))}
-
-                {/* The walker opens under the row whose Size was pressed, not in a column of
-                    its own (R7). */}
-                {walkDevice?.id === d.id && walkZone && (
-                  <div className="rd-walk">
-                    <IdentifyWalker
-                      key={`${walkDevice.id}#${walkZone.index}`}
-                      device={walkDevice}
-                      zone={walkZone}
-                      onClose={() => setWalk(null)}
-                    />
-                  </div>
-                )}
 
                 {wbOpen === d.id && (
                   <WhiteBalanceSection

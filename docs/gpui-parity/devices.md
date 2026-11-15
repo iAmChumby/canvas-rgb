@@ -2,6 +2,8 @@
 
 Issue: #209 | React pinned at: `0937970` | React files: `app/web/src/views/DevicesView.tsx`, `app/web/src/views/editor/IdentifyWalker.tsx`, `app/web/src/components/{Button,EmptyState,Panel,Loading,LoadShapes,AnimatedNumber,NumberField,Motion,Tooltip,Skeleton}.tsx`, `app/web/src/shell/PageHeader.tsx` (`PageTitle`), `app/web/src/shell/GlobalBanners.tsx` (`StandingNotices`, the "Size your ARGB headers" banner), `app/web/src/shell/Shell.tsx` (page gating only), `app/web/src/app/devices/page.tsx`, `app/web/src/lib/{store,api,endpoints,errors,format,host,demo,demoScenarios,fixtures}.ts`, `app/web/src/proto/{DeviceInfo,DeviceKind,ZoneInfo,ZoneKind,PatchZone,IdentifyRequest,DevicesResponse,LinkState,routes}.ts`, `app/web/src/styles/{app,motion,hardware,tokens}.css` | GPUI files: `app/gpui/src/views/devices.rs` (planned; `app/gpui` is not in the tree yet, checked by `ls app/gpui`)
 
+**#338 removed the walker, the `?walk=` link and the Size key.** Chain setup replaced them (`app/web/src/views/chain/`). The items below that name the walker, `IdentifyWalker.tsx`, `?walk=` or the Size key describe the React tree at `0937970` and are not to be ported.
+
 An item is ticked only with how it was checked: a test name, a screenshot pair, or a command and what it showed.
 An unchecked item stays `[ ]`. "Looks fine" is not a check.
 

@@ -14,20 +14,21 @@ import { fmtSeconds } from "@/lib/format";
 import { requestNavigation } from "@/lib/navigationGuard";
 import { patchSnap, useSnap } from "@/lib/store";
 import { UpdatedToast } from "@/shell/UpdatedToast";
+import { requestChainSetup } from "@/views/chain/request";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
 
 /**
- * The standing notices: the SignalRGB conflict, no scene yet, and the first-run "size your ARGB
- * headers" panel (G7). They take their own space in the page, above it. The page is not drawn
+ * The standing notices: the SignalRGB conflict, no scene yet, and the "set up your headers" panel
+ * (G7). They take their own space in the page, above it. The page is not drawn
  * until the daemon has answered once (see Shell), so these are part of the first frame of the page
  * and nothing is pushed down after it has been painted.
  */
 export function StandingNotices() {
   const pathname = usePathname();
+  const router = useRouter();
   const status = useSnap((s) => s.status);
-  const devices = useSnap((s) => s.devices);
   const [err, setErr] = useState<string | null>(null);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
@@ -35,11 +36,6 @@ export function StandingNotices() {
   // it, so the banner would say it twice and push the page down.
   const onScenes = pathname === "/";
   const noScene = status !== null && !status.active_scene && !onScenes;
-
-  const firstResizable = devices?.find((d) => d.zones.some((z) => z.resizable));
-  const walkHref = firstResizable
-    ? `/devices/?walk=${encodeURIComponent(firstResizable.id)}`
-    : "/devices/";
 
   const dismissPanel = async () => {
     setErr(null);
@@ -49,6 +45,15 @@ export function StandingNotices() {
     } catch (e) {
       setErr(messageOf(e));
     }
+  };
+
+  /**
+   * The panel's "Set up": the chain takeover on Scenes is the flow. The request opens it even
+   * after "Later", and it opens on Scenes whether this page is Scenes already or not.
+   */
+  const openSetup = () => {
+    requestChainSetup();
+    requestNavigation(() => router.push("/"));
   };
 
   if (!conflict && !noScene && !status?.show_zone_panel) return null;
@@ -86,17 +91,17 @@ export function StandingNotices() {
         <Banner
           tone="work"
           icon={<Lightning size={20} weight="fill" />}
-          title="Size your ARGB headers"
+          title="Set up your headers"
           onDismiss={dismissPanel}
           dismissLabel="Dismiss this panel"
           actions={
-            <ButtonLink href={walkHref} variant="primary" size="sm">
-              Open the identify walker
-            </ButtonLink>
+            <Button variant="primary" size="sm" onClick={openSetup}>
+              Set up
+            </Button>
           }
         >
-          Walk one lit LED along each addressable header and mark where it ends, so effects fill the strip you
-          actually have. The MSI JARGB headers are set this way.
+          Tell the app what is plugged into each addressable header, so effects fill the chain you
+          actually have. A header with nothing on it is marked empty and is never asked about again.
           {err && <span className="error-line"> {err}</span>}
         </Banner>
       )}

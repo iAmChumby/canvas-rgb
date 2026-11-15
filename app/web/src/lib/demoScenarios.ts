@@ -26,6 +26,7 @@
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { FansStatus } from "@/proto/FansStatus";
+import type { ChainView } from "@/proto/ChainView";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
@@ -52,6 +53,8 @@ export const OB_NO_DEVICES = "no-devices"; // OpenRGB is up and sees nothing
 export const OB_FOUND_ON_RESCAN = "found-on-rescan"; // ...until the owner asks again
 export const OB_CONFLICT_CLEARS = "conflict-clears"; // SignalRGB quits 6 s after the page opens
 export const OB_COMPLETE = "complete"; // the onboarding was finished already
+/** `?state=chains`: one header is set up as seven fans, as a run through the flow leaves it. */
+export const CHAINS_SET_UP = "chains";
 
 /** The scenario tokens in the query string, the same way the demo reads them. */
 function tokens(): string[] {
@@ -359,4 +362,60 @@ export function applySceneScenarios(
     all.push(lamp);
   }
   return { scenes, active, lights: all };
+}
+
+/** The seven fans of the set-up chain: 96 LEDs, the daemon's even split of 96 into 7. */
+const SET_UP_FAN_LEDS = [14, 14, 14, 14, 14, 13, 13];
+
+/**
+ * Applies the chain scenarios: `?state=chains` sets one header up as seven fans. The whole-zone
+ * light is replaced by its parts, in the lights list and in every group that held it, as a commit
+ * does; the parts keep their place in chain order.
+ */
+export function applyChainScenarios(
+  chains: ChainView[],
+  lights: LightView[],
+  scenes: Scene[],
+): { chains: ChainView[]; lights: LightView[]; scenes: Scene[] } {
+  if (!has(CHAINS_SET_UP)) return { chains, lights, scenes };
+  const at = chains.findIndex((chain) => chain.zone_name === "JARGB 1");
+  const chain = chains[at];
+  if (!chain) return { chains, lights, scenes };
+
+  let start = 0;
+  const parts: LightView[] = SET_UP_FAN_LEDS.map((leds, i) => {
+    const id = `${chain.device_id}#z${chain.zone_index}p${i + 1}`;
+    const view: LightView = {
+      light: {
+        id,
+        device_id: chain.device_id,
+        zone_index: chain.zone_index,
+        leds: { start, count: leds },
+        name: `Fan ${i + 1}`,
+        arrangement: "ring",
+        reversed: false,
+        kind: "fan",
+      },
+      led_count: leds,
+      connected: true,
+      label: `Fan ${i + 1}`,
+    };
+    start += leds;
+    return view;
+  });
+  const ids = parts.map((part) => part.light.id);
+  const zoneLight = `${chain.device_id}#z${chain.zone_index}`;
+  const set: ChainView = { ...chain, state: "set_up", leds: start, parts };
+
+  return {
+    chains: chains.map((c, i) => (i === at ? set : c)),
+    lights: lights.flatMap((l) => (l.light.id === zoneLight ? parts : [l])),
+    scenes: scenes.map((scene) => ({
+      ...scene,
+      groups: scene.groups.map((group) => ({
+        ...group,
+        members: group.members.flatMap((id) => (id === zoneLight ? ids : [id])),
+      })),
+    })),
+  };
 }

@@ -4,6 +4,7 @@
 //! middleware on the whole router.
 
 pub mod audio;
+pub mod chains;
 pub mod diag;
 pub mod devices;
 pub mod displays;
@@ -86,6 +87,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::LIGHTS_FLASH, post(scenes::flash_lights))
         .route(routes::LIGHTS, get(lights::list_lights))
         .route(routes::LIGHT, patch(lights::patch_light))
+        .route(routes::CHAINS, get(chains::list_chains))
+        .route(
+            routes::CHAIN_SETUP,
+            post(chains::start_setup).delete(chains::cancel_setup),
+        )
+        .route(routes::CHAIN_SETUP_LIGHT, post(chains::light_setup))
+        .route(routes::CHAIN_SETUP_COMMIT, post(chains::commit_setup))
+        .route(routes::CHAIN_SETUP_EMPTY, post(chains::empty_setup))
         .route(routes::STACKS, get(stacks::list_stacks))
         .route(
             routes::STACK_PREVIEW,
@@ -125,7 +134,6 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::AUDIO_TEST, put(audio::put_test).get(audio::get_test).delete(audio::delete_test))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
         .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
-        .route(routes::ONBOARDING_SESSION, post(devices::onboarding_session))
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))
         .route(routes::QUIT, post(status::quit))

@@ -123,6 +123,8 @@ const SCROLL_PANES = [
   '.rd-stacks .rd-stack-body[data-library="tray"] .rd-stack-main',
   '.rd-stacks .rd-stack-body[data-library="tab"] .rd-stack-main',
   ".sheetBody",
+  ".chainStage",
+  ".takeover",
 ];
 
 /**

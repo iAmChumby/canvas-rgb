@@ -686,6 +686,7 @@ mod tests {
             name: None,
             arrangement: Arrangement::Strip,
             reversed: false,
+            kind: None,
         }
     }
 

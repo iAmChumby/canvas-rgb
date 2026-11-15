@@ -115,7 +115,7 @@ pub fn migrate(layouts: Option<&LayoutsFile>, devices: &[DeviceInfo]) -> (Lights
     }
 
     let mut ids: HashMap<Key, LightId> = HashMap::new();
-    let mut lights = LightsFile { schema_version: LIGHTS_SCHEMA, lights: Vec::new() };
+    let mut lights = LightsFile { chains: Vec::new(), schema_version: LIGHTS_SCHEMA, lights: Vec::new() };
     for (key, placed) in &first_seen {
         let base = zone_light_id(&placed.device_id, placed.zone_index);
         let id = match key.2 {
@@ -137,6 +137,7 @@ pub fn migrate(layouts: Option<&LayoutsFile>, devices: &[DeviceInfo]) -> (Lights
             name: placed.label.clone(),
             arrangement: arrangement_of(placed, devices),
             reversed: placed.reversed,
+            kind: None,
         });
     }
 

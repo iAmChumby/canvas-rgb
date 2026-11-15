@@ -463,6 +463,7 @@ mod tests {
             name: None,
             arrangement,
             reversed: false,
+            kind: None,
         }
     }
 

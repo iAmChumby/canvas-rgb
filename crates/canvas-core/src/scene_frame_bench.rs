@@ -150,6 +150,7 @@ fn light(device: &DeviceInfo) -> Light {
         name: None,
         arrangement: Arrangement::Strip,
         reversed: false,
+        kind: None,
     }
 }
 
