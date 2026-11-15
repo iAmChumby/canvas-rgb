@@ -32,6 +32,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Removed
 
+- The per-LED walk and the onboarding session. Chain setup replaces them. (#338)
 - Layout, its placement canvas and the part-placing setup. Saved layouts become scenes. (#310)
 - The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
 

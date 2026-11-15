@@ -182,33 +182,6 @@ pub async fn identify(
     Ok(Json(serde_json::json!({ "ok": true })))
 }
 
-/// `POST /api/v1/onboarding/session`.
-///
-/// While a session is active every device is black except identify targets, even with output
-/// paused. It ends on `active: false` or 5 s after the last `active: true`.
-pub async fn onboarding_session(
-    State(app): State<Arc<App>>,
-    Json(request): Json<canvas_proto::api::OnboardingSession>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if request.active {
-        let (was_new, start) = app.identify.start_session(std::time::Instant::now());
-        if was_new {
-            tracing::info!("onboarding session started: every light is black except identify targets");
-        }
-        let devices = app.devices.read().await.clone();
-        if let crate::identify::Tick::Frames(frames) = app.identify.tick(std::time::Instant::now(), &devices) {
-            app.identify.push(frames);
-        }
-        if start {
-            crate::identify::spawn_ticker(app.clone());
-        }
-    } else if app.identify.end_session() {
-        tracing::info!("onboarding session ended by the page");
-        crate::identify::restore(&app).await;
-    }
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
 // ---------------------------------------------------------------- white balance (#50)
 
 /// The most devices that may carry a white balance: the config never grows past this.
