@@ -924,10 +924,17 @@ export function EffectsView() {
                   {patternEffect ? (
                     // The dots, in the pattern's own colours: its document, or its shape all off
                     // while the list is on its way. Never a thumbnail request.
-                    <PatternTile
-                      pattern={patternBody ?? emptyPattern(e.built_on ?? { led_count: 1, arrangement: "strip" })}
-                      size="md"
-                    />
+                    <>
+                      <PatternTile
+                        pattern={patternBody ?? emptyPattern(e.built_on ?? { led_count: 1, arrangement: "strip" })}
+                        size="md"
+                      />
+                      {/* What it was built on, on the picture: the footer stays one line, as a
+                          canvas effect's does, so every card in a row is the same height. */}
+                      <span className="effect-card-kind">
+                        {kindWords((patternBody ?? e).built_on ?? { led_count: 1, arrangement: "strip" })}
+                      </span>
+                    </>
                   ) : (
                     <Thumb id={e.id} size="md" label={e.name} live={selected} />
                   )}
@@ -940,12 +947,6 @@ export function EffectsView() {
                     {row.match?.excerpt && (
                       <span className="effect-card-excerpt">
                         <Highlighted text={row.match.excerpt.text} ranges={row.match.excerpt.ranges} />
-                      </span>
-                    )}
-                    {/* What a pattern was built on, under its name: "ring of 12". */}
-                    {patternEffect && !row.match?.excerpt && (
-                      <span className="effect-card-excerpt">
-                        {kindWords((patternBody ?? e).built_on ?? { led_count: 1, arrangement: "strip" })}
                       </span>
                     )}
                   </span>
@@ -1403,6 +1404,9 @@ export function EffectsView() {
             icon={<Plus size={15} />}
             disabled={editing}
             aria-expanded={newMenu}
+            aria-haspopup="menu"
+            // The words hide on a phone; the name stays "New effect", not the tooltip.
+            aria-label="New effect"
             title={editing ? "Finish editing first" : "A stack, a pattern, or an HTML effect"}
             onClick={() => setNewMenu((open) => !open)}
           >

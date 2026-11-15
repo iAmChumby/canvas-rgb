@@ -18,6 +18,7 @@ import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { api } from "@/lib/endpoints";
 import { groupFit, kindWords } from "@/lib/patternFit";
+import { PatternTile } from "@/views/effects/PatternTile";
 import { useSnap } from "@/lib/store";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
@@ -277,6 +278,8 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   const entries = useMemo(() => effects ?? [], [effects]);
   /** The lights the group holds, in its order: what a pattern would land on. */
   const lights = useSnap((st) => st.lights);
+  /** The saved patterns, so a pattern row draws its own dots in their colours. */
+  const patterns = useSnap((st) => st.patterns);
   const groupLights = useMemo(() => {
     if (!group || !lights) return [];
     const byId = new Map(lights.map((l) => [l.light.id, l]));
@@ -354,10 +357,13 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     onClick={() => !blocked && choose(effect.id)}
                   >
                     <span className={s.pickStrip} aria-hidden="true">
-                      {/* A pattern has no picture: the daemon refuses a thumbnail for one (it has
-                          no canvas frame). Its strip carries the mark of a picture made of LEDs. */}
+                      {/* A pattern has no canvas picture: the row draws its dots in their colours,
+                          or the mark of a picture made of LEDs while the library loads. */}
                       {builtOn ? (
-                        <DotsNine size={18} />
+                        (() => {
+                          const doc = patterns?.find((p) => p.id === effect.id);
+                          return doc ? <PatternTile pattern={doc} size="sm" /> : <DotsNine size={18} />;
+                        })()
                       ) : (
                         <Thumb id={effect.id} size="sm" label={effect.name} live={held} />
                       )}
