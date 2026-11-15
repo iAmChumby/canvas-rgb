@@ -1632,6 +1632,7 @@ pub fn zone_group(
                     arrangement: Arrangement::default_for(&zone.kind),
                     reversed: false,
                     kind: None,
+                    copies: None,
                 })
         })
         .collect();
@@ -1821,6 +1822,7 @@ mod tests {
             arrangement: canvas_proto::scene::Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 

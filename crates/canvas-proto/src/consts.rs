@@ -13,6 +13,9 @@ pub const API_ALLOWED_HOSTS: &[&str] = &["127.0.0.1:9430", "localhost:9430"];
 pub const API_ALLOWED_ORIGINS: &[&str] = &["http://tauri.localhost", "https://tauri.localhost", "tauri://localhost"];
 /// The preview WebSocket cannot carry headers from a browser; it takes `?token=`.
 pub const PREVIEW_TOKEN_QUERY: &str = "token";
+/// The query key that names the group on the per-group preview socket
+/// ([`crate::api::routes::PREVIEW_GROUP`], #378). Its value is a group id.
+pub const GROUP_PREVIEW_QUERY: &str = "group";
 pub const OPENRGB_HOST: &str = "127.0.0.1";
 pub const OPENRGB_PORT: u16 = 6742;
 /// OpenRGB SDK client name canvas-rgb registers with.

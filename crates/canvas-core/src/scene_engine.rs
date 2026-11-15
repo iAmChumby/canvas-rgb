@@ -777,6 +777,7 @@ mod tests {
             arrangement: Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 

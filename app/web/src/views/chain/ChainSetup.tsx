@@ -12,7 +12,7 @@
 // after the commit has already ended the session.
 
 import type { ReactNode } from "react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { CaretLeft, CaretRight, Check, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 
 import { Button } from "@/components/Button";
@@ -20,6 +20,7 @@ import type { ChainView } from "@/proto/ChainView";
 import { ConfirmStep } from "@/views/chain/ConfirmStep";
 import { CountStep } from "@/views/chain/CountStep";
 import { LengthStep } from "@/views/chain/LengthStep";
+import { chainKey, markChainOffered } from "@/views/chain/offered";
 import { useChainSetup } from "@/views/chain/useChainSetup";
 import s from "@/views/chain/chain.module.css";
 
@@ -30,6 +31,13 @@ export function ChainSetup({ chain, onClose }: { chain: ChainView; onClose: () =
   const setup = useChainSetup(chain);
   const [finishing, setFinishing] = useState(false);
   const at = STEP_OF[setup.step];
+
+  // A setup that is on screen is that header's one offer, wherever it was opened from: the
+  // takeover, or a device's own row. Without the mark a header put off from its row would be
+  // offered again by itself on the next visit to Scenes (#380).
+  useEffect(() => {
+    markChainOffered(chainKey(chain.device_id, chain.zone_index));
+  }, [chain.device_id, chain.zone_index]);
 
   /** Yes ends the flow; the key is held while the commit is out, so a second press cannot land. */
   const finish = async () => {
@@ -42,7 +50,10 @@ export function ChainSetup({ chain, onClose }: { chain: ChainView; onClose: () =
     }
   };
 
-  /** Later puts the header back and closes. */
+  /**
+   * Later puts the header back and closes. The header was marked as offered when this screen came
+   * up; the headers the visit has not shown yet are the takeover's to put off.
+   */
   const later = () => {
     setup.later();
     onClose();

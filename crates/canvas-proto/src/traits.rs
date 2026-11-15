@@ -223,6 +223,12 @@ pub trait Engine: Send + Sync {
     /// One group's brightness, 0..=100.
     fn set_group_brightness(&self, group: &str, brightness: u8);
     fn set_light_preview(&self, sink: Option<Arc<dyn LightPreviewSink>>);
+    /// #378: sends the picture of group `group` (its own canvas times its brightness; black for
+    /// an Off or failed group) to `sink`, at most [`crate::consts::PREVIEW_MAX_FPS`] a second,
+    /// through a sink of its own so the effects editor's preview is not touched. `None` for
+    /// either stops it and copies nothing. Required, like [`Engine::set_light_preview`]: an
+    /// engine that forgot it would compile and show a blank stage.
+    fn set_group_preview(&self, group: Option<String>, sink: Option<Arc<dyn PreviewSink>>);
     /// Every group of the running scene, in scene order. Empty outside scene mode.
     fn group_states(&self) -> Vec<GroupState>;
 }

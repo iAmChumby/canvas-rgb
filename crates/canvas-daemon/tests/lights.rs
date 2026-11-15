@@ -159,6 +159,7 @@ fn light(
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
