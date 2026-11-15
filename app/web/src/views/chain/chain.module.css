@@ -1,0 +1,493 @@
+/*
+ * The chain setup flow: one instrument, three screens. A printed bar names the header and counts
+ * the steps with LEDs; the reason the flow exists sits in a recess under it; one stage of fixed
+ * height holds the screen so the keys in the foot never move; the foot keeps Back, Later and the
+ * one key that finishes. Every colour is a token except the parts' own colours, which come from
+ * PART_COLOURS because they are the colours the LEDs show.
+ *
+ * Wide (a card of 560 px or more): a part row is one line, colour, name, what it is, its LEDs.
+ * Narrow: two lines, the kind under the name. The card is its own size container, so the window
+ * never decides what is inside it.
+ */
+
+.root {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  min-height: 100%;
+  padding: var(--s6);
+}
+
+.frame {
+  container: chain / inline-size;
+  display: flex;
+  flex-direction: column;
+  width: min(600px, 100%);
+  overflow: hidden;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--panel);
+}
+
+/* ---------- the bar: which header, and how far along ---------- */
+
+.bar {
+  display: flex;
+  align-items: center;
+  gap: var(--s3);
+  padding: var(--s3) var(--s5);
+  border-bottom: 1px solid var(--line);
+}
+
+.who {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.kicker {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+}
+
+.zone {
+  overflow: hidden;
+  color: var(--dim);
+  font-size: var(--t15);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.progress {
+  display: flex;
+  flex: none;
+  align-items: center;
+  gap: 6px;
+  margin-left: auto;
+}
+
+.dot {
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--led-off);
+  transition: background-color var(--dur) var(--ease);
+}
+
+.dot[data-on="true"] {
+  background: color-mix(in srgb, var(--live) 45%, var(--led-off));
+}
+
+.dot[data-now="true"] {
+  background: var(--live);
+}
+
+/* ---------- why the flow exists: a line in the case ---------- */
+
+.why {
+  margin: 0;
+  padding: var(--s2) var(--s5);
+  border-bottom: 1px solid var(--line);
+  background: var(--sunk);
+  box-shadow: var(--well);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+/* ---------- the stage: one screen's height, whatever the screen holds ---------- */
+
+.chainStage {
+  position: relative;
+  flex: none;
+  height: 440px;
+  padding: var(--s5);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+}
+
+.stepWrap {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  animation: stepIn var(--dur-enter) var(--ease) both;
+}
+
+@keyframes stepIn {
+  from {
+    opacity: 0;
+    transform: translateX(10px);
+  }
+  to {
+    opacity: 1;
+    transform: none;
+  }
+}
+
+.prompt {
+  margin: 0;
+  font-size: var(--t20);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+.second {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+/* ---------- the fader and its figure ---------- */
+
+.fader {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3) 0 var(--s2);
+}
+
+.reading {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s2);
+}
+
+.count {
+  display: inline-block;
+  text-align: right;
+  color: var(--live);
+  font-family: var(--fm);
+  font-size: var(--t40);
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  line-height: 1;
+}
+
+.countWord {
+  color: var(--dim);
+  font-size: var(--t15);
+}
+
+/* The cap is 14 x 24; the slot answers the pointer over its whole height, which is the hit area.
+   `flex: none`: the shared slider grows along a row (`flex: 1 1 180px`), and in this column that
+   basis would be its height, pushing the step's keys below the fold on a phone. */
+.fader :global(.slider) {
+  flex: none;
+  height: 44px;
+}
+
+.ends {
+  display: flex;
+  justify-content: space-between;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  line-height: 1.2;
+}
+
+/* The line reserved under the fader: the header's own ceiling, when it was reached. */
+.note {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-height: 20px;
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.noteDot {
+  flex: none;
+  width: 5px;
+  height: 5px;
+  border-radius: 50%;
+  background: var(--warn);
+}
+
+.aside {
+  display: flex;
+}
+
+/* ---------- the parts: a list of lights ---------- */
+
+.list {
+  display: flex;
+  flex-direction: column;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+  list-style: none;
+}
+
+.chip {
+  width: 12px;
+  height: 12px;
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  background: var(--c);
+  transition: background-color var(--dur) var(--ease);
+}
+
+/* A count-only row on the count step: the colour, what it is, how many LEDs. */
+.line {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: 7px var(--s3);
+  border-bottom: 1px solid var(--line);
+}
+
+.line:last-child {
+  border-bottom: 0;
+}
+
+.lineName {
+  overflow: hidden;
+  color: var(--dim);
+  font-size: var(--t15);
+  line-height: 1.3;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.lineLeds {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t15);
+  font-variant-numeric: tabular-nums;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.unit {
+  margin-left: 4px;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}
+
+/* A row on the confirm step: the colour, the name, what it is, its LEDs. */
+.row {
+  display: grid;
+  grid-template-columns: 12px minmax(0, 1fr) auto;
+  grid-template-areas:
+    "chip name leds"
+    ". kind kind";
+  align-items: center;
+  gap: var(--s2) var(--s3);
+  padding: 8px var(--s3);
+  border-bottom: 1px solid var(--line);
+}
+
+.row:last-child {
+  border-bottom: 0;
+}
+
+.rowChip {
+  grid-area: chip;
+}
+
+.rowName {
+  grid-area: name;
+  min-width: 0;
+}
+
+.rowName :global(.name-field) {
+  width: 100%;
+}
+
+.rowKind {
+  display: flex;
+  grid-area: kind;
+  min-width: 0;
+}
+
+.rowLeds {
+  display: flex;
+  grid-area: leds;
+  align-items: center;
+  gap: 4px;
+}
+
+.rowLeds :global(.num) {
+  width: 64px;
+}
+
+@container chain (min-width: 540px) {
+  .row {
+    grid-template-columns: 12px minmax(96px, 1fr) auto auto;
+    grid-template-areas: "chip name kind leds";
+    padding: 7px var(--s3);
+  }
+
+  .rowLeds :global(.num) {
+    width: 68px;
+  }
+}
+
+/* The words carry the meaning in a narrow row; the marks would crowd them out. */
+@container chain (max-width: 539px) {
+  .rowKind :global(.seg-item) svg {
+    display: none;
+  }
+}
+
+/* ---------- the count step's one line about the range ---------- */
+
+.countRow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2) var(--s3);
+}
+
+.hint {
+  flex: 1 1 180px;
+  min-width: 0;
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.4;
+}
+
+.hint[data-bad="true"] {
+  color: var(--down);
+}
+
+/* ---------- an error: the device's own words ---------- */
+
+.error {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s2);
+  margin-bottom: var(--s4);
+  padding: var(--s2) var(--s3);
+  border: 1px solid color-mix(in srgb, var(--down) 45%, var(--line));
+  border-radius: var(--r-sm);
+  background: color-mix(in srgb, var(--down) 10%, transparent);
+}
+
+.errorIcon {
+  flex: none;
+  margin-top: 2px;
+  color: var(--down);
+}
+
+.errorText {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin: 0;
+  overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+.errorScreen {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s3);
+}
+
+/* ---------- the finish ---------- */
+
+.done {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  align-items: flex-start;
+  padding-top: var(--s3);
+}
+
+.doneMark {
+  color: var(--ok);
+}
+
+.doneText {
+  margin: 0;
+  font-size: var(--t20);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  line-height: 1.3;
+  text-wrap: balance;
+}
+
+/* ---------- the foot ---------- */
+
+.foot {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  padding: var(--s3) var(--s5);
+  border-top: 1px solid var(--line);
+}
+
+.footStart {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.footEnd {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
+.footEnd :global(.btn-primary) {
+  min-width: 88px;
+}
+
+/* ---------- narrow: a phone in the hand ---------- */
+
+@media (max-width: 640px) {
+  .root {
+    align-items: flex-start;
+    padding: var(--s4);
+  }
+
+  .bar {
+    padding: var(--s3) var(--s4);
+  }
+
+  .why {
+    padding: var(--s2) var(--s4);
+  }
+
+  .chainStage {
+    height: 400px;
+    padding: var(--s4);
+  }
+
+  .foot {
+    padding: var(--s3) var(--s4);
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stepWrap {
+    animation: none;
+  }
+}
+
+:global(html[data-motion="reduced"]) .stepWrap {
+  animation: none;
+}

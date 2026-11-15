@@ -5,8 +5,8 @@
 // gone; a first run makes a scene of every light).
 //
 // The window opens while the daemon's `Status.onboarding_complete` is false; finishing the hello
-// sets it. The only thing remembered outside it is "Set up later": the owner put it off until
-// the next app start.
+// sets it. The only things remembered outside it are the two "Later"s: the hello's, and the chain
+// takeover's header setup, each put off until the next app start.
 //
 // A "launch" is one webview session. `sessionStorage` lives exactly that long (it survives a
 // reload and dies with the window), so the launch has an id kept there, and "Later" writes the
@@ -83,5 +83,43 @@ export function markRedirected(): void {
     window.sessionStorage.setItem(SHOWN_KEY, "1");
   } catch {
     // The redirect may happen again after a reload; harmless.
+  }
+}
+
+// ---- the chain setup's own "Later" (#338) ----
+//
+// The first run's header setup is offered by the chain takeover on Scenes. Its "Later" is
+// remembered the same way the hello's is: the launch that said it is written down, and the same
+// launch does not offer the headers again. It lives only in `localStorage` and is compared with
+// this launch's id, so a fresh app start (a new launch id) offers them again, and a reload keeps
+// quiet. No memory copy: the store is the one truth here, which is also what lets a test start a
+// new launch by clearing it.
+
+const CHAINS_LATER_KEY = "canvas-rgb.chains-later";
+
+/** True when the owner said "Later" to the header setup in this launch. */
+export function chainLaterThisLaunch(): boolean {
+  try {
+    return window.localStorage.getItem(CHAINS_LATER_KEY) === launchId();
+  } catch {
+    return false;
+  }
+}
+
+/** The owner said "Later": the takeover stays shut until the app is started again. */
+export function putOffChainsUntilNextLaunch(): void {
+  try {
+    window.localStorage.setItem(CHAINS_LATER_KEY, launchId());
+  } catch {
+    // Not remembered: the takeover may come again in this page.
+  }
+}
+
+/** The standing panel's "Set up": the headers are offered again in this launch. */
+export function offerChainsAgain(): void {
+  try {
+    window.localStorage.removeItem(CHAINS_LATER_KEY);
+  } catch {
+    // Nothing was remembered, so there is nothing to forget.
   }
 }

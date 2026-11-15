@@ -69,6 +69,22 @@ async fn main() -> std::process::ExitCode {
         }
     };
     println!("fake-openrgb listening on 127.0.0.1:{port}");
+    // One line per change of the motherboard's header sizes or resize count, so a drive of the
+    // chain setup can count the resizes it caused (#338). Polled: sizes between two polls merge,
+    // the count never does.
+    let server = std::sync::Arc::new(_server);
+    let watch = server.clone();
+    tokio::spawn(async move {
+        let mut last = None;
+        loop {
+            let now = (watch.resize_count(0), (0..3).map(|z| watch.zone_leds(0, z)).collect::<Vec<_>>());
+            if last.as_ref() != Some(&now) {
+                println!("fake-openrgb resizes={} JARGB1..3={:?}", now.0, now.1);
+                last = Some(now);
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        }
+    });
     let _ = tokio::signal::ctrl_c().await;
     println!("fake-openrgb stopped");
     std::process::ExitCode::from(0)

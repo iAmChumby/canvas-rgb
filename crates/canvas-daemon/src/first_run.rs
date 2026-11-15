@@ -363,7 +363,16 @@ pub async fn size_headers(
     devices: &[DeviceInfo],
     counts: &JargbCounts,
 ) -> Vec<DeviceInfo> {
-    let sizes = jargb_zone_sizes(devices, counts);
+    let mut sizes = jargb_zone_sizes(devices, counts);
+    // A header a chain setup holds is the setup's until it ends (#338): it is left alone here.
+    let _step = app.chain_setup.lock().await;
+    {
+        let holds = app.zone_holds.read().await;
+        for (device, zones) in sizes.iter_mut() {
+            zones.retain(|zone, _| !holds.contains_key(&(device.clone(), *zone)));
+        }
+        sizes.retain(|_, zones| !zones.is_empty());
+    }
     if sizes.is_empty() {
         return devices.to_vec();
     }
@@ -392,6 +401,9 @@ pub async fn size_headers(
             "the first run could not save the zone sizes",
             crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
         );
+        drop(guard);
+        // The store's copy is what a chain commit and an export write back: keep it in step.
+        app.store.write().await.zones.sizes = file.sizes;
     }
 
     // Read the devices again, so the scene and the engine see the new LED counts (the list

@@ -50,8 +50,21 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
     // header (#338). The replay puts the length back and reads the list again, so the rest of
     // this path works from the restored lengths.
     if !devices.is_empty() && !app.leftovers_replayed.swap(true, Ordering::SeqCst) {
-        crate::api::chains::replay_leftovers(app).await;
-        devices = app.devices.read().await.clone();
+        // One chain setup step at a time. A step that holds the lock (a start finishes the
+        // records itself) is waited for off this path, so the device list never waits on it.
+        match app.chain_setup.try_lock() {
+            Ok(_step) => {
+                crate::api::chains::replay_leftovers(app).await;
+                devices = app.devices.read().await.clone();
+            }
+            Err(_) => {
+                let app = Arc::clone(app);
+                tokio::spawn(async move {
+                    let _step = app.chain_setup.lock().await;
+                    crate::api::chains::replay_leftovers(&app).await;
+                });
+            }
+        }
     }
     // A placed device that never arrives sends no new list, so the wait is settled by a timer,
     // with the devices known when it ends.

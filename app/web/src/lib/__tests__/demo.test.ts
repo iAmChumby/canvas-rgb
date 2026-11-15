@@ -244,3 +244,28 @@ describe("the demo's value validator (#106)", () => {
     expect(() => checkPeripheralValue(device, "tint", { type: "number", value: 120 })).toThrow();
   });
 });
+
+describe("demo chain setup", () => {
+  it("a commit leaves the header's zone at the parts' length in the device list", async () => {
+    const { chains } = (await demoRequest("GET", "/api/v1/chains", undefined)) as {
+      chains: { device_id: string; zone_index: number; zone_name: string }[];
+    };
+    const chain = chains.find((c) => c.zone_name === "JARGB 1");
+    expect(chain).toBeDefined();
+    if (!chain) return;
+    const setup = `/api/v1/chains/${encodeURIComponent(chain.device_id)}/${chain.zone_index}/setup`;
+    const { session } = (await demoRequest("POST", setup, {})) as { session: string };
+    await demoRequest("POST", `${setup}/commit`, {
+      session,
+      parts: [
+        { name: "Fan 1", kind: "fan", leds: 24 },
+        { name: "Fan 2", kind: "fan", leds: 24 },
+      ],
+    });
+    const { devices } = (await demoRequest("GET", "/api/v1/devices", undefined)) as {
+      devices: { id: string; zones: { index: number; led_count: number }[] }[];
+    };
+    const zone = devices.find((d) => d.id === chain.device_id)?.zones.find((z) => z.index === chain.zone_index);
+    expect(zone?.led_count).toBe(48);
+  });
+});

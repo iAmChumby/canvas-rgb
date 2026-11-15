@@ -8,6 +8,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Chains: tell the app what is on a header in three steps: drag, type a number, confirm. (#338)
+- Chains: setup comes to you on first run, and Devices can redo any header. (#338)
 - Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
 - Effects: Play on chooses the groups; the builder shows the group you are tuning. (#310)
 - The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
@@ -21,6 +23,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - Chains: the daemon can hold a header while the app asks what is plugged into it, and puts the length back if the window closes.
+- Chains: set up a header's parts in one commit that either lands whole or leaves everything as it was.
 - Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
 - Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
 - Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
@@ -32,6 +35,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Removed
 
+- The per-LED walk and the onboarding session. Chain setup replaces them. (#338)
 - Layout, its placement canvas and the part-placing setup. Saved layouts become scenes. (#310)
 - The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
 

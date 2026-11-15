@@ -102,8 +102,7 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
                 return;
             }
             if holds_lights(&app.identify) {
-                // An onboarding session or a chain setup holds the lights; check again after
-                // another grace.
+                // A chain setup holds the lights; check again after another grace.
                 drop(inner);
                 spawn_timer(app.clone(), generation, GRACE);
                 return;
@@ -114,8 +113,8 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
     });
 }
 
-/// Whether the timer must wait instead of restoring: an onboarding session or a chain setup
-/// holds the lights. Both are transient, so the timer asks again after another grace.
+/// Whether the timer must wait instead of restoring: a chain setup holds the lights. A setup is
+/// transient, so the timer asks again after another grace.
 fn holds_lights(identify: &IdentifyGate) -> bool {
     identify.holds_lights()
 }
@@ -176,8 +175,7 @@ mod tests {
     use std::time::Instant;
 
     /// The timer takes this checkpoint after every wait, before it restores: a chain setup in
-    /// progress is the owner still choosing, so the restore waits for it the way it waits for
-    /// an onboarding session (#338).
+    /// progress is the owner still choosing, so the restore waits for it (#338).
     #[test]
     fn a_restore_waits_while_a_setup_holds_the_lights() {
         let gate = crate::identify::IdentifyGate::default();
@@ -187,10 +185,5 @@ mod tests {
         assert!(holds_lights(&gate), "the setup is open: the restore waits");
         assert!(gate.end_setup("s1"));
         assert!(!holds_lights(&gate), "the setup ended: the restore is due again");
-        // An onboarding session holds them the same way it did before the setup existed.
-        gate.start_session(now);
-        assert!(holds_lights(&gate));
-        assert!(gate.end_session());
-        assert!(!holds_lights(&gate));
     }
 }

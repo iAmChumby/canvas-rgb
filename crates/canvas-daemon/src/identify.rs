@@ -34,8 +34,6 @@ pub const WATCHDOG: Duration = Duration::from_secs(4);
 pub const TICK: Duration = Duration::from_millis(100);
 /// The colour of the target run.
 pub const TARGET: Rgb8 = Rgb8::WHITE;
-/// How long after the last `active: true` an onboarding session ends by itself.
-pub const SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// How long after the last light request a chain setup ends by itself (the spine's number).
 pub const SETUP_TIMEOUT: Duration = Duration::from_millis(SETUP_TIMEOUT_MS);
 
@@ -82,8 +80,6 @@ struct Inner {
     target: Option<Target>,
     /// The chain setup while one is open; one at a time.
     setup: Option<Setup>,
-    /// The last `active: true` of an onboarding session; `Some` while it holds the lights.
-    session_last: Option<Instant>,
     /// The writer channel of every device the daemon drives.
     sinks: HashMap<DeviceId, tokio::sync::mpsc::Sender<Vec<Rgb8>>>,
     ticker_running: bool,
@@ -98,10 +94,8 @@ pub enum Tick {
     Frames(Vec<(DeviceId, Vec<Rgb8>)>),
     /// The watchdog ended the override.
     Expired,
-    /// The setup's timeout ended it: the ticker restores the chain. Always reported, even when an
-    /// onboarding session still holds the lights; `ticker_continues` says whether the ticker
-    /// keeps running for it (true) or stops here (false).
-    SetupExpired { ticker_continues: bool },
+    /// The setup's timeout ended it: the ticker restores the chain and stops.
+    SetupExpired,
 }
 
 /// What happened to one frame of the override (#81).
@@ -167,19 +161,13 @@ impl IdentifyGate {
     /// True while the engine's frames must not reach the devices.
     pub fn is_active(&self) -> bool {
         let inner = self.lock();
-        inner.target.is_some() || inner.session_last.is_some() || inner.setup.is_some()
+        inner.target.is_some() || inner.setup.is_some()
     }
 
-    /// True while an onboarding session or a chain setup holds the lights: the transient restore
-    /// waits for both, so a greeting never lands in the middle of either.
+    /// True while a chain setup holds the lights: the transient restore waits for it, so a
+    /// greeting never lands in the middle of a setup.
     pub fn holds_lights(&self) -> bool {
-        let inner = self.lock();
-        inner.session_last.is_some() || inner.setup.is_some()
-    }
-
-    /// True while an onboarding session holds the lights.
-    pub fn session_active(&self) -> bool {
-        self.lock().session_last.is_some()
+        self.lock().setup.is_some()
     }
 
     /// Opens a chain setup on one zone of one device.
@@ -232,21 +220,6 @@ impl IdentifyGate {
         self.lock().setup.as_ref().map(|setup| setup.session.clone())
     }
 
-    /// Starts or renews the onboarding session. Returns `(was_new, start_ticker)`.
-    pub fn start_session(&self, now: Instant) -> (bool, bool) {
-        let mut inner = self.lock();
-        let was_new = inner.session_last.is_none();
-        inner.session_last = Some(now);
-        let start = !inner.ticker_running;
-        inner.ticker_running = true;
-        (was_new, start)
-    }
-
-    /// Ends the onboarding session. Returns true when one was active.
-    pub fn end_session(&self) -> bool {
-        self.lock().session_last.take().is_some()
-    }
-
     /// Registers a device's writer channel so the ticker can reach it.
     pub fn register(&self, device: DeviceId, tx: tokio::sync::mpsc::Sender<Vec<Rgb8>>) {
         self.lock().sinks.insert(device, tx);
@@ -283,7 +256,7 @@ impl IdentifyGate {
     /// One ticker step at `now`: the frames to send, or the end of the override.
     pub fn tick(&self, now: Instant, devices: &[DeviceInfo]) -> Tick {
         let mut inner = self.lock();
-        if inner.target.is_none() && inner.session_last.is_none() && inner.setup.is_none() {
+        if inner.target.is_none() && inner.setup.is_none() {
             inner.ticker_running = false;
             return Tick::Idle;
         }
@@ -299,19 +272,11 @@ impl IdentifyGate {
         if inner.target.as_ref().is_some_and(|t| now.saturating_duration_since(t.last_request) >= WATCHDOG) {
             inner.target = None;
         }
-        if inner.session_last.is_some_and(|l| now.saturating_duration_since(l) >= SESSION_TIMEOUT) {
-            inner.session_last = None;
-        }
-        let others = inner.target.is_some() || inner.session_last.is_some();
         if setup_ended {
-            // Reported even when an onboarding session still holds the lights: the chain must
-            // be put back whatever else is showing.
-            if !others {
-                inner.ticker_running = false;
-            }
-            return Tick::SetupExpired { ticker_continues: others };
+            inner.ticker_running = false;
+            return Tick::SetupExpired;
         }
-        if !others && inner.setup.is_none() {
+        if inner.target.is_none() && inner.setup.is_none() {
             inner.ticker_running = false;
             return Tick::Expired;
         }
@@ -504,21 +469,20 @@ pub fn spawn_ticker(app: Arc<App>) {
                     app.identify.push(frames);
                 }
                 Tick::Expired => {
-                    tracing::info!("identify or onboarding session ended by timeout (identify {WATCHDOG:?}, session {SESSION_TIMEOUT:?})");
+                    tracing::info!("identify ended by timeout ({WATCHDOG:?})");
                     restore(&app).await;
                     return;
                 }
-                Tick::SetupExpired { ticker_continues } => {
+                Tick::SetupExpired => {
                     tracing::info!("the chain setup ended by timeout ({SETUP_TIMEOUT:?} after the last light request); restoring");
                     // The same restore a cancel runs: the header's earlier length, the hold, the
                     // record and the scene (#338). A resize the device refuses keeps the record
-                    // for the next start to replay.
+                    // for the next start to replay. A setup clears any identify target when it
+                    // opens and refuses a flash while it is open, so nothing else outlives it.
                     if let Err(e) = crate::api::chains::finish_setup(&app).await {
                         tracing::warn!(error = %e.message, "the header could not be put back; the restore record stays for the next start");
                     }
-                    if !ticker_continues {
-                        return;
-                    }
+                    return;
                 }
             }
         }
@@ -655,47 +619,6 @@ mod tests {
         gate.start(id, 0, 0, 1, t0 + Duration::from_secs(3));
         assert!(matches!(gate.tick(t0 + Duration::from_secs(6), &devices), Tick::Frames(_)));
         assert_eq!(gate.tick(t0 + Duration::from_secs(7), &devices), Tick::Expired);
-    }
-
-    #[test]
-    fn a_session_makes_every_device_black() {
-        let (gate, devices, t0) = setup();
-        assert_eq!(gate.start_session(t0), (true, true));
-        assert!(gate.is_active());
-        let frames = frames_of(gate.tick(t0, &devices));
-        assert_eq!(frames.len(), 2);
-        assert!(frames.iter().all(|(_, f)| f.iter().all(|c| *c == Rgb8::BLACK)));
-    }
-
-    #[test]
-    fn an_identify_during_a_session_lights_only_its_target() {
-        let (gate, devices, t0) = setup();
-        gate.start_session(t0);
-        gate.start(DeviceId("openrgb:board".into()), 1, 3, 4, t0);
-        let frames = frames_of(gate.tick(t0, &devices));
-        let board = &frames.iter().find(|(id, _)| id.0 == "openrgb:board").unwrap().1;
-        let ram = &frames.iter().find(|(id, _)| id.0 == "openrgb:ram").unwrap().1;
-        assert_eq!(lit(board), vec![13, 14, 15, 16]);
-        assert!(ram.iter().all(|c| *c == Rgb8::BLACK));
-        // The identify ends by its watchdog; the renewed session still holds the lights black.
-        let later = t0 + Duration::from_secs(4);
-        gate.start_session(later);
-        let frames = frames_of(gate.tick(later, &devices));
-        assert!(frames.iter().all(|(_, f)| lit(f).is_empty()));
-        assert!(gate.session_active());
-    }
-
-    #[test]
-    fn the_session_times_out_and_can_be_ended() {
-        let (gate, devices, t0) = setup();
-        gate.start_session(t0);
-        assert!(matches!(gate.tick(t0 + Duration::from_millis(4900), &devices), Tick::Frames(_)));
-        assert_eq!(gate.tick(t0 + SESSION_TIMEOUT, &devices), Tick::Expired);
-        assert!(!gate.is_active());
-        gate.start_session(t0);
-        assert!(gate.end_session());
-        assert!(!gate.end_session());
-        assert_eq!(gate.tick(t0, &devices), Tick::Idle);
     }
 
     #[test]
@@ -880,7 +803,7 @@ mod tests {
             gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS - 1), &devices),
             Tick::Frames(_)
         ));
-        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired { ticker_continues: false });
+        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired);
         assert!(!gate.is_active(), "engine frames flow again");
         assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::Idle);
     }
@@ -897,7 +820,7 @@ mod tests {
             matches!(gate.tick(t0 + Duration::from_secs(6), &devices), Tick::Frames(_)),
             "the last request was 1 s ago, not 6"
         );
-        assert_eq!(gate.tick(t0 + Duration::from_secs(11), &devices), Tick::SetupExpired { ticker_continues: false });
+        assert_eq!(gate.tick(t0 + Duration::from_secs(11), &devices), Tick::SetupExpired);
     }
 
     /// The expiry is asked for once, and it clears the setup: the ticker restores on it.
@@ -907,7 +830,7 @@ mod tests {
         gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
         gate.set_runs("s", vec![SetupRun { start: 0, count: 2, color: Rgb8::WHITE }], t0);
         assert!(gate.holds_lights());
-        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired { ticker_continues: false });
+        assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired);
         assert!(!gate.holds_lights());
         assert!(!gate.is_active());
         assert!(gate.setup_session().is_none(), "the setup is cleared");
@@ -919,7 +842,7 @@ mod tests {
         assert_eq!(both.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t1), Some(false));
         assert_eq!(
             both.tick(t1 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices),
-            Tick::SetupExpired { ticker_continues: false }
+            Tick::SetupExpired
         );
         assert!(!both.is_active(), "the identify ended when the setup took the lights");
     }
@@ -959,21 +882,6 @@ mod tests {
         assert!(ram.iter().all(|c| *c == Rgb8::BLACK), "the flash lights nothing over the setup");
     }
 
-    /// The setup's end reaches the ticker even while an onboarding session still holds the
-    /// lights, and the ticker keeps running for the session (#338).
-    #[test]
-    fn a_setup_expiry_is_reported_while_an_onboarding_session_is_open() {
-        let (gate, devices, t0) = setup();
-        gate.start_session(t0);
-        assert_eq!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0), Some(false));
-        let at = t0 + Duration::from_millis(SETUP_TIMEOUT_MS);
-        gate.start_session(at);
-        assert_eq!(gate.tick(at, &devices), Tick::SetupExpired { ticker_continues: true });
-        assert!(gate.setup_session().is_none());
-        assert!(gate.is_active(), "the session still holds the lights");
-        assert!(matches!(gate.tick(at, &devices), Tick::Frames(_)), "the ticker goes on for the session");
-    }
-
     /// A flash asked for during a setup is refused: it would outlive the setup.
     #[test]
     fn a_flash_cannot_start_while_a_setup_is_open() {
@@ -982,7 +890,7 @@ mod tests {
         assert!(!gate.start(DeviceId("openrgb:ram".into()), 0, 0, 8, t0), "no second ticker, no target");
         assert_eq!(
             gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices),
-            Tick::SetupExpired { ticker_continues: false },
+            Tick::SetupExpired,
             "nothing the flash asked for outlives the setup"
         );
         assert!(!gate.is_active());
