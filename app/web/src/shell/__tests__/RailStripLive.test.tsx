@@ -2,6 +2,7 @@ import { act, cleanup, render, renderHook, screen, waitFor } from "@testing-libr
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { DEMO_LIGHTS } from "@/lib/fixtures";
 import type { TauriGlobal } from "@/lib/host";
+import { dropApiConfig } from "@/lib/api";
 import { patchSnap } from "@/lib/store";
 import { RailDeck } from "@/shell/RailDeck";
 import { useLightFeed } from "@/views/scenes/useLightFeed";
@@ -59,6 +60,7 @@ const run = (n: number, rgb: [number, number, number]) => Array.from({ length: n
 const PURPLE: [number, number, number] = [160, 32, 240];
 const RED: [number, number, number] = [255, 0, 0];
 const BLUE: [number, number, number] = [0, 0, 255];
+const BLACK: [number, number, number] = [0, 0, 0];
 
 const lightView = (id: string, leds: number, connected = true): LightView => {
   const base = DEMO_LIGHTS[0] as LightView;
@@ -111,6 +113,29 @@ const cells = () =>
   Array.from(document.querySelectorAll<HTMLElement>(".rail-strip-cell")).map((c) => c.style.backgroundColor);
 const rgb = ([r, g, b]: [number, number, number]) => `rgb(${r}, ${g}, ${b})`;
 
+/**
+ * The token request the test holds until it says so. A second socket could only open after a
+ * second token, so a test that waits for the token waits for the thing it asserts on.
+ */
+function heldToken() {
+  let asked = 0;
+  let answer!: () => void;
+  const promise = new Promise<{ base_url: string; token: string }>((resolve) => {
+    answer = () => resolve({ base_url: "http://127.0.0.1:9430", token: "tok" });
+  });
+  return {
+    promise,
+    answer,
+    get asked() {
+      return asked;
+    },
+    ask: () => {
+      asked += 1;
+      return promise;
+    },
+  };
+}
+
 /** Opens the light socket the strip made and names its lights. */
 async function openFeed(names: Record<string, string>): Promise<FakeSocket> {
   await waitFor(() => expect(FakeSocket.opened.length).toBeGreaterThan(0));
@@ -139,6 +164,8 @@ beforeEach(() => {
   FakeSocket.opened = [];
   thumbs.loadThumb.mockClear();
   preview.onFrame.mockClear();
+  // The token is asked for again in every test: the answer is cached by the client.
+  dropApiConfig();
   (globalThis as { WebSocket?: unknown }).WebSocket = FakeSocket as unknown as typeof WebSocket;
   window.__TAURI__ = {
     core: { invoke: async () => ({ base_url: "http://127.0.0.1:9430", token: "tok" }) },
@@ -207,15 +234,55 @@ describe("the sidebar strip in a scene", () => {
     expect(cells()).toEqual(Array.from({ length: 12 }, () => ""));
   });
 
+  it("shows black cells for a scene whose groups are all off, never the old colours", async () => {
+    show([group("g1", ["a"], "rain")], [lightView("a", 4)]);
+    render(<RailDeck />);
+    const socket = await openFeed({ "0": "a" });
+    act(() => {
+      socket.onmessage?.({ data: frame([{ index: 0, rgb: run(4, PURPLE) }]) } as MessageEvent);
+    });
+    expect(cells()[0]).toBe(rgb(PURPLE));
+
+    // The group is turned off. The daemon sends black for a group that plays nothing, so the
+    // strip shows black cells, which read as off.
+    show([group("g1", ["a"], null)], [lightView("a", 4)]);
+    act(() => {
+      socket.onmessage?.({ data: frame([{ index: 0, rgb: run(4, BLACK) }]) } as MessageEvent);
+    });
+    expect(cells()).toEqual(Array.from({ length: 12 }, () => rgb(BLACK)));
+  });
+
+  it("rests at the neutral colour when the feed carries no colours for the off group", async () => {
+    show([group("g1", ["a"], null)], [lightView("a", 4)]);
+    render(<RailDeck />);
+    const socket = await openFeed({ "0": "a" });
+    // The feed names the light but has no colours for it: nothing to show, so the cells rest.
+    act(() => {
+      socket.onmessage?.({ data: frame([{ index: 0, rgb: [] }]) } as MessageEvent);
+    });
+    expect(cells()).toEqual(Array.from({ length: 12 }, () => ""));
+  });
+
   it("shares one socket with the Scenes page, and closes it when the last holder goes", async () => {
     show([group("g1", ["a"], "rain")], [lightView("a", 4)]);
+    // The token is held until the test says so: the wait is on the token the socket waits for,
+    // not on the clock (class `cause:timing-test`).
+    const token = heldToken();
+    window.__TAURI__ = {
+      core: { invoke: () => token.ask() },
+      event: { listen: async () => () => undefined },
+    } as unknown as TauriGlobal;
     const deck = render(<RailDeck />);
-    await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
     const page = renderHook(() => useLightFeed());
-    // Give a second socket the time it would need to open.
+    // Both holders ask for the token together, and the answer is shared.
+    await waitFor(() => expect(token.asked).toBe(1));
     await act(async () => {
-      await new Promise((r) => setTimeout(r, 20));
+      token.answer();
+      await token.promise;
     });
+    await waitFor(() => expect(FakeSocket.opened).toHaveLength(1));
+    // The one socket is the one both holders share: no second token, no second socket.
+    expect(token.asked).toBe(1);
     expect(FakeSocket.opened).toHaveLength(1);
 
     deck.unmount();
@@ -239,6 +306,22 @@ describe("the deck with groups playing different effects", () => {
     expect((screen.getByRole("button", { name: /Previous effect/ }) as HTMLButtonElement).disabled).toBe(true);
   });
 
+  it("says in a sentence why the effect steps rest", () => {
+    show(
+      [group("g1", ["a"], "rain"), group("g2", ["b"], "fire")],
+      [lightView("a", 4), lightView("b", 4)],
+    );
+    render(<RailDeck />);
+    const next = screen.getByRole("button", { name: /Next effect/ });
+    const previous = screen.getByRole("button", { name: /Previous effect/ });
+    expect(next.getAttribute("aria-label")).toBe(
+      "Next effect is unavailable: the groups play different effects.",
+    );
+    expect(previous.getAttribute("aria-label")).toBe(
+      "Previous effect is unavailable: the groups play different effects.",
+    );
+  });
+
   it("keeps the effect steps when every group plays the same effect", () => {
     show(
       [group("g1", ["a"], "rain"), group("g2", ["b"], "rain")],
@@ -246,5 +329,27 @@ describe("the deck with groups playing different effects", () => {
     );
     render(<RailDeck />);
     expect((screen.getByRole("button", { name: "Next effect" }) as HTMLButtonElement).disabled).toBe(false);
+  });
+});
+
+describe("the deck with every group off", () => {
+  it("rests the effect steps, which would turn the groups on", () => {
+    show([group("g1", ["a"], null), group("g2", ["b"], null)], [lightView("a", 4), lightView("b", 4)]);
+    render(<RailDeck />);
+    const row = document.querySelector(".rail-deck-row") as HTMLElement;
+    expect(row.textContent).toContain("Purple Rain");
+    expect((screen.getByRole("button", { name: /Next effect/ }) as HTMLButtonElement).disabled).toBe(true);
+    expect((screen.getByRole("button", { name: /Previous effect/ }) as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("says in a sentence why the effect steps rest", () => {
+    show([group("g1", ["a"], null)], [lightView("a", 4)]);
+    render(<RailDeck />);
+    expect(screen.getByRole("button", { name: /Next effect/ }).getAttribute("aria-label")).toBe(
+      "Next effect is unavailable: every group of the scene is off.",
+    );
+    expect(screen.getByRole("button", { name: /Previous effect/ }).getAttribute("aria-label")).toBe(
+      "Previous effect is unavailable: every group of the scene is off.",
+    );
   });
 });

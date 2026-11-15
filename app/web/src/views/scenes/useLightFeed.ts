@@ -183,6 +183,10 @@ let stopShared: (() => void) | null = null;
 function openFeed(store: Map<string, Uint8Array>): () => void {
   let stopped = false;
   let socket: WebSocket | null = null;
+  // A connect is waiting for the token: the socket is set only after that wait, so the wait
+  // itself is claimed. Without the claim a second call in that window (a visibility change,
+  // a retry) would open a second socket and lose the first one.
+  let connecting = false;
   let retry: ReturnType<typeof setTimeout> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
   let failures = 0;
@@ -230,17 +234,23 @@ function openFeed(store: Map<string, Uint8Array>): () => void {
   };
 
   const connect = async (): Promise<void> => {
-    if (stopped || socket || !visible()) return;
+    if (stopped || socket || connecting || !visible()) return;
+    // The claim is taken before the wait for the token and given back on every way out.
+    connecting = true;
     let url: string;
     try {
       const cfg = await apiConfig();
       url = `${cfg.base_url.replace(/^http/, "ws")}${routes.previewLights}?token=${encodeURIComponent(cfg.token)}`;
     } catch {
+      connecting = false;
       schedule();
       return;
     }
     // The wait for the token may have outlived the component or the window.
-    if (stopped || socket || !visible()) return;
+    if (stopped || socket || !visible()) {
+      connecting = false;
+      return;
+    }
     const ws = new WebSocket(url);
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
@@ -268,6 +278,7 @@ function openFeed(store: Map<string, Uint8Array>): () => void {
       schedule();
     };
     socket = ws;
+    connecting = false;
   };
 
   const start = () => {

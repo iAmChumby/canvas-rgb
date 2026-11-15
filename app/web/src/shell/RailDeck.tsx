@@ -41,11 +41,17 @@ export function RailDeck() {
     ? (scenes?.scenes.find((x) => x.id === (status?.active_scene?.id ?? scenes.active)) ?? null)
     : null;
   const sceneGroups = activeScene ? activeScene.groups.length : null;
+  // What the scene's groups play: the effect each one plays, or "off" for a group that plays
+  // nothing.
+  const plays = activeScene
+    ? new Set(activeScene.groups.map((g) => (g.plays.type === "effect" ? g.plays.effect : "off")))
+    : null;
   // Groups that play different effects: the step buttons would put one effect on every group and
   // lose the others, and "the" effect to step from is only the first group's, so they rest.
-  const mixed =
-    activeScene !== null &&
-    new Set(activeScene.groups.map((g) => (g.plays.type === "effect" ? g.plays.effect : "off"))).size > 1;
+  const mixed = plays !== null && plays.size > 1;
+  // No group plays an effect at all (every group is off, or the scene has no groups): stepping
+  // would turn on the groups the user turned off, so the buttons rest too.
+  const nonePlays = plays !== null && (plays.size === 0 || (plays.size === 1 && plays.has("off")));
   // The effect the scene's groups play when they all play the same: what the step starts from.
   const activeId = status?.active_effects?.[0] ?? null;
   const active = effects?.find((e) => e.id === activeId) ?? null;
@@ -107,6 +113,7 @@ export function RailDeck() {
           groups={sceneGroups}
           scene={sceneName !== null}
           mixed={mixed}
+          nonePlays={nonePlays}
           devices={status?.devices_connected ?? null}
           known={status !== null}
           hasEffects={(effects?.length ?? 0) > 0}
@@ -132,6 +139,7 @@ function LightsPanel({
   groups,
   scene,
   mixed,
+  nonePlays,
   devices,
   known,
   hasEffects,
@@ -149,6 +157,8 @@ function LightsPanel({
   scene: boolean;
   /** The scene's groups play different effects: stepping would flatten them to one. */
   mixed: boolean;
+  /** No group of the scene plays an effect: stepping would turn on what is off. */
+  nonePlays: boolean;
   devices: number | null;
   known: boolean;
   hasEffects: boolean;
@@ -160,6 +170,14 @@ function LightsPanel({
   const [draft, setDraft] = useState<number | null>(null);
   const brightness = status?.brightness ?? null;
   const shown = draft ?? brightness;
+
+  // Why the step buttons rest, in a sentence: the label is the tooltip and the button's
+  // accessible name, so it has to read as a sentence on its own.
+  const resting = mixed
+    ? "the groups play different effects."
+    : nonePlays
+      ? "every group of the scene is off."
+      : null;
 
   const commit = useCallback(
     async (v: number) => {
@@ -202,9 +220,9 @@ function LightsPanel({
 
       <div className="rail-deck-transport">
         <IconButton
-          label={mixed ? "Previous effect (each group plays its own)" : "Previous effect"}
+          label={resting ? `Previous effect is unavailable: ${resting}` : "Previous effect"}
           icon={<SkipBack size={16} />}
-          disabled={!hasEffects || mixed}
+          disabled={!hasEffects || mixed || nonePlays}
           onClick={() => void onStep(-1)}
         />
         <Button
@@ -216,9 +234,9 @@ function LightsPanel({
           <Swap labels={["Pause", "Resume"]} at={paused ? 1 : 0} />
         </Button>
         <IconButton
-          label={mixed ? "Next effect (each group plays its own)" : "Next effect"}
+          label={resting ? `Next effect is unavailable: ${resting}` : "Next effect"}
           icon={<SkipForward size={16} />}
-          disabled={!hasEffects || mixed}
+          disabled={!hasEffects || mixed || nonePlays}
           onClick={() => void onStep(1)}
         />
       </div>

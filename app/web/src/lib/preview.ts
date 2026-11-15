@@ -45,6 +45,10 @@ const listeners = new Set<FrameListener>();
 const statusListeners = new Set<() => void>();
 let active = false;
 let socket: WebSocket | null = null;
+// A connect is waiting for the token: the socket is set only after that wait, so the wait
+// itself is claimed. Without the claim a second call in that window would open a second
+// socket and lose the first one.
+let connecting = false;
 let reconnect: ReturnType<typeof setTimeout> | null = null;
 let demoTimer: ReturnType<typeof setInterval> | null = null;
 let lastFrame: Frame | null = null;
@@ -112,7 +116,9 @@ function parseFrame(buf: ArrayBuffer): Frame | null {
 }
 
 async function connect(): Promise<void> {
-  if (!active || socket) return;
+  if (!active || socket || connecting) return;
+  // The claim is taken before the wait for the token and given back on every way out.
+  connecting = true;
   let url: string;
   let baseUrl: string;
   try {
@@ -121,7 +127,13 @@ async function connect(): Promise<void> {
     const wsBase = baseUrl.replace(/^http/, "ws");
     url = `${wsBase}${routes.preview}?token=${encodeURIComponent(cfg.token)}`;
   } catch {
+    connecting = false;
     scheduleReconnect();
+    return;
+  }
+  // The wait for the token may have outlived the feed: the socket is not opened then.
+  if (!active || socket) {
+    connecting = false;
     return;
   }
   // Once the socket has been refused the state stays "refused": a retry must not paper over the
@@ -149,6 +161,7 @@ async function connect(): Promise<void> {
     if (active) scheduleReconnect();
   };
   socket = ws;
+  connecting = false;
 }
 
 /**
