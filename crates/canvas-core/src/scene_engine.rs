@@ -1474,6 +1474,481 @@ mod tests {
         }
     }
 
+    // ------------------------------- the candidate rules (#372, the review's blocker)
+
+    /// How a strip's LED reads its column of the picture.
+    ///
+    /// The three candidates the review named, in the order of preference: the plain mean
+    /// over the column, the mean of the column's brightest quarter of rows, and the
+    /// column's brightest row.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    enum Rule {
+        /// The mean of every pixel in the cell.
+        Mean,
+        /// The mean of the brightest quarter of the cell's rows.
+        BrightestQuarter,
+        /// The mean colour of the cell's brightest row.
+        BrightestRow,
+    }
+
+    impl Rule {
+        /// The name the tables print.
+        fn name(self) -> &'static str {
+            match self {
+                Rule::Mean => "mean",
+                Rule::BrightestQuarter => "brightest quarter",
+                Rule::BrightestRow => "brightest row",
+            }
+        }
+    }
+
+    /// The candidates, in the order of preference: the plain mean first, its widths
+    /// swept, then the brightest quarter, then the brightest row.
+    fn candidates() -> Vec<(Rule, f32)> {
+        let mut out = Vec::new();
+        for rule in [Rule::Mean, Rule::BrightestQuarter, Rule::BrightestRow] {
+            for width in [7.0f32, 5.0, 3.0, 2.0] {
+                out.push((rule, width));
+            }
+        }
+        out
+    }
+
+    /// The shape of a strip's cell.
+    ///
+    /// `Column` is a full-height column of a given width, the shape every candidate reads.
+    /// `Today` is the cell the branch ships now: a small square at mid-height.
+    /// `Bottom` is today's square cell anchored at the bottom of the picture, where Fire
+    /// burns and the audio bars grow. It is a diagnostic, not a candidate.
+    #[derive(Debug, Clone, Copy, PartialEq)]
+    enum Shape {
+        /// A full-height column `width` units wide.
+        Column(f32),
+        /// Today's square cell at mid-height, at most `STRIP_CELL_MAX` units.
+        Today,
+        /// Today's square cell at the bottom of the picture.
+        Bottom,
+    }
+
+    impl Shape {
+        /// The name the tables print.
+        fn name(self) -> String {
+            match self {
+                Shape::Column(width) => format!("column {width}"),
+                Shape::Today => "today's square cell".to_string(),
+                Shape::Bottom => "today's square cell at the bottom".to_string(),
+            }
+        }
+
+        /// The cells of a strip of `n` LEDs in a slot.
+        fn cells(self, slot_x: f32, slot_w: f32, n: usize) -> Vec<LedSample> {
+            match self {
+                Shape::Column(width) => column_cells(width, slot_x, slot_w, n),
+                Shape::Today | Shape::Bottom => {
+                    let share = slot_w / n as f32;
+                    let side = share.min(CANVAS_HEIGHT as f32).min(7.0);
+                    let y = match self {
+                        Shape::Today => CANVAS_HEIGHT as f32 / 2.0,
+                        Shape::Bottom => CANVAS_HEIGHT as f32 - side / 2.0,
+                        Shape::Column(_) => unreachable!(),
+                    };
+                    let scale = SCENE_RENDER_SCALE;
+                    let (y0, y1) = clamp_span(y - side / 2.0, y + side / 2.0, CANVAS_HEIGHT as f32);
+                    (0..n)
+                        .map(|j| {
+                            let x = slot_x + share * (j as f32 + 0.5);
+                            LedSample {
+                                center_x: x * scale,
+                                center_y: y * scale,
+                                bounds: [
+                                    (x - side / 2.0) * scale,
+                                    y0 * scale,
+                                    (x + side / 2.0) * scale,
+                                    y1 * scale,
+                                ],
+                                sampled: true,
+                            }
+                        })
+                        .collect()
+                }
+            }
+        }
+    }
+
+    /// A strip's cells under a candidate: a column `width` units wide and the full
+    /// height of the slot, centred on the LED.
+    ///
+    /// This is the old full-height band with a narrow column, which is candidate (a), and
+    /// the cell candidates (b) and (c) read the same way.
+    fn column_cells(width: f32, slot_x: f32, slot_w: f32, n: usize) -> Vec<LedSample> {
+        let share = slot_w / n as f32;
+        let scale = SCENE_RENDER_SCALE;
+        (0..n)
+            .map(|j| {
+                let x = slot_x + share * (j as f32 + 0.5);
+                let (x0, x1) = clamp_span(x - width / 2.0, x + width / 2.0, CANVAS_WIDTH as f32);
+                LedSample {
+                    center_x: x * scale,
+                    center_y: CANVAS_HEIGHT as f32 / 2.0 * scale,
+                    bounds: [x0 * scale, 0.0, x1 * scale, CANVAS_HEIGHT as f32 * scale],
+                    sampled: true,
+                }
+            })
+            .collect()
+    }
+
+    /// Clamps a span to the canvas and keeps it at least one logical unit wide.
+    fn clamp_span(x0: f32, x1: f32, width: f32) -> (f32, f32) {
+        let mut x0 = x0.clamp(0.0, width);
+        let mut x1 = x1.clamp(0.0, width);
+        if x1 - x0 < 1.0 {
+            x1 = (x0 + 1.0).min(width);
+            x0 = x1 - 1.0;
+        }
+        (x0, x1)
+    }
+
+    /// Reads one LED's cell out of the canvas under a rule.
+    ///
+    /// The pixel range is the one `sampling::sample_area` averages over: the pixels whose
+    /// centres fall in the cell, one axis at a time, so a cell thinner than a pixel still
+    /// reads the pixel it is over in the other axis.
+    fn read_cell(
+        canvas: &[[f32; 3]],
+        width: u32,
+        height: u32,
+        led: &LedSample,
+        rule: Rule,
+    ) -> Rgb8 {
+        let [bx0, by0, bx1, by1] = led.bounds;
+        let max_x = width - 1;
+        let max_y = height - 1;
+        let x0 = ((bx0 - 0.5).ceil() as i64).clamp(0, i64::from(max_x)) as u32;
+        let y0 = ((by0 - 0.5).ceil() as i64).clamp(0, i64::from(max_y)) as u32;
+        let mut x1 = ((bx1 - 0.5).floor() as i64).clamp(0, i64::from(max_x)) as u32;
+        let mut y1 = ((by1 - 0.5).floor() as i64).clamp(0, i64::from(max_y)) as u32;
+        if x1 < x0 {
+            x1 = x0;
+        }
+        if y1 < y0 {
+            y1 = y0;
+        }
+        // Each row's mean colour across the cell's width.
+        let mut rows: Vec<(f64, [f64; 3])> = Vec::new();
+        for y in y0..=y1 {
+            let mut sum = [0.0f64; 3];
+            for x in x0..=x1 {
+                let p = canvas[(y * width + x) as usize];
+                sum[0] += f64::from(p[0]);
+                sum[1] += f64::from(p[1]);
+                sum[2] += f64::from(p[2]);
+            }
+            let n = f64::from(x1 - x0 + 1);
+            let mean = [sum[0] / n, sum[1] / n, sum[2] / n];
+            // Rec. 709 luminance of the row's mean colour.
+            let lum = 0.2126 * mean[0] + 0.7152 * mean[1] + 0.0722 * mean[2];
+            rows.push((lum, mean));
+        }
+        let keep = match rule {
+            Rule::Mean => rows.len(),
+            Rule::BrightestQuarter => rows.len().div_ceil(4),
+            Rule::BrightestRow => 1,
+        };
+        // The brightest rows first, ties by row order: the earlier row comes first.
+        let mut order: Vec<usize> = (0..rows.len()).collect();
+        order.sort_by(|a, b| {
+            rows[*b]
+                .0
+                .partial_cmp(&rows[*a].0)
+                .unwrap_or(std::cmp::Ordering::Equal)
+                .then(a.cmp(b))
+        });
+        let mut sum = [0.0f64; 3];
+        for index in order.iter().take(keep) {
+            for channel in 0..3 {
+                sum[channel] += rows[*index].1[channel];
+            }
+        }
+        let n = keep.max(1) as f64;
+        Rgb8::from_f32([
+            (sum[0] / n) as f32,
+            (sum[1] / n) as f32,
+            (sum[2] / n) as f32,
+        ])
+    }
+
+    /// Reads a strip's cells out of the canvas under a rule.
+    fn sample_cells(
+        canvas: &[[f32; 3]],
+        width: u32,
+        height: u32,
+        cells: &[LedSample],
+        rule: Rule,
+    ) -> Vec<Rgb8> {
+        cells.iter().map(|led| read_cell(canvas, width, height, led, rule)).collect()
+    }
+
+    /// Runs the scene and returns, for each strip, the per-channel (min, max) every LED
+    /// showed under `rule` and the given cells.
+    ///
+    /// The cells are the candidate's, not the plan's: the runner samples the plan, so the
+    /// candidate is measured on the same canvas the runner drew.
+    fn run_ranges_over(
+        scene: &mut SceneState,
+        runner: &mut SceneRunner,
+        devices: &[DeviceInfo],
+        cells: &[Vec<LedSample>],
+        rule: Rule,
+        frames: usize,
+    ) -> Vec<Vec<[(u8, u8); 3]>> {
+        let mut ranges: Vec<Vec<[(u8, u8); 3]>> =
+            cells.iter().map(|c| vec![[(255u8, 0u8); 3]; c.len()]).collect();
+        for index in 0..RAIN_WARMUP_FRAMES + frames {
+            frame(scene, runner, devices);
+            if index < RAIN_WARMUP_FRAMES {
+                continue;
+            }
+            let group = &runner.groups[0];
+            for (slot, led_cells) in cells.iter().enumerate() {
+                let colours = sample_cells(
+                    &group.canvas.pixels,
+                    group.canvas.width,
+                    group.canvas.height,
+                    led_cells,
+                    rule,
+                );
+                for (range, colour) in ranges[slot].iter_mut().zip(colours) {
+                    for (entry, v) in range.iter_mut().zip([colour.r, colour.g, colour.b]) {
+                        entry.0 = entry.0.min(v);
+                        entry.1 = entry.1.max(v);
+                    }
+                }
+            }
+        }
+        ranges
+    }
+
+    /// Measures an effect on a strip with the candidate's cells: the stats of every LED.
+    fn measure_cells(
+        effect: Box<dyn Effect>,
+        props: Option<Props>,
+        magnitude: Option<f32>,
+        cells: &[Vec<LedSample>],
+        rule: Rule,
+    ) -> Vec<Stats> {
+        let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(effect), 100);
+        scene.groups[0].mode = GroupMode::EachItsOwn;
+        scene.groups[0].needs = InputNeeds { screen: false, audio: magnitude.is_some() };
+        if let Some(props) = props {
+            scene.groups[0].pending_props = Some(props);
+        }
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+        let mut stats: Vec<Stats> = cells.iter().map(|c| Stats::new(c.len())).collect();
+        for index in 0..RAIN_WARMUP_FRAMES + 120 {
+            let mut params = params();
+            if let Some(magnitude) = magnitude {
+                params.input_source = Some(Arc::new(LoudBands { magnitude }));
+            }
+            frame_with(&mut scene, &mut runner, &devices, &params);
+            if index < RAIN_WARMUP_FRAMES {
+                continue;
+            }
+            let group = &runner.groups[0];
+            for (slot, led_cells) in cells.iter().enumerate() {
+                let colours = sample_cells(
+                    &group.canvas.pixels,
+                    group.canvas.width,
+                    group.canvas.height,
+                    led_cells,
+                    rule,
+                );
+                stats[slot].add(&colours);
+            }
+        }
+        stats
+    }
+
+    /// A spectrum with a run of loud bands at a given magnitude.
+    ///
+    /// Bands 8 to 24 of 32 are loud. On the scene's 80 pixel canvas a band is two pixels
+    /// wide, so the loud run covers the render pixels 16 to 50: the LEDs at 25, 35 and 45
+    /// of an 8-LED strip stand under it.
+    struct LoudBands {
+        magnitude: f32,
+    }
+
+    impl InputSource for LoudBands {
+        fn screen(&self) -> Option<Arc<ScreenFrame>> {
+            None
+        }
+
+        fn audio(&self) -> Option<Arc<AudioSpectrum>> {
+            let centers: Vec<f32> = (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect();
+            let magnitudes: Vec<f32> =
+                (0..32).map(|i| if (8..24).contains(&i) { self.magnitude } else { 0.0 }).collect();
+            Some(Arc::new(AudioSpectrum { centers_hz: centers, magnitudes }))
+        }
+    }
+
+    /// The render pixels the loud bands cover.
+    const LOUD_X0: f32 = 16.0;
+    /// The render pixels the loud bands cover.
+    const LOUD_X1: f32 = 50.0;
+
+    /// What one candidate measured: the numbers of the four checks.
+    struct Verdict {
+        /// Rain's widest channel range per LED, each its own.
+        rain_own: Vec<u8>,
+        /// Rain's widest channel range per LED, across two strips.
+        rain_flow: Vec<u8>,
+        /// Fire's mean level on the strip, and the old full-height band's.
+        fire: f64,
+        fire_old: f64,
+        /// Audio Spectrum's mean level under the loud bands, at 0.2, 0.5 and 1.0.
+        audio: [f64; 3],
+        /// The flat colour the strip read.
+        flat: Rgb8,
+        /// The biggest error a horizontal gradient showed, of 255.
+        gradient: u32,
+    }
+
+    impl Verdict {
+        /// Whether the candidate passes all four checks.
+        fn passes(&self) -> bool {
+            self.r1() && self.r2() && self.r3() && self.r4()
+        }
+
+        /// R1: every LED of a strip moves with Rain's thin lines.
+        fn r1(&self) -> bool {
+            self.rain_own.iter().chain(self.rain_flow.iter()).all(|w| *w >= 30)
+        }
+
+        /// R2: Fire is no darker on a strip than the old full-height band gave it.
+        fn r2(&self) -> bool {
+            self.fire >= self.fire_old
+        }
+
+        /// R3: Audio Spectrum is lit at every magnitude and rises with it.
+        fn r3(&self) -> bool {
+            self.audio[0] > 0.0
+                && self.audio[1] > 0.0
+                && self.audio[2] > 0.0
+                && self.audio[0] < self.audio[1]
+                && self.audio[1] < self.audio[2]
+        }
+
+        /// R4: a flat colour reads exactly, a gradient reads the LED's own position.
+        fn r4(&self) -> bool {
+            self.flat == Rgb8::from_f32([0.2, 0.4, 0.6]) && self.gradient <= 3
+        }
+    }
+
+    /// Measures one shape under one rule against the four checks.
+    fn measure_shape(rule: Rule, shape: Shape) -> Verdict {
+        // R1: Rain, each its own and across two strips.
+        let mut rain_own = Vec::new();
+        let mut rain_flow = Vec::new();
+        for (own, slots) in [
+            (true, vec![(0.0f32, 320.0f32)]),
+            (false, vec![(0.0f32, 160.0f32), (160.0f32, 160.0f32)]),
+        ] {
+            let mode = if own { GroupMode::EachItsOwn } else { GroupMode::FlowAcross };
+            let mut scene = rain_scene(&["d1", "d2"], mode);
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8), strip_device("d2", 8)];
+            let cells: Vec<Vec<LedSample>> =
+                slots.iter().map(|(x, w)| shape.cells(*x, *w, 8)).collect();
+            let ranges = run_ranges_over(&mut scene, &mut runner, &devices, &cells, rule, 120);
+            let all: Vec<u8> = ranges.iter().flat_map(|r| widest(r)).collect();
+            if own {
+                rain_own = all;
+            } else {
+                rain_flow = all;
+            }
+        }
+
+        let cells = shape.cells(0.0, 320.0, 8);
+
+        // R2: Fire's level on the strip, against the old full-height band.
+        let fire_stats =
+            measure_cells(Box::new(canvas_effects::fire::Fire::with_seed(372)), None, None, &[cells.clone()], rule);
+        let fire = fire_stats[0].levels().iter().sum::<f64>() / 8.0;
+        let old_stats = measure_cells(
+            Box::new(canvas_effects::fire::Fire::with_seed(372)),
+            None,
+            None,
+            &[old_band_cells(8)],
+            Rule::Mean,
+        );
+        let fire_old = old_stats[0].levels().iter().sum::<f64>() / 8.0;
+
+        // R3: Audio Spectrum at three magnitudes, on the LEDs under the loud bands.
+        let mut audio = [0.0f64; 3];
+        for (index, magnitude) in [0.2f32, 0.5, 1.0].iter().enumerate() {
+            let stats = measure_cells(
+                Box::new(canvas_effects::audio_spectrum::AudioSpectrum::new()),
+                None,
+                Some(*magnitude),
+                &[cells.clone()],
+                rule,
+            );
+            let levels = stats[0].levels();
+            let under: Vec<f64> = cells
+                .iter()
+                .zip(&levels)
+                .filter(|(led, _)| led.center_x >= LOUD_X0 && led.center_x < LOUD_X1)
+                .map(|(_, level)| *level)
+                .collect();
+            audio[index] = under.iter().sum::<f64>() / under.len().max(1) as f64;
+        }
+
+        // R4: a flat colour reads exactly, a horizontal gradient within 3 of 255.
+        let mut scene =
+            state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(FlatColour)), 100);
+        scene.groups[0].mode = GroupMode::EachItsOwn;
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+        frame(&mut scene, &mut runner, &devices);
+        let flat = {
+            let group = &runner.groups[0];
+            sample_cells(
+                &group.canvas.pixels,
+                group.canvas.width,
+                group.canvas.height,
+                &cells,
+                rule,
+            )[0]
+        };
+
+        let mut scene =
+            state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(HorizontalRamp)), 100);
+        scene.groups[0].mode = GroupMode::EachItsOwn;
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, &devices);
+        let gradient = {
+            let group = &runner.groups[0];
+            let now = sample_cells(
+                &group.canvas.pixels,
+                group.canvas.width,
+                group.canvas.height,
+                &cells,
+                rule,
+            );
+            let mut worst = 0u32;
+            for (led, colour) in cells.iter().zip(&now) {
+                let centre = led.center_x / SCENE_RENDER_SCALE;
+                let want = ramp_value_at((centre - 0.5) / (CANVAS_WIDTH as f32 - 1.0));
+                for (got, expect) in [colour.r, colour.g, colour.b].into_iter().zip(want) {
+                    worst = worst.max(i32::from(got).abs_diff(expect));
+                }
+            }
+            worst
+        };
+
+        Verdict { rain_own, rain_flow, fire, fire_old, audio, flat, gradient }
+    }
+
     // ------------------------------------------- what the cap costs each effect (#372)
 
     /// The cells of a strip for a given cell side, in the scaled canvas units.
@@ -1501,6 +1976,10 @@ mod tests {
 
     /// Sweeps the cell side and prints the widest channel range every LED of an 8-LED
     /// strip shows under Rain, for the two group modes.
+    ///
+    /// Then it sweeps the candidate rules and prints R1 for each of them: the range every
+    /// LED shows under Rain, each its own and across two strips. R1 wants 30 of 255 on
+    /// every LED.
     #[test]
     #[ignore = "#372: a sweep of the cap, run by hand"]
     fn sweep_the_cap_for_rain() {
@@ -1550,6 +2029,25 @@ mod tests {
                     all.iter().max().unwrap_or(&0)
                 );
             }
+        }
+
+        // R1 for every candidate rule, and the cell the branch ships now as the
+        // reference the candidates have to beat.
+        println!("#372 R1: the widest channel range per LED under Rain, of 255");
+        let today = measure_shape(Rule::Mean, Shape::Today);
+        println!(
+            "#372 R1 today's square cell: own {own:?} | flow {flow:?}",
+            own = today.rain_own,
+            flow = today.rain_flow,
+        );
+        for (rule, width) in candidates() {
+            let verdict = measure_shape(rule, Shape::Column(width));
+            println!(
+                "#372 R1 {} width {width}: own {own:?} | flow {flow:?}",
+                rule.name(),
+                own = verdict.rain_own,
+                flow = verdict.rain_flow,
+            );
         }
     }
 
@@ -1660,10 +2158,16 @@ mod tests {
             .collect()
     }
 
-    /// Measures one effect on an 8-LED strip in "each its own", for the capped cell and
-    /// for the old full-height band, over the same frames: the two samplings read the same
-    /// canvas, so the difference is the sampling and nothing else.
-    fn measure_effect(effect: Box<dyn Effect>, props: Option<Props>, audio: bool) -> (Stats, Stats) {
+    /// Measures one effect on an 8-LED strip in "each its own", for the candidate's cells
+    /// and for the old full-height band, over the same frames: the two samplings read the
+    /// same canvas, so the difference is the sampling and nothing else.
+    fn measure_effect(
+        effect: Box<dyn Effect>,
+        props: Option<Props>,
+        audio: bool,
+        cells: &[Vec<LedSample>],
+        rule: Rule,
+    ) -> (Vec<Stats>, Stats) {
         let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(effect), 100);
         scene.groups[0].mode = GroupMode::EachItsOwn;
         scene.groups[0].needs = InputNeeds { screen: false, audio };
@@ -1673,61 +2177,38 @@ mod tests {
         let mut runner = SceneRunner::new();
         let devices = vec![strip_device("d1", 8)];
         let band = old_band_cells(8);
-        let mut capped = Stats::new(8);
+        let mut candidate: Vec<Stats> = cells.iter().map(|c| Stats::new(c.len())).collect();
         let mut old = Stats::new(8);
         for index in 0..RAIN_WARMUP_FRAMES + 120 {
+            let mut frame_params = params();
             if audio {
-                frame_with_spectrum(&mut scene, &mut runner, &devices);
-            } else {
-                frame(&mut scene, &mut runner, &devices);
+                frame_params.input_source = Some(Arc::new(LoudBands { magnitude: 1.0 }));
             }
-            let now = take(&mut runner, "d1", 8);
-            // The old band reads the same canvas the capped cell reads.
+            frame_with(&mut scene, &mut runner, &devices, &frame_params);
+            // The old band reads the same canvas the candidate's cells read.
             let group = &runner.groups[0];
-            let mut before = Vec::new();
-            sampling::sample_leds(
+            let before = sample_cells(
                 &group.canvas.pixels,
                 group.canvas.width,
                 group.canvas.height,
                 &band,
-                SCENE_SAMPLING,
-                &mut before,
+                Rule::Mean,
             );
             if index >= RAIN_WARMUP_FRAMES {
-                capped.add(&now);
+                for (slot, led_cells) in cells.iter().enumerate() {
+                    let now = sample_cells(
+                        &group.canvas.pixels,
+                        group.canvas.width,
+                        group.canvas.height,
+                        led_cells,
+                        rule,
+                    );
+                    candidate[slot].add(&now);
+                }
                 old.add(&before);
             }
         }
-        (capped, old)
-    }
-
-    /// A source that publishes a spectrum with a run of loud bands: the Audio Spectrum
-    /// effect draws one bar per band, and a strip's LED reads a small cell of the
-    /// picture (#372), so the fake has to publish something the strip can read.
-    struct FakeSpectrum;
-
-    impl InputSource for FakeSpectrum {
-        fn screen(&self) -> Option<Arc<ScreenFrame>> {
-            None
-        }
-
-        fn audio(&self) -> Option<Arc<AudioSpectrum>> {
-            let centers: Vec<f32> = (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect();
-            let magnitudes: Vec<f32> =
-                (0..32).map(|i| if (8..24).contains(&i) { 1.0 } else { 0.0 }).collect();
-            Some(Arc::new(AudioSpectrum { centers_hz: centers, magnitudes }))
-        }
-    }
-
-    /// One frame with a spectrum for the effects that need one.
-    fn frame_with_spectrum(
-        scene: &mut SceneState,
-        runner: &mut SceneRunner,
-        devices: &[DeviceInfo],
-    ) {
-        let mut params = params();
-        params.input_source = Some(Arc::new(FakeSpectrum));
-        frame_with(scene, runner, devices, &params);
+        (candidate, old)
     }
 
     /// Measures every built-in effect on an 8-LED strip in "each its own" and prints the
@@ -1748,6 +2229,81 @@ mod tests {
     #[test]
     #[ignore = "#372: a measurement of the cap's cost, run by hand"]
     fn measure_every_effect_on_a_strip() {
+        // The candidates, in the order of preference, and the four checks each one has to
+        // pass. The first that passes all four is the rule that ships.
+        let today = measure_shape(Rule::Mean, Shape::Today);
+        println!(
+            "#372 candidate {}: R1 own {}..{} flow {}..{} | R2 {:.1} against the old band {:.1} | R3 {:.1} {:.1} {:.1} | R4 flat {:?} gradient {} | {}",
+            Shape::Today.name(),
+            today.rain_own.iter().copied().min().unwrap_or(0),
+            today.rain_own.iter().copied().max().unwrap_or(0),
+            today.rain_flow.iter().copied().min().unwrap_or(0),
+            today.rain_flow.iter().copied().max().unwrap_or(0),
+            today.fire,
+            today.fire_old,
+            today.audio[0],
+            today.audio[1],
+            today.audio[2],
+            today.flat,
+            today.gradient,
+            if today.passes() { "PASSES" } else { "fails" },
+        );
+        let bottom = measure_shape(Rule::Mean, Shape::Bottom);
+        println!(
+            "#372 diagnostic {}: R1 own {}..{} flow {}..{} | R2 {:.1} against the old band {:.1} | R3 {:.1} {:.1} {:.1} | R4 flat {:?} gradient {} | {}",
+            Shape::Bottom.name(),
+            bottom.rain_own.iter().copied().min().unwrap_or(0),
+            bottom.rain_own.iter().copied().max().unwrap_or(0),
+            bottom.rain_flow.iter().copied().min().unwrap_or(0),
+            bottom.rain_flow.iter().copied().max().unwrap_or(0),
+            bottom.fire,
+            bottom.fire_old,
+            bottom.audio[0],
+            bottom.audio[1],
+            bottom.audio[2],
+            bottom.flat,
+            bottom.gradient,
+            if bottom.passes() { "PASSES" } else { "fails" },
+        );
+        let mut winner: Option<(Rule, Shape)> = None;
+        for (rule, width) in candidates() {
+            let shape = Shape::Column(width);
+            let verdict = measure_shape(rule, shape);
+            println!(
+                "#372 candidate {} {}: R1 own {}..{} flow {}..{} | R2 {:.1} against the old band {:.1} | R3 {:.1} {:.1} {:.1} | R4 flat {:?} gradient {} | {}",
+                rule.name(),
+                shape.name(),
+                verdict.rain_own.iter().copied().min().unwrap_or(0),
+                verdict.rain_own.iter().copied().max().unwrap_or(0),
+                verdict.rain_flow.iter().copied().min().unwrap_or(0),
+                verdict.rain_flow.iter().copied().max().unwrap_or(0),
+                verdict.fire,
+                verdict.fire_old,
+                verdict.audio[0],
+                verdict.audio[1],
+                verdict.audio[2],
+                verdict.flat,
+                verdict.gradient,
+                if verdict.passes() { "PASSES" } else { "fails" },
+            );
+            println!(
+                "#372 candidate {} {}: R1 own {own:?} flow {flow:?}",
+                rule.name(),
+                shape.name(),
+                own = verdict.rain_own,
+                flow = verdict.rain_flow,
+            );
+            if verdict.passes() {
+                winner = Some((rule, shape));
+                break;
+            }
+        }
+        let Some((rule, shape)) = winner else {
+            println!("#372 no candidate passes all four: the rule does not change");
+            return;
+        };
+        println!("#372 the rule that ships: {} {}", rule.name(), shape.name());
+
         let effects: Vec<Measured> = vec![
             Measured {
                 name: "Solid",
@@ -1819,32 +2375,34 @@ mod tests {
                 audio: true,
             },
         ];
-        println!("#372 effect | capped range | old range | capped change | old change | capped level | old level");
+        let cells = shape.cells(0.0, 320.0, 8);
+        println!("#372 effect | new rule range | old range | new rule change | old change | new rule level | old level");
         for measured in effects {
-            let (capped, old) = measure_effect(measured.effect, measured.props, measured.audio);
-            let capped_range = capped.widest();
+            let (candidate, old) =
+                measure_effect(measured.effect, measured.props, measured.audio, &[cells.clone()], rule);
+            let candidate_range = candidate[0].widest();
             let old_range = old.widest();
-            let capped_change = capped.flicker();
+            let candidate_change = candidate[0].flicker();
             let old_change = old.flicker();
-            let capped_level = capped.levels();
+            let candidate_level = candidate[0].levels();
             let old_level = old.levels();
             println!(
-                "#372 {} | {}..{} | {}..{} | {capped_change:.3} | {old_change:.3} | {}..{} | {}..{}",
+                "#372 {} | {}..{} | {}..{} | {candidate_change:.3} | {old_change:.3} | {}..{} | {}..{}",
                 measured.name,
-                capped_range.iter().min().unwrap_or(&0),
-                capped_range.iter().max().unwrap_or(&0),
+                candidate_range.iter().min().unwrap_or(&0),
+                candidate_range.iter().max().unwrap_or(&0),
                 old_range.iter().min().unwrap_or(&0),
                 old_range.iter().max().unwrap_or(&0),
-                capped_level.iter().cloned().fold(f64::MAX, f64::min).round() as i64,
-                capped_level.iter().cloned().fold(f64::MIN, f64::max).round() as i64,
+                candidate_level.iter().cloned().fold(f64::MAX, f64::min).round() as i64,
+                candidate_level.iter().cloned().fold(f64::MIN, f64::max).round() as i64,
                 old_level.iter().cloned().fold(f64::MAX, f64::min).round() as i64,
                 old_level.iter().cloned().fold(f64::MIN, f64::max).round() as i64,
             );
             println!(
-                "#372 {} per LED: capped {capped_range:?} change {:?} level {:?} | old {old_range:?} change {:?} level {:?}",
+                "#372 {} per LED: new rule {candidate_range:?} change {:?} level {:?} | old {old_range:?} change {:?} level {:?}",
                 measured.name,
-                capped.mean_change(),
-                capped_level.iter().map(|l| l.round()).collect::<Vec<f64>>(),
+                candidate[0].mean_change(),
+                candidate_level.iter().map(|l| l.round()).collect::<Vec<f64>>(),
                 old.mean_change(),
                 old_level.iter().map(|l| l.round()).collect::<Vec<f64>>(),
             );
