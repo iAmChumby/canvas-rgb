@@ -40,9 +40,12 @@ pub const DEFAULT_GROUP_NAME: &str = "Everything";
 pub const GROUP_BRIGHTNESS_MAX: u8 = 100;
 /// The most groups of one scene that may play an HTML effect (#370). Each is a QuickJS runtime
 /// whose own script is the cost (about 5.5 to 6.7 ms a frame for the stock effects, whatever the
-/// canvas size; `docs/benchmark.md`, "Scenes: cost per group"). The daemon enforces it
-/// (`check_html_limit` in `crates/canvas-daemon/src/scenes.rs`) and counts a stack's HTML layers
-/// too; [`validate_scene`] does not, so a scene over the limit is still a valid file.
+/// canvas size; `docs/benchmark.md`, "Scenes: cost per group"). Two is allowed on a 25 ms
+/// frame-time bar (a 40 fps floor for the worst pair of stock effects), not on the 16.6 ms bar:
+/// the slowest stock effects alone are `palette-knife` at 23.9 ms and `wet-smear` at 18.4 ms
+/// (`docs/benchmark.md`). The daemon enforces it (`check_html_limit` in
+/// `crates/canvas-daemon/src/scenes.rs`) and counts a stack's HTML layers too; [`validate_scene`]
+/// does not, so a scene over the limit is still a valid file.
 pub const SCENE_HTML_MAX: usize = 2;
 /// The id prefix of an HTML effect.
 pub const HTML_EFFECT_PREFIX: &str = "html:";
