@@ -135,9 +135,12 @@ pub fn is_html_effect(id: &str) -> bool {
 /// The canonical id of the effect a layer names, or `None` when nothing builds it: a built-in,
 /// a user effect or a hidden onboarding one, matched by id or by display name. A layer builder
 /// takes ids, so a layer saved with "Fire" is stored as `fire`; a stack is never a layer's
-/// effect, and a name that resolves only to a stack is `None` (D95.4.8).
+/// effect, and neither is a pattern (0.16.0), and a name that resolves only to one is `None`
+/// (D95.4.8).
 pub fn layer_effect_id<'a>(known: &'a KnownEffects, effect: &str) -> Option<&'a str> {
-    if effect.starts_with(STACK_ID_PREFIX) {
+    if effect.starts_with(STACK_ID_PREFIX)
+        || effect.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX)
+    {
         return None;
     }
     known.takes(effect)
@@ -172,6 +175,14 @@ fn check_layer_structure(layer: &StackLayer, seen: &mut Vec<String>) -> Result<(
     if layer.effect.starts_with(STACK_ID_PREFIX) {
         return Err(format!(
             "{}: {} is a stack, and a stack cannot contain a stack",
+            who(layer), layer.effect
+        ));
+    }
+    // A pattern as a layer is a later step (the spec's "Room to grow"): the id is read the way
+    // `html:` and stock ids are, and 0.16.0 refuses it rather than saving a layer nothing runs.
+    if layer.effect.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+        return Err(format!(
+            "{}: {} is a pattern, and a pattern cannot be a layer of a stack",
             who(layer), layer.effect
         ));
     }
