@@ -17,6 +17,43 @@ struct Drop {
     brightness: f32,
 }
 
+/// The fade per frame at the default Trail Length and the default Speed on the anchor
+/// frame: the fixed fade Rain always had.
+const DEFAULT_FADE: f32 = 0.88;
+/// The Trail Length default. The fade above is measured at it, so it must stay the
+/// schema's default (`the_fade_anchor_is_the_schema_default`).
+const DEFAULT_TRAIL_LENGTH: f32 = 14.0;
+/// The Speed default, in logical cells a second.
+const DEFAULT_SPEED: f32 = 120.0;
+/// The frame interval the fade anchor is measured at: the 1/30 s frame every effect test
+/// drives the effects with.
+const ANCHOR_FRAME_S: f32 = 1.0 / 30.0;
+/// The logical cells a drop moves in one anchor frame at the default Speed: four.
+const DEFAULT_STEP: f32 = DEFAULT_SPEED * ANCHOR_FRAME_S;
+
+/// The per-frame fade for a trail `trail_length` cells long, with the drop moving `step`
+/// logical cells this frame.
+///
+/// Trail Length sets the streak's length in *cells*, not in frames: the frames a
+/// brightness survives are `cells / step`, so the fade's exponent is `step` times the
+/// anchor frame's and `DEFAULT_TRAIL_LENGTH / trail_length` times its own. The decay per
+/// cell is then the same at every Speed and every frame interval: a fast drop fades
+/// faster each frame and leaves the same streak, and a slower PC frame changes nothing.
+/// At the defaults (Trail Length 14, Speed 120, 4 cells a frame) the exponent is exactly
+/// 1 and the fade is `DEFAULT_FADE`, so an effect saved with the defaults renders what it
+/// always did.
+fn per_frame_fade(trail_length: f32, step: f32) -> f32 {
+    let trail = trail_length.max(1.0);
+    let step = if step.is_finite() { step.max(0.0) } else { 0.0 };
+    let exponent = (step / DEFAULT_STEP) * (DEFAULT_TRAIL_LENGTH / trail);
+    if exponent == 1.0 {
+        // The old constant itself, not `powf`'s answer for it.
+        DEFAULT_FADE
+    } else {
+        DEFAULT_FADE.powf(exponent)
+    }
+}
+
 /// The Rain effect.
 pub struct Rain {
     schema: PropertySchema,
@@ -24,9 +61,10 @@ pub struct Rain {
     background: [f32; 3],
     density: u32,
     speed: f32,
+    /// How long a streak is, in logical cells: the control sets the fade below.
+    trail_length: f32,
     drops: Vec<Drop>,
     rng: Rng,
-    trail: Vec<[f32; 3]>,
 }
 
 impl Rain {
@@ -70,9 +108,9 @@ impl Rain {
             background: [0.0; 3],
             density: 120,
             speed: 120.0,
+            trail_length: DEFAULT_TRAIL_LENGTH,
             drops: Vec::new(),
             rng: Rng::new(seed),
-            trail: Vec::new(),
         };
         e.init(&e.schema.defaults());
         e
@@ -107,9 +145,7 @@ impl Effect for Rain {
             self.rng = Rng::new(seed);
         }
         let len = p::number(&self.schema, props, "trail_length").max(1.0) as f32;
-        if self.trail.len() != len as usize {
-            self.trail.resize(len as usize, [0.0, 0.0, 0.0]);
-        }
+        self.trail_length = len;
     }
 
     fn update(&mut self, dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::Inputs) {
@@ -117,8 +153,9 @@ impl Effect for Rain {
             return;
         }
 
-        // Fade the previous frame toward the background, leaving the trails.
-        let fade = 0.88f32;
+        // Fade the previous frame toward the background, leaving the trails. How slowly
+        // it fades is Trail Length: see `per_frame_fade`.
+        let fade = per_frame_fade(self.trail_length, self.speed * dt);
         let bg = self.background;
         for p in canvas.pixels.iter_mut() {
             p[0] = p[0] * fade + bg[0] * (1.0 - fade);
@@ -180,6 +217,116 @@ fn color_kind(s: &str) -> canvas_proto::PropKind {
 mod tests {
     use super::*;
     use canvas_proto::Inputs;
+
+    /// The mean streak, in cells, behind the drop heads: for every column that has a
+    /// lit cell, the run of consecutive lit cells upward from the lowest one (the drop
+    /// head leaves the trail above it, because the drops fall).
+    fn mean_streak(canvas: &Canvas, threshold: f32) -> f32 {
+        let w = canvas.width as usize;
+        let h = canvas.height as usize;
+        let lit = |x: usize, y: usize| {
+            canvas.pixels[y * w + x].iter().copied().fold(0.0f32, f32::max) > threshold
+        };
+        let mut total = 0usize;
+        let mut columns = 0usize;
+        for x in 0..w {
+            let Some(head) = (0..h).rev().find(|&y| lit(x, y)) else {
+                continue;
+            };
+            let mut len = 1usize;
+            let mut y = head;
+            while y > 0 && lit(x, y - 1) {
+                len += 1;
+                y -= 1;
+            }
+            total += len;
+            columns += 1;
+        }
+        total as f32 / columns.max(1) as f32
+    }
+
+    /// The brightness a trail has to fall below to count as dark. The default
+    /// `#050814` background sits at 0.078 in its brightest channel (20/255), so this is
+    /// one step above it: the background alone is never counted as a streak.
+    const DARK: f32 = 0.12;
+
+    /// Rain with one Trail Length, `frames` frames of drops falling.
+    fn rain_with(trail_length: f64, density: f64, frames: usize) -> Canvas {
+        let mut e = Rain::with_seed(3);
+        let mut props = e.schema.defaults();
+        props.insert("trail_length".into(), canvas_proto::PropValue::Number(trail_length));
+        props.insert("density".into(), canvas_proto::PropValue::Number(density));
+        e.init(&props);
+        let mut canvas = Canvas::new(320, 200);
+        for _ in 0..frames {
+            e.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        }
+        canvas
+    }
+
+    /// Trail Length sets how long the streak behind a drop is.
+    #[test]
+    fn trail_length_changes_the_streak_behind_a_drop() {
+        let short = mean_streak(&rain_with(2.0, 120.0, 90), DARK);
+        let long = mean_streak(&rain_with(60.0, 120.0, 90), DARK);
+        assert!(
+            long > short * 2.0,
+            "Trail Length 60 leaves a mean streak of {long:.1} cells behind a drop head, \
+             not clearly longer than the {short:.1} cells at Trail Length 2"
+        );
+    }
+
+    /// FNV-1a over the 8-bit frame, the precision the lights see.
+    fn fingerprint(canvas: &Canvas) -> u64 {
+        let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+        for p in &canvas.pixels {
+            for v in p {
+                hash ^= (v.clamp(0.0, 1.0) * 255.0).round() as u64 & 0xff;
+                hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+            }
+        }
+        hash
+    }
+
+    /// The default Trail Length renders the frames the fixed 0.88 fade rendered.
+    #[test]
+    fn the_default_trail_length_keeps_the_old_frames() {
+        // Recorded from the code before Trail Length reached the frame: a fixed 0.88
+        // fade, seed 3, the schema defaults, 150 frames of 1/30 s on a 320x200 canvas.
+        let recorded = 0xe660_d6a5_70f3_1204;
+        assert_eq!(
+            fingerprint(&rain_with(14.0, 120.0, 150)),
+            recorded,
+            "the default Trail Length no longer renders the fixed 0.88 fade's frames"
+        );
+        // The derived fade is the old constant itself at the defaults, not merely close.
+        assert_eq!(per_frame_fade(DEFAULT_TRAIL_LENGTH, DEFAULT_STEP), DEFAULT_FADE);
+    }
+
+    /// The fade anchor is the schema's own default, so a changed default cannot leave
+    /// the anchor behind.
+    #[test]
+    fn the_fade_anchor_is_the_schema_default() {
+        let schema = Rain::schema();
+        let trail = schema.properties.iter().find(|p| p.key == "trail_length").expect("trail_length");
+        assert_eq!(trail.kind.default_value(), canvas_proto::PropValue::Number(14.0));
+        assert_eq!(DEFAULT_TRAIL_LENGTH, 14.0);
+        assert_eq!(DEFAULT_SPEED, 120.0);
+    }
+
+    /// A faster drop fades faster each frame, so its streak is the same length in cells.
+    #[test]
+    fn a_faster_drop_leaves_a_streak_of_the_same_length() {
+        let cells = |trail: f32, step: f32| {
+            let fade = per_frame_fade(trail, step);
+            step * (DARK.ln() / fade.ln())
+        };
+        for trail in [2.0f32, 14.0, 60.0] {
+            let slow = cells(trail, 1.0);
+            let fast = cells(trail, 10.0);
+            assert!((slow - fast).abs() < slow * 0.001, "trail {trail}: {slow} vs {fast}");
+        }
+    }
 
     #[test]
     fn rain_falls() {

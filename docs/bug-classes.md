@@ -863,3 +863,28 @@ retries can wait for one busy answer.
 - Left: the installed-app checks on #97 (Back/Forward and mouse back with unsaved code, the close/reload
   warning, CSS `round()` in WebView2), the phone code layer and screen readers need the installed app
   and are out of the fakes' reach. #97 carries no `cause:` label (not applied; left to the main agent).
+
+### `cause:wiring`: a control built but never connected to the frame
+
+An effect declares a property, the editor draws a control for it, and no code reads it: the value
+is stored and never reaches the picture. The control looks alive and the setting does nothing.
+Every effect reads its own props in `init`, so nothing notices a declared control that nothing
+uses.
+
+- [#383](https://github.com/iAmChumby/canvas-rgb/issues/383): Rain's Trail Length resized a
+  `trail` buffer in `init` and `update` never read it; every streak came from a fixed 0.88 fade
+  (`crates/canvas-effects/src/rain.rs`). The control now sets the streak's length: the per-frame
+  fade is derived from it (`per_frame_fade`), and the default (14) at the default Speed on the
+  1/30 s frame gives exactly the old 0.88, checked against a frame fingerprint recorded from the
+  old code (`the_default_trail_length_keeps_the_old_frames`). The unused buffer is gone.
+- **Class fix:** done (#383). One test over every built-in effect
+  (`crates/canvas-effects/src/lib.rs`, `every_numeric_or_choice_control_changes_the_frame`)
+  renders each effect at the two ends of every numeric, angle and choice control with the same
+  seed, keeps one fingerprint per frame, and fails naming the effect and the control when the
+  frames are identical. The capture effects get the crate's own input, and the screen changes
+  colour and the spectrum falls partway through so Smoothing, Decay and Peak Hold have something
+  to act on. It drives 31 controls over the 12 effects and found no other dead control; on the
+  pre-#383 code it fails only on Rain's Trail Length. The exception list (`KNOWN_DEAD`) is empty,
+  and the test fails on an entry that names no control. A colour control has no two ends and no
+  built-in has a bool control, so neither is driven; a control added later is covered without
+  editing the test.

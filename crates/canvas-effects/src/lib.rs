@@ -330,4 +330,139 @@ mod tests {
     fn every_effect_ignores_a_bad_dt() {
         check_bad_dt(&native_ids());
     }
+
+    // ------------------------------------------------- controls reach the frame
+
+    /// Frames the control test renders: two seconds, enough for every effect's shape to
+    /// show.
+    const CONTROL_FRAMES: usize = 60;
+
+    /// The capture input every effect that needs one is fed: a screen frame that changes
+    /// colour halfway through, so a smoothing control has a change to smooth. A constant
+    /// screen hides it at the steady state.
+    fn test_screen(frame: usize) -> std::sync::Arc<canvas_proto::ScreenFrame> {
+        let color = if frame < CONTROL_FRAMES / 2 {
+            canvas_proto::Rgb8::new(200, 100, 50)
+        } else {
+            canvas_proto::Rgb8::new(20, 90, 230)
+        };
+        std::sync::Arc::new(canvas_proto::ScreenFrame {
+            width: 64,
+            height: 40,
+            pixels: vec![color; 64 * 40],
+        })
+    }
+
+    /// The spectrum for one frame: loud for the first 20 frames, then quiet, so a decay
+    /// and a peak hold have something to do. A constant spectrum would hide both.
+    fn test_audio(frame: usize) -> std::sync::Arc<canvas_proto::AudioSpectrum> {
+        let level = if frame < 20 { 0.6 } else { 0.02 };
+        std::sync::Arc::new(canvas_proto::AudioSpectrum {
+            centers_hz: (0..16).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect(),
+            magnitudes: (0..16).map(|i| (level - i as f32 * 0.02).max(0.0)).collect(),
+        })
+    }
+
+    /// Renders `id` at `props` for `CONTROL_FRAMES` frames on a quarter-scale canvas, and
+    /// returns one fingerprint per frame (FNV-1a over the frame's 8-bit pixels).
+    ///
+    /// Every frame is kept, not just the last: a setting that only moves the picture for
+    /// a while must still be seen, and a setting that happens to land back where it
+    /// started after the last frame must not look inert.
+    fn render_with(id: &str, props: &Props) -> Vec<u64> {
+        let mut e = create(id).expect("effect");
+        let schema = e.schema();
+        e.init(props);
+        let mut canvas = canvas_proto::Canvas::with_scale(0.25);
+        let mut frames = Vec::with_capacity(CONTROL_FRAMES);
+        for frame in 0..CONTROL_FRAMES {
+            let mut inputs = Inputs::default();
+            if schema.needs.screen {
+                inputs.screen = Some(test_screen(frame));
+            }
+            if schema.needs.audio {
+                inputs.audio = Some(test_audio(frame));
+            }
+            e.update(1.0 / 30.0, &mut canvas, &inputs);
+            let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
+            for p in &canvas.pixels {
+                for v in p {
+                    hash ^= (v.clamp(0.0, 1.0) * 255.0).round() as u64 & 0xff;
+                    hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+                }
+            }
+            frames.push(hash);
+        }
+        frames
+    }
+
+    /// The two settings at the ends of one control.
+    ///
+    /// A `Bool` has a second setting rather than two ends and no built-in effect has one,
+    /// so it is skipped; a `Color` has no ends. An angle's ends are 0° and 360°, which are
+    /// one direction, so the two directions driven here are 0° and 90°.
+    fn control_ends(kind: &canvas_proto::PropKind) -> Option<[canvas_proto::PropValue; 2]> {
+        use canvas_proto::{PropKind, PropValue};
+        match kind {
+            PropKind::Number { min, max, .. } => {
+                Some([PropValue::Number(*min), PropValue::Number(*max)])
+            }
+            PropKind::Choice { options, .. } => {
+                let first = options.first()?;
+                let last = options.last()?;
+                Some([PropValue::Choice(first.clone()), PropValue::Choice(last.clone())])
+            }
+            PropKind::Angle { .. } => Some([PropValue::Angle(0.0), PropValue::Angle(90.0)]),
+            PropKind::Hue { .. } => Some([PropValue::Hue(0.0), PropValue::Hue(90.0)]),
+            PropKind::Bool { .. } | PropKind::Color { .. } => None,
+        }
+    }
+
+    /// The controls known not to reach the frame yet, with the issue each is filed as.
+    /// An entry is one (effect id, control key). The test fails on an entry that names no
+    /// control, so a fix deletes its entry.
+    const KNOWN_DEAD: &[(&str, &str)] = &[];
+
+    /// Every numeric or choice control of every built-in effect changes the frame at one
+    /// of its two ends. Run this first when an effect's setting looks inert: it names the
+    /// effect and the control, not the frame.
+    #[test]
+    fn every_numeric_or_choice_control_changes_the_frame() {
+        let mut seen: Vec<(String, String)> = Vec::new();
+        for id in native_ids() {
+            let schema = create(id).expect("effect").schema();
+            let base = schema.defaults();
+            for def in &schema.properties {
+                let Some(ends) = control_ends(&def.kind) else {
+                    continue;
+                };
+                seen.push((id.to_string(), def.key.clone()));
+                if KNOWN_DEAD.iter().any(|(known_id, known_key)| *known_id == id && *known_key == def.key) {
+                    continue;
+                }
+                let render = |value: canvas_proto::PropValue| {
+                    let mut props = base.clone();
+                    // Effects that draw from their own randomness take the tile seed, so
+                    // the two renders differ only in this one control.
+                    props.insert(TILE_SEED_PROP.to_string(), canvas_proto::PropValue::Number(TILE_SEED as f64));
+                    props.insert(def.key.clone(), value);
+                    render_with(id, &props)
+                };
+                let a = render(ends[0].clone());
+                let b = render(ends[1].clone());
+                assert_ne!(
+                    a, b,
+                    "{id}: the {} control ({}) does not reach the frame: \
+                     {:?} and {:?} render the same picture",
+                    def.label, def.key, ends[0], ends[1]
+                );
+            }
+        }
+        for (id, key) in KNOWN_DEAD {
+            assert!(
+                seen.iter().any(|(seen_id, seen_key)| seen_id == id && seen_key == key),
+                "KNOWN_DEAD names {id}'s {key}, which is not a numeric or choice control"
+            );
+        }
+    }
 }
