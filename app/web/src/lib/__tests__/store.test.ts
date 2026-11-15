@@ -12,6 +12,7 @@ const { api } = vi.hoisted(() => ({
     render: vi.fn(),
     settings: vi.fn(),
     displays: vi.fn(),
+    patterns: vi.fn(),
     scenes: { list: vi.fn() },
     lights: { list: vi.fn() },
   },
@@ -27,6 +28,7 @@ import {
   refreshEffects,
   refreshFans,
   refreshLights,
+  refreshPatterns,
   refreshScenes,
   refreshSettings,
   refreshStatus,
@@ -36,6 +38,22 @@ import {
 import { ApiFailure } from "@/lib/errors";
 
 const STATUS = { version: "0.2.0", devices_connected: 3, devices_total: 4 };
+
+/** Two patterns, as `GET /patterns` answers them: the whole document, colours and all. */
+const PATTERNS = [
+  {
+    id: "pattern:Intake",
+    built_on: { led_count: 2, arrangement: "ring" },
+    frames: [{ colors: ["#ff0000", "#000000"], hold: 0 }],
+    motion: { type: "none" },
+  },
+  {
+    id: "pattern:Underglow",
+    built_on: { led_count: 2, arrangement: "strip" },
+    frames: [{ colors: ["#0000ff", "#00ff00"], hold: 0 }],
+    motion: { type: "none" },
+  },
+];
 
 describe("the store's answers", () => {
   beforeEach(() => {
@@ -54,6 +72,8 @@ describe("the store's answers", () => {
       devicesTotal: null,
       effects: null,
       effectsError: null,
+      patterns: null,
+      patternsError: null,
       settings: null,
       settingsError: null,
       displays: null,
@@ -99,6 +119,37 @@ describe("the store's answers", () => {
     release();
     await Promise.all([first, second]);
     expect(getSnap().pending).toEqual([]);
+  });
+
+  it("fills the patterns snapshot and a lost answer keeps the old list", async () => {
+    api.patterns.mockResolvedValue({ patterns: PATTERNS });
+    await refreshPatterns();
+    expect(getSnap().patterns).toEqual(PATTERNS);
+    expect(getSnap().patternsError).toBeNull();
+
+    // A newer answer lands first, then the request before it fails: the list the newer answer
+    // brought stays, and the old request's failure is not shown.
+    let fail!: (e: unknown) => void;
+    api.patterns.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    api.patterns.mockImplementationOnce(() => Promise.resolve({ patterns: [PATTERNS[0]] }));
+    const late = refreshPatterns();
+    await refreshPatterns();
+    expect(getSnap().patterns).toEqual([PATTERNS[0]]);
+    fail(new Error("the service is late and says no"));
+    await late;
+    expect(getSnap().patterns).toEqual([PATTERNS[0]]);
+    expect(getSnap().patternsError).toBeNull();
+
+    // A read that fails with nothing newer keeps the list and says why it is old.
+    api.patterns.mockRejectedValueOnce(new Error("the service is gone"));
+    await refreshPatterns();
+    expect(getSnap().patterns).toEqual([PATTERNS[0]]);
+    expect(getSnap().patternsError).toMatch(/gone/);
   });
 
   it("stops asking a daemon without the scene routes until its version changes", async () => {
@@ -184,6 +235,12 @@ const AREAS = [
     answer: { effects: [], active: null, failed: [] },
     field: "effectsError",
   },
+  {
+    name: "patterns",
+    call: () => refreshPatterns(),
+    answer: { patterns: [] },
+    field: "patternsError",
+  },
   { name: "settings", call: () => refreshSettings(), answer: { fps: 30 }, field: "settingsError" },
   { name: "displays", call: () => refreshDisplays(), answer: [], field: "displaysError" },
 ] as const;
@@ -198,6 +255,7 @@ describe("the store's late failures", () => {
       fansError: null,
       devicesError: null,
       effectsError: null,
+      patternsError: null,
       settingsError: null,
       displaysError: null,
     });

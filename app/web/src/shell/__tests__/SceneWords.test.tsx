@@ -158,7 +158,7 @@ describe("the status strip", () => {
   const mark = () => document.querySelector(".strip-mark") as HTMLElement;
 
   it("says a group is dark in words, never 'All connected' over it", () => {
-    const states = DEMO_SCENES.scenes[0]?.groups.map((g, i) => ({ id: g.id, failed: i === 0 ? "gone" : null })) ?? [];
+    const states = DEMO_SCENES.scenes[0]?.groups.map((g, i) => ({ id: g.id, failed: i === 0 ? "gone" : null, fits: [] })) ?? [];
     patchSnap({
       status: status(),
       effects: EFFECTS,

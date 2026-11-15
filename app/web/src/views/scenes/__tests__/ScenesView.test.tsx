@@ -105,7 +105,7 @@ function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, 
     scene: active,
     scenes: clone(DEMO_SCENES.scenes),
     unassigned: DEMO_LIGHTS.filter((l) => !held.has(l.light.id)),
-    states: active.groups.map((g): GroupState => ({ id: g.id, failed: null })),
+    states: active.groups.map((g): GroupState => ({ id: g.id, failed: null, fits: [] })),
     edit: (change: (draft: Scene) => void, label: string) => {
       const draft = clone(active);
       change(draft);
@@ -183,7 +183,7 @@ describe("the Scenes page", () => {
 
   it("Unassigned is absent when every light is in a group", () => {
     const one = clone(DEMO_SCENES.scenes[1] as Scene);
-    mount(fake({ scene: one, unassigned: [], states: one.groups.map((g) => ({ id: g.id, failed: null })) }));
+    mount(fake({ scene: one, unassigned: [], states: one.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) }));
     expect(screen.queryByTestId("unassigned-row")).toBeNull();
   });
 
@@ -202,7 +202,7 @@ describe("the Scenes page", () => {
   it("a failed group shows the daemon's own words when its effect is installed", () => {
     const base = fake();
     const first = (base.scene as Scene).groups[0];
-    mount(fake({ states: [{ id: first?.id ?? "", failed: "the effect could not start" }] }));
+    mount(fake({ states: [{ id: first?.id ?? "", failed: "the effect could not start", fits: [] }] }));
     expect(screen.getByText("the effect could not start")).toBeTruthy();
   });
 
@@ -215,6 +215,7 @@ describe("the Scenes page", () => {
         states: evening.groups.map((g) => ({
           id: g.id,
           failed: g.id === lost?.id ? "the effect html:glow-removed is not installed" : null,
+          fits: [],
         })),
       }),
     );

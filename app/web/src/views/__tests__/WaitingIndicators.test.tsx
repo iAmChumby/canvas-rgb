@@ -105,7 +105,7 @@ beforeEach(() => {
   );
   api.effectThumbnail.mockResolvedValue(new ArrayBuffer(0));
   patchSnap({
-    effects: [{ id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false }],
+    effects: [{ id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" }],
     effectsError: null,
     effectsFailed: [],
     status: {
@@ -225,7 +225,7 @@ describe("the Import button", () => {
     expect(spinnerIn(importButton())).not.toBeNull();
 
     await act(async () => {
-      land({ effect: { id: "html:comet", name: "Comet", description: "d", needs: { screen: false, audio: false }, favorite: false }, replaced: false });
+      land({ effect: { id: "html:comet", name: "Comet", description: "d", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" }, replaced: false });
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(importButton().getAttribute("aria-busy")).toBeNull();
@@ -268,7 +268,7 @@ describe("the Import button", () => {
     expect(spinnerIn(replace)).not.toBeNull();
 
     await act(async () => {
-      land({ effect: { id: "html:comet", name: "Comet", description: "d", needs: { screen: false, audio: false }, favorite: false }, replaced: true });
+      land({ effect: { id: "html:comet", name: "Comet", description: "d", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" }, replaced: true });
       await vi.advanceTimersByTimeAsync(0);
     });
     // The ask is gone with the replace (the note unmounts), and the Import key is not busy any more.

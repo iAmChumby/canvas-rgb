@@ -49,7 +49,7 @@ function answer(active?: string): ScenesResponse {
   return {
     active: id,
     scenes: clone(DEMO_SCENES.scenes),
-    group_states: scene.groups.map((g) => ({ id: g.id, failed: null })),
+    group_states: scene.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
   };
 }
 
@@ -71,7 +71,7 @@ function oneScene(scene: Scene): ScenesResponse {
   return {
     active: scene.id,
     scenes: [scene],
-    group_states: scene.groups.map((g) => ({ id: g.id, failed: null })),
+    group_states: scene.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
   };
 }
 
@@ -102,7 +102,7 @@ function fakeDaemon(): { active: string; activeName: string } {
   const list = () => ({
     active,
     scenes: clone(scenes),
-    group_states: scenes.find((s) => s.id === active)?.groups.map((g) => ({ id: g.id, failed: null })) ?? [],
+    group_states: scenes.find((s) => s.id === active)?.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) ?? [],
   });
   api.scenes.list.mockImplementation(async () => list());
   api.scenes.setActive.mockImplementation(async (id: string) => {
@@ -206,7 +206,7 @@ describe("useScene", () => {
     api.scenes.list.mockResolvedValueOnce(answer()).mockResolvedValue({
       active: other.id,
       scenes: DEMO_SCENES.scenes.map((s) => (s.id === other.id ? other : s)),
-      group_states: other.groups.map((g) => ({ id: g.id, failed: null })),
+      group_states: other.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     });
     api.scenes.put.mockRejectedValueOnce(new ApiFailure(409, "conflict", "the scene changed"));
 
@@ -626,7 +626,7 @@ describe("useScene", () => {
       .mockResolvedValue({
         active: other.id,
         scenes: DEMO_SCENES.scenes.map((s) => (s.id === other.id ? other : s)),
-        group_states: other.groups.map((g) => ({ id: g.id, failed: null })),
+        group_states: other.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
       });
     api.scenes.put.mockRejectedValueOnce(new ApiFailure(409, "conflict", "the scene changed"));
 
@@ -648,7 +648,7 @@ describe("useScene", () => {
     release({
       active: other.id,
       scenes: DEMO_SCENES.scenes.map((s) => (s.id === other.id ? other : s)),
-      group_states: other.groups.map((g) => ({ id: g.id, failed: null })),
+      group_states: other.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     });
 
     // The second edit goes out, on the daemon's scene.
@@ -816,7 +816,7 @@ describe("useScene", () => {
     api.scenes.list.mockImplementation(async () => ({
       active: held.id,
       scenes: [clone(held)],
-      group_states: held.groups.map((g) => ({ id: g.id, failed: null })),
+      group_states: held.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     }));
     // The first write reaches the daemon and is saved; its answer is lost on the way back.
     let lost = true;
@@ -1134,7 +1134,7 @@ describe("useScene", () => {
     api.scenes.list.mockResolvedValue({
       active: first.id,
       scenes: [first, second],
-      group_states: first.groups.map((g) => ({ id: g.id, failed: null })),
+      group_states: first.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     });
 
     // This window's first save is out until the test lets it land.
@@ -1192,7 +1192,7 @@ describe("useScene", () => {
     api.scenes.list.mockResolvedValue({
       active: first.id,
       scenes: [first, second],
-      group_states: first.groups.map((g) => ({ id: g.id, failed: null })),
+      group_states: first.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     });
 
     // The brightness write of the first scene stays out until the test lets it land.
@@ -1400,7 +1400,7 @@ describe("useScene", () => {
     const otherAnswer: ScenesResponse = {
       active: other.id,
       scenes: DEMO_SCENES.scenes.map((s) => (s.id === other.id ? other : s)),
-      group_states: other.groups.map((g) => ({ id: g.id, failed: null })),
+      group_states: other.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     };
     // The first read is this window's; the read after the refusal waits, so the second edit lands
     // while the daemon's scene is being read.

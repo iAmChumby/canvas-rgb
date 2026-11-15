@@ -107,7 +107,7 @@ function answer(): ScenesResponse {
   return {
     active: s.id,
     scenes: [s],
-    group_states: s.groups.map((g) => ({ id: g.id, failed: null })),
+    group_states: s.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
   };
 }
 
@@ -129,8 +129,8 @@ const DETAIL: EffectDetail = {
 };
 
 const EFFECTS: EffectSummary[] = [
-  { id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false },
-  { id: "fire", name: "Fire", description: "", needs: { screen: false, audio: false }, favorite: false },
+  { id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" },
+  { id: "fire", name: "Fire", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" },
 ];
 
 /** The rev the fake daemon is at. */

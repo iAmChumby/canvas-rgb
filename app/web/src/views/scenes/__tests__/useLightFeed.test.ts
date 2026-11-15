@@ -151,7 +151,7 @@ describe("demoLightColours", () => {
       scenes: {
         active: active.id,
         scenes: [active],
-        group_states: active.groups.map((g) => ({ id: g.id, failed: failed.includes(g.id) ? "gone" : null })),
+        group_states: active.groups.map((g) => ({ id: g.id, failed: failed.includes(g.id) ? "gone" : null, fits: [] })),
       },
     });
   const led = (rgb: Uint8Array | undefined, i: number) => Array.from(rgb?.slice(i * 3, i * 3 + 3) ?? []);
