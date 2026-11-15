@@ -19,6 +19,7 @@ import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayStatus } from "@/proto/DisplayStatus";
 import type { UpdateState } from "@/proto/UpdateState";
+import type { Pattern } from "@/proto/Pattern";
 
 export const RPM_HISTORY = 60;
 
@@ -83,6 +84,9 @@ export interface Snap {
   effectsError: string | null;
   /** The user effect files that did not parse. */
   effectsFailed: FailedEffect[];
+  /** Every saved pattern, whole: the editor draws one from its colours (0.16.0). */
+  patterns: Pattern[] | null;
+  patternsError: string | null;
   /** Every scene, the active one's id and how its groups are doing (0.14.0). */
   scenes: ScenesResponse | null;
   scenesError: string | null;
@@ -117,6 +121,8 @@ let snap: Snap = {
   effects: null,
   effectsError: null,
   effectsFailed: [],
+  patterns: null,
+  patternsError: null,
   scenes: null,
   scenesError: null,
   lights: null,
@@ -345,6 +351,24 @@ export async function refreshEffects(n?: number): Promise<void> {
   }
 }
 
+/**
+ * Reads every saved pattern, whole. A pattern is small (a colour per LED of one device), and the
+ * editor draws its dots from these colours: nothing asks for a thumbnail.
+ */
+export async function refreshPatterns(n?: number): Promise<void> {
+  const req = n ?? beginRequest("patterns");
+  try {
+    const r = await api.patterns();
+    if (!isNewest("patterns", req)) return;
+    markAnswered("patterns", req);
+    patchSnap({ patterns: r.patterns, patternsError: null });
+  } catch (e) {
+    if (!isNewest("patterns", req)) return;
+    markAnswered("patterns", req);
+    patchSnap({ patternsError: messageOf(e) });
+  }
+}
+
 export async function refreshScenes(n?: number): Promise<void> {
   // A daemon without the scene routes is not asked again until its version changes. A Try
   // again brings its own number: the user asked for it, so it goes out.
@@ -440,6 +464,7 @@ export const retryFans = (): Promise<void> => retryArea("fans", refreshFans);
 export const retryDevices = (): Promise<void> =>
   retryArea("devices", (n) => refreshDevices(n, { rescan: true }));
 export const retryEffects = (): Promise<void> => retryArea("effects", refreshEffects);
+export const retryPatterns = (): Promise<void> => retryArea("patterns", refreshPatterns);
 export const retryScenes = (): Promise<void> =>
   retryArea("scenes", async (n) => {
     await Promise.all([refreshScenes(n), refreshLights(beginRequest("lights"))]);
@@ -472,6 +497,7 @@ export async function refreshAll(): Promise<void> {
     refreshFans(),
     refreshDevices(),
     refreshEffects(),
+    refreshPatterns(),
     refreshScenes(),
     refreshLights(),
     refreshChains(),
@@ -506,6 +532,7 @@ export function startSync(): () => void {
     if (lastStatusFailureAt && Date.now() < lastStatusFailureAt + DOWN_RETRY_MS) return;
     void refreshDevices();
     void refreshEffects();
+    void refreshPatterns();
     void refreshScenes();
     void refreshLights();
     void refreshChains();

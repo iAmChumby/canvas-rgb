@@ -76,7 +76,7 @@ function build(
   return {
     schema,
     defaults,
-    summary: { id, name, description, needs, favorite },
+    summary: { id, name, description, needs, favorite, kind: "canvas" },
   };
 }
 
@@ -645,7 +645,7 @@ export const DEMO_SCENES: ScenesResponse = (() => {
   return {
     active: gaming.id,
     scenes: [gaming, focus, evening],
-    group_states: gaming.groups.map((g) => ({ id: g.id, failed: null })),
+    group_states: gaming.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
   };
 })();
 
