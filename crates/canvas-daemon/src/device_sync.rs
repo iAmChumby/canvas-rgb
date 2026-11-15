@@ -10,6 +10,7 @@
 //! It lives in the library, and not in the daemon's binary, so a test can run the real path.
 
 use std::collections::HashMap;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 
 use canvas_proto::api::LinkState;
@@ -25,6 +26,7 @@ pub type DeviceSinks = tokio::sync::Mutex<HashMap<DeviceId, JoinHandle<()>>>;
 
 /// Keeps `devices` as the device list and brings everything that depends on it up to date.
 pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
+    let mut devices = devices;
     *app.devices.write().await = devices.clone();
     *app.openrgb.write().await = LinkState::Connected;
     // After the first run, a zone that appears (a late device, a header that got its LEDs) is a
@@ -43,6 +45,13 @@ pub async fn apply_devices(app: &Arc<App>, devices: Vec<DeviceInfo>) {
         }
         scenes_deadline = store.scenes_deadline_to_arm(crate::storage::clock());
         store.sync_lights_from(&devices);
+    }
+    // Once, on the first non-empty list: a crash mid-setup left a restore record and a raised
+    // header (#338). The replay puts the length back and reads the list again, so the rest of
+    // this path works from the restored lengths.
+    if !devices.is_empty() && !app.leftovers_replayed.swap(true, Ordering::SeqCst) {
+        crate::api::chains::replay_leftovers(app).await;
+        devices = app.devices.read().await.clone();
     }
     // A placed device that never arrives sends no new list, so the wait is settled by a timer,
     // with the devices known when it ends.

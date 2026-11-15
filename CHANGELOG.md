@@ -19,6 +19,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
+- Chains: the daemon can hold a header while the app asks what is plugged into it, and puts the length back if the window closes.
+- Chains: set up a header's parts in one commit that either lands whole or leaves everything as it was.
 - Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
 - Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
 - Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
