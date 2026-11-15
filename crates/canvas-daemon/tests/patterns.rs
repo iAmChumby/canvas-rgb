@@ -15,7 +15,7 @@ use canvas_proto::api::{
 };
 use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::pattern::{BuiltOn, Frame, Motion, Pattern};
+use canvas_proto::pattern::{BuiltOn, FitKind, Frame, LightFit, Motion, Pattern};
 use canvas_proto::props::{PropValue, Props};
 use canvas_proto::scene::{
     Arrangement, Group, GroupMode, Light, LightsFile, Plays, Scene, ScenesFile, LIGHTS_SCHEMA,
@@ -98,6 +98,11 @@ impl FrameSink for Rec {
 }
 
 fn device(id: &str) -> DeviceInfo {
+    device_of(id, LEDS)
+}
+
+/// A device whose one linear zone has `leds` LEDs.
+fn device_of(id: &str, leds: u32) -> DeviceInfo {
     DeviceInfo {
         id: DeviceId(id.into()),
         name: id.into(),
@@ -111,9 +116,9 @@ fn device(id: &str) -> DeviceInfo {
             index: 0,
             name: "zone0".into(),
             kind: ZoneKind::Linear,
-            led_count: LEDS,
-            min_leds: LEDS,
-            max_leds: LEDS,
+            led_count: leds,
+            min_leds: leds,
+            max_leds: leds,
             resizable: false,
         }],
         connected: true,
@@ -121,13 +126,18 @@ fn device(id: &str) -> DeviceInfo {
 }
 
 fn light(device: &str) -> Light {
+    light_of(device, Arrangement::Ring)
+}
+
+/// The whole zone of `device` as one light, in `arrangement`.
+fn light_of(device: &str, arrangement: Arrangement) -> Light {
     Light {
         id: format!("{device}#z0"),
         device_id: DeviceId(device.into()),
         zone_index: 0,
         leds: None,
         name: None,
-        arrangement: Arrangement::Ring,
+        arrangement,
         reversed: false,
         kind: None,
     }
@@ -200,6 +210,8 @@ struct Rig {
     app: Arc<App>,
     a: Arc<Rec>,
     b: Arc<Rec>,
+    /// Every device's sink, by device id.
+    sinks: std::collections::BTreeMap<String, Arc<Rec>>,
     home: TempHome,
 }
 
@@ -210,6 +222,22 @@ async fn rig() -> Rig {
 
 /// [`rig`] with `patterns` already saved in `patterns.json` and `scenes` active.
 async fn rig_with_patterns(patterns: Vec<Pattern>, scenes: ScenesFile) -> Rig {
+    rig_full(
+        patterns,
+        scenes,
+        vec![device(A), device(B)],
+        vec![light(A), light(B)],
+    )
+    .await
+}
+
+/// A rig of any devices and lights, with a recording sink on each device.
+async fn rig_full(
+    patterns: Vec<Pattern>,
+    scenes: ScenesFile,
+    devices: Vec<DeviceInfo>,
+    lights: Vec<Light>,
+) -> Rig {
     let home = TempHome::new();
     let effects = home.path.join("effects");
     std::fs::create_dir_all(&effects).expect("the effects folder is created");
@@ -221,7 +249,7 @@ async fn rig_with_patterns(patterns: Vec<Pattern>, scenes: ScenesFile) -> Rig {
     store.lights = LightsFile {
         chains: Vec::new(),
         schema_version: LIGHTS_SCHEMA,
-        lights: vec![light(A), light(B)],
+        lights,
     };
     store.scenes = scenes;
     let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
@@ -241,13 +269,18 @@ async fn rig_with_patterns(patterns: Vec<Pattern>, scenes: ScenesFile) -> Rig {
     );
     app.effects_dir = effects;
     let app = Arc::new(app);
-    *app.devices.write().await = vec![device(A), device(B)];
-    let (a, b) = (Arc::new(Rec::default()), Arc::new(Rec::default()));
-    engine.add_sink(DeviceId(A.into()), a.clone());
-    engine.add_sink(DeviceId(B.into()), b.clone());
+    *app.devices.write().await = devices.clone();
+    let mut sinks = std::collections::BTreeMap::new();
+    for device in &devices {
+        let sink = Arc::new(Rec::default());
+        engine.add_sink(device.id.clone(), Arc::clone(&sink) as Arc<dyn FrameSink>);
+        sinks.insert(device.id.0.clone(), sink);
+    }
+    let a = Arc::clone(sinks.get(A).expect("the first fake device has a sink"));
+    let b = Arc::clone(sinks.get(B).expect("the second fake device has a sink"));
     // The way start-up applies the saved scenes.
     canvas_daemon::scenes::restore_active(&app).await;
-    Rig { router: canvas_daemon::api::router(app.clone()), app, a, b, home }
+    Rig { router: canvas_daemon::api::router(app.clone()), app, a, b, sinks, home }
 }
 
 async fn send(
@@ -728,4 +761,217 @@ async fn an_unknown_future_field_survives_a_put_and_a_get() {
         assert!(on_disk.contains(kept), "{kept} was dropped on disk: {on_disk}");
     }
 }
+
+// ---------------------------------------------------------------- Task 6: groups and flags
+
+/// The `fits` of every group of the active scene, by group id, from `GET /api/v1/scenes`.
+async fn group_fits(rig: &Rig) -> std::collections::BTreeMap<String, Vec<LightFit>> {
+    let (status, body) = send(rig, "GET", routes::SCENES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let scene: canvas_proto::api::ScenesResponse = serde_json::from_value(body).unwrap();
+    scene
+        .group_states
+        .into_iter()
+        .map(|state| (state.id, state.fits))
+        .collect()
+}
+
+/// Waits (real time) until `sink`'s newest frame has `leds` LEDs with `want` at `index` and every
+/// other LED black.
+async fn shows_marked(sink: &Rec, leds: usize, index: usize, want: Rgb8, what: &str) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        let right = sink.last().is_some_and(|frame| {
+            frame.len() == leds
+                && frame[index] == want
+                && frame.iter().enumerate().all(|(i, c)| i == index || *c == Rgb8::BLACK)
+        });
+        if right {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what}: never showed {want:?} at LED {index}; last frame starts {:?}",
+        sink.last().map(|f| f[..3.min(f.len())].to_vec()));
+}
+
+/// A pattern of `leds` LEDs with `lit` lit and every other LED off.
+fn pattern_with(name: &str, leds: u32, lit: Rgb8) -> Pattern {
+    let mut colors = vec![Rgb8::BLACK; leds as usize];
+    colors[0] = lit;
+    Pattern {
+        id: format!("pattern:{name}"),
+        built_on: BuiltOn { led_count: leds, arrangement: Arrangement::Ring, grid: None },
+        frames: vec![Frame { colors, hold: 0, extra: serde_json::Map::new() }],
+        motion: Motion::none(),
+        extra: serde_json::Map::new(),
+    }
+}
+
+async fn put_pattern_body(rig: &Rig, id: &str, body: &Pattern) -> (StatusCode, serde_json::Value) {
+    send(rig, "PUT", &pattern_path(id), Some(serde_json::to_value(body).unwrap())).await
+}
+
+/// A pattern group's colours are on the fake sinks, LED by LED: the daemon path, not just the
+/// engine's unit test (the plan's `a_pattern_group_writes_its_colours_by_led`, proved on the
+/// fakes).
+#[tokio::test]
+async fn a_pattern_group_writes_its_colours_by_led() {
+    let rig = rig().await;
+    shows_marked(&rig.b, LEDS as usize, 0, rgb(RED), "the pattern group")
+        .await;
+}
+
+#[tokio::test]
+async fn a_pattern_edit_reaches_every_group_playing_it() {
+    let rig = rig_full(
+        vec![pattern("Intake")],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("one", &["fake:a#z0"], INTAKE, Props::new()),
+                    group("two", &["fake:b#z0"], INTAKE, Props::new()),
+                    group("three", &["fake:c#z0"], INTAKE, Props::new()),
+                    group("four", &["fake:d#z0"], "solid", color(RED)),
+                ],
+            }],
+        },
+        vec![device(A), device(B), device("fake:c"), device("fake:d")],
+        vec![light(A), light(B), light("fake:c"), light("fake:d")],
+    )
+    .await;
+    let (a, b, c, d) = (
+        Arc::clone(rig.sinks.get(A).unwrap()),
+        Arc::clone(rig.sinks.get(B).unwrap()),
+        Arc::clone(rig.sinks.get("fake:c").unwrap()),
+        Arc::clone(rig.sinks.get("fake:d").unwrap()),
+    );
+    shows_marked(&a, LEDS as usize, 0, rgb(RED), "group one before").await;
+    shows_marked(&c, LEDS as usize, 0, rgb(RED), "group three before").await;
+
+    let blue = Rgb8::new(0, 0, 200);
+    let (status, answer) = put_pattern_body(&rig, INTAKE, &pattern_with("Intake", LEDS, blue)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    for (sink, what) in [(&a, "group one"), (&b, "group two"), (&c, "group three")] {
+        shows_marked(sink, LEDS as usize, 0, blue, what).await;
+    }
+    // The group on another effect is untouched.
+    shows(&d, rgb(RED), "group four").await;
+}
+
+#[tokio::test]
+async fn a_pattern_edit_waits_while_a_takeover_holds_the_group() {
+    let rig = rig().await;
+    // A takeover of the left group, as a draft leaves the engine: the group holds another effect,
+    // and `Held` says so.
+    let green = Rgb8::new(0, 200, 0);
+    let mut green_props = Props::new();
+    green_props.insert("color".into(), PropValue::Color(green));
+    let effect = canvas_daemon::create_effect(
+        &rig.app.user_effects,
+        &rig.app.stacks,
+        &rig.app.patterns,
+        "solid",
+        Some("left"),
+    )
+    .expect("the solid effect builds");
+    rig.app.engine.set_group_effect("left", Some(effect), &green_props);
+    rig.app.scene.land_takeover(canvas_daemon::scenes::Held {
+        groups: vec!["left".into(), "right".into()],
+        takeover: vec!["left".into()],
+    });
+    shows(&rig.a, green, "the held group").await;
+
+    let blue = Rgb8::new(0, 0, 200);
+    let (status, answer) = put_pattern_body(&rig, INTAKE, &pattern_with("Intake", LEDS, blue)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The group the takeover holds keeps the takeover's effect; the free group takes the edit.
+    shows_marked(&rig.b, LEDS as usize, 0, blue, "the free group").await;
+    shows(&rig.a, green, "the held group after the edit").await;
+}
+
+#[tokio::test]
+async fn a_missing_pattern_darkens_only_its_group() {
+    let rig = rig().await;
+    shows(&rig.a, rgb(RED), "the canvas group").await;
+    shows_marked(&rig.b, LEDS as usize, 0, rgb(RED), "the pattern group").await;
+
+    // The pattern is gone from the store without a scene write, as a hand edit of the file
+    // followed by a reload would leave it: the change is reported for it.
+    assert!(rig.app.patterns.delete(INTAKE).unwrap().is_some(), "the pattern was there");
+    canvas_daemon::scenes::pattern_changed(&rig.app, INTAKE).await;
+
+    let states = group_states(&rig).await;
+    let failed = states.get("right").cloned().flatten().expect("the right group is dark and says why");
+    assert!(failed.contains(INTAKE), "the failure names the pattern: {failed}");
+    assert_eq!(states.get("left"), Some(&None), "the other group is not failed");
+    shows(&rig.a, rgb(RED), "the other group runs").await;
+    goes_dark(&rig.b, "the group whose pattern is gone").await;
+}
+
+#[tokio::test]
+async fn group_states_flag_the_stretched_lights() {
+    let rig = rig_full(
+        vec![pattern("Intake")],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![group(
+                    "all",
+                    &["fake:a#z0", "fake:b#z0", "fake:c#z0"],
+                    INTAKE,
+                    Props::new(),
+                )],
+            }],
+        },
+        vec![device(A), device_of(B, 24), device_of("fake:c", 1)],
+        vec![light(A), light(B), light_of("fake:c", Arrangement::Single)],
+    )
+    .await;
+    let fits = group_fits(&rig).await;
+    let all = fits.get("all").expect("the group is in the answer");
+    assert_eq!(
+        all,
+        &vec![
+            LightFit { light: "fake:a#z0".into(), fit: FitKind::Exact },
+            LightFit { light: "fake:b#z0".into(), fit: FitKind::Stretched },
+            LightFit { light: "fake:c#z0".into(), fit: FitKind::OneLed },
+        ],
+        "the flags follow the rule: exact, stretched, one LED"
+    );
+}
+
+#[tokio::test]
+async fn the_flags_follow_a_resize_without_a_save() {
+    let rig = rig().await;
+    let fits = group_fits(&rig).await;
+    assert_eq!(fits["right"][0].fit, FitKind::Exact, "the group starts exact");
+
+    // The zone grows (a chain-setup commit) and nothing is saved: the next read works the fit out
+    // again from the current devices.
+    *rig.app.devices.write().await = vec![device_of(A, LEDS), device_of(B, 24)];
+    let fits = group_fits(&rig).await;
+    assert_eq!(fits["right"][0].fit, FitKind::Stretched, "the 24-LED light is stretched now");
+    assert_eq!(fits["right"][0].light, "fake:b#z0");
+}
+
+#[tokio::test]
+async fn a_group_playing_a_canvas_effect_has_no_flags() {
+    let rig = rig().await;
+    let fits = group_fits(&rig).await;
+    assert!(fits["left"].is_empty(), "a canvas group has no fits: {:?}", fits["left"]);
+    assert!(!fits["right"].is_empty(), "the pattern group has its fits");
+}
+
 

@@ -70,6 +70,10 @@ pub async fn put_pattern(
         }
     })?;
     tracing::info!(pattern = %saved.id, "a pattern was saved");
+    // A saved pattern is live at once: every group of the active scene that plays it takes the new
+    // colours, and a group that held the old document takes the new one. The store is written, so
+    // the change never depends on a later scene save.
+    crate::scenes::pattern_changed(&app, &saved.id).await;
     Ok(Json(saved))
 }
 
