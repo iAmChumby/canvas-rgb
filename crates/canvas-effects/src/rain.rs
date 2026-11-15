@@ -17,35 +17,33 @@ struct Drop {
     brightness: f32,
 }
 
-/// The fade per frame at the default Trail Length and the default Speed on the anchor
-/// frame: the fixed fade Rain always had.
+/// The fade per frame at the default Trail Length on the anchor frame: the fixed fade Rain
+/// always had, at every Speed.
 const DEFAULT_FADE: f32 = 0.88;
 /// The Trail Length default. The fade above is measured at it, so it must stay the
 /// schema's default (`the_fade_anchor_is_the_schema_default`).
 const DEFAULT_TRAIL_LENGTH: f32 = 14.0;
-/// The Speed default, in logical cells a second.
-const DEFAULT_SPEED: f32 = 120.0;
-/// The frame interval the fade anchor is measured at: the 1/30 s frame every effect test
-/// drives the effects with.
+/// The frame interval the fade anchor is measured at: the engine's default 30 frames a
+/// second, which is also the frame every effect test drives the effects with.
 const ANCHOR_FRAME_S: f32 = 1.0 / 30.0;
-/// The logical cells a drop moves in one anchor frame at the default Speed: four.
-const DEFAULT_STEP: f32 = DEFAULT_SPEED * ANCHOR_FRAME_S;
+/// How the setting bends into the fade. A straight line would make the top third of the
+/// control one solid column (at the default Speed, 60 would ask for a streak longer than the
+/// 200-cell canvas); with this curve the streak at 60 is about nine tenths of the canvas and
+/// 2 is still a short dash, so every part of the control looks different from its neighbour.
+const TRAIL_CURVE: f32 = 0.69;
 
-/// The per-frame fade for a trail `trail_length` cells long, with the drop moving `step`
-/// logical cells this frame.
+/// The fade for one frame of `dt` seconds at a Trail Length.
 ///
-/// Trail Length sets the streak's length in *cells*, not in frames: the frames a
-/// brightness survives are `cells / step`, so the fade's exponent is `step` times the
-/// anchor frame's and `DEFAULT_TRAIL_LENGTH / trail_length` times its own. The decay per
-/// cell is then the same at every Speed and every frame interval: a fast drop fades
-/// faster each frame and leaves the same streak, and a slower PC frame changes nothing.
-/// At the defaults (Trail Length 14, Speed 120, 4 cells a frame) the exponent is exactly
-/// 1 and the fade is `DEFAULT_FADE`, so an effect saved with the defaults renders what it
-/// always did.
-fn per_frame_fade(trail_length: f32, step: f32) -> f32 {
+/// Trail Length sets how long a drop's light lingers. The streak that leaves depends on the
+/// drop's Speed as it always did (a faster drop draws a longer streak in the same time), so
+/// a scene or a preset saved before the control worked keeps its picture: at the default
+/// Trail Length on the anchor frame the exponent is exactly 1 and the fade is `DEFAULT_FADE`
+/// whatever the Speed. The frame interval is in the exponent, so the light lingers the same
+/// time at 30 and at 60 frames a second.
+fn per_frame_fade(trail_length: f32, dt: f32) -> f32 {
     let trail = trail_length.max(1.0);
-    let step = if step.is_finite() { step.max(0.0) } else { 0.0 };
-    let exponent = (step / DEFAULT_STEP) * (DEFAULT_TRAIL_LENGTH / trail);
+    let frames = if dt.is_finite() { (dt / ANCHOR_FRAME_S).max(0.0) } else { 0.0 };
+    let exponent = frames * (DEFAULT_TRAIL_LENGTH / trail).powf(TRAIL_CURVE);
     if exponent == 1.0 {
         // The old constant itself, not `powf`'s answer for it.
         DEFAULT_FADE
@@ -155,7 +153,7 @@ impl Effect for Rain {
 
         // Fade the previous frame toward the background, leaving the trails. How slowly
         // it fades is Trail Length: see `per_frame_fade`.
-        let fade = per_frame_fade(self.trail_length, self.speed * dt);
+        let fade = per_frame_fade(self.trail_length, dt);
         let bg = self.background;
         for p in canvas.pixels.iter_mut() {
             p[0] = p[0] * fade + bg[0] * (1.0 - fade);
@@ -300,7 +298,7 @@ mod tests {
             "the default Trail Length no longer renders the fixed 0.88 fade's frames"
         );
         // The derived fade is the old constant itself at the defaults, not merely close.
-        assert_eq!(per_frame_fade(DEFAULT_TRAIL_LENGTH, DEFAULT_STEP), DEFAULT_FADE);
+        assert_eq!(per_frame_fade(DEFAULT_TRAIL_LENGTH, ANCHOR_FRAME_S), DEFAULT_FADE);
     }
 
     /// The fade anchor is the schema's own default, so a changed default cannot leave
@@ -311,21 +309,50 @@ mod tests {
         let trail = schema.properties.iter().find(|p| p.key == "trail_length").expect("trail_length");
         assert_eq!(trail.kind.default_value(), canvas_proto::PropValue::Number(14.0));
         assert_eq!(DEFAULT_TRAIL_LENGTH, 14.0);
-        assert_eq!(DEFAULT_SPEED, 120.0);
     }
 
-    /// A faster drop fades faster each frame, so its streak is the same length in cells.
+    /// The streak behind a drop moving `step` cells a frame, in cells, from the fade alone.
+    fn streak_cells(trail: f32, step: f32, dt: f32) -> f32 {
+        step * (DARK.ln() / per_frame_fade(trail, dt).ln())
+    }
+
+    /// A scene saved at the default Trail Length keeps its picture at every Speed: the fade
+    /// does not read the Speed, so it is the old constant for a slow drizzle and a storm.
     #[test]
-    fn a_faster_drop_leaves_a_streak_of_the_same_length() {
-        let cells = |trail: f32, step: f32| {
-            let fade = per_frame_fade(trail, step);
-            step * (DARK.ln() / fade.ln())
-        };
-        for trail in [2.0f32, 14.0, 60.0] {
-            let slow = cells(trail, 1.0);
-            let fast = cells(trail, 10.0);
-            assert!((slow - fast).abs() < slow * 0.001, "trail {trail}: {slow} vs {fast}");
+    fn a_saved_scene_at_the_default_trail_length_keeps_its_fade_at_every_speed() {
+        for speed in [60.0f32, 120.0, 220.0, 247.0] {
+            let mut e = Rain::with_seed(3);
+            let mut props = e.schema.defaults();
+            props.insert("speed".into(), canvas_proto::PropValue::Number(f64::from(speed)));
+            e.init(&props);
+            assert_eq!(per_frame_fade(e.trail_length, ANCHOR_FRAME_S), DEFAULT_FADE, "speed {speed}");
         }
+    }
+
+    /// The light lingers the same time whatever the frame rate: two frames of 1/60 s fade as
+    /// much as one of 1/30 s.
+    #[test]
+    fn the_trail_lasts_the_same_time_at_30_and_60_frames_a_second() {
+        for trail in [2.0f32, 14.0, 60.0] {
+            let one = per_frame_fade(trail, 1.0 / 30.0);
+            let two = per_frame_fade(trail, 1.0 / 60.0).powi(2);
+            assert!((one - two).abs() < 1e-5, "trail {trail}: {one} vs {two}");
+        }
+    }
+
+    /// Every part of the control looks different from its neighbour, and the top of it still
+    /// fits the canvas: at the default Speed the streak grows by at least a fifth from one
+    /// stop to the next and stays shorter than the 200 cells the canvas is tall.
+    #[test]
+    fn every_part_of_the_control_changes_the_streak_and_the_top_fits_the_canvas() {
+        let step = 120.0 * ANCHOR_FRAME_S;
+        let stops = [2.0f32, 14.0, 30.0, 45.0, 60.0];
+        let cells: Vec<f32> = stops.iter().map(|t| streak_cells(*t, step, ANCHOR_FRAME_S)).collect();
+        for pair in cells.windows(2) {
+            assert!(pair[1] > pair[0] * 1.2, "the streak grows too little: {cells:?}");
+        }
+        assert!(cells[4] < 200.0, "Trail Length 60 fills the whole column: {cells:?}");
+        assert!(cells[0] > 8.0, "Trail Length 2 leaves no streak: {cells:?}");
     }
 
     #[test]

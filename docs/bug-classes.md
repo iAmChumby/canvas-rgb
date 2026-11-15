@@ -932,10 +932,11 @@ uses.
 
 - [#383](https://github.com/iAmChumby/canvas-rgb/issues/383): Rain's Trail Length resized a
   `trail` buffer in `init` and `update` never read it; every streak came from a fixed 0.88 fade
-  (`crates/canvas-effects/src/rain.rs`). The control now sets the streak's length: the per-frame
-  fade is derived from it (`per_frame_fade`), and the default (14) at the default Speed on the
-  1/30 s frame gives exactly the old 0.88, checked against a frame fingerprint recorded from the
-  old code (`the_default_trail_length_keeps_the_old_frames`). The unused buffer is gone.
+  (`crates/canvas-effects/src/rain.rs`). The control now sets how long a drop's light lingers:
+  the per-frame fade is derived from it (`per_frame_fade`), and the default (14) on the 1/30 s
+  frame gives exactly the old 0.88 at every Speed, so a saved scene or preset keeps its picture
+  at 30 frames a second (checked against a frame fingerprint recorded from the old code,
+  `the_default_trail_length_keeps_the_old_frames`). The unused buffer is gone.
 - **Class fix:** done (#383). One test over every built-in effect
   (`crates/canvas-effects/src/lib.rs`, `every_numeric_or_choice_control_changes_the_frame`)
   renders each effect at the two ends of every numeric, angle and choice control with the same
