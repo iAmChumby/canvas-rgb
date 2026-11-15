@@ -218,6 +218,121 @@ describe("the pattern editor", () => {
     expect(lit(frame.colors)).toEqual([4]);
   });
 
+  it("a beat before the next render carries the newest colours", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    api.putPatternDraft.mockClear();
+
+    // The stroke's frame and the heartbeat land in one batch, before React re-renders and runs an
+    // effect: the beat must carry the stroke's document, never the colours of the render it began
+    // in, which the daemon would take as the newer stroke.
+    await act(async () => {
+      fireEvent.pointerDown(canvas, at(dots[0]!));
+      fireEvent.pointerUp(canvas, { pointerId: 1 });
+      for (const cb of [...pending.values()]) cb(0);
+      pending.clear();
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+
+    const calls = api.putPatternDraft.mock.calls.map((call) => call[0] as { pattern: Pattern; seq: number });
+    expect(calls.length).toBe(2);
+    expect(lit(coloursOf(calls[0]!.pattern))).toEqual([0]);
+    expect(lit(coloursOf(calls[1]!.pattern))).toEqual([0]);
+    expect(calls[1]!.seq).toBeGreaterThan(calls[0]!.seq);
+  });
+
+  it("a save that fails keeps the strokes and the dirty mark and says why", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("the daemon could not write it"));
+    const { canvas, dots } = show(ring(), { onSave });
+    await settle();
+
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await settle();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    // The sentence is the editor's own, in the row its other notes use, and the mark still says
+    // the document is unsaved.
+    expect(screen.getByText("the daemon could not write it")).toBeTruthy();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+    // The stroke is still the editor's: the next beat carries it.
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(lit(coloursOf(api.putPatternDraft.mock.calls.at(-1)![0].pattern))).toEqual([0]);
+  });
+
+  it("a save that lands clears the dirty mark", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { canvas, dots } = show(ring(), { onSave });
+    await settle();
+
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await settle();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("No unsaved changes")).toBeTruthy();
+  });
+
+  it("another window's draft is named, and a stroke of this page's own is not", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    const our = api.putPatternDraft.mock.calls[0]![0].epoch as string;
+    // The daemon names the epoch that owns the lights: one that is not this editor's is another
+    // window.
+    api.putPatternDraft.mockResolvedValue(status({ applied: false, epoch: "fedcba9876543210" }));
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText(/another window has the lights/)).toBeTruthy();
+
+    // A later stroke that the daemon answers as superseded by a newer one of this same page is
+    // this editor's own older stroke, so the note goes: the newest colours are on the lights.
+    api.putPatternDraft.mockResolvedValue(status({ applied: true, epoch: our }));
+    fireEvent.pointerDown(canvas, at(dots[1]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.queryByText(/another window has the lights/)).toBeNull();
+  });
+
+  it("a stroke overtaken by a newer stroke of this page is not another window", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    const our = api.putPatternDraft.mock.calls[0]![0].epoch as string;
+    api.putPatternDraft.mockResolvedValue(status({ applied: false, epoch: our }));
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.queryByText(/another window has the lights/)).toBeNull();
+  });
+
+  it("a draft the answer cannot place is another window's after two in a row", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    // No epoch in the answer: the page cannot tell whose draft it is, so one stroke that did not
+    // land is not enough to say another window has the lights.
+    api.putPatternDraft.mockResolvedValue(status({ applied: false, active: false }));
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.queryByText(/another window has the lights/)).toBeNull();
+
+    fireEvent.pointerDown(canvas, at(dots[1]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText(/another window has the lights/)).toBeTruthy();
+  });
+
   it("closing the editor deletes the draft", async () => {
     const { view } = show();
     await settle();

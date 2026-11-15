@@ -50,19 +50,39 @@ export function PatternEditor({
   const heartbeat = useRef(HEARTBEAT_MS);
   const [daemonNote, setDaemonNote] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  /** A save that did not land: the document on the lights is not the saved one. */
+  const [saveProblem, setSaveProblem] = useState<string | null>(null);
+  /** How many answers in a row said this editor's stroke is not on the lights. */
+  const notApplied = useRef(0);
 
   /** Puts a stroke on the lights: the page's epoch and the next sequence. */
   const send = useCallback(
     async (document: Pattern) => {
       seq.current += 1;
       const at = seq.current;
+      /**
+       * True when the answer says the lights are another page's. A stroke the daemon answered
+       * `applied: false` because a newer stroke of this same page went first is not another
+       * window: the answer names the epoch that owns the draft, and only a different one is a
+       * supersede. When it names none, two answers in a row are the only sign there is.
+       */
+      const anotherWindow = (answer: { applied?: boolean; active?: boolean; epoch?: string | null }): boolean => {
+        if (answer.applied !== false && answer.active !== false) {
+          notApplied.current = 0;
+          return false;
+        }
+        notApplied.current += 1;
+        if (answer.epoch !== undefined && answer.epoch !== null) return answer.epoch !== epoch;
+        return notApplied.current >= 2;
+      };
       try {
         const answer = await api.putPatternDraft({ pattern: document, epoch, seq: at });
         if (!alive.current) return;
         if (answer.heartbeat_ms > 0) heartbeat.current = answer.heartbeat_ms;
-        if (answer.applied === false) setDaemonNote(SUPERSEDED);
+        if (anotherWindow(answer)) setDaemonNote(SUPERSEDED);
         else if (answer.note) setDaemonNote(answer.note);
-        if (answer.active === false) setDaemonNote(SUPERSEDED);
+        // A stroke that landed makes an earlier "another window has the lights" note stale.
+        else if (answer.applied === true) setDaemonNote(null);
         setProblem(null);
       } catch (error) {
         if (!alive.current) return;
@@ -72,14 +92,20 @@ export function PatternEditor({
     [epoch],
   );
 
-  const draft = useCallback((document: Pattern) => void send(document), [send]);
+  /**
+   * The newest document, for the heartbeat's own PUT: moved with every draft that goes out, so a
+   * beat that lands between a stroke and its render sends that stroke and never the colours the
+   * render began in.
+   */
+  const latest = useRef<Pattern>(pattern);
+  const draft = useCallback(
+    (document: Pattern) => {
+      latest.current = document;
+      void send(document);
+    },
+    [send],
+  );
   const editor = usePatternEditor(pattern, { onDraft: draft });
-  /** The document as it is now, for the heartbeat's own PUT. */
-  const latest = useRef(editor.pattern);
-
-  useEffect(() => {
-    latest.current = editor.pattern;
-  }, [editor.pattern]);
 
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
   // of the current document every `heartbeat_ms`, which is what keeps the lease alive while the
@@ -108,16 +134,22 @@ export function PatternEditor({
   const name = pattern.id.startsWith(PATTERN_ID_PREFIX) ? pattern.id.slice(PATTERN_ID_PREFIX.length) : pattern.id;
   const leds = pattern.built_on.led_count;
   const lit = editor.colours.filter((colour) => (parseHex(colour) ?? BLACK_HEX) !== BLACK_HEX).length;
-  const line = problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
+  const line = saveProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
+  const failed = saveProblem !== null || problem !== null;
 
-  /** Hands the document up, and clears the unsaved mark once the save lands. */
+  /**
+   * Hands the document up and clears the unsaved mark only once the save lands: a save that fails
+   * says why in the row the editor's other notes use, and leaves the strokes and the mark as they
+   * are, so nothing painted is lost and Save can be pressed again.
+   */
   const save = async () => {
     if (!onSave) return;
     try {
       await onSave(editor.pattern);
+      setSaveProblem(null);
       editor.markSaved();
     } catch (error) {
-      setProblem(messageOf(error));
+      setSaveProblem(messageOf(error));
     }
   };
 
@@ -157,10 +189,11 @@ export function PatternEditor({
         </div>
       </header>
 
-      {/* The daemon's own sentence (no device of this kind, another window has the lights). The row
-          keeps its height either way, so the device never moves when a sentence arrives. */}
+      {/* The daemon's own sentence (no device of this kind, another window has the lights), or a
+          save that did not land. The row keeps its height either way, so the device never moves
+          when a sentence arrives. */}
       <p className={s.noteRow} role="status">
-        {line !== null && <span className={problem !== null ? s.problem : s.note}>{line}</span>}
+        {line !== null && <span className={failed ? s.problem : s.note}>{line}</span>}
       </p>
 
       <div className={s.stage}>

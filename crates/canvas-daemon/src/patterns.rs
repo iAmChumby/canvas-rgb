@@ -7,11 +7,12 @@
 //!
 //! The load rules are the damaged-file rules of the design (Review Focus 2):
 //!
-//! - A missing file is no patterns. A file that does not parse is moved aside as
-//!   `patterns.json.<stamp>.corrupt` and no patterns load, as `read_parsed` does for every file.
-//! - A parseable file loads pattern by pattern: one that breaks a rule is left out and logged
-//!   with its id, the rest load, and the first write after such a load keeps the file aside
-//!   first, so what this build does not run is never erased silently.
+//! - A missing file is no patterns. A file that is not JSON, or is from another schema, is moved
+//!   aside as `patterns.json.<stamp>.corrupt` and no patterns load.
+//! - A file of this schema loads pattern by pattern: one that does not parse (a `motion` with no
+//!   `type`, an arrangement this build does not know, a colour that is not `#rrggbb`) or breaks a
+//!   rule is left out and logged with its id, the rest load, and the first write after such a
+//!   load keeps the file aside first, so what this build does not run is never erased silently.
 //! - More than one frame, a `motion` other than none and fields this build does not know all
 //!   load and are kept whole. Only frame 0 plays (the engine's job, not this store's).
 
@@ -72,16 +73,12 @@ impl Patterns {
     /// Reads `patterns.json`. A missing file is no patterns; a file that does not parse is
     /// quarantined and the store starts empty; a pattern that breaks a rule is dropped with the
     /// reason logged, and the rest load.
+    ///
+    /// Each pattern is read on its own (see [`Patterns::read_file`]), so one damaged entry costs
+    /// its own pattern and not the file.
     pub fn reload(&self) {
         let path = self.path();
-        let parsed: Option<PatternsFile> =
-            match crate::storage::read_parsed(&path, PATTERNS_SCHEMA, PATTERNS_FILE) {
-                Ok(value) => value,
-                Err(error) => {
-                    tracing::error!(error = %error, "patterns.json could not be read; starting with no patterns");
-                    None
-                }
-            };
+        let parsed: Option<PatternsFile> = self.read_file(&path);
         let Some(file) = parsed else {
             *write_recovering(&self.file) = PatternsFile::default();
             self.generation.fetch_add(1, Ordering::SeqCst);
@@ -109,6 +106,84 @@ impl Patterns {
             extra: file.extra,
         };
         self.generation.fetch_add(1, Ordering::SeqCst);
+    }
+
+    /// `patterns.json` read pattern by pattern: `None` when there is no file, when it is not
+    /// JSON, or when it is from another schema (those keep the damaged-file rule: the file is
+    /// moved aside as `*.corrupt` and no pattern loads).
+    ///
+    /// A file of this schema is read twice: whole first, and then, when one entry stops the whole
+    /// parse (a `motion` with no `type`, an arrangement this build does not know, a colour that is
+    /// not `#rrggbb`), entry by entry, so the good patterns load and only the damaged one is left
+    /// out. Its id is logged with the reason where the entry still gives one, and the first write
+    /// after such a load keeps the file aside, so nothing is erased silently.
+    fn read_file(&self, path: &Path) -> Option<PatternsFile> {
+        let bytes = crate::paths::read_optional(path)?;
+        let shape: serde_json::Value = match serde_json::from_slice(&bytes) {
+            Ok(value) => value,
+            Err(error) => {
+                tracing::error!(error = %error, "patterns.json did not parse; starting with no patterns");
+                self.quarantine(path);
+                return None;
+            }
+        };
+        match shape.get("schema_version").and_then(serde_json::Value::as_u64) {
+            Some(found) if found == u64::from(PATTERNS_SCHEMA) => {}
+            found => {
+                tracing::warn!(
+                    found = found.unwrap_or_default(),
+                    expected = PATTERNS_SCHEMA,
+                    "patterns.json is from another schema; starting with no patterns"
+                );
+                self.quarantine(path);
+                return None;
+            }
+        }
+        // A file this build wrote parses in one go, with every field it does not know kept.
+        if let Ok(file) = serde_json::from_value::<PatternsFile>(shape.clone()) {
+            return Some(file);
+        }
+        let entries = match shape.get("patterns") {
+            None => Vec::new(),
+            Some(serde_json::Value::Array(entries)) => entries.clone(),
+            // A `patterns` that is not a list is not a file this build can read at all.
+            Some(_) => {
+                tracing::error!("patterns.json's patterns is not a list; starting with no patterns");
+                self.quarantine(path);
+                return None;
+            }
+        };
+        let mut patterns = Vec::with_capacity(entries.len());
+        let mut dropped = false;
+        for entry in entries {
+            match serde_json::from_value::<Pattern>(entry.clone()) {
+                Ok(pattern) => patterns.push(pattern),
+                Err(error) => {
+                    let id = entry
+                        .get("id")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<a pattern with no id>");
+                    tracing::warn!(pattern = %id, error = %error, "a pattern was dropped as it was loaded");
+                    dropped = true;
+                }
+            }
+        }
+        if dropped {
+            self.dropped_on_load.store(true, Ordering::SeqCst);
+        }
+        Some(PatternsFile {
+            schema_version: PATTERNS_SCHEMA,
+            patterns,
+            extra: other_fields(&shape),
+        })
+    }
+
+    /// Moves a file that could not be read at all aside, as [`crate::storage::quarantine`] does for
+    /// every other file. A copy that cannot be made is logged and the store still starts empty.
+    fn quarantine(&self, path: &Path) {
+        if let Err(error) = crate::storage::quarantine(path) {
+            tracing::error!(error = %error, "patterns.json could not be moved aside; it is left as it is");
+        }
     }
 
     /// Every saved pattern, in the order they are stored.
@@ -225,6 +300,19 @@ impl Patterns {
             }
         }
     }
+}
+
+/// The file-level fields a `patterns.json` carries besides its schema and its patterns: a later
+/// version's, kept as they are when the file is read entry by entry.
+fn other_fields(file: &serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+    let serde_json::Value::Object(fields) = file else {
+        return serde_json::Map::new();
+    };
+    fields
+        .iter()
+        .filter(|(key, _)| key.as_str() != "schema_version" && key.as_str() != "patterns")
+        .map(|(key, value)| (key.clone(), value.clone()))
+        .collect()
 }
 
 /// Writes a patterns file into `home`, replacing the one there: what a config import does with
@@ -415,6 +503,73 @@ mod tests {
         assert!(after.contains("pattern:Good"), "{after}");
         assert!(after.contains("pattern:New"), "{after}");
         assert!(!after.contains("pattern:Short"), "{after}");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pattern_with_a_bad_colour_is_left_out_and_the_good_ones_load() {
+        let dir = dir("bad-colour");
+        std::fs::write(
+            dir.join(PATTERNS_FILE),
+            r##"{"schema_version": 1, "future": {"anything": [1, 2]}, "patterns": [
+                {"id": "pattern:Good", "built_on": {"led_count": 2, "arrangement": "ring"},
+                 "frames": [{"colors": ["#ff0000", "#00ff00"]}]},
+                {"id": "pattern:BadColour", "built_on": {"led_count": 2, "arrangement": "ring"},
+                 "frames": [{"colors": ["#ff0000", "#ff00zz"]}]},
+                {"id": "pattern:AlsoGood", "built_on": {"led_count": 1, "arrangement": "single"},
+                 "frames": [{"colors": ["#0000ff"]}]}
+            ]}"##,
+        )
+        .unwrap();
+        let store = Patterns::new(&dir);
+        store.reload();
+        assert_eq!(
+            store.all().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["pattern:Good", "pattern:AlsoGood"],
+            "a bad colour costs its own pattern only"
+        );
+
+        // The file as it loaded is kept beside the new one: the dropped pattern is not lost.
+        store.put(pattern("New")).expect("the save is written");
+        let kept = std::fs::read_dir(&dir)
+            .unwrap()
+            .filter_map(|entry| entry.ok())
+            .map(|entry| entry.file_name().to_string_lossy().into_owned())
+            .find(|name| name.starts_with(PATTERNS_FILE) && name.ends_with(".corrupt"))
+            .expect("the file as it loaded is kept aside");
+        let text = std::fs::read_to_string(dir.join(&kept)).unwrap();
+        assert!(text.contains("pattern:BadColour"), "the kept file still holds it: {text}");
+
+        let after = std::fs::read_to_string(dir.join(PATTERNS_FILE)).unwrap();
+        assert!(after.contains("pattern:Good"), "{after}");
+        assert!(!after.contains("pattern:BadColour"), "{after}");
+        let file: serde_json::Value = serde_json::from_str(&after).unwrap();
+        assert_eq!(file["future"]["anything"], serde_json::json!([1, 2]), "the file's own field is kept");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_pattern_with_a_motion_that_has_no_type_is_left_out_and_the_good_ones_load() {
+        let dir = dir("bad-motion");
+        std::fs::write(
+            dir.join(PATTERNS_FILE),
+            r##"{"schema_version": 1, "patterns": [
+                {"id": "pattern:Good", "built_on": {"led_count": 2, "arrangement": "ring"},
+                 "frames": [{"colors": ["#ff0000", "#00ff00"]}]},
+                {"id": "pattern:BadMotion", "built_on": {"led_count": 2, "arrangement": "ring"},
+                 "frames": [{"colors": ["#ff0000", "#00ff00"]}], "motion": {"speed": 2}},
+                {"id": "pattern:AlsoGood", "built_on": {"led_count": 1, "arrangement": "single"},
+                 "frames": [{"colors": ["#0000ff"]}], "motion": {"type": "none"}}
+            ]}"##,
+        )
+        .unwrap();
+        let store = Patterns::new(&dir);
+        store.reload();
+        assert_eq!(
+            store.all().iter().map(|p| p.id.as_str()).collect::<Vec<_>>(),
+            ["pattern:Good", "pattern:AlsoGood"],
+            "a motion without a type costs its own pattern only"
+        );
         let _ = std::fs::remove_dir_all(&dir);
     }
 

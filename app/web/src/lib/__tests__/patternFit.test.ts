@@ -104,6 +104,21 @@ describe("the pattern fit", () => {
     expect(groupFit(built, [])).toEqual({ exact: 0, flagged: 0, total: 0 });
   });
 
+  it("groupFit leaves out a light that is not connected or has no LEDs", () => {
+    const built = on(12, "ring");
+    // The daemon plays nothing on a light whose device is gone or whose zone has no LEDs, so it is
+    // neither a fit nor stretched: it is not counted at all.
+    const unplugged: LightView = { ...light("unplugged", 0, "ring"), connected: false };
+    const empty = light("empty zone", 0, "ring");
+    expect(groupFit(built, [light("ring 12", 12, "ring"), unplugged, empty])).toEqual({
+      exact: 1,
+      flagged: 0,
+      total: 1,
+    });
+    // A group of none of those is nothing to count, exactly as an empty group is.
+    expect(groupFit(built, [unplugged, empty])).toEqual({ exact: 0, flagged: 0, total: 0 });
+  });
+
   it("the document to save is the loaded pattern with its first frame's colours", () => {
     // What the daemon sent: fields this version of the editor does not know (`motion` other than
     // none, an unknown key on the pattern, one on the frame, and a second frame).
