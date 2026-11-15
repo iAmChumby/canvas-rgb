@@ -13,10 +13,11 @@
 // one, the HTML effects are shown and say why they cannot be chosen; they are not offered.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Moon } from "@phosphor-icons/react";
+import { DotsNine, Moon } from "@phosphor-icons/react";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { api } from "@/lib/endpoints";
+import { groupFit, kindWords } from "@/lib/patternFit";
 import { useSnap } from "@/lib/store";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
@@ -31,10 +32,20 @@ export const SCENE_HTML_MAX = 1;
 export const HTML_EFFECT_PREFIX = "html:";
 /** The id prefix of a stack: a stack is in the library after the user's own effects. */
 export const STACK_EFFECT_PREFIX = "stack:";
+/** The id prefix of a pattern: `pattern:` + its name (`crates/canvas-proto/src/pattern.rs`). */
+export const PATTERN_EFFECT_PREFIX = "pattern:";
 /** Why an HTML effect cannot be chosen: the scene's limit, in words. */
 export const HTML_ONE_AT_A_TIME = "One HTML effect at a time";
+/** The mark a pattern carries when it lands exactly on every device of the group. */
+const FITS_MARK = "Fits";
 /** The entry that plays nothing. */
 export const OFF = "off";
+
+/** How a pattern would land on a group, in the owner's words: "Fits", or how many would stretch. */
+function fitMark(flagged: number): string {
+  if (flagged === 0) return FITS_MARK;
+  return `${flagged} ${flagged === 1 ? "device" : "devices"} would be stretched`;
+}
 
 /** The effect details this window has read: one read per effect, kept while the window lives. */
 const details = new Map<string, EffectDetail>();
@@ -100,16 +111,23 @@ export function isStackEffect(id: string): boolean {
   return id.startsWith(STACK_EFFECT_PREFIX);
 }
 
+/** True when the effect is a pattern: a saved pattern's id is `pattern:` + its name. */
+export function isPatternEffect(id: string): boolean {
+  return id.startsWith(PATTERN_EFFECT_PREFIX);
+}
+
 /** The headings the library is read under, in the order they are drawn. */
 export const PICKER_SECTIONS = [
   { key: "off", title: "Off" },
   { key: "builtin", title: "Built-in" },
   { key: "yours", title: "Your effects" },
   { key: "stacks", title: "Stacks" },
+  { key: "patterns", title: "Patterns" },
 ] as const;
 
 /** Which heading an effect belongs under. */
 export function sectionOf(effect: EffectSummary): (typeof PICKER_SECTIONS)[number]["key"] {
+  if (effect.kind === "pattern" || isPatternEffect(effect.id)) return "patterns";
   if (isStackEffect(effect.id)) return "stacks";
   if (isHtmlEffect(effect.id)) return "yours";
   return "builtin";
@@ -257,8 +275,24 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
 
   const current = group?.plays.type === "effect" ? group.plays.effect : OFF;
   const entries = useMemo(() => effects ?? [], [effects]);
+  /** The lights the group holds, in its order: what a pattern would land on. */
+  const lights = useSnap((st) => st.lights);
+  const groupLights = useMemo(() => {
+    if (!group || !lights) return [];
+    const byId = new Map(lights.map((l) => [l.light.id, l]));
+    return group.members.flatMap((id) => {
+      const l = byId.get(id);
+      return l ? [l] : [];
+    });
+  }, [group, lights]);
   const bySection = useMemo(() => {
-    const out: Record<string, EffectSummary[]> = { off: [], builtin: [], yours: [], stacks: [] };
+    const out: Record<string, EffectSummary[]> = {
+      off: [],
+      builtin: [],
+      yours: [],
+      stacks: [],
+      patterns: [],
+    };
     for (const effect of entries) {
       const key = sectionOf(effect);
       out[key]?.push(effect);
@@ -303,6 +337,10 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
               {list.map((effect) => {
                 const blocked = htmlBlocked && isHtmlEffect(effect.id);
                 const held = current === effect.id;
+                // A pattern says what it was built on and how it lands on this group; a canvas
+                // effect says neither.
+                const builtOn = effect.kind === "pattern" ? effect.built_on : undefined;
+                const fit = builtOn ? groupFit(builtOn, groupLights) : null;
                 return (
                   <button
                     key={effect.id}
@@ -316,12 +354,27 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     onClick={() => !blocked && choose(effect.id)}
                   >
                     <span className={s.pickStrip} aria-hidden="true">
-                      <Thumb id={effect.id} size="sm" label={effect.name} live={held} />
+                      {/* A pattern has no picture: the daemon refuses a thumbnail for one (it has
+                          no canvas frame). Its strip carries the mark of a picture made of LEDs. */}
+                      {builtOn ? (
+                        <DotsNine size={18} />
+                      ) : (
+                        <Thumb id={effect.id} size="sm" label={effect.name} live={held} />
+                      )}
                     </span>
                     <span className={s.pickText}>
                       <span className={s.pickName}>{effect.name}</span>
                       {blocked && <span className={s.pickNote}>{HTML_ONE_AT_A_TIME}</span>}
                       {!blocked && isHtmlEffect(effect.id) && <Chip html>HTML</Chip>}
+                      {builtOn && fit && (
+                        <span className={s.pickMeta}>
+                          <span className={s.pickKind}>{kindWords(builtOn)}</span>
+                          <span className={s.pickFit} data-fits={fit.flagged === 0 ? "true" : undefined}>
+                            <span className={s.pickFitLed} aria-hidden="true" />
+                            {fitMark(fit.flagged)}
+                          </span>
+                        </span>
+                      )}
                     </span>
                     {held && <span className={s.pickLive}>playing</span>}
                   </button>

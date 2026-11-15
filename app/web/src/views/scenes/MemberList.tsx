@@ -12,9 +12,18 @@ import { DotsSixVertical, X } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { notify } from "@/components/Notify";
 import { groupGoneMessage, takeLightOut } from "@/views/scenes/groupEdit";
+import type { FitKind } from "@/proto/FitKind";
 import type { LightView } from "@/proto/LightView";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
+
+/** How a pattern lands on one device, in the owner's words (spec "Fit"). */
+const FIT_WORDS: Record<FitKind, string> = {
+  exact: "Fits",
+  stretched: "Stretched",
+  other_shape: "Built for a different shape",
+  one_led: "One LED shows the first colour",
+};
 
 export interface MemberListProps {
   groupId: string;
@@ -34,6 +43,14 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
 
   const byId = new Map(lights.map((l) => [l.light.id, l]));
   const members = useMemo(() => group?.members ?? [], [group?.members]);
+  /**
+   * How the group's pattern lands on each device, from the daemon (`group_states[].fits`). Empty
+   * for a canvas effect, so a canvas group's devices carry no flag and no room for one.
+   */
+  const fits = useMemo(() => {
+    const state = use.states.find((x) => x.id === groupId);
+    return new Map((state?.fits ?? []).map((f) => [f.light, f.fit]));
+  }, [use.states, groupId]);
 
   /**
    * Moves one member to another place in the group. `at` is the place in the group *without*
@@ -124,6 +141,7 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
         {members.map((id) => {
           const light = byId.get(id);
           const name = light?.label ?? id;
+          const fit = fits.get(id);
           return (
             <li className={s.member} key={id} data-member={id} data-held={held === id ? "true" : undefined}>
               <IconButton
@@ -144,6 +162,13 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
                 <span className={`${s.memberLeds} fig`}>
                   {light ? `${light.led_count} ${light.led_count === 1 ? "LED" : "LEDs"}` : "not read"}
                 </span>
+                {/* A pattern group says what the pattern does to this device. Nothing is refused,
+                    so every device of the group that the daemon flags says so. */}
+                {fit && (
+                  <span className={s.memberFit} data-fit={fit}>
+                    {FIT_WORDS[fit]}
+                  </span>
+                )}
               </span>
               <IconButton
                 label={`Take ${name} out of this group`}
