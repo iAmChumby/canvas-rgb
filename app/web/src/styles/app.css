@@ -6579,16 +6579,218 @@ button.chip:hover {
   stroke: var(--mute);
 }
 
-.pad-target[data-pressed="true"] .pad-btn,
+/* The key that has the keyboard's focus. It is a ring of the live hue, never the held look:
+   a focused key must not read as a pressed one. */
 .pad-target:focus-visible .pad-btn {
   fill: var(--live-soft);
   stroke: var(--live);
+}
+
+/*
+ * The key that is held down (#375). It takes a solid fill of the live hue, and its legend is
+ * printed in the ink that goes with that fill: --on-accent, which is near-black on the bright
+ * fill of the dark theme and white on the deeper fill of the light one. The fill holds its
+ * contrast at every hue the live preview can take (5.8:1 or better in the dark theme, 5.2:1 or
+ * better in the light one), so the legend never disappears into the fill.
+ */
+.pad-target[data-pressed="true"] .pad-btn {
+  fill: var(--live-press);
+  stroke: var(--live);
+  transition: none;
+}
+
+.pad-target[data-pressed="true"] .pad-print {
+  fill: var(--on-accent);
+  /* The legend drops 1 px, the way a key's legend does while it is held. */
+  transform: translateY(1px);
+}
+
+.pad-target[data-pressed="true"] .pad-glyph {
+  stroke: var(--on-accent);
 }
 
 .pad-target[data-on="true"] .pad-btn {
   fill: var(--live-soft);
   stroke: var(--live);
   stroke-width: 2;
+}
+
+/*
+ * The four paddles are ghosts: XInput cannot see them, so they are drawn as dashed outlines
+ * and they never light. They come after the hover and the focus rules, so a ghost stays a
+ * ghost under the pointer and under the keyboard.
+ */
+.pad-target[data-ghost="true"] .pad-btn {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-dasharray: 3 3;
+}
+
+.pad-target[data-ghost="true"] .pad-print {
+  fill: var(--mute);
+}
+
+.pad-target[data-ghost="true"]:focus-visible .pad-btn {
+  fill: none;
+  stroke: var(--live);
+}
+
+/* The stick's dot: where the stick stands inside its well. */
+.pad-stick-dot {
+  fill: var(--live);
+  stroke: var(--on-accent);
+  stroke-width: 1.5;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* While the pad is live the cap is the stick: the dot stands where the stick stands, and the
+   cap's legend gives way to it. */
+.pad-plan-wrap[data-live="true"] .pad-stick-dot {
+  opacity: 1;
+}
+
+.pad-plan-wrap[data-live="true"] [data-pad-dot] ~ .pad-print {
+  opacity: 0;
+}
+
+/* The two triggers: a slot that fills with the travel, and the number that counts it. */
+.pad-travel-slot {
+  fill: var(--sunk);
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.pad-travel-fill {
+  fill: var(--live);
+  transition: none;
+}
+
+.pad-travel-label {
+  fill: var(--mute);
+  font-family: var(--fm);
+  font-size: 13px;
+}
+
+.pad-travel-value {
+  fill: var(--dim);
+  font-family: var(--fm);
+  font-size: 14px;
+}
+
+/* The two sticks, in numbers: where each one stands. */
+.pad-readouts {
+  display: flex;
+  justify-content: center;
+  gap: var(--s5);
+  width: 100%;
+}
+
+.pad-readout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s1);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}
+
+.pad-readout-name {
+  color: var(--dim);
+}
+
+.pad-readout-axis {
+  color: var(--mute);
+}
+
+.pad-readout-value {
+  /* The slot is the width of the longest number, so the row never moves. */
+  min-width: 4ch;
+  color: var(--ink);
+  text-align: right;
+}
+
+/* What the plan cannot show, said once. */
+.pad-note {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  text-align: center;
+}
+
+/*
+ * The strip that says what the pad is doing (#375). It is the same height in every state, so
+ * the panels below it never move: two lines are held for the longest of the four.
+ */
+.pad-state {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-height: calc(var(--t14) * 2 * 1.45);
+  margin-bottom: var(--s3);
+}
+
+.pad-state-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  border-radius: 50%;
+  background: var(--mute);
+}
+
+.pad-state[data-state="live"] .pad-state-dot {
+  background: var(--ok);
+}
+
+.pad-state[data-state="gone"] .pad-state-dot {
+  background: var(--down);
+}
+
+.pad-state[data-state="paused"] .pad-state-dot {
+  background: var(--work);
+}
+
+.pad-state-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+/* The badge that says the pad is simulated. Its slot is always there, so the line beside it
+   keeps its width whether the badge is shown or not. */
+.pad-badge {
+  flex: none;
+  visibility: hidden;
+}
+
+.pad-badge[data-on="true"] {
+  visibility: visible;
+}
+
+/* The row of the button that is held: it takes the live colour and says so at its edge. */
+.pad-map-row[data-pressed="true"] {
+  border-bottom-color: var(--live);
+  background: var(--live-soft);
+}
+
+.pad-map-row[data-pressed="true"] .pad-map-label {
+  color: var(--live);
+}
+
+.pad-map-pressed {
+  /* The slot the word stands in: it is always there, so the row never moves. */
+  flex: none;
+  width: 8ch;
+  color: var(--live);
+  font-family: var(--fm);
+  font-size: 12px;
+  text-align: right;
+  visibility: hidden;
+}
+
+.pad-map-row[data-pressed="true"] .pad-map-pressed {
+  visibility: visible;
 }
 
 .pad-print {
