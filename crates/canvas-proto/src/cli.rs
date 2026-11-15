@@ -38,6 +38,10 @@ pub const SCENES_LIST: &[&str] = &["scenes", "list"];
 /// `canvas-rgb scenes set <name>`: sets a scene by name, case-insensitively; no match prints
 /// the list and fails.
 pub const SCENES_SET: &[&str] = &["scenes", "set"];
+/// `canvas-rgb scenes order <scene>...`: names every scene once in the new order (#371).
+pub const SCENES_ORDER: &[&str] = &["scenes", "order"];
+/// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]` (#368).
+pub const SCENES_GROUP_MOVE: &[&str] = &["scenes", "group", "move"];
 /// `--group <name>`, repeatable, on the commands that play an effect: play it on those groups
 /// of the active scene only (`ActivateEffect.groups`).
 pub const GROUP_FLAG: &str = "--group";
