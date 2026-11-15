@@ -101,8 +101,7 @@ describe("the dots of a device", () => {
     expect(dotAt(dots, 0, 0)).toBeNull();
   });
 
-  it("dotsBetween skips no dot on a fast drag across a 512-LED strip", () => {
-    const dots = layoutDots(builtOn(512, "strip"), 900, 400);
+  it("dotsBetween skips no dot on a fast drag across a 512-LED strip", () => {    const dots = layoutDots(builtOn(512, "strip"), 900, 400);
     const first = row(dots, dots[0]!.y);
     const from = first[0]!;
     const to = first[first.length - 1]!;
@@ -120,5 +119,29 @@ describe("the dots of a device", () => {
 
     // A segment nowhere near the device takes nothing.
     expect(dotsBetween(dots, { x: 0, y: 0 }, { x: 900, y: 0 })).toEqual([]);
+  });
+
+  it("every dot stays in the box on the densest devices", () => {
+    // The sizes the editor is looked at on, and the ones the spine's cap allows: a strip of 300 and
+    // of 4096 in the well a phone gives, a ring of 4096, and a 5 by 4 grid.
+    const cases: { builtOn: BuiltOn; width: number; height: number }[] = [
+      { builtOn: builtOn(30, "strip"), width: 390, height: 500 },
+      { builtOn: builtOn(300, "strip"), width: 342, height: 400 },
+      { builtOn: builtOn(4096, "strip"), width: 342, height: 400 },
+      { builtOn: builtOn(4096, "ring"), width: 342, height: 400 },
+      { builtOn: builtOn(20, "grid", { width: 5, height: 4 }), width: 600, height: 800 },
+    ];
+    for (const one of cases) {
+      const dots = layoutDots(one.builtOn, one.width, one.height);
+      expect(dots).toHaveLength(one.builtOn.led_count);
+      for (const dot of dots) {
+        expect(dot.r).toBeGreaterThan(0);
+        expect(dot.x - dot.r).toBeGreaterThanOrEqual(0);
+        expect(dot.x + dot.r).toBeLessThanOrEqual(one.width);
+        expect(dot.y - dot.r).toBeGreaterThanOrEqual(0);
+        expect(dot.y + dot.r).toBeLessThanOrEqual(one.height);
+        expect(dotAt(dots, dot.x, dot.y)).toBe(dot.index);
+      }
+    }
   });
 });
