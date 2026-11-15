@@ -13,13 +13,23 @@ import {
   Mouse,
 } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
+import { Chip } from "@/components/Chip";
 import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { PeripheralDetailShape, PeripheralListShape } from "@/components/LoadShapes";
 import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
 import { InlineSkeleton } from "@/components/Skeleton";
-import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
+import { ControllerOutline, PAD_STICK_TRAVEL, type PadButton } from "@/components/ControllerOutline";
+import {
+  litKeys,
+  PAD_STATUS_WORDS,
+  STICK_SCALE,
+  TRIGGER_SCALE,
+  usePadInput,
+  type PadFrame,
+  type PadMapRow,
+} from "@/lib/padInput";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
 import { UnreadValue } from "@/components/UnreadValue";
@@ -1029,13 +1039,97 @@ function ControllerPanel({
     row?.querySelector<HTMLButtonElement>(".select-trigger")?.click();
   };
 
+  // What the pad is doing right now (#375). The loop runs only while this panel is on the page
+  // and the editor is in front: it stops on blur, when the page is hidden, and when the panel
+  // goes away.
+  const pad = usePadInput();
+  const planRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  // What each row does, in the words the schema uses. The painter needs it: a button that is
+  // mapped to another button lights when that one is held.
+  const mapRows = useMemo<PadMapRow[]>(
+    () =>
+      rows.map((p) => {
+        const held = plain(known(values, p.key));
+        return { key: p.key, target: held === null ? null : String(held) };
+      }),
+    [rows, values],
+  );
+  const mapRowsRef = useRef(mapRows);
+  mapRowsRef.current = mapRows;
+
+  /**
+   * Writes the pad's state into the drawing: the keys that are held, the travel of the two
+   * triggers and where the two sticks stand. It writes into the page's own elements, so the
+   * drawing is right in the frame the press was read in.
+   */
+  const paint = useCallback((frame: PadFrame) => {
+    const plan = planRef.current;
+    const map = mapRef.current;
+    if (!plan || !map) return;
+    const lit = litKeys(frame, mapRowsRef.current);
+
+    for (const el of plan.querySelectorAll<SVGGElement>("[data-pad-key]")) {
+      const key = el.getAttribute("data-pad-key");
+      el.setAttribute("data-pressed", key !== null && lit.has(key) ? "true" : "false");
+    }
+    for (const el of map.querySelectorAll<HTMLElement>("[data-key]")) {
+      const key = el.getAttribute("data-key");
+      el.setAttribute("data-pressed", key !== null && lit.has(key) ? "true" : "false");
+    }
+
+    // The two triggers: the slot fills with the travel, and the number counts it.
+    for (const side of ["lt", "rt"] as const) {
+      const slot = plan.querySelector<SVGRectElement>(`[data-pad-slot="${side}"]`);
+      const fill = plan.querySelector<SVGRectElement>(`[data-pad-travel="${side}"]`);
+      const number = plan.querySelector<SVGTextElement>(`[data-pad-value="${side}"]`);
+      if (!slot || !fill || !number) continue;
+      const travel = (side === "lt" ? frame.lt : frame.rt) / TRIGGER_SCALE;
+      const x = Number(slot.getAttribute("x"));
+      const width = Number(slot.getAttribute("width"));
+      fill.setAttribute("width", String(width * travel));
+      fill.setAttribute("x", String(side === "rt" ? x + width * (1 - travel) : x));
+      number.textContent = String(side === "lt" ? frame.lt : frame.rt).padStart(3, "0");
+    }
+
+    // The two sticks: the dot stands where the stick stands, inside its well.
+    for (const dot of plan.querySelectorAll<SVGCircleElement>("[data-pad-dot]")) {
+      const which = dot.getAttribute("data-pad-dot");
+      const cap = dot.parentElement?.querySelector(".pad-btn");
+      if (!which || !cap) continue;
+      const cx = Number(cap.getAttribute("cx"));
+      const cy = Number(cap.getAttribute("cy"));
+      const sx = which === "l" ? frame.lx : frame.rx;
+      const sy = which === "l" ? frame.ly : frame.ry;
+      dot.setAttribute("cx", String(cx + (sx / STICK_SCALE) * PAD_STICK_TRAVEL));
+      dot.setAttribute("cy", String(cy + (sy / STICK_SCALE) * PAD_STICK_TRAVEL));
+    }
+    for (const axis of ["lx", "ly", "rx", "ry"] as const) {
+      const number = plan.querySelector<HTMLElement>(`[data-pad-stick="${axis}"]`);
+      if (!number) continue;
+      number.textContent = `${frame[axis] < 0 ? "" : "+"}${frame[axis]}`;
+    }
+
+    plan.setAttribute("data-live", frame.connected ? "true" : "false");
+  }, []);
+
+  useEffect(() => pad.register(paint), [pad.register, paint]);
+
   return (
     <Panel title={detail.info.name}>
+      {/* What the pad is doing: one line, the same height in every state. */}
+      <div className="pad-state" data-state={pad.status} role="status">
+        <span className="pad-state-dot" aria-hidden="true" />
+        <span className="pad-state-text">{PAD_STATUS_WORDS[pad.status]}</span>
+        <span className="pad-badge" data-on={pad.simulated ? "true" : "false"}>
+          <Chip>Simulated pad</Chip>
+        </span>
+      </div>
       <div className="pad-grid">
-        <div className="pad-plan-wrap">
+        <div className="pad-plan-wrap" ref={planRef}>
           <ControllerOutline buttons={planButtons} selected={picked} onPick={pick} />
         </div>
-        <div className="pad-map">
+        <div className="pad-map" ref={mapRef}>
           {rows.map((p) => {
             const options =
               p.kind.type === "choice"
@@ -1070,6 +1164,8 @@ function ControllerPanel({
                     onChange={(v) => onChange(p.key, { type: "choice", value: v })}
                   />
                 )}
+                {/* The slot the word "pressed" stands in: it is always there, so the row never moves. */}
+                <span className="pad-map-pressed">pressed</span>
               </div>
             );
           })}
