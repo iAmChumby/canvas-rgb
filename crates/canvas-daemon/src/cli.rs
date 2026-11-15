@@ -55,6 +55,9 @@ pub enum Command {
     /// The effect library.
     #[command(subcommand)]
     Effects(EffectsCommand),
+    /// The scenes.
+    #[command(subcommand)]
+    Scenes(ScenesCommand),
     /// The lighting output.
     #[command(subcommand)]
     Output(OutputCommand),
@@ -131,6 +134,52 @@ pub struct ActivateArgs {
     /// The properties, as `--<prop> <value>` pairs, e.g. `--color #ff0000`.
     #[arg(allow_hyphen_values = true, trailing_var_arg = true)]
     pub props: Vec<String>,
+    /// The groups of the active scene to play it on, by name. Repeatable. With no group, every
+    /// group of the active scene plays it.
+    ///
+    /// The properties are a trailing list (everything after the effect is one), so a `--group`
+    /// after them is taken out of that list by [`split_groups`]: the flag works before and after
+    /// the properties.
+    #[arg(long = "group", value_name = "NAME")]
+    pub groups: Vec<String>,
+}
+
+/// The groups named by `--group <name>` in the activate's trailing arguments, and the rest of
+/// them.
+///
+/// The properties are a trailing var arg (everything after the effect), so `--group` can come
+/// before or after them: the pairs are taken out of the list, whatever their place.
+pub fn split_groups(args: &[String]) -> (Vec<String>, Vec<String>) {
+    let mut groups = Vec::new();
+    let mut props = Vec::new();
+    let mut rest = args.iter();
+    while let Some(arg) = rest.next() {
+        if arg == canvas_proto::cli::GROUP_FLAG {
+            if let Some(name) = rest.next() {
+                groups.push(name.clone());
+                continue;
+            }
+        }
+        // `--group=NAME` is the same flag.
+        if let Some(name) = arg.strip_prefix(&format!("{}=", canvas_proto::cli::GROUP_FLAG)) {
+            groups.push(name.to_string());
+            continue;
+        }
+        props.push(arg.clone());
+    }
+    (groups, props)
+}
+
+/// `canvas-rgb scenes ...`
+#[derive(Debug, Subcommand)]
+pub enum ScenesCommand {
+    /// List the scenes: the active one is marked.
+    List,
+    /// Set the scene by name. Names match case-insensitively.
+    Set {
+        /// The scene's name.
+        name: String,
+    },
 }
 
 /// `canvas-rgb effects import <file> [--replace]`
@@ -971,6 +1020,96 @@ pub enum Output {
     Json(serde_json::Value),
     /// The text the command prints.
     Text(String),
+}
+
+/// `canvas-rgb scenes list`: the scenes, the active one marked.
+pub fn scenes_list(api: &dyn Api, json: bool) -> Result<Output, CliError> {
+    let answer = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(scenes_list_text(&answer))
+    })
+}
+
+/// `canvas-rgb scenes set <name>`: sets the scene by name, case-insensitively, or by its id.
+///
+/// A name that matches nothing prints the list and fails: the owner sees the names the daemon
+/// knows and picks one. A name that matches several scenes is refused too, and the matches are
+/// listed: scene names are not unique, and picking one of them is the owner's call. An id
+/// names one scene, so it is accepted as well.
+pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliError> {
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let scenes = list.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    // An exact id names one scene.
+    if let Some(found) = scenes.iter().find(|scene| scene.get("id").and_then(|v| v.as_str()) == Some(name)) {
+        return set_scene(api, found, json);
+    }
+    let matches: Vec<&serde_json::Value> = scenes
+        .iter()
+        .filter(|scene| {
+            scene
+                .get("name")
+                .and_then(|v| v.as_str())
+                .is_some_and(|scene_name| scene_name.eq_ignore_ascii_case(name))
+        })
+        .collect();
+    if matches.len() > 1 {
+        let names: Vec<String> = matches
+            .iter()
+            .map(|scene| {
+                let id = scene.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+                let scene_name = scene.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+                format!("{id} ({scene_name})")
+            })
+            .collect();
+        return Err(CliError::Other(format!(
+            "{name} names {} scenes: {}; name one of them by its id",
+            matches.len(),
+            names.join(", ")
+        )));
+    }
+    let Some(found) = matches.first() else {
+        let list_text = scenes_list_text(&list);
+        if json {
+            return Err(CliError::Other(format!(
+                "no scene is named {name}; the scenes are: {}",
+                list_text.trim()
+            )));
+        }
+        return Err(CliError::Other(format!("no scene is named {name}\n{list_text}")));
+    };
+    set_scene(api, found, json)
+}
+
+/// Sets the scene the answer names.
+fn set_scene(api: &dyn Api, scene: &serde_json::Value, json: bool) -> Result<Output, CliError> {
+    let id = scene.get("id").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let canonical = scene.get("name").and_then(|v| v.as_str()).unwrap_or_default().to_string();
+    let body = serde_json::json!({ "id": id }).to_string();
+    let answer = api.call("PUT", canvas_proto::api::routes::SCENE_ACTIVE, Some(&body))?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(format!("the scene is {canonical}\n"))
+    })
+}
+
+/// The scenes, one per line: the id, the name, and a mark on the active one.
+pub fn scenes_list_text(answer: &serde_json::Value) -> String {
+    let active = answer.get("active").and_then(|v| v.as_str()).unwrap_or("");
+    let scenes = answer.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if scenes.is_empty() {
+        return "no scenes\n".into();
+    }
+    let mut out = String::new();
+    for scene in &scenes {
+        let id = scene.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        let name = scene.get("name").and_then(|v| v.as_str()).unwrap_or("?");
+        let marker = if id == active { "*" } else { " " };
+        out.push_str(&format!("{marker} {id:<24} {name}\n"));
+    }
+    out
 }
 
 /// `canvas-rgb fans status`: the fan headers, the temperatures and the active profile.
@@ -1819,6 +1958,221 @@ mod tests {
             assert_eq!(method, "GET");
             assert_eq!(path, canvas_proto::api::routes::FANS);
             Ok(self.0.clone())
+        }
+    }
+
+    /// An API that answers the scenes list and records the request that set a scene.
+    struct ScenesApi {
+        answer: serde_json::Value,
+        asked: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl Api for ScenesApi {
+        fn call(
+            &self,
+            method: &str,
+            path: &str,
+            body: Option<&str>,
+        ) -> Result<serde_json::Value, CliError> {
+            self.asked.lock().unwrap().push((method.to_string(), path.to_string(), body.map(str::to_string)));
+            if path == canvas_proto::api::routes::SCENES {
+                return Ok(self.answer.clone());
+            }
+            Ok(serde_json::json!({ "ok": true }))
+        }
+    }
+
+    /// The scenes answer the CLI reads.
+    fn a_scenes_answer() -> serde_json::Value {
+        serde_json::json!({
+            "active": "gaming",
+            "scenes": [
+                { "id": "gaming", "name": "Gaming" },
+                { "id": "movie", "name": "Movie" },
+            ],
+            "group_states": []
+        })
+    }
+
+    /// The scene is set by its name, whatever the case: the owner types the name they see.
+    #[test]
+    fn scenes_set_matches_names_without_case() {
+        let api = ScenesApi {
+            answer: a_scenes_answer(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        for name in ["gaming", "GAMING", "GaMiNg"] {
+            let output = super::scenes_set(&api, name, false).expect("the scene is set");
+            match output {
+                super::Output::Text(text) => assert!(text.contains("Gaming"), "{text}"),
+                other => panic!("{other:?}"),
+            }
+            let asked = api.asked.lock().unwrap().clone();
+            let last = asked.last().expect("the set was sent");
+            assert_eq!(last.0, "PUT");
+            assert_eq!(last.1, canvas_proto::api::routes::SCENE_ACTIVE);
+            let body: serde_json::Value = serde_json::from_str(last.2.as_deref().expect("a body")).unwrap();
+            assert_eq!(body["id"], "gaming", "the id of the scene whose name matched");
+        }
+    }
+
+    /// A name that matches nothing prints the list and fails: the owner sees the names.
+    #[test]
+    fn scenes_set_with_no_match_prints_the_list_and_fails() {
+        let api = ScenesApi {
+            answer: a_scenes_answer(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let error = super::scenes_set(&api, "nope", false).expect_err("no scene has that name");
+        let message = error.to_string();
+        assert!(message.contains("nope"), "{message}");
+        assert!(message.contains("Gaming"), "the list is in the message: {message}");
+        assert!(message.contains("Movie"), "the list is in the message: {message}");
+        let asked = api.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "only the list was asked for");
+    }
+
+    /// The list marks the active scene.
+    #[test]
+    fn scenes_list_marks_the_active_one() {
+        let api = ScenesApi {
+            answer: a_scenes_answer(),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let output = super::scenes_list(&api, false).expect("the list");
+        match output {
+            super::Output::Text(text) => {
+                let lines: Vec<&str> = text.lines().collect();
+                assert_eq!(lines.len(), 2, "{text}");
+                assert!(lines[0].starts_with('*'), "the active scene is marked: {text}");
+                assert!(lines[0].contains("gaming") && lines[0].contains("Gaming"), "{text}");
+                assert!(lines[1].starts_with(' '), "the other scene is not: {text}");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// A name that names two scenes is refused, and the matches are listed: scene names are
+    /// not unique, and picking one is the owner's call.
+    #[test]
+    fn scenes_set_refuses_an_ambiguous_name_and_lists_the_matches() {
+        let api = ScenesApi {
+            answer: serde_json::json!({
+                "active": "one",
+                "scenes": [
+                    { "id": "one", "name": "Gaming" },
+                    { "id": "two", "name": "GAMING" },
+                ],
+                "group_states": []
+            }),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let error = super::scenes_set(&api, "gaming", false).expect_err("the name is ambiguous");
+        let message = error.to_string();
+        assert!(message.contains("gaming"), "{message}");
+        assert!(message.contains("two"), "the matches are listed: {message}");
+        assert!(message.contains("one"), "the matches are listed: {message}");
+        let asked = api.asked.lock().unwrap().clone();
+        assert_eq!(asked.len(), 1, "only the list was asked for");
+    }
+
+    /// The `--group` flag works before and after the properties: the properties are a trailing
+    /// list, so the flag is taken out of it.
+    #[test]
+    fn the_group_flag_works_before_and_after_the_properties() {
+        let args = |rest: &[&str]| -> Vec<String> { rest.iter().map(|s| s.to_string()).collect() };
+        let (groups, props) = super::split_groups(&args(&["--color", "#f00", "--group", "Intake"]));
+        assert_eq!(groups, vec!["Intake".to_string()]);
+        assert_eq!(props, args(&["--color", "#f00"]));
+
+        let (groups, props) = super::split_groups(&args(&["--group", "Intake", "--color", "#f00"]));
+        assert_eq!(groups, vec!["Intake".to_string()]);
+        assert_eq!(props, args(&["--color", "#f00"]));
+
+        // Two groups, and no properties.
+        let (groups, props) =
+            super::split_groups(&args(&["--group", "Intake", "--group", "Desk"]));
+        assert_eq!(groups, vec!["Intake".to_string(), "Desk".to_string()]);
+        assert!(props.is_empty());
+
+        // No flag: the properties are the properties.
+        let (groups, props) = super::split_groups(&args(&["--color", "#f00"]));
+        assert!(groups.is_empty());
+        assert_eq!(props, args(&["--color", "#f00"]));
+    }
+
+    /// The `--group` flag works through clap, before and after the properties, in both forms.
+    #[test]
+    fn the_group_flag_parses_through_clap() {
+        for args in [
+            vec!["canvas-rgb", "effects", "activate", "solid", "--group", "Intake", "--color", "red"],
+            vec!["canvas-rgb", "effects", "activate", "solid", "--color", "red", "--group", "Intake"],
+            vec!["canvas-rgb", "effects", "activate", "solid", "--group=Intake", "--color", "red"],
+            vec!["canvas-rgb", "effects", "activate", "solid", "--color", "red", "--group=Intake"],
+            vec!["canvas-rgb", "effects", "activate", "--group", "Intake", "solid", "--color", "red"],
+        ] {
+            let cli = Cli::try_parse_from(&args).unwrap_or_else(|e| panic!("{args:?}: {e}"));
+            match cli.command {
+                Command::Effects(EffectsCommand::Activate(activate)) => {
+                    let (from_props, prop_args) = super::split_groups(&activate.props);
+                    let mut groups = activate.groups.clone();
+                    groups.extend(from_props);
+                    assert_eq!(groups, vec!["Intake".to_string()], "{args:?}");
+                    assert_eq!(
+                        prop_args,
+                        vec!["--color".to_string(), "red".to_string()],
+                        "{args:?}"
+                    );
+                }
+                other => panic!("{other:?}"),
+            }
+        }
+    }
+
+    /// An id names one scene, so it is accepted even when the names are ambiguous.
+    #[test]
+    fn scenes_set_accepts_an_id() {
+        let api = ScenesApi {
+            answer: serde_json::json!({
+                "active": "one",
+                "scenes": [
+                    { "id": "one", "name": "Gaming" },
+                    { "id": "two", "name": "GAMING" },
+                ],
+                "group_states": []
+            }),
+            asked: std::sync::Mutex::new(Vec::new()),
+        };
+        let output = super::scenes_set(&api, "two", false).expect("the id names one scene");
+        match output {
+            super::Output::Text(text) => assert!(text.contains("GAMING"), "{text}"),
+            other => panic!("{other:?}"),
+        }
+        let asked = api.asked.lock().unwrap().clone();
+        let last = asked.last().expect("the set was sent");
+        let body: serde_json::Value = serde_json::from_str(last.2.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["id"], "two");
+    }
+
+    /// The commands parse: `scenes list`, `scenes set <name>`, and `--group` on the activate.
+    #[test]
+    fn the_scenes_commands_parse() {
+        let cli = Cli::try_parse_from(["canvas-rgb", "scenes", "list"]).unwrap();
+        assert!(matches!(cli.command, Command::Scenes(ScenesCommand::List)));
+        let cli = Cli::try_parse_from(["canvas-rgb", "scenes", "set", "Gaming"]).unwrap();
+        match cli.command {
+            Command::Scenes(ScenesCommand::Set { name }) => assert_eq!(name, "Gaming"),
+            other => panic!("{other:?}"),
+        }
+        let cli =
+            Cli::try_parse_from(["canvas-rgb", "effects", "activate", "solid", "--group", "Intake"])
+                .unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Activate(args)) => {
+                assert_eq!(args.groups, vec!["Intake".to_string()]);
+                assert_eq!(args.effect, "solid");
+            }
+            other => panic!("{other:?}"),
         }
     }
 

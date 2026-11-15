@@ -6,10 +6,7 @@
 //! headers" panel.
 
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{
-    CaseForm, Facing, Landmark, Layout, Part, PartKind, PlacedZone, RenderScale, SamplingMode,
-    ZoneShape,
-};
+use canvas_proto::layout::ZoneShape;
 use canvas_proto::Rgb8;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -284,468 +281,6 @@ pub fn default_shape(kind: DeviceKind, zone: &ZoneInfo) -> ZoneShape {
 }
 
 /// What a case slot holds.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum SlotKind {
-    Fan,
-    Ram,
-    Gpu,
-    Edge,
-    Desk,
-}
-
-/// The case box: where the case sits on the canvas and how big it is.
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CaseBox {
-    pub x: f32,
-    pub y: f32,
-    /// The depth, front to back.
-    pub width: f32,
-    /// The height, floor to roof.
-    pub height: f32,
-}
-
-/// The case forms the editor used to offer, as boxes.
-///
-/// One scale for every case: 4 mm per canvas unit, so a 120 mm fan is 30 units in
-/// every case. The width is the depth (front to back), the height is the height
-/// (floor to roof), and every case stands on the desk line (y 152) in the middle of
-/// the canvas (x 160).
-///
-/// The editor's own table is `app/web/src/lib/caseForms.ts`; the two must agree.
-pub fn case_form_box(form: CaseForm) -> Option<CaseBox> {
-    let (depth_mm, height_mm) = match form {
-        CaseForm::FullTower => (576, 584),
-        CaseForm::MidTower => (488, 480),
-        CaseForm::SmallFormFactor => (336, 368),
-        CaseForm::OpenFrame => (480, 472),
-        CaseForm::None => return None,
-    };
-    let width = (depth_mm as f32 / 4.0).round();
-    let height = (height_mm as f32 / 4.0).round();
-    Some(CaseBox {
-        x: (160.0 - width / 2.0).round(),
-        y: 152.0 - 3.0 - height,
-        width,
-        height,
-    })
-}
-
-/// The case of the first run: today's mid tower.
-fn mid_tower_case() -> CaseBox {
-    case_form_box(CaseForm::MidTower).expect("the mid tower has a size")
-}
-
-/// The case as a landmark: the box the owner sizes, at today's mid-tower size.
-///
-/// The case is not a form factor any more: there is one box, and the owner drags its
-/// sides. A layout saved with a form becomes a landmark of that form's size (see
-/// [`crate::migration::migrate_case_form`]).
-pub fn case_landmark() -> Landmark {
-    case_landmark_of(CaseForm::MidTower).expect("the mid tower has a size")
-}
-
-/// The case landmark of a form, for a layout that was saved with one.
-pub fn case_landmark_of(form: CaseForm) -> Option<Landmark> {
-    let case = case_form_box(form)?;
-    Some(Landmark {
-        kind: PartKind::Case,
-        x: case.x,
-        y: case.y,
-        width: case.width,
-        height: case.height,
-        rotation_deg: 0.0,
-        facing: Facing::Viewer,
-        label: None,
-        visible: true,
-        locked: false,
-    })
-}
-
-/// The part a device kind is.
-fn part_of(kind: DeviceKind) -> PartKind {
-    match kind {
-        DeviceKind::Dram => PartKind::Ram,
-        DeviceKind::Gpu => PartKind::Gpu,
-        DeviceKind::Keyboard => PartKind::Keyboard,
-        DeviceKind::Mouse => PartKind::Mouse,
-        DeviceKind::Microphone => PartKind::Microphone,
-        DeviceKind::Headset => PartKind::Headset,
-        DeviceKind::LedStrip => PartKind::Strip,
-        DeviceKind::Motherboard => PartKind::Strip,
-        DeviceKind::Other => PartKind::Generic,
-    }
-}
-
-/// One standard place in the generic case drawing: a fan position, a RAM slot, the GPU slot, a
-/// case edge where a strip runs, or a place on the desk shelf. The editor draws the same slots
-/// (`app/web/src/lib/caseForms.ts`) and snaps zones to them; keep the two tables the same.
-#[derive(Debug, Clone, Copy)]
-struct Slot {
-    kind: SlotKind,
-    /// Peripheral slots on the desk name the kind they are for.
-    peripheral: Option<DeviceKind>,
-    /// The part the slot holds, and the way it faces: what the editor draws.
-    part: PartKind,
-    facing: Facing,
-    x: f32,
-    y: f32,
-    w: f32,
-    h: f32,
-}
-
-/// The mid-tower's slots, in the order zones fill them: front fans, top fans, rear fan, RAM,
-/// GPU, three case edges, the desk's keyboard, mouse, mic and headset places, then three
-/// spare desk places. Arithmetic is the editor's, rounded to whole units.
-fn mid_tower_slots() -> Vec<Slot> {
-    // 4 mm per canvas unit: a 480 x 488 mm mid tower is 120 x 122 units, centred, standing on the
-    // desk line (y 152). The fan is 120 mm = 30 units. ATX board 76 x 61 units.
-    let case = mid_tower_case();
-    let (cx, cy, cw, ch) = (case.x, case.y, case.width, case.height);
-    let s = 30.0f32;
-    let (front, top, ram) = (3usize, 2usize, 4usize);
-    let mut slots = Vec::new();
-    let slot = |kind, part, facing, x: f32, y: f32, w: f32, h: f32| Slot {
-        kind,
-        peripheral: None,
-        part,
-        facing,
-        x,
-        y,
-        w,
-        h,
-    };
-    let fy0 = cy + 7.0;
-    for i in 0..front {
-        // The fans on the front panel face the viewer.
-        slots.push(slot(
-            SlotKind::Fan,
-            PartKind::Fan,
-            Facing::Viewer,
-            cx + 3.0,
-            fy0 + i as f32 * (s + 2.0),
-            s,
-            s,
-        ));
-    }
-    let bx = cx + 3.0 + s + 1.0;
-    let by = cy + 7.0 + s + 4.0;
-    for i in 0..top {
-        // The fans on the top panel face up.
-        slots.push(slot(
-            SlotKind::Fan,
-            PartKind::Fan,
-            Facing::Up,
-            bx + i as f32 * (s + 1.0),
-            cy + 7.0,
-            s,
-            s,
-        ));
-    }
-    // The rear fan sits on the back panel, so it faces away from the viewer.
-    slots.push(slot(
-        SlotKind::Fan,
-        PartKind::Fan,
-        Facing::Away,
-        cx + cw - 5.0 - s,
-        by,
-        s,
-        s,
-    ));
-    let (bw, bh) = (76.0f32, 61.0f32);
-    let (rw, rh) = (6.0f32, 34.0f32);
-    for i in 0..ram {
-        slots.push(slot(
-            SlotKind::Ram,
-            PartKind::Ram,
-            Facing::Viewer,
-            bx + 3.0 + i as f32 * (rw + 2.0),
-            by + 4.0,
-            rw,
-            rh,
-        ));
-    }
-    slots.push(slot(
-        SlotKind::Gpu,
-        PartKind::Gpu,
-        Facing::Viewer,
-        bx + 3.0,
-        (by + 4.0 + rh + 3.0).max((by + bh * 0.55).round()),
-        (bw * 0.6).round(),
-        14.0,
-    ));
-    // The case edges, where an ARGB strip runs: the top edge faces up, the bottom edge
-    // down, the rear edge away.
-    slots.push(slot(SlotKind::Edge, PartKind::Strip, Facing::Up, cx + 10.0, cy + 2.0, cw - 20.0, 4.0));
-    slots.push(slot(SlotKind::Edge, PartKind::Strip, Facing::Down, cx + 10.0, cy + ch - 8.0, cw - 20.0, 4.0));
-    slots.push(slot(SlotKind::Edge, PartKind::Strip, Facing::Away, cx + cw - 4.0, cy + 8.0, 3.0, ch - 24.0));
-    let desk = |kind, x, y, w, h| Slot {
-        kind: SlotKind::Desk,
-        peripheral: Some(kind),
-        part: part_of(kind),
-        facing: Facing::Viewer,
-        x,
-        y,
-        w,
-        h,
-    };
-    slots.push(desk(DeviceKind::Keyboard, 14.0, 158.0, 110.0, 30.0));
-    slots.push(desk(DeviceKind::Mouse, 132.0, 156.0, 22.0, 32.0));
-    slots.push(desk(DeviceKind::Microphone, 162.0, 158.0, 16.0, 28.0));
-    slots.push(desk(DeviceKind::Headset, 186.0, 157.0, 30.0, 30.0));
-    for i in 0..3 {
-        slots.push(Slot {
-            kind: SlotKind::Desk,
-            peripheral: None,
-            part: PartKind::Generic,
-            facing: Facing::Viewer,
-            x: 226.0 + 30.0 * i as f32,
-            y: 159.0,
-            w: 26.0,
-            h: 26.0,
-        });
-    }
-    slots
-}
-
-/// The slot a zone belongs in, among `slots` not yet taken (`used`). A fan-like zone takes a fan
-/// position, RAM a RAM slot, a GPU the GPU slot, a keyboard, mouse, mic or headset its own place
-/// on the desk; a header or strip takes a case edge; anything else (and anything whose own slots
-/// are full) takes a spare desk place if it is a desk thing.
-fn pick_slot(kind: DeviceKind, zone: &ZoneInfo, slots: &[Slot], used: &[bool]) -> Option<usize> {
-    let free = |want: &dyn Fn(&Slot) -> bool| (0..slots.len()).find(|&i| !used[i] && want(&slots[i]));
-    let fan_like = zone.name.to_ascii_lowercase().contains("fan") && zone.led_count > 1;
-    let single = matches!(zone.kind, ZoneKind::Single) || zone.led_count == 1;
-    let own = if fan_like {
-        free(&|s| s.kind == SlotKind::Fan)
-    } else {
-        match kind {
-            DeviceKind::Dram => free(&|s| s.kind == SlotKind::Ram),
-            DeviceKind::Gpu if !single => free(&|s| s.kind == SlotKind::Gpu),
-            DeviceKind::Keyboard | DeviceKind::Mouse | DeviceKind::Microphone | DeviceKind::Headset => {
-                free(&|s| s.kind == SlotKind::Desk && s.peripheral == Some(kind))
-            }
-            _ if single => None,
-            _ => free(&|s| s.kind == SlotKind::Edge),
-        }
-    };
-    // A spare desk place is for what lives on a desk: a second keyboard, a single-LED gadget. A fan,
-    // a RAM stick or a strip with no case slot left is staggered in the case by the caller.
-    let desk_thing = matches!(
-        kind,
-        DeviceKind::Keyboard | DeviceKind::Mouse | DeviceKind::Microphone | DeviceKind::Headset
-    ) || (single && !matches!(kind, DeviceKind::Dram | DeviceKind::Gpu) && !fan_like);
-    own.or_else(|| {
-        if desk_thing {
-            free(&|s| s.kind == SlotKind::Desk && s.peripheral.is_none())
-        } else {
-            None
-        }
-    })
-}
-
-/// The part a zone is when it has no slot of its own: the device says what it is.
-fn fallback_part(kind: DeviceKind, zone: &ZoneInfo) -> (PartKind, Facing) {
-    if zone.name.to_ascii_lowercase().contains("fan") && zone.led_count > 1 {
-        return (PartKind::Fan, Facing::Viewer);
-    }
-    (part_of(kind), Facing::Viewer)
-}
-
-/// Places every zone with LEDs of `devices` in the mid-tower's slots, skipping slots already
-/// `used`. Returns the zones in placement order. A zone with no slot left is staggered near the
-/// middle of the desk so it is never off the canvas or on top of a slot.
-///
-/// Every placed zone gets a part: what it is, and which way it faces. The owner confirms the
-/// mapping later, so `mapped` starts false.
-fn place_in_mid_tower(devices: &[DeviceInfo], existing: &[PlacedZone], used: &mut Vec<bool>) -> Vec<PlacedZone> {
-    let slots = mid_tower_slots();
-    used.resize(slots.len(), false);
-    let mut sorted: Vec<&DeviceInfo> = devices.iter().collect();
-    sorted.sort_by(|a, b| {
-        kind_rank(a.kind)
-            .cmp(&kind_rank(b.kind))
-            .then_with(|| a.name.to_ascii_lowercase().cmp(&b.name.to_ascii_lowercase()))
-    });
-    let mut zones = Vec::new();
-    let mut overflow = 0.0f32;
-    for device in sorted {
-        for zone in &device.zones {
-            if zone.led_count == 0 {
-                continue;
-            }
-            if existing.iter().any(|p| p.device_id == device.id && p.zone_index == zone.index) {
-                continue;
-            }
-            let shape = default_shape(device.kind, zone);
-            let (x, y, width, height, part) = match pick_slot(device.kind, zone, &slots, used) {
-                Some(i) => {
-                    used[i] = true;
-                    (
-                        slots[i].x,
-                        slots[i].y,
-                        slots[i].w,
-                        slots[i].h,
-                        Part { kind: slots[i].part, facing: slots[i].facing, mapped: false },
-                    )
-                }
-                None => {
-                    overflow += 1.0;
-                    let (kind, facing) = fallback_part(device.kind, zone);
-                    (
-                        150.0 + 6.0 * overflow,
-                        60.0 + 6.0 * overflow,
-                        24.0,
-                        24.0,
-                        Part { kind, facing, mapped: false },
-                    )
-                }
-            };
-            zones.push(PlacedZone {
-                device_id: device.id.clone(),
-                zone_index: zone.index,
-                x,
-                y,
-                width,
-                height,
-                rotation_deg: 0.0,
-                reversed: false,
-                visible: true,
-                shape,
-                label: None,
-                leds: None,
-                part: Some(part),
-                locked: false,
-            });
-        }
-    }
-    zones
-}
-
-/// Builds the default layout for the discovered devices: a case box, with every device in its
-/// place in the case (fans in the fan positions, RAM in the RAM slots, header strips along the
-/// case edges) and the keyboard, mouse, mic and headset on the desk shelf. The placement is
-/// deterministic and nothing overlaps another zone.
-///
-/// The case is a landmark, not a form factor: there is one box, at today's mid-tower size, and
-/// the owner drags its sides.
-pub fn build_default_layout(devices: &[DeviceInfo]) -> Layout {
-    let mut used = Vec::new();
-    let zones = place_in_mid_tower(devices, &[], &mut used);
-    Layout {
-        id: "default".into(),
-        name: "Default".into(),
-        render_scale: RenderScale::default(),
-        sampling: SamplingMode::AreaAverage,
-        zones,
-        effect: None,
-        case_form: CaseForm::None,
-        landmarks: vec![case_landmark()],
-    }
-}
-
-/// Adds every zone with LEDs that the layout does not place yet, in the mid tower's next free
-/// slot. Zones already in the layout are left where they are, and a slot an existing zone sits
-/// in counts as taken.
-///
-/// A device detected after the first run (or a header sized later) lands on the canvas,
-/// as SignalRGB does with a new device, instead of staying black. Returns how many zones
-/// were added.
-pub fn place_missing_zones(layout: &mut Layout, devices: &[DeviceInfo]) -> usize {
-    let slots = mid_tower_slots();
-    let mut used: Vec<bool> = slots
-        .iter()
-        .map(|s| {
-            let (cx, cy) = (s.x + s.w / 2.0, s.y + s.h / 2.0);
-            layout
-                .zones
-                .iter()
-                .any(|p| cx >= p.x && cx <= p.x + p.width && cy >= p.y && cy <= p.y + p.height)
-        })
-        .collect();
-    let mut added = 0;
-    for zone in place_in_mid_tower(devices, &layout.zones.clone(), &mut used) {
-        layout.zones.push(zone);
-        added += 1;
-    }
-    added
-}
-
-/// The one zone whose kind changed under a saved placement: the ROYUAN keyboard's (#312).
-///
-/// It reported a single LED, so the first run saved `Point` for it; it reports a 128-key matrix
-/// now, and `Point` makes every key sample the whole box. No other zone is touched: a `Point` on
-/// another matrix zone is the owner's own choice.
-const REPAIRED_ZONE: (&str, u32) = ("royuan:3151:4015", 0);
-
-/// The stale `Point` on the keyboard's zone becomes the zone's own map (`Auto`).
-///
-/// `Point` lights every LED of the zone with the whole box, which is what a one-LED zone looked
-/// like: that is the shape the first run wrote for this keyboard while it reported a single LED
-/// (#312). The keyboard reports 128 keys now, so a saved `Point` made every key one colour. A
-/// matrix zone's map is its per-key shape (`default_shape` returns `Auto` for one).
-///
-/// Returns how many placements changed. Called once per install, through
-/// [`repair_point_on_matrix_once`].
-pub fn repair_point_on_matrix(layout: &mut Layout, devices: &[DeviceInfo]) -> usize {
-    let mut repaired = 0;
-    for placement in &mut layout.zones {
-        if placement.shape != ZoneShape::Point {
-            continue;
-        }
-        if placement.device_id.0 != REPAIRED_ZONE.0 || placement.zone_index != REPAIRED_ZONE.1 {
-            continue;
-        }
-        let zone = devices
-            .iter()
-            .find(|d| d.id == placement.device_id)
-            .and_then(|d| d.zones.iter().find(|z| z.index == placement.zone_index));
-        let Some(zone) = zone else { continue };
-        // One LED is a point whatever the kind says: there is no shape to get wrong.
-        if matches!(zone.kind, ZoneKind::Matrix { .. }) && zone.led_count > 1 {
-            placement.shape = ZoneShape::Auto;
-            repaired += 1;
-        }
-    }
-    repaired
-}
-
-/// The result of one pass of the one-off repair (#312 review pass 3, S4).
-pub struct RepairPass {
-    /// How many placements changed.
-    pub repaired: usize,
-    /// True when the keyboard was in the device list and the marker is not there yet: the caller
-    /// records the run once the layout it changed is saved.
-    pub record: bool,
-}
-
-/// Runs [`repair_point_on_matrix`] once and says whether the run may be recorded.
-///
-/// The marker is only recorded when the keyboard was actually in the device list: a device list
-/// read before the keyboard enumerates must not spend the one run, or every key would stay one
-/// colour for good (#312 review pass 3, S4). The caller records it after saving the layout, so a
-/// failed save does not lose the repair either.
-pub fn repair_point_on_matrix_once(
-    layout: &mut Layout,
-    devices: &[DeviceInfo],
-    marker: &std::path::Path,
-) -> RepairPass {
-    if marker.exists() || !devices.iter().any(|d| d.id.0 == REPAIRED_ZONE.0) {
-        return RepairPass { repaired: 0, record: false };
-    }
-    RepairPass { repaired: repair_point_on_matrix(layout, devices), record: true }
-}
-
-/// Records that the one-off repair ran, in `marker`. Returns whether it was written.
-pub fn record_repair(marker: &std::path::Path) -> bool {
-    match crate::storage::write_atomic(marker, b"{\"point_on_matrix\": true}\n") {
-        Ok(()) => true,
-        Err(e) => {
-            tracing::warn!(error = %e, "the one-off layout repair could not be recorded");
-            false
-        }
-    }
-}
-
 /// How long the device list must hold still before the first run trusts it: longer than
 /// one supervisor refresh (5 s), so a device still being detected shows up first.
 const SETTLE: std::time::Duration = std::time::Duration::from_secs(6);
@@ -784,20 +319,6 @@ async fn settled_devices(app: &std::sync::Arc<crate::state::App>) -> Option<Vec<
     Some(devices)
 }
 
-/// The order the device kinds are placed in.
-fn kind_rank(kind: DeviceKind) -> u8 {
-    match kind {
-        DeviceKind::Motherboard => 0,
-        DeviceKind::LedStrip => 1,
-        DeviceKind::Keyboard => 2,
-        DeviceKind::Mouse => 3,
-        DeviceKind::Microphone => 4,
-        DeviceKind::Headset => 5,
-        DeviceKind::Dram => 6,
-        DeviceKind::Gpu => 7,
-        DeviceKind::Other => 8,
-    }
-}
 
 /// The zone sizes to save for the JARGB headers, by device fingerprint.
 pub fn jargb_zone_sizes(devices: &[DeviceInfo], counts: &JargbCounts) -> BTreeMap<String, BTreeMap<u32, u32>> {
@@ -829,6 +350,83 @@ fn is_jargb_zone(device_name: &str, zone_name: &str) -> bool {
         return false;
     }
     zone.contains("jargb") || zone.contains("argb")
+}
+
+/// Sizes the JARGB headers, saves the sizes, and makes the lights that come of it join the
+/// first-run scene.
+///
+/// The zones the sizing gives LEDs are lights now: they join the hardware map, and the first-run
+/// scene (one group holding every light) takes them, so the owner's headers are lit and not
+/// dark. The devices are read again after the sizing, so the counts are the new ones.
+pub async fn size_headers(
+    app: &std::sync::Arc<crate::state::App>,
+    devices: &[DeviceInfo],
+    counts: &JargbCounts,
+) -> Vec<DeviceInfo> {
+    let sizes = jargb_zone_sizes(devices, counts);
+    if sizes.is_empty() {
+        return devices.to_vec();
+    }
+    for (device, zones) in &sizes {
+        for (zone, leds) in zones {
+            let mut adapter = app.adapter.lock().await;
+            if let Err(e) = adapter
+                .set_zone_size(&canvas_proto::device::DeviceId(device.clone()), *zone, *leds)
+                .await
+            {
+                tracing::warn!(device, zone, leds, error = %e, "could not size the header");
+            }
+        }
+    }
+    {
+        let home = app.store.read().await.home.clone();
+        let mut guard = app.zones.write().await;
+        for (device, zones) in &sizes {
+            guard.entry(device.clone()).or_default().extend(zones.clone());
+        }
+        let file = canvas_proto::config::ZonesFile {
+            schema_version: canvas_proto::config::ZONES_SCHEMA,
+            sizes: guard.clone(),
+        };
+        crate::logging::warn_if_err(
+            "the first run could not save the zone sizes",
+            crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
+        );
+    }
+
+    // Read the devices again, so the scene and the engine see the new LED counts (the list
+    // read above still has the headers at 0 LEDs).
+    let devices = match app.adapter.lock().await.discover().await {
+        Ok(list) => {
+            *app.devices.write().await = list.clone();
+            list
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "could not re-discover after sizing the headers");
+            devices.to_vec()
+        }
+    };
+
+    // The lights that come of the sizing join the hardware map, and the first-run scene takes
+    // them: they were skipped when the scene was made, because the headers had no LEDs then.
+    {
+        let mut store = app.store.write().await;
+        let added = store.sync_lights_from(&devices);
+        if added > 0 {
+            tracing::info!(added, "the sized headers are lights now");
+        }
+        // A migration that is still held (the layouts place a device that has not arrived)
+        // runs now, with the devices the sizing left.
+        store.finish_scenes(&devices);
+        if store.refresh_first_run_scene() {
+            tracing::info!("the first run's scene holds every light");
+            crate::logging::warn_if_err(
+                "the first run could not save the scenes",
+                store.save_scenes(),
+            );
+        }
+    }
+    devices
 }
 
 /// The colour the devices get before the first run's layout is applied.
@@ -898,81 +496,24 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
         }
     }
 
-    // Size the JARGB headers and save the sizes.
-    let sizes = jargb_zone_sizes(&devices, &counts);
-    if !sizes.is_empty() {
-        for (device, zones) in &sizes {
-            for (zone, leds) in zones {
-                let mut adapter = app.adapter.lock().await;
-                if let Err(e) = adapter.set_zone_size(&canvas_proto::device::DeviceId(device.clone()), *zone, *leds).await {
-                    tracing::warn!(device, zone, leds, error = %e, "could not size the header");
-                }
-            }
-        }
-        {
-            let home = app.store.read().await.home.clone();
-            let mut guard = app.zones.write().await;
-            for (device, zones) in &sizes {
-                guard.entry(device.clone()).or_default().extend(zones.clone());
-            }
-            let file = canvas_proto::config::ZonesFile {
-                schema_version: canvas_proto::config::ZONES_SCHEMA,
-                sizes: guard.clone(),
-            };
-            crate::logging::warn_if_err(
-                "the first run could not save the zone sizes",
-                crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
-            );
-        }
-    }
+    // Size the JARGB headers, save the sizes, and make the lights that come of it join the
+    // first-run scene.
+    let _devices = size_headers(app, &devices, &counts).await;
 
-    // Re-discover after sizing, so the layout and the engine see the new LED counts (the
-    // list read above still has the headers at 0 LEDs).
-    let devices = if sizes.is_empty() {
-        devices
-    } else {
-        let rediscovered = app.adapter.lock().await.discover().await;
-        match rediscovered {
-            Ok(list) => {
-                *app.devices.write().await = list.clone();
-                list
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "could not re-discover after sizing the headers");
-                devices
-            }
-        }
-    };
-
-    // Place the devices and activate the first effect. The effect is saved on the layout,
-    // as the activate route does, so the status and the next start both see it.
-    let props = canvas_proto::props::Props::new();
-    let mut layout = build_default_layout(&devices);
-    layout.effect = Some(canvas_proto::layout::ActiveEffect {
-        id: FIRST_RUN_EFFECT.to_string(),
-        props: props.clone(),
-    });
+    // The scene: the store made it from the first device list (on a first run the migration
+    // through `migrate(None, devices)`), and it is already on disk. Nothing is written here:
+    // writing it twice would fight the migration the store owns.
+    //
+    // The default scene plays the first run's effect, so applying the scene puts the lights
+    // on the way the owner expects.
+    let replace = crate::draft::hold_for_replace(app).await;
+    crate::scenes::apply_active_ungated(app, false).await;
+    // The scene is on the lights: the takeover is over, and the guard owes nothing.
+    replace.settle();
     {
-        let mut store = app.store.write().await;
-        store.layouts.active = layout.id.clone();
-        match store.layouts.layouts.iter_mut().find(|l| l.id == layout.id) {
-            Some(existing) => *existing = layout.clone(),
-            None => store.layouts.layouts.push(layout.clone()),
-        }
-        crate::logging::warn_if_err("the first run could not save the layouts", store.save_layouts());
-    }
-    let device_list = app.devices.read().await.clone();
-    // The first run puts an effect of its own on the lights: a draft (only possible when a
-    // completed setup is walked through again) ends here, and a beat cannot start another
-    // until this effect is on.
-    let _replace = crate::draft::hold_for_replace(app).await;
-    app.set_layout(&layout, &device_list);
-    app.stacks.publish_areas(&layout, &device_list);
-
-    if let Err(e) = crate::apply_effect(app, FIRST_RUN_EFFECT, &props).await {
-        tracing::error!(error = %e, effect = FIRST_RUN_EFFECT, "the first run could not activate the effect");
-    } else {
-        tracing::info!(effect = FIRST_RUN_EFFECT, "the first run activated the effect");
+        let store = app.store.read().await;
+        let scene = crate::scenes::active_scene(&store.scenes);
+        tracing::info!(scene = %scene.name, groups = scene.groups.len(), effect = FIRST_RUN_EFFECT, "the first run applied the default scene");
     }
 
     // The zone panel stays open until the user dismisses it.
@@ -990,477 +531,6 @@ async fn run(app: &std::sync::Arc<crate::state::App>) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use canvas_proto::device::DeviceId;
-
-    fn device(name: &str, kind: DeviceKind, leds: u32) -> DeviceInfo {
-        DeviceInfo {
-            id: DeviceId(format!("openrgb:{name}")),
-            name: name.into(),
-            vendor: "test".into(),
-            kind,
-            adapter: "openrgb".into(),
-            adapter_index: 0,
-            serial: name.into(),
-            location: String::new(),
-            zones: vec![ZoneInfo {
-                index: 0,
-                name: "Zone 1".into(),
-                kind: ZoneKind::Linear,
-                led_count: leds,
-                min_leds: 1,
-                max_leds: 512,
-                resizable: true,
-            }],
-            connected: true,
-        }
-    }
-
-    #[test]
-    fn the_ram_sticks_are_vertical_and_side_by_side() {
-        let devices = vec![
-            device("ENE DIMM A", DeviceKind::Dram, 8),
-            device("ENE DIMM B", DeviceKind::Dram, 8),
-        ];
-        let layout = build_default_layout(&devices);
-        assert_eq!(layout.zones.len(), 2);
-        let a = &layout.zones[0];
-        let b = &layout.zones[1];
-        assert!(a.height > a.width, "a RAM zone is vertical");
-        assert!(b.height > b.width, "a RAM zone is vertical");
-        assert_ne!(a.x, b.x, "the RAM sticks are side by side");
-        assert_eq!(a.shape, ZoneShape::Strip);
-    }
-
-    #[test]
-    fn the_keyboard_is_a_point_the_size_of_a_keyboard_and_the_mic_a_small_point() {
-        let mut keyboard = device("ROYUAN", DeviceKind::Keyboard, 1);
-        keyboard.zones[0].kind = ZoneKind::Single;
-        let mut mic = device("Quadcast S", DeviceKind::Microphone, 2);
-        mic.zones[0].kind = ZoneKind::Single;
-        let layout = build_default_layout(&[keyboard, mic]);
-        let keyboard = layout.zones.iter().find(|z| z.device_id.0.contains("ROYUAN")).unwrap();
-        let mic = layout.zones.iter().find(|z| z.device_id.0.contains("Quadcast")).unwrap();
-        assert_eq!(keyboard.shape, ZoneShape::Point);
-        assert_eq!(mic.shape, ZoneShape::Point);
-        assert!(keyboard.width > keyboard.height * 2.0 && keyboard.width < keyboard.height * 5.0);
-        assert!(mic.height > mic.width, "a microphone stands upright");
-        assert!(mic.width <= 20.0 && mic.height <= 32.0);
-    }
-
-    #[test]
-    fn peripherals_do_not_stack_on_one_spot() {
-        let mut mouse = device("Mouse", DeviceKind::Mouse, 1);
-        mouse.zones[0].kind = ZoneKind::Single;
-        let mut mic = device("Mic", DeviceKind::Microphone, 2);
-        mic.zones[0].kind = ZoneKind::Single;
-        let mut headset = device("Headset", DeviceKind::Headset, 2);
-        headset.zones[0].kind = ZoneKind::Single;
-        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
-        keyboard.zones[0].kind = ZoneKind::Single;
-        let layout = build_default_layout(&[mouse, mic, headset, keyboard]);
-        assert_eq!(layout.zones.len(), 4);
-        for (i, a) in layout.zones.iter().enumerate() {
-            for b in layout.zones.iter().skip(i + 1) {
-                let overlap = a.x < b.x + b.width
-                    && b.x < a.x + a.width
-                    && a.y < b.y + b.height
-                    && b.y < a.y + a.height;
-                assert!(!overlap, "{a:?} overlaps {b:?}");
-            }
-        }
-    }
-
-    #[test]
-    fn no_default_zone_overlaps_another_on_a_full_desk() {
-        let mut devices = vec![
-            device("MSI", DeviceKind::Motherboard, 120),
-            device("ENE A", DeviceKind::Dram, 8),
-            device("ENE B", DeviceKind::Dram, 8),
-        ];
-        devices[0].zones = (0..3)
-            .map(|i| ZoneInfo { index: i, name: format!("JARGB{}", i + 1), ..devices[0].zones[0].clone() })
-            .chain((3..6).map(|i| ZoneInfo { index: i, name: format!("CPU Fan {i}"), led_count: 12, ..devices[0].zones[0].clone() }))
-            .collect();
-        let mut mouse = device("Mouse", DeviceKind::Mouse, 1);
-        mouse.zones[0].kind = ZoneKind::Single;
-        let mut mic = device("Mic", DeviceKind::Microphone, 2);
-        mic.zones[0].kind = ZoneKind::Single;
-        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
-        keyboard.zones[0].kind = ZoneKind::Single;
-        devices.extend([mouse, mic, keyboard]);
-        let layout = build_default_layout(&devices);
-        assert_eq!(layout.zones.len(), 3 + 3 + 2 + 3);
-        for (i, a) in layout.zones.iter().enumerate() {
-            assert!(a.x >= 0.0 && a.y >= 0.0 && a.x + a.width <= 320.0 && a.y + a.height <= 200.0, "{a:?} off canvas");
-            for b in layout.zones.iter().skip(i + 1) {
-                let overlap = a.x < b.x + b.width
-                    && b.x < a.x + a.width
-                    && a.y < b.y + b.height
-                    && b.y < a.y + a.height;
-                assert!(!overlap, "{a:?} overlaps {b:?}");
-            }
-        }
-    }
-
-    /// A keyboard that reports one matrix zone of 128 keys, as the ROYUAN adapter does (#312).
-    fn matrix_keyboard() -> DeviceInfo {
-        let mut board = device("ROYUAN MonsGeek Keyboard", DeviceKind::Keyboard, 128);
-        board.id = DeviceId("royuan:3151:4015".into());
-        let map = (0..128).map(Some).collect();
-        board.zones[0] = ZoneInfo {
-            index: 0,
-            name: "Keyboard".into(),
-            kind: ZoneKind::Matrix { width: 22, height: 6, map },
-            led_count: 128,
-            min_leds: 128,
-            max_leds: 128,
-            resizable: false,
-        };
-        board
-    }
-
-    /// A layout with nothing on it, as the tests below build one.
-    fn empty_layout() -> Layout {
-        Layout {
-            id: "default".into(),
-            name: "Default".into(),
-            render_scale: Default::default(),
-            sampling: Default::default(),
-            zones: Vec::new(),
-            effect: None,
-            case_form: Default::default(),
-            landmarks: Vec::new(),
-        }
-    }
-
-    /// The saved layout of an install from before #312: its keyboard was one LED, so the first
-    /// run saved `Point`, and every one of the 128 keys then sampled the whole box.
-    fn layout_saved_as_a_point(shape: ZoneShape) -> (Layout, DeviceInfo) {
-        let board = matrix_keyboard();
-        let mut layout = empty_layout();
-        layout.zones.push(PlacedZone {
-            device_id: board.id.clone(),
-            zone_index: 0,
-            x: 14.0,
-            y: 158.0,
-            width: 110.0,
-            height: 30.0,
-            rotation_deg: 0.0,
-            reversed: false,
-            visible: true,
-            shape,
-            label: None,
-            leds: None,
-            part: None,
-            locked: false,
-        });
-        (layout, board)
-    }
-
-    #[test]
-    fn a_point_saved_for_a_one_led_keyboard_becomes_the_key_grid() {
-        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
-        // Before the repair every key samples the same box: one colour across the keyboard.
-        let flat = canvas_core::geometry::build_plan(&layout, std::slice::from_ref(&board));
-        let leds = &flat.devices[0].zones[0].leds;
-        assert_eq!(leds.len(), 128);
-        assert_eq!(leds.iter().filter(|l| l.bounds == leds[0].bounds).count(), 128, "one rect each");
-
-        assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&board)), 1);
-        assert_eq!(layout.zones[0].shape, ZoneShape::Auto, "the matrix zone's own map");
-
-        // And every key now samples its own key of the grid.
-        let grid = canvas_core::geometry::build_plan(&layout, std::slice::from_ref(&board));
-        let leds = &grid.devices[0].zones[0].leds;
-        assert_eq!(leds.len(), 128);
-        assert_eq!(leds.iter().filter(|l| l.bounds == leds[0].bounds).count(), 1, "a key each");
-        assert_eq!(repair_point_on_matrix(&mut layout, &[board]), 0, "and only once");
-    }
-
-    #[test]
-    fn a_point_on_a_zone_that_is_still_one_led_stays_a_point() {
-        let mut mouse = device("Mouse", DeviceKind::Mouse, 1);
-        mouse.zones[0].kind = ZoneKind::Single;
-        let mut layout = empty_layout();
-        layout.zones.push(PlacedZone {
-            device_id: mouse.id.clone(),
-            zone_index: 0,
-            x: 1.0,
-            y: 1.0,
-            width: 10.0,
-            height: 10.0,
-            rotation_deg: 0.0,
-            reversed: false,
-            visible: true,
-            shape: ZoneShape::Point,
-            label: None,
-            leds: None,
-            part: None,
-            locked: false,
-        });
-        assert_eq!(repair_point_on_matrix(&mut layout, &[mouse]), 0);
-        assert_eq!(layout.zones[0].shape, ZoneShape::Point, "one LED is a point");
-    }
-
-    #[test]
-    fn another_shape_on_a_matrix_zone_is_left_alone() {
-        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Strip);
-        assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&board)), 0);
-        assert_eq!(layout.zones[0].shape, ZoneShape::Strip, "a strip on a matrix is a choice");
-    }
-
-    #[test]
-    fn a_point_on_another_matrix_zone_is_the_owners_choice() {
-        // Only the keyboard's zone changed from one LED to a matrix in #312. A 128-LED panel
-        // that has always been a matrix may show one blob of light on purpose.
-        let mut panel = matrix_keyboard();
-        panel.id = DeviceId("openrgb:panel".into());
-        let (mut layout, _) = layout_saved_as_a_point(ZoneShape::Point);
-        layout.zones[0].device_id = panel.id.clone();
-        assert_eq!(repair_point_on_matrix(&mut layout, std::slice::from_ref(&panel)), 0);
-        assert_eq!(layout.zones[0].shape, ZoneShape::Point, "not the keyboard's zone");
-    }
-
-    #[test]
-    fn the_repair_runs_once_and_records_it() {
-        let dir = std::env::temp_dir().join(format!("canvas-rgb-repairs-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let marker = dir.join("layout-repairs.json");
-        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
-        let pass = repair_point_on_matrix_once(&mut layout, std::slice::from_ref(&board), &marker);
-        assert_eq!((pass.repaired, pass.record), (1, true), "the keyboard is here, so the run counts");
-        assert!(record_repair(&marker), "the run is recorded");
-        assert!(marker.exists());
-        assert_eq!(layout.zones[0].shape, ZoneShape::Auto);
-        // A `Point` the owner picks afterwards is kept: the repair never runs again.
-        layout.zones[0].shape = ZoneShape::Point;
-        let pass = repair_point_on_matrix_once(&mut layout, &[board], &marker);
-        assert_eq!((pass.repaired, pass.record), (0, false));
-        assert_eq!(layout.zones[0].shape, ZoneShape::Point, "a later choice stands");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn a_missing_keyboard_does_not_spend_the_one_repair() {
-        // The first device list after an update can arrive before the keyboard enumerates.
-        let dir = std::env::temp_dir().join(format!("canvas-rgb-repairs-miss-{}", std::process::id()));
-        let _ = std::fs::remove_dir_all(&dir);
-        let marker = dir.join("layout-repairs.json");
-        let (mut layout, board) = layout_saved_as_a_point(ZoneShape::Point);
-        let pass = repair_point_on_matrix_once(&mut layout, &[], &marker);
-        assert_eq!((pass.repaired, pass.record), (0, false), "no keyboard, no run");
-        assert!(!marker.exists(), "and nothing recorded");
-        assert_eq!(layout.zones[0].shape, ZoneShape::Point);
-        // The next list has the keyboard, and the repair happens then.
-        let pass = repair_point_on_matrix_once(&mut layout, &[board], &marker);
-        assert_eq!((pass.repaired, pass.record), (1, true));
-        assert_eq!(layout.zones[0].shape, ZoneShape::Auto);
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn default_shapes_follow_the_device_and_zone() {
-        let zone = |name: &str, kind: ZoneKind, n: u32| ZoneInfo {
-            index: 0,
-            name: name.into(),
-            kind,
-            led_count: n,
-            min_leds: 1,
-            max_leds: 512,
-            resizable: true,
-        };
-        assert_eq!(default_shape(DeviceKind::Dram, &zone("DRAM", ZoneKind::Linear, 8)), ZoneShape::Strip);
-        assert_eq!(default_shape(DeviceKind::Motherboard, &zone("CPU Fan", ZoneKind::Linear, 12)), ZoneShape::Ring);
-        assert_eq!(default_shape(DeviceKind::Motherboard, &zone("JARGB1", ZoneKind::Linear, 120)), ZoneShape::Strip);
-        assert_eq!(default_shape(DeviceKind::Mouse, &zone("Logo", ZoneKind::Single, 1)), ZoneShape::Point);
-        assert_eq!(default_shape(DeviceKind::Microphone, &zone("Mic", ZoneKind::Single, 2)), ZoneShape::Point);
-        let matrix = ZoneKind::Matrix { width: 2, height: 2, map: vec![Some(0), Some(1), Some(2), Some(3)] };
-        assert_eq!(default_shape(DeviceKind::Keyboard, &zone("Keys", matrix, 4)), ZoneShape::Auto);
-        assert_eq!(
-            default_shape(DeviceKind::Keyboard, &zone("Keys", ZoneKind::Linear, 100)),
-            ZoneShape::Grid { columns: 17 }
-        );
-    }
-
-    #[test]
-    fn a_fan_zone_becomes_a_square_ring() {
-        let mut board = device("MSI", DeviceKind::Motherboard, 12);
-        board.zones[0].name = "System Fan".into();
-        let layout = build_default_layout(&[board]);
-        let fan = &layout.zones[0];
-        assert_eq!(fan.shape, ZoneShape::Ring);
-        assert_eq!(fan.width, fan.height);
-    }
-
-    #[test]
-    fn the_board_headers_are_horizontal_strips() {
-        let devices = vec![device("MSI B850 Mystic Light", DeviceKind::Motherboard, 120)];
-        let layout = build_default_layout(&devices);
-        let zone = &layout.zones[0];
-        assert!(zone.width > zone.height, "a board header is a horizontal strip");
-    }
-
-    #[test]
-    fn a_late_device_is_placed_and_the_placed_ones_stay_put() {
-        let mic = device("HyperX Quadcast S", DeviceKind::Microphone, 2);
-        let board = device("MSI MYSTIC LIGHT", DeviceKind::Motherboard, 120);
-        let mut layout = build_default_layout(std::slice::from_ref(&mic));
-        layout.zones[0].x = 200.0; // The mic was moved.
-        let added = place_missing_zones(&mut layout, &[mic.clone(), board.clone()]);
-        assert_eq!(added, board.zones.iter().filter(|z| z.led_count > 0).count());
-        assert!(layout.zones.iter().any(|z| z.device_id == board.id));
-        let mic_zone = layout.zones.iter().find(|z| z.device_id == mic.id).unwrap();
-        assert_eq!(mic_zone.x, 200.0);
-        assert_eq!(place_missing_zones(&mut layout, &[mic, board]), 0);
-    }
-
-    #[test]
-    fn the_default_layout_is_a_case_box_with_devices_in_their_slots() {
-        let mut board = device("MSI", DeviceKind::Motherboard, 120);
-        board.zones = vec![
-            ZoneInfo { index: 0, name: "JARGB 1".into(), ..board.zones[0].clone() },
-            ZoneInfo { index: 1, name: "Front Fan".into(), led_count: 16, ..board.zones[0].clone() },
-        ];
-        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
-        keyboard.zones[0].kind = ZoneKind::Single;
-        let ram = device("ENE DRAM", DeviceKind::Dram, 8);
-        let gpu = device("RTX", DeviceKind::Gpu, 20);
-        let layout = build_default_layout(&[board.clone(), keyboard.clone(), ram.clone(), gpu.clone()]);
-        // The picker is gone: the case is a box, at today's mid-tower size.
-        assert_eq!(layout.case_form, CaseForm::None);
-        let case = layout.landmarks.iter().find(|l| l.kind == PartKind::Case).expect("a case box");
-        assert_eq!((case.x, case.y, case.width, case.height), (99.0, 29.0, 122.0, 120.0));
-        let at = |id: &DeviceId, zone: u32| {
-            layout.zones.iter().find(|z| &z.device_id == id && z.zone_index == zone).unwrap()
-        };
-        // The numbers are the editor's mid-tower table (caseForms.ts): front fan 1, RAM slot 1,
-        // the GPU slot, the top edge and the desk's keyboard place.
-        let fan = at(&board.id, 1);
-        assert_eq!((fan.x, fan.y, fan.width, fan.height, fan.shape), (102.0, 36.0, 30.0, 30.0, ZoneShape::Ring));
-        let header = at(&board.id, 0);
-        assert_eq!((header.x, header.y, header.width, header.height), (109.0, 31.0, 102.0, 4.0));
-        let stick = at(&ram.id, 0);
-        assert_eq!((stick.x, stick.y, stick.width, stick.height), (136.0, 74.0, 6.0, 34.0));
-        let card = at(&gpu.id, 0);
-        assert_eq!((card.x, card.y, card.width, card.height), (136.0, 111.0, 46.0, 14.0));
-        let keys = at(&keyboard.id, 0);
-        assert_eq!((keys.x, keys.y, keys.width, keys.height, keys.shape), (14.0, 158.0, 110.0, 30.0, ZoneShape::Point));
-    }
-
-    #[test]
-    fn every_placed_zone_gets_a_part_and_its_facing() {
-        let mut board = device("MSI", DeviceKind::Motherboard, 120);
-        board.zones = vec![
-            ZoneInfo { index: 0, name: "JARGB 1".into(), ..board.zones[0].clone() },
-            ZoneInfo { index: 1, name: "Front Fan".into(), led_count: 16, ..board.zones[0].clone() },
-            ZoneInfo { index: 2, name: "Front Fan 2".into(), led_count: 16, ..board.zones[0].clone() },
-            ZoneInfo { index: 3, name: "Front Fan 3".into(), led_count: 16, ..board.zones[0].clone() },
-        ];
-        let mut top = device("Top", DeviceKind::Motherboard, 12);
-        top.zones[0].name = "Top Fan".into();
-        let ram = device("ENE DRAM", DeviceKind::Dram, 8);
-        let gpu = device("RTX", DeviceKind::Gpu, 20);
-        let mut keyboard = device("Keys", DeviceKind::Keyboard, 1);
-        keyboard.zones[0].kind = ZoneKind::Single;
-        let layout = build_default_layout(&[board.clone(), top.clone(), ram.clone(), gpu.clone(), keyboard.clone()]);
-        let part = |id: &DeviceId, zone: u32| {
-            layout
-                .zones
-                .iter()
-                .find(|z| &z.device_id == id && z.zone_index == zone)
-                .and_then(|z| z.part)
-                .expect("the zone has a part")
-        };
-        // The fans: the three on the front panel face the viewer, the one on the top
-        // panel (the fourth fan slot) faces up.
-        assert_eq!(part(&board.id, 1), Part { kind: PartKind::Fan, facing: Facing::Viewer, mapped: false });
-        assert_eq!(part(&board.id, 3), Part { kind: PartKind::Fan, facing: Facing::Viewer, mapped: false });
-        assert_eq!(part(&top.id, 0), Part { kind: PartKind::Fan, facing: Facing::Up, mapped: false });
-        // The RAM, the card and the keyboard.
-        assert_eq!(part(&ram.id, 0), Part { kind: PartKind::Ram, facing: Facing::Viewer, mapped: false });
-        assert_eq!(part(&gpu.id, 0), Part { kind: PartKind::Gpu, facing: Facing::Viewer, mapped: false });
-        assert_eq!(
-            part(&keyboard.id, 0),
-            Part { kind: PartKind::Keyboard, facing: Facing::Viewer, mapped: false }
-        );
-        // The header strip runs along the top edge of the case, so it faces up.
-        assert_eq!(
-            part(&board.id, 0),
-            Part { kind: PartKind::Strip, facing: Facing::Up, mapped: false }
-        );
-        // Every part starts unmapped: the owner confirms them in setup.
-        assert!(layout.zones.iter().all(|z| z.part.is_some_and(|p| !p.mapped)));
-    }
-
-    #[test]
-    fn a_zone_with_no_slot_of_its_own_still_gets_a_part() {
-        // More fans than fan slots: the extra ones are staggered on the desk.
-        let mut board = device("MSI", DeviceKind::Motherboard, 12);
-        board.zones = (0..9)
-            .map(|i| ZoneInfo { index: i, name: format!("Fan {i}"), ..board.zones[0].clone() })
-            .collect();
-        let layout = build_default_layout(&[board]);
-        assert_eq!(layout.zones.len(), 9);
-        for z in &layout.zones {
-            let part = z.part.expect("the zone has a part");
-            assert_eq!(part.kind, PartKind::Fan, "{z:?}");
-            assert!(!part.mapped);
-        }
-    }
-
-    #[test]
-    fn a_late_device_gets_a_part_too() {
-        let mic = device("HyperX Quadcast S", DeviceKind::Microphone, 2);
-        let mut layout = build_default_layout(std::slice::from_ref(&mic));
-        assert!(layout.zones[0].part.is_some());
-        let board = device("MSI MYSTIC LIGHT", DeviceKind::Motherboard, 120);
-        place_missing_zones(&mut layout, &[mic, board.clone()]);
-        let late = layout.zones.iter().find(|z| z.device_id == board.id).expect("the board");
-        assert!(late.part.is_some(), "a late device gets a part too");
-    }
-
-    #[test]
-    fn a_late_device_takes_the_next_free_slot_and_not_a_taken_one() {
-        let first = device("ENE A", DeviceKind::Dram, 8);
-        let second = device("ENE B", DeviceKind::Dram, 8);
-        let mut layout = build_default_layout(std::slice::from_ref(&first));
-        let taken = (layout.zones[0].x, layout.zones[0].y);
-        let added = place_missing_zones(&mut layout, &[first, second.clone()]);
-        assert_eq!(added, 1);
-        let late = layout.zones.iter().find(|z| z.device_id == second.id).unwrap();
-        assert_ne!((late.x, late.y), taken, "the second stick has its own slot");
-        assert_eq!(late.shape, ZoneShape::Strip);
-        assert!(late.height > late.width);
-    }
-
-    #[test]
-    fn more_fans_than_fan_slots_do_not_leave_the_canvas_or_stack() {
-        let mut board = device("MSI", DeviceKind::Motherboard, 12);
-        board.zones = (0..9)
-            .map(|i| ZoneInfo { index: i, name: format!("Fan {i}"), ..board.zones[0].clone() })
-            .collect();
-        let layout = build_default_layout(&[board]);
-        assert_eq!(layout.zones.len(), 9);
-        for z in &layout.zones {
-            assert!(z.x >= 0.0 && z.y >= 0.0 && z.x + z.width <= 320.0 && z.y + z.height <= 200.0, "{z:?}");
-        }
-    }
-
-    #[test]
-    fn the_layout_is_deterministic() {
-        let devices = vec![
-            device("B", DeviceKind::Dram, 8),
-            device("A", DeviceKind::Dram, 8),
-        ];
-        let first = build_default_layout(&devices);
-        let second = build_default_layout(&devices);
-        assert_eq!(first.zones.len(), second.zones.len());
-        for (a, b) in first.zones.iter().zip(second.zones.iter()) {
-            assert_eq!(a.device_id, b.device_id);
-            assert_eq!(a.x, b.x);
-            assert_eq!(a.y, b.y);
-        }
-    }
 
     #[test]
     fn counts_are_pulled_out_of_a_log_line() {

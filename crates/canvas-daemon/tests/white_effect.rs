@@ -6,7 +6,6 @@
 //! that device alone. No device, no port.
 
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::props::{PropValue, Props};
 use canvas_proto::traits::{Engine, EngineSettings, FrameSink};
 use canvas_proto::Rgb8;
@@ -65,36 +64,36 @@ fn device(id: &str, leds: u32) -> DeviceInfo {
     }
 }
 
-fn placed(id: &str, x: f32) -> PlacedZone {
-    PlacedZone {
-        device_id: DeviceId(id.to_string()),
-        zone_index: 0,
-        x,
-        y: 0.0,
-        width: 160.0,
-        height: 200.0,
-        rotation_deg: 0.0,
-        reversed: false,
-        visible: true,
-        shape: ZoneShape::Auto,
-        label: None,
-        leds: None,
-        part: None,
-        locked: false,
-    }
-}
-
-fn layout() -> Layout {
-    Layout {
-        id: "test".into(),
-        name: "test".into(),
-        render_scale: RenderScale::P100,
-        sampling: SamplingMode::AreaAverage,
-        zones: vec![placed("fans", 0.0), placed("strip", 160.0)],
-        effect: None,
-        case_form: canvas_proto::layout::CaseForm::None,
-        landmarks: Vec::new(),
-    }
+/// Runs `effect` on both fake devices: they are one light each, in one group (#310).
+fn run_on_both(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::Effect>, props: &Props) {
+    use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
+    let devices = vec![device("fans", 24), device("strip", 60)];
+    let lights: Vec<Light> = devices
+        .iter()
+        .map(|d| Light {
+            id: zone_light_id(&d.id, 0),
+            device_id: d.id.clone(),
+            zone_index: 0,
+            leds: None,
+            name: None,
+            arrangement: Arrangement::Strip,
+            reversed: false,
+        })
+        .collect();
+    let members: Vec<String> = lights.iter().map(|l| l.id.clone()).collect();
+    engine.set_scene(
+        lights,
+        devices,
+        vec![canvas_proto::traits::EngineGroup {
+            id: "all".into(),
+            members,
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+            effect: Some(effect),
+            props: props.clone(),
+        }],
+        false,
+    );
 }
 
 fn at(kelvin: f64) -> Props {
@@ -111,7 +110,6 @@ fn white_writes_the_chosen_white_to_every_led_of_every_sink() {
         brightness: 100,
         warmth: canvas_proto::consts::WARMTH_OFF,
     });
-    engine.set_layout(layout(), vec![device("fans", 24), device("strip", 60)]);
     let sinks = [("fans", 24usize), ("strip", 60usize)].map(|(id, leds)| {
         let sink = Arc::new(RecordingSink::default());
         engine.add_sink(DeviceId(id.into()), sink.clone());
@@ -121,7 +119,7 @@ fn white_writes_the_chosen_white_to_every_led_of_every_sink() {
     for kelvin in [2700.0, 6500.0] {
         let want = Rgb8::from_f32(canvas_effects::color::kelvin_to_led(kelvin as f32));
         let effect = canvas_effects::create("white").expect("White is a built-in effect");
-        engine.set_effect(effect, &at(kelvin));
+        run_on_both(&engine, effect, &at(kelvin));
         for (id, leds, sink) in &sinks {
             let reached = wait_until(Duration::from_secs(20), || {
                 sink.last().is_some_and(|frame| frame.len() == *leds && frame.iter().all(|c| *c == want))
@@ -150,7 +148,6 @@ fn the_warmth_stage_and_white_balance_scale_what_every_sink_gets() {
         brightness: 100,
         warmth: canvas_proto::consts::WARMTH_OFF,
     });
-    engine.set_layout(layout(), vec![device("fans", 24), device("strip", 60)]);
     let sinks = [("fans", 24usize), ("strip", 60usize)].map(|(id, leds)| {
         let sink = Arc::new(RecordingSink::default());
         engine.add_sink(DeviceId(id.into()), sink.clone());
@@ -165,7 +162,7 @@ fn the_warmth_stage_and_white_balance_scale_what_every_sink_gets() {
         }
     };
     let (effect, props) = white_canvas();
-    engine.set_effect(effect, &props);
+    run_on_both(&engine, effect, &props);
     shows([Rgb8::WHITE; 2], "warmth off");
 
     // The warmth stage turns a white canvas into the LED white of that temperature, on

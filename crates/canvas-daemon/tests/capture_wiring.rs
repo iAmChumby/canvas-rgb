@@ -8,7 +8,6 @@ mod common;
 
 use canvas_daemon::state::App;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{Layout, PlacedZone, RenderScale, SamplingMode, ZoneShape};
 use canvas_proto::props::Props;
 use canvas_proto::traits::{
     AudioSpectrum, Engine, EngineSettings, FrameSink, InputSource, ScreenFrame,
@@ -155,12 +154,8 @@ async fn the_capture_survives_an_effect_switch() {
         .expect("the lights' engine was given the capture");
 
     // Two effects in a row, the way the daemon applies them.
-    canvas_daemon::apply_built(&harness.app, solid_effect(), &Props::new())
-        .await
-        .expect("the first effect is applied");
-    canvas_daemon::apply_built(&harness.app, solid_effect(), &Props::new())
-        .await
-        .expect("the second effect is applied");
+    run_on_d0(&harness.app.engine, solid_effect(), &Props::new());
+    run_on_d0(&harness.app.engine, solid_effect(), &Props::new());
 
     let after = harness
         .engine
@@ -272,32 +267,33 @@ fn device(id: &str, leds: u32) -> DeviceInfo {
     }
 }
 
-fn layout() -> Layout {
-    Layout {
-        id: "test".into(),
-        name: "test".into(),
-        render_scale: RenderScale::P100,
-        sampling: SamplingMode::AreaAverage,
-        zones: vec![PlacedZone {
-            device_id: DeviceId("d0".to_string()),
-            zone_index: 0,
-            x: 0.0,
-            y: 0.0,
-            width: 320.0,
-            height: 200.0,
-            rotation_deg: 0.0,
-            reversed: false,
-            visible: true,
-            shape: ZoneShape::Auto,
-            label: None,
-            leds: None,
-            part: None,
-            locked: false,
+
+/// Runs `effect` on device `d0`'s one zone, as one light in one group (#310).
+fn run_on_d0(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::traits::Effect>, props: &Props) {
+    use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
+    let dev = device("d0", 12);
+    let light = Light {
+        id: zone_light_id(&dev.id, 0),
+        device_id: dev.id.clone(),
+        zone_index: 0,
+        leds: None,
+        name: None,
+        arrangement: Arrangement::Strip,
+        reversed: false,
+    };
+    engine.set_scene(
+        vec![light.clone()],
+        vec![dev],
+        vec![canvas_proto::traits::EngineGroup {
+            id: "all".into(),
+            members: vec![light.id],
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+            effect: Some(effect),
+            props: props.clone(),
         }],
-        effect: None,
-        case_form: canvas_proto::layout::CaseForm::None,
-        landmarks: Vec::new(),
-    }
+        false,
+    );
 }
 
 /// A mono sine at `amplitude` (0.1 is -20 dBFS) through the real capture
@@ -384,13 +380,12 @@ async fn an_audio_effect_reads_the_source_and_lights_the_sink() {
     // The daemon's wiring, with the fake source the test can drive.
     app.set_input_source(Some(Arc::new(SpectrumSource::new())));
 
-    engine.set_layout(layout(), vec![device("d0", 12)]);
     let sink = RecordingSink::new();
     engine.add_sink(DeviceId("d0".into()), sink.clone());
 
     // The effect that needs the audio.
     let effect = canvas_effects::create("audio_spectrum").expect("the built-in effect exists");
-    engine.set_effect(effect, &Props::new());
+    run_on_d0(&engine, effect, &Props::new());
 
     assert!(
         wait_until(Duration::from_secs(10), || sink.lit()),

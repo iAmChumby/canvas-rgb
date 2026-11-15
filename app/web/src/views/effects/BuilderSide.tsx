@@ -15,7 +15,7 @@ import type { useStackEdits } from "@/views/effects/useStackEdits";
 import type { useStackLoad } from "@/views/effects/useStackLoad";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
 
@@ -29,7 +29,7 @@ export function BuilderSide({
   schemas,
   effects,
   statuses,
-  layout,
+  canvas,
   devices,
   maskProblem,
   edits,
@@ -52,7 +52,7 @@ export function BuilderSide({
   schemas: ReturnType<typeof useStackLoad>["schemas"];
   effects: EffectSummary[] | null;
   statuses: ReturnType<typeof useStackLoad>["statuses"];
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   maskProblem: string | null;
   edits: ReturnType<typeof useStackEdits>;
@@ -93,7 +93,7 @@ export function BuilderSide({
           schemas={schemas}
           effects={effects}
           statuses={statuses}
-          layout={layout}
+          canvas={canvas}
           devices={devices}
           maskProblem={maskProblem}
           layerProblem={edits.layerProblem}

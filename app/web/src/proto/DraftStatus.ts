@@ -32,7 +32,7 @@ lease_ms: number,
 /**
  * A sentence about the ending, when it needs saying: the prior effect could not be
  * restored (its file was deleted mid-draft), so the lights are black. Absent when the
- * prior, or black for a layout with no effect, went on normally.
+ * prior, or black for a group with no effect, went on normally.
  */
 note?: string, 
 /**

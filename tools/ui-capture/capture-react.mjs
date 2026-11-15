@@ -45,7 +45,7 @@ if (!/^http:\/\/(127\.0\.0\.1|localhost):\d+$/.test(DAEMON_BASE)) {
 }
 
 const VIEWS = [
-  { name: "layout", path: "/" },
+  { name: "scenes", path: "/" },
   { name: "effects", path: "/effects/" },
   { name: "devices", path: "/devices/" },
   { name: "fans", path: "/fans/" },

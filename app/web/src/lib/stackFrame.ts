@@ -4,7 +4,7 @@
 
 import { kelvinToLed } from "@/lib/kelvin";
 import { demoFrameFor, THUMB_FRAMES, THUMB_H, THUMB_W } from "@/lib/thumb-demo";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
@@ -128,7 +128,7 @@ export function blendChannel(mode: StackLayer["blend"], d: number, s: number, a:
 /** One frame of the stack: every visible layer mapped into its area, bottom first. */
 export function composeStack(
   stack: Stack,
-  layout: Layout | null,
+  canvas: GroupCanvas | null,
   seconds: number,
   width: number,
   height: number,
@@ -137,7 +137,7 @@ export function composeStack(
   const acc = new Float32Array(width * height * 3);
   for (const layer of stack.layers) {
     if (!layer.visible || layer.opacity === 0) continue;
-    const bounds = areaBounds(layer.area, layout);
+    const bounds = areaBounds(layer.area, canvas);
     if (!bounds || bounds.width <= 0 || bounds.height <= 0) continue;
     const picture = demoLayerPicture(layer, width, height, seconds);
     // A layer's mask (#256) is another effect's picture over the same box, whose coverage shapes
@@ -184,7 +184,7 @@ export function composeStack(
 }
 
 /** A stack's library tile: the same binary a daemon thumbnail uses, composed in the demo. */
-export function stackThumbnailBytes(stack: Stack, layout: Layout | null, loopSeconds = 2): ArrayBuffer {
+export function stackThumbnailBytes(stack: Stack, canvas: GroupCanvas | null, loopSeconds = 2): ArrayBuffer {
   const frameBytes = THUMB_W * THUMB_H * 3;
   const buffer = new ArrayBuffer(6 + frameBytes * THUMB_FRAMES);
   const view = new DataView(buffer);
@@ -193,7 +193,7 @@ export function stackThumbnailBytes(stack: Stack, layout: Layout | null, loopSec
   view.setUint16(4, THUMB_FRAMES, true);
   const out = new Uint8Array(buffer, 6);
   for (let frame = 0; frame < THUMB_FRAMES; frame++) {
-    const rgb = composeStack(stack, layout, (frame / THUMB_FRAMES) * loopSeconds, THUMB_W, THUMB_H);
+    const rgb = composeStack(stack, canvas, (frame / THUMB_FRAMES) * loopSeconds, THUMB_W, THUMB_H);
     out.set(rgb, frame * frameBytes);
   }
   return buffer;

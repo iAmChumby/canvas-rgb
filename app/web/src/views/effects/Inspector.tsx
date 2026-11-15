@@ -33,7 +33,7 @@ import type { BlendMode } from "@/proto/BlendMode";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { MaskSource } from "@/proto/MaskSource";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
@@ -48,7 +48,7 @@ export function Inspector({
   schemas,
   effects,
   statuses,
-  layout,
+  canvas,
   devices,
   maskProblem,
   layerProblem,
@@ -79,7 +79,7 @@ export function Inspector({
   schemas: Record<string, PropertySchema | null>;
   effects: EffectSummary[] | null;
   statuses: Record<string, StackLayerStatus>;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   maskProblem: string | null;
   layerProblem: string | null;
@@ -199,7 +199,7 @@ export function Inspector({
           <div className="layer-area-text">
             <Monitor size={16} aria-hidden="true" />
             <span className="layer-area-words">
-              <span>{areaName(layer.area, layout, devices)}</span>
+              <span>{areaName(layer.area, canvas, devices)}</span>
               {areaPosition(layer.area) && <span className="mute fig">{areaPosition(layer.area)}</span>}
             </span>
           </div>

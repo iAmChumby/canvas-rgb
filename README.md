@@ -36,14 +36,15 @@ into `%APPDATA%\canvas-rgb\effects\` and the daemon loads it within five seconds
 
 ## Lighting
 
-Every device sits on one layout, so an effect paints across the whole case as a single picture.
-Fourteen effects ship built in. Eleven are the classics, from solid colour to screen ambience and
-audio spectrum. The other three paint the case: Ink Drop unfurls ink through still water, Wet
-Smear drags thick pigment into streaks, and Palette Knife lays colour on in slabs.
+Every device is a light, and a scene's groups each play their own effect, so one group can flow
+across the case while another breathes on the RAM. Fourteen effects ship built in. Eleven are the
+classics, from solid colour to screen ambience and audio spectrum. The other three paint the case:
+Ink Drop unfurls ink through still water, Wet Smear drags thick pigment into streaks, and Palette
+Knife lays colour on in slabs.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/public/shots/layout-dark.webp">
-  <img alt="The canvas-rgb editor: a desk layout with the devices placed on it and an effect running across them." src="site/public/shots/layout-light.webp">
+  <img alt="The canvas-rgb editor: the Scenes page, with a group's lights running an effect." src="site/public/shots/layout-light.webp">
 </picture>
 
 ## Fans

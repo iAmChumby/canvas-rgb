@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
+import { Fragment, useCallback, useEffect, useRef, useState, type CSSProperties, type ReactElement } from "react";
 import {
   ArrowClockwise,
   Cpu,
@@ -10,20 +10,26 @@ import {
   Memory,
   Microphone,
   Mouse,
+  PencilSimple,
   Plugs,
   SlidersHorizontal,
 } from "@phosphor-icons/react";
 import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
+import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
+import { Segmented } from "@/components/Segmented";
+import { Toggle } from "@/components/Toggle";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { DeviceListShape } from "@/components/LoadShapes";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { retryDevices, useSnap } from "@/lib/store";
+import { refreshLights, retryDevices, useSnap } from "@/lib/store";
+import type { LightPatch } from "@/proto/LightPatch";
+import type { LightView } from "@/proto/LightView";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { DeviceKind } from "@/proto/DeviceKind";
 import type { WhiteBalance } from "@/proto/WhiteBalance";
@@ -281,9 +287,103 @@ function WhiteBalanceSection({
   );
 }
 
+/**
+ * One light's row: its name, what it is (a strip or a ring, where the hardware says linear), and
+ * whether it runs the other way. Every change goes straight to the lights route and the list is
+ * read back, so two windows never disagree about a light.
+ */
+function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
+  const light = view.light;
+  const [editing, setEditing] = useState(false);
+  const [name, setName] = useState(view.label);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const patch = async (body: LightPatch) => {
+    setBusy(true);
+    setError(null);
+    try {
+      await api.lights.patch(light.id, body);
+      await refreshLights();
+    } catch (e) {
+      setError(messageOf(e));
+      throw e;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const commitName = () => {
+    const next = name.trim();
+    setEditing(false);
+    if (next === view.label) return;
+    void patch({ name: next || null }).catch(() => setName(view.label));
+  };
+
+  // The hardware says whether a light can be a ring: only a line can be one.
+  const linear = zone.kind.type === "linear";
+
+  return (
+    <div className="rd-light-row" data-busy={busy ? "true" : undefined}>
+      <span className="mute rd-light-key">Light</span>
+      {editing ? (
+        <NameField
+          value={name}
+          label={`Name for ${view.label}`}
+          maxLength={40}
+          disabled={busy}
+          onChange={setName}
+          onEnter={commitName}
+          onEscape={() => {
+            setName(view.label);
+            setEditing(false);
+          }}
+        />
+      ) : (
+        <Button
+          variant="ghost"
+          size="sm"
+          className="rd-light-name"
+          aria-label={`Rename ${view.label}`}
+          disabled={busy}
+          onClick={() => {
+            setName(view.label);
+            setEditing(true);
+          }}
+        >
+          <PencilSimple size={13} aria-hidden="true" />
+          <span className="one-line">{view.label}</span>
+        </Button>
+      )}
+      {linear && (
+        <Segmented<"strip" | "ring">
+          label={`What ${view.label} is`}
+          value={light.arrangement === "ring" ? "ring" : "strip"}
+          options={[
+            { value: "strip", label: "Strip" },
+            { value: "ring", label: "Ring" },
+          ]}
+          onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
+        />
+      )}
+      <span className="rd-light-turn">
+        <span className="mute">Runs the other way</span>
+        <Toggle
+          label="Runs the other way"
+          checked={light.reversed}
+          disabled={busy}
+          onChange={(next) => void patch({ reversed: next }).catch(() => undefined)}
+        />
+      </span>
+      {error && <span className="error-line rd-light-error">{error}</span>}
+    </div>
+  );
+}
+
 export function DevicesView() {
   const devices = useSnap((s) => s.devices);
   const devicesError = useSnap((s) => s.devicesError);
+  const lights = useSnap((s) => s.lights);
   // How many lights the daemon has already counted: the placeholder draws as many cards.
   const counted = useSnap((s) => s.status?.devices_connected ?? 0);
   // How many devices the daemon has, connected or not. The status route knows the total, so the
@@ -495,6 +595,8 @@ export function DevicesView() {
             // The zones of a device that has one are the device's own row; a device with
             // several gets a row of its own and a row for each of its zones.
             const one = d.zones.length === 1 ? d.zones[0] : null;
+            const lightOf = (zoneIndex: number) =>
+              lights?.find((l) => l.light.device_id === d.id && l.light.zone_index === zoneIndex);
             return (
               <section
                 key={d.id}
@@ -517,7 +619,13 @@ export function DevicesView() {
                   {one && <ZoneStrip zone={one} />}
                   {one && (
                     <span className="zone-strip-count">
-                      <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
+                      {one.led_count === 0 ? (
+                        <span className="mute">Not sized</span>
+                      ) : (
+                        <>
+                          <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
+                        </>
+                      )}
                     </span>
                   )}
                   {(() => {
@@ -565,6 +673,10 @@ export function DevicesView() {
                   </span>
                 </div>
 
+                {one && lightOf(one.index) && (
+                  <LightControls view={lightOf(one.index)!} zone={one} />
+                )}
+
                 {d.zones.length === 0 && (
                   <div className="zone-empty rd-zone-empty">
                     <EmptyState
@@ -583,28 +695,37 @@ export function DevicesView() {
 
                 {d.zones.length > 1 &&
                   d.zones.map((z) => (
-                    <div className="rd-zone" key={z.index}>
-                      <span className="zone-strip-name">
-                        <span className="one-line">{z.name}</span>
-                        <span className="mute one-line rd-zone-shape">{zoneShape(z)}</span>
-                      </span>
-                      <ZoneStrip zone={z} />
-                      <span className="zone-strip-count">
-                        <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
-                        {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
-                      </span>
-                      <span className="zone-strip-size">
-                        {z.resizable && (
-                          <Button
-                            size="sm"
-                            variant={walk?.deviceId === d.id && walk.zoneIndex === z.index ? "primary" : "default"}
-                            onClick={() => setWalk({ deviceId: d.id, zoneIndex: z.index })}
-                          >
-                            Size
-                          </Button>
-                        )}
-                      </span>
-                    </div>
+                    <Fragment key={z.index}>
+                      <div className="rd-zone">
+                        <span className="zone-strip-name">
+                          <span className="one-line">{z.name}</span>
+                          <span className="mute one-line rd-zone-shape">{zoneShape(z)}</span>
+                        </span>
+                        <ZoneStrip zone={z} />
+                        <span className="zone-strip-count">
+                          {z.led_count === 0 ? (
+                            <span className="mute">Not sized</span>
+                          ) : (
+                            <>
+                              <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
+                              {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
+                            </>
+                          )}
+                        </span>
+                        <span className="zone-strip-size">
+                          {z.resizable && (
+                            <Button
+                              size="sm"
+                              variant={walk?.deviceId === d.id && walk.zoneIndex === z.index ? "primary" : "default"}
+                              onClick={() => setWalk({ deviceId: d.id, zoneIndex: z.index })}
+                            >
+                              Size
+                            </Button>
+                          )}
+                        </span>
+                      </div>
+                      {lightOf(z.index) && <LightControls view={lightOf(z.index)!} zone={z} />}
+                    </Fragment>
                   ))}
 
                 {/* The walker opens under the row whose Size was pressed, not in a column of

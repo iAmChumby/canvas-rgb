@@ -5,8 +5,9 @@
 
 use canvas_daemon::cli::{
     Cli, CliError, Command, ConfigCommand, DevicesCommand, DiagCommand, EffectsCommand, FansCommand,
-    OutputCommand, PeripheralsCommand,
-};use clap::Parser;
+    OutputCommand, PeripheralsCommand, ScenesCommand,
+};
+use clap::Parser;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -29,6 +30,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Effects(EffectsCommand::Activate(args)) => effects_activate(cli, args),
         Command::Effects(EffectsCommand::Import(args)) => effects_import(cli, args),
         Command::Effects(EffectsCommand::Check(args)) => effects_check(cli, args),
+        Command::Scenes(ScenesCommand::List) => scenes_list(cli),
+        Command::Scenes(ScenesCommand::Set { name }) => scenes_set(cli, name),
         Command::Output(OutputCommand::Pause) => output(cli, "paused"),
         Command::Output(OutputCommand::Resume) => output(cli, "running"),
         Command::Fans(FansCommand::Status) => fans_status(cli),
@@ -71,17 +74,25 @@ fn status(cli: &Cli) -> Result<(), CliError> {
         print_json(cli, &status);
         return Ok(());
     }
+    print!("{}", render_status(&status));
+    Ok(())
+}
 
-    println!("canvas-rgb {}", status.get("version").and_then(|v| v.as_str()).unwrap_or("?"));
-    println!(
+/// The table `canvas-rgb status` prints: the scene that is playing and the effects its groups
+/// play, straight from what the daemon answered.
+fn render_status(status: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "canvas-rgb {}", status.get("version").and_then(|v| v.as_str()).unwrap_or("?"));
+    let _ = writeln!(out,
         "  power        {}",
         status.get("power").and_then(|v| v.as_str()).unwrap_or("?")
     );
-    println!(
+    let _ = writeln!(out,
         "  brightness   {}",
         status.get("brightness").and_then(|v| v.as_u64()).unwrap_or(0)
     );
-    println!(
+    let _ = writeln!(out,
         "  fps          {} target, {} measured",
         status.get("fps_target").and_then(|v| v.as_u64()).unwrap_or(0),
         status
@@ -90,7 +101,7 @@ fn status(cli: &Cli) -> Result<(), CliError> {
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "?".into())
     );
-    println!(
+    let _ = writeln!(out,
         "  frames       {} rendered{}",
         status.get("frames_rendered").and_then(|v| v.as_u64()).unwrap_or(0),
         if status.get("parked").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -99,33 +110,52 @@ fn status(cli: &Cli) -> Result<(), CliError> {
             ""
         }
     );
-    println!(
+    let _ = writeln!(out,
         "  devices      {} connected",
         status.get("devices_connected").and_then(|v| v.as_u64()).unwrap_or(0)
     );
-    println!(
+    let _ = writeln!(out,
         "  preview      {} subscriber(s)",
         status.get("preview_subscribers").and_then(|v| v.as_u64()).unwrap_or(0)
     );
-    println!(
+    let _ = writeln!(out,
         "  openrgb      {}",
         status.get("openrgb").and_then(|v| v.as_str()).unwrap_or("?")
     );
     let service = status.get("service").and_then(|v| v.as_str()).unwrap_or("?");
-    println!("  service      {service}");
+    let _ = writeln!(out, "  service      {service}");
     if let Some(down) = status.get("service_down_ms").and_then(|v| v.as_u64()) {
-        println!("               down for {down} ms");
+        let _ = writeln!(out, "               down for {down} ms");
     }
-    println!(
-        "  layout       {}",
-        status.get("active_layout").and_then(|v| v.as_str()).unwrap_or("none")
-    );
-    println!(
-        "  effect       {}",
-        status.get("active_effect").and_then(|v| v.as_str()).unwrap_or("none")
+    // The active scene: its name, and its id beside it.
+    let scene = status.get("active_scene");
+    let scene_name = scene
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let scene_id = scene
+        .and_then(|s| s.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if scene_id.is_empty() {
+        let _ = writeln!(out, "  scene        {scene_name}");
+    } else {
+        let _ = writeln!(out, "  scene        {scene_name} ({scene_id})");
+    }
+    // The effects the scene's groups play, one entry per distinct effect, in the scene's order:
+    // the same list `Status.active_effects` carries.
+    let effects: Vec<&str> = status
+        .get("active_effects")
+        .and_then(|v| v.as_array())
+        .map(|list| list.iter().filter_map(|e| e.as_str()).collect())
+        .unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "  effects      {}",
+        if effects.is_empty() { "none".to_string() } else { effects.join(", ") }
     );
     if status.get("show_zone_panel").and_then(|v| v.as_bool()).unwrap_or(false) {
-        println!("  zone panel   open (size your ARGB headers)");
+        let _ = writeln!(out, "  zone panel   open (size your ARGB headers)");
     }
 
     // The conflict banner.
@@ -142,14 +172,14 @@ fn status(cli: &Cli) -> Result<(), CliError> {
                 if service {
                     parts.push(format!("{} service", canvas_proto::consts::SIGNALRGB_SERVICE));
                 }
-                println!(
+                let _ = writeln!(out,
                     "  CONFLICT     SignalRGB is running ({}): it will fight canvas-rgb for the devices",
                     parts.join(", ")
                 );
             }
         }
     }
-    Ok(())
+    out
 }
 
 /// `canvas-rgb devices list`.
@@ -238,7 +268,14 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
     let schema = detail.get("schema").cloned().unwrap_or(serde_json::Value::Null);
     let properties = schema.get("properties").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-    let raw = canvas_daemon::cli::parse_activate_props(&args.props)?;
+    // The groups the effect plays on, by name: with none, every group of the active scene
+    // plays it. The `--group` pairs are taken out of the trailing list, so the flag works
+    // before and after the properties.
+    let (from_props, prop_args) = canvas_daemon::cli::split_groups(&args.props);
+    let mut groups = args.groups.clone();
+    groups.extend(from_props);
+
+    let raw = canvas_daemon::cli::parse_activate_props(&prop_args)?;
     let mut props = serde_json::Map::new();
     for (key, value) in raw {
         let Some(property) = properties.iter().find(|p| p.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
@@ -255,7 +292,12 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
         props.insert(key, serde_json::to_value(parsed).map_err(|e| CliError::Other(e.to_string()))?);
     }
 
-    let body = serde_json::json!({ "props": props }).to_string();
+    let mut body = serde_json::Map::new();
+    body.insert("props".into(), serde_json::Value::Object(props));
+    if !groups.is_empty() {
+        body.insert("groups".into(), serde_json::json!(groups));
+    }
+    let body = serde_json::Value::Object(body).to_string();
     let answer = client.request(
         "POST",
         &format!("{}/{}/activate", canvas_proto::api::routes::EFFECTS, args.effect),
@@ -265,6 +307,26 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
         print_json(cli, &answer);
     } else {
         println!("activated {}", args.effect);
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes list`.
+fn scenes_list(cli: &Cli) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_list(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes set <name>`.
+fn scenes_set(cli: &Cli, name: &str) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_set(&client, name, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
     }
     Ok(())
 }
@@ -722,4 +784,43 @@ fn update(cli: &Cli, args: &canvas_daemon::cli::UpdateArgs) -> Result<(), CliErr
         println!("the service started the update to {version}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_status;
+
+    /// The scene's name and the effects its groups play: the two fields the daemon fills now
+    /// (`Status.active_scene`, `Status.active_effects`). The table used to print a layout and an
+    /// effect that were always "none" (review of #337).
+    #[test]
+    fn the_status_table_names_the_scene_and_the_effects_it_plays() {
+        let status = serde_json::json!({
+            "version": "0.14.0",
+            "active_scene": { "id": "main", "name": "Evening" },
+            "active_effects": ["spiral", "solid"],
+            "show_zone_panel": false,
+            "conflicts": [],
+        });
+
+        let text = render_status(&status);
+
+        assert!(text.contains("  scene        Evening (main)\n"), "{text}");
+        assert!(text.contains("  effects      spiral, solid\n"), "{text}");
+        assert!(!text.to_lowercase().contains("layout"), "the word layout is gone:\n{text}");
+    }
+
+    /// Nothing playing is said in words, not with an empty gap.
+    #[test]
+    fn the_status_table_says_none_when_the_scene_plays_nothing() {
+        let status = serde_json::json!({
+            "version": "0.14.0",
+            "active_scene": { "id": "main", "name": "Evening" },
+            "active_effects": [],
+        });
+
+        let text = render_status(&status);
+
+        assert!(text.contains("  effects      none\n"), "{text}");
+    }
 }

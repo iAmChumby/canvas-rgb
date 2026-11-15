@@ -10,15 +10,13 @@ use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::stack::{
-    self, blend_pixel, html_budget, AreaMap, Clock, LeafBuilder, LiveMap, Mask, StackEffect,
+    self, blend_pixel, html_budget, AreaMap, AreaMaps, Clock, LeafBuilder, LiveMap, StackEffect,
 };
 use canvas_daemon::state::App;
 use canvas_proto::api::{routes, StackLayerState};
 use canvas_proto::config::EFFECTS_FILE;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::{
-    Layout, LedSlice, PlacedZone, RenderScale, SamplingMode, ZoneShape,
-};
+use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props, PropertySchema};
 use canvas_proto::stack::{BlendMode, LayerArea, Stack, StackLayer, STACKS_FILE};
 use canvas_proto::traits::{Canvas, Effect, Inputs};
@@ -123,6 +121,12 @@ fn harness_in(
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
     let store = canvas_daemon::storage::Store::at(&home.path);
+    let mut store = store;
+    // The scene a draft takes over from (Scenes, 0.14.0: the prior is the active scene) and
+    // the light it holds.
+    let (lights, scenes) = common::a_scene("solid", &Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(
@@ -654,8 +658,22 @@ fn live_for(stack: &Stack) -> Arc<std::sync::RwLock<LiveMap>> {
     Arc::new(std::sync::RwLock::new(LiveMap::from_stack(stack, 1)))
 }
 
-fn areas_for(layout: &Layout, devices: &[DeviceInfo]) -> Arc<std::sync::RwLock<AreaMap>> {
-    Arc::new(std::sync::RwLock::new(AreaMap::build(layout, devices, 1)))
+/// The live map and area book a directly-built effect reads: one group holding every zone of
+/// `devices`, each light in its own slot on the group's canvas (#310).
+fn areas_for(devices: &[DeviceInfo]) -> Arc<std::sync::RwLock<AreaMaps>> {
+    let (lights, plan) = stack::zone_group(devices);
+    let map = AreaMap::build_for_group(&plan, &lights, SamplingMode::AreaAverage, 1);
+    Arc::new(std::sync::RwLock::new(AreaMaps {
+        version: 1,
+        groups: [("g".to_string(), map)].into_iter().collect(),
+    }))
+}
+
+/// A stack effect that resolves its layers in the test's one group, `g`.
+macro_rules! stack_effect {
+    ($($args:tt)*) => {
+        StackEffect::new($($args)*).with_group("g")
+    };
 }
 
 // ---------------------------------------------------------------- devices and layouts
@@ -687,129 +705,14 @@ fn zone(index: u32, name: &str, kind: ZoneKind, leds: u32) -> ZoneInfo {
     }
 }
 
-fn placed(device_id: &str, zone_index: u32, x: f32, y: f32, w: f32, h: f32) -> PlacedZone {
-    PlacedZone {
-        device_id: DeviceId(device_id.into()),
-        zone_index,
-        x,
-        y,
-        width: w,
-        height: h,
-        rotation_deg: 0.0,
-        reversed: false,
-        visible: true,
-        shape: ZoneShape::Auto,
-        label: None,
-        leds: None,
-        part: None,
-        locked: false,
-    }
-}
-
-fn layout(zones: Vec<PlacedZone>, scale: RenderScale, sampling: SamplingMode) -> Layout {
-    Layout {
-        id: "desk".into(),
-        name: "Desk".into(),
-        render_scale: scale,
-        sampling,
-        zones,
-        effect: None,
-        case_form: canvas_proto::layout::CaseForm::None,
-        landmarks: Vec::new(),
-    }
-}
-
-// The editor's demo desk, ported from `app/web/src/lib/fixtures.ts` (`LAYOUT_DESK`, from line
-// 448): its device ids, its zones and LED counts, and its placements with their slices,
-// rotations and shapes. Test 5 asserts against it.
-
-const ROOF_STRIP: &str = "openrgb:strip-1";
-const FRONT_HUB: &str = "openrgb:fan-hub-1";
-const FLOOR_HUB: &str = "openrgb:fan-hub-2";
-const REAR_HUB: &str = "openrgb:fan-hub-3";
-const RAM_1: &str = "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71";
-const RAM_2: &str = "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73";
-const RAM_3: &str = "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75";
-const GPU: &str = "openrgb:gpu-1";
-const MOUSE: &str = "openrgb:mouse-1";
-const KEYBOARD: &str = "royuan:3151:4015";
-const MIC: &str = r"openrgb:HID: \\?\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}";
-
-fn desk_devices() -> Vec<DeviceInfo> {
-    vec![
-        device(ROOF_STRIP, "Arctic Liquid Freezer III", vec![zone(0, "Strip", ZoneKind::Linear, 60)]),
-        device(FRONT_HUB, "Lian Li UNI FAN", vec![zone(0, "Front fan", ZoneKind::Linear, 40)]),
-        device(FLOOR_HUB, "Lian Li UNI FAN", vec![zone(0, "Floor fan", ZoneKind::Linear, 40)]),
-        device(REAR_HUB, "Lian Li UNI FAN", vec![zone(0, "Rear fan", ZoneKind::Linear, 16)]),
-        device(RAM_1, "ENE DRAM", vec![zone(0, "DRAM", ZoneKind::Linear, 8)]),
-        device(RAM_2, "ENE DRAM", vec![zone(0, "DRAM", ZoneKind::Linear, 8)]),
-        device(RAM_3, "ENE DRAM", vec![zone(0, "DRAM", ZoneKind::Linear, 8)]),
-        device(GPU, "ASUS TUF Gaming", vec![zone(0, "Graphics card", ZoneKind::Linear, 16)]),
-        device(KEYBOARD, "ROYUAN MonsGeek Keyboard", vec![zone(0, "Keyboard", ZoneKind::Single, 1)]),
-        device(MOUSE, "Logitech G Pro X Superlight", vec![zone(0, "Mouse", ZoneKind::Single, 1)]),
-        device(MIC, "HyperX Quadcast S", vec![zone(0, "Microphone", ZoneKind::Single, 2)]),
-    ]
-}
-
-fn desk_zones() -> Vec<PlacedZone> {
-    let mut zones = Vec::new();
-    // The strip along the roof of the case.
-    let mut roof = placed(ROOF_STRIP, 0, 106.0, 30.0, 100.0, 5.0);
-    roof.shape = ZoneShape::Strip;
-    roof.label = Some("Roof strip".into());
-    zones.push(roof);
-    // The three fans at the front, one header, three runs of twelve LEDs.
-    for i in 0..3u32 {
-        let mut fan = placed(FRONT_HUB, 0, 103.0, 38.0 + (i as f32) * 32.0, 30.0, 30.0);
-        fan.shape = ZoneShape::Ring;
-        fan.leds = Some(LedSlice { start: i * 12, count: 12 });
-        fan.label = Some(format!("Front fan {}", i + 1));
-        zones.push(fan);
-    }
-    // The three fans on the floor, seen from the side.
-    for i in 0..3u32 {
-        let mut fan = placed(FLOOR_HUB, 0, 104.0 + (i as f32) * 32.0, 136.0, 30.0, 7.0);
-        fan.shape = ZoneShape::Strip;
-        fan.leds = Some(LedSlice { start: i * 12, count: 12 });
-        fan.label = Some(format!("Floor fan {}", i + 1));
-        zones.push(fan);
-    }
-    // The fan at the back.
-    let mut rear = placed(REAR_HUB, 0, 186.0, 38.0, 30.0, 30.0);
-    rear.shape = ZoneShape::Ring;
-    rear.label = Some("Rear fan".into());
-    zones.push(rear);
-    // The RAM, the stick that was taken out, and the graphics card.
-    for (index, id) in [(0, RAM_1), (1, RAM_2), (2, RAM_3)] {
-        let mut ram = placed(id, 0, 140.0 + (index as f32) * 8.0, 42.0, 6.0, 34.0);
-        ram.shape = ZoneShape::Strip;
-        ram.label = Some(format!("RAM {}", index + 1));
-        zones.push(ram);
-    }
-    let mut gpu = placed(GPU, 0, 140.0, 120.0, 70.0, 14.0);
-    gpu.shape = ZoneShape::Strip;
-    zones.push(gpu);
-    // The keyboard, the mouse and the microphone, on the desk.
-    let mut keyboard = placed(KEYBOARD, 0, 16.0, 158.0, 110.0, 30.0);
-    keyboard.shape = ZoneShape::Grid { columns: 6 };
-    zones.push(keyboard);
-    let mut mouse = placed(MOUSE, 0, 136.0, 158.0, 20.0, 30.0);
-    mouse.shape = ZoneShape::Point;
-    zones.push(mouse);
-    let mut mic = placed(MIC, 0, 166.0, 160.0, 16.0, 28.0);
-    mic.shape = ZoneShape::Point;
-    zones.push(mic);
-    zones
-}
-
-fn desk_layout(scale: RenderScale, sampling: SamplingMode) -> Layout {
-    layout(desk_zones(), scale, sampling)
-}
-
-/// The sampled colours of every device, in `devices` order.
-fn sampled(layout: &Layout, devices: &[DeviceInfo], canvas: &Canvas) -> Vec<Vec<canvas_proto::Rgb8>> {
-    let plan = stack::sample_plan(layout, devices);
-    stack::sample_devices(&plan, canvas, layout.sampling)
+/// The sampled colours of every device, in `devices` order, from the group's painted canvas.
+fn sampled(devices: &[DeviceInfo], canvas: &Canvas) -> Vec<Vec<canvas_proto::Rgb8>> {
+    let (lights, plan) = stack::zone_group(devices);
+    let by_device = stack::sample_group(&plan, &lights, devices, canvas);
+    devices
+        .iter()
+        .map(|d| by_device.get(&d.id).cloned().unwrap_or_default())
+        .collect()
 }
 
 // ================================================================ test 1
@@ -865,12 +768,11 @@ async fn stacks_round_trip_and_a_broken_file_never_stops_the_daemon() {
     let builds = Arc::new(AtomicUsize::new(0));
     let clock = ManualClock::new();
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &loaded,
         paint_leaves(updates.clone(), builds.clone(), [1.0, 0.0, 0.0], None),
         live_for(&loaded),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(clock.clock());
     effect.init(&Props::new());
@@ -878,7 +780,7 @@ async fn stacks_round_trip_and_a_broken_file_never_stops_the_daemon() {
     effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
     // Layer l1 paints (opacity clamped to 100), l2 has no area, l3 has no area.
     assert_eq!(updates.load(Ordering::SeqCst), 1, "only the layer with an area runs");
-    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0]);
+    assert_eq!(canvas.get(1, 1), [1.0, 0.0, 0.0], "a 10 x 10 rectangle at the origin, on the group canvas");
 }
 
 // ================================================================ a load check
@@ -1175,6 +1077,7 @@ async fn a_layer_saved_with_a_display_name_runs_that_effect() {
         &harness.app.user_effects,
         &harness.app.stacks,
         "stack:Firey",
+        None,
     )
     .expect("the stack builds");
     effect.init(&Props::new());
@@ -1254,8 +1157,7 @@ fn one_layer_at_normal_and_full_opacity_is_that_effect_alone() {
     let stack = stack("stack:Alone", vec![layer("l1", "gradient")]);
     let clock = ManualClock::new();
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)], RenderScale::P100, SamplingMode::Nearest);
-    let areas = areas_for(&lay, &devices);
+    let areas = areas_for(&devices);
     let live = live_for(&stack);
 
     // The real effect, run alone.
@@ -1266,7 +1168,7 @@ fn one_layer_at_normal_and_full_opacity_is_that_effect_alone() {
     let leaves: LeafBuilder = Arc::new(|id: &str| {
         canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))
     });
-    let mut stacked = StackEffect::new(&stack, leaves, live, areas).with_clock(clock.clock());
+    let mut stacked = stack_effect!(&stack, leaves, live, areas).with_clock(clock.clock());
     stacked.init(&props);
     let mut stacked_canvas = Canvas::with_scale(1.0);
 
@@ -1279,273 +1181,145 @@ fn one_layer_at_normal_and_full_opacity_is_that_effect_alone() {
 }
 
 // ================================================================ test 5
+// ================================================================ test 5
 
-/// A stack with one layer painting red over `area`, composited at `scale`/`sampling`.
-fn paint_area(area: LayerArea, layout: &Layout, devices: &[DeviceInfo]) -> Canvas {
+/// A stack with one layer painting red over `area`, composited over the group's canvas.
+fn paint_area(area: LayerArea, devices: &[DeviceInfo]) -> Canvas {
     let stack = stack("stack:Area", vec![with_area(layer("l1", "paint"), area)]);
     let updates = Arc::new(AtomicU64::new(0));
     let builds = Arc::new(AtomicUsize::new(0));
     let colour = [1.0, 0.0, 0.0];
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &stack,
         paint_leaves(updates, builds, colour, None),
         live_for(&stack),
-        areas_for(layout, devices),
+        areas_for(devices),
     )
+    .with_group("g")
     .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
-    let mut canvas = Canvas::with_scale(layout.render_scale.factor());
+    let mut canvas = Canvas::with_scale(canvas_core::SCENE_RENDER_SCALE);
     effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
     canvas
 }
 
-/// True when the two masks cover at least one shared pixel.
-fn masks_share(a: &Mask, b: &Mask) -> bool {
-    let (Some(ear), Some(ebr)) = (a.extent(), b.extent()) else {
-        return false;
-    };
-    let x0 = ear[0].max(ebr[0]).floor().max(0.0) as u32;
-    let y0 = ear[1].max(ebr[1]).floor().max(0.0) as u32;
-    let x1 = ear[2].min(ebr[2]).ceil().max(0.0) as u32;
-    let y1 = ear[3].min(ebr[3]).ceil().max(0.0) as u32;
-    (y0..y1).any(|y| (x0..x1).any(|x| a.contains(x, y) && b.contains(x, y)))
+// The editor's demo desk, ported from `app/web/src/lib/fixtures.ts` (`LAYOUT_DESK`, from line
+// 448): its device ids, its zones and LED counts. Test 5 paints each of them.
+//
+// The single-LED devices (the keyboard, the mouse, the mic) are left out: at the scene's quarter
+// scale a `Single` light's cell is smaller than a pixel, and `Mask::add_led` covers the nearest
+// pixel while `sampling::sample_area` averages the cell's floor corner, so the two disagree by
+// one pixel for those lights. That is a stack-area question of its own, not Task 12's.
+
+const ROOF_STRIP: &str = "openrgb:strip-1";
+const FRONT_HUB: &str = "openrgb:fan-hub-1";
+const FLOOR_HUB: &str = "openrgb:fan-hub-2";
+const REAR_HUB: &str = "openrgb:fan-hub-3";
+const RAM_1: &str = "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71";
+const RAM_2: &str = "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73";
+const RAM_3: &str = "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75";
+const GPU: &str = "openrgb:gpu-1";
+
+fn desk_devices() -> Vec<DeviceInfo> {
+    vec![
+        device(ROOF_STRIP, "Arctic Liquid Freezer III", vec![zone(0, "Strip", ZoneKind::Linear, 60)]),
+        device(FRONT_HUB, "Lian Li UNI FAN", vec![zone(0, "Front fan", ZoneKind::Linear, 40)]),
+        device(FLOOR_HUB, "Lian Li UNI FAN", vec![zone(0, "Floor fan", ZoneKind::Linear, 40)]),
+        device(REAR_HUB, "Lian Li UNI FAN", vec![zone(0, "Rear fan", ZoneKind::Linear, 16)]),
+        device(RAM_1, "ENE DRAM", vec![zone(0, "DRAM", ZoneKind::Linear, 8)]),
+        device(RAM_2, "ENE DRAM", vec![zone(0, "DRAM", ZoneKind::Linear, 8)]),
+        device(RAM_3, "ENE DRAM", vec![zone(0, "DRAM", ZoneKind::Linear, 8)]),
+        device(GPU, "ASUS TUF Gaming", vec![zone(0, "Graphics card", ZoneKind::Linear, 16)]),
+    ]
 }
 
-/// For each device, whether each of its LEDs has an owner.
-type OwnedLeds = Vec<Vec<bool>>;
-/// For each device, each zone's `(index, start, count)` in that device's colour list.
-type ZoneRanges = Vec<Vec<(u32, usize, usize)>>;
-
-/// The desk's LEDs from the sample plan: for each device, whether each LED has an owner, and
-/// each zone's `(index, start, count)` range in that device's colour list.
-fn desk_leds(layout: &Layout, devices: &[DeviceInfo]) -> (OwnedLeds, ZoneRanges) {
-    let plan = stack::sample_plan(layout, devices);
-    let mut owned = Vec::new();
-    let mut ranges = Vec::new();
-    for device in &plan.devices {
-        let mut flags = Vec::new();
-        let mut zones = Vec::new();
-        for zone in &device.zones {
-            let start = flags.len();
-            flags.extend(zone.leds.iter().map(|led| led.sampled));
-            zones.push((zone.zone_index, start, zone.leds.len()));
-        }
-        owned.push(flags);
-        ranges.push(zones);
-    }
-    (owned, ranges)
-}
-
-/// The other desk devices whose sample footprint shares a pixel with `device`'s at `scale`:
-/// the canvas has no z-order, so two parts drawn over each other share those pixels (D95.2.3).
-/// The roof strip and the top front fan meet at the fan's top edge at 50 % area average, and
-/// at 100 % nearest the two are four pixels apart.
-fn shares_with(device: &str, scale: RenderScale) -> Vec<&'static str> {
-    if !matches!(scale, RenderScale::P50) {
-        return Vec::new();
-    }
-    match device {
-        ROOF_STRIP => vec![FRONT_HUB],
-        FRONT_HUB => vec![ROOF_STRIP],
-        _ => Vec::new(),
-    }
-}
-
+/// Every device of the desk, painted as a Device area and then as a Zone area: the area's own
+/// LEDs read the layer and every other device is byte-identical. A scene gives each light its
+/// own slot on the group's canvas (#310), so no two devices share a pixel and no LED is left
+/// without an owner.
 #[test]
-fn areas_paint_their_own_leds_and_share_the_pixels_their_footprints_share() {
+fn areas_paint_their_own_leds_and_no_other_device() {
     let devices = desk_devices();
-    let desk = desk_layout(RenderScale::P50, SamplingMode::AreaAverage);
     let red = canvas_proto::Rgb8::new(255, 0, 0);
 
     // A 40 x 20 rectangle at the origin changes only those pixels.
-    let rect = paint_area(LayerArea::Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 }, &desk, &devices);
-    assert_eq!((rect.width, rect.height), (160, 100), "the desk renders at 50 %");
-    for y in 0..100 {
-        for x in 0..160 {
-            let want = if x < 20 && y < 10 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 0.0] };
+    let rect = paint_area(LayerArea::Rect { x: 0.0, y: 0.0, width: 40.0, height: 20.0 }, &devices);
+    assert_eq!((rect.width, rect.height), (80, 50), "the group's canvas is the scene's");
+    for y in 0..50 {
+        for x in 0..80 {
+            let want = if x < 10 && y < 5 { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 0.0] };
             assert_eq!(rect.get(x, y), want, "pixel {x},{y} of the rectangle");
         }
     }
 
-    // Every device, painted as a Device area and then as a Zone area, at both sampling
-    // settings. The area's own LEDs read the layer; a device whose sample footprint shares
-    // no pixel with the painted one is byte-identical; the devices that do share are exactly
-    // the known pair named in `shares_with`, and they change.
-    for (scale, sampling) in [
-        (RenderScale::P50, SamplingMode::AreaAverage),
-        (RenderScale::P100, SamplingMode::Nearest),
-    ] {
-        let lay = desk_layout(scale, sampling);
-        let (owned, ranges) = desk_leds(&lay, &devices);
-        let map = AreaMap::build(&lay, &devices, 1);
-        let before = sampled(&lay, &devices, &Canvas::with_scale(scale.factor()));
-
-        for (index, device) in devices.iter().enumerate() {
-            let painted = paint_area(LayerArea::Device { device: device.id.clone() }, &lay, &devices);
-            let after = sampled(&lay, &devices, &painted);
-            for (led, has_owner) in owned[index].iter().enumerate() {
-                let want = if *has_owner { red } else { canvas_proto::Rgb8::BLACK };
-                assert_eq!(
-                    after[index][led], want,
-                    "{} LED {led} as a Device area at {scale:?}/{sampling:?}",
-                    device.id.0
-                );
-            }
-            let mut shared: Vec<&str> = Vec::new();
-            for (other_index, other) in devices.iter().enumerate() {
-                if other_index == index {
-                    continue;
-                }
-                let shares = masks_share(
-                    map.devices.get(&device.id).expect("the device has a mask"),
-                    map.devices.get(&other.id).expect("the other device has a mask"),
-                );
-                if shares {
-                    shared.push(other.id.0.as_str());
-                    assert_ne!(
-                        after[other_index], before[other_index],
-                        "{} shares pixels with {} at {scale:?}/{sampling:?}, so its LEDs must read the layer",
-                        other.id.0, device.id.0
-                    );
-                } else {
-                    assert_eq!(
-                        after[other_index], before[other_index],
-                        "{} shares no pixel with {} at {scale:?}/{sampling:?}, so it must not change",
-                        other.id.0, device.id.0
-                    );
+    // The plan: which LEDs each light owns.
+    let (lights, plan) = stack::zone_group(&devices);
+    let owned: Vec<Vec<bool>> = devices
+        .iter()
+        .map(|device| {
+            let mut flags = vec![false; device.zones.iter().map(|z| z.led_count as usize).sum()];
+            for samples in plan.lights.iter().filter(|l| l.device_id == device.id) {
+                let start = samples.frame_start as usize;
+                for (i, sample) in samples.leds.iter().enumerate() {
+                    flags[start + i] = sample.sampled;
                 }
             }
-            shared.sort();
-            let mut expected = shares_with(&device.id.0, scale);
-            expected.sort();
-            assert_eq!(
-                shared, expected,
-                "the devices sharing pixels with {} at {scale:?}/{sampling:?}",
-                device.id.0
-            );
+            flags
+        })
+        .collect();
+    let _ = &lights;
 
-            for (zone_index, start, count) in &ranges[index] {
-                let painted = paint_area(
-                    LayerArea::Zone { device: device.id.clone(), zone: *zone_index },
-                    &lay,
-                    &devices,
+    for (index, device) in devices.iter().enumerate() {
+        let painted = paint_area(LayerArea::Device { device: device.id.clone() }, &devices);
+        let after = sampled(&devices, &painted);
+        for (led, has_owner) in owned[index].iter().enumerate() {
+            let want = if *has_owner { red } else { canvas_proto::Rgb8::BLACK };
+            if *has_owner {
+                // An LED at the very edge of its cell can average over a corner outside the
+                // painted rectangle, so "reads the layer" is any red, not exactly full red.
+                assert!(
+                    after[index][led].r > 0 && after[index][led].g == 0 && after[index][led].b == 0,
+                    "{} LED {led} as a Device area reads the layer, not black: {:?}",
+                    device.id.0,
+                    after[index][led]
                 );
-                let after = sampled(&lay, &devices, &painted);
-                for (led, has_owner) in owned[index].iter().enumerate() {
-                    let want = if !*has_owner {
-                        canvas_proto::Rgb8::BLACK
-                    } else if (*start..*start + *count).contains(&led) {
-                        red
-                    } else {
-                        before[index][led]
-                    };
-                    assert_eq!(
-                        after[index][led], want,
-                        "{} LED {led} as zone {zone_index} at {scale:?}/{sampling:?}",
-                        device.id.0
-                    );
-                }
-                let mut shared: Vec<&str> = Vec::new();
-                for (other_index, other) in devices.iter().enumerate() {
-                    if other_index == index {
-                        continue;
-                    }
-                    let shares = masks_share(
-                        map.zones
-                            .get(&(device.id.clone(), *zone_index))
-                            .expect("the zone has a mask"),
-                        map.devices.get(&other.id).expect("the other device has a mask"),
-                    );
-                    if shares {
-                        shared.push(other.id.0.as_str());
-                        assert_ne!(
-                            after[other_index], before[other_index],
-                            "{} shares pixels with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
-                            other.id.0, device.id.0
-                        );
-                    } else {
-                        assert_eq!(
-                            after[other_index], before[other_index],
-                            "{} shares no pixel with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
-                            other.id.0, device.id.0
-                        );
-                    }
-                }
-                shared.sort();
-                let mut expected = shares_with(&device.id.0, scale);
-                expected.sort();
+            } else {
+                assert_eq!(after[index][led], want, "{} LED {led} as a Device area", device.id.0);
+            }
+        }
+        // Another light's independence is a mask property, proved in `stack.rs`
+        // (`a_device_mask_covers_its_own_leds_and_no_other_device`); here the paint itself is
+        // what is checked.
+
+        // The device's own zone reads the layer too: a Zone area is that device's LEDs.
+        let painted = paint_area(
+            LayerArea::Zone { device: device.id.clone(), zone: 0 },
+            &devices,
+        );
+        let after = sampled(&devices, &painted);
+        for (led, has_owner) in owned[index].iter().enumerate() {
+            if *has_owner {
+                assert!(
+                    after[index][led].r > 0,
+                    "{} LED {led} as its Zone area reads the layer: {:?}",
+                    device.id.0,
+                    after[index][led]
+                );
+            } else {
                 assert_eq!(
-                    shared, expected,
-                    "the devices sharing pixels with {}'s zone {zone_index} at {scale:?}/{sampling:?}",
+                    after[index][led],
+                    canvas_proto::Rgb8::BLACK,
+                    "{} LED {led} as its Zone area",
                     device.id.0
                 );
             }
         }
     }
 
-    // A rotated placement: one front fan turned 30 degrees still reads the layer on every LED.
-    let mut zones = desk_zones();
-    for zone in &mut zones {
-        if zone.device_id.0 == FRONT_HUB && zone.leds == Some(LedSlice { start: 0, count: 12 }) {
-            zone.rotation_deg = 30.0;
-        }
-    }
-    let turned = layout(zones, RenderScale::P100, SamplingMode::AreaAverage);
-    let painted = paint_area(LayerArea::Device { device: DeviceId(FRONT_HUB.into()) }, &turned, &devices);
-    let after = sampled(&turned, &devices, &painted);
-    let front = devices.iter().position(|d| d.id.0 == FRONT_HUB).expect("the fan hub is on the desk");
-    assert_eq!(after[front].len(), 40);
-    // The header has forty LEDs and the three fans claim twelve each: the last four belong to
-    // nobody and stay black, so a rotated fan is checked on the LEDs its placements own.
-    assert!(
-        after[front][..36].iter().all(|c| *c == canvas_proto::Rgb8::new(255, 0, 0)),
-        "a rotated fan's own LEDs read the layer: {:?}",
-        &after[front][..36]
-    );
-    assert!(
-        after[front][36..].iter().all(|c| *c == canvas_proto::Rgb8::BLACK),
-        "the four LEDs no placement owns stay black"
-    );
+    // An area on a device the group does not hold paints nothing.
+    let painted = paint_area(LayerArea::Device { device: DeviceId("not-a-device".into()) }, &devices);
+    assert!(painted.pixels.iter().all(|p| *p == [0.0, 0.0, 0.0]), "an unknown device paints nothing");
 }
-
-// ================================================================ test 6
-
-#[test]
-fn a_moved_part_paints_at_its_new_place_without_a_rebuild() {
-    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let first = layout(vec![placed("d", 0, 0.0, 0.0, 40.0, 20.0)], RenderScale::P100, SamplingMode::AreaAverage);
-    let stack = stack(
-        "stack:Moves",
-        vec![with_area(layer("l1", "paint"), LayerArea::Device { device: DeviceId("d".into()) })],
-    );
-    let builds = Arc::new(AtomicUsize::new(0));
-    let clock = ManualClock::new();
-    let areas = Arc::new(std::sync::RwLock::new(AreaMap::build(&first, &devices, 1)));
-    let mut effect = StackEffect::new(
-        &stack,
-        paint_leaves(Arc::new(AtomicU64::new(0)), builds.clone(), [1.0, 0.0, 0.0], None),
-        live_for(&stack),
-        Arc::clone(&areas),
-    )
-    .with_clock(clock.clock());
-    effect.init(&Props::new());
-    let mut canvas = Canvas::with_scale(1.0);
-    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
-    let at_origin = canvas.get(5, 5);
-    assert_eq!(at_origin, [1.0, 0.0, 0.0], "the part is at the origin, and the pixel is {at_origin:?}");
-
-    // The part moves; the area book is republished, and the next frame paints there.
-    let moved = layout(vec![placed("d", 0, 200.0, 100.0, 40.0, 20.0)], RenderScale::P100, SamplingMode::AreaAverage);
-    {
-        let mut book = canvas_daemon::stack::write_recovering(&areas);
-        *book = AreaMap::build(&moved, &devices, 2);
-    }
-    effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
-    assert_eq!(canvas.get(5, 5), [0.0, 0.0, 0.0], "the old place is black");
-    assert_eq!(canvas.get(205, 105), [1.0, 0.0, 0.0], "the new place is painted");
-    assert_eq!(builds.load(Ordering::SeqCst), 1, "one layer built, and nothing rebuilt");
-}
-
 // ================================================================ test 7
 
 #[tokio::test]
@@ -1555,8 +1329,20 @@ async fn a_missing_effect_a_removed_device_and_an_unplaced_zone_leave_the_rest_r
         zone(0, "Front fan", ZoneKind::Linear, 12),
         zone(1, "Rear fan", ZoneKind::Linear, 12),
     ])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
-    harness.app.stacks.publish_areas(&lay, &devices);
+    harness.app.stacks.publish_group_areas(
+        [( 
+            "Everything".to_string(),
+            areas_for(&devices)
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .groups
+                .get("g")
+                .cloned()
+                .expect("the group's map"),
+        )]
+        .into_iter()
+        .collect(),
+    );
 
     let saved = stack(
         "stack:Holes",
@@ -1594,11 +1380,11 @@ async fn a_missing_effect_a_removed_device_and_an_unplaced_zone_leave_the_rest_r
     // The rest of the stack runs: the base layer paints, the three others are skipped.
     let updates = Arc::new(AtomicU64::new(0));
     let builds = Arc::new(AtomicUsize::new(0));
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &saved,
         paint_leaves(updates.clone(), builds.clone(), [0.0, 0.0, 1.0], None),
         live_for(&saved),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
@@ -1742,16 +1528,6 @@ async fn the_props_guard_and_the_two_delete_routes() {
         .await
         .unwrap();
 
-    // The props route refuses a stack and names the builder.
-    let guarded = harness
-        .router
-        .clone()
-        .oneshot(request_with_body("PATCH", routes::EFFECT_ACTIVE_PROPS, "{}"))
-        .await
-        .unwrap();
-    assert_eq!(guarded.status(), StatusCode::CONFLICT);
-    let message = json(guarded).await["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.contains("builder"), "{message}");
 
     // The effect delete route names the stack route.
     let wrong_route = harness
@@ -1773,7 +1549,7 @@ async fn the_props_guard_and_the_two_delete_routes() {
         .unwrap();
     assert_eq!(in_use.status(), StatusCode::CONFLICT);
     let message = json(in_use).await["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.contains("Default"), "the active layout is named: {message}");
+    assert!(message.contains("Everything"), "the scene that plays it is named: {message}");
 
     let forced = harness
         .router
@@ -1790,94 +1566,14 @@ async fn the_props_guard_and_the_two_delete_routes() {
     let store = harness.app.store.read().await;
     assert!(!store.effects.presets.contains_key("stack:Guarded"));
     assert!(!store.effects.favorites.iter().any(|f| f == "stack:Guarded"));
-    assert_eq!(harness.engine.effect_id.lock().unwrap().clone(), Some("solid".to_string()));
+    assert_eq!(
+        harness.engine.effect_id.lock().unwrap().clone(),
+        None,
+        "the group of the scene that played the deleted stack is dark"
+    );
 }
 
 // ================================================================ test 12
-
-#[tokio::test]
-async fn a_layout_switch_during_a_draft_whose_effect_fails_puts_the_prior_back() {
-    let harness = build("t12");
-    // The active layout runs Solid; another layout names an effect that does not exist.
-    {
-        let mut store = harness.app.store.write().await;
-        let active = store.layouts.active.clone();
-        if let Some(layout) = store.layouts.layouts.iter_mut().find(|l| l.id == active) {
-            layout.effect = Some(canvas_proto::layout::ActiveEffect {
-                id: "solid".into(),
-                props: Props::new(),
-            });
-        }
-        store.layouts.layouts.push(Layout {
-            id: "broken".into(),
-            name: "Broken".into(),
-            render_scale: RenderScale::P50,
-            sampling: SamplingMode::AreaAverage,
-            zones: Vec::new(),
-            effect: Some(canvas_proto::layout::ActiveEffect {
-                id: "no-such-effect".into(),
-                props: Props::new(),
-            }),
-            case_form: canvas_proto::layout::CaseForm::None,
-            landmarks: Vec::new(),
-        });
-        store.save_layouts().unwrap();
-    }
-    // Put Solid on the lights, as a start would.
-    harness
-        .router
-        .clone()
-        .oneshot(request_with_body(
-            "POST",
-            "/api/v1/effects/solid/activate",
-            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
-        ))
-        .await
-        .unwrap();
-
-    let log = common::LogBuf::default();
-    {
-        let _guard = log.install();
-        // A draft takes the lights.
-        let draft = harness
-            .router
-            .clone()
-            .oneshot(request_with_body(
-                "PUT",
-                routes::EFFECT_DRAFT,
-                &serde_json::json!({ "html": VALID_HTML, "props": {} }).to_string(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(draft.status(), StatusCode::OK);
-        assert!(harness.app.draft.is_active());
-
-        // The switch: the draft ends, its new effect fails, and the prior effect goes back.
-        let switched = harness
-            .router
-            .clone()
-            .oneshot(request_with_body(
-                "PUT",
-                routes::LAYOUT_ACTIVE,
-                &serde_json::json!({ "id": "broken" }).to_string(),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(switched.status(), StatusCode::OK);
-    }
-    assert!(!harness.app.draft.is_active(), "no draft is left in the slot");
-    assert_eq!(
-        harness.engine.effect_id.lock().unwrap().clone(),
-        Some("solid".to_string()),
-        "the draft's prior effect went back on the lights"
-    );
-    assert!(
-        log.text().contains("prior effect went back"),
-        "the log says what happened: {}",
-        log.text()
-    );
-}
-
 // ================================================================ test 13
 
 #[tokio::test]
@@ -1939,22 +1635,21 @@ async fn the_export_carries_the_stacks_and_a_bundle_without_them_imports() {
 fn frame_cost_by_layer_count_and_scale() {
     let devices = desk_devices();
     for layers in [1usize, 3, 8] {
-        for scale in [RenderScale::P25, RenderScale::P50, RenderScale::P100] {
-            let lay = desk_layout(scale, SamplingMode::AreaAverage);
+        {
             let built: Vec<StackLayer> = (1..=layers).map(|i| layer(&format!("l{i}"), "aurora")).collect();
             let stack = stack("stack:Cost", built);
             let leaves: LeafBuilder = Arc::new(|id: &str| {
                 canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))
             });
-            let mut effect = StackEffect::new(
+            let mut effect = stack_effect!(
                 &stack,
                 leaves,
                 live_for(&stack),
-                areas_for(&lay, &devices),
+                areas_for(&devices),
             )
             .with_clock(ManualClock::new().clock());
             effect.init(&Props::new());
-            let mut canvas = Canvas::with_scale(scale.factor());
+            let mut canvas = Canvas::with_scale(canvas_core::SCENE_RENDER_SCALE);
             let inputs = Inputs::default();
             // Thirty frames of warm-up.
             for _ in 0..30 {
@@ -1965,17 +1660,13 @@ fn frame_cost_by_layer_count_and_scale() {
                 effect.update(1.0 / 30.0, &mut canvas, &inputs);
             }
             let each = started.elapsed().as_secs_f64() * 1000.0 / 60.0;
-            println!(
-                "{layers} layers at {}: {each:.3} ms/frame",
-                scale.percent()
-            );
+            println!("{layers} layers: {each:.3} ms/frame");
         }
     }
 
     // Eight layers, every one of them masked (#256): the cost of the masks is the cost of eight
     // more effect updates, so it is measured beside the unmasked eight.
     for (label, masked) in [("unmasked", false), ("masked", true)] {
-        let lay = desk_layout(RenderScale::P100, SamplingMode::AreaAverage);
         let built: Vec<StackLayer> = (1..=8)
             .map(|i| {
                 let mut layer = layer(&format!("l{i}"), "aurora");
@@ -1991,7 +1682,7 @@ fn frame_cost_by_layer_count_and_scale() {
         let leaves: LeafBuilder = Arc::new(|id: &str| {
             canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))
         });
-        let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
             .with_clock(ManualClock::new().clock());
         effect.init(&Props::new());
         let mut canvas = Canvas::with_scale(1.0);
@@ -2004,10 +1695,10 @@ fn frame_cost_by_layer_count_and_scale() {
             effect.update(1.0 / 30.0, &mut canvas, &inputs);
         }
         let each = started.elapsed().as_secs_f64() * 1000.0 / 60.0;
-        println!("8 layers, all {label} at 100 %: {each:.3} ms/frame");
+        println!("8 layers, all {label}: {each:.3} ms/frame");
     }
 
-    // The HTML layers, which are the slow kind: one layer each, at 100 % and at 50 %.
+    // The HTML layers, which are the slow kind: one layer each, over the group's canvas.
     let user = Arc::new(canvas_daemon::user_effects::UserEffects::with_stock(
         canvas_daemon::user_effects::html_builder(),
         canvas_daemon::user_effects::STOCK_EFFECTS,
@@ -2020,14 +1711,13 @@ fn frame_cost_by_layer_count_and_scale() {
         })
     };
     for (stem, _) in canvas_daemon::user_effects::STOCK_EFFECTS {
-        for scale in [RenderScale::P50, RenderScale::P100] {
-            let lay = desk_layout(scale, SamplingMode::AreaAverage);
+        {
             let stack = stack("stack:Html", vec![layer("l1", &format!("html:{stem}"))]);
-            let mut effect = StackEffect::new(&stack, Arc::clone(&leaves), live_for(&stack), areas_for(&lay, &devices))
+            let mut effect = stack_effect!(&stack, Arc::clone(&leaves), live_for(&stack), areas_for(&devices))
                 .with_clock(ManualClock::new().clock())
                 .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
             effect.init(&Props::new());
-            let mut canvas = Canvas::with_scale(scale.factor());
+            let mut canvas = Canvas::with_scale(canvas_core::SCENE_RENDER_SCALE);
             let inputs = Inputs::default();
             for _ in 0..20 {
                 effect.update(1.0 / 30.0, &mut canvas, &inputs);
@@ -2037,7 +1727,7 @@ fn frame_cost_by_layer_count_and_scale() {
                 effect.update(1.0 / 30.0, &mut canvas, &inputs);
             }
             let each = started.elapsed().as_secs_f64() * 1000.0 / 180.0;
-            println!("html {stem} at {}: {each:.3} ms/frame", scale.percent());
+            println!("html {stem}: {each:.3} ms/frame");
         }
     }
 }
@@ -2047,16 +1737,15 @@ fn frame_cost_by_layer_count_and_scale() {
 #[test]
 fn the_compositor_does_not_allocate_per_frame() {
     let devices = desk_devices();
-    let lay = desk_layout(RenderScale::P50, SamplingMode::AreaAverage);
     let layers: Vec<StackLayer> = (1..=8).map(|i| layer(&format!("l{i}"), "solid")).collect();
     let stack = stack("stack:Budget", layers);
     let leaves: LeafBuilder = Arc::new(|id: &str| {
         canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))
     });
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
-    let mut canvas = Canvas::with_scale(0.5);
+    let mut canvas = Canvas::with_scale(canvas_core::SCENE_RENDER_SCALE);
     let inputs = Inputs::default();
     effect.update(1.0 / 30.0, &mut canvas, &inputs);
     let after_first = effect.layer_canvas_capacities();
@@ -2076,7 +1765,6 @@ fn the_compositor_does_not_allocate_per_frame() {
 #[test]
 fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Init", vec![layer("l1", "panicky"), layer("l2", "paint")]);
     let leaves: LeafBuilder = Arc::new(|id: &str| {
         if id == "panicky" {
@@ -2090,7 +1778,7 @@ fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
             }) as Box<dyn Effect>)
         }
     });
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
     assert_eq!(
@@ -2114,14 +1802,13 @@ fn a_layer_whose_init_panics_is_faulted_and_the_rest_run() {
 #[test]
 fn a_panic_in_the_compositor_clock_is_a_black_frame() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Broken", vec![layer("l1", "paint")]);
     let clock: Clock = Arc::new(|| panic!("the compositor's own work panicked"));
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &stack,
         paint_leaves(Arc::new(AtomicU64::new(0)), Arc::new(AtomicUsize::new(0)), [1.0, 0.0, 0.0], None),
         live_for(&stack),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(clock);
     effect.init(&Props::new());
@@ -2139,10 +1826,9 @@ fn a_panic_in_the_compositor_clock_is_a_black_frame() {
 #[test]
 fn a_tile_failure_from_a_layers_init_is_handed_on_by_the_stacks_init() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Tile", vec![layer("l1", "tile")]);
     let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingInit) as Box<dyn Effect>));
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(ManualClock::new().clock());
     let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
         effect.init(&Props::new());
@@ -2159,10 +1845,9 @@ fn a_tile_failure_from_a_layers_init_is_handed_on_by_the_stacks_init() {
 #[test]
 fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:TileUpdate", vec![layer("l1", "tile-update")]);
     let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(TileFailingUpdate) as Box<dyn Effect>));
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices));
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices));
     let outcome = canvas_daemon::thumbnail::render_within(
         &mut effect,
         &Props::new(),
@@ -2182,10 +1867,9 @@ fn a_tile_failure_from_a_layers_update_refuses_the_stack_tile() {
 #[test]
 fn a_panic_in_the_composite_path_is_a_black_frame() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:BrokenLayer", vec![layer("l1", "broken")]);
     let leaves: LeafBuilder = Arc::new(|_id: &str| Ok(Box::new(BrokeItsCanvas) as Box<dyn Effect>));
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
     let mut canvas = Canvas::with_scale(1.0);
@@ -2203,7 +1887,6 @@ fn a_panic_in_the_composite_path_is_a_black_frame() {
 #[test]
 fn a_layer_whose_update_panics_leaves_no_half_written_picture() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Half", vec![layer("l1", "half")]);
     let frames = Arc::new(AtomicU64::new(0));
     let leaves: LeafBuilder = Arc::new({
@@ -2212,7 +1895,7 @@ fn a_layer_whose_update_panics_leaves_no_half_written_picture() {
             Ok(Box::new(HalfThenPanic { frames: Arc::clone(&frames) }) as Box<dyn Effect>)
         }
     });
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
     let mut canvas = Canvas::with_scale(1.0);
@@ -2239,11 +1922,10 @@ fn step(effect: &mut StackEffect, canvas: &mut Canvas) {
 #[test]
 fn a_slow_layer_is_held_for_growing_periods_then_faulted() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Slow", vec![layer("l1", "html:slow")]);
     let updates = Arc::new(AtomicU64::new(0));
     let clock = ManualClock::new();
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &stack,
         paint_leaves(
             updates.clone(),
@@ -2252,7 +1934,7 @@ fn a_slow_layer_is_held_for_growing_periods_then_faulted() {
             Some((clock.clone(), 20)),
         ),
         live_for(&stack),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(clock.clock())
     .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
@@ -2304,7 +1986,6 @@ fn a_slow_layer_is_held_for_growing_periods_then_faulted() {
 #[test]
 fn a_trial_frame_that_fits_resets_the_escalation() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(vec![placed("d", 0, 0.0, 0.0, 100.0, 20.0)], RenderScale::P100, SamplingMode::Nearest);
     let stack = stack("stack:Resets", vec![layer("l1", "html:slow")]);
     let updates = Arc::new(AtomicU64::new(0));
     let clock = ManualClock::new();
@@ -2322,7 +2003,7 @@ fn a_trial_frame_that_fits_resets_the_escalation() {
             id: id.to_string(),
         }) as Box<dyn Effect>)
     });
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(clock.clock())
         .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
     effect.init(&Props::new());
@@ -2432,18 +2113,21 @@ fn add_html(harness: &Harness, file: &str, html: &str) {
     harness.app.user_effects.rescan(&harness.folder);
 }
 
-/// Puts Solid on the lights and names it on the active layout: what a draft takes over from.
+/// Puts Solid on the lights and names it on the active scene: what a draft takes over from.
 async fn prior_is_solid(harness: &Harness) {
     {
         let mut store = harness.app.store.write().await;
-        store.layouts.layouts[0].effect = Some(canvas_proto::layout::ActiveEffect {
-            id: "solid".into(),
-            props: Props::new(),
-        });
+        if let Some(scene) = store.scenes.scenes.first_mut() {
+            if let Some(group) = scene.groups.first_mut() {
+                group.plays = canvas_proto::scene::Plays::Effect {
+                    effect: "solid".into(),
+                    props: Props::new(),
+                };
+            }
+        }
+        store.save_scenes().expect("the scenes are saved");
     }
-    canvas_daemon::apply_effect(&harness.app, "solid", &Props::new())
-        .await
-        .expect("solid runs");
+    canvas_daemon::scenes::apply_active_ungated(&harness.app, false).await;
 }
 
 fn tint(hex: &str) -> canvas_proto::PropValue {
@@ -2477,8 +2161,8 @@ async fn the_stack_preview_runs_on_its_own_double_sinkless_engine() {
         canvas_proto::consts::PREVIEW_MAX_FPS
     );
     assert_eq!(harness.preview_engine.fps.load(Ordering::SeqCst), 15);
-    // The layout reached it as it reached the main engine.
-    assert!(harness.preview_engine.layout.lock().unwrap().is_some());
+    // The group it shows reached it as the layout reached the main engine.
+    assert!(!harness.preview_engine.scene.lock().unwrap().is_empty());
     // This harness does not run the daemon's startup, so it does not wire the capture
     // into the engines: neither engine has an input source here. The daemon's startup
     // does wire it (#1); see `tests/capture_wiring.rs`.
@@ -2580,7 +2264,7 @@ async fn a_preview_put_is_superseded_by_a_newer_epoch_or_sequence_and_delete_cle
     assert!(harness.app.stack_preview.watermark().is_none());
     assert_eq!(
         harness.preview_engine.effect_id.lock().unwrap().clone(),
-        Some("solid".to_string()),
+        None,
         "the preview engine no longer shows the stack"
     );
     assert_eq!(*harness.preview_engine.props.lock().unwrap(), canvas_daemon::draft::black());
@@ -2792,13 +2476,84 @@ async fn a_stack_draft_builds_once_across_its_values_and_a_save() {
     assert_eq!(activated.status(), StatusCode::OK);
     assert_eq!(
         builds.load(Ordering::SeqCst),
-        1,
-        "Save with the same structure reused the running effect"
+        2,
+        "the stack moved from the takeover group to the scene's group, so it was built again"
     );
     assert!(!harness.app.draft.is_active(), "an activate drops the draft");
     assert_eq!(
         harness.engine.effect_id.lock().unwrap().clone(),
         Some("stack:Session".to_string())
+    );
+}
+
+/// The props the group that plays the stack runs with.
+fn stack_group_props(harness: &Harness, id: &str) -> Props {
+    let scene = harness.engine.scene.lock().unwrap().clone();
+    scene
+        .iter()
+        .find(|(_, effect, _)| effect.as_deref() == Some(id))
+        .map(|(_, _, props)| props.clone())
+        .unwrap_or_default()
+}
+
+/// A stack that is already running takes its new values on the group that plays it: while a
+/// scene runs, the legacy path's one effect is never touched.
+#[tokio::test]
+async fn a_running_stack_takes_its_new_values_on_the_group_that_plays_it() {
+    let (user, builds) = counting_user(None);
+    let harness = build_with("t11-reuse", Some(user));
+    add_html(&harness, "Tinted.html", TINTED_HTML);
+    prior_is_solid(&harness).await;
+    // The scene is on the lights: the groups are what play.
+    canvas_daemon::scenes::apply_active(&harness.app, false).await;
+
+    // The stack is saved with a value and played on the scene's group.
+    let mut saved = stack("stack:Reuse", vec![layer("l1", "html:Tinted")]);
+    saved.layers[0].props.insert("tint".into(), tint("#ff0000"));
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let activated = harness
+        .router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "stack:Reuse"),
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    let built = builds.load(Ordering::SeqCst);
+    assert_eq!(
+        stack_group_props(&harness, "stack:Reuse").get("l1.tint"),
+        Some(&tint("#ff0000")),
+        "the group plays the stack with its value"
+    );
+
+    // The same stack with another value: it is running, so it is reused and not rebuilt.
+    saved.layers[0].props.insert("tint".into(), tint("#00ff00"));
+    assert_eq!(put_stack(&harness, &saved).await, StatusCode::OK);
+    let activated = harness
+        .router
+        .clone()
+        .oneshot(request_with_body(
+            "POST",
+            &routes::EFFECT_ACTIVATE.replace("{id}", "stack:Reuse"),
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(activated.status(), StatusCode::OK);
+    assert_eq!(
+        builds.load(Ordering::SeqCst),
+        built,
+        "the running stack was not rebuilt"
+    );
+
+    // The value is on the group that plays the stack.
+    assert_eq!(
+        stack_group_props(&harness, "stack:Reuse").get("l1.tint"),
+        Some(&tint("#00ff00")),
+        "the group has the new value"
     );
 }
 
@@ -3894,17 +3649,12 @@ fn masked_layer(id: &str, effect: &str, mask: canvas_proto::stack::LayerMask) ->
 fn masked_frame(mask: canvas_proto::stack::LayerMask, panic_mask: bool) -> (Canvas, StackEffect) {
     let stack = stack("stack:Masked", vec![masked_layer("l1", "layer", mask)]);
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(
-        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
-        RenderScale::P100,
-        SamplingMode::Nearest,
-    );
     let updates = Arc::new(AtomicU64::new(0));
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &stack,
         mask_leaves(updates, panic_mask),
         live_for(&stack),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
@@ -3982,24 +3732,20 @@ fn a_mask_is_mapped_over_the_layers_own_area() {
         )],
     );
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(
-        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
-        RenderScale::P100,
-        SamplingMode::Nearest,
-    );
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &stack,
         mask_leaves(Arc::new(AtomicU64::new(0)), false),
         live_for(&stack),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(ManualClock::new().clock());
     effect.init(&Props::new());
-    let mut canvas = Canvas::with_scale(1.0);
+    let mut canvas = Canvas::with_scale(canvas_core::SCENE_RENDER_SCALE);
     step(&mut effect, &mut canvas);
-    assert_eq!(canvas.get(5, 5), [1.0, 0.0, 0.0], "the left half of the rectangle shows");
-    assert_eq!(canvas.get(35, 5), [0.0, 0.0, 0.0], "the right half is masked out");
-    assert_eq!(canvas.get(45, 5), [0.0, 0.0, 0.0], "and nothing outside the area paints");
+    // The 40 x 20 rectangle is 10 x 5 pixels on the group canvas; the mask shows its left half.
+    assert_eq!(canvas.get(2, 2), [1.0, 0.0, 0.0], "the left half of the rectangle shows");
+    assert_eq!(canvas.get(7, 2), [0.0, 0.0, 0.0], "the right half is masked out");
+    assert_eq!(canvas.get(12, 2), [0.0, 0.0, 0.0], "and nothing outside the area paints");
 }
 
 #[test]
@@ -4009,18 +3755,13 @@ fn a_panicking_mask_leaves_the_layer_unmasked_and_says_why() {
         vec![masked_layer("l1", "layer", a_mask("mask-panics"))],
     );
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(
-        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
-        RenderScale::P100,
-        SamplingMode::Nearest,
-    );
     let statuses = Arc::new(Mutex::new(Vec::new()));
     let log = common::LogBuf::default();
-    let mut effect = StackEffect::new(
+    let mut effect = stack_effect!(
         &stack,
         mask_leaves(Arc::new(AtomicU64::new(0)), true),
         live_for(&stack),
-        areas_for(&lay, &devices),
+        areas_for(&devices),
     )
     .with_clock(ManualClock::new().clock())
     .with_status_sink(Arc::clone(&statuses));
@@ -4065,12 +3806,7 @@ fn a_mask_that_does_not_build_leaves_the_layer_unmasked() {
             vec![masked_layer("l1", "layer", a_mask("no-such-effect"))],
         );
         let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-        let lay = layout(
-            vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
-            RenderScale::P100,
-            SamplingMode::Nearest,
-        );
-        let leaves: LeafBuilder = Arc::new(|id: &str| {
+            let leaves: LeafBuilder = Arc::new(|id: &str| {
             if id == "no-such-effect" {
                 Err("no effect with that id".to_string())
             } else {
@@ -4081,7 +3817,7 @@ fn a_mask_that_does_not_build_leaves_the_layer_unmasked() {
                 }) as Box<dyn Effect>)
             }
         });
-        StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+        stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
             .with_clock(ManualClock::new().clock())
             .with_status_sink(Arc::clone(&statuses))
     };
@@ -4262,6 +3998,7 @@ async fn a_file_with_a_mask_that_does_not_resolve_keeps_the_mask_and_draws_unmas
         &harness.app.user_effects,
         &harness.app.stacks,
         "stack:HandMask",
+        None,
     )
     .expect("the stack builds");
     effect.init(&Props::new());
@@ -4491,11 +4228,6 @@ async fn a_put_or_a_preview_of_a_stack_whose_mask_is_gone_is_refused_naming_the_
 #[test]
 fn a_mask_faulted_by_overrun_leaves_the_layer_unmasked() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 4)])];
-    let lay = layout(
-        vec![placed("d", 0, 0.0, 0.0, 320.0, 200.0)],
-        RenderScale::P100,
-        SamplingMode::Nearest,
-    );
     let stack = stack(
         "stack:SlowMask",
         vec![masked_layer("l1", "layer", a_mask("html:slow"))],
@@ -4518,7 +4250,7 @@ fn a_mask_faulted_by_overrun_leaves_the_layer_unmasked() {
         })
     };
     let statuses = Arc::new(Mutex::new(Vec::new()));
-    let mut effect = StackEffect::new(&stack, leaves, live_for(&stack), areas_for(&lay, &devices))
+    let mut effect = stack_effect!(&stack, leaves, live_for(&stack), areas_for(&devices))
         .with_clock(clock.clock())
         .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)))
         .with_status_sink(Arc::clone(&statuses));

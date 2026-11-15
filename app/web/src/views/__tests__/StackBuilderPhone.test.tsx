@@ -269,8 +269,8 @@ describe("the stack builder on a phone", () => {
     const sheet = await screen.findByRole("dialog", { name: "Tune Heat" });
     focusAndClick(within(sheet).getByRole("button", { name: "Change area" }));
     const picker = await screen.findByRole("dialog", { name: "Area for Heat" });
-    const zone = within(picker).getByRole("radio", { name: "Zone" });
-    zone.focus();
+    const device = within(picker).getByRole("radio", { name: "Device" });
+    device.focus();
     // The builder re-renders on each poll; the picker must not take the focus back.
     await act(async () => {
       await refreshStatus();
@@ -278,7 +278,7 @@ describe("the stack builder on a phone", () => {
     await act(async () => {
       await refreshStatus();
     });
-    expect(document.activeElement).toBe(zone);
+    expect(document.activeElement).toBe(device);
   });
 
   it("returns focus to Tune on Escape after a tap that focused nothing", async () => {

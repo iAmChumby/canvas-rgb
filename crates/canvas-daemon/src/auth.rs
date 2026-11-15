@@ -140,10 +140,12 @@ pub async fn guard(State(app): State<Arc<App>>, request: Request, next: Next) ->
 
     // The status endpoint is open: the tray shows it without a token.
     let is_status = method == Method::GET && uri.path() == routes::STATUS;
-    // The preview is a WebSocket, and a browser cannot set headers on a WebSocket handshake:
+    // The previews are WebSockets, and a browser cannot set headers on a WebSocket handshake:
     // the token rides in the query string and the route's handler checks it. The bearer check
-    // has to let the handshake through, or no editor can ever open the preview.
-    let is_preview = method == Method::GET && uri.path() == routes::PREVIEW;
+    // has to let the handshake through, or no editor can ever open a preview. The per-light feed
+    // is one of them; the host and origin checks above still apply to both.
+    let is_preview = method == Method::GET
+        && (uri.path() == routes::PREVIEW || uri.path() == routes::PREVIEW_LIGHTS);
     if !is_status && !is_preview {
         let presented = request
             .headers()

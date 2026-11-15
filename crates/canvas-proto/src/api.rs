@@ -6,8 +6,9 @@
 
 use crate::device::DeviceInfo;
 use crate::fans::{FanMode, FanProfile, FansStatus};
-use crate::layout::{Layout, RenderScale, SamplingMode};
 use crate::props::{InputNeeds, Preset, Props, PropertySchema};
+use crate::scene::{Arrangement, Light, LightId, Scene};
+use crate::traits::GroupState;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -15,7 +16,6 @@ pub mod routes {
     pub const PREFIX: &str = "/api/v1";
     pub const STATUS: &str = "/api/v1/status";
     pub const OUTPUT: &str = "/api/v1/output";
-    pub const RENDER: &str = "/api/v1/render";
     pub const DEVICES: &str = "/api/v1/devices";
     /// `PATCH` with [`super::PatchZone`].
     pub const DEVICE_ZONE: &str = "/api/v1/devices/{id}/zones/{zone}";
@@ -30,7 +30,6 @@ pub mod routes {
     pub const EFFECTS: &str = "/api/v1/effects";
     pub const EFFECT: &str = "/api/v1/effects/{id}";
     pub const EFFECT_ACTIVATE: &str = "/api/v1/effects/{id}/activate";
-    pub const EFFECT_ACTIVE_PROPS: &str = "/api/v1/effects/active/props";
     /// `GET`: a short looping preview of the effect at its default props, rendered headless by
     /// the daemon (no devices touched). Binary: `u16 LE width, u16 LE height, u16 LE frames`, then
     /// frames x width x height x 3 RGB bytes. 64x40, 24 frames at 12 fps. Cached per effect id
@@ -73,7 +72,7 @@ pub mod routes {
     /// stops it. The editor PUTs every [`crate::consts::DRAFT_HEARTBEAT`] while the draft runs;
     /// the slot ends after [`crate::consts::DRAFT_LEASE`] with no PUT. Nothing about a draft is
     /// saved: the previous effect comes back on Stop, on expiry, or when the daemon restarts.
-    /// An `activate` or a layout switch ends the draft without restoring anything, because the
+    /// An `activate` or a scene switch ends the draft without restoring anything, because the
     /// owner chose something else. A bad PUT (one that does not parse) leaves a running draft
     /// alone. Same body cap as [`EFFECTS_IMPORT`].
     pub const EFFECT_DRAFT: &str = "/api/v1/effects/draft";
@@ -91,10 +90,6 @@ pub mod routes {
     /// clears the sequence watermark. The preview engine has no device sink, so nothing here
     /// reaches a light. Same body cap as [`EFFECTS_IMPORT`].
     pub const STACK_PREVIEW: &str = "/api/v1/stacks/preview";
-    pub const LAYOUTS: &str = "/api/v1/layouts";
-    pub const LAYOUT: &str = "/api/v1/layouts/{id}";
-    /// `PUT` with [`super::SetActiveLayout`].
-    pub const LAYOUT_ACTIVE: &str = "/api/v1/layouts/active";
     pub const FANS: &str = "/api/v1/fans";
     pub const FAN_HEADER: &str = "/api/v1/fans/headers/{h}";
     pub const FAN_PROFILE: &str = "/api/v1/fans/profile";
@@ -166,6 +161,35 @@ pub mod routes {
     /// at most [`crate::consts::PREVIEW_MAX_FPS`]. Without a query it streams the running
     /// effect; `?stack=1` streams the preview engine ([`STACK_PREVIEW`]) instead.
     pub const PREVIEW: &str = "/api/v1/preview";
+
+    // Scenes (0.14.0).
+    /// `GET` [`super::ScenesResponse`]; `POST` [`super::SceneCreate`] makes a scene and answers it.
+    pub const SCENES: &str = "/api/v1/scenes";
+    /// `PUT` [`super::ScenePut`] replaces a scene whole: `409 conflict` with the current scene
+    /// when `expected_rev` is stale, `422 validation` when a scene rule is broken. `DELETE`
+    /// refuses the last scene with `409`.
+    pub const SCENE: &str = "/api/v1/scenes/{id}";
+    /// `PUT` [`super::SceneActivePut`]: sets a scene (with a fade).
+    pub const SCENE_ACTIVE: &str = "/api/v1/scenes/active";
+    /// `PATCH` with a `Props` body: new values for one group's effect, no rebuild. Saved, and the
+    /// scene's `rev` goes up by one; answers the whole [`crate::scene::Scene`] with its new `rev`.
+    pub const GROUP_PROPS: &str = "/api/v1/scenes/{id}/groups/{group}/props";
+    /// `PUT` [`super::GroupBrightnessPut`]. As [`GROUP_PROPS`]: saved, `rev` + 1, answers the scene.
+    pub const GROUP_BRIGHTNESS: &str = "/api/v1/scenes/{id}/groups/{group}/brightness";
+    /// `GET` [`super::LightsResponse`].
+    pub const LIGHTS: &str = "/api/v1/lights";
+    /// `PATCH` [`super::LightPatch`].
+    pub const LIGHT: &str = "/api/v1/lights/{id}";
+    /// `POST` [`super::FlashRequest`]: the named lights white, every other LED black, under the
+    /// identify watchdog; `stop: true` ends it.
+    pub const LIGHTS_FLASH: &str = "/api/v1/lights/flash";
+    /// WebSocket. The first message is JSON mapping a `u16` index to a light id (re-sent when
+    /// the scene or the lights change); then binary frames: per light a `u16 LE` index, a
+    /// `u16 LE` LED count, then that many RGB triples. At most 15 a second.
+    pub const PREVIEW_LIGHTS: &str = "/api/v1/preview/lights";
+    /// `PATCH` with a `Props` body: an effect's starting values (`EffectsFile.saved`). A group
+    /// already playing the effect keeps its own.
+    pub const EFFECT_DEFAULTS: &str = "/api/v1/effects/{id}/defaults";
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -253,8 +277,13 @@ pub struct Status {
     #[serde(default)]
     pub devices_total: u32,
     pub preview_subscribers: u32,
-    pub active_layout: Option<String>,
-    pub active_effect: Option<String>,
+    /// The active scene (0.14.0). A daemon from before scenes sends none.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub active_scene: Option<SceneRef>,
+    /// The effect ids the active scene's groups play, in group order, without repeats.
+    #[serde(default)]
+    pub active_effects: Vec<String>,
     pub openrgb: LinkState,
     pub service: LinkState,
     /// Milliseconds the service pipe has been down, if it is (G4 banner after 10 s).
@@ -292,25 +321,6 @@ pub struct PatchOutput {
     /// [`crate::consts::WARMTH_MIN`]..=[`crate::consts::WARMTH_OFF`], 422 otherwise.
     #[serde(default)]
     pub warmth: Option<u16>,
-}
-
-/// `GET /render`: fps is global; scale and sampling are the active layout's.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct RenderState {
-    /// 10..=60
-    pub fps: u32,
-    pub scale: RenderScale,
-    pub sampling: SamplingMode,
-}
-
-/// `PATCH /render`: fps changes live; scale and sampling apply to the active layout.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct PatchRender {
-    pub fps: Option<u32>,
-    pub scale: Option<RenderScale>,
-    pub sampling: Option<SamplingMode>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -748,7 +758,7 @@ pub struct DraftStatus {
     pub lease_ms: u64,
     /// A sentence about the ending, when it needs saying: the prior effect could not be
     /// restored (its file was deleted mid-draft), so the lights are black. Absent when the
-    /// prior, or black for a layout with no effect, went on normally.
+    /// prior, or black for a group with no effect, went on normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub note: Option<String>,
@@ -778,25 +788,17 @@ pub struct ActivateEffect {
     /// A built-in preset (`schema.presets`) or a user preset, by name. A preset's props sit on
     /// the defaults, not on the saved values, so two presets never leak into each other.
     pub preset: Option<String>,
+    /// Scenes: the groups of the active scene to play it on, by name. `None` plays it on every
+    /// group, from the effect's starting values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SetFavorite {
     pub favorite: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct LayoutsResponse {
-    pub active: String,
-    pub layouts: Vec<Layout>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct SetActiveLayout {
-    pub id: String,
 }
 
 /// `PATCH /fans/headers/{h}` body is a [`FanMode`].
@@ -854,4 +856,134 @@ pub struct DisplayStatus {
 #[ts(export)]
 pub struct SetDisplayValue {
     pub value: Option<f32>,
+}
+
+// ---------------------------------------------------------------- scenes (0.14.0)
+
+/// `GET` [`routes::SCENES`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScenesResponse {
+    pub active: String,
+    pub scenes: Vec<Scene>,
+    /// The active scene's groups, in its order.
+    pub group_states: Vec<GroupState>,
+}
+
+/// `POST` [`routes::SCENES`]. With `copy_of`, the new scene copies that scene's groups under
+/// new ids; without it, one group of every light, set to Off.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneCreate {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copy_of: Option<String>,
+}
+
+/// `PUT` [`routes::SCENE`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScenePut {
+    pub scene: Scene,
+    /// The `rev` the change was made from.
+    #[ts(type = "number")]
+    pub expected_rev: u64,
+}
+
+/// `PUT` [`routes::SCENE_ACTIVE`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneActivePut {
+    pub id: String,
+}
+
+/// `PUT` [`routes::GROUP_BRIGHTNESS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupBrightnessPut {
+    /// 0..=100.
+    pub brightness: u8,
+}
+
+/// `GET` [`routes::LIGHTS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightsResponse {
+    pub lights: Vec<LightView>,
+}
+
+/// A light with what the editor shows beside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightView {
+    pub light: Light,
+    /// The LEDs it has now: its run clamped to the zone, or the zone's count.
+    pub led_count: u32,
+    pub connected: bool,
+    /// The owner's name, else the device and zone name.
+    pub label: String,
+}
+
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// `PATCH` [`routes::LIGHT`]. A field left out is unchanged; `name: null` clears the name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightPatch {
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub name: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub arrangement: Option<Arrangement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reversed: Option<bool>,
+}
+
+/// `POST` [`routes::LIGHTS_FLASH`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FlashRequest {
+    #[serde(default)]
+    pub lights: Vec<LightId>,
+    #[serde(default)]
+    pub stop: bool,
+}
+
+/// A scene by id and name, for the status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneRef {
+    pub id: String,
+    pub name: String,
+}
+
+#[cfg(test)]
+mod scene_payload_tests {
+    use super::*;
+
+    #[test]
+    fn light_patch_tells_a_cleared_name_from_an_absent_one() {
+        let absent: LightPatch = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.name, None);
+        let cleared: LightPatch = serde_json::from_str(r#"{"name":null}"#).unwrap();
+        assert_eq!(cleared.name, Some(None));
+        let set: LightPatch = serde_json::from_str(r#"{"name":"Top fan","reversed":true}"#).unwrap();
+        assert_eq!(set.name, Some(Some("Top fan".into())));
+        assert_eq!(set.reversed, Some(true));
+    }
+
+    #[test]
+    fn an_old_activate_body_plays_on_every_group() {
+        let body: ActivateEffect = serde_json::from_str(r#"{"props":{},"preset":null}"#).unwrap();
+        assert_eq!(body.groups, None);
+    }
 }

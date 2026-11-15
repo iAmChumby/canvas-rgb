@@ -44,8 +44,8 @@ impl Drop for TempHome {
 }
 
 /// The router, the state, the home and the effects folder.
-fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
-    let (router, app, _engine, home, folder, _clock) = build_with_clock();
+async fn build() -> (axum::Router, Arc<App>, TempHome, PathBuf) {
+    let (router, app, _engine, home, folder, _clock) = build_with_clock().await;
     (router, app, home, folder)
 }
 
@@ -74,12 +74,26 @@ impl TestClock {
 }
 
 /// Like [`build`], with the fake engine and the draft's clock handed back too.
-fn build_with_clock(
+async fn build_with_clock(
+) -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome, PathBuf, TestClock) {
+    build_with_clock_and_scene(true).await
+}
+
+/// [`build_with_clock`] with the scene left off the lights: the daemon in its legacy mode,
+/// where the layout's one effect is what plays.
+async fn build_with_clock_and_scene(
+    scene: bool,
 ) -> (axum::Router, Arc<App>, Arc<FakeEngine>, TempHome, PathBuf, TestClock) {
     let home = TempHome::new();
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
     let store = canvas_daemon::storage::Store::at(&home.path);
+    let mut store = store;
+    // The scene a draft takes over from: one group playing the solid effect (Scenes, 0.14.0:
+    // the prior is the active scene).
+    let (lights, scenes) = common::a_scene("solid", &canvas_proto::props::Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
     let mut app = App::new(
@@ -96,6 +110,11 @@ fn build_with_clock(
     let clock = TestClock::new();
     app.draft = canvas_daemon::draft::Draft::with_clock(clock.clock());
     let app = Arc::new(app);
+    // The scene runs, so the daemon is in scene mode: a draft takes over the groups of the
+    // active scene, and the old layout path stays out of the engine.
+    if scene {
+        canvas_daemon::scenes::apply_active(&app, false).await;
+    }
     (api::router(app.clone()), app, engine, home, folder, clock)
 }
 
@@ -170,7 +189,7 @@ const NO_SCRIPT: &str = "<head><title>Empty</title></head><body></body>";
 
 #[tokio::test]
 async fn a_user_effect_serves_its_source_and_the_file_name_save_would_use() {
-    let (router, app, _home, folder) = build();
+    let (router, app, _home, folder) = build().await;
     std::fs::write(folder.join("My Effect.html"), MOVING).expect("the effect is written");
     app.user_effects.rescan(&folder);
 
@@ -186,7 +205,7 @@ async fn a_user_effect_serves_its_source_and_the_file_name_save_would_use() {
 
 #[tokio::test]
 async fn a_stock_effect_serves_its_source_and_a_file_name_for_save() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = router
         .oneshot(request("GET", "/api/v1/effects/html:ink-drop/source"))
         .await
@@ -199,7 +218,7 @@ async fn a_stock_effect_serves_its_source_and_a_file_name_for_save() {
 
 #[tokio::test]
 async fn a_rust_built_in_has_no_source() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = router
         .oneshot(request("GET", &routes::EFFECT_SOURCE.replace("{id}", "solid")))
         .await
@@ -213,7 +232,7 @@ async fn a_rust_built_in_has_no_source() {
 
 #[tokio::test]
 async fn an_unknown_effect_has_no_source() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = router
         .oneshot(request("GET", "/api/v1/effects/html:not-there/source"))
         .await
@@ -223,7 +242,7 @@ async fn an_unknown_effect_has_no_source() {
 
 #[tokio::test]
 async fn a_file_that_does_not_parse_still_serves_its_source() {
-    let (router, app, _home, folder) = build();
+    let (router, app, _home, folder) = build().await;
     std::fs::write(folder.join("broken.html"), NO_SCRIPT).expect("the broken effect is written");
     app.user_effects.rescan(&folder);
     // The file is not in the library, but it is exactly what needs editing.
@@ -241,7 +260,7 @@ async fn a_file_that_does_not_parse_still_serves_its_source() {
 
 #[tokio::test]
 async fn a_source_id_cannot_reach_out_of_the_effects_folder() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = router
         .oneshot(request("GET", "/api/v1/effects/html:..%2Fsecret/source"))
         .await
@@ -251,7 +270,7 @@ async fn a_source_id_cannot_reach_out_of_the_effects_folder() {
 
 #[tokio::test]
 async fn the_source_route_needs_the_token() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = router
         .oneshot(
             Request::builder()
@@ -290,7 +309,7 @@ async fn post_preview(router: axum::Router, body: String) -> axum::response::Res
 
 #[tokio::test]
 async fn a_moving_draft_previews_with_its_schema_and_loop() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = post_preview(
         router,
         preview_body(MOVING, serde_json::json!({ "tint": { "type": "color", "value": "#ff0000" } })),
@@ -315,7 +334,7 @@ async fn a_moving_draft_previews_with_its_schema_and_loop() {
     assert!(!canvas_daemon::thumbnail::body_is_flat(&loop_bytes), "and is not one colour");
 
     // The editor's props reach the render: another tint is another picture.
-    let (router2, _app2, _home2, _folder2) = build();
+    let (router2, _app2, _home2, _folder2) = build().await;
     let other = post_preview(
         router2,
         preview_body(MOVING, serde_json::json!({ "tint": { "type": "color", "value": "#00ff00" } })),
@@ -331,7 +350,7 @@ async fn a_moving_draft_previews_with_its_schema_and_loop() {
 
 #[tokio::test]
 async fn a_still_draft_previews_with_the_check_warnings() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = post_preview(router, preview_body(FLAT, serde_json::json!({}))).await;
     assert_eq!(response.status(), StatusCode::OK);
     let answer = json(response).await;
@@ -353,7 +372,7 @@ async fn a_still_draft_previews_with_the_check_warnings() {
 
 #[tokio::test]
 async fn a_draft_that_does_not_parse_is_refused() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = post_preview(router, preview_body(NO_SCRIPT, serde_json::json!({}))).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
@@ -375,7 +394,7 @@ async fn a_script_that_throws_is_reported_with_its_loop() {
   }
   window.requestAnimationFrame(draw);
 </script>"##;
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = post_preview(router, preview_body(source, serde_json::json!({}))).await;
     assert_eq!(response.status(), StatusCode::OK, "the loop is still served");
     let answer = json(response).await;
@@ -401,7 +420,7 @@ async fn a_runaway_draft_is_stopped_and_the_api_keeps_answering() {
   var ctx = c.getContext("2d");
   while (true) {}
 </script>"##;
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     // The runtime's own load budget stops the script; this bound only keeps a broken build
     // from hanging the test run.
     let response = tokio::time::timeout(
@@ -434,7 +453,7 @@ async fn a_runaway_draft_is_stopped_and_the_api_keeps_answering() {
 
 #[tokio::test]
 async fn a_preview_body_over_the_limit_is_refused() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     // The html is exactly the body's cap; the JSON wrapper around it puts the body over.
     let html = "a".repeat(canvas_daemon::api::effects::IMPORT_BODY_LIMIT);
     let body = preview_body(&html, serde_json::json!({}));
@@ -446,7 +465,7 @@ async fn a_preview_body_over_the_limit_is_refused() {
 
 #[tokio::test]
 async fn the_preview_route_needs_the_token() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = router
         .oneshot(
             Request::builder()
@@ -474,14 +493,30 @@ fn color(hex: &str) -> canvas_proto::props::Props {
     props
 }
 
-/// Makes `id` the active layout's effect, and runs it: this is what a draft takes over from.
+/// Makes `id` the active scene's effect, and runs it: this is what a draft takes over from.
+///
+/// The prior is the active scene now (Scenes, 0.14.0), so the scene's group plays the effect
+/// and the scene is applied to the engine.
 async fn prior_effect(app: &Arc<App>, id: &str, props: canvas_proto::props::Props) {
     {
         let mut store = app.store.write().await;
-        store.layouts.layouts[0].effect =
-            Some(canvas_proto::layout::ActiveEffect { id: id.to_string(), props: props.clone() });
+        if let Some(scene) = store.scenes.scenes.first_mut() {
+            if let Some(group) = scene.groups.first_mut() {
+                group.plays = canvas_proto::scene::Plays::Effect {
+                    effect: id.to_string(),
+                    props: props.clone(),
+                };
+            }
+        }
+        store.save_scenes().expect("the scenes are saved");
     }
-    canvas_daemon::apply_effect(app, id, &props).await.expect("the prior effect runs");
+    canvas_daemon::scenes::apply_active_ungated(app, false).await;
+    let store = app.store.read().await;
+    let plays = store.scenes.scenes.iter().flat_map(|s| s.groups.iter()).any(|group| {
+        matches!(&group.plays,
+            canvas_proto::scene::Plays::Effect { effect, .. } if effect == id)
+    });
+    assert!(plays, "the prior effect is the scene's: {id}");
 }
 
 /// What the fake engine is running, and with which props.
@@ -517,7 +552,7 @@ async fn draft_state(router: axum::Router) -> canvas_proto::api::DraftStatus {
 
 #[tokio::test]
 async fn a_draft_runs_on_the_lights_and_stop_puts_the_prior_effect_back() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     let prior = color("#112233");
     prior_effect(&app, "solid", prior.clone()).await;
     assert_eq!(running(&engine).0.as_deref(), Some("solid"));
@@ -563,7 +598,7 @@ async fn a_draft_runs_on_the_lights_and_stop_puts_the_prior_effect_back() {
 
 #[tokio::test]
 async fn a_beat_renews_the_lease_and_a_beat_after_the_lease_still_runs() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
 
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -589,7 +624,7 @@ async fn a_beat_renews_the_lease_and_a_beat_after_the_lease_still_runs() {
 
 #[tokio::test]
 async fn a_draft_whose_lease_runs_out_restores_the_prior_effect() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, clock) = build_with_clock().await;
     let prior = color("#224466");
     prior_effect(&app, "solid", prior.clone()).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -607,7 +642,7 @@ async fn a_draft_whose_lease_runs_out_restores_the_prior_effect() {
 
 #[tokio::test]
 async fn a_saved_activation_ends_the_draft_without_restoring_it() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
 
@@ -634,93 +669,43 @@ async fn a_saved_activation_ends_the_draft_without_restoring_it() {
     );
 }
 
+/// A scene that cannot be built leaves the lights dark and the takeover over: the build task
+/// died, so nothing is left on the takeover.
 #[tokio::test]
-async fn a_layout_switch_ends_the_draft_without_restoring_it() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+async fn a_failed_scene_build_leaves_the_lights_dark_and_the_takeover_over() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
-    // A second layout, with an effect of its own.
-    {
-        let mut store = app.store.write().await;
-        let mut other = store.layouts.layouts[0].clone();
-        other.id = "other".to_string();
-        other.name = "Other".to_string();
-        other.effect = Some(canvas_proto::layout::ActiveEffect {
-            id: "gradient".to_string(),
-            props: canvas_proto::props::Props::new(),
-        });
-        store.layouts.layouts.push(other);
-    }
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    assert!(!app.scene.held().takeover.is_empty(), "the draft holds the lights");
 
+    // The engine panics on the next scene: the build task dies with it.
+    engine
+        .panic_on_set_scene
+        .store(1, std::sync::atomic::Ordering::SeqCst);
+
+    // The activation ends the draft: the whole scene goes on again.
     let response = router
         .clone()
         .oneshot(request_with_body(
-            "PUT",
-            routes::LAYOUT_ACTIVE,
-            r#"{"id": "other"}"#,
+            "POST",
+            "/api/v1/effects/solid/activate",
+            &serde_json::json!({ "props": {}, "preset": null }).to_string(),
         ))
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(running(&engine).0.as_deref(), Some("gradient"));
 
-    assert!(!draft_state(router).await.active, "the switch ended the draft");
-    clock.advance(canvas_proto::consts::DRAFT_LEASE * 2);
-    assert_eq!(
-        running(&engine).0.as_deref(),
-        Some("gradient"),
-        "nothing restored the draft's prior effect over the chosen layout"
-    );
+    // The takeover is over and the groups are dark: the failure is named.
+    assert!(app.scene.held().takeover.is_empty(), "the takeover is over");
+    let failures = app.scene.failures();
+    assert!(!failures.is_empty(), "the failure is named: {failures:?}");
+    assert_eq!(running(&engine).0, None, "the groups are dark");
 }
 
-#[tokio::test]
-async fn the_active_props_route_is_refused_while_a_draft_runs() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
-    prior_effect(&app, "solid", color("#112233")).await;
-    assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
-
-    let response = router
-        .clone()
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::EFFECT_ACTIVE_PROPS,
-            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::NOT_FOUND);
-    let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
-    assert!(message.contains("draft"), "the message names the draft route: {message}");
-    assert_eq!(
-        running(&engine).0,
-        Some(format!("draft:{}", canvas_daemon::user_effects::source_hash(MOVING))),
-        "the draft is still what runs"
-    );
-
-    // After Stop, the route works again.
-    assert_eq!(
-        router
-            .clone()
-            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
-            .await
-            .expect("the router answers")
-            .status(),
-        StatusCode::OK
-    );
-    let response = router
-        .oneshot(request_with_body(
-            "PATCH",
-            routes::EFFECT_ACTIVE_PROPS,
-            r##"{"color": {"type": "color", "value": "#00ff00"}}"##,
-        ))
-        .await
-        .expect("the router answers");
-    assert_eq!(response.status(), StatusCode::OK);
-}
-
+/// Without a scene on the lights the props route is refused while a draft runs: the draft's
 #[tokio::test]
 async fn a_bad_draft_leaves_the_running_draft_alone() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
     let hash = canvas_daemon::user_effects::source_hash(MOVING);
@@ -738,7 +723,7 @@ async fn a_bad_draft_leaves_the_running_draft_alone() {
 
 #[tokio::test]
 async fn a_beat_with_new_props_updates_the_lights_without_a_reload() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
     assert!(running(&engine).1.is_empty(), "no props on the first beat");
@@ -759,9 +744,15 @@ async fn a_beat_with_new_props_updates_the_lights_without_a_reload() {
 }
 
 #[tokio::test]
-async fn a_draft_with_no_saved_effect_goes_black_on_stop() {
-    let (router, _app, engine, _home, _folder, _clock) = build_with_clock();
+async fn a_draft_stop_puts_the_active_scene_back() {
+    let (router, _app, engine, _home, _folder, _clock) = build_with_clock().await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
+    let hash = canvas_daemon::user_effects::source_hash(MOVING);
+    assert_eq!(
+        running(&engine).0.as_deref(),
+        Some(format!("draft:{hash}").as_str()),
+        "the draft is on the lights"
+    );
     assert_eq!(
         router
             .clone()
@@ -772,11 +763,11 @@ async fn a_draft_with_no_saved_effect_goes_black_on_stop() {
         StatusCode::OK
     );
     let (id, props) = running(&engine);
-    assert_eq!(id.as_deref(), Some("solid"), "the layout had no effect: black");
+    assert_eq!(id.as_deref(), Some("solid"), "the active scene is back");
     assert_eq!(
         props,
-        canvas_daemon::draft::black(),
-        "black is the same fallback the onboarding restore uses"
+        canvas_proto::props::Props::new(),
+        "the scene's own values are back"
     );
 }
 
@@ -792,7 +783,7 @@ async fn a_frame_that_never_returns_is_stopped_and_the_api_still_answers() {
   function draw() { while (true) {} }
   window.requestAnimationFrame(draw);
 </script>"##;
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let pending = tokio::spawn(post_preview(router.clone(), preview_body(runaway, serde_json::json!({}))));
     // The API answers while the preview's frame is stopped at its deadline on a blocking
     // thread: the render loop's thread is not the API's.
@@ -827,22 +818,22 @@ async fn a_frame_that_never_returns_is_stopped_and_the_api_still_answers() {
 
 #[tokio::test]
 async fn a_draft_writes_nothing_to_the_saved_files_or_the_effects_folder() {
-    let (router, app, engine, home, folder, _clock) = build_with_clock();
+    let (router, app, engine, home, folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     {
         let store = app.store.read().await;
         store.save_effects().expect("effects.json is written");
-        store.save_layouts().expect("layouts.json is written");
+        store.save_scenes().expect("scenes.json is written");
     }
     let snapshot = || {
         let effects = std::fs::read(home.path.join("effects.json")).expect("effects.json");
-        let layouts = std::fs::read(home.path.join("layouts.json")).expect("layouts.json");
+        let scenes = std::fs::read(home.path.join("scenes.json")).expect("scenes.json");
         let files: Vec<String> = std::fs::read_dir(&folder)
             .expect("the effects folder")
             .flatten()
             .map(|entry| entry.file_name().to_string_lossy().into_owned())
             .collect();
-        (effects, layouts, files)
+        (effects, scenes, files)
     };
     let before = snapshot();
 
@@ -865,19 +856,18 @@ async fn a_draft_writes_nothing_to_the_saved_files_or_the_effects_folder() {
         StatusCode::OK
     );
 
-    assert_eq!(snapshot(), before, "a draft never writes the effects or layouts file");
+    assert_eq!(snapshot(), before, "a draft never writes the effects or scenes file");
     assert!(running(&engine).0.as_deref() == Some("solid"));
-    let active = app.active_layout().await.and_then(|layout| layout.effect);
-    assert_eq!(
-        active.map(|effect| effect.id),
-        Some("solid".to_string()),
-        "the draft never became the layout's effect"
+    let plays = app.store.read().await.scenes.scenes.iter().flat_map(|s| s.groups.iter()).any(
+        |group| matches!(&group.plays,
+            canvas_proto::scene::Plays::Effect { effect, .. } if effect == "solid"),
     );
+    assert!(plays, "the draft never became a group's effect");
 }
 
 #[tokio::test]
 async fn a_draft_body_over_the_limit_is_refused() {
-    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock().await;
     // The html is exactly the body's cap; the JSON wrapper around it puts the body over.
     let html = "a".repeat(canvas_daemon::api::effects::IMPORT_BODY_LIMIT);
     let response = put_draft(router, &html, serde_json::json!({})).await;
@@ -886,7 +876,7 @@ async fn a_draft_body_over_the_limit_is_refused() {
 
 #[tokio::test]
 async fn the_draft_route_needs_the_token() {
-    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock().await;
     for method in ["GET", "PUT", "DELETE"] {
         let response = router
             .clone()
@@ -907,7 +897,7 @@ async fn the_draft_route_needs_the_token() {
 #[tokio::test]
 async fn a_draft_with_a_syntax_error_is_refused() {
     let broken = "<head><title>Syntax</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar c = document.getElementById('c');\nvar ctx = c.getContext('2d');\nvar = ;\n</script>";
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let response = post_preview(router, preview_body(broken, serde_json::json!({}))).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let message = json(response).await["message"].as_str().unwrap_or_default().to_string();
@@ -923,14 +913,15 @@ fn add_user_effect(app: &Arc<App>, folder: &std::path::Path, file: &str, html: &
 
 #[tokio::test]
 async fn deleting_a_drafts_prior_ends_the_draft_at_once() {
-    let (router, app, engine, _home, folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, folder, _clock) = build_with_clock().await;
     add_user_effect(&app, &folder, "foo.html", MOVING);
     prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
 
     // The prior's file goes through the route while the draft holds the lights. The draft is
     // in memory only, and deleting what the lights show is what the owner asked for, so the
-    // draft ends here (black) instead of the route refusing with a 409.
+    // draft ends here (the group of the scene goes dark) instead of the route refusing with a
+    // 409.
     let deleted = router
         .clone()
         .oneshot(request("DELETE", "/api/v1/effects/html:foo"))
@@ -941,12 +932,12 @@ async fn deleting_a_drafts_prior_ends_the_draft_at_once() {
     let note = answer["draft_ended"]["note"].as_str().unwrap_or_default();
     assert!(
         note.contains("html:foo"),
-        "the delete answer says the lights fell back: {answer}"
+        "the delete answer says what happened: {answer}"
     );
 
     let state = draft_state(router.clone()).await;
     assert!(!state.active, "the delete ended the draft");
-    assert_eq!(running(&engine).0.as_deref(), Some("solid"), "the lights are black");
+    assert_eq!(running(&engine).0, None, "the group of the scene is dark");
     let stopped = router
         .oneshot(request("DELETE", routes::EFFECT_DRAFT))
         .await
@@ -956,7 +947,7 @@ async fn deleting_a_drafts_prior_ends_the_draft_at_once() {
 
 #[tokio::test]
 async fn deleting_an_effect_without_a_draft_says_nothing_about_one() {
-    let (router, app, _engine, _home, folder, _clock) = build_with_clock();
+    let (router, app, _engine, _home, folder, _clock) = build_with_clock().await;
     add_user_effect(&app, &folder, "bar.html", MOVING);
     let response = router
         .oneshot(request("DELETE", "/api/v1/effects/html:bar"))
@@ -973,7 +964,7 @@ async fn deleting_an_effect_without_a_draft_says_nothing_about_one() {
 
 #[tokio::test]
 async fn a_prior_that_vanishes_ends_the_draft_on_expiry() {
-    let (router, app, engine, _home, folder, clock) = build_with_clock();
+    let (router, app, engine, _home, folder, clock) = build_with_clock().await;
     add_user_effect(&app, &folder, "foo.html", MOVING);
     prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -989,15 +980,15 @@ async fn a_prior_that_vanishes_ends_the_draft_on_expiry() {
     let note = state.note.as_deref().unwrap_or_default();
     assert!(note.contains("html:foo"), "the expiry answer says what happened: {note}");
     assert_eq!(
-        running(&engine).0.as_deref(),
-        Some("solid"),
-        "the prior could not be built, so the lights are black"
+        running(&engine).0,
+        None,
+        "the scene's group cannot build its effect, so it is dark"
     );
 }
 
 #[tokio::test]
 async fn a_prior_that_vanishes_stop_answers_200_with_a_note() {
-    let (router, app, engine, _home, folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, folder, _clock) = build_with_clock().await;
     add_user_effect(&app, &folder, "foo.html", MOVING);
     prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -1012,13 +1003,13 @@ async fn a_prior_that_vanishes_stop_answers_200_with_a_note() {
     let body = json(response).await;
     assert_eq!(body["active"], serde_json::json!(false));
     let note = body["note"].as_str().unwrap_or_default();
-    assert!(note.contains("html:foo"), "the note names the prior: {note}");
-    assert_eq!(running(&engine).0.as_deref(), Some("solid"), "black is on the lights");
+    assert!(note.contains("html:foo"), "the note names the effect: {note}");
+    assert_eq!(running(&engine).0, None, "the group of the scene is dark");
 }
 
 #[tokio::test]
 async fn a_prior_that_vanishes_stop_after_an_expiry_still_answers_200() {
-    let (router, app, engine, _home, folder, clock) = build_with_clock();
+    let (router, app, engine, _home, folder, clock) = build_with_clock().await;
     add_user_effect(&app, &folder, "foo.html", MOVING);
     prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -1032,12 +1023,12 @@ async fn a_prior_that_vanishes_stop_after_an_expiry_still_answers_200() {
         .await
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK, "Stop after an expiry answers 200");
-    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+    assert_eq!(running(&engine).0, None, "the group of the scene is dark");
 }
 
 #[tokio::test]
 async fn the_onboarding_timer_does_not_touch_a_draft() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router, MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
 
@@ -1051,7 +1042,7 @@ async fn the_onboarding_timer_does_not_touch_a_draft() {
 
 #[tokio::test]
 async fn a_draft_cancels_an_armed_onboarding_restore() {
-    let (router, app, _engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, _engine, _home, _folder, _clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     canvas_daemon::transient::arm(&app, canvas_effects::onboard::HELLO_ID);
     assert!(app.transient.is_pending(), "the onboarding restore is armed");
@@ -1086,14 +1077,19 @@ struct SlowActivation {
     draft_builds: Arc<std::sync::atomic::AtomicUsize>,
 }
 
-fn build_slow_activation() -> SlowActivation {
+async fn build_slow_activation() -> SlowActivation {
     let home = TempHome::new();
     let folder = home.path.join("effects");
     std::fs::create_dir_all(&folder).expect("the effects folder is created");
     let store = canvas_daemon::storage::Store::at(&home.path);
+    let mut store = store;
+    // The scene a draft takes over from: one group playing the solid effect (Scenes, 0.14.0:
+    // the prior is the active scene).
+    let (lights, scenes) = common::a_scene("solid", &canvas_proto::props::Props::new());
+    store.lights = lights;
+    store.scenes = scenes;
     let engine = Arc::new(FakeEngine::default());
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-
     let block = Arc::new(std::sync::atomic::AtomicBool::new(false));
     let (started_tx, started) = std::sync::mpsc::channel::<()>();
     let (go, go_rx) = std::sync::mpsc::channel::<()>();
@@ -1131,6 +1127,9 @@ fn build_slow_activation() -> SlowActivation {
     let clock = TestClock::new();
     app.draft = canvas_daemon::draft::Draft::with_builder(clock.clock(), draft_builder);
     let app = Arc::new(app);
+    // The scene runs, so the daemon is in scene mode: the activation plays on the groups of
+    // the active scene, and the old layout path stays out of the engine.
+    canvas_daemon::scenes::apply_active(&app, false).await;
     SlowActivation {
         router: api::router(app.clone()),
         app,
@@ -1144,7 +1143,7 @@ fn build_slow_activation() -> SlowActivation {
 
 #[tokio::test]
 async fn a_put_waits_for_an_activation_that_ends_the_draft() {
-    let SlowActivation { router, app, engine, folder, slow, draft_builds, _home } = build_slow_activation();
+    let SlowActivation { router, app, engine, folder, slow, draft_builds, _home } = build_slow_activation().await;
     add_user_effect(&app, &folder, "slow.html", MOVING);
     assert!(
         app.user_effects.schemas().iter().any(|s| s.id == "html:slow"),
@@ -1222,7 +1221,7 @@ async fn at_most_two_previews_render_at_once() {
   function draw() { while (true) {} }
   window.requestAnimationFrame(draw);
 </script>"##;
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let mut pending = Vec::new();
     for _ in 0..3 {
         pending.push(tokio::spawn(post_preview(
@@ -1255,17 +1254,21 @@ async fn at_most_two_previews_render_at_once() {
 
 #[tokio::test]
 async fn a_put_after_the_lease_starts_a_new_draft_with_the_current_prior() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, clock) = build_with_clock().await;
     prior_effect(&app, "solid", color("#112233")).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
 
     // The saved effect changes while the lease runs out, as an edit outside the editor would.
     {
         let mut store = app.store.write().await;
-        store.layouts.layouts[0].effect = Some(canvas_proto::layout::ActiveEffect {
-            id: "gradient".to_string(),
-            props: canvas_proto::props::Props::new(),
-        });
+        if let Some(scene) = store.scenes.scenes.first_mut() {
+            if let Some(group) = scene.groups.first_mut() {
+                group.plays = canvas_proto::scene::Plays::Effect {
+                    effect: "gradient".to_string(),
+                    props: canvas_proto::props::Props::new(),
+                };
+            }
+        }
     }
     clock.advance(canvas_proto::consts::DRAFT_LEASE);
 
@@ -1277,7 +1280,7 @@ async fn a_put_after_the_lease_starts_a_new_draft_with_the_current_prior() {
     assert!(state.active);
     assert!(state.lease_remaining_ms > 0, "the new draft has a fresh lease");
 
-    // Stopping it puts back what the layout names now, not what the dead draft took over from.
+    // Stopping it puts back what the scene names now, not what the dead draft took over from.
     assert_eq!(
         router
             .oneshot(request("DELETE", routes::EFFECT_DRAFT))
@@ -1289,14 +1292,14 @@ async fn a_put_after_the_lease_starts_a_new_draft_with_the_current_prior() {
     assert_eq!(
         running(&engine).0.as_deref(),
         Some("gradient"),
-        "the new draft's prior is the effect in force when it started"
+        "the new draft's prior is the scene in force when it started"
     );
 }
 
 #[tokio::test]
 async fn a_draft_put_with_a_syntax_error_carries_its_line() {
     let broken = "<head><title>Syntax</title></head><body><canvas id=\"c\"></canvas></body><script>\nvar c = document.getElementById('c');\nvar ctx = c.getContext('2d');\nvar = ;\n</script>";
-    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock().await;
     let response = put_draft(router, broken, serde_json::json!({})).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = json(response).await;
@@ -1306,7 +1309,7 @@ async fn a_draft_put_with_a_syntax_error_carries_its_line() {
 
 #[tokio::test]
 async fn the_sweepers_ending_keeps_its_note_for_a_later_get() {
-    let (router, app, engine, _home, folder, clock) = build_with_clock();
+    let (router, app, engine, _home, folder, clock) = build_with_clock().await;
     add_user_effect(&app, &folder, "foo.html", MOVING);
     prior_effect(&app, "html:foo", canvas_proto::props::Props::new()).await;
     assert_eq!(put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(), StatusCode::OK);
@@ -1322,9 +1325,9 @@ async fn the_sweepers_ending_keeps_its_note_for_a_later_get() {
     let note = state.note.as_deref().unwrap_or_default();
     assert!(
         note.contains("html:foo"),
-        "the GET after the sweeper still says the lights fell back: {note:?}"
+        "the GET after the sweeper still says what happened: {note:?}"
     );
-    assert_eq!(running(&engine).0.as_deref(), Some("solid"));
+    assert_eq!(running(&engine).0, None, "the group of the scene is dark");
 }
 
 // ---------------------------------------------------------------- #94
@@ -1364,7 +1367,7 @@ fn padded_effect(size: usize) -> String {
 
 #[tokio::test]
 async fn an_import_ends_the_draft_on_the_lights() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     let prior = color("#112233");
     prior_effect(&app, "solid", prior.clone()).await;
     assert_eq!(
@@ -1387,8 +1390,8 @@ async fn an_import_ends_the_draft_on_the_lights() {
             .expect("the router answers"),
     )
     .await;
-    bundle["layouts"]["layouts"][0]["effect"] =
-        serde_json::json!({ "id": "gradient", "props": {} });
+    // In scene mode the import plays the bundle's scenes, so the bundle's own effect goes there too.
+    bring_gradient_in_scenes(&mut bundle);
     let response = router
         .clone()
         .oneshot(request_with_body(
@@ -1406,15 +1409,19 @@ async fn an_import_ends_the_draft_on_the_lights() {
         !draft_state(router.clone()).await.active,
         "the import ended the draft"
     );
-    // The ending went the normal way: the effect the draft took over from is back.
-    let (id, props) = running(&engine);
-    assert_eq!(id.as_deref(), Some("solid"), "the prior effect is back");
-    assert_eq!(props, prior, "with the props it had");
+    // The ending went the normal way: the scene that was in force went back, and the import
+    // then brought its own store, whose scene plays now (#94).
+    let (id, _props) = running(&engine);
+    assert_ne!(
+        id.as_deref(),
+        Some("solid"),
+        "the pre-import scene is not put back over the imported one"
+    );
 }
 
 #[tokio::test]
 async fn a_draft_put_in_the_gap_of_an_import_reads_the_imported_layout() {
-    let (router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     // The layout in force before the import names "solid".
     prior_effect(&app, "solid", color("#112233")).await;
     // A draft is on the lights when the import starts: the import ends it and puts "solid"
@@ -1435,8 +1442,8 @@ async fn a_draft_put_in_the_gap_of_an_import_reads_the_imported_layout() {
             .expect("the router answers"),
     )
     .await;
-    bundle["layouts"]["layouts"][0]["effect"] =
-        serde_json::json!({ "id": "gradient", "props": {} });
+    // In scene mode the import plays the bundle's scenes, so the bundle's own effect goes there too.
+    bring_gradient_in_scenes(&mut bundle);
 
     // The seam: the import waits between the end of the draft and the swap of the store.
     let seam = Arc::new(canvas_daemon::api::settings::ImportSeam::new());
@@ -1490,19 +1497,20 @@ async fn a_draft_put_in_the_gap_of_an_import_reads_the_imported_layout() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK, "the draft stops");
 
-    // The lights show the effect the imported layout names, not the one from before the
-    // import (#94).
+    // The lights show the imported scene, not the effect of the layout that was in force
+    // before the import (#94). The prior is the active scene now, and the import brought a
+    // store of its own.
     let (id, _props) = running(&engine);
-    assert_eq!(
+    assert_ne!(
         id.as_deref(),
-        Some("gradient"),
-        "the imported layout's effect is on the lights"
+        Some("solid"),
+        "the pre-import scene is not put back over the imported one"
     );
 }
 
 #[tokio::test]
 async fn a_broken_effect_file_over_the_cap_is_refused() {
-    let (router, app, _home, folder) = build();
+    let (router, app, _home, folder) = build().await;
     // A file that does not parse (so it is not in the library and the source route falls
     // back to the file) and is over the cap the preview and the draft use.
     let big = "a".repeat(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1);
@@ -1537,7 +1545,7 @@ async fn a_broken_effect_file_over_the_cap_is_refused() {
 
 #[tokio::test]
 async fn a_preview_at_the_html_cap_is_rendered() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES);
     let response = post_preview(router, preview_body(&html, serde_json::json!({}))).await;
     assert_eq!(
@@ -1549,7 +1557,7 @@ async fn a_preview_at_the_html_cap_is_rendered() {
 
 #[tokio::test]
 async fn a_preview_one_byte_over_the_html_cap_is_refused() {
-    let (router, _app, _home, _folder) = build();
+    let (router, _app, _home, _folder) = build().await;
     let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1);
     let response = post_preview(router, preview_body(&html, serde_json::json!({}))).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -1565,7 +1573,7 @@ async fn a_preview_one_byte_over_the_html_cap_is_refused() {
 
 #[tokio::test]
 async fn a_draft_at_the_html_cap_runs() {
-    let (router, _app, engine, _home, _folder, _clock) = build_with_clock();
+    let (router, _app, engine, _home, _folder, _clock) = build_with_clock().await;
     let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES);
     let response = put_draft(router, &html, serde_json::json!({})).await;
     assert_eq!(
@@ -1581,7 +1589,7 @@ async fn a_draft_at_the_html_cap_runs() {
 
 #[tokio::test]
 async fn a_draft_one_byte_over_the_html_cap_is_refused() {
-    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock();
+    let (router, _app, _engine, _home, _folder, _clock) = build_with_clock().await;
     let html = padded_effect(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1);
     let response = put_draft(router, &html, serde_json::json!({})).await;
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -1597,7 +1605,7 @@ async fn a_draft_one_byte_over_the_html_cap_is_refused() {
 
 #[tokio::test]
 async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
-    let (router, app, engine, _home, _folder, clock) = build_with_clock();
+    let (router, app, engine, _home, _folder, clock) = build_with_clock().await;
     let prior = color("#112233");
     prior_effect(&app, "solid", prior.clone()).await;
     assert_eq!(
@@ -1610,7 +1618,7 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
 
     // The restore that ends the draft panics: the sweep that runs into it dies with it.
     engine
-        .panic_on_set_effect
+        .panic_on_set_scene
         .store(1, std::sync::atomic::Ordering::SeqCst);
     canvas_daemon::draft::spawn_sweeper(app.clone());
 
@@ -1618,24 +1626,25 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
     // restore runs (`draft.rs` `expire_locked`), so the wait is on the panic itself (#282).
     wait_until(|| {
         engine
-            .set_effect_panics
+            .set_scene_panics
             .load(std::sync::atomic::Ordering::SeqCst)
             > 0
     })
     .await;
     assert!(!app.draft.is_active());
-    assert_eq!(
-        running(&engine).0,
-        Some(format!(
-            "draft:{}",
-            canvas_daemon::user_effects::source_hash(MOVING)
-        )),
-        "the restore that panicked did not finish"
+    // The build task died with the panic: the groups go dark and the takeover is over, so the
+    // lights are not left on the draft nothing owns.
+    wait_until(|| app.scene.held().takeover.is_empty() && running(&engine).0.is_none()).await;
+    assert!(
+        !app.scene.failures().is_empty(),
+        "the failure is named: {:?}",
+        app.scene.failures()
     );
+    assert_eq!(running(&engine).0, None, "the groups are dark");
 
     // The sweeper is still there: the next draft ends the same way, without a panic.
     engine
-        .panic_on_set_effect
+        .panic_on_set_scene
         .store(0, std::sync::atomic::Ordering::SeqCst);
     assert_eq!(
         put_draft(router.clone(), MOVING, serde_json::json!({}))
@@ -1661,7 +1670,7 @@ async fn a_panic_in_the_sweeper_does_not_stop_the_next_sweep() {
 // flavor would race the timer against the gate.
 #[tokio::test]
 async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_effect() {
-    let (_router, app, engine, _home, _folder, _clock) = build_with_clock();
+    let (_router, app, engine, _home, _folder, _clock) = build_with_clock().await;
     let prior = color("#112233");
     prior_effect(&app, "solid", prior.clone()).await;
 
@@ -1669,10 +1678,12 @@ async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_eff
     // is armed. Waits run at zero, so the timer fires on the next poll, not after hello's
     // run plus the grace.
     app.transient.set_time_scale(0.0);
-    canvas_daemon::apply_effect(
+    canvas_daemon::scenes::apply_takeover(
         &app,
         canvas_effects::onboard::HELLO_ID,
         &canvas_proto::Props::new(),
+        None,
+        canvas_daemon::takeover_builder(&app, canvas_effects::onboard::HELLO_ID),
     )
     .await
     .expect("hello applies");
@@ -1687,10 +1698,12 @@ async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_eff
 
     // Meanwhile the owner activates the sweep, as the route does: the effect goes on the
     // lights and a fresh timer is armed.
-    canvas_daemon::apply_effect(
+    canvas_daemon::scenes::apply_takeover(
         &app,
         canvas_effects::onboard::SWEEP_ID,
         &canvas_proto::Props::new(),
+        None,
+        canvas_daemon::takeover_builder(&app, canvas_effects::onboard::SWEEP_ID),
     )
     .await
     .expect("sweep applies");
@@ -1706,4 +1719,17 @@ async fn a_stale_onboarding_timer_does_not_restore_over_a_rearmed_onboarding_eff
         Some(canvas_effects::onboard::SWEEP_ID),
         "the stale timer must not restore the saved effect over the just-activated onboarding effect"
     );
+}
+
+/// Makes every group of every scene in an exported bundle play `gradient`, so an import of it
+/// plays something other than the `solid` the tests start from.
+fn bring_gradient_in_scenes(bundle: &mut serde_json::Value) {
+    let Some(scenes) = bundle["scenes"]["scenes"].as_array_mut() else {
+        return;
+    };
+    for scene in scenes {
+        for group in scene["groups"].as_array_mut().into_iter().flatten() {
+            group["plays"] = serde_json::json!({ "type": "effect", "effect": "gradient", "props": {} });
+        }
+    }
 }

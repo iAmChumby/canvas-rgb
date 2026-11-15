@@ -19,7 +19,10 @@
 // All lengths are canvas units except those ending in `Px`, which are css pixels; `k` is css
 // pixels per canvas unit.
 
-import type { Point } from "@/lib/zones";
+export interface Point {
+  x: number;
+  y: number;
+}
 
 /** A part of the desk, by kind and place in its list. Structurally the editor's `Sel`. */
 export interface PartRef {

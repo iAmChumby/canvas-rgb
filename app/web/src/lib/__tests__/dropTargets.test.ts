@@ -1,8 +1,9 @@
-// The drop targets (#257 phase 2): one pure table from a pointer to what a drop would mean.
+﻿// The drop targets (#257 phase 2): one pure table from a pointer to what a drop would mean.
 // The desk is the demo layout, so the coordinates are the ones the screenshots use.
 
 import { describe, expect, it } from "vitest";
-import { DEVICES, LAYOUT_DESK } from "@/lib/fixtures";
+import { DEVICES } from "@/lib/fixtures";
+import { canvasWith } from "./groupCanvasFixture";
 import {
   dropArea,
   dropTargetAt,
@@ -27,12 +28,23 @@ const layers = [
   { id: "l2", name: "Heat" },
   { id: "l3", name: "Sparkles" },
 ];
-const names = { layout: LAYOUT_DESK, devices: DEVICES, layers };
+const canvas = canvasWith([
+  {
+    id: "royuan:3151:4015#z0",
+    label: "ROYUAN MonsGeek Keyboard · Zone 1",
+    device: "royuan:3151:4015",
+    x: 16,
+    y: 158,
+    width: 110,
+    height: 30,
+  },
+]);
+const names = { canvas, devices: DEVICES, layers };
 
 describe("a pointer on the stage", () => {
   it("lands on the device of the smallest zone under it", () => {
     // The keyboard's 110 x 30 zone, inside both whole-canvas layers and nothing else.
-    expect(dropTargetAt({ point: at(71, 173), boxes, layout: LAYOUT_DESK, payload: "effect" })).toEqual({
+    expect(dropTargetAt({ point: at(71, 173), boxes, canvas, payload: "effect" })).toEqual({
       kind: "device",
       device: "royuan:3151:4015",
     });
@@ -40,12 +52,12 @@ describe("a pointer on the stage", () => {
 
   it("lands on that one zone with Shift", () => {
     expect(
-      dropTargetAt({ point: at(71, 173), boxes, layout: LAYOUT_DESK, payload: "effect", shift: true }),
+      dropTargetAt({ point: at(71, 173), boxes, canvas, payload: "effect", shift: true }),
     ).toEqual({ kind: "zone", device: "royuan:3151:4015", zone: 0 });
   });
 
   it("lands on a new rectangle in empty picture, centred on the pointer", () => {
-    expect(dropTargetAt({ point: at(200, 100), boxes, layout: LAYOUT_DESK, payload: "effect" })).toEqual({
+    expect(dropTargetAt({ point: at(200, 100), boxes, canvas, payload: "effect" })).toEqual({
       kind: "rect",
       x: 140,
       y: 60,
@@ -55,7 +67,7 @@ describe("a pointer on the stage", () => {
   });
 
   it("lands on the whole canvas on the strip above the picture", () => {
-    expect(dropTargetAt({ point: { x: 100, y: 90 }, boxes, layout: LAYOUT_DESK, payload: "effect" })).toEqual({
+    expect(dropTargetAt({ point: { x: 100, y: 90 }, boxes, canvas, payload: "effect" })).toEqual({
       kind: "canvas",
     });
   });
@@ -66,12 +78,12 @@ describe("a pointer on the stage", () => {
   });
 
   it("has no target off the stage and off the stack", () => {
-    expect(dropTargetAt({ point: { x: 900, y: 900 }, boxes, layout: LAYOUT_DESK, payload: "effect" })).toBeNull();
+    expect(dropTargetAt({ point: { x: 900, y: 900 }, boxes, canvas, payload: "effect" })).toBeNull();
   });
 });
 
 describe("a pointer on the layer list", () => {
-  const slot = (y: number) => dropTargetAt({ point: { x: 300, y }, boxes, layout: LAYOUT_DESK, payload: "effect" });
+  const slot = (y: number) => dropTargetAt({ point: { x: 300, y }, boxes, canvas, payload: "effect" });
 
   it("names the insertion slot an effect would take", () => {
     // Above the top row's middle: above Sparkles, which is the top of the list.
@@ -84,7 +96,7 @@ describe("a pointer on the layer list", () => {
 
   it("names the row a layer would take", () => {
     expect(
-      dropTargetAt({ point: { x: 300, y: 570 }, boxes, layout: LAYOUT_DESK, payload: "layer" }),
+      dropTargetAt({ point: { x: 300, y: 570 }, boxes, canvas, payload: "layer" }),
     ).toEqual({ kind: "row", id: "l2", index: 1 });
   });
 });
@@ -119,3 +131,4 @@ describe("what a target is called and what it places", () => {
     expect(dropArea({ kind: "row", id: "l1", index: 0 })).toBeNull();
   });
 });
+

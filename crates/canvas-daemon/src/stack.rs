@@ -8,8 +8,8 @@
 //! The three pieces:
 //!
 //! - [`AreaMap`] (the *area book*): every device's and zone's per-LED pixel mask, built from the
-//!   same sample plan the engine samples with. It is rebuilt when the layout, the render scale or
-//!   the sampling mode changes, never per frame. A device area lights the pixels its own LEDs
+//!   same sample plan the engine samples with. It is rebuilt when the scene's plan or the
+//!   sampling changes, never per frame. A device area lights the pixels its own LEDs
 //!   read, and a second device drawn over those same pixels reads them too: the canvas has no
 //!   z-order, so two overlapping footprints share the pixels they share.
 //! - [`LiveMap`]: each layer's blend, opacity, visibility and area, read once per frame, so a
@@ -20,7 +20,7 @@
 use canvas_core::geometry;
 use canvas_proto::api::{StackLayerState, StackLayerStatus};
 use canvas_proto::device::DeviceId;
-use canvas_proto::layout::{Layout, PlacedZone, SamplingMode, CANVAS_HEIGHT, CANVAS_WIDTH};
+use canvas_proto::layout::{SamplingMode, CANVAS_HEIGHT, CANVAS_WIDTH};
 use canvas_proto::props::{InputNeeds, Props, PropertyDef, PropertySchema};
 use canvas_proto::stack::{
     BlendMode, LayerArea, LayerMask, MaskSource, Stack, STACK_ID_PREFIX, STACK_MAX_LAYERS,
@@ -154,8 +154,9 @@ pub fn replace_live(live: &LiveStack, stack: &Stack) {
     *map = next;
 }
 
-/// The area book every `StackEffect` resolves its layers against.
-pub type AreaBook = Arc<RwLock<AreaMap>>;
+/// The area book every `StackEffect` resolves its layers against: the masks of every group of
+/// the active scene, by group id.
+pub type AreaBook = Arc<RwLock<AreaMaps>>;
 
 // ---------------------------------------------------------------- the area book
 
@@ -278,7 +279,7 @@ impl Mask {
     }
 }
 
-/// Every device's and zone's mask, at one layout, render scale and sampling mode.
+/// Every device's and zone's mask, at one group, render scale and sampling mode.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AreaMap {
     /// Bumped whenever a new map is published; the compositor rebuilds its resolved masks only
@@ -286,7 +287,7 @@ pub struct AreaMap {
     pub version: u64,
     pub devices: BTreeMap<DeviceId, Mask>,
     pub zones: BTreeMap<(DeviceId, u32), Mask>,
-    /// The layout's render scale, as a factor.
+    /// The group's render scale, as a factor.
     pub scale: f32,
     pub sampling: SamplingMode,
     /// The render size the masks are built for.
@@ -295,49 +296,51 @@ pub struct AreaMap {
 }
 
 impl AreaMap {
-    /// Builds the masks for `layout` over `devices`.
+    /// Builds the masks of one group: its members' LEDs, arranged on the group's canvas.
     ///
-    /// A device's mask is the union, over every LED of every zone it has, of the pixels that
-    /// LED's sampling mode reads; a zone's is the union over that zone's LEDs. A device with no
-    /// placements, or whose zones are all unplaced, gets no mask: an area over it paints nothing.
-    pub fn build(layout: &Layout, devices: &[canvas_proto::DeviceInfo], version: u64) -> Self {
-        let scale = layout.render_scale.factor();
+    /// The plan is the arrangement (Task 3): where each member's LEDs read the group's canvas.
+    /// The samples are in the group's canvas units, so they are scaled to the render size the
+    /// masks are built at, the same scale the engine renders the group at.
+    ///
+    /// A device's mask is the union of the samples of every light of that device in the group;
+    /// a zone's is the union of the samples of every light on that zone. A device or a zone the
+    /// group does not hold gets no mask: an area over it paints nothing.
+    pub fn build_for_group(
+        plan: &canvas_core::arrangement::GroupPlan,
+        lights: &[canvas_proto::scene::Light],
+        sampling: SamplingMode,
+        version: u64,
+    ) -> Self {
+        let scale = canvas_core::SCENE_RENDER_SCALE;
         let width = ((CANVAS_WIDTH as f32 * scale).round() as u32).max(1);
         let height = ((CANVAS_HEIGHT as f32 * scale).round() as u32).max(1);
-        let plan = geometry::build_plan(layout, devices);
         let mut map = Self {
             version,
             devices: BTreeMap::new(),
             zones: BTreeMap::new(),
             scale,
-            sampling: layout.sampling,
+            sampling,
             width,
             height,
         };
-
-        for device in &plan.devices {
-            let mut mask = Mask::new(width, height);
-            for zone in &device.zones {
-                let mut zone_mask = Mask::new(width, height);
-                for led in &zone.leds {
-                    mask.add_led(led, layout.sampling);
-                    zone_mask.add_led(led, layout.sampling);
-                }
-                if let Some(bounds) = placed_bounds(layout, |p| {
-                    p.device_id == device.device_id && p.zone_index == zone.zone_index
-                }) {
-                    zone_mask.dest = bounds.map(|v| v * scale);
-                }
-                if !zone_mask.is_empty() {
-                    map.zones.insert((device.device_id.clone(), zone.zone_index), zone_mask);
-                }
+        for samples in plan.lights.iter() {
+            let Some(light) = lights.iter().find(|l| l.id == samples.light) else { continue };
+            let device_mask = map.devices.entry(light.device_id.clone()).or_insert_with(|| Mask::new(width, height));
+            let zone_mask = map
+                .zones
+                .entry((light.device_id.clone(), light.zone_index))
+                .or_insert_with(|| Mask::new(width, height));
+            for led in &samples.leds {
+                let scaled = scale_sample(led, scale);
+                device_mask.add_led(&scaled, sampling);
+                zone_mask.add_led(&scaled, sampling);
             }
-            if let Some(bounds) = placed_bounds(layout, |p| p.device_id == device.device_id) {
-                mask.dest = bounds.map(|v| v * scale);
-            }
-            if !mask.is_empty() {
-                map.devices.insert(device.device_id.clone(), mask);
-            }
+        }
+        // A device or zone with no LED of its own paints nothing, and has no box.
+        map.devices.retain(|_, mask| !mask.is_empty());
+        map.zones.retain(|_, mask| !mask.is_empty());
+        for mask in map.devices.values_mut().chain(map.zones.values_mut()) {
+            mask.dest = mask.extent().unwrap_or([0.0, 0.0, 0.0, 0.0]);
         }
         map
     }
@@ -379,6 +382,60 @@ impl AreaMap {
     }
 }
 
+/// A sample in the group's canvas units, as a sample in render pixels.
+fn scale_sample(sample: &geometry::LedSample, scale: f32) -> geometry::LedSample {
+    geometry::LedSample {
+        center_x: sample.center_x * scale,
+        center_y: sample.center_y * scale,
+        bounds: sample.bounds.map(|v| v * scale),
+        sampled: sample.sampled,
+    }
+}
+
+/// The masks of every group, at one version.
+///
+/// A stack resolves its layers in the group it plays in, so the book holds one map per group.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct AreaMaps {
+    /// Bumped whenever a new map is published; the compositor rebuilds its resolved masks only
+    /// when it moves.
+    pub version: u64,
+    /// The masks of each group of the active scene, by group id.
+    pub groups: BTreeMap<String, AreaMap>,
+}
+
+impl AreaMaps {
+    /// The mask for the area a layer names, or `None` when it covers nothing.
+    ///
+    /// `group` is the group the stack plays in: its areas resolve in that group's canvas. A group
+    /// the book does not hold resolves to nothing ("not in this group"). With no group (a library
+    /// tile) a whole-canvas area and a rectangle still resolve, at the logical size and 100 %; a
+    /// device or a zone has no mask then, so it covers nothing.
+    pub fn resolve(&self, group: Option<&str>, area: &LayerArea) -> Option<ResolvedArea<'_>> {
+        match group {
+            Some(id) => self.groups.get(id)?.resolve(area),
+            // A tile renders a stack for the library: it has no group and so no masks.
+            None => match area {
+                LayerArea::Canvas => Some(ResolvedArea {
+                    dest: [0.0, 0.0, CANVAS_WIDTH as f32, CANVAS_HEIGHT as f32],
+                    mask: None,
+                    whole_canvas: true,
+                }),
+                LayerArea::Rect { x, y, width, height } => {
+                    let dest = rect_px(*x, *y, *width, *height, 1.0, CANVAS_WIDTH, CANVAS_HEIGHT)?;
+                    Some(ResolvedArea { dest, mask: None, whole_canvas: false })
+                }
+                LayerArea::Device { .. } | LayerArea::Zone { .. } => None,
+            },
+        }
+    }
+
+    /// True when the area covers nothing at all, for the status the API reports.
+    pub fn is_empty_area(&self, group: Option<&str>, area: &LayerArea) -> bool {
+        self.resolve(group, area).is_none()
+    }
+}
+
 /// Where one layer's picture is mapped, and the pixels it may paint.
 #[derive(Debug, Clone, Copy)]
 pub struct ResolvedArea<'a> {
@@ -416,42 +473,6 @@ struct ResolvedLayer {
     area: Option<OwnedArea>,
 }
 
-/// The bounding box, in logical canvas units, of every visible placement of the zones `which`
-/// chooses: the four corners after rotation.
-fn placed_bounds(layout: &Layout, which: impl Fn(&PlacedZone) -> bool) -> Option<[f32; 4]> {
-    let mut out: Option<[f32; 4]> = None;
-    for placed in layout.zones.iter().filter(|p| p.visible && which(p)) {
-        let center = (placed.x + placed.width / 2.0, placed.y + placed.height / 2.0);
-        let corners = [
-            (placed.x, placed.y),
-            (placed.x + placed.width, placed.y),
-            (placed.x + placed.width, placed.y + placed.height),
-            (placed.x, placed.y + placed.height),
-        ];
-        for (x, y) in corners.map(|p| rotate(p, center, placed.rotation_deg)) {
-            if !x.is_finite() || !y.is_finite() {
-                continue;
-            }
-            out = Some(match out {
-                Some([x0, y0, x1, y1]) => [x0.min(x), y0.min(y), x1.max(x), y1.max(y)],
-                None => [x, y, x, y],
-            });
-        }
-    }
-    out
-}
-
-/// Rotates `p` clockwise around `center` by `deg` degrees, the rule the desk draws with.
-fn rotate(p: (f32, f32), center: (f32, f32), deg: f32) -> (f32, f32) {
-    if deg == 0.0 {
-        return p;
-    }
-    let rad = deg.to_radians();
-    let (sin, cos) = rad.sin_cos();
-    let dx = p.0 - center.0;
-    let dy = p.1 - center.1;
-    (center.0 + dx * cos - dy * sin, center.1 + dx * sin + dy * cos)
-}
 
 /// A rectangle in logical canvas units as render pixels, clamped to the canvas, or `None` when
 /// it covers nothing. A NaN or an infinity is "no area" (D95.3.6).
@@ -476,7 +497,7 @@ fn rect_px(x: f32, y: f32, w: f32, h: f32, scale: f32, width: u32, height: u32) 
 
 /// One pixel of one layer, composited over what is under it (D95.3.3).
 ///
-/// Each mode is `d + a·(blend(d, s) − d)`, with Add's blend clamped before the opacity is
+/// Each mode is `d + a·(blend(d, s) âˆ’ d)`, with Add's blend clamped before the opacity is
 /// folded in: at `d = 0.5, s = 0.8, a = 0.5` the result is 0.75, not 0.90.
 pub fn blend_pixel(mode: BlendMode, d: [f32; 3], s: [f32; 3], a: f32) -> [f32; 3] {
     // A NaN has no value to clamp, so it is 0; an infinity clamps like any other number.
@@ -769,6 +790,9 @@ pub struct StackEffect {
     layers: Vec<Layer>,
     live: LiveStack,
     areas: AreaBook,
+    /// The group this stack plays in: its layers resolve in that group's canvas. `None` for the
+    /// legacy layout, until the layout is gone (Task 12).
+    group: Option<String>,
     clock: Clock,
     /// The frame rate the daemon is configured for; the HTML budget comes from it.
     fps: Arc<AtomicU32>,
@@ -889,6 +913,7 @@ impl StackEffect {
             layers,
             live,
             areas,
+            group: None,
             clock: real_clock(),
             fps: Arc::new(AtomicU32::new(canvas_proto::consts::FPS_DEFAULT)),
             statuses: None,
@@ -905,6 +930,12 @@ impl StackEffect {
     /// The clock the hold is measured on.
     pub fn with_clock(mut self, clock: Clock) -> Self {
         self.clock = clock;
+        self
+    }
+
+    /// The group this stack plays in: its layers resolve in that group's canvas.
+    pub fn with_group(mut self, group: &str) -> Self {
+        self.group = Some(group.to_string());
         self
     }
 
@@ -957,10 +988,10 @@ impl StackEffect {
     /// The render size the layer canvases are built for, from the area book.
     fn area_scale(&self) -> f32 {
         let areas = read_recovering(&self.areas);
-        if areas.width > 0 {
-            areas.scale
-        } else {
-            1.0
+        let map = self.group.as_deref().and_then(|id| areas.groups.get(id));
+        match map {
+            Some(map) if map.width > 0 => map.scale,
+            _ => 1.0,
         }
     }
 
@@ -1018,7 +1049,7 @@ impl StackEffect {
                 .get(&layer.id)
                 .cloned()
                 .unwrap_or_else(|| layer.values.clone());
-            let area = areas.resolve(&values.area).map(OwnedArea::from_resolved);
+            let area = areas.resolve(self.group.as_deref(), &values.area).map(OwnedArea::from_resolved);
             masks.push(values.mask.clone());
             resolved.push(ResolvedLayer { values, area });
         }
@@ -1576,34 +1607,85 @@ impl StackEffect {
     }
 }
 
-// ---------------------------------------------------------------- the sample plan for tests
+// ---------------------------------------------------------------- the group a test paints
 
-/// The sample plan a build reads, for the area tests: the same plan the engine samples with.
-pub fn sample_plan(layout: &Layout, devices: &[canvas_proto::DeviceInfo]) -> geometry::LayoutPlan {
-    geometry::build_plan(layout, devices)
+/// Every zone of every device as one light, and the plan that lays them on a group's canvas.
+///
+/// The tests that check what an area paints use this: one group holding every zone, each in its
+/// own slot, which is what the engine renders. The plan's samples are in the group's canvas
+/// units, the same ones [`AreaMap::build_for_group`] scales.
+pub fn zone_group(
+    devices: &[canvas_proto::DeviceInfo],
+) -> (Vec<canvas_proto::scene::Light>, canvas_core::arrangement::GroupPlan) {
+    use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
+    let lights: Vec<Light> = devices
+        .iter()
+        .flat_map(|device| {
+            device
+                .zones
+                .iter()
+                .filter(|zone| zone.led_count > 0)
+                .map(move |zone| Light {
+                    id: zone_light_id(&device.id, zone.index),
+                    device_id: device.id.clone(),
+                    zone_index: zone.index,
+                    leds: None,
+                    name: None,
+                    arrangement: Arrangement::default_for(&zone.kind),
+                    reversed: false,
+                })
+        })
+        .collect();
+    let members: Vec<String> = lights.iter().map(|l| l.id.clone()).collect();
+    let plan = canvas_core::arrangement::build_group_plan(&members, GroupMode::FlowAcross, &lights, devices);
+    (lights, plan)
 }
 
-/// Samples every device's LEDs from `canvas`, as the engine does every frame.
-pub fn sample_devices(
-    plan: &geometry::LayoutPlan,
+/// Samples every light's LEDs from a painted group canvas, as the engine does: per device, in
+/// zone order, with a zone the group does not hold left black.
+///
+/// The tests compare the compositor's frame with this: the pixels a layer painted are the ones
+/// the lights of that area read.
+pub fn sample_group(
+    plan: &canvas_core::arrangement::GroupPlan,
+    lights: &[canvas_proto::scene::Light],
+    devices: &[canvas_proto::DeviceInfo],
     canvas: &Canvas,
-    mode: SamplingMode,
-) -> Vec<Vec<canvas_proto::Rgb8>> {
-    let mut out = Vec::with_capacity(plan.devices.len());
-    for device in &plan.devices {
-        let mut colors = Vec::new();
-        for zone in &device.zones {
-            canvas_core::sampling::sample_leds(
-                &canvas.pixels,
-                canvas.width,
-                canvas.height,
-                &zone.leds,
-                mode,
-                &mut colors,
-            );
+) -> BTreeMap<DeviceId, Vec<canvas_proto::Rgb8>> {
+    let mut out: BTreeMap<DeviceId, Vec<canvas_proto::Rgb8>> = devices
+        .iter()
+        .map(|device| (device.id.clone(), Vec::new()))
+        .collect();
+    for samples in plan.lights.iter() {
+        let Some(light) = lights.iter().find(|l| l.id == samples.light) else {
+            continue;
+        };
+        let frame = out.entry(light.device_id.clone()).or_default();
+        let start = samples.frame_start as usize;
+        if frame.len() < start + samples.leds.len() {
+            frame.resize(start + samples.leds.len(), canvas_proto::Rgb8::BLACK);
         }
-        colors.resize(device.led_count as usize, canvas_proto::Rgb8::BLACK);
-        out.push(colors);
+        let mut colors = Vec::new();
+        // The plan's samples are in the group's canvas units; the canvas is the scaled one.
+        let scaled: Vec<canvas_core::geometry::LedSample> = samples
+            .leds
+            .iter()
+            .map(|sample| canvas_core::geometry::LedSample {
+                center_x: sample.center_x * canvas_core::SCENE_RENDER_SCALE,
+                center_y: sample.center_y * canvas_core::SCENE_RENDER_SCALE,
+                bounds: sample.bounds.map(|v| v * canvas_core::SCENE_RENDER_SCALE),
+                sampled: sample.sampled,
+            })
+            .collect();
+        canvas_core::sampling::sample_leds(
+            &canvas.pixels,
+            canvas.width,
+            canvas.height,
+            &scaled,
+            canvas_core::SCENE_SAMPLING,
+            &mut colors,
+        );
+        frame[start..start + colors.len()].copy_from_slice(&colors);
     }
     out
 }
@@ -1612,7 +1694,6 @@ pub fn sample_devices(
 mod tests {
     use super::*;
     use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-    use canvas_proto::layout::{RenderScale, ZoneShape};
     use canvas_proto::props::PropValue;
 
     fn near(a: f32, b: f32) -> bool {
@@ -1728,84 +1809,157 @@ mod tests {
         }
     }
 
-    fn placed(device: &str, zone: u32, x: f32, y: f32, w: f32, h: f32) -> PlacedZone {
-        PlacedZone {
+    // ---------------------------------------------------------------- the group's areas
+
+    /// A light of the hardware map.
+    fn light(id: &str, device: &str, zone: u32) -> canvas_proto::scene::Light {
+        canvas_proto::scene::Light {
+            id: id.into(),
             device_id: DeviceId(device.into()),
             zone_index: zone,
-            x,
-            y,
-            width: w,
-            height: h,
-            rotation_deg: 0.0,
-            reversed: false,
-            visible: true,
-            shape: ZoneShape::Auto,
-            label: None,
             leds: None,
-            part: None,
-            locked: false,
+            name: None,
+            arrangement: canvas_proto::scene::Arrangement::Strip,
+            reversed: false,
         }
     }
 
-    fn layout(zones: Vec<PlacedZone>, scale: RenderScale, sampling: SamplingMode) -> Layout {
-        Layout {
-            id: "l".into(),
-            name: "l".into(),
-            render_scale: scale,
-            sampling,
-            zones,
-            effect: None,
-            case_form: canvas_proto::layout::CaseForm::None,
-            landmarks: Vec::new(),
+    /// The masks of one group: its members' lights, arranged on the group's canvas.
+    fn group_map(
+        members: &[&str],
+        lights: &[canvas_proto::scene::Light],
+        devices: &[DeviceInfo],
+        mode: canvas_proto::scene::GroupMode,
+    ) -> AreaMaps {
+        let plan = canvas_core::arrangement::build_group_plan(
+            &members.iter().map(|m| m.to_string()).collect::<Vec<_>>(),
+            mode,
+            lights,
+            devices,
+        );
+        AreaMaps {
+            version: 1,
+            groups: [(
+                "g".to_string(),
+                AreaMap::build_for_group(&plan, lights, SamplingMode::AreaAverage, 1),
+            )]
+            .into_iter()
+            .collect(),
         }
     }
 
+    /// A group the book does not hold resolves to nothing: "not in this group".
+    #[test]
+    fn an_unknown_group_resolves_to_nothing() {
+        let devices = vec![device("a", vec![zone(0, ZoneKind::Linear, 4)])];
+        let lights = vec![light("a#z0", "a", 0)];
+        let map = group_map(&["a#z0"], &lights, &devices, canvas_proto::scene::GroupMode::FlowAcross);
+        let area = LayerArea::Device { device: DeviceId("a".into()) };
+        assert!(
+            map.resolve(Some("not-a-group"), &area).is_none(),
+            "a group the book does not hold paints nothing"
+        );
+        assert!(map.is_empty_area(Some("not-a-group"), &area));
+        // The group the book holds still resolves.
+        assert!(map.resolve(Some("g"), &area).is_some());
+    }
+
+    /// A device's area covers every light of that device in the group, and no other device's.
+    #[test]
+    fn a_device_area_covers_every_light_of_that_device_in_the_group() {
+        let devices = vec![
+            device("a", vec![zone(0, ZoneKind::Linear, 4), zone(1, ZoneKind::Linear, 4)]),
+            device("b", vec![zone(0, ZoneKind::Linear, 4)]),
+        ];
+        let lights = vec![light("a#z0", "a", 0), light("a#z1", "a", 1), light("b#z0", "b", 0)];
+        // The group holds both lights of a and none of b.
+        let map = group_map(&["a#z0", "a#z1"], &lights, &devices, canvas_proto::scene::GroupMode::FlowAcross);
+        let area = LayerArea::Device { device: DeviceId("a".into()) };
+        let resolved = map.resolve(Some("g"), &area).expect("device a is in the group");
+        let mask = resolved.mask.expect("a device area has a mask");
+        // Both zones of a are covered: the mask holds every LED of the device.
+        let plan = canvas_core::arrangement::build_group_plan(
+            &["a#z0".to_string(), "a#z1".to_string()],
+            canvas_proto::scene::GroupMode::FlowAcross,
+            &lights,
+            &devices,
+        );
+        for sample in plan.lights.iter().flat_map(|l| l.leds.iter()) {
+            let x = (sample.center_x * canvas_core::SCENE_RENDER_SCALE).round() as u32;
+            let y = (sample.center_y * canvas_core::SCENE_RENDER_SCALE).round() as u32;
+            assert!(mask.contains(x, y), "the LED at {x},{y} is covered");
+        }
+        // And the device's own box is the box of those LEDs.
+        assert!(resolved.dest[2] > resolved.dest[0], "the device has a box: {:?}", resolved.dest);
+    }
+
+    /// A device the group does not hold covers nothing, and the layer says so.
+    #[test]
+    fn an_area_for_a_device_outside_the_group_lights_nothing_and_says_so() {
+        let devices = vec![
+            device("a", vec![zone(0, ZoneKind::Linear, 4)]),
+            device("b", vec![zone(0, ZoneKind::Linear, 4)]),
+        ];
+        let lights = vec![light("a#z0", "a", 0), light("b#z0", "b", 0)];
+        let map = group_map(&["a#z0"], &lights, &devices, canvas_proto::scene::GroupMode::FlowAcross);
+        let area = LayerArea::Device { device: DeviceId("b".into()) };
+        assert!(map.resolve(Some("g"), &area).is_none(), "device b is not in the group");
+        assert!(map.is_empty_area(Some("g"), &area), "the area covers nothing");
+        // A zone of a device the group does not hold, too.
+        let zone = LayerArea::Zone { device: DeviceId("b".into()), zone: 0 };
+        assert!(map.resolve(Some("g"), &zone).is_none(), "zone 0 of b is not in the group");
+    }
+
+    /// A rectangle is a rectangle of the group's canvas: the same 320x200 numbers.
+    #[test]
+    fn a_rect_area_is_a_rectangle_of_the_group_canvas() {
+        let devices = vec![device("a", vec![zone(0, ZoneKind::Linear, 4)])];
+        let lights = vec![light("a#z0", "a", 0)];
+        let map = group_map(&["a#z0"], &lights, &devices, canvas_proto::scene::GroupMode::FlowAcross);
+        let area = LayerArea::Rect { x: 16.0, y: 150.0, width: 110.0, height: 46.0 };
+        let resolved = map.resolve(Some("g"), &area).expect("a rectangle covers the canvas");
+        assert!(resolved.mask.is_none(), "a rectangle has no per-LED mask");
+        let scale = canvas_core::SCENE_RENDER_SCALE;
+        assert_eq!(resolved.dest, [16.0 * scale, 150.0 * scale, 126.0 * scale, 196.0 * scale]);
+        // The whole canvas is the whole canvas.
+        let whole = map.resolve(Some("g"), &LayerArea::Canvas).expect("the canvas");
+        assert!(whole.whole_canvas);
+        assert_eq!(whole.dest, [0.0, 0.0, 80.0, 50.0], "the group canvas at the scene's render scale");
+    }
+
+    /// A device's mask covers its own LEDs and no other device's.
     #[test]
     fn a_device_mask_covers_its_own_leds_and_no_other_device() {
         let devices = vec![
             device("a", vec![zone(0, ZoneKind::Linear, 4)]),
             device("b", vec![zone(0, ZoneKind::Linear, 4)]),
         ];
-        let lay = layout(
-            vec![placed("a", 0, 0.0, 0.0, 40.0, 20.0), placed("b", 0, 200.0, 0.0, 40.0, 20.0)],
-            RenderScale::P100,
-            SamplingMode::AreaAverage,
+        let lights = vec![light("a#z0", "a", 0), light("b#z0", "b", 0)];
+        let map = group_map(
+            &["a#z0", "b#z0"],
+            &lights,
+            &devices,
+            canvas_proto::scene::GroupMode::FlowAcross,
         );
-        let map = AreaMap::build(&lay, &devices, 1);
-        let a = map.devices.get(&DeviceId("a".into())).expect("device a has a mask");
-        assert!(a.contains(5, 10), "LED 0's cell is lit");
-        assert!(!a.contains(205, 10), "device b is outside a's mask");
-        assert_eq!((map.width, map.height), (320, 200));
-    }
-
-    #[test]
-    fn a_rotated_cell_is_covered_by_its_own_bounding_box() {
-        let devices = vec![device("a", vec![zone(0, ZoneKind::Single, 1)])];
-        let mut p = placed("a", 0, 20.0, 20.0, 40.0, 10.0);
-        p.rotation_deg = 30.0;
-        let lay = layout(vec![p], RenderScale::P100, SamplingMode::AreaAverage);
-        let map = AreaMap::build(&lay, &devices, 1);
-        let mask = map.devices.get(&DeviceId("a".into())).unwrap();
-        let led = sample_plan(&lay, &devices).devices[0].zones[0].leds[0];
-        // Every pixel whose centre falls in the rotated cell's bounding box is covered.
-        let [x0, y0, x1, y1] = led.bounds;
-        for y in (y0.ceil() as u32)..(y1.floor() as u32) {
-            for x in (x0.ceil() as u32)..(x1.floor() as u32) {
-                assert!(mask.contains(x, y), "a rotated cell's own pixel {x},{y} is uncovered");
-            }
-        }
+        let group = map.groups.get("g").expect("the group's map");
+        let a = group.devices.get(&DeviceId("a".into())).expect("device a has a mask");
+        let b = group.devices.get(&DeviceId("b".into())).expect("device b has a mask");
+        assert!(a.contains(10, 25), "device a's own LEDs are covered");
+        assert!(!b.contains(10, 25), "device b is outside a's mask");
+        assert!((group.width, group.height) == (80, 50), "the group canvas at the scene's scale");
     }
 
     #[test]
     fn a_rect_with_a_nan_is_no_area_and_a_negative_one_too() {
-        let map = AreaMap::build(&layout(vec![], RenderScale::P100, SamplingMode::Nearest), &[], 1);
-        assert!(map
-            .resolve(&LayerArea::Rect { x: f32::NAN, y: 0.0, width: 10.0, height: 10.0 })
+        // A library tile has no group, so no masks: a canvas and a rectangle still resolve.
+        let book = AreaMaps::default();
+        assert!(book
+            .resolve(None, &LayerArea::Rect { x: f32::NAN, y: 0.0, width: 10.0, height: 10.0 })
             .is_none());
-        assert!(map
-            .resolve(&LayerArea::Rect { x: 0.0, y: 0.0, width: -4.0, height: 10.0 })
+        assert!(book
+            .resolve(None, &LayerArea::Rect { x: 0.0, y: 0.0, width: -4.0, height: 10.0 })
             .is_none());
-        assert!(map.resolve(&LayerArea::Canvas).is_some());
+        assert!(book.resolve(None, &LayerArea::Canvas).is_some());
     }
 
     #[test]

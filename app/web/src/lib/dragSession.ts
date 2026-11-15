@@ -9,7 +9,7 @@
 // moves; it names the insertion point and the builder commits it once, on the drop.
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { StackLayer } from "@/proto/StackLayer";
 import { CANVAS_H, CANVAS_W, moveLayer } from "@/views/effects/stackDraft";
 import { dropTargetWords, type DragPayloadKind, type DropBoxes, type DropRow, type DropTarget } from "@/lib/dropTargets";
@@ -47,7 +47,7 @@ export function lifted(source: DragSource, mode: DragMode, target: DropTarget | 
 
 /** The names a target is said by. */
 export interface TargetNames {
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   layers: Pick<StackLayer, "id" | "name">[];
 }
@@ -146,24 +146,19 @@ export function readDropBoxes(root: ParentNode | null = typeof document === "und
   return boxes;
 }
 
-/** The visible devices on the desk, in the layout's own order, each once. */
-export function deskDevices(layout: Layout | null): string[] {
-  const seen: string[] = [];
-  for (const zone of layout?.zones ?? []) {
-    if (!zone.visible || zone.width <= 0 || zone.height <= 0) continue;
-    if (!seen.includes(zone.device_id)) seen.push(zone.device_id);
-  }
-  return seen;
+/** The devices with a light in this group, in the group's own order, each once. */
+export function canvasDevicesOf(canvas: GroupCanvas | null): string[] {
+  return canvas?.deviceIds ?? [];
 }
 
 /**
  * The keyboard's stage targets, in the cycle order the spec gives: the whole canvas, each device
- * on the desk, then a new rectangle. A keyboard drop on a device takes the whole device.
+ * in the group, then a new rectangle. A keyboard drop on a device takes the whole device.
  */
-export function stageTargets(layout: Layout | null): DropTarget[] {
+export function stageTargets(canvas: GroupCanvas | null): DropTarget[] {
   return [
     { kind: "canvas" },
-    ...deskDevices(layout).map((device): DropTarget => ({ kind: "device", device })),
+    ...canvasDevicesOf(canvas).map((device): DropTarget => ({ kind: "device", device })),
     { kind: "rect", x: Math.round((CANVAS_W - 120) / 2), y: Math.round((CANVAS_H - 80) / 2), width: 120, height: 80 },
   ];
 }

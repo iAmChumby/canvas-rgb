@@ -5,7 +5,11 @@
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
-import type { Layout } from "@/proto/Layout";
+import type { Arrangement } from "@/proto/Arrangement";
+import type { Group } from "@/proto/Group";
+import type { LightView } from "@/proto/LightView";
+import type { Scene } from "@/proto/Scene";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { Settings } from "@/proto/Settings";
 import type { DisplayInfo } from "@/proto/DisplayInfo";
@@ -437,197 +441,6 @@ export const DEVICES: DeviceInfo[] = [
   },
 ];
 
-/**
- * The demo desk: Luke's own PC, drawn the way the new editor draws it.
- *
- * The case is a box with a handle on every side (a landmark, not a form-factor picker). Inside
- * it: three fans at the front pointing at the reader, three fans on the floor pointing up, a
- * fan at the back, two sticks of RAM, a graphics card and a strip along the roof. On the desk:
- * the keyboard, the mouse and the microphone.
- *
- * The three front fans share one header: the zone has forty LEDs, the fans take twelve each,
- * and the last four belong to nobody and stay black. The scale is 4 mm to the canvas unit, so
- * a 120 mm fan is thirty units and the case is 48 x 49 cm.
- */
-export const LAYOUT_DESK: Layout = {
-  id: "desk",
-  name: "Desk",
-  render_scale: 50,
-  sampling: "area_average",
-  case_form: "none",
-  landmarks: [
-    // The case: 120 x 122 units, 48 x 49 cm, standing on the desk line.
-    { kind: "case", x: 100, y: 27, width: 120, height: 122, rotation_deg: 0, facing: "viewer", visible: true },
-  ],
-  zones: [
-    // The strip along the roof of the case.
-    {
-      device_id: "openrgb:strip-1",
-      zone_index: 0,
-      x: 106,
-      y: 30,
-      width: 100,
-      height: 5,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-      part: { kind: "strip", facing: "viewer", mapped: false },
-      label: "Roof strip",
-    },
-    // The three fans at the front, pointing at the reader: one header, three runs of LEDs.
-    ...([0, 1, 2] as const).map((i) => ({
-      device_id: "openrgb:fan-hub-1",
-      zone_index: 0,
-      x: 103,
-      y: 38 + i * 32,
-      width: 30,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "ring" } as const,
-      leds: { start: i * 12, count: 12 },
-      part: { kind: "fan" as const, facing: "viewer" as const, mapped: false },
-      label: `Front fan ${i + 1}`,
-    })),
-    // The three fans on the floor, pointing up: seen from the side, so they are bars.
-    ...([0, 1, 2] as const).map((i) => ({
-      device_id: "openrgb:fan-hub-2",
-      zone_index: 0,
-      x: 104 + i * 32,
-      y: 136,
-      width: 30,
-      height: 7,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" } as const,
-      leds: { start: i * 12, count: 12 },
-      part: { kind: "fan" as const, facing: "up" as const, mapped: false },
-      label: `Floor fan ${i + 1}`,
-    })),
-    // The fan at the back of the case.
-    {
-      device_id: "openrgb:fan-hub-3",
-      zone_index: 0,
-      x: 186,
-      y: 38,
-      width: 30,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "ring" },
-      part: { kind: "fan", facing: "viewer", mapped: false },
-      label: "Rear fan",
-    },
-    // The two sticks of RAM, standing on the board.
-    {
-      device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x71",
-      zone_index: 0,
-      x: 140,
-      y: 42,
-      width: 6,
-      height: 34,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-      part: { kind: "ram", facing: "viewer", mapped: false },
-      label: "RAM 1",
-    },
-    {
-      device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x73",
-      zone_index: 0,
-      x: 148,
-      y: 42,
-      width: 6,
-      height: 34,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-      part: { kind: "ram", facing: "viewer", mapped: false },
-      label: "RAM 2",
-    },
-    // The stick of RAM that was taken out: its part stays where it was.
-    {
-      device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75",
-      zone_index: 0,
-      x: 156,
-      y: 42,
-      width: 6,
-      height: 34,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-      part: { kind: "ram", facing: "viewer", mapped: false },
-      label: "RAM 3",
-    },
-    // The graphics card, under the board.
-    {
-      device_id: "openrgb:gpu-1",
-      zone_index: 0,
-      x: 140,
-      y: 120,
-      width: 70,
-      height: 14,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-      part: { kind: "gpu", facing: "viewer", mapped: false },
-    },
-    // The keyboard, the mouse and the microphone, on the desk.
-    {
-      device_id: "royuan:3151:4015",
-      zone_index: 0,
-      x: 16,
-      y: 158,
-      width: 110,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "grid", columns: 6 },
-      part: { kind: "keyboard", facing: "viewer", mapped: false },
-    },
-    {
-      device_id: "openrgb:mouse-1",
-      zone_index: 0,
-      x: 136,
-      y: 158,
-      width: 20,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "point" },
-      part: { kind: "mouse", facing: "viewer", mapped: false },
-    },
-    {
-      device_id: "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c&0&0000#{4d1e55b2-f16f-11cf-88cb-001111000030}",
-      zone_index: 0,
-      x: 166,
-      y: 160,
-      width: 16,
-      height: 28,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "point" },
-      part: { kind: "microphone", facing: "viewer", mapped: false },
-    },
-  ],
-  // Aurora in the editor's own accents (--a1 blue, --a2 violet, --a3 teal): one calm picture
-  // flowing across every device. The demo thumbnail is rendered with the same three colours.
-  effect: {
-    id: "aurora",
-    props: { ...EFFECTS.find((e) => e.schema.id === "aurora")!.defaults, color1: c("#8fb4e8"), color2: c("#b49cf0"), color3: c("#5fd0c0") },
-  },
-};
 
 export interface DemoHeader {
   id: string;
@@ -708,3 +521,121 @@ export const DISPLAY_DEFAULT: DisplayConfig = {
   decimals: 1,
   blink_above: null,
 };
+
+// ---- scenes (0.14.0) ----
+
+/** A light's id: the device and the zone, never an adapter index (canvas-proto `zone_light_id`). */
+export const zoneLightId = (deviceId: string, zone: number): string => `${deviceId}#z${zone}`;
+
+/** The demo's lights: one per zone of every device, as the daemon's first scenes sync makes them. */
+export const DEMO_LIGHTS: LightView[] = DEVICES.flatMap((device) =>
+  device.zones.map((zone): LightView => {
+    // A fan is a ring: the owner's choice, set on the Devices row (a migrated zone keeps its shape).
+    const arrangement: Arrangement = device.id.startsWith("openrgb:fan-hub-")
+      ? "ring"
+      : zone.kind.type === "single"
+        ? "single"
+        : zone.kind.type === "matrix"
+          ? "grid"
+          : "strip";
+    return {
+      light: {
+        id: zoneLightId(device.id, zone.index),
+        device_id: device.id,
+        zone_index: zone.index,
+        arrangement,
+        reversed: false,
+      },
+      led_count: zone.led_count,
+      connected: device.connected,
+      label: `${device.name} · ${zone.name}`,
+    };
+  }),
+);
+
+/** The ids of the demo lights that belong to the devices whose id starts with one of `prefixes`. */
+function demoLightIds(...prefixes: string[]): string[] {
+  return DEMO_LIGHTS.filter((l) => prefixes.some((p) => l.light.device_id.startsWith(p))).map((l) => l.light.id);
+}
+
+const demoGroup = (
+  id: string,
+  name: string,
+  members: string[],
+  effect: string | null,
+  mode: Group["mode"] = "flow_across",
+  brightness = 100,
+): Group => ({
+  id,
+  name,
+  members,
+  plays: effect ? { type: "effect", effect, props: {} } : { type: "off" },
+  mode,
+  brightness,
+});
+
+/**
+ * The demo's three scenes. "Gaming" is the active one: four groups and one light left over (the
+ * mouse). "Focus" is one group. "Evening" has a group whose effect file is gone, so the daemon
+ * reports that group failed. Every one passes {@link demoSceneProblem}.
+ */
+export const DEMO_SCENES: ScenesResponse = (() => {
+  const mouse = demoLightIds("openrgb:mouse-1");
+  const everything = DEMO_LIGHTS.map((l) => l.light.id);
+  const gaming: Scene = {
+    id: "gaming",
+    name: "Gaming",
+    rev: 7,
+    groups: [
+      demoGroup("g-case", "Case fans", demoLightIds("openrgb:fan-hub-"), "aurora"),
+      demoGroup("g-ram", "Memory", demoLightIds("openrgb:I2C: PawnIO SMBus PIIX4 0"), "rainbow_wave", "each_its_own", 80),
+      demoGroup("g-gpu", "Graphics card", demoLightIds("openrgb:gpu-1"), "breathing"),
+      demoGroup(
+        "g-desk",
+        "Cooler and desk",
+        everything.filter((id) => !mouse.includes(id) && !demoLightIds("openrgb:fan-hub-", "openrgb:I2C: PawnIO SMBus PIIX4 0", "openrgb:gpu-1").includes(id)),
+        "spiral",
+      ),
+    ],
+  };
+  const focus: Scene = {
+    id: "focus",
+    name: "Focus",
+    rev: 3,
+    groups: [demoGroup("g-all", "Everything", everything, "white", "flow_across", 60)],
+  };
+  const evening: Scene = {
+    id: "evening",
+    name: "Evening",
+    rev: 2,
+    groups: [
+      demoGroup("g-warm", "Case", demoLightIds("openrgb:fan-hub-", "openrgb:strip-"), "fire"),
+      demoGroup("g-lost", "Everything else", everything.filter((id) => !demoLightIds("openrgb:fan-hub-", "openrgb:strip-").includes(id)), "html:glow-removed"),
+    ],
+  };
+  return {
+    active: gaming.id,
+    scenes: [gaming, focus, evening],
+    group_states: gaming.groups.map((g) => ({ id: g.id, failed: null })),
+  };
+})();
+
+/**
+ * A TS port of canvas-proto's `validate_scene` membership rules: a light is in one group at
+ * most, and a group has at least one member. Returns the first broken rule in words, or null.
+ */
+export function demoSceneProblem(scene: Scene): string | null {
+  const held = new Map<string, string>();
+  const ids = new Set<string>();
+  for (const group of scene.groups) {
+    if (ids.has(group.id)) return `two groups have the id ${group.id}`;
+    ids.add(group.id);
+    if (group.members.length === 0) return `group ${group.name} has no members`;
+    for (const light of group.members) {
+      const other = held.get(light);
+      if (other !== undefined) return `light ${light} is in two groups (${other} and ${group.id})`;
+      held.set(light, group.id);
+    }
+  }
+  return null;
+}

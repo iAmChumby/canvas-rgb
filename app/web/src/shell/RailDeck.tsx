@@ -31,10 +31,17 @@ export function RailDeck() {
   const status = useSnap((s) => s.status);
   const effects = useSnap((s) => s.effects);
   const fans = useSnap((s) => s.fans);
-  const render = useSnap((s) => s.render);
+
+  const scenes = useSnap((s) => s.scenes);
 
   const paused = status?.power === "paused";
-  const activeId = status?.active_effect ?? null;
+  // With scenes the deck names the scene, not an effect: every group plays its own.
+  const sceneName = status?.active_scene?.name ?? null;
+  const sceneGroups = sceneName
+    ? (scenes?.scenes.find((x) => x.id === (status?.active_scene?.id ?? scenes.active))?.groups.length ?? null)
+    : null;
+  // The effect the first group of the scene plays: what the "next effect" step starts from.
+  const activeId = status?.active_effects?.[0] ?? null;
   const active = effects?.find((e) => e.id === activeId) ?? null;
 
   // The effect before and the effect after: the neighbours in the effects list, in its order.
@@ -42,7 +49,7 @@ export function RailDeck() {
     async (dir: -1 | 1) => {
       const list = getSnap().effects ?? [];
       if (list.length === 0) return;
-      const current = getSnap().status?.active_effect ?? null;
+      const current = getSnap().status?.active_effects?.[0] ?? null;
       const at = list.findIndex((e) => e.id === current);
       const from = at < 0 ? 0 : at;
       const next = list[(from + dir + list.length) % list.length];
@@ -89,7 +96,9 @@ export function RailDeck() {
         <LightsPanel
           paused={paused}
           activeId={activeId}
-          activeName={active?.name ?? null}
+          activeName={sceneName ?? active?.name ?? null}
+          presetId={sceneName ? null : activeId}
+          groups={sceneGroups}
           devices={status?.devices_connected ?? null}
           known={status !== null}
           hasEffects={(effects?.length ?? 0) > 0}
@@ -100,7 +109,7 @@ export function RailDeck() {
         <SystemPanel
           fans={fans}
           fps={status?.fps_measured ?? null}
-          target={render?.fps ?? status?.fps_target ?? null}
+          target={status?.fps_target ?? null}
         />
       )}
     </section>
@@ -111,6 +120,8 @@ function LightsPanel({
   paused,
   activeId,
   activeName,
+  presetId,
+  groups,
   devices,
   known,
   hasEffects,
@@ -120,6 +131,10 @@ function LightsPanel({
   paused: boolean;
   activeId: string | null;
   activeName: string | null;
+  /** The effect whose preset the row names after it: none when the row names a scene. */
+  presetId: string | null;
+  /** The active scene's group count: the count the row shows in place of the devices. */
+  groups: number | null;
   devices: number | null;
   known: boolean;
   hasEffects: boolean;
@@ -156,12 +171,18 @@ function LightsPanel({
       <div className="rail-deck-row">
         <span className="rail-deck-name">
           {activeName ?? (known ? "Nothing is running" : "—")}
-          <RunningPresetName effectId={activeId} />
+          <RunningPresetName effectId={presetId} />
         </span>
-        {devices !== null && (
+        {groups !== null ? (
           <span className="rail-deck-count">
-            <span className="fig">{devices}</span> devices
+            <span className="fig">{groups}</span> {groups === 1 ? "group" : "groups"}
           </span>
+        ) : (
+          devices !== null && (
+            <span className="rail-deck-count">
+              <span className="fig">{devices}</span> devices
+            </span>
+          )
         )}
       </div>
 

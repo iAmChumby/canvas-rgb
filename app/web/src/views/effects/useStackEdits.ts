@@ -29,7 +29,7 @@ import {
   MAX_LAYERS,
 } from "@/views/effects/stackDraft";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
@@ -38,7 +38,7 @@ import type { StackLayer } from "@/proto/StackLayer";
 export function useStackEdits({
   draft,
   picked,
-  layout,
+  canvas,
   draftRef,
   mounted,
   historyMoves,
@@ -49,7 +49,7 @@ export function useStackEdits({
 }: {
   draft: Stack;
   picked: string | null;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   draftRef: { current: Stack };
   mounted: { current: boolean };
   historyMoves: { current: number };
@@ -88,7 +88,7 @@ export function useStackEdits({
   const makeRect = (id: string) => {
     const layer = draftRef.current.layers.find((entry) => entry.id === id);
     if (!layer) return;
-    const rect = areaAsRect(layer.area, layout);
+    const rect = areaAsRect(layer.area, canvas);
     if (!rect) {
       refuse("That area is not on the desk, so there is no rectangle to make.");
       return;

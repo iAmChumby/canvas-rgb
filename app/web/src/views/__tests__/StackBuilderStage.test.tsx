@@ -3,11 +3,13 @@
 // layer, Ctrl+D copies it, the Make-rectangle key converts an area by name, and undo and redo
 // take a whole drag back in one press.
 
-import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
+import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
+import { canvasWith } from "@/lib/__tests__/groupCanvasFixture";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 vi.mock("@/lib/stackPreview", async (importOriginal) => {
@@ -17,6 +19,14 @@ vi.mock("@/lib/stackPreview", async (importOriginal) => {
     onStackPreviewFeed: () => () => {},
   };
 });
+
+vi.mock("next/navigation", () => ({
+  useRouter: () => ({ push: () => undefined, replace: () => undefined }),
+  usePathname: () => "/effects/",
+}));
+vi.mock("next/link", () => ({
+  default: ({ href, children }: { href: string; children?: React.ReactNode }) => <a href={href}>{children}</a>,
+}));
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -116,7 +126,93 @@ function dragOn(el: HTMLElement, from: [number, number], to: [number, number]) {
   });
 }
 
+const zoneLayer = {
+  id: "l1",
+  name: "Layer l1",
+  effect: "solid",
+  props: {},
+  area: { kind: "zone", device: "kb:1", zone: 2 },
+  blend: "normal",
+  opacity: 100,
+  visible: true,
+} as const;
+
 describe("the stage", () => {
+  it("draws the group it is tuning and names it", async () => {
+    await refreshAll();
+    window.history.replaceState(
+      {},
+      "",
+      "/effects/?stack=Sunset%20glow&state=complete,stack&group=g-case",
+    );
+    render(
+      <StripSlotsProvider>
+        <div className="strip-slots">
+          <StripSlot kind="title" />
+          <StripSlot kind="actions" />
+        </div>
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    await screen.findByTestId("stack-builder");
+    // The panel says which group the picture is for.
+    expect(await screen.findByText(/Preview · Case fans/i)).toBeTruthy();
+    // And the group's lights are drawn on it: a slot outline for each of its three fans.
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(3));
+    expect(screen.getByRole("switch", { name: "Show each light's LEDs" }).getAttribute("aria-checked")).toBe("true");
+  });
+
+  it("offers the canvas, a device in the group and a rectangle, and no zone", async () => {
+    await openBuilder();
+    fireEvent.click(screen.getByRole("button", { name: "Change area" }));
+    const picker = await screen.findByRole("dialog", { name: "Area for Sparkles" });
+    const modes = within(picker).getAllByRole("radio").map((el) => el.textContent);
+    expect(modes).toEqual(["Whole canvas", "Device", "Rectangle"]);
+    expect(within(picker).queryByRole("radio", { name: "Zone" })).toBeNull();
+  });
+
+  it("keeps a saved zone area as a zone, and says which one", async () => {
+    const canvas = canvasWith([
+      { id: "kb:1#z2", label: "Keyboard · Zone 3", device: "kb:1", zone: 2, x: 0, y: 0, width: 100, height: 50 },
+    ]);
+    const onUse = vi.fn();
+    render(
+      <StackAreaPicker
+        layer={zoneLayer}
+        canvas={canvas}
+        devices={null}
+        onUse={onUse}
+        onClose={() => undefined}
+      />,
+    );
+    const picker = await screen.findByRole("dialog", { name: "Area for Layer l1" });
+    const zone = within(picker).getByRole("radio", { name: "Zone" });
+    expect(zone.getAttribute("aria-checked")).toBe("true");
+    expect(within(picker).getAllByText("Keyboard · Zone 3").length).toBeGreaterThan(0);
+    fireEvent.click(within(picker).getByRole("button", { name: "Use this area" }));
+    expect(onUse).toHaveBeenCalledWith({ kind: "zone", device: "kb:1", zone: 2 });
+  });
+
+  it("says when the group the builder was opened for is not in the scene", async () => {
+    await refreshAll();
+    window.history.replaceState(
+      {},
+      "",
+      "/effects/?stack=Sunset%20glow&state=complete,stack&group=gone",
+    );
+    render(
+      <StripSlotsProvider>
+        <div className="strip-slots">
+          <StripSlot kind="title" />
+          <StripSlot kind="actions" />
+        </div>
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    await screen.findByTestId("stack-builder");
+    expect(await screen.findByText("That group is not in the active scene.")).toBeTruthy();
+  });
+
   it("draws a frame for every visible layer, and only the picked one is the solid frame", async () => {
     await openBuilder();
     expect(frameOf("l1")).toBeTruthy();
@@ -225,15 +321,15 @@ describe("the stage", () => {
     expect(screen.getByRole("button", { name: "Make Sparkles a rectangle" })).toBeTruthy();
   });
 
-  it("starts with Parts off, and shows and hides the desk's outlines with it", async () => {
+  it("starts with the LEDs on, and shows and hides each light's outlines with the switch", async () => {
     await openBuilder();
-    const toggle = screen.getByRole("switch", { name: "Show the desk's device and zone outlines" });
-    expect(toggle.getAttribute("aria-checked")).toBe("false");
-    expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
-    fireEvent.click(toggle);
+    const toggle = screen.getByRole("switch", { name: "Show each light's LEDs" });
+    expect(toggle.getAttribute("aria-checked")).toBe("true");
     await waitFor(() => expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0));
     fireEvent.click(toggle);
     await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0));
+    fireEvent.click(toggle);
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline").length).toBeGreaterThan(0));
   });
 
   it("removes a layer from its row's Delete key too", async () => {
@@ -299,9 +395,10 @@ describe("a drag is one undo step", () => {
     await waitFor(() => expect(readout()).toContain(HEAT_AT));
   });
 
-  it("shows the desk's outlines while it lasts, even with Parts off", async () => {
+  it("shows the group's outlines while it lasts, even with the LEDs off", async () => {
     const { frame } = await pickHeat();
-    expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0);
+    fireEvent.click(screen.getByRole("switch", { name: "Show each light's LEDs" }));
+    await waitFor(() => expect(document.querySelectorAll(".rd-part-outline")).toHaveLength(0));
     act(() => {
       fireEvent.pointerDown(frame, { ...mouse, clientX: px(71), clientY: px(173) });
     });

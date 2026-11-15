@@ -95,7 +95,10 @@ pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> 
             needs: s.needs,
         })
         .collect();
-    let active = store.active_layout().and_then(|l| l.effect.as_ref().map(|e| e.id.clone()));
+    // The first effect the active scene plays, in the scene's order: what the library marks as
+    // running. Every group plays its own, so this is a summary and not one engine effect.
+    let scene = crate::scenes::active_scene(&store.scenes);
+    let active = crate::scenes::running_effect(scene).map(|(id, _)| id);
     let failed = failed_effects(&app.user_effects);
     Json(EffectsResponse { effects, active, failed })
 }
@@ -114,15 +117,9 @@ pub async fn get_effect(
     Ok(Json(EffectDetail { schema, favorite, user_presets, props }))
 }
 
-/// The values in force for an effect: the active layout's when it is the active effect,
-/// otherwise the saved ones, otherwise the schema defaults.
+/// The values in force for an effect: the saved ones, with the schema defaults filled in for
+/// anything the owner never set.
 fn current_props(store: &crate::storage::Store, schema: &PropertySchema) -> Props {
-    let active = store.active_layout().and_then(|l| l.effect.clone());
-    if let Some(active) = active {
-        if active.id == schema.id {
-            return active.props;
-        }
-    }
     let mut props = store.effects.saved.get(&schema.id).cloned().unwrap_or_default();
     // Fill in the schema defaults for anything the user never set.
     for (key, def) in schema.defaults() {
@@ -193,133 +190,119 @@ pub async fn activate(
     // own effect, and a timer puts that effect back (see `crate::transient`).
     let transient = canvas_effects::onboard::is_onboard_id(&schema.id);
 
-    // Save the props for next time, then apply the effect. A stack is never in `effects.saved`
-    // (D95.4.3): its values live in `stacks.json`, and the layout keeps the snapshot.
-    let is_stack = stack.is_some();
-    if !transient {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        if !is_stack {
-            store.effects.saved.insert(schema.id.clone(), props.clone());
-            store
-                .save_effects()
-                .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-        }
+    // Scenes: the effect plays on the groups asked for (every group when none is named), with the
+    // values just worked out. Planned first, so a refusal (an unknown group, too many HTML
+    // groups) changes nothing, not even the legacy layout below.
+    let scene_lock = app.scene.lock().await;
+    let planned = if transient {
+        None
+    } else {
+        crate::api::scenes::plan_activation(&app, &schema.id, &props, request.groups.as_deref()).await?
+    };
 
-        if let Some(layout) = store.active_layout_mut() {
-            layout.effect = Some(canvas_proto::layout::ActiveEffect {
-                id: schema.id.clone(),
-                props: props.clone(),
-            });
-        }
-        store
-            .save_layouts()
-            .map_err(|e| ApiFailure::internal(format!("could not save the layouts: {e}")))?;
-    }
+    // Save the props for next time, then apply the effect. A stack is never in `effects.saved`
+    // (D95.4.3): its values live in `stacks.json`. Activating only changes groups: an effect's
+    // starting values are written by `PATCH /effects/{id}/defaults` and nothing else, so playing
+    // it on one group never changes what another group starts from.
+    let _is_stack = stack.is_some();
 
     // Any activation ends an earlier timer; an onboarding effect arms a new one below.
     app.transient.cancel();
     // The owner chose a saved effect: a draft on the lights ends, and the guard keeps a beat
     // from starting a new one until this effect is on the lights.
-    let _replace = crate::draft::hold_for_replace(&app).await;
-    // Activating a stack whose structure is the one already on the engine reuses the running
-    // effect: the live map is updated from the file and the props go through `set_props`, so
-    // pressing Save twice never reloads an HTML layer (D95.4.3, D95.4.6).
-    let reused = match &stack {
-        Some(stack) => {
-            let structure = crate::stack::structure_hash(&crate::stack::structure(stack, &|id| {
-                app.user_effects
-                    .source_and_file_name(id)
-                    .map(|(source, _)| source.to_string())
-            }));
-            if app.stacks.running_is(&stack.id, &structure) {
-                app.stacks.update_live(stack);
-                app.engine.set_props(&props);
-                tracing::info!(effect = %schema.id, "the running stack was reused: no layer was rebuilt");
-                true
-            } else {
-                false
+    let replace = crate::draft::hold_for_replace(&app).await;
+    // Everything from here on can fail. If it does, the guard puts the scene back on the
+    // lights: a takeover that nothing owns any more must not stay there.
+    let answer = async {
+        // Activating a stack whose structure is the one already on the engine reuses the running
+        // effect: the live map is updated from the file, so pressing Save twice never reloads an
+        // HTML layer (D95.4.3, D95.4.6).
+        let _reused = match &stack {
+            Some(stack) => {
+                let structure = crate::stack::structure_hash(&crate::stack::structure(stack, &|id| {
+                    app.user_effects
+                        .source_and_file_name(id)
+                        .map(|(source, _)| source.to_string())
+                }));
+                if app.stacks.running_is(&stack.id, &structure) {
+                    app.stacks.update_live(stack);
+                    // While a scene runs, the groups are what play: the values are put on the
+                    // groups the activation names by the plan and the apply below. A running
+                    // stack is never reloaded, so pressing Save twice keeps its layers.
+                    tracing::info!(effect = %schema.id, "the running stack was reused: no layer was rebuilt");
+                    true
+                } else {
+                    false
+                }
             }
+            None => false,
+        };
+        // Once the engine runs a scene the layout's single effect is not what plays: the groups are.
+        if replace.ended_takeover() {
+            // Something held the lights: the whole scene goes on again, so the group it was on
+            // plays the scene's effect and not the takeover's.
+            if let Some(planned) = planned {
+                crate::api::scenes::commit_activation(&app, &scene_lock, planned, true, &replace).await?;
+            } else {
+                replace.end_takeover(&app, false).await;
+            }
+        } else if let Some(planned) = planned {
+            crate::api::scenes::commit_activation(&app, &scene_lock, planned, false, &replace).await?;
         }
-        None => false,
-    };
-    if !reused {
-        crate::apply_effect(&app, &schema.id, &props)
+        if transient {
+            // The onboarding effect takes over the lights: it plays on the groups of the active
+            // scene that play it (none does), so it plays on one temporary flow-across group of
+            // every light. The timer puts the active scene back when it ends.
+            crate::scenes::apply_takeover(
+                &app,
+                &schema.id,
+                &props,
+                None,
+                crate::takeover_builder(&app, &schema.id),
+            )
             .await
             .map_err(|e| ApiFailure::internal(format!("could not activate the effect: {e}")))?;
+        }
+        if transient {
+            crate::transient::arm(&app, &schema.id);
+        }
+        tracing::info!(effect = %schema.id, "the effect was activated");
+        Ok::<Json<serde_json::Value>, ApiFailure>(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": props })))
     }
-    if transient {
-        crate::transient::arm(&app, &schema.id);
+    .await;
+    if answer.is_err() {
+        // The route failed: the takeover must not stay on the lights with nothing owning it.
+        replace.fail(&app).await;
     }
-
-    tracing::info!(effect = %schema.id, "the effect was activated");
-    Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": props })))
+    answer
 }
 
-/// `PATCH /api/v1/effects/active/props`.
+/// `PATCH /api/v1/effects/{id}/defaults`.
 ///
-/// Changes the props of the effect that is running.
-pub async fn patch_active_props(
+/// An effect's starting values (`EffectsFile.saved`): what the next group to play it starts from.
+/// A group that already plays the effect keeps its own values; no scene changes.
+pub async fn patch_defaults(
     State(app): State<Arc<App>>,
+    Path(id): Path<String>,
     Json(props): Json<Props>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    // A draft holds the lights; the layout's effect is not what is running. The props of a
-    // draft are changed with PUT /effects/draft, so this is a clear 404 and not a silent
-    // overwrite of the draft with the saved effect. The draft gate is held across the check
-    // and the apply, so a PUT that is already building is seen here and one that arrives
-    // during the apply waits until the saved effect is on (its PUT then starts a new draft).
-    let _draft_gate = app.draft.gate().lock().await;
-    if app.draft.is_active() {
-        return Err(ApiFailure::not_found(
-            "a draft is on the lights; change its props with PUT /api/v1/effects/draft",
-        ));
+    check_preset_caps(&props)?;
+    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    if schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
+        return Err(ApiFailure::conflict(format!(
+            "{} is a stack; its values live in the stack builder, not in the starting values",
+            schema.id
+        )));
     }
-    let (schema, merged) = {
-        let store = app.store.read().await;
-        let active = store
-            .active_layout()
-            .and_then(|l| l.effect.clone())
-            .ok_or_else(|| ApiFailure::not_found("no effect is active"))?;
-        // A stack's property values are edited in its builder, not with this route: a preset is
-        // a merged-props map, and the builder owns the draft (D95.4.3).
-        if active.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
-            return Err(ApiFailure::conflict(format!(
-                "{} is a stack; change its values in the stack builder, not with this route",
-                active.id
-            )));
-        }
-        let schema = find_schema(&app.user_effects, &app.stacks, &active.id)
-            .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id {}", active.id)))?;
-        let mut merged = active.props;
-        merged.extend(props.clone());
-        (schema, merged)
-    };
-
-    {
-        let mut store = app
-            .store
-            .write()
-            .await;
-        store.effects.saved.insert(schema.id.clone(), merged.clone());
-        store
-            .save_effects()
-            .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
-        if let Some(layout) = store.active_layout_mut() {
-            if let Some(effect) = layout.effect.as_mut() {
-                effect.props = merged.clone();
-            }
-        }
-        store
-            .save_layouts()
-            .map_err(|e| ApiFailure::internal(format!("could not save the layouts: {e}")))?;
-    }
-
-    crate::apply_effect(&app, &schema.id, &merged)
-        .await
-        .map_err(|e| ApiFailure::internal(format!("could not change the props: {e}")))?;
-
+    let fitted = fit_props_to_schema(&schema, props, "the starting values");
+    let mut store = app.store.write().await;
+    let mut merged = store.effects.saved.get(&schema.id).cloned().unwrap_or_default();
+    merged.extend(fitted);
+    store.effects.saved.insert(schema.id.clone(), merged.clone());
+    store
+        .save_effects()
+        .map_err(|e| ApiFailure::internal(format!("could not save the effects: {e}")))?;
     Ok(Json(serde_json::json!({ "ok": true, "id": schema.id, "props": merged })))
 }
 
@@ -424,6 +407,11 @@ fn clean_preset_name(name: &str) -> Result<String, ApiFailure> {
         ));
     }
     Ok(name.to_string())
+}
+
+/// The props of a request, within the caps.
+pub fn check_props_caps(props: &Props) -> Result<(), ApiFailure> {
+    check_preset_caps(props)
 }
 
 /// The props of a request, within the caps.
@@ -1010,32 +998,25 @@ pub async fn delete_effect(
     }
 
     // The effect was the active one: the daemon falls back the same way it does when
-    // the file is missing. The active layout still names it, so the restore path
+    // the file is missing. The active scene still names it, so the restore path
     // cannot build it any more and says so, exactly as it does at start.
-    let active = app.active_layout().await.and_then(|l| l.effect);
+    let playing = crate::scenes::groups_playing(&app, &id).await;
     let mut draft_ended = None;
-    if let Some(active) = active {
-        if active.id == id {
-            tracing::warn!(effect = %id, "the active user effect was deleted");
-            // A draft took this effect over from, and its prior now names a file that is
-            // gone. End the draft first, chosen over refusing the delete with a 409: the
-            // draft is in memory only, and deleting what the lights show is what the owner
-            // asked for. The restore cannot build the file any more, so the lights go black
-            // and the note says so, in the answer as well as the log.
-            if let Some(ended) = crate::draft::stop(&app, None).await.ended {
-                if let Some(note) = &ended.note {
-                    tracing::warn!(%note, "the draft ended when its prior effect was deleted");
-                }
-                draft_ended = Some(DraftEnded { note: ended.note });
+    if !playing.is_empty() {
+        tracing::warn!(effect = %id, "a user effect a group plays was deleted");
+        // A draft took this effect over from, and its prior (the active scene) now names a
+        // file that is gone. End the draft first, chosen over refusing the delete with a 409:
+        // the draft is in memory only, and deleting what the lights show is what the owner
+        // asked for. The restore cannot build the file any more, so that group goes dark and
+        // the note says so, in the answer as well as the log.
+        if let Some(ended) = crate::draft::stop(&app, None).await.ended {
+            if let Some(note) = &ended.note {
+                tracing::warn!(%note, "the draft ended when its prior effect was deleted");
             }
-            if let Err(e) = crate::apply_effect(&app, &active.id, &active.props).await {
-                tracing::warn!(
-                    effect = %active.id,
-                    error = %e,
-                    "the deleted effect could not be restored"
-                );
-            }
+            draft_ended = Some(DraftEnded { note: ended.note });
         }
+        // The scene goes on again: the group that played the deleted effect is dark.
+        crate::scenes::apply_active_ungated(&app, false).await;
     }
 
     Ok(Json(DeleteEffectResponse { ok: true, id, presets_removed, draft_ended }))

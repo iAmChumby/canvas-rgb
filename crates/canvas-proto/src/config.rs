@@ -207,4 +207,12 @@ pub struct ExportBundle {
     /// them `Missing` until those files are imported too.
     #[serde(default)]
     pub stacks: Vec<crate::stack::Stack>,
+    /// `lights.json` (0.14.0). Absent in older bundles: import then migrates their layouts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub lights: Option<crate::scene::LightsFile>,
+    /// `scenes.json` (0.14.0). Absent in older bundles, as `lights`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub scenes: Option<crate::scene::ScenesFile>,
 }

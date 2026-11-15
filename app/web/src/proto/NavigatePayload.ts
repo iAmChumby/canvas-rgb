@@ -2,6 +2,6 @@
 
 export type NavigatePayload = { 
 /**
- * `"layout" | "effects" | "devices" | "fans" | "settings" | "updates"` ([`EDITOR_PAGES`])
+ * `"scenes" | "effects" | "devices" | "fans" | "settings" | "updates"` ([`EDITOR_PAGES`])
  */
 page: string, };

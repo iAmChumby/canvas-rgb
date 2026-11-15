@@ -120,10 +120,8 @@ pub async fn patch_zone(
         let mut list = app.devices.write().await;
         *list = devices.clone();
     }
-    if let Some(layout) = app.active_layout().await {
-        app.set_layout(&layout, &devices);
-        app.stacks.publish_areas(&layout, &devices);
-    }
+    // The scene's plans are built from the zone sizes: the groups follow the new count.
+    crate::scenes::apply_for_devices(&app).await;
 
     tracing::info!(device = %id, zone, leds = patch.led_count, "the zone size changed");
     Ok(Json(serde_json::json!({ "ok": true, "device_id": id, "zone": zone, "led_count": patch.led_count })))

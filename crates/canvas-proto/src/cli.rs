@@ -33,3 +33,11 @@ pub const CONFIG_IMPORT: &[&str] = &["config", "import"];
 /// `canvas-rgb update --file <installer> --sig <installer.sig>`: asks the service to install a
 /// signed build as SYSTEM, with no permission prompt (#43). Prints the signed version it started.
 pub const UPDATE: &[&str] = &["update"];
+/// `canvas-rgb scenes list`: each scene's id and name, the active one marked (0.14.0).
+pub const SCENES_LIST: &[&str] = &["scenes", "list"];
+/// `canvas-rgb scenes set <name>`: sets a scene by name, case-insensitively; no match prints
+/// the list and fails.
+pub const SCENES_SET: &[&str] = &["scenes", "set"];
+/// `--group <name>`, repeatable, on the commands that play an effect: play it on those groups
+/// of the active scene only (`ActivateEffect.groups`).
+pub const GROUP_FLAG: &str = "--group";

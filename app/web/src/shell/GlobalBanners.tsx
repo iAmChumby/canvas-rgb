@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
-import { ArrowCircleUp, FolderOpen, WarningCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowCircleUp, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
 import { api } from "@/lib/endpoints";
@@ -19,7 +19,7 @@ import { UpdatedToast } from "@/shell/UpdatedToast";
 const SERVICE_BANNER_MS = 10_000;
 
 /**
- * The standing notices: the SignalRGB conflict, no layout yet, and the first-run "size your ARGB
+ * The standing notices: the SignalRGB conflict, no scene yet, and the first-run "size your ARGB
  * headers" panel (G7). They take their own space in the page, above it. The page is not drawn
  * until the daemon has answered once (see Shell), so these are part of the first frame of the page
  * and nothing is pushed down after it has been painted.
@@ -31,10 +31,10 @@ export function StandingNotices() {
   const [err, setErr] = useState<string | null>(null);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
-  // Nothing can run until the desk canvas has a zone in it. The Layout page is where the layout is
-  // made: its own frame says it, so the banner would say it twice and push the page down.
-  const onLayout = pathname === "/";
-  const noLayout = status !== null && !status.active_layout && !onLayout;
+  // Nothing can run until a scene is set. The Scenes page is where scenes are: its own frame says
+  // it, so the banner would say it twice and push the page down.
+  const onScenes = pathname === "/";
+  const noScene = status !== null && !status.active_scene && !onScenes;
 
   const firstResizable = devices?.find((d) => d.zones.some((z) => z.resizable));
   const walkHref = firstResizable
@@ -51,7 +51,7 @@ export function StandingNotices() {
     }
   };
 
-  if (!conflict && !noLayout && !status?.show_zone_panel) return null;
+  if (!conflict && !noScene && !status?.show_zone_panel) return null;
 
   return (
     <div className="banners-flow">
@@ -68,18 +68,18 @@ export function StandingNotices() {
           .
         </Banner>
       )}
-      {noLayout && (
+      {noScene && (
         <Banner
           tone="work"
-          icon={<SquaresFour size={20} weight="fill" />}
-          title="There is no layout yet"
+          icon={<FilmSlate size={20} weight="fill" />}
+          title="There is no scene yet"
           actions={
             <ButtonLink href="/" variant="primary" size="sm">
-              Open the Layout
+              Open Scenes
             </ButtonLink>
           }
         >
-          Nothing can run until the desk canvas has a zone in it.
+          Nothing can run until a scene is set.
         </Banner>
       )}
       {status?.show_zone_panel && (

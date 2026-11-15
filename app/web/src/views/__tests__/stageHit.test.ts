@@ -3,7 +3,6 @@
 
 import { describe, expect, it } from "vitest";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
 import type { StackLayer } from "@/proto/StackLayer";
 import {
   areaAsRect,
@@ -14,43 +13,12 @@ import {
   stageFrames,
   stageHitOrder,
 } from "@/views/effects/stackDraft";
+import { canvasWith } from "@/lib/__tests__/groupCanvasFixture";
 
-const desk: Layout = {
-  id: "desk",
-  name: "Desk",
-  render_scale: 50,
-  sampling: "area_average",
-  case_form: "none",
-  landmarks: [],
-  effect: null,
-  zones: [
-    {
-      device_id: "kb:1",
-      zone_index: 0,
-      x: 20,
-      y: 150,
-      width: 100,
-      height: 40,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-      label: "Keyboard",
-    },
-    {
-      device_id: "mouse:1",
-      zone_index: 0,
-      x: 130,
-      y: 150,
-      width: 30,
-      height: 30,
-      rotation_deg: 0,
-      reversed: false,
-      visible: true,
-      shape: { type: "strip" },
-    },
-  ],
-};
+const desk = canvasWith([
+  { id: "kb:1#z0", label: "Keyboard", device: "kb:1", zone: 0, x: 20, y: 150, width: 100, height: 40 },
+  { id: "mouse:1#z0", label: "Mouse", device: "mouse:1", zone: 0, x: 130, y: 150, width: 30, height: 30 },
+]);
 
 function layer(id: string, area: LayerArea, extra: Partial<StackLayer> = {}): StackLayer {
   return {
@@ -174,33 +142,11 @@ describe("Make rectangle", () => {
     expect(areaAsRect({ kind: "device", device: "gone:1" }, desk)).toBeNull();
   });
 
-  const deskWith = (...zones: Partial<Layout["zones"][number]>[]): Layout => ({
-    ...desk,
-    zones: zones.map((zone, i) => ({ ...desk.zones[0]!, device_id: `z:${i}`, ...zone })),
-  });
-
-  it("holds a zone that runs past the canvas inside it", () => {
-    const wide = deskWith({ x: 300, y: 180, width: 60, height: 50 });
-    expect(areaAsRect({ kind: "device", device: "z:0" }, wide)).toEqual({
-      kind: "rect",
-      x: 300,
-      y: 180,
-      width: 20,
-      height: 20,
-    });
-    const before = deskWith({ x: -10, y: -4.5, width: 30, height: 20 });
-    expect(areaAsRect({ kind: "device", device: "z:0" }, before)).toEqual({
-      kind: "rect",
-      x: 0,
-      y: 0,
-      width: 20,
-      height: 16,
-    });
-  });
-
-  it("rounds outward, so the box covers every zone it came from", () => {
-    // 10.4 .. 30.6 and 20.5 .. 41.1: rounded to the nearest, the box would lose the edges.
-    const zone = deskWith({ x: 10.4, y: 20.5, width: 20.2, height: 20.6 });
+  it("rounds outward, so the box covers every light it came from", () => {
+    // 10.4 .. 30.6: rounded to the nearest, the box would lose the edges.
+    const zone = canvasWith([
+      { id: "z:0#z0", label: "Z", device: "z:0", x: 10.4, y: 20.5, width: 20.2, height: 20.6 },
+    ]);
     const made = areaAsRect({ kind: "device", device: "z:0" }, zone);
     expect(made).toEqual({ kind: "rect", x: 10, y: 20, width: 21, height: 22 });
     if (!made || made.kind !== "rect") throw new Error("expected a rectangle");
@@ -210,15 +156,12 @@ describe("Make rectangle", () => {
     expect(made.y + made.height).toBeGreaterThanOrEqual(41.1);
   });
 
-  it("covers the union of two zones of one device exactly, to the unit", () => {
-    const both = deskWith({ x: 10.2, y: 10.2, width: 10, height: 10 }, { x: 40.7, y: 30.1, width: 9.6, height: 9.6 });
-    both.zones[1] = { ...both.zones[1]!, device_id: "z:0", zone_index: 1 };
+  it("covers the union of two lights of one device exactly, to the unit", () => {
+    const both = canvasWith([
+      { id: "z:0#z0", label: "One", device: "z:0", zone: 0, x: 10.2, y: 10.2, width: 10, height: 10 },
+      { id: "z:0#z1", label: "Two", device: "z:0", zone: 1, x: 40.7, y: 30.1, width: 9.6, height: 9.6 },
+    ]);
     expect(areaAsRect({ kind: "device", device: "z:0" }, both)).toEqual({ kind: "rect", x: 10, y: 10, width: 41, height: 30 });
-  });
-
-  it("offers nothing for a zone wholly off the canvas", () => {
-    const off = deskWith({ x: 400, y: 10, width: 20, height: 20 });
-    expect(areaAsRect({ kind: "device", device: "z:0" }, off)).toBeNull();
   });
 });
 

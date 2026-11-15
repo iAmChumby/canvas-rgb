@@ -2,7 +2,8 @@
 // cycle, and the one reorder rule a drop uses. No DOM: the sensors' decisions are pure.
 
 import { describe, expect, it } from "vitest";
-import { DEVICES, LAYOUT_DESK } from "@/lib/fixtures";
+import { DEVICES } from "@/lib/fixtures";
+import { canvasWith } from "./groupCanvasFixture";
 import {
   CANCEL_ANNOUNCEMENT,
   cycleTarget,
@@ -32,7 +33,11 @@ const layerOf = (id: string, name: string): StackLayer => ({
 });
 
 const layers = [layerOf("l1", "Sunset"), layerOf("l2", "Heat"), layerOf("l3", "Sparkles")];
-const names = { layout: LAYOUT_DESK, devices: DEVICES, layers };
+const canvas = canvasWith([
+  { id: "royuan:3151:4015#z0", label: "ROYUAN MonsGeek Keyboard · Zone 1", device: "royuan:3151:4015", x: 0, y: 0, width: 100, height: 50 },
+  { id: "openrgb:mouse-1#z0", label: "Mouse · Zone 1", device: "openrgb:mouse-1", x: 100, y: 0, width: 100, height: 50 },
+]);
+const names = { canvas, devices: DEVICES, layers };
 const effect = { kind: "effect" as const, effect: "fire", name: "Fire" };
 const layer = { kind: "layer" as const, id: "l2", name: "Heat" };
 
@@ -62,23 +67,23 @@ describe("the live region", () => {
 });
 
 describe("the keyboard's targets", () => {
-  it("cycles the whole canvas, each device on the desk, then a new rectangle", () => {
-    const targets = stageTargets(LAYOUT_DESK);
+  it("cycles the whole canvas, each device in the group, then a new rectangle", () => {
+    const targets = stageTargets(canvas);
     expect(targets[0]).toEqual({ kind: "canvas" });
-    expect(targets[1]).toEqual({ kind: "device", device: "openrgb:strip-1" });
+    expect(targets[1]).toEqual({ kind: "device", device: "royuan:3151:4015" });
     expect(targets.at(-1)).toEqual({ kind: "rect", x: 100, y: 60, width: 120, height: 80 });
-    // The devices are each offered once, however many placements they have.
+    // The devices are each offered once, however many lights they have.
     const devices = targets.filter((target) => target.kind === "device");
     expect(new Set(devices.map((target) => (target.kind === "device" ? target.device : ""))).size).toBe(devices.length);
-    expect(devices.length).toBeGreaterThan(3);
+    expect(devices).toHaveLength(2);
   });
 
   it("moves one place and wraps at both ends", () => {
-    const targets = stageTargets(LAYOUT_DESK);
+    const targets = stageTargets(canvas);
     const first = cycleTarget(targets, null, 1);
     const second = cycleTarget(targets, first, 1);
     expect(targetKey(first)).toBe("canvas");
-    expect(targetKey(second)).toBe("device:openrgb:strip-1");
+    expect(targetKey(second)).toBe("device:royuan:3151:4015");
     expect(targetKey(cycleTarget(targets, first, -1))).toBe(targetKey(targets.at(-1) ?? null));
     expect(targetKey(cycleTarget(targets, targets.at(-1) ?? null, 1))).toBe("canvas");
   });

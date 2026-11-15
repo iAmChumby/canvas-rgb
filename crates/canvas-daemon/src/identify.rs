@@ -33,12 +33,19 @@ pub const SESSION_TIMEOUT: Duration = Duration::from_secs(5);
 /// The id prefix of devices whose adapter lights the whole device (the ROYUAN keyboard).
 const WHOLE_DEVICE_PREFIX: &str = "royuan:";
 
+/// One run of LEDs the override lights: `count` LEDs from `led` in `zone` of `device`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Run {
+    pub device: DeviceId,
+    pub zone: u32,
+    pub led: u32,
+    pub count: u32,
+}
+
+/// What the override lights: one or more runs (a light flash names several at once).
 #[derive(Debug, Clone)]
 struct Target {
-    device: DeviceId,
-    zone: u32,
-    led: u32,
-    count: u32,
+    runs: Vec<Run>,
     last_request: Instant,
 }
 
@@ -156,8 +163,16 @@ impl IdentifyGate {
 
     /// Sets (or replaces) the target. Returns true when the caller must start the ticker.
     pub fn start(&self, device: DeviceId, zone: u32, led: u32, count: u32, now: Instant) -> bool {
+        self.start_runs(vec![Run { device, zone, led, count }], now)
+    }
+
+    /// Sets (or replaces) the target as several runs at once: the lights flash (Scenes) names every
+    /// light of the lights it was asked for. Each run is at least one LED. Same watchdog, same
+    /// ticker. Returns true when the caller must start the ticker.
+    pub fn start_runs(&self, runs: Vec<Run>, now: Instant) -> bool {
+        let runs = runs.into_iter().map(|r| Run { count: r.count.max(1), ..r }).collect();
         let mut inner = self.lock();
-        inner.target = Some(Target { device, zone, led, count: count.max(1), last_request: now });
+        inner.target = Some(Target { runs, last_request: now });
         let start = !inner.ticker_running;
         inner.ticker_running = true;
         start
@@ -238,11 +253,11 @@ fn frames(target: Option<&Target>, devices: &[DeviceInfo]) -> Vec<(DeviceId, Vec
         .filter(|d| d.connected)
         .map(|d| {
             let mut colors = vec![Rgb8::BLACK; d.led_count() as usize];
-            if let Some(target) = target.filter(|t| d.id == t.device) {
+            for run in target.iter().flat_map(|t| &t.runs).filter(|r| d.id == r.device) {
                 if d.id.0.starts_with(WHOLE_DEVICE_PREFIX) {
                     colors.fill(TARGET);
-                } else if let Some(run) = run_of(d, target) {
-                    colors[run].fill(TARGET);
+                } else if let Some(range) = run_of(d, run) {
+                    colors[range].fill(TARGET);
                 }
             }
             (d.id.clone(), colors)
@@ -251,7 +266,7 @@ fn frames(target: Option<&Target>, devices: &[DeviceInfo]) -> Vec<(DeviceId, Vec
 }
 
 /// The range of the device's frame the target lights, clamped to its zone.
-fn run_of(device: &DeviceInfo, target: &Target) -> Option<std::ops::Range<usize>> {
+fn run_of(device: &DeviceInfo, target: &Run) -> Option<std::ops::Range<usize>> {
     let mut offset = 0u32;
     for zone in &device.zones {
         if zone.index == target.zone {
@@ -368,7 +383,11 @@ pub fn spawn_ticker(app: Arc<App>) {
 
 /// Puts the lights back after the override: the engine resumes by itself when running; a
 /// paused output needs its one black frame again.
-pub async fn restore(app: &App) {
+///
+/// The identify is a sink-level override: it never took the lights away from what the engine
+/// runs. A draft on the lights stays on the lights, the onboarding effect is not killed, and
+/// the scene is not rebuilt. Nothing is applied here.
+pub async fn restore(app: &Arc<App>) {
     let power = app.store.read().await.config.settings.power;
     if power == Power::Paused {
         app.engine.write_solid(Rgb8::BLACK);

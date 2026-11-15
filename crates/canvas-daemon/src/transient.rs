@@ -9,8 +9,6 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use canvas_proto::Rgb8;
-
 use crate::state::App;
 
 /// How long after the effect's own run the daemon waits for another activate or identify.
@@ -114,13 +112,16 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
     });
 }
 
-/// Puts the layout's saved effect back on the lights (black when the layout has none).
+/// Puts the active scene back on the lights.
+///
+/// The scene order is not taken (see [`crate::scenes::apply_active_ungated`]): the draft gate is
+/// held across the check and the apply, and a scene write holds the scene order while it waits
+/// for that gate.
 ///
 /// A draft on the lights outranks the onboarding restore: the editor is holding them on purpose,
-/// and ending that draft puts the same saved effect back (or black when there is none), so this
-/// does nothing while a draft runs. The draft gate is held across the check and the apply, so a
-/// PUT that is already building is seen before the check and one that arrives during the apply
-/// waits for it.
+/// and ending that draft puts the same scene back, so this does nothing while a draft runs. The
+/// draft gate is held across the check and the apply, so a PUT that is already building is seen
+/// before the check and one that arrives during the apply waits for it.
 pub async fn restore(app: &Arc<App>) {
     let _gate = app.draft.gate().lock().await;
     restore_locked(app).await;
@@ -148,26 +149,14 @@ async fn restore_armed(app: &Arc<App>, generation: u64) {
     restore_locked(app).await;
 }
 
-/// [`restore`] with the draft gate already held: the draft check, the layout read and
-/// the apply, exactly as before. `restore` (tests and direct callers) takes the gate
-/// and comes here; `restore_armed` rechecks the generation under the gate and only then
-/// comes here.
+/// [`restore`] with the draft gate already held: the draft check and the apply, exactly as
+/// before. `restore` (tests and direct callers) takes the gate and comes here; `restore_armed`
+/// rechecks the generation under the gate and only then comes here.
 async fn restore_locked(app: &Arc<App>) {
     if app.draft.is_active() {
         tracing::info!("the onboarding restore is skipped: a draft holds the lights");
         return;
     }
-    let saved = app.active_layout().await.and_then(|l| l.effect);
-    let result = match saved {
-        Some(effect) => crate::apply_effect(app, &effect.id, &effect.props).await,
-        None => {
-            let mut props = canvas_proto::Props::new();
-            props.insert("color".to_string(), canvas_proto::PropValue::Color(Rgb8::BLACK));
-            crate::apply_effect(app, "solid", &props).await
-        }
-    };
-    match result {
-        Ok(()) => tracing::info!("the onboarding effect ended; the saved effect is back"),
-        Err(e) => tracing::warn!(error = %e, "could not restore the saved effect after onboarding"),
-    }
+    crate::scenes::apply_active_ungated(app, false).await;
+    tracing::info!("the onboarding effect ended; the active scene is back");
 }

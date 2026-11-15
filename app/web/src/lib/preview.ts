@@ -192,7 +192,7 @@ const demoThumbs = new Map<string, Thumb>();
  */
 function demoFrame(t: number): Frame {
   // The status is null until the demo backend answers its first request.
-  const id = getSnap().status?.active_effect ?? "";
+  const id = getSnap().status?.active_effects?.[0] ?? "";
   const thumb = demoThumbs.get(id);
   if (!thumb) {
     if (id && !demoThumbs.has(id)) {

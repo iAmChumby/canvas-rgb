@@ -8,6 +8,27 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+- Effects: Play on chooses the groups; the builder shows the group you are tuning. (#310)
+- The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
+- Scenes: tune an effect inside its group, and make groups and scenes from your own devices. (#310)
+- Command line: `canvas-rgb scenes list` shows the scenes with the active one marked, `canvas-rgb scenes set <name>` sets one by name (case does not matter), and `canvas-rgb status` names the active scene (#310)
+- Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names, whether the group comes before or after the effect's properties (#310)
+
+### Changed
+
+- Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
+- Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
+- Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
+- Effects: the change of the running effect's properties is refused while the editor's draft holds the lights: the draft is the editor's unsaved work, and its values are changed in the editor, not with this route (#310)
+
+### Fixed
+
+- Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
+
+### Removed
+
+- Layout, its placement canvas and the part-placing setup. Saved layouts become scenes. (#310)
 - The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
 
 ### Fixed

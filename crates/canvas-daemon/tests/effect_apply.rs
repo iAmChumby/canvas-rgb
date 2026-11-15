@@ -1,12 +1,15 @@
-//! A panicking `schema` in `apply_built` is an apply error, never a crash (#99).
+//! A panicking `schema` or `init` in a scene's effect is caught by the engine's guard, never a
+//! crash (#99). Scenes are the only render path now, so these run through `set_scene`.
 
 mod common;
 
 use std::sync::Arc;
 
 use canvas_daemon::state::App;
+use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::props::{InputNeeds, PropertySchema, Props};
-use canvas_proto::traits::{Canvas, Effect, Inputs};
+use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
+use canvas_proto::traits::{Canvas, Effect, Engine, EngineGroup, EngineSettings, Inputs};
 use common::{FakeAdapter, FakeEngine};
 
 /// An effect whose `schema` panics every time.
@@ -64,21 +67,78 @@ fn app_with_fake_engine(tag: &str) -> (Arc<App>, Arc<FakeEngine>) {
     (app, engine)
 }
 
-#[tokio::test]
-async fn apply_built_with_a_panicking_schema_is_an_error_not_a_crash() {
-    let (app, engine) = app_with_fake_engine("schema");
-    let result = canvas_daemon::apply_built(&app, Box::new(PanicSchemaDaemonEffect), &Props::new()).await;
-    let error = result.expect_err("a panicking schema becomes an apply error");
-    assert!(error.contains("schema"), "the apply error names the schema: {error}");
-    assert!(engine.effect_id.lock().unwrap().is_none(), "the panicking effect never reached the engine");
+/// The device, its light and the group a scene needs: one zone of four LEDs.
+fn one_light() -> (Vec<Light>, Vec<DeviceInfo>, EngineGroup) {
+    let device_id = DeviceId("d0".into());
+    let light = Light {
+        id: zone_light_id(&device_id, 0),
+        device_id: device_id.clone(),
+        zone_index: 0,
+        leds: None,
+        name: None,
+        arrangement: Arrangement::Strip,
+        reversed: false,
+    };
+    let device = DeviceInfo {
+        id: device_id,
+        name: "d0".into(),
+        vendor: "test".into(),
+        kind: DeviceKind::Other,
+        adapter: "fake".into(),
+        adapter_index: 0,
+        serial: String::new(),
+        location: String::new(),
+        zones: vec![ZoneInfo {
+            index: 0,
+            name: "zone0".into(),
+            kind: ZoneKind::Linear,
+            led_count: 4,
+            min_leds: 4,
+            max_leds: 4,
+            resizable: false,
+        }],
+        connected: true,
+    };
+    let group = EngineGroup {
+        id: "all".into(),
+        members: vec![light.id.clone()],
+        mode: GroupMode::FlowAcross,
+        brightness: 100,
+        effect: None,
+        props: Props::new(),
+    };
+    (vec![light], vec![device], group)
+}
 
-    let ok = canvas_daemon::apply_built(&app, Box::new(GoodDaemonEffect), &Props::new()).await;
-    assert!(ok.is_ok(), "the daemon keeps applying after the schema panic: {ok:?}");
-    assert_eq!(
-        engine.effect_id.lock().unwrap().as_deref(),
-        Some("test_good_daemon"),
-        "the engine runs the next effect"
+/// #99 finding 4: a panicking `schema` becomes a failed group, never a crash, and the engine
+/// keeps rendering the next scene.
+#[tokio::test]
+async fn a_panicking_schema_is_a_failed_group_not_a_crash() {
+    let (_app, _engine) = app_with_fake_engine("schema");
+    let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
+        fps: 30,
+        power: canvas_proto::api::Power::Running,
+        brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
+    });
+    let (lights, devices, mut group) = one_light();
+    group.effect = Some(Box::new(PanicSchemaDaemonEffect));
+    engine.set_scene(lights.clone(), devices.clone(), vec![group], false);
+    let states = engine.group_states();
+    assert_eq!(states.len(), 1);
+    assert!(
+        states[0].failed.as_deref().is_some_and(|text| text.contains("schema")),
+        "the group failed, naming the schema: {:?}",
+        states[0]
     );
+
+    // The engine keeps running the next scene: a good effect in the same group.
+    let (lights, devices, mut group) = one_light();
+    group.effect = Some(Box::new(GoodDaemonEffect));
+    engine.set_scene(lights, devices, vec![group], false);
+    let states = engine.group_states();
+    assert!(states[0].failed.is_none(), "the good group runs: {:?}", states[0]);
+    engine.shutdown();
 }
 
 /// An effect whose `init` panics every time.
@@ -116,10 +176,10 @@ fn wait_until(timeout: std::time::Duration, check: impl Fn() -> bool) -> bool {
     check()
 }
 
-/// #99 finding 4: end to end through the real `apply_built` path and the real panic
-/// hook. A panicking `init` is caught by the engine's guard, the hook logs
-/// "an effect panicked (caught)" at WARN, and logging stays open: a later tracing
-/// line still reaches the log. No port 9430 is opened.
+/// #99 finding 4: end to end through the real `set_scene` path and the real panic hook. A
+/// panicking `init` is caught by the engine's guard, the hook logs "an effect panicked
+/// (caught)" at WARN, and logging stays open: a later tracing line still reaches the log. No
+/// port 9430 is opened.
 #[tokio::test]
 async fn a_panicking_init_keeps_logging_open_and_logs_the_caught_warn() {
     let home = std::env::temp_dir().join(format!(
@@ -129,14 +189,14 @@ async fn a_panicking_init_keeps_logging_open_and_logs_the_caught_warn() {
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("the temp home is created");
     let store = canvas_daemon::storage::Store::at(&home);
-    let engine: Arc<dyn canvas_proto::traits::Engine> = canvas_core::spawn(canvas_proto::traits::EngineSettings {
+    let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
         fps: 30,
         power: canvas_proto::api::Power::Running,
         brightness: 100,
         warmth: canvas_proto::consts::WARMTH_OFF,
     });
     let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
-    let app = Arc::new(App::new(
+    let _app = Arc::new(App::new(
         store,
         engine.clone(),
         Box::new(FakeAdapter::default()),
@@ -149,8 +209,13 @@ async fn a_panicking_init_keeps_logging_open_and_logs_the_caught_warn() {
     let _guard = common::LogBuf::install(&log);
     canvas_daemon::exit_log::install_panic_hook();
 
-    let result = canvas_daemon::apply_built(&app, Box::new(PanicInitDaemonEffect), &Props::new()).await;
-    assert!(result.is_ok(), "a caught init panic is not an apply error: {result:?}");
+    let (lights, devices, mut group) = one_light();
+    group.effect = Some(Box::new(PanicInitDaemonEffect));
+    engine.set_scene(lights, devices, vec![group], false);
+    assert!(
+        engine.group_states()[0].failed.is_some(),
+        "a caught init panic is a failed group"
+    );
 
     // The WARN was emitted by the real hook while the guarded init unwound.
     assert!(

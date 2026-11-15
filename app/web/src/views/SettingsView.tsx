@@ -1,8 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { useRouter } from "next/navigation";
-import { CompassTool, DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
+import { DownloadSimple, FolderOpen, UploadSimple } from "@phosphor-icons/react";
 import { Button, FileButton } from "@/components/Button";
 import { ColorField } from "@/components/ColorField";
 import { Field, Panel, StateDot } from "@/components/Panel";
@@ -16,8 +15,7 @@ import { messageOf } from "@/lib/errors";
 import { exportConfig, importConfigFile } from "@/lib/config-transfer";
 import { BLACK_HEX } from "@/lib/color";
 import { openLogsFolder, tauriHost } from "@/lib/host";
-import { requestNavigation } from "@/lib/navigationGuard";
-import { getSnap, patchSnap, refreshAll, refreshRender, refreshSettings, retrySettings, useSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshAll, refreshSettings, retrySettings, useSnap } from "@/lib/store";
 import { fmt1 } from "@/lib/format";
 import { ErrorPanel, Details, LoadFrame } from "@/components/Loading";
 import { SettingsShape } from "@/components/LoadShapes";
@@ -40,7 +38,6 @@ export function SettingsView() {
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("settings"));
   const status = useSnap((s) => s.status);
-  const render = useSnap((s) => s.render);
   const [fps, setFps] = useState<number | null>(null);
   const [brightness, setBrightness] = useState<number | null>(null);
   const [warmth, setWarmth] = useState<number | null>(null);
@@ -51,7 +48,6 @@ export function SettingsView() {
   const [motion, setMotion] = useState<MotionPref>(() => readMotion());
   const [bootDraft, setBootDraft] = useState<string | null>(null);
   const inTray = tauriHost() !== null;
-  const router = useRouter();
 
   if (!settings) {
     return (
@@ -74,7 +70,7 @@ export function SettingsView() {
     );
   }
 
-  const shownFps = fps ?? render?.fps ?? settings.fps;
+  const shownFps = fps ?? settings.fps;
   const shownBrightness = brightness ?? settings.brightness;
   const shownWarmth = warmth ?? settings.warmth;
 
@@ -93,18 +89,11 @@ export function SettingsView() {
   };
 
   const commitFps = async (v: number) => {
-    setRenderErr(null);
-    try {
-      // The daemon's answer goes into the snapshot first: the draft goes away onto the new value,
-      // not onto the old one for as long as the refresh takes.
-      patchSnap({ render: await api.patchRender({ fps: v, scale: null, sampling: null }) });
-      setFps(null);
-      await refreshRender();
-    } catch (e) {
-      // The control goes back to the value the daemon has: nothing fails silently.
-      setFps(null);
-      setRenderErr(messageOf(e));
-    }
+    // The settings route is where the frame rate lives now (#310: the layout's render route is
+    // gone, and the scene's scale and sampling are fixed). `save` shows a refusal and puts the
+    // control back on the daemon's value.
+    setFps(null);
+    await save({ fps: v });
   };
 
   const commitBrightness = async (v: number) => {
@@ -298,23 +287,6 @@ export function SettingsView() {
           </Panel>
 
           <Panel title="Setup">
-            <Field label="Map my PC" hint="Walk through every light again">
-              <Button
-                icon={<CompassTool size={16} />}
-                onClick={() => {
-                  try {
-                    window.sessionStorage.setItem("canvas-rgb.onboarding-remap", "1");
-                  } catch {
-                    // The address carries it instead.
-                  }
-                  // Settings cannot be open with a dirty editor (one page at a time), but the
-                  // guard keeps every page change behind the one question.
-                  requestNavigation(() => router.push("/?map=1"));
-                }}
-              >
-                Map my PC again
-              </Button>
-            </Field>
             <Field label="Export">
               <Button icon={<DownloadSimple size={16} />} onClick={() => void doExport()}>
                 Export

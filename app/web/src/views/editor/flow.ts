@@ -1,39 +1,24 @@
 // The onboarding flow (flow.ts): which screens a run has, and when it opens by itself.
 //
-// The flow works on the layout, like the setup always did: a part is mapped when its
-// `part.mapped` says so, so what the owner has done survives a restart. The window opens while
-// the daemon's `Status.onboarding_complete` is false; the owner reaching the end sets it. The
-// only thing remembered outside the layout is "Set up later": the owner put it off until the
-// next app start.
+// One screen: the hello. It is the first run's greeting, with the count of lights found, and
+// what it leads to is the Scenes page (#310: Layout, its case and its part-placing setup are
+// gone; a first run makes a scene of every light).
+//
+// The window opens while the daemon's `Status.onboarding_complete` is false; finishing the hello
+// sets it. The only thing remembered outside it is "Set up later": the owner put it off until
+// the next app start.
 //
 // A "launch" is one webview session. `sessionStorage` lives exactly that long (it survives a
 // reload and dies with the window), so the launch has an id kept there, and "Later" writes the
 // id it was said in to `localStorage`. The same id next time means the same launch.
 
-import type { DeviceInfo } from "@/proto/DeviceInfo";
-import type { Layout } from "@/proto/Layout";
 import type { Status } from "@/proto/Status";
 
-export type Step =
-  | { kind: "hello" }
-  | { kind: "case" }
-  | { kind: "parts" }
-  | { kind: "match" }
-  | { kind: "finish" };
+export type Step = { kind: "hello" };
 
-/** The part the flow is limited to, when one device is redone from its row. */
-export interface Scope {
-  deviceId: string;
-  zoneIndex: number;
-}
-
-/**
- * The five screens of one run, parts first: Hello, Case, Your parts (put in what is in the PC),
- * Match the lights (which part is lit), Finish. A redo of one device is Match and Finish.
- */
-export function buildSteps(_layout: Layout, _devices: DeviceInfo[] | null, scope: Scope | null): Step[] {
-  if (scope) return [{ kind: "match" }, { kind: "finish" }];
-  return [{ kind: "hello" }, { kind: "case" }, { kind: "parts" }, { kind: "match" }, { kind: "finish" }];
+/** The one screen of a run. */
+export function buildSteps(): Step[] {
+  return [{ kind: "hello" }];
 }
 
 /** The window opens by itself while the owner has not finished the onboarding. */
@@ -92,6 +77,7 @@ export function redirectedThisLaunch(): boolean {
   }
 }
 
+/** Marks the first-page redirect of this launch. */
 export function markRedirected(): void {
   try {
     window.sessionStorage.setItem(SHOWN_KEY, "1");

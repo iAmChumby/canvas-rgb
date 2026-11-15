@@ -4,7 +4,7 @@
 // can be seen. `?state=conflict|service-down|first-run|html` changes what the status reports.
 //
 // The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
-// be seen in a plain browser: `?state=daemon-down|openrgb-down|no-layout|device-empty|slow|
+// be seen in a plain browser: `?state=daemon-down|openrgb-down|device-empty|slow|
 // save-error|handback:<header id>`.
 
 import { ApiFailure } from "@/lib/errors";
@@ -13,7 +13,7 @@ import {
   answerDelayMs,
   applyDeviceScenarios,
   applyFanScenarios,
-  applyLayoutScenarios,
+  applySceneScenarios,
   applyStatusScenarios,
   conflictClearsMs,
   daemonDown,
@@ -36,7 +36,9 @@ import {
   INITIAL_SETTINGS,
   ONBOARD_EFFECTS,
   isHiddenEffect,
-  LAYOUT_DESK,
+  DEMO_LIGHTS,
+  DEMO_SCENES,
+  demoSceneProblem,
   CHIONE_DISPLAY,
   DISPLAY_DEFAULT,
   type DemoEffect,
@@ -46,7 +48,12 @@ import { demoHtmlEffects, demoSource, parseUserEffect } from "@/lib/demoEffects"
 import { scriptBody } from "@/lib/effectSource";
 import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
-import type { Layout } from "@/proto/Layout";
+import type { Scene } from "@/proto/Scene";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { ScenePut } from "@/proto/ScenePut";
+import type { SceneCreate } from "@/proto/SceneCreate";
+import type { LightView } from "@/proto/LightView";
+import type { LightPatch } from "@/proto/LightPatch";
 import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
@@ -94,9 +101,9 @@ import {
   stackSummary,
 } from "@/lib/demoStacks";
 import { stackThumbnailBytes } from "@/lib/stackFrame";
+import { wholeLightsCanvas } from "@/lib/groupCanvas";
 
 const BASE = "/api/v1";
-const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
 const APP_VERSION = "0.13.1";
 const SCHEMA_VERSION = 1;
@@ -118,8 +125,10 @@ interface DemoState {
   /** The owner's presets per effect, in the order they were saved. */
   userPresets: Record<string, Preset[]>;
   activeEffect: string | null;
-  layouts: Layout[];
-  activeLayout: string;
+  /** The scenes (0.14.0), the id of the active one and the lights they group. */
+  scenes: Scene[];
+  activeScene: string;
+  lights: LightView[];
   fanModes: Record<string, FanMode>;
   fanFloor: number;
   fanHotLimits: HotLimits;
@@ -244,28 +253,27 @@ function initialState(): DemoState {
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
   const favorites = new Set(EFFECTS.filter((e) => e.summary.favorite).map((e) => e.schema.id));
-  const layouts = applyLayoutScenarios([{ ...LAYOUT_DESK, zones: LAYOUT_DESK.zones.map((z) => ({ ...z })) }], LAYOUT_DESK.id);
-  // `?state=persist`: saved layouts are kept in localStorage, so a reload sees what was saved,
-  // as it does with the daemon. Used by the onboarding's reload checks.
-  if (s.has("persist")) {
-    try {
-      const kept = window.localStorage.getItem(DEMO_LAYOUTS_KEY);
-      if (kept) layouts.layouts = JSON.parse(kept) as Layout[];
-    } catch {
-      // Starts from the fixture.
-    }
-  }
-  if (s.has("presets")) {
-    const dusk = seededPresets().aurora?.[0];
-    const layout = layouts.layouts.find((l) => l.id === layouts.active);
-    if (dusk && layout) layout.effect = { id: "aurora", props: { ...dusk.props } };
-  }
   let onboarded = onboardingDone();
   if (s.has("persist")) {
     try {
       if (window.localStorage.getItem(DEMO_ONBOARDED_KEY) === "1") onboarded = true;
     } catch {
       // Not remembered.
+    }
+  }
+  const sceneScenarios = applySceneScenarios(DEMO_SCENES, DEMO_LIGHTS);
+  // `?state=presets`: the group that plays Aurora plays it with the first preset's values, so the
+  // strip lights that key (0.14.0: a group's own values are what run, not the layout's effect).
+  if (s.has("presets")) {
+    const dusk = seededPresets().aurora?.[0];
+    if (dusk) {
+      for (const scene of sceneScenarios.scenes) {
+        for (const group of scene.groups) {
+          if (group.plays.type === "effect" && group.plays.effect === "aurora") {
+            group.plays = { type: "effect", effect: "aurora", props: { ...dusk.props } };
+          }
+        }
+      }
     }
   }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
@@ -281,8 +289,9 @@ function initialState(): DemoState {
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
-    layouts: layouts.layouts,
-    activeLayout: layouts.active,
+    scenes: sceneScenarios.scenes,
+    activeScene: sceneScenarios.active,
+    lights: sceneScenarios.lights,
     fanModes,
     fanFloor: 20,
     fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },
@@ -490,12 +499,6 @@ function checkWhiteBalance(wb: { red: number; green: number; blue: number }): vo
 /** The daemon's caps (`crates/canvas-daemon/src/api/devices.rs`). */
 const WHITE_BALANCE_MAX_DEVICES = 128;
 const WHITE_BALANCE_MAX_ID_LEN = 256;
-
-function activeLayout(): Layout {
-  const found = st().layouts.find((l) => l.id === st().activeLayout);
-  if (!found) fail(404, "not_found", "no active layout");
-  return found;
-}
 
 // ---- a slow device read (`?state=slow-read`) ----
 
@@ -731,8 +734,12 @@ function statusNow(): Status {
     devices_connected: connected,
     devices_total: total,
     preview_subscribers: 1,
-    active_layout: s.activeLayout,
-    active_effect: s.activeEffect,
+    active_scene: activeSceneOf(s) ? { id: s.activeScene, name: activeSceneOf(s)?.name ?? "" } : null,
+    active_effects: activeSceneOf(s)
+      ? sceneEffects(activeSceneOf(s) as Scene)
+      : s.activeEffect
+        ? [s.activeEffect]
+        : [],
     openrgb: waking ? "connecting" : "connected",
     service: down ? "down" : "connected",
     service_down_ms: down ? 14000 + elapsed : null,
@@ -740,6 +747,168 @@ function statusNow(): Status {
     show_zone_panel: s.zonePanel,
     onboarding_complete: s.onboardingComplete,
   });
+}
+
+// ---- scenes ----
+
+function activeSceneOf(s: DemoState): Scene | undefined {
+  return s.scenes.find((scene) => scene.id === s.activeScene);
+}
+
+/** The effect ids a scene's groups play, in group order, without repeats. */
+function sceneEffects(scene: Scene): string[] {
+  const out: string[] = [];
+  for (const group of scene.groups) {
+    if (group.plays.type === "effect" && !out.includes(group.plays.effect)) out.push(group.plays.effect);
+  }
+  return out;
+}
+
+/** What `GET /scenes` answers: a group whose effect is gone is dark and says why. */
+function scenesAnswer(s: DemoState): ScenesResponse {
+  const active = activeSceneOf(s);
+  return {
+    active: s.activeScene,
+    scenes: s.scenes,
+    group_states: (active?.groups ?? []).map((g) => ({
+      id: g.id,
+      failed:
+        g.plays.type === "effect" && !s.effects[g.plays.effect] && !s.stacks[g.plays.effect]
+          ? `the effect ${g.plays.effect} is not installed`
+          : null,
+    })),
+  };
+}
+
+function sceneOrNotFound(s: DemoState, id: string): Scene {
+  const scene = s.scenes.find((x) => x.id === id);
+  if (!scene) fail(404, "not_found", `no scene ${id}`);
+  return scene;
+}
+
+/** The rules the daemon's `validate_scene` keeps, answered as a 422. */
+function checkScene(s: DemoState, scene: Scene): void {
+  if ([...scene.name].length > 40) fail(422, "validation", `the name of scene ${scene.id} is over 40 characters`);
+  const known = new Set(s.lights.map((l) => l.light.id));
+  for (const group of scene.groups) {
+    if ([...group.name].length > 40) fail(422, "validation", `the name of group ${group.id} is over 40 characters`);
+    if (group.brightness > 100) fail(422, "validation", `the brightness of group ${group.id} is over 100`);
+    for (const light of group.members) {
+      if (!known.has(light)) fail(422, "validation", `group ${group.name} holds ${light}, which is not a light`);
+    }
+  }
+  const problem = demoSceneProblem(scene);
+  if (problem) fail(422, "validation", problem);
+}
+
+let demoSceneCounter = 0;
+
+function createScene(s: DemoState, body: SceneCreate): Scene {
+  const name = (body.name ?? "").trim();
+  if (!name) fail(422, "validation", "a scene needs a name");
+  demoSceneCounter += 1;
+  const copy = body.copy_of ? sceneOrNotFound(s, body.copy_of) : null;
+  const scene: Scene = {
+    id: `scene-${demoSceneCounter}`,
+    name,
+    rev: 1,
+    groups: copy
+      ? copy.groups.map((g, i) => ({ ...structuredClone(g), id: `g${demoSceneCounter}-${i + 1}` }))
+      : [
+          {
+            id: `g${demoSceneCounter}-1`,
+            name: "Everything",
+            members: s.lights.map((l) => l.light.id),
+            plays: { type: "off" },
+            mode: "flow_across",
+            brightness: 100,
+          },
+        ],
+  };
+  // The daemon's rules hold for a new scene too: a name over 40 characters is refused.
+  checkScene(s, scene);
+  s.scenes.push(scene);
+  return scene;
+}
+
+function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
+  const bad = (): never => fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
+  if (seg.length === 1) {
+    if (method === "GET") return scenesAnswer(s);
+    if (method === "POST") return createScene(s, body as SceneCreate);
+    return bad();
+  }
+  if (seg[1] === "active") {
+    if (method !== "PUT") return bad();
+    const id = (body as { id: string }).id;
+    sceneOrNotFound(s, id);
+    s.activeScene = id;
+    return scenesAnswer(s);
+  }
+  const id = seg[1] ?? "";
+  const scene = sceneOrNotFound(s, id);
+  if (seg.length === 2) {
+    if (method === "PUT") {
+      const put = body as ScenePut;
+      if (put.scene.id !== id) fail(422, "validation", "the scene id in the body does not match the path");
+      if (put.expected_rev !== scene.rev) {
+        fail(409, "conflict", `scene ${scene.name} changed in another window (it is at revision ${scene.rev})`);
+      }
+      checkScene(s, put.scene);
+      const saved: Scene = { ...structuredClone(put.scene), rev: scene.rev + 1 };
+      s.scenes[s.scenes.indexOf(scene)] = saved;
+      return saved;
+    }
+    if (method === "DELETE") {
+      if (s.scenes.length === 1) fail(409, "conflict", "the last scene cannot be deleted");
+      s.scenes = s.scenes.filter((x) => x.id !== id);
+      if (s.activeScene === id) s.activeScene = s.scenes[0]?.id ?? "";
+      return { ok: true };
+    }
+    return bad();
+  }
+  if (seg[2] === "groups" && seg.length === 5) {
+    const group = scene.groups.find((g) => g.id === seg[3]);
+    if (!group) fail(404, "not_found", `no group ${seg[3]} in scene ${scene.name}`);
+    if (seg[4] === "props" && method === "PATCH") {
+      if (group.plays.type !== "effect") fail(422, "validation", `group ${group.name} plays nothing`);
+      group.plays = { ...group.plays, props: { ...group.plays.props, ...(body as Props) } };
+      // The daemon saves the write, bumps the scene's rev and answers the whole scene.
+      scene.rev += 1;
+      return structuredClone(scene);
+    }
+    if (seg[4] === "brightness" && method === "PUT") {
+      const brightness = (body as { brightness: number }).brightness;
+      if (!(brightness >= 0 && brightness <= 100)) fail(422, "validation", "brightness must be 0..=100");
+      group.brightness = Math.round(brightness);
+      // The daemon saves the write, bumps the scene's rev and answers the whole scene.
+      scene.rev += 1;
+      return structuredClone(scene);
+    }
+  }
+  return bad();
+}
+
+function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
+  if (seg.length === 1 && method === "GET") return { lights: s.lights };
+  if (seg[1] === "flash" && method === "POST") return { ok: true };
+  if (seg.length === 2 && method === "PATCH") {
+    const view = s.lights.find((l) => l.light.id === seg[1]);
+    if (!view) fail(404, "not_found", `no light ${seg[1]}`);
+    const patch = body as LightPatch;
+    if ("name" in patch) {
+      const name = (patch.name ?? "").trim();
+      if (name) view.light.name = name;
+      else delete view.light.name;
+      const device = s.devices.find((d) => d.id === view.light.device_id);
+      const zone = device?.zones.find((z) => z.index === view.light.zone_index);
+      view.label = name || (device && zone ? `${device.name} · ${zone.name}` : view.label);
+    }
+    if (patch.arrangement) view.light.arrangement = patch.arrangement;
+    if (typeof patch.reversed === "boolean") view.light.reversed = patch.reversed;
+    return view;
+  }
+  return fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
 }
 
 // ---- effects ----
@@ -766,11 +935,14 @@ function stackOrNotFound(id: string): Stack {
 }
 
 function currentProps(e: DemoEffect): Props {
+  // The group that plays the effect has its own values (0.14.0); otherwise the saved ones sit on
+  // the schema's defaults.
   const s = st();
-  if (s.activeEffect === e.schema.id) {
-    const layout = activeLayout();
-    if (layout.effect) return { ...layout.effect.props };
-  }
+  const scene = activeSceneOf(s);
+  const group = scene?.groups.find(
+    (g) => g.plays.type === "effect" && g.plays.effect === e.schema.id,
+  );
+  if (group && group.plays.type === "effect") return { ...group.plays.props };
   return { ...e.defaults, ...(s.saved[e.schema.id] ?? {}) };
 }
 
@@ -788,9 +960,15 @@ function setActiveProps(over: Props): void {
   const s = st();
   if (!s.activeEffect) fail(422, "validation", "no effect is active");
   const e = effectOrNotFound(s.activeEffect);
-  const layout = activeLayout();
-  const next = mergeProps(layout.effect?.props ?? currentProps(e), over);
-  layout.effect = { id: e.schema.id, props: next };
+  const next = mergeProps(currentProps(e), over);
+  // The groups that play the effect carry the new values (0.14.0): the layout's one effect is
+  // not what plays.
+  const scene = activeSceneOf(s);
+  for (const group of scene?.groups ?? []) {
+    if (group.plays.type === "effect" && group.plays.effect === e.schema.id) {
+      group.plays = { type: "effect", effect: e.schema.id, props: { ...next } };
+    }
+  }
   s.saved[e.schema.id] = next;
 }
 
@@ -1113,26 +1291,6 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
-  if (head === "render") {
-    if (method === "GET") {
-      const layout = activeLayout();
-      return { fps: s.settings.fps, scale: layout.render_scale, sampling: layout.sampling };
-    }
-    if (method === "PATCH") {
-      const b = body as { fps?: number | null; scale?: number | null; sampling?: string | null };
-      if (typeof b.fps === "number") {
-        if (b.fps < 10 || b.fps > 60) fail(422, "validation", `fps must be 10 to 60, got ${b.fps}`);
-        s.settings.fps = b.fps;
-      }
-      const layout = activeLayout();
-      if (b.scale === 25 || b.scale === 50 || b.scale === 100) layout.render_scale = b.scale;
-      if (b.sampling === "nearest" || b.sampling === "bilinear" || b.sampling === "area_average") {
-        layout.sampling = b.sampling;
-      }
-      return { fps: s.settings.fps, scale: layout.render_scale, sampling: layout.sampling };
-    }
-    return bad();
-  }
 
   if (head === "devices") {
     if (seg.length === 1 && method === "GET") {
@@ -1389,9 +1547,18 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 3 && seg[2] === "thumbnail" && method === "GET") {
       const stack = s.stacks[id];
-      if (stack) return stackThumbnailBytes(stack, activeLayout());
+      if (stack) return stackThumbnailBytes(stack, wholeLightsCanvas(s.lights, s.devices));
       effectOrNotFound(id);
       return demoThumbnail(id);
+    }
+    if (seg.length === 3 && seg[2] === "defaults" && method === "PATCH") {
+      // The effect's starting values: what the next group to play it starts from. A group that
+      // already plays it keeps its own values; no scene changes.
+      const e = effectOrNotFound(id);
+      if (id.startsWith("stack:")) fail(409, "conflict", `${id} is a stack; its values live in the stack builder`);
+      const props = body as Props;
+      s.saved[id] = { ...(s.saved[id] ?? {}), ...props };
+      return { ok: true, id, props: { ...e.defaults, ...s.saved[id] } };
     }
     if (seg.length === 3 && seg[2] === "activate" && method === "POST") {
       const e = effectOrNotFound(id);
@@ -1400,7 +1567,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (scenario().has("activate-fail")) {
         fail(503, "service_unavailable", "the effect could not start: the engine is busy");
       }
-      const req = body as { props?: Props; preset?: string | null };
+      const req = body as { props?: Props; preset?: string | null; groups?: string[] };
       const isStack = id.startsWith("stack:");
       // A stack's values are its layers' own (D95.4.3): there is no `effects.saved` entry.
       let base: Props = isStack ? { ...e.defaults } : { ...e.defaults, ...(s.saved[id] ?? {}) };
@@ -1415,9 +1582,31 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       s.draft = null;
       const next = mergeProps(base, req.props ?? {});
       s.activeEffect = id;
-      const layout = activeLayout();
-      layout.effect = { id, props: next };
-      if (!isStack) s.saved[id] = next;
+      // Scenes: the effect plays on the groups asked for (every group when none is named). The
+      // starting values are written by PATCH /effects/{id}/defaults and nothing else.
+      const scene = activeSceneOf(s);
+      if (scene) {
+        const at =
+          req.groups && req.groups.length > 0
+            ? req.groups.map((name) => {
+                const found = scene.groups.find(
+                  (g) => g.name.toLowerCase() === name.toLowerCase() || g.id === name,
+                );
+                if (!found) fail(404, "not_found", `scene ${scene.name} has no group named ${name}`);
+                return found;
+              })
+            : scene.groups;
+        for (const group of at) group.plays = { type: "effect", effect: id, props: next };
+        const html = scene.groups.filter((g) => {
+          if (g.plays.type !== "effect") return false;
+          if (g.plays.effect.startsWith("html:")) return true;
+          const stack = s.stacks[g.plays.effect];
+          return stack ? stack.layers.some((layer) => layer.effect.startsWith("html:")) : false;
+        }).length;
+        if (html > 1) {
+          fail(422, "validation", "at most 1 group of a scene may play an HTML effect (a stack with an HTML layer counts); " + html + " do");
+        }
+      }
       return { ok: true };
     }
     if (seg.length === 3 && seg[2] === "favorite" && method === "PUT") {
@@ -1647,38 +1836,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
-  if (head === "layouts") {
-    if (seg.length === 1 && method === "GET") return { active: s.activeLayout, layouts: s.layouts };
-    if (seg[1] === "active" && method === "PUT") {
-      s.activeLayout = (body as { id: string }).id;
-      return { active: s.activeLayout, layouts: s.layouts };
-    }
-    const id = seg[1] ?? "";
-    const layout = s.layouts.find((l) => l.id === id);
-    if (seg.length === 2 && method === "GET") {
-      if (!layout) fail(404, "not_found", `no layout ${id}`);
-      return layout;
-    }
-    if (seg.length === 2 && method === "PUT") {
-      const next = body as Layout;
-      if (next.id !== id) fail(422, "validation", "the layout id in the body does not match the path");
-      if (![25, 50, 100].includes(next.render_scale)) {
-        fail(422, "validation", `render scale must be 25, 50 or 100, got ${next.render_scale}`);
-      }
-      const idx = s.layouts.findIndex((l) => l.id === id);
-      if (idx < 0) s.layouts.push(next);
-      else s.layouts[idx] = next;
-      if (scenario().has("persist")) {
-        try {
-          window.localStorage.setItem(DEMO_LAYOUTS_KEY, JSON.stringify(s.layouts));
-        } catch {
-          // Kept in memory only.
-        }
-      }
-      return next;
-    }
-    return bad();
-  }
+  if (head === "scenes") return scenesRoute(s, method, seg, body);
+  if (head === "lights") return lightsRoute(s, method, seg, body);
+
 
   if (head === "fans") {
     if (seg.length === 1 && method === "GET") {
@@ -1870,7 +2030,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         exported_at: new Date().toISOString(),
         app_version: APP_VERSION,
         settings: { ...s.settings },
-        layouts: { schema_version: SCHEMA_VERSION, active: s.activeLayout, layouts: s.layouts },
+        layouts: { schema_version: SCHEMA_VERSION, active: "", layouts: [] },
         zones: {
           schema_version: SCHEMA_VERSION,
           sizes: Object.fromEntries(

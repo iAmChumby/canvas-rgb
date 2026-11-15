@@ -16,9 +16,22 @@ use crate::api::{effects, ApiFailure, ApiResult};
 use crate::preview::PreviewError;
 use crate::state::App;
 
+/// The query `PUT /stacks/preview` takes: the group the preview shows.
+///
+/// The field is optional and the route has no request type in `canvas-proto` (the builder sends
+/// the stack, the epoch and the sequence), so it stays here. With no group the preview shows
+/// one temporary flow-across group of every light.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct StackPreviewQuery {
+    /// The group of the active scene the preview shows, by id.
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
 /// `PUT /api/v1/stacks/preview`.
 pub async fn put_stack_preview(
     State(app): State<Arc<App>>,
+    Query(query): Query<StackPreviewQuery>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
 ) -> ApiResult<Json<canvas_proto::api::StackPreviewResponse>> {
     let bytes = crate::api::limited_body(body, effects::IMPORT_BODY_LIMIT)?;
@@ -30,18 +43,24 @@ pub async fn put_stack_preview(
             request.epoch
         )));
     }
-    let answer = crate::preview::put(&app, &request.stack, &request.epoch, request.seq)
-        .await
-        .map_err(|error| match error {
-            PreviewError::Busy => ApiFailure::service_unavailable(format!(
-                "the daemon is already rendering {} previews; try again shortly",
-                crate::api::editor::PREVIEW_CONCURRENT
-            ))
-            .with_retry_after(1),
-            PreviewError::Conflict(message) => ApiFailure::conflict(message),
-            PreviewError::Validation(message) => ApiFailure::validation(message),
-            PreviewError::Internal(message) => ApiFailure::internal(message),
-        })?;
+    let answer = crate::preview::put(
+        &app,
+        &request.stack,
+        &request.epoch,
+        request.seq,
+        query.group.as_deref(),
+    )
+    .await
+    .map_err(|error| match error {
+        PreviewError::Busy => ApiFailure::service_unavailable(format!(
+            "the daemon is already rendering {} previews; try again shortly",
+            crate::api::editor::PREVIEW_CONCURRENT
+        ))
+        .with_retry_after(1),
+        PreviewError::Conflict(message) => ApiFailure::conflict(message),
+        PreviewError::Validation(message) => ApiFailure::validation(message),
+        PreviewError::Internal(message) => ApiFailure::internal(message),
+    })?;
     Ok(Json(answer))
 }
 

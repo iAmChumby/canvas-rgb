@@ -32,7 +32,7 @@ const THUMB_FPS = 12;
  */
 export function EffectPreview({ id, className, label = "Effect preview", note = false }: { id: string; className?: string; label?: string; note?: boolean }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
-  const activeId = useSnap((s) => s.status?.active_effect ?? null);
+  const activeId = useSnap((s) => s.status?.active_effects?.[0] ?? null);
   const live = activeId === id;
   const [thumb, setThumb] = useState<{ id: string; data: Thumb } | null>(null);
   // The id whose first live frame has been drawn, for a running effect whose thumbnail is late.

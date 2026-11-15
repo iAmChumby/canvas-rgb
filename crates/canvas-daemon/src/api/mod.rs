@@ -10,11 +10,11 @@ pub mod displays;
 pub mod editor;
 pub mod effects;
 pub mod fans;
-pub mod layouts;
+pub mod lights;
 pub mod output;
 pub mod peripherals;
 pub mod preview;
-pub mod render;
+pub mod scenes;
 pub mod settings;
 pub mod stack_preview;
 pub mod stacks;
@@ -33,7 +33,6 @@ pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route(routes::STATUS, get(status::status))
         .route(routes::OUTPUT, get(output::get_output).patch(output::patch_output))
-        .route(routes::RENDER, get(render::get_render).patch(render::patch_render))
         .route(routes::DEVICES, get(devices::list_devices))
         .route(
             routes::DEVICE_ZONE,
@@ -63,8 +62,8 @@ pub fn router(app: Arc<App>) -> Router {
             put(effects::replace_preset).delete(effects::delete_preset),
         )
         .route(routes::EFFECT_ACTIVATE, post(effects::activate))
+        .route(routes::EFFECT_DEFAULTS, patch(effects::patch_defaults))
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
-        .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
         .route(routes::EFFECT_FAVORITE, put(effects::put_favorite))
         .route(routes::EFFECT_SOURCE, get(editor::effect_source))
         .route(
@@ -79,9 +78,14 @@ pub fn router(app: Arc<App>) -> Router {
                 .delete(editor::delete_draft)
                 .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
-        .route(routes::LAYOUTS, get(layouts::list_layouts))
-        .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
-        .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
+        .route(routes::SCENES, get(scenes::list_scenes).post(scenes::create_scene))
+        .route(routes::SCENE_ACTIVE, put(scenes::put_active))
+        .route(routes::SCENE, put(scenes::put_scene).delete(scenes::delete_scene))
+        .route(routes::GROUP_PROPS, patch(scenes::patch_group_props))
+        .route(routes::GROUP_BRIGHTNESS, put(scenes::put_group_brightness))
+        .route(routes::LIGHTS_FLASH, post(scenes::flash_lights))
+        .route(routes::LIGHTS, get(lights::list_lights))
+        .route(routes::LIGHT, patch(lights::patch_light))
         .route(routes::STACKS, get(stacks::list_stacks))
         .route(
             routes::STACK_PREVIEW,
@@ -128,7 +132,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::UPDATE_INSTALL, post(update::install))
         .route(routes::DIAG_READBACK, get(diag::readback))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
-        .route(routes::PREVIEW, get(preview::preview));
+        .route(routes::PREVIEW, get(preview::preview))
+        .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights));
 
     api.layer(axum::middleware::from_fn_with_state(
         app.clone(),

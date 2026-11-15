@@ -46,8 +46,8 @@ describe("the Activate button's success pulse (#187, F1)", () => {
     );
     // The detail has loaded when the preset strip answers.
     await screen.findByRole("button", { name: /^Apply preset Slow dusk/ });
-    const running = await screen.findAllByRole("button", { name: /^Running$/ });
-    expect(running.length, "the running effect's Activate buttons are present").toBeGreaterThan(0);
+    const running = await screen.findAllByRole("button", { name: /^Playing$|^Playing on all|^Playing on \d+ of/ });
+    expect(running.length, "the running effect's play buttons are present").toBeGreaterThan(0);
     for (const btn of running) {
       expect(btn.classList.contains("success-pulse"), "no pulse without a successful activate()").toBe(false);
     }

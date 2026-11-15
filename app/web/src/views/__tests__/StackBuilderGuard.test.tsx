@@ -211,7 +211,7 @@ describe("the builder's unsaved guard", () => {
     await builderReady();
     await dirty();
 
-    fireEvent.click(screen.getByRole("link", { name: /^Layout/ }));
+    fireEvent.click(screen.getByRole("link", { name: /^Scenes/ }));
     expect(await screen.findByRole("alertdialog", { name: "Unsaved changes" })).toBeTruthy();
     expect(push).not.toHaveBeenCalled();
     fireEvent.click(screen.getByRole("button", { name: "Discard" }));

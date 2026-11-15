@@ -10,7 +10,7 @@ import { Stage, StageTools } from "@/views/effects/Stage";
 import type { DraftState } from "@/views/effects/useDraftOnLights";
 import type { DragState } from "@/lib/dragSession";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { LayerArea } from "@/proto/LayerArea";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
@@ -19,7 +19,7 @@ import type { StackLayer } from "@/proto/StackLayer";
 
 export function StackStage({
   draft,
-  layout,
+  canvas,
   devices,
   pickedLayer,
   parts,
@@ -56,7 +56,7 @@ export function StackStage({
   leaving,
 }: {
   draft: Stack;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   pickedLayer: StackLayer | null;
   parts: boolean;
@@ -95,7 +95,7 @@ export function StackStage({
   return (
     <Panel
       className="rd-stack-stage"
-      title="Preview"
+      title={canvas && canvas.id !== "all" ? `Preview · ${canvas.name}` : "Preview"}
       actions={
         <StageTools
           canUndo={canUndo}
@@ -110,7 +110,7 @@ export function StackStage({
       <Stage
         feedFailed={feedProblem !== null}
         stack={draft}
-        layout={layout}
+        canvas={canvas}
         devices={devices}
         picked={pickedLayer}
         parts={parts}

@@ -112,7 +112,6 @@ impl LogBuf {
 
 /// A test engine that records what it was told.
 pub struct FakeEngine {
-    pub layout: Mutex<Option<(canvas_proto::layout::Layout, Vec<DeviceInfo>)>>,
     pub effect_id: Mutex<Option<String>>,
     pub props: Mutex<Props>,
     pub fps: AtomicU32,
@@ -127,17 +126,18 @@ pub struct FakeEngine {
     pub frames: AtomicU64,
     pub shutdown: AtomicU32,
     pub stats: Mutex<RenderStats>,
-    /// When this is not zero, `set_effect` panics instead of recording the effect: a test
-    /// that needs a panic in the middle of a route (#94).
-    pub panic_on_set_effect: AtomicU32,
-    /// How many times `set_effect` has panicked: a test waits on this, not on the slot (#282).
-    pub set_effect_panics: AtomicU32,
+    /// The scene the engine was handed (Scenes, 0.14.0): every group, with the id of the
+    /// effect it plays and the props it runs with.
+    pub scene: Mutex<Vec<(String, Option<String>, Props)>>,
+    /// When this is not zero, `set_scene` panics instead of recording the scene.
+    pub panic_on_set_scene: AtomicU32,
+    /// How many times `set_scene` has panicked: a test waits on this, not on the slot (#282).
+    pub set_scene_panics: AtomicU32,
 }
 
 impl Default for FakeEngine {
     fn default() -> Self {
         Self {
-            layout: Mutex::new(None),
             effect_id: Mutex::new(None),
             props: Mutex::new(Props::new()),
             fps: AtomicU32::new(30),
@@ -152,30 +152,14 @@ impl Default for FakeEngine {
             frames: AtomicU64::new(0),
             shutdown: AtomicU32::new(0),
             stats: Mutex::new(RenderStats::default()),
-            panic_on_set_effect: AtomicU32::new(0),
-            set_effect_panics: AtomicU32::new(0),
+            scene: Mutex::new(Vec::new()),
+            panic_on_set_scene: AtomicU32::new(0),
+            set_scene_panics: AtomicU32::new(0),
         }
     }
 }
 
 impl Engine for FakeEngine {
-    fn set_layout(&self, layout: canvas_proto::layout::Layout, devices: Vec<DeviceInfo>) {
-        *self.layout.lock().unwrap() = Some((layout, devices));
-    }
-
-    fn set_effect(&self, effect: Box<dyn Effect>, props: &Props) {
-        if self.panic_on_set_effect.load(Ordering::SeqCst) != 0 {
-            self.set_effect_panics.fetch_add(1, Ordering::SeqCst);
-            panic!("the engine panicked on set_effect");
-        }
-        *self.effect_id.lock().unwrap() = Some(effect.schema().id);
-        *self.props.lock().unwrap() = props.clone();
-    }
-
-    fn set_props(&self, props: &Props) {
-        *self.props.lock().unwrap() = props.clone();
-    }
-
     fn set_fps(&self, fps: u32) {
         self.fps.store(fps, Ordering::SeqCst);
     }
@@ -223,8 +207,78 @@ impl Engine for FakeEngine {
         self.stats.lock().unwrap().clone()
     }
 
+    // Scenes (0.14.0): the fake records the groups it was handed, and what the first of them
+    // plays, so a test reads "what is running" the same way as before the scene mode.
+    fn set_scene(
+        &self,
+        _lights: Vec<canvas_proto::scene::Light>,
+        _devices: Vec<DeviceInfo>,
+        groups: Vec<canvas_proto::EngineGroup>,
+        _fade: bool,
+    ) {
+        // The panic is one-shot: the flag is cleared as it fires, so the daemon's own answer
+        // to a failed build (the groups go dark) can be handed to the engine.
+        if self.panic_on_set_scene.swap(0, Ordering::SeqCst) != 0 {
+            self.set_scene_panics.fetch_add(1, Ordering::SeqCst);
+            panic!("the engine panicked on set_scene");
+        }
+        let recorded: Vec<(String, Option<String>, Props)> = groups
+            .into_iter()
+            .map(|group| {
+                let id = group.effect.map(|effect| effect.schema().id);
+                (group.id, id, group.props)
+            })
+            .collect();
+        *self.scene.lock().unwrap() = recorded.clone();
+        self.publish_running(recorded.first().cloned());
+    }
+
+    fn set_group_effect(&self, group: &str, effect: Option<Box<dyn Effect>>, props: &Props) {
+        let id = effect.map(|effect| effect.schema().id);
+        let mut scene = self.scene.lock().unwrap();
+        // The real engine drops an effect for a group it does not have
+        // (`canvas-core/src/engine.rs`: "set_group_effect: no such group in the running scene"),
+        // so the fake does the same: a group that is not in the scene is not added to it.
+        if let Some(entry) = scene.iter_mut().find(|(held, _, _)| held == group) {
+            entry.1 = id.clone();
+            entry.2 = props.clone();
+        }
+        let first = scene.first().cloned();
+        drop(scene);
+        self.publish_running(first);
+    }
+
+    fn set_group_props(&self, group: &str, props: &Props) {
+        let mut scene = self.scene.lock().unwrap();
+        if let Some(entry) = scene.iter_mut().find(|(held, _, _)| held == group) {
+            entry.2 = props.clone();
+        }
+        let first = scene.first().cloned();
+        drop(scene);
+        self.publish_running(first);
+    }
+
+    fn set_group_brightness(&self, _group: &str, _brightness: u8) {}
+
+    fn set_light_preview(&self, _sink: Option<std::sync::Arc<dyn canvas_proto::LightPreviewSink>>) {}
+    fn group_states(&self) -> Vec<canvas_proto::GroupState> {
+        Vec::new()
+    }
+
     fn shutdown(&self) {
         self.shutdown.store(1, Ordering::SeqCst);
+    }
+}
+
+impl FakeEngine {
+    /// What the first group of the scene plays, as the old layout-mode path reported it.
+    fn publish_running(&self, first: Option<(String, Option<String>, Props)>) {
+        let (id, props) = match first {
+            Some((_, id, props)) => (id, props),
+            None => (None, Props::new()),
+        };
+        *self.effect_id.lock().unwrap() = id;
+        *self.props.lock().unwrap() = props;
     }
 }
 
@@ -314,6 +368,16 @@ impl DeviceAdapter for FakeAdapter {
         leds: u32,
     ) -> Result<(), AdapterError> {
         self.zone_sizes.lock().unwrap().push((device.clone(), zone, leds));
+        // The zone has that many LEDs now, as a real adapter's does: the next discovery
+        // reports them.
+        let mut devices = self.devices.lock().unwrap();
+        if let Some(found) = devices.iter_mut().find(|d| &d.id == device) {
+            if let Some(found) = found.zones.iter_mut().find(|z| z.index == zone) {
+                found.led_count = leds;
+                found.min_leds = leds;
+                found.max_leds = leds;
+            }
+        }
         Ok(())
     }
 
@@ -382,6 +446,48 @@ impl InputSource for FakeInputs {
     fn audio(&self) -> Option<Arc<AudioSpectrum>> {
         self.audio.clone()
     }
+}
+
+/// The lights and scenes of a daemon with one light and one group playing `effect`: the prior
+/// a draft takes over from (Scenes, 0.14.0: the prior is the active scene).
+pub fn a_scene(
+    effect: &str,
+    props: &Props,
+) -> (canvas_proto::scene::LightsFile, canvas_proto::scene::ScenesFile) {
+    let light = canvas_proto::scene::Light {
+        id: "fake:x#z0".into(),
+        device_id: DeviceId("fake:x".into()),
+        zone_index: 0,
+        leds: None,
+        name: None,
+        arrangement: canvas_proto::scene::Arrangement::Strip,
+        reversed: false,
+    };
+    let lights = canvas_proto::scene::LightsFile {
+        schema_version: canvas_proto::scene::LIGHTS_SCHEMA,
+        lights: vec![light],
+    };
+    let scenes = canvas_proto::scene::ScenesFile {
+        schema_version: canvas_proto::scene::SCENES_SCHEMA,
+        active: "everything".into(),
+        scenes: vec![canvas_proto::scene::Scene {
+            id: "everything".into(),
+            name: "Everything".into(),
+            rev: 1,
+            groups: vec![canvas_proto::scene::Group {
+                id: "g".into(),
+                name: "Everything".into(),
+                members: vec!["fake:x#z0".into()],
+                plays: canvas_proto::scene::Plays::Effect {
+                    effect: effect.to_string(),
+                    props: props.clone(),
+                },
+                mode: canvas_proto::scene::GroupMode::FlowAcross,
+                brightness: 100,
+            }],
+        }],
+    };
+    (lights, scenes)
 }
 
 /// A device with one zone.
@@ -904,7 +1010,13 @@ pub struct MemoryServer {
 impl MemoryServer {
     /// Opens a connection: the returned end is the client's, and the server has the other.
     pub fn connect(&self) -> tokio::io::DuplexStream {
-        let (client, server) = tokio::io::duplex(64 * 1024);
+        self.connect_with_buffer(64 * 1024)
+    }
+
+    /// Like [`MemoryServer::connect`] with a pipe that holds only `bytes` each way: a client that
+    /// stops reading then blocks the server's sends after a few frames.
+    pub fn connect_with_buffer(&self, bytes: usize) -> tokio::io::DuplexStream {
+        let (client, server) = tokio::io::duplex(bytes);
         self.connections
             .send(server)
             .expect("the in-memory server is serving");

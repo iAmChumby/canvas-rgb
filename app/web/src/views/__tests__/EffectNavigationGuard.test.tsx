@@ -122,7 +122,7 @@ async function dirty() {
   await replaceSource("<html><!-- a change --></html>");
 }
 
-const railLink = () => screen.getByRole("link", { name: /^Layout/ });
+const railLink = () => screen.getByRole("link", { name: /^Scenes/ });
 
 describe("leaving the editor for another page", () => {
   it("asks before a rail click leaves unsaved code, and goes on Discard", async () => {
