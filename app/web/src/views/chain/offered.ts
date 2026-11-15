@@ -10,6 +10,11 @@
 // device and its zone, and the record lives in this viewer's own storage, so a header is offered
 // by itself at most once, ever, and "Later", the close key and Escape are remembered across
 // window opens and app restarts.
+//
+// The storage can fail: a webview with its storage locked throws on every read and every write.
+// The marks are then kept in memory for the life of the page, so a remount in the same window
+// does not offer the header again. Only a window that cannot write loses the marks, and that is
+// the one case the record cannot cover.
 
 /** The browser storage key that holds the headers the app has already offered by itself. */
 export const CHAIN_OFFERED_KEY = "canvas-rgb.chains-offered";
@@ -24,12 +29,17 @@ export function chainKey(deviceId: string, zoneIndex: number): string {
 let cachedRaw: string | null | undefined;
 let cached: Set<string> | null = null;
 
+/** The marks this page has made, kept for the life of the page when the storage cannot be used. */
+const memory = new Set<string>();
+
 function stored(): Set<string> {
   let raw: string | null = null;
   try {
     raw = window.localStorage.getItem(CHAIN_OFFERED_KEY);
   } catch {
-    return cached ?? new Set();
+    // The storage cannot be read: the marks this page has made are all there is.
+    if (cached === null) cached = new Set(memory);
+    return cached;
   }
   if (raw === cachedRaw && cached) return cached;
   cachedRaw = raw;
@@ -54,11 +64,12 @@ export function markChainOffered(key: string): void {
   const set = stored();
   if (set.has(key)) return;
   set.add(key);
+  memory.add(key);
   const text = JSON.stringify([...set]);
   try {
     window.localStorage.setItem(CHAIN_OFFERED_KEY, text);
     cachedRaw = text;
   } catch {
-    // Not remembered: the header may be offered by itself again.
+    // Not remembered across a window: the mark stays in memory for the life of this page.
   }
 }

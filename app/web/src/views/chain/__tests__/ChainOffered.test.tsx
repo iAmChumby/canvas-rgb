@@ -3,12 +3,14 @@
 // The takeover is the part that offers a header by itself. What is checked here: a header is
 // offered at most once, ever; "Later", the close key and Escape are remembered per header, so a
 // window opened from the tray (a new webview, and so a new launch) does not offer it again; a
-// header that already has a size is never offered by itself; and a second header still gets its
-// one offer.
+// header that already has a size is never offered by itself; "Later" puts off every header the
+// visit has not shown yet; and a request is spent by the visit that serves it, so the setup does
+// not open by itself on a later visit.
 //
 // The daemon is the mocked chain routes, answered the way the other chain tests answer them, so
 // what is checked is the takeover against the store it reads and the flow it draws.
 
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -42,8 +44,9 @@ import type { ChainSetupState } from "@/proto/ChainSetupState";
 import type { ChainView } from "@/proto/ChainView";
 import type { Status } from "@/proto/Status";
 import { ChainTakeover } from "@/views/chain/ChainTakeover";
-import { chainKey, offeredChains } from "@/views/chain/offered";
+import { chainKey, markChainOffered, offeredChains } from "@/views/chain/offered";
 import { requestChainSetup } from "@/views/chain/request";
+import { chainLaterThisLaunch } from "@/views/editor/flow";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -100,6 +103,19 @@ async function show(chains: ChainView[]) {
   return view;
 }
 
+/** Mounts the takeover in strict mode, where every effect is run twice. */
+async function showStrict(chains: ChainView[]) {
+  api.chains.list.mockResolvedValue({ chains });
+  patchSnap({ status: STATUS, chains });
+  const view = render(
+    <StrictMode>
+      <ChainTakeover />
+    </StrictMode>,
+  );
+  await flush();
+  return view;
+}
+
 /** Lets pending answers land and moves the clock by `ms`. */
 async function flush(ms = 0): Promise<void> {
   await act(async () => {
@@ -123,6 +139,33 @@ function trayOpen(): void {
   window.sessionStorage.clear();
 }
 
+const originalStorage = Object.getOwnPropertyDescriptor(window, "localStorage");
+
+/** Puts a storage that cannot be read or written in the window's place, as a locked webview has. */
+function lockStorage(): void {
+  const refuse = () => {
+    throw new Error("no storage");
+  };
+  Object.defineProperty(window, "localStorage", {
+    value: {
+      getItem: refuse,
+      setItem: refuse,
+      removeItem: refuse,
+      clear: refuse,
+      key: refuse,
+      length: 0,
+    },
+    configurable: true,
+    writable: true,
+  });
+}
+
+/** The window's own storage again. */
+function unlockStorage(): void {
+  if (originalStorage) Object.defineProperty(window, "localStorage", originalStorage);
+  else Reflect.deleteProperty(window, "localStorage");
+}
+
 describe("the header setup the app offers by itself", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -142,7 +185,24 @@ describe("the header setup the app offers by itself", () => {
 
   afterEach(() => {
     cleanup();
+    unlockStorage();
+    vi.restoreAllMocks();
     vi.useRealTimers();
+  });
+
+  // The record is kept for the life of the page, so this test comes first: the storage has to
+  // fail from the very first read for the mark to be lost.
+  it("the header is not offered again in the same window when the storage cannot be used", async () => {
+    // A webview with its storage locked throws on every read and on every write.
+    lockStorage();
+
+    const first = await show([chain(9, "JARGB 9", "not_set_up", 0)]);
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+    first.unmount();
+
+    // The same window: the mark is kept in memory, so the header is not offered again.
+    await show([chain(9, "JARGB 9", "not_set_up", 0)]);
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
   });
 
   it("a header the app has not sized is offered by itself", async () => {
@@ -172,6 +232,21 @@ describe("the header setup the app offers by itself", () => {
 
     expect(screen.queryByRole("region", SETUP)).toBeNull();
     expect(api.chains.start).toHaveBeenCalledTimes(1);
+    expect(offeredChains().has(chainKey(DEVICE, 1))).toBe(true);
+  });
+
+  it("the header's own record keeps it shut once the launch that said Later is over", async () => {
+    const first = await show([chain(1, "JARGB 1", "not_set_up", 0)]);
+    await press("Later");
+    first.unmount();
+
+    // The window comes up from the tray: a new launch, and the launch's own flag is gone with it.
+    trayOpen();
+    expect(chainLaterThisLaunch()).toBe(false);
+
+    // The header's own record is what keeps it shut.
+    await show([chain(1, "JARGB 1", "not_set_up", 0)]);
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
     expect(offeredChains().has(chainKey(DEVICE, 1))).toBe(true);
   });
 
@@ -214,24 +289,90 @@ describe("the header setup the app offers by itself", () => {
     expect(api.chains.start).toHaveBeenCalledTimes(1);
   });
 
-  it("a second header still gets its one offer", async () => {
+  it("Later puts off every header the visit has not shown yet", async () => {
     const first = await show([chain(1, "JARGB 1", "not_set_up", 0), chain(2, "JARGB 2", "not_set_up", 0)]);
     expect(screen.getByText(/JARGB 1/)).toBeTruthy();
     await press("Later");
     first.unmount();
 
-    // A new launch: the first header is put off for good, the second one has its own offer.
+    // A new launch: the first header is put off for good, and so is the second one, because the
+    // question is the same for both of them.
     trayOpen();
     await show([chain(1, "JARGB 1", "not_set_up", 0), chain(2, "JARGB 2", "not_set_up", 0)]);
 
     expect(screen.queryByText(/JARGB 1/)).toBeNull();
-    expect(screen.getByText(/JARGB 2/)).toBeTruthy();
-    await flush();
-    expect(api.chains.start).toHaveBeenLastCalledWith(DEVICE, 2);
+    expect(screen.queryByText(/JARGB 2/)).toBeNull();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
   });
 
-  // The request counter is the module's own state, so this is the last test in this file: a
-  // request makes every later visit one the owner asked for.
+  it("a request is spent by the visit that serves it", async () => {
+    // The owner asks for the headers from the standing panel.
+    const first = await show([chain(1, "JARGB 1", "not_set_up", 0), chain(2, "JARGB 2", "not_set_up", 8)]);
+    requestChainSetup();
+    await flush();
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+
+    // The header is answered.
+    api.chains.list.mockResolvedValue({
+      chains: [chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 8)],
+    });
+    await press("Next");
+    await press("Next");
+    await press("Yes");
+    await press("Close");
+    first.unmount();
+
+    // The next visit: the request is spent, so the app asks for nothing. A header is offered by
+    // itself only if it has no size and has never been offered, and this one has a size.
+    await show([chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 8)]);
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
+  });
+
+  it("a request does not bring back a header an earlier launch put off", async () => {
+    // An earlier launch put the second header off for good.
+    markChainOffered(chainKey(DEVICE, 2));
+
+    const first = await show([chain(1, "JARGB 1", "not_set_up", 0), chain(2, "JARGB 2", "not_set_up", 0)]);
+    requestChainSetup();
+    await flush();
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+
+    api.chains.list.mockResolvedValue({
+      chains: [chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 0)],
+    });
+    await press("Next");
+    await press("Next");
+    await press("Yes");
+    await press("Close");
+    first.unmount();
+
+    // The next visit: the request is spent, and the header an earlier launch put off is not
+    // offered by itself again.
+    await show([chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 0)]);
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
+  });
+
+  it("strict mode's double effect does not take the request before it is shown", async () => {
+    requestChainSetup();
+    await showStrict([chain(1, "JARGB 1", "not_set_up", 8)]);
+
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+    expect(screen.getByText(/JARGB 1/)).toBeTruthy();
+  });
+
+  it("strict mode's double effect does not serve the request twice", async () => {
+    requestChainSetup();
+    await showStrict([chain(1, "JARGB 1", "not_set_up", 8)]);
+
+    // One setup on screen, not two.
+    expect(screen.getAllByRole("region", SETUP)).toHaveLength(1);
+    // The request is spent by the visit that served it: the header does not come back.
+    await press("Later");
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
+  });
+
+  // The owner can ask for the setup of a header the app would not offer. The request is spent by
+  // the visit that serves it, so the visit before this one asked for nothing.
   it("the owner can ask for the setup of a header the app would not offer", async () => {
     await show([chain(1, "JARGB 1", "not_set_up", 8)]);
     expect(screen.queryByRole("region", SETUP)).toBeNull();

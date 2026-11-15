@@ -34,7 +34,8 @@ const { chainSetup } = vi.hoisted(() => ({ chainSetup: { request: vi.fn() } }));
 vi.mock("@/views/chain/request", () => ({
   requestChainSetup: chainSetup.request,
   useChainSetupVisit: () => 0,
-  wantedChain: () => null,
+  chainSetupRequest: () => null,
+  consumeChainSetupRequest: () => {},
 }));
 
 import { patchSnap } from "@/lib/store";

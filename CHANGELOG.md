@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Chains: the header setup comes up on its own only once per header, and saying Later, closing it or pressing Escape puts that header off for good, so it no longer comes back every time the app is opened from the tray. (#380)
+- The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
 - The sidebar strip shows your lights' real colours in a scene (#379)
 
 ## [0.16.0] - 2026-11-15

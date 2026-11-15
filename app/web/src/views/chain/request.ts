@@ -14,13 +14,26 @@
 // A request may name the header it is for (the notice for a new light offers that header's
 // setup). A request without a name asks for the headers in general, and the takeover offers them
 // one after another.
+//
+// The request is spent by the visit that serves it (#380). A flag that lived here would outlive
+// that visit, and the setup would open by itself on every later mount of the takeover: the visit
+// reads the request while it renders and clears it when it is over, so a later visit is a visit
+// of its own and is asked for nothing.
 
 import { useSyncExternalStore } from "react";
 
 import { offerChainsAgain } from "@/views/editor/flow";
 
+/** A request for the takeover to open: the visit it was made for, and the header it names. */
+export interface ChainSetupRequest {
+  /** The visit the request was made for. */
+  visit: number;
+  /** The header the request names, if it names one. */
+  target: string | null;
+}
+
 let visits = 0;
-let wanted: string | null = null;
+let pending: ChainSetupRequest | null = null;
 const listeners = new Set<() => void>();
 
 function tell(): void {
@@ -37,8 +50,8 @@ function subscribe(listener: () => void): () => void {
 /** The panel's "Set up": forget this launch's Later, and ask the takeover to offer the headers. */
 export function requestChainSetup(target?: string): void {
   offerChainsAgain();
-  wanted = target ?? null;
   visits += 1;
+  pending = { visit: visits, target: target ?? null };
   tell();
 }
 
@@ -47,9 +60,19 @@ export function chainSetupVisit(): number {
   return visits;
 }
 
-/** The header the last request named, if it named one. */
-export function wantedChain(): string | null {
-  return wanted;
+/**
+ * The request this visit serves, if it is the one the request was made for.
+ *
+ * It is read, not taken: a render that happens twice (React's strict mode) must see the same
+ * request both times, and the request is only spent when the visit that served it is over.
+ */
+export function chainSetupRequest(visit: number): ChainSetupRequest | null {
+  return pending !== null && pending.visit === visit ? pending : null;
+}
+
+/** The visit that served the request is over: the request is not served again. */
+export function consumeChainSetupRequest(visit: number): void {
+  if (pending !== null && pending.visit === visit) pending = null;
 }
 
 /** The takeover's view of the request. */
