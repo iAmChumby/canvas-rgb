@@ -120,14 +120,16 @@ describe("the Scenes effect picker keeps one width (#367)", () => {
   });
 
   it("the line that says why a row cannot be chosen stays on one line (#370)", () => {
-    // The why is the daemon's whole sentence now, and a second line would make that row taller
-    // than the others: one line with an ellipsis, and the whole sentence on the row's title.
+    // The why is the daemon's sentence now, and a second line is taller than the strip beside it,
+    // so the row would grow: one line with an ellipsis and no reserved height of its own, and the
+    // whole sentence on the line's title.
     const note = forSelector(scenesCss, ".pickNote");
     expect(note.length).toBeGreaterThan(0);
     for (const r of note) {
-      expect(decl(r, "white-space"), ".pickNote wraps, so a long sentence makes its row taller").toBe("nowrap");
+      expect(decl(r, "white-space"), ".pickNote wraps, so a longer sentence makes its row taller").toBe("nowrap");
       expect(decl(r, "text-overflow")).toBe("ellipsis");
       expect(decl(r, "overflow")).toBe("hidden");
+      expect(decl(r, "height")).toBeUndefined();
     }
     expect(read("src/views/scenes/EffectPicker.tsx")).toContain("<span className={s.pickNote} title={blockedWords}>");
   });

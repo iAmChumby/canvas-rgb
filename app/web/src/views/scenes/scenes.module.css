@@ -1000,8 +1000,10 @@
 }
 
 /* Why an effect cannot be chosen, on the row it applies to (#370: the daemon's sentence). One
-   line, always: the row's height must not depend on its content (#367), and the whole sentence is
-   the row's `title`. */
+   line, always: two lines are taller than the strip beside them and would make this row taller
+   than the others, and the row's height must not depend on its content (#367). The row keeps the
+   strip's height, and the whole sentence is the line's `title`; the group's own row on the Scenes
+   page carries it in full. */
 .pickNote {
   display: block;
   max-width: 100%;
