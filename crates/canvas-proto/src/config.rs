@@ -215,4 +215,7 @@ pub struct ExportBundle {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub scenes: Option<crate::scene::ScenesFile>,
+    /// The saved patterns (`patterns.json`, 0.16.0). Absent in older bundles.
+    #[serde(default)]
+    pub patterns: Vec<crate::pattern::Pattern>,
 }

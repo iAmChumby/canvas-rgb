@@ -898,6 +898,7 @@ pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
     let store = Store::load_from(home);
     let (lights, scenes) = scenes_for_export(&store);
     ExportBundle {
+        patterns: Vec::new(),
         schema_version: EXPORT_SCHEMA,
         exported_at: chrono_like_timestamp(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1456,6 +1457,7 @@ power = "running"
     #[test]
     fn an_import_with_out_of_range_settings_is_refused() {
         let bundle = |settings: Settings| ExportBundle {
+            patterns: Vec::new(),
             schema_version: EXPORT_SCHEMA,
             exported_at: "2026-11-08T00:00:00Z".into(),
             app_version: "0.0.0".into(),
@@ -1505,6 +1507,7 @@ power = "running"
         write_toml(&dir.join(CONFIG_FILE), &current).unwrap();
         // A bundle from another machine (its settings, no audio_source at all).
         let bundle = ExportBundle {
+            patterns: Vec::new(),
             schema_version: EXPORT_SCHEMA,
             exported_at: "2026-11-05T00:00:00Z".into(),
             app_version: "0.0.0".into(),
@@ -1653,6 +1656,7 @@ power = "running"
         scenes: Option<ScenesFile>,
     ) -> ExportBundle {
         ExportBundle {
+            patterns: Vec::new(),
             schema_version: EXPORT_SCHEMA,
             exported_at: "2026-11-12T00:00:00Z".into(),
             app_version: "0.13.0".into(),

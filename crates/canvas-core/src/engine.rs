@@ -609,7 +609,7 @@ impl Engine for CoreEngine {
                 scene
                     .groups
                     .iter()
-                    .map(|g| GroupState { id: g.id.clone(), failed: g.failed.clone() })
+                    .map(|g| GroupState { fits: Vec::new(), id: g.id.clone(), failed: g.failed.clone() })
                     .collect()
             })
             .unwrap_or_default()

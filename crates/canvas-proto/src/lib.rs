@@ -11,6 +11,7 @@ pub mod device;
 pub mod display;
 pub mod fans;
 pub mod layout;
+pub mod pattern;
 pub mod peripheral;
 pub mod pipe;
 pub mod props;

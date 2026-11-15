@@ -88,6 +88,8 @@ pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> 
     let effects: Vec<EffectSummary> = schemas(&app.user_effects, &app.stacks)
         .into_iter()
         .map(|s| EffectSummary {
+            built_on: None,
+            kind: canvas_proto::api::EffectKind::Canvas,
             favorite: favorites.iter().any(|f| f == &s.id),
             id: s.id,
             name: s.name,
@@ -921,6 +923,8 @@ pub async fn import_effect(
 
     Ok(Json(ImportEffectResponse {
         effect: EffectSummary {
+            built_on: None,
+            kind: canvas_proto::api::EffectKind::Canvas,
             id,
             name,
             description,

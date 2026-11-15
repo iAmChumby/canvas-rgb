@@ -2225,6 +2225,7 @@ async fn a_0_13_import_migrates_with_the_devices_and_the_export_carries_the_scen
         }],
     };
     let bundle = ExportBundle {
+        patterns: Vec::new(),
         schema_version: canvas_proto::config::EXPORT_SCHEMA,
         exported_at: "2026-11-12T00:00:00Z".into(),
         app_version: "0.13.0".into(),

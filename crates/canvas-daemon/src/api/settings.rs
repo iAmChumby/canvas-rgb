@@ -123,6 +123,7 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
     // only the layouts do, and the import migrates them with its own devices.
     let (lights, scenes) = crate::storage::scenes_for_export(&store);
     let bundle = ExportBundle {
+        patterns: Vec::new(),
         schema_version: canvas_proto::config::EXPORT_SCHEMA,
         exported_at: crate::storage::export_timestamp(),
         app_version: crate::version(),

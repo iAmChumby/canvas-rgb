@@ -1341,6 +1341,7 @@ pub fn group_states(app: &App, scene: &Scene) -> Vec<GroupState> {
         .groups
         .iter()
         .map(|g| GroupState {
+            fits: Vec::new(),
             id: g.id.clone(),
             failed: built
                 .get(&g.id)

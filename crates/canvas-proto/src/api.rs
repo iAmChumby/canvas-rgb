@@ -85,6 +85,11 @@ pub mod routes {
     /// removes it and what points at it; 409 `in_use` while the stack runs, unless
     /// `?force=true`.
     pub const STACK: &str = "/api/v1/stacks/{id}";
+    /// `GET` [`super::PatternsResponse`].
+    pub const PATTERNS: &str = "/api/v1/patterns";
+    /// `GET` a [`crate::pattern::Pattern`]; `PUT` the whole document (creates or replaces);
+    /// `DELETE` with [`super::DeletePatternQuery`], answering [`super::DeletePatternResponse`].
+    pub const PATTERN: &str = "/api/v1/patterns/{id}";
     /// `PUT` with [`super::StackPreviewRequest`]: builds or updates the stack the preview
     /// engine runs and answers [`super::StackPreviewResponse`]. `DELETE` drops the preview and
     /// clears the sequence watermark. The preview engine has no device sink, so nothing here
@@ -403,6 +408,50 @@ pub struct EffectSummary {
     pub description: String,
     pub needs: InputNeeds,
     pub favorite: bool,
+    /// A canvas effect or a pattern (0.16.0).
+    #[serde(default)]
+    pub kind: EffectKind,
+    /// The kind of device a pattern was built on. `None` for a canvas effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub built_on: Option<crate::pattern::BuiltOn>,
+}
+
+/// The two kinds of effect (0.16.0). The UI says "effect" for both and tags a pattern.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    #[default]
+    Canvas,
+    Pattern,
+}
+
+/// `GET` [`routes::PATTERNS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PatternsResponse {
+    pub patterns: Vec<crate::pattern::Pattern>,
+}
+
+/// `DELETE` [`routes::PATTERN`]: `force` deletes a pattern a scene still plays.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeletePatternQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `DELETE` [`routes::PATTERN`] answer, as [`DeleteStackResponse`] with no presets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeletePatternResponse {
+    pub ok: bool,
+    pub id: String,
+    pub favorite_removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -731,6 +780,11 @@ pub struct DraftRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stack: Option<crate::stack::Stack>,
+    /// A pattern as the draft (0.16.0): exactly one of `html`, `stack` and `pattern` is set. A
+    /// pattern draft needs `epoch` and `seq`, as a stack draft does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pattern: Option<crate::pattern::Pattern>,
     /// The builder session's epoch, as for [`StackPreviewRequest`]. A stack draft needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
