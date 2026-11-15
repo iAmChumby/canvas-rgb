@@ -775,7 +775,11 @@ async fn start_up_replays_a_leftover_restore_record() {
         "start-up never put the header's length back: {:?}",
         rig.server.zone_leds(0, 0)
     );
-    assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "the record is deleted");
+    // The record goes after the resize answers, so it is waited for, not sampled.
+    assert!(
+        wait_until(Duration::from_secs(30), || !rig.home.join(CHAIN_RESTORE_FILE).exists()).await,
+        "the record is deleted"
+    );
     assert!(
         wait_for(Duration::from_secs(30), || async {
             rig.app
