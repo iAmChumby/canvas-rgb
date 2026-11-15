@@ -94,22 +94,20 @@ describe("the Scenes effect picker keeps one width (#367)", () => {
 
 describe("the colour picker keeps one size (#369)", () => {
   it("the swatch beside the hex code never gives up its size", () => {
-    expect(decl(forSelector(appCss, ".color-swatch")[0], "flex")).toBe("0 0 auto");
-    expect(decl(forSelector(appCss, ".picker-preview")[0], "flex")).toBe("0 0 auto");
+    expect(hasDecl(forSelector(appCss, ".color-swatch"), "flex", "0 0 auto")).toBe(true);
+    expect(hasDecl(forSelector(appCss, ".picker-preview"), "flex", "0 0 auto")).toBe(true);
   });
 
   it("the hex code has a width of its own and tabular digits", () => {
-    const hex = forSelector(appCss, ".color-hex")[0];
-    expect(decl(hex, "width")).toBe("7ch");
-    expect(decl(hex, "font-variant-numeric")).toBe("tabular-nums");
+    expect(hasDecl(forSelector(appCss, ".color-hex"), "width", "7ch")).toBe(true);
+    expect(hasDecl(forSelector(appCss, ".color-hex"), "font-variant-numeric", "tabular-nums")).toBe(true);
     // The field in the picker never gets narrower than the code it holds.
-    expect(decl(forSelector(appCss, ".picker-hex")[0], "min-width")).toBe("8ch");
+    expect(hasDecl(forSelector(appCss, ".picker-hex"), "min-width", "8ch")).toBe(true);
   });
 
   it("the quick swatches keep their place: the one that matches is marked, not dropped", () => {
-    const swatch = forSelector(appCss, ".picker-swatch")[0];
-    expect(decl(swatch, "width")).toBe("22px");
-    expect(decl(swatch, "height")).toBe("22px");
+    expect(hasDecl(forSelector(appCss, ".picker-swatch"), "width", "22px")).toBe(true);
+    expect(hasDecl(forSelector(appCss, ".picker-swatch"), "height", "22px")).toBe(true);
     // The colour in the field is marked with a ring, so the list is never a different length.
     expect(forSelector(appCss, '.picker-swatch[aria-current="true"]').length).toBeGreaterThan(0);
     const picker = read("src/components/ColorPicker.tsx");
