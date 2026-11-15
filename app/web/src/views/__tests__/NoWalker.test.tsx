@@ -13,8 +13,8 @@ const SRC = resolve(process.cwd(), "src");
 
 /** The walker's names in source: a component, a query string, a link and an endpoint. */
 const WALKER_TOKENS = ["IdentifyWalker", "walk=", "walkHref", "onboardingSession"];
-/** The prose name the old component used in comments and CSS. */
-const WALKER_WORDS = /identify\s+walker/i;
+/** The old component's name in prose, comments and CSS class names (`.walker`, `walkerBig`). */
+const WALKER_WORDS = /walker/i;
 
 function sources(dir: string): string[] {
   return (
