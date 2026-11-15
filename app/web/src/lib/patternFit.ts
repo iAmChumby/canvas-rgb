@@ -52,16 +52,23 @@ export function kindWords(builtOn: BuiltOn): string {
  * How a pattern lands on the lights of one group: how many take it exactly, how many are flagged
  * (stretched, another shape, or a single LED showing the first colour), and how many there are.
  * Nothing is refused, so `flagged` is the rest of `total`.
+ *
+ * A light whose device is not connected, or whose zone reports no LEDs, is not counted: the
+ * engine plays nothing there, so it is neither a fit nor stretched. `total` is the lights that
+ * were considered, and a group of none of them is `0/0/0`, as an empty group is.
  */
 export function groupFit(
   builtOn: BuiltOn,
   lights: LightView[],
 ): { exact: number; flagged: number; total: number } {
   let exact = 0;
+  let total = 0;
   for (const light of lights) {
+    if (!light.connected || light.led_count <= 0) continue;
+    total += 1;
     if (fitKind(builtOn, light.led_count, light.light.arrangement) === "exact") exact += 1;
   }
-  return { exact, flagged: lights.length - exact, total: lights.length };
+  return { exact, flagged: total - exact, total };
 }
 
 /**

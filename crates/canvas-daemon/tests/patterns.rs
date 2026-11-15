@@ -1070,6 +1070,40 @@ async fn the_flags_follow_a_resize_without_a_save() {
 }
 
 #[tokio::test]
+async fn a_light_with_no_leds_has_no_fit() {
+    // B's zone has no LEDs and C's device is gone (an unplugged fan lists no zone): the engine
+    // plays nothing on either, so neither is exact and neither is called stretched. A keeps its
+    // fit, and the group is still the lights that play.
+    let rig = rig_full(
+        vec![pattern("Intake")],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![group(
+                    "all",
+                    &["fake:a#z0", "fake:b#z0", "fake:c#z0"],
+                    INTAKE,
+                    Props::new(),
+                )],
+            }],
+        },
+        vec![device(A), device_of(B, 0)],
+        vec![light(A), light(B), light("fake:c")],
+    )
+    .await;
+    let fits = group_fits(&rig).await;
+    assert_eq!(
+        fits.get("all"),
+        Some(&vec![LightFit { light: "fake:a#z0".into(), fit: FitKind::Exact }]),
+        "only the light that has LEDs carries a fit"
+    );
+}
+
+#[tokio::test]
 async fn a_group_playing_a_canvas_effect_has_no_flags() {
     let rig = rig().await;
     let fits = group_fits(&rig).await;

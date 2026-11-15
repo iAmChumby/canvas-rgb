@@ -1563,6 +1563,10 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
 
 /// The fit of each of a group's member lights against the pattern it plays. Empty for a group
 /// that plays no pattern, and for one whose pattern is gone (the group is dark and says why).
+///
+/// A light with no LEDs is left out: its device is not connected, or its zone reports none, so
+/// the engine plays nothing there. It is neither exact nor flagged, and the picker's count is of
+/// the lights the pattern lands on.
 fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]) -> Vec<LightFit> {
     let Plays::Effect { effect, .. } = &group.plays else {
         return Vec::new();
@@ -1576,27 +1580,23 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
     group
         .members
         .iter()
-        .map(|member| {
-            match lights.iter().find(|light| &light.id == member) {
-                Some(light) => LightFit {
-                    light: member.clone(),
-                    fit: canvas_proto::pattern::fit_kind(
-                        &pattern.built_on,
-                        canvas_core::arrangement::light_led_count(light, devices),
-                        light.arrangement,
-                    ),
-                },
-                // A member the daemon does not hold has no LEDs; the arrangement is unknown, so
-                // the fit is only ever about a count of zero here.
-                None => LightFit {
-                    light: member.clone(),
-                    fit: canvas_proto::pattern::fit_kind(
-                        &pattern.built_on,
-                        0,
-                        canvas_proto::scene::Arrangement::Strip,
-                    ),
-                },
+        .filter_map(|member| {
+            let Some(light) = lights.iter().find(|light| &light.id == member) else {
+                // A member the daemon does not hold has no LEDs to play on.
+                return None;
+            };
+            let led_count = canvas_core::arrangement::light_led_count(light, devices);
+            if led_count == 0 {
+                return None;
             }
+            Some(LightFit {
+                light: member.clone(),
+                fit: canvas_proto::pattern::fit_kind(
+                    &pattern.built_on,
+                    led_count,
+                    light.arrangement,
+                ),
+            })
         })
         .collect()
 }
