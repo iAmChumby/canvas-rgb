@@ -247,11 +247,16 @@ export async function refreshStatus(n?: number): Promise<void> {
     patchSnap({ status, statusError: null });
     lastStatusFailureAt = 0;
     statusFailures = 0;
-    // A daemon that changed is a daemon that may have the scene routes now.
+    // A daemon that changed is a daemon that may have the scene routes now. The first version
+    // we hear is the baseline, not a change: the daemon that answered 404 may be the one we
+    // are talking to, and asking it again would only get the same answer.
     if (status.version !== daemonVersion) {
+      const changed = daemonVersion !== "" && status.version !== daemonVersion;
       daemonVersion = status.version;
-      scenesUnsupported = false;
-      lightsUnsupported = false;
+      if (changed) {
+        scenesUnsupported = false;
+        lightsUnsupported = false;
+      }
     }
   } catch (e) {
     if (!isNewest("status", req)) return;

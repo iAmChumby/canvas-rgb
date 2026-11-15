@@ -110,9 +110,10 @@ describe("the store's answers", () => {
     api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
     api.lights.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/lights"));
 
+    // The daemon's version is known before it answers 404.
+    await refreshStatus();
     await refreshScenes();
     await refreshLights();
-    await refreshStatus();
     expect(api.scenes.list).toHaveBeenCalledTimes(1);
     expect(api.lights.list).toHaveBeenCalledTimes(1);
 

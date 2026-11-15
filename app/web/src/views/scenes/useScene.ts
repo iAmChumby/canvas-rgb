@@ -330,7 +330,13 @@ export function useScene(): UseScene {
   /** The scene a whole-scene write sends: the draft with the live values on top. */
   const body = useCallback((scene: Scene): Scene => {
     const shown: Record<string, Live> = {};
-    for (const [id, g] of live.current) shown[id] = g.shown;
+    // Only the live values of the scene being written. Another scene may have a group of the
+    // same id, and its value is not this scene's: writing it here would change a scene the
+    // user never touched.
+    for (const [id, g] of live.current) {
+      if (g.sceneId !== scene.id) continue;
+      shown[id] = g.shown;
+    }
     return overlayOn(scene, shown);
   }, []);
 
@@ -348,10 +354,14 @@ export function useScene(): UseScene {
       const send = async (): Promise<void> => {
         if (writing.current) await waitForWrite();
         if (props !== undefined) {
-          await api.scenes.patchGroupProps(g.sceneId, groupId, props).catch(() => undefined);
+          // The daemon answers with the scene and its new rev: the snapshot takes it, so the
+          // next write of that scene does not go with a rev the daemon has left behind.
+          const answer = await api.scenes.patchGroupProps(g.sceneId, groupId, props).catch(() => null);
+          if (answer) adoptScene(answer);
         }
         if (brightness !== undefined) {
-          await api.scenes.putGroupBrightness(g.sceneId, groupId, brightness).catch(() => undefined);
+          const answer = await api.scenes.putGroupBrightness(g.sceneId, groupId, brightness).catch(() => null);
+          if (answer) adoptScene(answer);
         }
       };
       if (g.sending) {
@@ -364,7 +374,7 @@ export function useScene(): UseScene {
       }
       void send();
     },
-    [waitForWrite],
+    [adoptScene, waitForWrite],
   );
 
   useEffect(() => {
@@ -475,6 +485,7 @@ export function useScene(): UseScene {
         }
         // Another failure: the write is dropped, and the undo stack forgets it, so the first
         // undo is not a no-op.
+        const later = now && now !== pending ? now.changes.slice(sentChanges.length) : [];
         const dropped = (now?.changes ?? sentChanges).map((c) => c.id);
         outgoing.current.delete(sceneId);
         history.current = {
@@ -482,6 +493,21 @@ export function useScene(): UseScene {
           past: history.current.past.filter((e) => e.changeId === undefined || !dropped.includes(e.changeId)),
         };
         await refreshScenes();
+        if (later.length > 0) {
+          // The edit that came while the daemon was answering still goes: a failed write must
+          // not take the next edit with it.
+          const serverScene = getSnap().scenes?.scenes.find((s) => s.id === sceneId) ?? null;
+          if (serverScene) {
+            outgoing.current.set(sceneId, { scene: withChanges(serverScene, later), changes: later });
+            history.current.past.push({
+              scene: clone(serverScene),
+              label: later[0]!.label,
+              changeId: later[0]!.id,
+            });
+            publish();
+            continue;
+          }
+        }
         fail(messageOf(failure));
         return;
       }

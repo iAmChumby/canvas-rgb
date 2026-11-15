@@ -27,7 +27,7 @@ const { api } = vi.hoisted(() => ({
 vi.mock("@/lib/endpoints", () => ({ api }));
 
 import { ApiFailure } from "@/lib/errors";
-import { patchSnap } from "@/lib/store";
+import { getSnap, patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES, demoSceneProblem } from "@/lib/fixtures";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
@@ -55,6 +55,19 @@ function answer(active?: string): ScenesResponse {
 
 function number(value: number): Props {
   return { amount: { type: "number", value } };
+}
+
+/**
+ * Lets the hook's own promises settle. Every await between two of them is a microtask, so
+ * this does not need a timer: a test that waits on a timer can hang when a fake clock is
+ * still in place.
+ */
+async function settle(rounds = 30): Promise<void> {
+  for (let i = 0; i < rounds; i += 1) {
+    await act(async () => {
+      await Promise.resolve();
+    });
+  }
 }
 
 /** The scene the daemon answers a live write with: the whole scene, one rev on. */
@@ -656,6 +669,144 @@ describe("useScene", () => {
       result.current.undo();
     });
     expect(api.scenes.put).toHaveBeenCalledTimes(1);
+  });
+
+  it("an edit that lands while a failing write is out still goes", async () => {
+    // The first write is refused when the test lets it be.
+    let release!: () => void;
+    api.scenes.put.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          release = () => reject(new ApiFailure(500, "http", "the daemon said no"));
+        }),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "First";
+      }, "Rename");
+    });
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+
+    // The second edit lands while the first write is still out.
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "Second";
+      }, "Rename again");
+    });
+    release();
+    await settle();
+
+    // The refused write is dropped, but the edit that came while it was out goes.
+    expect(api.scenes.put).toHaveBeenCalledTimes(2);
+    const [, second] = api.scenes.put.mock.calls[1] as [string, { scene: Scene; expected_rev: number }];
+    expect(second.scene.name).toBe("Second");
+  });
+
+  it("a live value of one scene is not written into another scene's save", async () => {
+    // Three scenes that share a group id: two of them must not write each other's value.
+    const scene = (id: string, brightness: number): Scene => {
+      const s = gaming();
+      s.id = id;
+      s.rev = 1;
+      const group = s.groups[0];
+      if (!group) throw new Error("the demo scene has no groups");
+      s.groups = [{ ...group, id: "shared", brightness }];
+      return s;
+    };
+    const blocked = scene("blocked", 10);
+    const first = scene("first", 20);
+    const second = scene("second", 30);
+    const scenes = {
+      active: "blocked",
+      scenes: [blocked, first, second],
+      group_states: [],
+    };
+    api.scenes.list.mockResolvedValue(scenes);
+
+    // The first write hangs: the second scene's write waits behind it.
+    let release!: () => void;
+    api.scenes.put.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          release = () => resolve({ ...blocked, rev: 2 });
+        }),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await settle();
+    expect(result.current.scene?.id).toBe("blocked");
+
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "Blocked";
+      }, "Rename");
+    });
+    await settle();
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+
+    // Another scene becomes the active one, and an edit waits behind the write that is out.
+    await act(async () => {
+      patchSnap({ scenes: { ...scenes, active: "first" } });
+    });
+    expect(result.current.scene?.id).toBe("first");
+    act(() => {
+      result.current.edit((draft) => {
+        draft.name = "First";
+      }, "Rename");
+    });
+
+    // The third scene becomes the active one, and a live value is set there.
+    await act(async () => {
+      patchSnap({ scenes: { ...scenes, active: "second" } });
+    });
+    expect(result.current.scene?.id).toBe("second");
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setBrightness("shared", 42);
+    });
+
+    release();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
+
+    // The waiting save goes out with its own scene's value: the other scene's live value is
+    // not written into it.
+    expect(api.scenes.put).toHaveBeenCalledTimes(2);
+    const [id, body] = api.scenes.put.mock.calls[1] as [string, { scene: Scene; expected_rev: number }];
+    expect(id).toBe("first");
+    expect(body.scene.groups[0]?.brightness).toBe(20);
+  });
+
+  it("a scene switch that sends the last live value keeps the daemon's new rev", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+    const groupId = result.current.scene?.groups[0]?.id ?? "";
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.setBrightness(groupId, 42);
+    });
+
+    // Another scene becomes the active one: the value goes out on its way.
+    act(() => {
+      patchSnap({
+        scenes: { active: "focus", scenes: clone(DEMO_SCENES.scenes), group_states: [] },
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(120);
+    });
+
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(1);
+    // The snapshot carries the rev the daemon answered with, so the next write of that scene
+    // does not go with a rev the daemon has left behind.
+    const gamingScene = getSnap().scenes?.scenes.find((s) => s.id === "gaming");
+    expect(gamingScene?.rev).toBe(8);
   });
 });
 
