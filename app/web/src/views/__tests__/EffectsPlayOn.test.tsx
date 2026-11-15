@@ -7,6 +7,7 @@ import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure } from "@/lib/errors";
+import { htmlLimitSentence, SCENE_HTML_MAX } from "@/lib/htmlLimit";
 import { getSnap, patchSnap, refreshAll } from "@/lib/store";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -226,7 +227,7 @@ describe("Play on …", () => {
     const spy = vi
       .spyOn(api, "activateEffect")
       .mockRejectedValue(
-        new ApiFailure(422, "validation", "at most 1 group of a scene may play an HTML effect (a stack with an HTML layer counts); 2 do"),
+        new ApiFailure(422, "validation", htmlLimitSentence(3)),
       );
     const play = await screen.findByRole("button", { name: "Play on …" });
     fireEvent.click(play);
@@ -236,8 +237,8 @@ describe("Play on …", () => {
     });
     await waitFor(() => expect(spy).toHaveBeenCalled());
     expect(
-      (await screen.findByText(/at most 1 group of a scene may play an HTML effect/)).textContent,
-    ).toContain("2 do");
+      (await screen.findByText(new RegExp(htmlLimitSentence(3)))).textContent,
+    ).toContain("This one has 3.");
   });
 
   it("marks a stack with an HTML layer as one HTML effect", async () => {
@@ -268,7 +269,7 @@ describe("Play on …", () => {
     const play = (await screen.findAllByRole("button", { name: "Play on …" }))[0]!;
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
-    expect(await within(dialog).findByText("One HTML effect at a time")).toBeTruthy();
+    expect(await within(dialog).findByText(new RegExp(`A scene runs ${SCENE_HTML_MAX} HTML effects at a time`))).toBeTruthy();
     expect(within(dialog).queryByRole("checkbox", { name: "Every group" })).toBeNull();
   });
 
@@ -310,7 +311,7 @@ describe("Play on …", () => {
     fireEvent.click(play);
     const dialog = await screen.findByRole("dialog", { name: "Play on" });
     expect(within(dialog).queryByRole("checkbox", { name: "Every group" })).toBeNull();
-    expect(within(dialog).getByText("One HTML effect at a time")).toBeTruthy();
+    expect(within(dialog).getByText(new RegExp(`A scene runs ${SCENE_HTML_MAX} HTML effects at a time`))).toBeTruthy();
     const spy = vi.spyOn(api, "activateEffect").mockResolvedValue({ ok: true });
     fireEvent.click(within(dialog).getByRole("checkbox", { name: "Memory" }));
     await act(async () => {

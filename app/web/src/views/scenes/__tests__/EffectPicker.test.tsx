@@ -20,6 +20,7 @@ const { api } = vi.hoisted(() => ({
     },
     lights: { list: vi.fn(), patch: vi.fn(), flash: vi.fn() },
     effect: vi.fn(),
+    stacks: vi.fn(),
     createPreset: vi.fn(),
   },
 }));
@@ -29,7 +30,8 @@ vi.mock("@/components/Notify", () => ({ notify: vi.fn() }));
 
 import { patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS } from "@/lib/fixtures";
-import { EffectPicker, HTML_ONE_AT_A_TIME } from "@/views/scenes/EffectPicker";
+import { htmlLimitSentence, SCENE_HTML_MAX } from "@/lib/htmlLimit";
+import { EffectPicker } from "@/views/scenes/EffectPicker";
 import { useScene } from "@/views/scenes/useScene";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
@@ -65,35 +67,54 @@ const clone = <T,>(value: T): T => structuredClone(value);
 
 const FIRST = DEMO_LIGHTS[0];
 
-/** The scene the fake daemon holds. `html` says the other group plays an HTML effect. */
-function scene(html: boolean): Scene {
+/** The scene the fake daemon holds. `html` is how many OTHER groups play an HTML effect. */
+function scene(html: number): Scene {
+  const groups: Scene["groups"] = [
+    {
+      id: "g-one",
+      name: "One device",
+      members: [FIRST?.light.id ?? ""],
+      plays: { type: "effect", effect: "aurora", props: {} },
+      mode: "flow_across",
+      brightness: 100,
+    },
+    {
+      id: "g-two",
+      name: "Other",
+      members: [],
+      plays: html > 0 ? { type: "effect", effect: "html:sample", props: {} } : { type: "off" },
+      mode: "flow_across",
+      brightness: 100,
+    },
+  ];
+  // The limit is two: a second other group is what makes the picker refuse a third runtime.
+  if (html > 1) {
+    groups.push({
+      id: "g-three",
+      name: "Third",
+      members: [],
+      plays: { type: "effect", effect: "html:sample", props: {} },
+      mode: "flow_across",
+      brightness: 100,
+    });
+  }
+  return { id: "gaming", name: "Gaming", rev: 7, groups };
+}
+
+function answer(html = 0): ScenesResponse {
+  const s = scene(html);
   return {
-    id: "gaming",
-    name: "Gaming",
-    rev: 7,
-    groups: [
-      {
-        id: "g-one",
-        name: "One device",
-        members: [FIRST?.light.id ?? ""],
-        plays: { type: "effect", effect: "aurora", props: {} },
-        mode: "flow_across",
-        brightness: 100,
-      },
-      {
-        id: "g-two",
-        name: "Other",
-        members: [],
-        plays: html ? { type: "effect", effect: "html:sample", props: {} } : { type: "off" },
-        mode: "flow_across",
-        brightness: 100,
-      },
-    ],
+    active: s.id,
+    scenes: [s],
+    group_states: s.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
   };
 }
 
-function answer(html = false): ScenesResponse {
-  const s = scene(html);
+/** A scene whose other group plays a stack: the scene names it by id, so its layers come from
+ *  `GET /stacks`. */
+function stacked(): ScenesResponse {
+  const s = scene(0);
+  s.groups[1]!.plays = { type: "effect", effect: "stack:Twice", props: {} };
   return {
     active: s.id,
     scenes: [s],
@@ -194,8 +215,10 @@ beforeEach(() => {
   for (const group of Object.values(api.scenes)) group.mockReset();
   for (const fn of Object.values(api.lights)) fn.mockReset();
   api.effect.mockReset();
+  api.stacks.mockReset();
   serverRev = 7;
   api.scenes.list.mockResolvedValue(answer());
+  api.stacks.mockResolvedValue({ stacks: [] });
   api.scenes.put.mockImplementation(
     async (_id: string, body: { scene: Scene; expected_rev: number }) => {
       serverRev = body.expected_rev + 1;
@@ -288,18 +311,46 @@ describe("the effect picker", () => {
     expect(api.scenes.put).not.toHaveBeenCalled();
   });
 
-  it("an HTML effect another group plays cannot be chosen, and says why", async () => {
-    patchSnap({ scenes: answer(true) });
-    api.scenes.list.mockResolvedValue(answer(true));
+  it("an HTML effect cannot be chosen when the scene's two runtimes are taken, and says why", async () => {
+    patchSnap({ scenes: answer(2) });
+    api.scenes.list.mockResolvedValue(answer(2));
     render(<Harness />);
     const html = await screen.findByRole("button", { name: /Sample/ });
     expect(html.getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByText(new RegExp(HTML_ONE_AT_A_TIME))).toBeTruthy();
+    // The daemon's own sentence, with this group's runtime counted: two others plus this one.
+    expect(screen.getByText(new RegExp(htmlLimitSentence(3)))).toBeTruthy();
     // Clicking it does nothing at all: no preview and no choice.
     fireEvent.click(html);
     fireEvent.pointerEnter(html);
     await new Promise((r) => setTimeout(r, 30));
     expect(api.scenes.put).not.toHaveBeenCalled();
+  });
+
+  it("a second HTML effect can be chosen beside one, and a third cannot", async () => {
+    patchSnap({ scenes: answer(1) });
+    api.scenes.list.mockResolvedValue(answer(1));
+    render(<Harness />);
+    // One other group plays an HTML effect: the scene's second slot is this one's.
+    const html = await screen.findByRole("button", { name: /Sample/ });
+    expect(html.getAttribute("aria-disabled")).toBeNull();
+    expect(screen.queryByText(new RegExp(htmlLimitSentence(2)))).toBeNull();
+    fireEvent.click(html);
+    await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "html:sample" }));
+  });
+
+  it("a stack with two HTML layers takes both runtimes, and blocks an HTML effect", async () => {
+    patchSnap({ scenes: stacked() });
+    api.scenes.list.mockResolvedValue(stacked());
+    // The scene names the stack by id only: the picker reads its layers from the stacks route.
+    api.stacks.mockResolvedValue({
+      stacks: [
+        { id: "stack:Twice", name: "Twice", layers: 2, html_layers: SCENE_HTML_MAX, missing: [] },
+      ],
+    });
+    render(<Harness groupId="g-one" />);
+    const html = await screen.findByRole("button", { name: /Sample/ });
+    await waitFor(() => expect(html.getAttribute("aria-disabled")).toBe("true"));
+    expect(screen.getByText(new RegExp(htmlLimitSentence(SCENE_HTML_MAX + 1)))).toBeTruthy();
   });
 
   // Plan Task 11: patterns are in the picker with the effects, under a heading of their own, and

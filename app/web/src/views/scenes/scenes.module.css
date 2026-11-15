@@ -999,11 +999,19 @@
   overflow-wrap: normal;
 }
 
-/* Why an effect cannot be chosen, on the row it applies to. */
+/* Why an effect cannot be chosen, on the row it applies to (#370: the daemon's sentence). One
+   line, always: the row's height must not depend on its content (#367), and the whole sentence is
+   the row's `title`. */
 .pickNote {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   color: var(--warn);
   font-size: var(--t14);
   line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* What a pattern was built on and how it lands on this group: one small line under its name.

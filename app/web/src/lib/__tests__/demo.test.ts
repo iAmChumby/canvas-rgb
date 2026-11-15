@@ -2,9 +2,11 @@ import { describe, expect, it, vi } from "vitest";
 import { checkPeripheralValue, demoRequest } from "@/lib/demo";
 import type { DemoPeripheral } from "@/lib/peripheralFixtures";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { Pattern } from "@/proto/Pattern";
 import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 
 // The demo backend's own words. The editor shows them behind a disclosure, and they are the
 // only words a person reads when nothing answers: they say canvas-rgb, not "the daemon".
@@ -20,6 +22,35 @@ describe("the demo backend's words", () => {
     }
     expect(message).toMatch(/canvas-rgb/);
     expect(message).not.toMatch(/daemon/i);
+  });
+});
+
+describe("the demo's HTML limit (#370)", () => {
+  /** A fresh demo backend on `?state=html,html-limit`: three groups, each playing an HTML effect. */
+  async function htmlDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=html,html-limit");
+    return import("@/lib/demo");
+  }
+
+  it("the first two HTML groups run and the third says why, as the daemon does", async () => {
+    const demo = await htmlDemo();
+    const scenes = (await demo.demoRequest("GET", "/api/v1/scenes", undefined)) as ScenesResponse;
+    const failed = scenes.group_states.map((g) => g.failed);
+    expect(failed).toHaveLength(3);
+    expect(failed.slice(0, 2)).toEqual([null, null]);
+    expect(failed[2]).toBe(htmlLimitSentence(3));
+  });
+
+  it("playing an HTML effect on every group is refused with the daemon's sentence", async () => {
+    const demo = await htmlDemo();
+    let message = "";
+    try {
+      await demo.demoRequest("POST", "/api/v1/effects/html:ink-drop/activate", {});
+    } catch (e) {
+      message = messageOf(e);
+    }
+    expect(message).toBe(htmlLimitSentence(3));
   });
 });
 

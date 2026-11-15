@@ -21,6 +21,7 @@ const { api } = vi.hoisted(() => ({
     activateEffect: vi.fn(),
     completeOnboarding: vi.fn(),
     status: vi.fn(),
+    stacks: vi.fn(),
     lights: { flash: vi.fn(), list: vi.fn(), patch: vi.fn() },
   },
 }));
@@ -32,6 +33,7 @@ vi.mock("@/views/scenes/useLightFeed", () => ({ useLightFeed: () => () => null }
 
 import { patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
 import { Rail } from "@/shell/Rail";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { SEEN_LIGHTS_KEY } from "@/views/scenes/newLights";
@@ -141,6 +143,8 @@ function mount(use: UseScene) {
 beforeEach(() => {
   window.localStorage.clear();
   window.history.replaceState({}, "", "/");
+  api.stacks.mockReset();
+  api.stacks.mockResolvedValue({ stacks: [] });
   api.effect.mockReset();
   api.effect.mockResolvedValue({
     schema: {
@@ -204,6 +208,23 @@ describe("the Scenes page", () => {
     const first = (base.scene as Scene).groups[0];
     mount(fake({ states: [{ id: first?.id ?? "", failed: "the effect could not start", fits: [] }] }));
     expect(screen.getByText("the effect could not start")).toBeTruthy();
+  });
+
+  it("a group past the scene's HTML limit shows the daemon's sentence on its row (#370)", () => {
+    const base = fake();
+    const groups = (base.scene as Scene).groups;
+    const last = groups[groups.length - 1];
+    const sentence = htmlLimitSentence(groups.length);
+    mount(
+      fake({
+        states: groups.map((g) => ({ id: g.id, failed: g.id === last?.id ? sentence : null, fits: [] })),
+      }),
+    );
+    const row = rows()[rows().length - 1] as HTMLElement;
+    // The row keeps the daemon's own words, and the whole sentence is its tooltip.
+    expect(within(row).getByRole("alert").textContent).toContain("A scene runs 2 HTML effects at a time.");
+    expect(within(row).getByRole("alert").textContent).toContain("Move one to another scene.");
+    expect(row.innerHTML).toContain(sentence);
   });
 
   it("a missing effect is said in words: 'Missing effect', the raw id only in a tooltip", () => {
