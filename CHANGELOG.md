@@ -9,14 +9,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+
 ### Fixed
 
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
 - Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
 - The sidebar strip shows your lights' real colours in a scene (#379)
-### Changed
-
-- A scene can have two groups playing HTML effects (#370)
 
 ## [0.16.0] - 2026-11-15
 
