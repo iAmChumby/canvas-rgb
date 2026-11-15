@@ -1159,8 +1159,8 @@ async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     assert_eq!(chain_state(&rig, 0).await, Some(ChainState::SetUp));
 }
 
-/// Review Focus 3: a store write that fails after the resize puts the files and the header back,
-/// and the session stays open for a retry.
+/// Review Focus 3: a store write that fails after the resize puts the files back and the header
+/// back to the raised length the setup holds, and the session stays open for a retry or a cancel.
 #[tokio::test]
 async fn a_failed_store_write_resizes_back_and_leaves_the_files() {
     let rig = rig("commit-store-fails", fake(EARLIER).await, true).await;
@@ -1182,7 +1182,7 @@ async fn a_failed_store_write_resizes_back_and_leaves_the_files() {
     assert_eq!(std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json"), lights_before);
     assert_eq!(std::fs::read(rig.home.join(SCENES_FILE)).expect("scenes.json"), scenes_before);
     assert_eq!(std::fs::read(rig.home.join(ZONES_FILE)).expect("zones.json"), zones_before);
-    assert_eq!(rig.server.zone_leds(0, 0), Some(EARLIER), "the header is back at its earlier length");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(300), "the header is back at the raised length");
     assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent is deleted");
     assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record stays for the session");
     assert_eq!(
@@ -1190,7 +1190,11 @@ async fn a_failed_store_write_resizes_back_and_leaves_the_files() {
         Some(setup.session.as_str()),
         "the session stays open for a retry"
     );
-    assert!(rig.app.zone_holds.read().await.is_empty(), "nothing is held raised any more");
+    assert_eq!(
+        rig.app.zone_holds.read().await.get(&(BOARD.to_string(), 0)).copied(),
+        Some(300),
+        "the setup still holds the header raised"
+    );
     let lights = rig.app.store.read().await.lights.clone();
     assert_eq!(lights.chains, Vec::new(), "memory is put back: no chain record");
     assert_eq!(zone_parts(&lights, 0).len(), 1, "memory is put back: the whole-zone light");
@@ -1469,4 +1473,118 @@ async fn commit_during_a_takeover_saves_and_lands_when_the_takeover_ends() {
         "the lights stayed dark after the takeover ended: {:?}",
         rig.server.colors(0)
     );
+}
+
+fn zone_path(zone: u32) -> String {
+    format!("/api/v1/devices/{}/zones/{zone}", BOARD.replace(':', "%3A"))
+}
+
+/// The store's copy of the sizes is what a commit writes `zones.json` from: a size the owner
+/// patched since start (or the first run saved) must survive another header's commit.
+#[tokio::test]
+async fn a_commit_keeps_the_other_headers_saved_lengths() {
+    let rig = rig("commit-keeps-sizes", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let (status, body) = send(&rig, "PATCH", &zone_path(1), Some(r#"{"led_count":80}"#)).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(read_zones(&rig.home).sizes[BOARD].get(&1).copied(), Some(80));
+
+    let setup = started(&rig, 0).await;
+    committed(&rig, 0, &setup.session, &seven_parts()).await;
+
+    let zones = read_zones(&rig.home);
+    assert_eq!(zones.sizes[BOARD].get(&0).copied(), Some(FINAL), "the committed header's length");
+    assert_eq!(zones.sizes[BOARD].get(&1).copied(), Some(80), "the other header keeps its patched length");
+}
+
+/// A setup owns the header it raised: a zone PATCH on it is refused and resizes nothing.
+#[tokio::test]
+async fn a_zone_patch_on_a_header_being_set_up_is_a_409() {
+    let rig = rig("patch-during-setup", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let before = rig.server.resize_count(0);
+
+    let (status, body) = send(&rig, "PATCH", &zone_path(0), Some(r#"{"led_count":100}"#)).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(rig.server.resize_count(0), before, "no resize");
+    assert_eq!(read_zones(&rig.home).sizes[BOARD].get(&0).copied(), Some(EARLIER), "zones.json is unchanged");
+    let (status, body) = cancel(&rig, 0, &setup.session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(EARLIER), "the cancel puts the earlier length back");
+}
+
+/// A restore record still on disk is a header not put back yet: a new setup would overwrite it,
+/// so the start is refused and touches nothing.
+#[tokio::test]
+async fn a_start_waits_for_an_earlier_header_still_raised() {
+    let rig = rig("start-pending-record", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    assert!(
+        wait_until(Duration::from_secs(30), || rig
+            .app
+            .leftovers_replayed
+            .load(std::sync::atomic::Ordering::SeqCst))
+        .await,
+        "the start-up replay never ran"
+    );
+    let pending = RestoreRecord { device_id: DeviceId(BOARD.into()), zone_index: 1, leds: SECOND_EARLIER };
+    canvas_daemon::chain_records::write_restore(&rig.home, &pending).expect("the restore record");
+    let before = rig.server.resize_count(0);
+
+    let (status, body) = start(&rig, 0).await;
+
+    assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert_eq!(rig.server.resize_count(0), before, "no raise");
+    assert_eq!(rig.app.identify.setup_session(), None, "no session opened");
+    assert_eq!(
+        canvas_daemon::chain_records::read_restore(&rig.home),
+        Some(pending),
+        "the earlier header's record is left as it was"
+    );
+}
+
+/// Two ends of one setup at once (a cancel and the timeout): the header goes back once.
+#[tokio::test]
+async fn two_ends_at_once_put_the_header_back_once() {
+    let rig = rig("two-ends", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let before = rig.server.resize_count(0);
+
+    let (first, second) = tokio::join!(
+        canvas_daemon::api::chains::finish_setup(&rig.app),
+        canvas_daemon::api::chains::finish_setup(&rig.app),
+    );
+
+    assert!(first.is_ok() && second.is_ok());
+    assert_eq!(rig.server.resize_count(0), before + 1, "one resize back, not two");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(EARLIER));
+}
+
+/// A cancel that arrives while a commit runs waits for it, then finds the session closed: the
+/// commit stands, the header keeps its final length and the parts stay.
+#[tokio::test]
+async fn a_cancel_racing_a_commit_waits_and_the_commit_stands() {
+    let rig = rig("cancel-racing-commit", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let before = rig.server.resize_count(0);
+
+    let parts = seven_parts();
+    let ((commit_status, commit_body), (cancel_status, cancel_body)) =
+        tokio::join!(commit(&rig, 0, &setup.session, &parts), cancel(&rig, 0, &setup.session));
+
+    assert_eq!(commit_status, StatusCode::OK, "{commit_body}");
+    assert_eq!(cancel_status, StatusCode::CONFLICT, "{cancel_body}");
+    assert_eq!(rig.server.resize_count(0), before + 1, "the commit's resize only");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(FINAL));
+    assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 7, "the parts stay");
+    assert_eq!(read_zones(&rig.home).sizes[BOARD].get(&0).copied(), Some(FINAL));
 }

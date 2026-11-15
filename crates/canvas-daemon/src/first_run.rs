@@ -392,6 +392,9 @@ pub async fn size_headers(
             "the first run could not save the zone sizes",
             crate::storage::write_json(&home.join(canvas_proto::config::ZONES_FILE), &file),
         );
+        drop(guard);
+        // The store's copy is what a chain commit and an export write back: keep it in step.
+        app.store.write().await.zones.sizes = file.sizes;
     }
 
     // Read the devices again, so the scene and the engine see the new LED counts (the list

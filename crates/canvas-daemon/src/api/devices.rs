@@ -85,6 +85,16 @@ pub async fn patch_zone(
         )));
     }
 
+    // A chain setup owns the header it raised until it ends (#338): a resize here would leave it
+    // at neither its earlier length nor the one the setup saves. The step lock keeps a setup from
+    // opening on this header while the resize runs.
+    let _step = app.chain_setup.lock().await;
+    if app.zone_holds.read().await.contains_key(&(id.clone(), zone)) {
+        return Err(ApiFailure::conflict(format!(
+            "{id} zone {zone} is being set up as a chain; finish or cancel the setup first"
+        )));
+    }
+
     // Resize in OpenRGB first: if the hardware refuses, the saved size must not change.
     {
         let mut adapter = app.adapter.lock().await;
@@ -106,6 +116,9 @@ pub async fn patch_zone(
         };
         crate::storage::write_json(&file, &snapshot)
             .map_err(|e| ApiFailure::internal(format!("could not save the zone sizes: {e}")))?;
+        drop(zones);
+        // The store's copy is what a chain commit and an export write back: keep it in step.
+        app.store.write().await.zones.sizes = snapshot.sizes;
     }
 
     // Re-discover so the device list carries the new LED count, then re-set the layout.

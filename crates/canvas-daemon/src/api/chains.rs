@@ -101,6 +101,15 @@ pub async fn start_setup(
 
     let restore_to = zone_info.led_count;
     let raised_to = zone_info.max_leds;
+    let _step = app.chain_setup.lock().await;
+    // A restore record still on disk is an earlier header that has not gone back yet (its resize
+    // failed, or the start-up replay has not run). A new record would overwrite it and leave that
+    // header raised for good, so the start waits for it.
+    if crate::chain_records::read_restore(&app.store.read().await.home).is_some() {
+        return Err(ApiFailure::conflict(
+            "an earlier chain setup has not put its header back yet; restart canvas-rgb to finish it",
+        ));
+    }
     let session = session_id();
     let Some(start_ticker) =
         app.identify
@@ -148,7 +157,7 @@ pub async fn start_setup(
     // gate holds the lights dark, and the raised list would be a frame of the old scene.
     if let Err(e) = rediscover(&app).await {
         tracing::warn!(device = %id, zone, error = %e.message, "the raised header's list could not be read; putting the length back");
-        let _ = finish_setup(&app).await;
+        let _ = finish_setup_locked(&app).await;
         return Err(e);
     }
 
@@ -202,8 +211,11 @@ pub async fn cancel_setup(
     Path((id, zone)): Path<(String, u32)>,
     Json(request): Json<SetupEmpty>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // The session is checked under the step lock: a commit that finished while this waited has
+    // closed it, and its parts must stay.
+    let _step = app.chain_setup.lock().await;
     check_session(&app, &id, zone, &request.session).await?;
-    let leds = finish_setup(&app).await?;
+    let leds = finish_setup_locked(&app).await?;
     Ok(Json(serde_json::json!({ "ok": true, "leds": leds })))
 }
 
@@ -228,6 +240,7 @@ pub async fn commit_setup(
     Json(request): Json<SetupCommit>,
 ) -> ApiResult<Json<SetupCommitted>> {
     let device_id = DeviceId(id.clone());
+    let _step = app.chain_setup.lock().await;
     check_session(&app, &id, zone, &request.session).await?;
     let max_leds = app
         .device(&device_id)
@@ -337,16 +350,25 @@ pub async fn commit_setup(
     }
 
     let saved = {
+        // `zones.json` is written whole from the store's copy, and the sizes the first run and a
+        // zone PATCH saved live in `app.zones`: the copy takes them first, so the commit keeps
+        // every other header's saved length.
+        let sizes = app.zones.read().await.clone();
         let mut store = app.store.write().await;
+        store.zones.sizes = sizes;
         store.apply_chain_plan(&plan, Some((&device_id, zone, plan.final_leds)))
     };
     if let Err(e) = saved {
         // Memory is back already: the store puts it back itself. Put the three files and the
         // header back too. When either fails, both records stay and start-up replays them.
+        // The session stays open for a retry or a cancel, as after a refused resize: the header
+        // goes back to the raised length the setup holds, and the restore record still names the
+        // earlier length for the cancel (or the next start).
         let files = crate::chain_records::rollback_files(&home, &intent);
+        app.zone_holds.write().await.insert(key.clone(), raised);
         let back = {
             let mut adapter = app.adapter.lock().await;
-            adapter.set_zone_size(&device_id, zone, restore.leds).await
+            adapter.set_zone_size(&device_id, zone, raised).await
         };
         let mut rolled_back = true;
         if let Err(files) = &files {
@@ -359,14 +381,13 @@ pub async fn commit_setup(
         if let Err(back) = &back {
             rolled_back = false;
             tracing::warn!(
-                device = %id, zone, leds = restore.leds, error = %back,
-                "the header could not be put back after the failed write; the restore record stays"
+                device = %id, zone, leds = raised, error = %back,
+                "the header could not be put back to its raised length after the failed write"
             );
         }
         if rolled_back {
             crate::chain_records::delete_intent(&home);
-            app.zone_holds.write().await.remove(&key);
-            tracing::info!(device = %id, zone, "the commit could not be saved: its files and the header are back");
+            tracing::info!(device = %id, zone, "the commit could not be saved: its files are back and the setup is still open");
             return Err(ApiFailure::service_unavailable(format!("the chain was not saved: {e}")));
         }
         return Err(ApiFailure::service_unavailable(format!(
@@ -424,8 +445,9 @@ pub async fn empty_setup(
     Path((id, zone)): Path<(String, u32)>,
     Json(request): Json<SetupEmpty>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    let _step = app.chain_setup.lock().await;
     check_session(&app, &id, zone, &request.session).await?;
-    let leds = finish_setup(&app).await?;
+    let leds = finish_setup_locked(&app).await?;
     let device_id = DeviceId(id.clone());
     let plan = {
         let store = app.store.read().await;
@@ -451,6 +473,13 @@ pub async fn empty_setup(
 /// anything any more. Returns the length the header went back to (0 when there was nothing to
 /// restore).
 pub async fn finish_setup(app: &Arc<App>) -> Result<u32, ApiFailure> {
+    let _step = app.chain_setup.lock().await;
+    finish_setup_locked(app).await
+}
+
+/// [`finish_setup`] for a caller that already holds `App::chain_setup`. A second end (a cancel
+/// after the timeout) finds no record and resizes nothing.
+async fn finish_setup_locked(app: &Arc<App>) -> Result<u32, ApiFailure> {
     // Whatever the reason, the setup is over: the gate must not keep holding the lights.
     if let Some(session) = app.identify.setup_session() {
         app.identify.end_setup(&session);

@@ -78,6 +78,10 @@ pub struct App {
     /// the saved sizes so its refresh leaves the raise alone. Never written to `zones` or
     /// `zones.json`: the hold ends when the setup drops it.
     pub zone_holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
+    /// One chain setup step at a time (#338): start, commit, empty and every end of a setup
+    /// (cancel, the timeout, quit) take it first, before any other lock. A cancel that races a
+    /// commit, or the timeout that races a cancel, then runs after it and finds the setup over.
+    pub chain_setup: tokio::sync::Mutex<()>,
     /// Set when the first non-empty device list replayed what a crash left (#338): the chain
     /// restore record, and the commit rollback that reads an intent record. One replay, however
     /// many lists follow.
@@ -272,6 +276,7 @@ impl App {
             devices: tokio::sync::RwLock::new(Vec::new()),
             zones: Arc::new(tokio::sync::RwLock::new(ZoneSizes::new())),
             zone_holds: Arc::new(tokio::sync::RwLock::new(ZoneHolds::new())),
+            chain_setup: tokio::sync::Mutex::new(()),
             leftovers_replayed: AtomicBool::new(false),
             preview_subs: PreviewRegistry::default(),
             stack_subs: PreviewRegistry::default(),
