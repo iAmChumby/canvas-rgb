@@ -12,6 +12,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
 - Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
 - Peripherals: the DPI stages sit in even columns at every window size, so the mouse's settings no longer reshuffle the panels beside them. (#373)
 - Peripherals: a device with a long name keeps its row in the page, cutting the name with an ellipsis. (#373)
