@@ -704,10 +704,16 @@ scroll, so the content was clipped and unreachable.
   the page, so a control that says nothing about its type is drawn in the system font. The sibling
   search found 29 such controls on the nine pages (the device key, the DPI chip, and the icon
   buttons, switches and swatches); after the fix a headless pass over every page finds 0 (the
-  number fields stay in the app's mono face, which is the app's rule for figures). The rule that
-  holds it is `app/web/src/views/__tests__/PeripheralTabsType.test.tsx`: the device key carries
-  `.tab-key`, the scene key carries it too, `.tab-key` is one rule in the app's tokens, and no tab
-  rule declares a font of its own.
+  number fields stay in the app's mono face, which is the app's rule for figures).
+- **The check, fourth mechanism** (`app/web/src/views/__tests__/PeripheralTabsType.test.tsx`):
+  it renders both tab rows — the Peripherals device row and the Scenes strip — and asks *every*
+  button in each for `.tab-key`, so a new raw `<button>` tab fails it (proved by adding one to
+  each row, watching both cases fail, and taking it out again). The pinned "+" key in the Scenes
+  strip is the one button that is not a tab, and it is named as the exception. The rule that
+  `.tab-key` declares, and the `button` reset, are read from `app.css` instead of rendered:
+  jsdom has no stylesheet. The "0 controls in the system face" number above is *not* this test's
+  job — it comes from the headless scan over every page's controls, which is the check to re-run
+  after a control is added.
 
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 

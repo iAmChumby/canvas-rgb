@@ -1,16 +1,22 @@
 // Issue #373: the device keys on Peripherals were drawn in the browser's own default font, so
 // they did not match the scene keys on Scenes ("Attack Shark X6" against "Gaming"). The type of
 // a tab now comes from one shared class, `.tab-key`, in app.css, and no page sets a tab's font
-// for itself. jsdom has no layout and no stylesheet, so the computed font is proved by a
-// headless-Chromium measurement (.build/screens/373-374, gitignored: it lives in the main
-// checkout); this test holds the shared type in place.
+// for itself.
+//
+// The rule is held by rendering each tab row and asking EVERY button in it for the shared class
+// (#387): a new raw `<button>` tab with no `tab-key` fails, which a string match on the source
+// file could never see. jsdom has no stylesheet, so what `.tab-key` itself declares is read from
+// app.css, and the computed type in a real browser is proved by the headless measurement
+// (`.build/screens/373-374/`, gitignored: it lives in the main checkout).
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cleanup, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PeripheralsView } from "@/views/PeripheralsView";
+import { SceneStrip } from "@/views/scenes/SceneStrip";
 import type { PeripheralDetail } from "@/proto/PeripheralDetail";
+import type { Scene } from "@/proto/Scene";
 
 const { api } = vi.hoisted(() => ({
   api: {
@@ -102,26 +108,45 @@ function mouse(id: string): PeripheralDetail {
   };
 }
 
+const scene = (id: string, name: string): Scene => ({ id, name, rev: 1, groups: [] }) as unknown as Scene;
+
 beforeEach(() => {
   for (const fn of Object.values(api)) fn.mockReset();
   api.peripheralRead.mockResolvedValue({ stage: "idle", done: 0, total: 0 });
 });
 
+/** Every button of a row, as the reader can reach it. */
+const buttonsOf = (row: Element) => [...row.querySelectorAll("button")];
+
 describe("the tab keys of the app (#373)", () => {
-  it("the device key on Peripherals carries the shared tab type", async () => {
-    api.peripherals.mockResolvedValue({ peripherals: [mouse("x6:tabs").info] });
-    api.peripheral.mockResolvedValue(mouse("x6:tabs"));
-    render(<PeripheralsView />);
-    const key = await screen.findByRole("button", { name: /Attack Shark X6/ });
-    expect(key.className).toContain("tab-key");
+  it("every button in the Peripherals device row carries the shared tab type", async () => {
+    api.peripherals.mockResolvedValue({ peripherals: [mouse("x6:row").info] });
+    api.peripheral.mockResolvedValue(mouse("x6:row"));
+    const view = render(<PeripheralsView />);
+    await screen.findByRole("button", { name: /Attack Shark X6/ });
+    const row = view.container.querySelector(".rd-peri-keys");
+    expect(row).not.toBeNull();
+    const keys = buttonsOf(row as Element);
+    // A row of no keys would pass a loop over nothing: the device's own key is here.
+    expect(keys.length).toBeGreaterThan(0);
+    for (const key of keys) expect(key.className).toContain("tab-key");
   });
 
-  it("the scene key on Scenes carries the same shared tab type", () => {
-    const strip = read("src/views/scenes/SceneStrip.tsx");
-    expect(strip).toContain("tab-key");
+  it("every button in the Scenes strip carries the shared tab type", () => {
+    const scenes = [scene("gaming", "Gaming"), scene("work", "Work")];
+    const view = render(
+      <SceneStrip scenes={scenes} active="gaming" onSet={() => {}} onNew={() => {}} />,
+    );
+    const strip = view.container.querySelector('[role="group"][aria-label="Scenes"]');
+    expect(strip).not.toBeNull();
+    // The pinned "+" key is the one button in the strip that is not a tab: it makes a new scene.
+    const keys = buttonsOf(strip as Element).filter((b) => b.closest("[data-pin]") === null);
+    expect(keys).toHaveLength(scenes.length);
+    for (const key of keys) expect(key.className).toContain("tab-key");
   });
 
   it("the shared tab type is one rule, in the app's own tokens", () => {
+    // jsdom renders no stylesheet, so the rule's own body is read from app.css.
     const tab = rule(".tab-key");
     expect(tab).not.toBe("");
     expect(tab).toMatch(/font-family:\s*var\(--fu\)/);
@@ -142,7 +167,8 @@ describe("the tab keys of the app (#373)", () => {
 
   it("every button takes the app's face, so no control drifts into the system font", () => {
     // The browser's stylesheet gives a button its own default font. One rule keeps every
-    // control in the app's own face.
+    // control in the app's own face. A rendering cannot see it (jsdom has no stylesheet), so the
+    // rule is read, and the headless scan over every page's controls is what proves the result.
     expect(rule("button")).toMatch(/font-family:\s*var\(--fu\)/);
   });
 });
