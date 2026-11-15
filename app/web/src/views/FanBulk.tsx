@@ -208,7 +208,13 @@ export function FanBulkBar({
         </div>
       </div>
 
-      <Popover anchor={detailRef} open={open && result !== null} onClose={() => setOpen(false)} label="What each header did">
+      <Popover
+        anchor={detailRef}
+        open={open && result !== null}
+        onClose={() => setOpen(false)}
+        label="What each header did"
+        className="fan-bulk-popover"
+      >
         <ul className="fan-bulk-list">
           {result?.outcomes.map((o) => {
             const now = fans.headers.find((h) => h.id === o.id);

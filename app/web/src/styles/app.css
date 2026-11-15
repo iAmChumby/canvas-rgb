@@ -612,9 +612,17 @@ html[data-motion="reduced"] *::after {
   font-weight: 600;
 }
 
+/* The status details panel. Its figures are live (the frame rate, the frame time, the number of
+   devices), so the panel has one width (#369): a panel as wide as its content moves every time a
+   figure changes. */
+.strip-details {
+  width: min(320px, calc(100vw - 16px));
+}
+
+/* The value sits in a fixed column, so a figure that changes never moves the label beside it. */
 .strip-details-list {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 116px;
   gap: var(--s1) var(--s3);
   margin: 0;
   font-size: var(--t14);
@@ -1602,6 +1610,19 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* The audio readings panel. The readings are live - the meter's cells, the figure in dB and the
+   bands - so the panel has one width (#369): a panel as wide as its content moves every time a
+   reading changes. */
+.audio-popover {
+  width: min(320px, calc(100vw - 16px));
+}
+
+/* The fan bulk panel hangs under the Fans page's key: the duty each header runs at is live, so
+   the panel has one width too (#369). Its list and rows stay with the rest of the fan bulk. */
+.fan-bulk-popover {
+  width: min(320px, calc(100vw - 16px));
+}
+
 /* The compact form (UI finding 4): the Source select sits in the panel head's
    action slot, and one row under it carries the state words, the Listen
    toggle and the "Show readings" button. The panel is about 90 px tall and
@@ -1729,7 +1750,8 @@ button.chip:hover {
   overflow: hidden;
   width: 32px;
   height: 32px;
-  flex: none;
+  /* The swatch never gives up its size (#369): it is the one fixed thing beside the hex. */
+  flex: 0 0 auto;
   padding: 0;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
@@ -1742,8 +1764,10 @@ button.chip:hover {
 
 /* The colour wipe (issue #187, rule 9): the new colour reveals over the old
    one behind a circular mask opening from the swatch's centre, instead of a
-   flat cross-fade. The overlay is keyed by the wipe, not the colour; the base
-   takes the new colour when the wipe ends. With motion off it opens at once. */
+   flat cross-fade. It is drawn only for a change that lands once (#369): a
+   stream of values - a drag, a held key, a feed from the daemon - shows the
+   new colour at once and mounts no overlay, so nothing replays. With motion
+   off it is never drawn. */
 @keyframes swatch-wipe {
   from {
     clip-path: circle(0% at 50% 50%);
@@ -1765,10 +1789,16 @@ button.chip:hover {
   border-color: var(--mute);
 }
 
+/* The hex value beside the swatch. It has one width (#369): the text is seven characters in a
+   monospace face with tabular digits, so the row beside the swatch is the same size for every
+   colour and the swatch never moves. */
 .color-hex {
+  width: 7ch;
+  flex: 0 0 auto;
   color: var(--dim);
   font-family: var(--fm);
   font-size: var(--t14);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- the colour picker ---------- */
@@ -1845,30 +1875,35 @@ button.chip:hover {
   gap: var(--s2);
 }
 
+/* The hex field. It never gives up its width either (#369): the field is as wide as the hex it
+   holds, so a shorter or longer code cannot resize the swatch beside it. */
 .picker-hex {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 8ch;
   font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
   text-align: left;
 }
 
 .picker-preview {
-  flex: none;
+  /* The colour the hex names: one size, whatever the code says (#369). */
+  flex: 0 0 auto;
   width: 24px;
   height: 24px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--c);
-  /* The same mask reveal as the swatch (issue #187, rule 9): the preview is
-     keyed by the colour in ColorPicker, so each change wipes in. */
+  /* The same mask reveal as the swatch (issue #187, rule 9). It is added for a change that
+     lands once (#369); a drag or a held key updates the colour in place and never adds it. */
 }
 
-/* The picker's preview wipes only on a change, never when the picker opens. */
+/* The picker's preview wipes only on a choice made once, never when the picker opens. */
 .picker-preview.wipe {
   animation: swatch-wipe var(--dur) var(--ease) both;
 }
 
-/* The other colours of the same effect, one click away. */
+/* The other colours of the same effect, one click away. The one that names the colour in the
+   field is marked (#369), so the list never changes length. */
 .picker-swatches {
   display: flex;
   flex-wrap: wrap;
@@ -1886,6 +1921,12 @@ button.chip:hover {
   transition:
     border-color var(--dur-fast) var(--ease),
     transform var(--dur-fast) var(--ease);
+}
+
+/* The swatch of the colour in the field: a ring, so it is told from the others. */
+.picker-swatch[aria-current="true"] {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 
 .picker-swatch:hover {

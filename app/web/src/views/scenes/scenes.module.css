@@ -904,10 +904,14 @@
   list-style: none;
 }
 
-/* One effect: its picture as a strip, its whole name beside it, and what it is. */
+/* One effect: its picture as a strip, its whole name beside it, and what it is.
+   The third track is a fixed column, not `auto` (#367): the PLAYING tag is drawn only on the row
+   the group plays, and the preview moves it to the row under the pointer. With an `auto` track the
+   tag took the space it needed and the row - and with it the whole menu - grew. A fixed column
+   keeps every row the same width, and the tags in one line. */
 .pickRow {
   display: grid;
-  grid-template-columns: 132px minmax(0, 1fr) auto;
+  grid-template-columns: 132px minmax(0, 1fr) 64px;
   align-items: center;
   gap: var(--s3);
   width: 100%;
@@ -979,13 +983,20 @@
   min-width: 0;
 }
 
+/* One line, always: an effect's name has no cap in the spine (it is the file's `<title>`), and a
+   name that wrapped would make its row taller than the others (#367: the row's height must not
+   depend on its content). The whole name is on the row's `title`. */
 .pickName {
   display: block;
+  max-width: 100%;
   min-width: 0;
+  overflow: hidden;
   color: var(--ink);
   font-size: var(--t15);
   line-height: 1.25;
-  overflow-wrap: anywhere;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  overflow-wrap: normal;
 }
 
 /* Why an effect cannot be chosen, on the row it applies to. */
@@ -1041,13 +1052,20 @@
   text-transform: uppercase;
 }
 
-/* One line under the list: what the lights are showing now. It never changes height. */
+/* One line under the list: what the lights are showing now. It names the effect, so its words
+   change with the pointer; two lines are reserved and the rest is cut with an ellipsis, so the
+   menu never grows, whatever the name's length (#367). */
 .pickerHint {
-  min-height: 2.6em;
+  display: -webkit-box;
+  height: 2.6em;
   margin: 0;
+  overflow: hidden;
   color: var(--mute);
   font-size: var(--t14);
   line-height: 1.3;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+  line-clamp: 2;
 }
 
 /* The head of the picker when it hangs under a row's key: what it is, and the way out. */
@@ -1065,9 +1083,14 @@
   font: 600 var(--t15) / 1.2 var(--fu);
 }
 
-/* The picker in a popover under a row's effect key: wider than the usual list. */
+/* The picker in a popover under a row's effect key: wider than the usual list, and one width in
+   every state (#367). The panel is as wide as its content, so anything that changes with the
+   pointer - the line under the list, which says what the lights show, and the PLAYING tag - moved
+   the whole menu. The width is set here instead: the picture (132 px), the gap, the name, the gap
+   and the fixed PLAYING column (64 px), plus the panel's own padding and border. */
 .pickerPopover {
-  max-width: min(520px, calc(100vw - 16px));
+  width: min(380px, calc(100vw - 16px));
+  max-width: min(380px, calc(100vw - 16px));
 }
 
 /* ---------- the devices in a group ---------- */
@@ -1306,9 +1329,10 @@
     height: 56px;
   }
 
-  /* The picture of an effect is a strip on a phone too, but a shorter one. */
+  /* The picture of an effect is a strip on a phone too, but a shorter one. The PLAYING column
+     stays the same width (#367): the tag never changes the row's width, on a phone either. */
   .pickRow {
-    grid-template-columns: 104px minmax(0, 1fr) auto;
+    grid-template-columns: 104px minmax(0, 1fr) 64px;
   }
 
   .pickStrip {

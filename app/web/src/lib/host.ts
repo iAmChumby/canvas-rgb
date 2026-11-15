@@ -66,6 +66,26 @@ export async function openLogsFolder(): Promise<void> {
   await host.core.invoke(CMD_OPEN_LOGS_FOLDER);
 }
 
+/**
+ * Opens an address outside the app: an issue's page, from the release notes. Inside the tray it
+ * goes through the opener plugin, which is how "Open logs folder" reaches Explorer, so the
+ * editor window itself never navigates away. In a plain browser it is a new tab.
+ *
+ * Only `https` is opened: the notes come from a release feed, and an address of any other shape
+ * is not something this app has any business starting.
+ */
+export async function openExternal(url: string): Promise<void> {
+  if (!/^https:\/\/[^\s]+$/.test(url)) return;
+  const host = tauriHost();
+  if (!host) {
+    if (typeof window !== "undefined") window.open(url, "_blank", "noopener,noreferrer");
+    return;
+  }
+  // The plugin's own command (tauri-plugin-opener, allowed by `opener:default` in
+  // app/src-tauri/capabilities/default.json).
+  await host.core.invoke("plugin:opener|open_url", { url });
+}
+
 /** Listens for the tray's "Open editor" page request. Returns an unlisten function. */
 export async function onNavigate(handler: (page: string) => void): Promise<Unlisten> {
   const host = tauriHost();
