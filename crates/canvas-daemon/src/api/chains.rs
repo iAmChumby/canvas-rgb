@@ -102,13 +102,27 @@ pub async fn start_setup(
     let restore_to = zone_info.led_count;
     let raised_to = zone_info.max_leds;
     let _step = app.chain_setup.lock().await;
-    // A restore record still on disk is an earlier header that has not gone back yet (its resize
-    // failed, or the start-up replay has not run). A new record would overwrite it and leave that
-    // header raised for good, so the start waits for it.
-    if crate::chain_records::read_restore(&app.store.read().await.home).is_some() {
+    if app.identify.setup_session().is_some() {
         return Err(ApiFailure::conflict(
-            "an earlier chain setup has not put its header back yet; restart canvas-rgb to finish it",
+            "a chain setup is already open; finish or cancel it first",
         ));
+    }
+    // A record still on disk with no setup open is an earlier header that has not gone back yet
+    // (its resize failed, or the start-up replay has not run) or a commit that never finished. A
+    // new record would overwrite it, so the start finishes it first, the way start-up does, and
+    // is refused only when that fails again.
+    let home = app.store.read().await.home.clone();
+    if crate::chain_records::read_restore(&home).is_some()
+        || crate::chain_records::read_intent(&home).is_some()
+    {
+        replay_leftovers(&app).await;
+        if crate::chain_records::read_restore(&home).is_some()
+            || crate::chain_records::read_intent(&home).is_some()
+        {
+            return Err(ApiFailure::conflict(
+                "an earlier chain setup's header could not be put back yet; check that the device is connected and try again",
+            ));
+        }
     }
     let session = session_id();
     let Some(start_ticker) =
@@ -128,7 +142,6 @@ pub async fn start_setup(
     if start_ticker {
         crate::identify::spawn_ticker(app.clone());
     }
-    let home = app.store.read().await.home.clone();
     let record = RestoreRecord { device_id: device_id.clone(), zone_index: zone, leds: restore_to };
     // Before the raise: a crash after this point is a header the next start puts back.
     if let Err(e) = crate::chain_records::write_restore(&home, &record) {
@@ -485,6 +498,23 @@ async fn finish_setup_locked(app: &Arc<App>) -> Result<u32, ApiFailure> {
         app.identify.end_setup(&session);
     }
     let home = app.store.read().await.home.clone();
+    // A commit whose rollback failed left its intent: the setup ends the way start-up would end
+    // it, now, rather than at a start that may come much later and would undo every edit since.
+    if let Some(intent) = crate::chain_records::read_intent(&home) {
+        app.zone_holds
+            .write()
+            .await
+            .remove(&(intent.device_id.0.clone(), intent.zone_index));
+        roll_back_intent(app, &home, &intent).await;
+        if crate::chain_records::read_intent(&home).is_some() {
+            crate::identify::restore(app).await;
+            return Err(ApiFailure::internal(
+                "the unfinished commit could not be undone; the next start finishes it",
+            ));
+        }
+        crate::identify::restore(app).await;
+        return Ok(intent.restore_leds);
+    }
     let Some(record) = crate::chain_records::read_restore(&home) else {
         // No readable record: nothing says which length to put back, but nothing may keep the
         // header raised either. One setup at a time, so every hold is this setup's. The scene goes

@@ -667,6 +667,10 @@ async fn a_second_session_for_another_zone_is_a_409() {
 
     let (status, body) = start(&rig, 1).await;
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
+    assert!(
+        body["message"].as_str().unwrap_or_default().contains("already open"),
+        "the answer says a setup is open: {body}"
+    );
     assert_eq!(
         rig.app.identify.setup_session().as_deref(),
         Some(first.session.as_str()),
@@ -1265,6 +1269,22 @@ async fn a_failed_rollback_keeps_both_records() {
         "the setup's hold no longer keeps the header: {:?}",
         rig.server.zone_leds(0, 0)
     );
+
+    // The owner cancels once the snapshot can be read again: the unfinished commit is undone now,
+    // and no intent is left for a later start to replay over edits made in between.
+    std::fs::remove_dir(folder.join(LIGHTS_FILE)).expect("the folder goes");
+    std::fs::write(folder.join(LIGHTS_FILE), &lights_before).expect("the snapshot's lights.json is back");
+    let (status, body) = cancel(&rig, 0, &setup.session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the cancel finished the intent");
+    assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "and the restore record");
+    assert!(
+        wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(EARLIER)).await,
+        "the header is not at its earlier length: {:?}",
+        rig.server.zone_leds(0, 0)
+    );
+    assert!(rig.app.zone_holds.read().await.is_empty(), "nothing is held");
+    assert_eq!(rig.app.identify.setup_session(), None, "the setup is over");
 }
 
 /// Review Focus 3: a daemon start that finds an intent record undoes the interrupted commit: the
@@ -1522,9 +1542,10 @@ async fn a_zone_patch_on_a_header_being_set_up_is_a_409() {
 }
 
 /// A restore record still on disk is a header not put back yet: a new setup would overwrite it,
-/// so the start is refused and touches nothing.
+/// so the start puts that header back first, as start-up does, and is refused only while it
+/// cannot.
 #[tokio::test]
-async fn a_start_waits_for_an_earlier_header_still_raised() {
+async fn a_start_puts_an_earlier_header_back_first() {
     let rig = rig("start-pending-record", fake(EARLIER).await, true).await;
     assert!(connected(&rig).await, "the daemon never applied a device list");
     assert!(
@@ -1535,20 +1556,38 @@ async fn a_start_waits_for_an_earlier_header_still_raised() {
         .await,
         "the start-up replay never ran"
     );
+    // A restore of header 1 failed and left its record.
     let pending = RestoreRecord { device_id: DeviceId(BOARD.into()), zone_index: 1, leds: SECOND_EARLIER };
     canvas_daemon::chain_records::write_restore(&rig.home, &pending).expect("the restore record");
-    let before = rig.server.resize_count(0);
 
+    // While the device still refuses, the start is refused and the record is left as it was.
+    rig.server.fail_resizes(true);
     let (status, body) = start(&rig, 0).await;
-
     assert_eq!(status, StatusCode::CONFLICT, "{body}");
-    assert_eq!(rig.server.resize_count(0), before, "no raise");
     assert_eq!(rig.app.identify.setup_session(), None, "no session opened");
+    assert_eq!(canvas_daemon::chain_records::read_restore(&rig.home), Some(pending.clone()));
+
+    // Once it answers, the start puts header 1 back and then opens the setup on header 0.
+    rig.server.fail_resizes(false);
+    // The silent device dropped the connection; the supervisor makes a new one.
+    assert!(
+        wait_for(Duration::from_secs(30), || async {
+            matches!(*rig.app.openrgb.read().await, canvas_proto::api::LinkState::Connected)
+                && rig.app.adapter.lock().await.discover().await.is_ok()
+        })
+        .await,
+        "the daemon never reconnected"
+    );
+    let setup = started(&rig, 0).await;
+    assert_eq!(rig.server.zone_leds(0, 1), Some(SECOND_EARLIER), "header 1 is back");
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
     assert_eq!(
         canvas_daemon::chain_records::read_restore(&rig.home),
-        Some(pending),
-        "the earlier header's record is left as it was"
+        Some(RestoreRecord { device_id: DeviceId(BOARD.into()), zone_index: 0, leds: EARLIER }),
+        "the record is the new setup's"
     );
+    let (status, body) = cancel(&rig, 0, &setup.session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
 }
 
 /// Two ends of one setup at once (a cancel and the timeout): the header goes back once.
