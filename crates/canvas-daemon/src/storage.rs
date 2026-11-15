@@ -551,41 +551,14 @@ impl Store {
         scenes: Loaded<ScenesFile>,
         layouts: Option<&LayoutsFile>,
     ) {
-        // A light on a device the daemon never drives (`crate::is_driven`) is a leftover of a
-        // migration from before that device was dropped from discovery: it has no device behind
-        // it, so it shows as a nameless "not connected" entry (#372). It is removed from
-        // `lights.json` and from every group; nothing else is.
-        let mut orphans: Vec<String> = Vec::new();
         match lights {
-            Loaded::Parsed(mut lights) => {
-                lights.lights.retain(|l| {
-                    let driven = crate::is_driven(&l.device_id);
-                    if !driven {
-                        orphans.push(l.id.clone());
-                    }
-                    driven
-                });
-                self.lights = lights;
-            }
+            Loaded::Parsed(lights) => self.lights = lights,
             Loaded::Unreadable => self.lights_blocked = true,
             Loaded::Absent | Loaded::Quarantined => {}
         }
-        if !orphans.is_empty() {
-            tracing::warn!(lights = ?orphans, "lights on devices the daemon never drives were removed");
-        }
         match scenes {
             Loaded::Parsed(mut scenes) => {
-                // A group that loses its only member is dropped by the repair's empty-group rule.
-                let mut orphaned = false;
-                for group in scenes.scenes.iter_mut().flat_map(|s| s.groups.iter_mut()) {
-                    let before = group.members.len();
-                    group.members.retain(|m| !orphans.contains(m));
-                    orphaned |= group.members.len() != before;
-                }
-                let mut changes = crate::scenes::repair(&mut scenes, &self.lights);
-                if orphaned && changes.is_empty() {
-                    changes.push("removed lights on devices the daemon never drives".into());
-                }
+                let changes = crate::scenes::repair(&mut scenes, &self.lights);
                 for change in &changes {
                     tracing::warn!("scenes.json was repaired: {change}");
                 }
@@ -630,11 +603,6 @@ impl Store {
                     deadline_armed: false,
                 });
             }
-        }
-        // The cleaned `lights.json` is written once the scenes are settled and only when the file
-        // may be written at all (not blocked, no migration pending, which writes both files itself).
-        if !orphans.is_empty() && !self.lights_blocked && !self.scenes_blocked && self.scenes_pending.is_none() {
-            crate::logging::warn_if_err("lights.json could not be saved without the removed lights", self.save_lights());
         }
     }
 
@@ -2402,59 +2370,6 @@ power = "running"
         assert!(lights.lights.iter().any(|l| l.id == "openrgb:board#z1"), "the layout's light is added");
         let loaded = Store::load_from(&dir);
         assert_eq!(loaded.scenes, scenes, "no migration is held: the scenes are on disk");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// A `lights.json` and `scenes.json` holding the light of a device the daemon never drives
-    /// (#372) load without it, keep the group's other members, and save the cleaned `lights.json`.
-    #[test]
-    fn a_light_on_a_device_the_daemon_never_drives_is_removed_at_start() {
-        const RAW: &str = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
-        let dir = temp_home("orphan-light");
-        let mut lights = crate::scenes::empty_lights();
-        crate::scenes::sync_lights(&mut lights, &[bundle_board()]);
-        let orphan = crate::scenes::tests::device(RAW, 1, vec![crate::scenes::tests::zone(0, canvas_proto::device::ZoneKind::Linear, 4)]);
-        // `sync_lights` skips it now, so the old file is made by hand.
-        let mut orphan_light = lights.lights[0].clone();
-        orphan_light.id = canvas_proto::scene::zone_light_id(&orphan.id, 0);
-        orphan_light.device_id = orphan.id.clone();
-        lights.lights.push(orphan_light.clone());
-        let mut scenes = crate::scenes::default_scenes(&lights);
-        // A second scene whose only group holds just the orphan: the group goes, the scene stays.
-        let mut lone = crate::scenes::default_scene(&lights.lights[..1]);
-        lone.id = "lone".into();
-        lone.name = "Lone".into();
-        lone.groups[0].members = vec![orphan_light.id.clone()];
-        scenes.scenes.push(lone);
-        let kept: Vec<String> = lights.lights[..2].iter().map(|l| l.id.clone()).collect();
-        assert!(scenes.scenes[0].groups[0].members.contains(&orphan_light.id));
-        write_json(&dir.join(LIGHTS_FILE), &lights).unwrap();
-        write_json(&dir.join(SCENES_FILE), &scenes).unwrap();
-
-        let store = Store::load_from(&dir);
-
-        let ids: Vec<&str> = store.lights.lights.iter().map(|l| l.id.as_str()).collect();
-        assert_eq!(ids, kept.iter().map(String::as_str).collect::<Vec<_>>(), "only the orphan left");
-        let everything = &store.scenes.scenes[0].groups[0];
-        assert_eq!(everything.members, kept, "the group keeps its other members");
-        let lone = store.scenes.scenes.iter().find(|s| s.id == "lone").expect("the scene stays");
-        assert!(lone.groups.is_empty(), "a group left empty follows the repair rule");
-        let on_disk: LightsFile = serde_json::from_slice(&std::fs::read(dir.join(LIGHTS_FILE)).unwrap()).unwrap();
-        assert_eq!(on_disk.lights.len(), 2, "lights.json was saved without the orphan");
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    /// `sync_lights_from` makes no light for a device the daemon never drives either.
-    #[test]
-    fn sync_lights_from_skips_a_device_the_daemon_never_drives() {
-        const RAW: &str = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
-        let dir = temp_home("orphan-sync");
-        let mut store = Store::load_from(&dir);
-        store.scenes_pending = None;
-        let raw = crate::scenes::tests::device(RAW, 1, vec![crate::scenes::tests::zone(0, canvas_proto::device::ZoneKind::Linear, 4)]);
-        let added = store.sync_lights_from(&[bundle_board(), raw]);
-        assert_eq!(added, 2, "the board's two zones, not the raw copy");
-        assert!(store.lights.lights.iter().all(|l| !l.id.to_lowercase().contains("vid_3151")));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
