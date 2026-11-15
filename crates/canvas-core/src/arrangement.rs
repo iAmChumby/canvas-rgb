@@ -25,7 +25,8 @@
 //! # The cells
 //!
 //! Every sample carries the cell it averages over, clamped to the canvas:
-//! - a strip cell is `slot.w / n` wide and the slot's whole height,
+//! - a strip cell is `slot.w / n` wide and as tall as it is wide (at most the slot's
+//!   height), centred on the LED at mid-height,
 //! - a grid cell is the matrix's own cell,
 //! - a single light's cell is one logical unit at the slot's centre,
 //! - a ring cell is the square of one LED's share of the circle, `2 * pi * r / n`.
@@ -264,15 +265,18 @@ fn build_light_leds(
 
 /// A strip: left to right at mid-height, each LED in the middle of its own cell.
 ///
-/// The cell is `slot.w / n` wide and the slot's whole height.
+/// The cell is `slot.w / n` wide and as tall as it is wide, at most the slot's height, centred
+/// on the LED: an LED is a position on the picture, not a column through it. A full-height
+/// band averaged a thin falling line (Rain) into a steady colour (#372).
 fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
     let cell_w = slot.w / n as f32;
+    let cell_h = cell_w.min(slot.h);
     let y = slot.y + slot.h / 2.0;
     (0..n)
         .map(|j| {
             let x = slot.x + cell_w * (j as f32 + 0.5);
             let bounds =
-                clamp_cell(x - cell_w / 2.0, slot.y, x + cell_w / 2.0, slot.y + slot.h);
+                clamp_cell(x - cell_w / 2.0, y - cell_h / 2.0, x + cell_w / 2.0, y + cell_h / 2.0);
             LedSample { center_x: x, center_y: y, bounds, sampled: true }
         })
         .collect()
@@ -536,9 +540,17 @@ mod tests {
                 light.light,
                 last.bounds[2]
             );
-            assert!(first.bounds[1].abs() < 0.05, "{} starts at {}", light.light, first.bounds[1]);
+            // Vertically the cell is a square centred at mid-height (#372), at most the slot.
+            let cell_w = CANVAS_WIDTH as f32 / light.leds.len() as f32;
+            let cell_h = cell_w.min(CANVAS_HEIGHT as f32);
             assert!(
-                (last.bounds[3] - CANVAS_HEIGHT as f32).abs() < 0.05,
+                (first.bounds[1] - (CANVAS_HEIGHT as f32 - cell_h) / 2.0).abs() < 0.05,
+                "{} starts at {}",
+                light.light,
+                first.bounds[1]
+            );
+            assert!(
+                (last.bounds[3] - (CANVAS_HEIGHT as f32 + cell_h) / 2.0).abs() < 0.05,
                 "{} ends at {}",
                 light.light,
                 last.bounds[3]
@@ -655,7 +667,7 @@ mod tests {
     }
 
     /// The bounds of a sample hold its centre and are the cell around it: a strip cell is
-    /// `slot.w / n` wide, a grid cell is the grid's own cell, a single light's cell is one
+    /// `slot.w / n` wide and as tall (at most the slot), a grid cell is the grid's own cell, a single light's cell is one
     /// logical unit at the slot's centre, and a ring cell is the square of one LED's share
     /// of the circle.
     #[test]
@@ -664,12 +676,12 @@ mod tests {
         let height = CANVAS_HEIGHT as f32;
 
         // A strip alone: the slot is the whole canvas, so each of its 8 cells is a
-        // 320/8 = 40 wide column of the whole height.
+        // 320/8 = 40 wide square, centred at mid-height.
         let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 8)])];
         let plan =
             build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &[strip("a", "d0")], &devices);
         for led in &plan.lights[0].leds {
-            assert_cell(led, width / 8.0, height, "a strip cell");
+            assert_cell(led, width / 8.0, width / 8.0, "a strip cell");
         }
 
         // A grid alone on a 4x4 matrix: each cell is 320/4 by 200/4.

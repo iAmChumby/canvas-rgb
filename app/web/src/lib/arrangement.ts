@@ -214,9 +214,13 @@ function buildLightLeds(
   return leds;
 }
 
-/** A strip: left to right at mid-height, each LED in the middle of its own cell. */
+/**
+ * A strip: left to right at mid-height, each LED in the middle of its own cell. The cell is
+ * `slot.w / n` wide and as tall as it is wide, at most the slot's height, centred on the LED.
+ */
 function stripSamples(slot: Slot, n: number): LedSample[] {
   const cellW = slot.w / n;
+  const cellH = Math.min(cellW, slot.h);
   const y = slot.y + slot.h / 2;
   const leds: LedSample[] = [];
   for (let j = 0; j < n; j++) {
@@ -224,7 +228,7 @@ function stripSamples(slot: Slot, n: number): LedSample[] {
     leds.push({
       center_x: x,
       center_y: y,
-      bounds: clampCell(x - cellW / 2, slot.y, x + cellW / 2, slot.y + slot.h),
+      bounds: clampCell(x - cellW / 2, y - cellH / 2, x + cellW / 2, y + cellH / 2),
       sampled: true,
     });
   }

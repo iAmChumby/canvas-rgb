@@ -267,12 +267,12 @@ describe("the arrangement planner (#310)", () => {
     const height = CANVAS_HEIGHT;
 
     // A strip alone: the slot is the whole canvas, so each of its 8 cells is a
-    // 320/8 = 40 wide column of the whole height.
+    // 320/8 = 40 wide square, centred at mid-height.
     {
       const devices = [device("d0", [zone(0, { type: "linear" }, 8)])];
       const plan = buildGroupPlan(ids(["a"]), "each_its_own", [strip("a", "d0")], devices);
       for (const led of first(plan.lights).leds) {
-        expectCell(led, width / 8.0, height, "a strip cell");
+        expectCell(led, width / 8.0, width / 8.0, "a strip cell");
       }
     }
 
