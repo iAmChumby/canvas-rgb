@@ -205,10 +205,11 @@ pub async fn get_draft(State(app): State<Arc<App>>) -> Json<DraftStatus> {
 ///
 /// Starts the draft, or renews its lease (and updates its props). A draft that does not parse
 /// is refused and a running draft is left alone, so a bad keystroke mid-edit never takes the
-/// lights off the last good draft. Exactly one of `html` and `stack` is set: #2's editor sends
-/// the HTML, the stack builder sends the stack with its epoch and sequence (D95.4.5).
-/// A PUT whose build would be the third at once answers 503 with `Retry-After`, like the
-/// preview routes: the heartbeat beats survive a missed answer and try again.
+/// lights off the last good draft. Exactly one of `html`, `stack` and `pattern` is set: #2's
+/// editor sends the HTML, the stack builder sends the stack with its epoch and sequence
+/// (D95.4.5), and the pattern editor sends the pattern with the same epoch and sequence
+/// (0.16.0). A PUT whose build would be the third at once answers 503 with `Retry-After`, like
+/// the preview routes: the heartbeat beats survive a missed answer and try again.
 pub async fn put_draft(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -216,40 +217,54 @@ pub async fn put_draft(
     let bytes = crate::api::limited_body(body, crate::api::effects::IMPORT_BODY_LIMIT)?;
     let request: DraftRequest = serde_json::from_slice(&bytes)
         .map_err(|e| ApiFailure::validation(format!("the body is not a draft request: {e}")))?;
-    let applied = match (&request.stack, request.html.is_empty()) {
-        (Some(stack), true) => {
-            let epoch = request
-                .epoch
-                .as_deref()
-                .ok_or_else(|| ApiFailure::validation("a stack draft needs an epoch"))?;
-            if !crate::epoch::valid_epoch(epoch) {
-                return Err(ApiFailure::validation(format!(
-                    "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
-                )));
-            }
-            let seq = request
-                .seq
-                .ok_or_else(|| ApiFailure::validation("a stack draft needs a seq"))?;
-            crate::draft::put_stack(&app, stack, &request.props, epoch, seq).await
+    let set = usize::from(!request.html.is_empty())
+        + usize::from(request.stack.is_some())
+        + usize::from(request.pattern.is_some());
+    if set == 0 {
+        return Err(ApiFailure::validation("a draft needs html, stack or pattern"));
+    }
+    if set > 1 {
+        return Err(ApiFailure::validation(
+            "send one of html, stack and pattern, not more than one",
+        ));
+    }
+    let applied = if let Some(pattern) = &request.pattern {
+        let epoch = request
+            .epoch
+            .as_deref()
+            .ok_or_else(|| ApiFailure::validation("a pattern draft needs an epoch"))?;
+        if !crate::epoch::valid_epoch(epoch) {
+            return Err(ApiFailure::validation(format!(
+                "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+            )));
         }
-        (None, false) => {
-            if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
-                return Err(ApiFailure::validation(format!(
-                    "the draft is {} bytes; the limit is {}",
-                    request.html.len(),
-                    canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
-                )));
-            }
-            crate::draft::put(&app, &request.html, &request.props).await
+        let seq = request
+            .seq
+            .ok_or_else(|| ApiFailure::validation("a pattern draft needs a seq"))?;
+        crate::draft::put_pattern(&app, pattern, epoch, seq).await
+    } else if let Some(stack) = &request.stack {
+        let epoch = request
+            .epoch
+            .as_deref()
+            .ok_or_else(|| ApiFailure::validation("a stack draft needs an epoch"))?;
+        if !crate::epoch::valid_epoch(epoch) {
+            return Err(ApiFailure::validation(format!(
+                "the epoch {epoch:?} is not 16 hexadecimal characters, as a page makes it"
+            )));
         }
-        (Some(_), false) => {
-            return Err(ApiFailure::validation(
-                "send one of html and stack, not both",
-            ))
+        let seq = request
+            .seq
+            .ok_or_else(|| ApiFailure::validation("a stack draft needs a seq"))?;
+        crate::draft::put_stack(&app, stack, &request.props, epoch, seq).await
+    } else {
+        if request.html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
+            return Err(ApiFailure::validation(format!(
+                "the draft is {} bytes; the limit is {}",
+                request.html.len(),
+                canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+            )));
         }
-        (None, true) => {
-            return Err(ApiFailure::validation("a draft needs html or stack"))
-        }
+        crate::draft::put(&app, &request.html, &request.props).await
     }
     .map_err(|error| match error {
         crate::draft::PutError::Build(message) => {

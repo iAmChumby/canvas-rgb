@@ -205,6 +205,30 @@ fn scenes_file() -> ScenesFile {
     }
 }
 
+/// A clock the test moves by hand: a draft lease is tested without waiting.
+#[derive(Clone)]
+struct TestClock {
+    now: Arc<Mutex<std::time::Duration>>,
+}
+
+impl TestClock {
+    fn new() -> Self {
+        Self { now: Arc::new(Mutex::new(std::time::Duration::ZERO)) }
+    }
+
+    /// The clock the draft reads.
+    fn clock(&self) -> canvas_daemon::draft::Clock {
+        let now = Arc::clone(&self.now);
+        Arc::new(move || *now.lock().unwrap_or_else(|poisoned| poisoned.into_inner()))
+    }
+
+    /// Moves the clock on.
+    fn advance(&self, by: std::time::Duration) {
+        let mut now = self.now.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        *now += by;
+    }
+}
+
 struct Rig {
     router: axum::Router,
     app: Arc<App>,
@@ -212,6 +236,7 @@ struct Rig {
     b: Arc<Rec>,
     /// Every device's sink, by device id.
     sinks: std::collections::BTreeMap<String, Arc<Rec>>,
+    clock: TestClock,
     home: TempHome,
 }
 
@@ -268,6 +293,9 @@ async fn rig_full(
         tx,
     );
     app.effects_dir = effects;
+    // A lease is driven by the test's clock, never by the wall clock.
+    let clock = TestClock::new();
+    app.draft = canvas_daemon::draft::Draft::with_clock(clock.clock());
     let app = Arc::new(app);
     *app.devices.write().await = devices.clone();
     let mut sinks = std::collections::BTreeMap::new();
@@ -280,7 +308,7 @@ async fn rig_full(
     let b = Arc::clone(sinks.get(B).expect("the second fake device has a sink"));
     // The way start-up applies the saved scenes.
     canvas_daemon::scenes::restore_active(&app).await;
-    Rig { router: canvas_daemon::api::router(app.clone()), app, a, b, sinks, home }
+    Rig { router: canvas_daemon::api::router(app.clone()), app, a, b, sinks, clock, home }
 }
 
 async fn send(
@@ -973,5 +1001,271 @@ async fn a_group_playing_a_canvas_effect_has_no_flags() {
     assert!(fits["left"].is_empty(), "a canvas group has no fits: {:?}", fits["left"]);
     assert!(!fits["right"].is_empty(), "the pattern group has its fits");
 }
+
+// ---------------------------------------------------------------- Task 7: the draft takeover
+
+const EPOCH: &str = "0123456789abcdef";
+const EPOCH2: &str = "fedcba9876543210";
+const C: &str = "fake:c";
+
+/// Three lights in one group painting solid red: the prior a pattern draft takes over from. Two
+/// are rings of twelve (the kind a pattern is built on) and one is a strip of twelve.
+fn draft_scene() -> ScenesFile {
+    ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![Scene {
+            id: "main".into(),
+            name: "Main".into(),
+            rev: 1,
+            groups: vec![group(
+                "all",
+                &["fake:a#z0", "fake:b#z0", "fake:c#z0"],
+                "solid",
+                color(RED),
+            )],
+        }],
+    }
+}
+
+async fn draft_rig(patterns: Vec<Pattern>) -> Rig {
+    rig_full(
+        patterns,
+        draft_scene(),
+        vec![device(A), device(B), device_of(C, LEDS)],
+        vec![light(A), light(B), light_of(C, Arrangement::Strip)],
+    )
+    .await
+}
+
+fn sink(rig: &Rig, id: &str) -> Arc<Rec> {
+    Arc::clone(rig.sinks.get(id).unwrap_or_else(|| panic!("no sink for {id}")))
+}
+
+/// The scene's frame at the draft's dim level.
+fn dimmed() -> Rgb8 {
+    let percent = canvas_proto::pattern::PATTERN_EDIT_DIM_PERCENT as u32;
+    Rgb8::new(
+        (RED.0 as u32 * percent / 100) as u8,
+        (RED.1 as u32 * percent / 100) as u8,
+        (RED.2 as u32 * percent / 100) as u8,
+    )
+}
+
+async fn put_pattern_draft(
+    rig: &Rig,
+    pattern: &Pattern,
+    epoch: &str,
+    seq: u64,
+) -> (StatusCode, serde_json::Value) {
+    let body = serde_json::json!({
+        "pattern": serde_json::to_value(pattern).unwrap(),
+        "props": {},
+        "epoch": epoch,
+        "seq": seq,
+    });
+    send(rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await
+}
+
+async fn status_of(rig: &Rig) -> canvas_proto::api::DraftStatus {
+    let (status, body) = send(rig, "GET", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    serde_json::from_value(body).expect("the body is a DraftStatus")
+}
+
+#[tokio::test]
+async fn a_pattern_draft_lights_the_devices_of_its_kind_and_dims_the_rest() {
+    let rig = draft_rig(Vec::new()).await;
+    shows(&rig.a, rgb(RED), "the scene before").await;
+
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Draft", LEDS, Rgb8::new(0, 0, 200)), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(true), "{answer}");
+
+    // The two rings of twelve show the draft, LED by LED.
+    for sink in [sink(&rig, A), sink(&rig, B)] {
+        shows_marked(&sink, LEDS as usize, 0, Rgb8::new(0, 0, 200), "a ring of the draft's kind")
+            .await;
+    }
+    // The strip is not of the pattern's kind: it keeps the scene's frame at the dim level.
+    shows(&sink(&rig, C), dimmed(), "the dimmed strip").await;
+    assert_ne!(dimmed(), Rgb8::BLACK, "the dimmed lights are not black");
+}
+
+#[tokio::test]
+async fn a_stroke_changes_the_lit_devices_without_rebuilding_the_scene() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let green = Rgb8::new(0, 200, 0);
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, blue), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the first stroke").await;
+
+    let builds = rig.app.scene.builds();
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Draft", LEDS, green), EPOCH, 2).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, green, "the second stroke").await;
+    assert_eq!(
+        rig.app.scene.builds(),
+        builds,
+        "a stroke swaps the pattern on its group and builds nothing"
+    );
+}
+
+#[tokio::test]
+async fn an_older_stroke_never_replaces_a_newer_one() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let green = Rgb8::new(0, 200, 0);
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, blue), EPOCH, 5).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "stroke 5").await;
+
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Draft", LEDS, green), EPOCH, 3).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(false), "the older stroke is superseded");
+    // The newer stroke is still what the lights show.
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "stroke 5 after stroke 3").await;
+}
+
+#[tokio::test]
+async fn a_new_epoch_supersedes_the_old_one() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let green = Rgb8::new(0, 200, 0);
+    let red = Rgb8::new(200, 0, 0);
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, blue), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the first page").await;
+
+    // A page the daemon has not seen is the newest page and takes the draft.
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Draft", LEDS, green), EPOCH2, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(true), "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, green, "the new page").await;
+
+    // The page that lost keeps losing, whatever its sequence.
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, red), EPOCH, 2).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["applied"], serde_json::json!(false), "the older page is superseded");
+    shows_marked(&rig.a, LEDS as usize, 0, green, "the new page after the old one").await;
+}
+
+#[tokio::test]
+async fn the_lease_ending_puts_the_scene_back() {
+    let rig = draft_rig(Vec::new()).await;
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Draft", LEDS, Rgb8::new(0, 0, 200)), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, Rgb8::new(0, 0, 200), "the draft").await;
+
+    rig.clock.advance(canvas_proto::consts::DRAFT_LEASE + Duration::from_secs(1));
+    let status = status_of(&rig).await;
+    assert!(!status.active, "the lease ran out: {status:?}");
+    shows(&rig.a, rgb(RED), "the scene after the lease").await;
+    shows(&sink(&rig, C), rgb(RED), "the strip after the lease").await;
+}
+
+#[tokio::test]
+async fn delete_stops_the_draft_and_restores_the_scene() {
+    let rig = draft_rig(Vec::new()).await;
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Draft", LEDS, Rgb8::new(0, 0, 200)), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, Rgb8::new(0, 0, 200), "the draft").await;
+
+    let (status, _) = send(&rig, "DELETE", routes::EFFECT_DRAFT, None).await;
+    assert_eq!(status, StatusCode::OK);
+    assert!(!status_of(&rig).await.active, "the draft is over");
+    shows(&rig.a, rgb(RED), "the scene after the delete").await;
+}
+
+#[tokio::test]
+async fn a_draft_with_no_device_of_its_kind_starts_and_says_so() {
+    let rig = draft_rig(Vec::new()).await;
+    // A ring of 24, a kind no fake here is.
+    let wide = pattern_with("Wide", 24, Rgb8::new(0, 0, 200));
+    let (status, answer) = put_pattern_draft(&rig, &wide, EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(answer["active"], serde_json::json!(true), "the draft still starts: {answer}");
+    assert_eq!(answer["id"], serde_json::json!("draft:pattern:Wide"));
+    assert_eq!(
+        answer["note"],
+        serde_json::json!("no device of this kind is connected"),
+        "{answer}"
+    );
+    // Nothing is of that kind, so every light is at the scene's dim level.
+    shows(&rig.a, dimmed(), "the dimmed ring").await;
+}
+
+#[tokio::test]
+async fn an_invalid_pattern_draft_is_a_422_and_a_running_draft_stays() {
+    let rig = draft_rig(Vec::new()).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let (status, answer) = put_pattern_draft(&rig, &pattern_with("Draft", LEDS, blue), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the good draft").await;
+
+    let mut broken = pattern_with("Draft", LEDS, Rgb8::new(0, 200, 0));
+    broken.frames[0].colors.pop();
+    let (status, answer) = put_pattern_draft(&rig, &broken, EPOCH, 2).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("11") && message.contains("12"), "the sentence counts them: {message}");
+
+    // The draft that was running is left alone, showing its last good stroke.
+    let status = status_of(&rig).await;
+    assert!(status.active, "the running draft stayed");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the running draft after the refusal").await;
+}
+
+#[tokio::test]
+async fn deleting_the_pattern_being_drafted_ends_the_draft_first() {
+    let rig = draft_rig(vec![pattern("Intake")]).await;
+    let blue = Rgb8::new(0, 0, 200);
+    let (status, answer) =
+        put_pattern_draft(&rig, &pattern_with("Intake", LEDS, blue), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    shows_marked(&rig.a, LEDS as usize, 0, blue, "the pattern being drafted").await;
+
+    // No group plays it, so no force is needed: the draft ends before the pattern goes.
+    let (status, answer) = send(&rig, "DELETE", &pattern_path(INTAKE), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(rig.app.patterns.get(INTAKE).is_none(), "the pattern is gone");
+    assert!(!status_of(&rig).await.active, "the draft ended first");
+    shows(&rig.a, rgb(RED), "the scene is back").await;
+}
+
+#[tokio::test]
+async fn a_draft_with_html_and_a_pattern_is_refused() {
+    let rig = draft_rig(Vec::new()).await;
+    let body = serde_json::json!({
+        "html": "<html><body>hi</body></html>",
+        "pattern": serde_json::to_value(pattern_with("Draft", LEDS, Rgb8::new(0, 0, 200))).unwrap(),
+        "props": {},
+        "epoch": EPOCH,
+        "seq": 1,
+    });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("html") && message.contains("pattern"), "{message}");
+    assert!(!status_of(&rig).await.active, "nothing started");
+}
+
+#[tokio::test]
+async fn a_draft_with_no_field_says_what_it_needs() {
+    let rig = draft_rig(Vec::new()).await;
+    let body = serde_json::json!({ "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert_eq!(message, "a draft needs html, stack or pattern", "{answer}");
+}
+
 
 
