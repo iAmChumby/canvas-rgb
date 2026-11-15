@@ -87,6 +87,8 @@ function fake(): UseScene & { calls: Record<string, unknown[][]> } {
     create: spy("create"),
     remove: spy("remove"),
     renameScene: spy("renameScene"),
+    moveGroup: spy("moveGroup") as unknown as UseScene["moveGroup"],
+    reorderScenes: spy("reorderScenes"),
     undo: spy("undo"),
     redo: spy("redo"),
     canUndo: false,

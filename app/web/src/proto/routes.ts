@@ -1,4 +1,4 @@
-// Mirrors crates/canvas-proto/src/api.rs `routes`. Spine file: edit only through the spine owner.
+﻿// Mirrors crates/canvas-proto/src/api.rs `routes`. Spine file: edit only through the spine owner.
 // Every request needs `Authorization: Bearer <token>` except GET STATUS (G9).
 export const routes = {
   status: "/api/v1/status",
@@ -86,6 +86,10 @@ export const routes = {
   // PUT GroupBrightnessPut. As groupProps: saved, rev + 1, answers the scene.
   groupBrightness: (scene: string, group: string) =>
     `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/brightness`,
+  // POST GroupMove: moves or copies one group to another scene (#368). 409 with `which`
+  // ("from" or "to") and that scene when a rev is stale, 422 when a scene rule is broken.
+  groupMove: (scene: string, group: string) =>
+    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/move`,
   // GET LightsResponse.
   lights: "/api/v1/lights",
   // PATCH LightPatch.
