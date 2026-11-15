@@ -62,12 +62,19 @@ function group(members: string[], mode: GroupMode) {
   return { id: "g", name: "Group", members, mode };
 }
 
+/** The first light of a canvas, or a thrown error: the tests know their lists are not empty. */
+function firstLight(canvas: ReturnType<typeof buildGroupCanvas>) {
+  const light = canvas.lights[0];
+  if (light === undefined) throw new Error("the canvas has no light");
+  return light;
+}
+
 describe("the builder's frames (#372)", () => {
   it("gives a strip the whole slot, not the union of its cells", () => {
     const devices = [device("dev-a", [zone(0, { type: "linear" }, 8)])];
     const lights = [strip("a", 8)];
     const canvas = buildGroupCanvas(group(["a"], "each_its_own"), lights, devices);
-    const box = canvas.lights[0].box;
+    const box = firstLight(canvas).box;
     expect(box.x).toBe(0);
     expect(box.width).toBe(320);
     expect(box.y).toBe(0);
@@ -87,7 +94,7 @@ describe("the builder's frames (#372)", () => {
     const devices = [device("dev-a", [zone(0, { type: "linear" }, 8)])];
     const lights = [lightView("a", "dev-a", "ring", 8)];
     const canvas = buildGroupCanvas(group(["a"], "each_its_own"), lights, devices);
-    const box = canvas.lights[0].box;
+    const box = firstLight(canvas).box;
     expect(box.width).toBeLessThan(320);
     expect(box.height).toBeLessThan(200);
   });
