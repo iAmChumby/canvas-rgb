@@ -312,17 +312,21 @@ export function ColorPicker({
       </div>
 
       {swatches && swatches.length > 0 && (
-        <div className="picker-swatches" role="group" aria-label={`${label} other colours`}>
-          {swatches.map((sw) => {
+        <div className="picker-swatches" role="group" aria-label={`${label} colours`}>
+          {swatches.map((sw, at) => {
             const parsed = parseHex(sw.hex);
             const swHex = parsed ?? hex;
+            // The swatch that names the colour in the field is marked, not dropped (#369): the
+            // list stays the same length, so the picker keeps one size.
+            const current = swHex.toLowerCase() === hex.toLowerCase();
             return (
               <button
-                key={swHex}
+                key={`${swHex}-${at}`}
                 type="button"
                 className="picker-swatch"
                 style={{ "--c": swHex } as CSSProperties}
                 aria-label={sw.label ? `${sw.label} ${swHex}` : swHex}
+                aria-current={current ? "true" : undefined}
                 title={sw.label ?? swHex}
                 onClick={() => {
                   const next = hexToHsv(swHex, liveRef.current.h);
