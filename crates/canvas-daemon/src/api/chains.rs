@@ -508,6 +508,7 @@ async fn finish_setup_locked(app: &Arc<App>) -> Result<u32, ApiFailure> {
         roll_back_intent(app, &home, &intent).await;
         if crate::chain_records::read_intent(&home).is_some() {
             crate::identify::restore(app).await;
+            crate::scenes::apply_for_devices(app).await;
             return Err(ApiFailure::internal(
                 "the unfinished commit could not be undone; the next start finishes it",
             ));
@@ -570,6 +571,11 @@ async fn finish_setup_locked(app: &Arc<App>) -> Result<u32, ApiFailure> {
 /// record with no intent is a setup that was open when the daemon stopped, and it puts the header
 /// back on its own.
 pub async fn replay_leftovers(app: &Arc<App>) {
+    // An open setup's records are its own, and a start finished any earlier ones before it
+    // opened: a replay that waited for the step lock behind that start leaves them alone.
+    if app.identify.setup_session().is_some() {
+        return;
+    }
     let home = app.store.read().await.home.clone();
     if let Some(intent) = crate::chain_records::read_intent(&home) {
         roll_back_intent(app, &home, &intent).await;
@@ -639,7 +645,13 @@ async fn roll_back_intent(
     match resized {
         Ok(()) => {
             crate::chain_records::delete_intent(home);
-            crate::chain_records::delete_restore(home);
+            // The restore record is the same header's (one setup at a time); one that names
+            // another header is that header's to put back, so it stays.
+            if crate::chain_records::read_restore(home).is_none_or(|record| {
+                record.device_id == intent.device_id && record.zone_index == intent.zone_index
+            }) {
+                crate::chain_records::delete_restore(home);
+            }
             if let Err(e) = rediscover(app).await {
                 tracing::warn!(error = %e.message, "the rolled-back header's list could not be read");
             }

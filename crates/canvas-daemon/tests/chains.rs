@@ -1582,8 +1582,14 @@ async fn a_start_puts_an_earlier_header_back_first() {
         .await,
         "the daemon never reconnected"
     );
+    let resizes = rig.server.resize_count(0);
     let setup = started(&rig, 0).await;
-    assert_eq!(rig.server.zone_leds(0, 1), Some(SECOND_EARLIER), "header 1 is back");
+    assert_eq!(
+        rig.server.resize_count(0),
+        resizes + 2,
+        "the start put header 1 back, then raised header 0"
+    );
+    assert_eq!(rig.server.zone_leds(0, 1), Some(SECOND_EARLIER), "header 1 is at its earlier length");
     assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
     assert_eq!(
         canvas_daemon::chain_records::read_restore(&rig.home),
@@ -1634,4 +1640,24 @@ async fn a_cancel_racing_a_commit_waits_and_the_commit_stands() {
     assert_eq!(rig.server.zone_leds(0, 0), Some(FINAL));
     assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 7, "the parts stay");
     assert_eq!(read_zones(&rig.home).sizes[BOARD].get(&0).copied(), Some(FINAL));
+}
+
+/// A start-up replay that waited for the step lock behind a start runs after that setup opened:
+/// the open setup's record and raised header are its own, and the replay leaves them alone.
+#[tokio::test]
+async fn a_late_replay_leaves_an_open_setup_alone() {
+    let rig = rig("late-replay", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let resizes = rig.server.resize_count(0);
+
+    canvas_daemon::api::chains::replay_leftovers(&rig.app).await;
+
+    assert_eq!(rig.server.resize_count(0), resizes, "no resize");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(300), "the header stays raised");
+    assert!(rig.home.join(CHAIN_RESTORE_FILE).exists(), "the setup keeps its record");
+    let (status, body) = cancel(&rig, 0, &setup.session).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(EARLIER));
 }
