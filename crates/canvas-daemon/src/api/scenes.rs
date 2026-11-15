@@ -74,10 +74,11 @@ fn save_failure(store: &crate::storage::Store, error: std::io::Error) -> ApiFail
 async fn response(app: &App) -> ScenesResponse {
     let store = app.store.read().await;
     let active = scenes::active_scene(&store.scenes);
+    let lights = store.lights.lights.clone();
     ScenesResponse {
         active: active.id.clone(),
         scenes: store.scenes.scenes.clone(),
-        group_states: scenes::group_states(app, active),
+        group_states: scenes::group_states(app, active, &lights).await,
     }
 }
 
