@@ -131,17 +131,7 @@ export function buildGroupPlan(
   lights: readonly Light[],
   devices: readonly DeviceInfo[],
 ): GroupPlan {
-  // The members that have LEDs, in the group's order.
-  const placed: { light: Light; count: number }[] = [];
-  for (const member of members) {
-    // A member named twice is one member: the first occurrence holds the slot.
-    if (placed.some((p) => p.light.id === member)) continue;
-    const found = lights.find((l) => l.id === member);
-    if (!found) continue;
-    const count = lightLedCount(found, devices);
-    if (count === 0) continue;
-    placed.push({ light: found, count });
-  }
+  const placed = placedMembers(members, lights, devices);
 
   // The group's LEDs: what the slots are shared out by.
   let total = 0;
@@ -158,6 +148,63 @@ export function buildGroupPlan(
     before += p.count;
   }
   return plan;
+}
+
+/**
+ * The members that have LEDs, in the group's order, with their LED counts.
+ *
+ * A member named twice is one member: the first occurrence holds the slot. A member that
+ * names no light, or a light whose device is not in `devices`, is skipped, and a light
+ * whose zone has no LEDs left gets no slot.
+ */
+function placedMembers(
+  members: readonly string[],
+  lights: readonly Light[],
+  devices: readonly DeviceInfo[],
+): { light: Light; count: number }[] {
+  const placed: { light: Light; count: number }[] = [];
+  for (const member of members) {
+    // A member named twice is one member: the first occurrence holds the slot.
+    if (placed.some((p) => p.light.id === member)) continue;
+    const found = lights.find((l) => l.id === member);
+    if (!found) continue;
+    const count = lightLedCount(found, devices);
+    if (count === 0) continue;
+    placed.push({ light: found, count });
+  }
+  return placed;
+}
+
+/**
+ * The slot a member's LEDs stand in, in the group's canvas.
+ *
+ * The planner gives every member a slot: in flow across the canvas is cut into
+ * side-by-side shares by LED count, and in each its own the slot is the whole canvas.
+ *
+ * The editor's frame for a member is that slot, not the union of the member's cells. A
+ * strip's cells are small squares at the LEDs themselves, so their union leaves the ends
+ * of the slot empty: eight LEDs in a 320-unit slot lose 33 units at the two ends, and the
+ * frame the owner draws and picks is shorter than the strip it stands for.
+ */
+export function memberSlot(
+  members: readonly string[],
+  mode: GroupMode,
+  lights: readonly Light[],
+  devices: readonly DeviceInfo[],
+  lightId: string,
+): { x: number; y: number; width: number; height: number } | null {
+  const placed = placedMembers(members, lights, devices);
+  let total = 0;
+  for (const p of placed) total += p.count;
+  let before = 0;
+  for (const p of placed) {
+    const slot = slotFor(mode, before, p.count, total);
+    before += p.count;
+    if (p.light.id === lightId) {
+      return { x: slot.x, y: slot.y, width: slot.w, height: slot.h };
+    }
+  }
+  return null;
 }
 
 /**

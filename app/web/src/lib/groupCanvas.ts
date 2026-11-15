@@ -8,7 +8,7 @@
 // `buildGroupCanvas` takes a group; `wholeLightsCanvas` takes every light as one flow-across
 // group, which is what the builder shows when it was not opened from a group.
 
-import { buildGroupPlan, CANVAS_HEIGHT, CANVAS_WIDTH } from "@/lib/arrangement";
+import { buildGroupPlan, memberSlot, CANVAS_HEIGHT, CANVAS_WIDTH } from "@/lib/arrangement";
 import type { Arrangement } from "@/proto/Arrangement";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { Group } from "@/proto/Group";
@@ -70,12 +70,8 @@ export function buildGroupCanvas(
   lights: readonly LightView[],
   devices: readonly DeviceInfo[],
 ): GroupCanvas {
-  const plan = buildGroupPlan(
-    group.members,
-    group.mode,
-    lights.map((l) => l.light),
-    devices,
-  );
+  const lightList = lights.map((l) => l.light);
+  const plan = buildGroupPlan(group.members, group.mode, lightList, devices);
   const out: CanvasLight[] = [];
   for (const samples of plan.lights) {
     const view = lights.find((l) => l.light.id === samples.light);
@@ -91,9 +87,14 @@ export function buildGroupCanvas(
     // A light with no sampled LED has no place on the canvas: the daemon draws it black.
     if (!cells) continue;
     // A strip's LEDs read small square cells at mid-height (#372), but the light still owns its
-    // whole slot: the frame, the hit test and the area picker keep the full height.
+    // whole slot: the frame, the hit test and the area picker keep the slot's edges, not the
+    // union of the cells, which leaves the ends of the slot empty (33 of 320 units for eight
+    // LEDs in a whole canvas).
+    const slot = memberSlot(group.members, group.mode, lightList, devices, samples.light);
     const box =
-      view.light.arrangement === "strip" ? { ...cells, y: 0, height: CANVAS_HEIGHT } : cells;
+      view.light.arrangement === "strip" && slot
+        ? { x: slot.x, y: slot.y, width: slot.width, height: slot.height }
+        : cells;
     out.push({
       id: view.light.id,
       label: view.label,

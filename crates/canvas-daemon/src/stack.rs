@@ -1985,6 +1985,24 @@ mod tests {
             }
         }
         assert_eq!(covered, 4, "every one of device a's LEDs was checked");
+        // The area itself, not only the LED's centre: every pixel the LED's cell covers is
+        // the device's area, under the rule the sampler reads (#372). The cell is a small
+        // square at the LED, so the area is the square the sampler averages over.
+        for samples in plan.lights.iter().filter(|l| l.device_id == DeviceId("a".into())) {
+            for led in &samples.leds {
+                let [bx0, by0, bx1, by1] = led.bounds;
+                let x0 = (((bx0 * scale) - 0.5).ceil() as i64).clamp(0, 79) as u32;
+                let y0 = (((by0 * scale) - 0.5).ceil() as i64).clamp(0, 49) as u32;
+                let x1 = ((((bx1 * scale) - 0.5).floor() as i64).clamp(0, 79) as u32).max(x0);
+                let y1 = ((((by1 * scale) - 0.5).floor() as i64).clamp(0, 49) as u32).max(y0);
+                for y in y0..=y1 {
+                    for x in x0..=x1 {
+                        assert!(a.contains(x, y), "device a's area holds the pixel {x},{y} its LED reads");
+                        assert!(!b.contains(x, y), "device b is outside a's area");
+                    }
+                }
+            }
+        }
         assert!((group.width, group.height) == (80, 50), "the group canvas at the scene's scale");
     }
 
