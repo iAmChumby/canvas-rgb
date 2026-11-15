@@ -57,6 +57,9 @@ function queued<T>(id: string, send: () => Promise<T>, first: boolean): Promise<
 }
 
 /** How many thumbnail requests are on the wire now (for tests). */
+/** The id prefix of a saved pattern (`crates/canvas-proto/src/pattern.rs`). */
+const PATTERN_ID_PREFIX = "pattern:";
+
 export function thumbsInFlight(): number {
   return inFlight;
 }
@@ -66,6 +69,8 @@ export function thumbsInFlight(): number {
  * and is not kept, so the next tile that mounts asks again (a daemon hiccup is not cached).
  */
 export function loadThumb(id: string, opts: { first?: boolean } = {}): Promise<Thumb | null> {
+  // A pattern has no canvas frame, so the daemon has no picture of it (#339): nothing is asked.
+  if (id.startsWith(PATTERN_ID_PREFIX)) return Promise.resolve(null);
   let hit = cache.get(id);
   if (hit && opts.first) {
     // Asked for already but still waiting: the picture the person is looking at goes first.
