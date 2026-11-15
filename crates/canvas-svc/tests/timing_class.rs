@@ -101,7 +101,6 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/tests/api.rs", "from_millis(60)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/api.rs", "from_millis(70)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/api.rs", "from_millis(250)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
-    ("canvas-daemon/tests/api.rs", "from_millis(350)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/api.rs", "from_millis(300)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/exit_lines.rs", "sleep(Duration::from_millis(100))", "safe: the poll loop of a child exit, with a 20 s deadline that panics"),
     ("canvas-daemon/tests/wave1.rs", "sleep(std::time::Duration::from_secs(2))", "open: 2 s for an engine to park, then asserts it parked; a state reached in about 100 ms"),
