@@ -147,8 +147,8 @@ pub async fn put_stack(
             crate::stacks::StackRefusal::Invalid(message) => ApiFailure::validation(message),
         },
     )?;
-    // The scene must not run more HTML groups than it may: a stack with an HTML layer is one,
-    // and a group of the active scene plays this stack.
+    // The scene must not start more HTML runtimes than a scene may: a stack with an HTML layer
+    // starts one for each, and a group of the active scene plays this stack.
     crate::scenes::check_stack_html_limit(&app, &stack)
         .await
         .map_err(ApiFailure::validation)?;

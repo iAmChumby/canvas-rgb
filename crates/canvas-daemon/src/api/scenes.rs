@@ -255,8 +255,8 @@ pub async fn delete_scene(
 
 /// `PUT /api/v1/scenes/active`.
 ///
-/// The scene that is set must be able to run: a scene with more HTML groups than a scene may
-/// have is refused, before the lights change.
+/// The scene that is set must be able to run: a scene that starts more HTML runtimes than a scene
+/// may have is refused, before the lights change.
 pub async fn put_active(
     State(app): State<Arc<App>>,
     Json(request): Json<SceneActivePut>,
@@ -267,7 +267,7 @@ pub async fn put_active(
         let Some(scene) = store.scenes.scenes.iter().find(|s| s.id == request.id) else {
             return Err(ApiFailure::not_found(format!("no scene with the id {}", request.id)));
         };
-        // The scene must not run more HTML groups than a scene may: it is about to be on the
+        // The scene must not start more HTML runtimes than a scene may: it is about to be on the
         // lights.
         scenes::check_html_limit(&app, scene).map_err(ApiFailure::validation)?;
         let before = std::mem::replace(&mut store.scenes.active, request.id.clone());
