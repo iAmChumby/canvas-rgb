@@ -95,7 +95,9 @@ pub fn migrate(layouts: Option<&LayoutsFile>, devices: &[DeviceInfo]) -> (Lights
 
     let mut first_seen: Vec<(Key, &PlacedZone)> = Vec::new();
     for layout in &ordered {
-        for placed in layout.zones.iter().filter(|p| has_leds(p, devices)) {
+        // A device the daemon never drives (`crate::is_driven`) makes no light, however the layout
+        // placed it: nothing could light it, and it would show as a nameless "not connected" entry (#393).
+        for placed in layout.zones.iter().filter(|p| crate::is_driven(&p.device_id) && has_leds(p, devices)) {
             let key = key_of(placed);
             if !first_seen.iter().any(|(k, _)| *k == key) {
                 first_seen.push((key, placed));
@@ -1023,5 +1025,34 @@ mod tests {
             );
             canvas_proto::scene::validate_scene(scene, &lights.lights).expect("each migrated scene is valid");
         }
+    }
+
+    /// OpenRGB's copy of the MonsGeek keyboard, which `is_driven` drops from discovery (#393).
+    const RAW_KEYBOARD: &str = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
+
+    #[test]
+    fn a_layout_placing_a_device_the_daemon_never_drives_migrates_to_no_light() {
+        let layouts = file(
+            "a",
+            vec![layout("a", "Gaming", vec![placed("openrgb:board", 0), placed(RAW_KEYBOARD, 0)], None)],
+        );
+        // Discovery dropped the raw copy, so the device list never holds it.
+        let (lights, scenes) = migrate(Some(&layouts), &[board()]);
+        let ids: Vec<&str> = lights.lights.iter().map(|l| l.id.as_str()).collect();
+        assert_eq!(ids, vec!["openrgb:board#z0"], "no light for the raw HID copy");
+        assert_eq!(scenes.scenes[0].groups[0].members, vec!["openrgb:board#z0".to_string()]);
+        // A device list that does hold it (the raw copy connected) still makes no light.
+        let mut raw = device(RAW_KEYBOARD, 1, vec![zone(0, ZoneKind::Linear, 4)]);
+        raw.connected = true;
+        let (lights, _) = migrate(Some(&layouts), &[board(), raw]);
+        assert_eq!(lights.lights.len(), 1, "{:?}", lights.lights);
+    }
+
+    #[test]
+    fn the_first_run_makes_no_light_for_a_device_the_daemon_never_drives() {
+        let raw = device(RAW_KEYBOARD, 1, vec![zone(0, ZoneKind::Linear, 4)]);
+        let (lights, scenes) = migrate(None, &[board(), raw]);
+        assert_eq!(lights.lights.len(), 3, "the board's three zones only");
+        assert!(scenes.scenes[0].groups[0].members.iter().all(|m| !m.to_lowercase().contains("vid_3151")));
     }
 }
