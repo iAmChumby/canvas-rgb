@@ -235,6 +235,24 @@ struct RunGroup {
     fitted: Vec<Vec<Rgb8>>,
     /// The effect generation the canvas was last cleared for.
     seen_effect_generation: u64,
+    /// What the group drew last frame, for the group preview (#378). Written by
+    /// [`run_group`] every frame (one byte), read only while a group is selected.
+    drawn: Drawn,
+    /// The group's brightness as of last frame, 0.0..=1.0: the factor the LEDs got.
+    factor: f32,
+}
+
+/// What a group put on its canvas in the last frame: the choice the group preview needs to
+/// decide between the canvas, black and no frame at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drawn {
+    /// A canvas effect ran: the canvas is the picture.
+    Canvas,
+    /// No effect, or a failed one: the LEDs are black, and so is the picture. An Off group keeps
+    /// its last pixels on the canvas, so the canvas must not be shown for it.
+    Black,
+    /// A pattern: its canvas is never drawn, so there is no picture to send.
+    Pattern,
 }
 
 impl RunGroup {
@@ -298,11 +316,39 @@ pub(crate) struct FrameParams {
     pub input_source: Option<Arc<dyn InputSource>>,
     /// Whether a light preview sink is set.
     pub want_light_preview: bool,
+    /// The group preview's selection, resolved under the lock to the group's place in this
+    /// frame's scene (#378). `None` while no group is selected, and the frame then does nothing
+    /// extra: no copy, no allocation.
+    pub group_preview: Option<GroupTap>,
+}
+
+/// The selected group of the group preview, as one frame sees it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct GroupTap {
+    /// The group's place in the scene's group list.
+    pub index: usize,
+    /// Which `set_group_preview` call chose it: the newest call has the biggest number.
+    pub serial: u64,
+}
+
+/// One group's picture for the preview sink: the group's own canvas times its brightness, in
+/// the wire format of the editor preview (`width`, `height`, `width*height*3` RGB bytes).
+pub(crate) struct GroupFrame {
+    /// The scene generation the frame was built under. A frame whose scene has been replaced is
+    /// dropped at delivery, never sent.
+    pub generation: u64,
+    /// The selection the frame was built for; a frame for an older selection is dropped.
+    pub serial: u64,
+    pub width: u32,
+    pub height: u32,
+    pub rgb: Vec<u8>,
 }
 
 /// What a frame gives back besides the device frames.
 pub(crate) struct FrameOutput {
     pub light_frame: Option<LightFrame>,
+    /// The selected group's picture, at most [`LIGHT_PREVIEW_MAX_FPS`] a second.
+    pub group_frame: Option<GroupFrame>,
     /// How many effect panics this frame caught.
     pub panics: u64,
 }
@@ -318,6 +364,13 @@ pub(crate) struct SceneRunner {
     last_sent: HashMap<DeviceId, Vec<Rgb8>>,
     fade: Option<Fade>,
     last_light_preview_at: Option<Instant>,
+    /// The group preview's rate limit: when the last picture was built, and for which selection
+    /// (a new selection gets its first picture at once).
+    last_group_frame_at: Option<Instant>,
+    last_group_serial: Option<u64>,
+    /// How many group pictures have been built, ever. The only place one is built bumps it, so a
+    /// test reads "nothing is copied while no group is selected" off this number.
+    group_frames_built: u64,
     /// The frame's groups, on their way to the state. The buffer is reused every frame.
     works: Vec<GroupWork>,
     /// The groups coming back from the frame. The buffer is reused every frame.
@@ -343,6 +396,9 @@ impl SceneRunner {
             last_sent: HashMap::new(),
             fade: None,
             last_light_preview_at: None,
+            last_group_frame_at: None,
+            last_group_serial: None,
+            group_frames_built: 0,
             works: Vec::new(),
             done: Vec::new(),
             warned_out_of_range: false,
@@ -368,6 +424,7 @@ impl SceneRunner {
     /// Runs one frame: effects, sampling, merge, global stages, fade. The device frames wait in
     /// the runner for [`SceneRunner::take_frame`].
     pub fn render(&mut self, mut input: SceneInput, params: &FrameParams) -> FrameOutput {
+        let generation = input.generation;
         if let Some(rebuild) = input.rebuild {
             self.rebuild(rebuild, input.generation);
             // A new scene replaces a fade that was still running; `start_fade` below starts a
@@ -407,9 +464,10 @@ impl SceneRunner {
 
         self.merge_devices();
         let light_frame = self.light_frame(params);
+        let group_frame = self.group_frame(params, generation);
         self.apply_global_stages(params);
         self.apply_fade(params.dt);
-        FrameOutput { light_frame, panics }
+        FrameOutput { light_frame, group_frame, panics }
     }
 
     /// Records a frame that was sent to a device's sink, whatever mode sent it.
@@ -489,6 +547,8 @@ impl SceneRunner {
                     reversed,
                     fitted: Vec::new(),
                     seen_effect_generation: u64::MAX,
+                    drawn: Drawn::Black,
+                    factor: 1.0,
                 }
             })
             .collect();
@@ -557,6 +617,55 @@ impl SceneRunner {
             .map(|(light, colors)| (light.light.clone(), colors.clone()))
             .collect();
         Some(LightFrame { lights })
+    }
+
+    /// The group preview (#378): the selected group's own canvas times its brightness, at most
+    /// [`LIGHT_PREVIEW_MAX_FPS`] a second.
+    ///
+    /// With no group selected this returns on its first line: nothing is read, copied or
+    /// allocated. A group the scene does not hold, or one that plays a pattern, has no picture.
+    /// An Off or failed group sends black, so the picture never shows pixels the lights no longer
+    /// show.
+    fn group_frame(&mut self, params: &FrameParams, generation: u64) -> Option<GroupFrame> {
+        let tap = params.group_preview?;
+        if self.last_group_serial != Some(tap.serial) {
+            // A new selection (a takeover, or another group) gets its first picture at once.
+            self.last_group_serial = Some(tap.serial);
+            self.last_group_frame_at = None;
+        }
+        let interval = Duration::from_nanos(1_000_000_000 / u64::from(LIGHT_PREVIEW_MAX_FPS));
+        if self.last_group_frame_at.is_some_and(|at| params.now.duration_since(at) < interval) {
+            return None;
+        }
+        let group = self.groups.get(tap.index)?;
+        let rgb = match group.drawn {
+            Drawn::Pattern => return None,
+            Drawn::Black => vec![0; group.canvas.pixels.len() * 3],
+            Drawn::Canvas => {
+                let mut rgb = Vec::with_capacity(group.canvas.pixels.len() * 3);
+                for pixel in &group.canvas.pixels {
+                    // The conversion and the brightness the LEDs got (`run_group`).
+                    let c = scaled(Rgb8::from_f32(*pixel), group.factor);
+                    rgb.extend_from_slice(&[c.r, c.g, c.b]);
+                }
+                rgb
+            }
+        };
+        self.last_group_frame_at = Some(params.now);
+        self.group_frames_built += 1;
+        Some(GroupFrame {
+            generation,
+            serial: tap.serial,
+            width: group.canvas.width,
+            height: group.canvas.height,
+            rgb,
+        })
+    }
+
+    /// How many group pictures this runner has built.
+    #[cfg(test)]
+    pub fn group_frames_built(&self) -> u64 {
+        self.group_frames_built
     }
 
     /// Global brightness, warmth and the device's white balance, as one gain per channel.
@@ -682,6 +791,14 @@ fn run_group(
     // colours fitted for each light; a canvas group samples the canvas.
     let live = !work.failed && failure.is_none() && effect.is_some();
     let factor = f32::from(work.brightness.min(100)) / 100.0;
+    group.factor = factor;
+    group.drawn = if !live {
+        Drawn::Black
+    } else if is_pattern {
+        Drawn::Pattern
+    } else {
+        Drawn::Canvas
+    };
     for (index, (light, out)) in
         group.plan.lights.iter().zip(group.colors.iter_mut()).enumerate()
     {
@@ -725,10 +842,19 @@ fn run_group(
 fn scale_light(colors: &mut [Rgb8], factor: f32) {
     if factor < 1.0 {
         for c in colors.iter_mut() {
-            let f = c.to_f32();
-            *c = Rgb8::from_f32([f[0] * factor, f[1] * factor, f[2] * factor]);
+            *c = scaled(*c, factor);
         }
     }
+}
+
+/// One colour times the group's brightness (`factor` is 0.0..=1.0). The one place the LEDs and
+/// the group preview share the arithmetic, so the picture and the lights agree to the bit.
+fn scaled(color: Rgb8, factor: f32) -> Rgb8 {
+    if factor >= 1.0 {
+        return color;
+    }
+    let f = color.to_f32();
+    Rgb8::from_f32([f[0] * factor, f[1] * factor, f[2] * factor])
 }
 
 #[cfg(test)]
@@ -807,6 +933,7 @@ mod tests {
             white_balance: Arc::new(HashMap::new()),
             input_source: None,
             want_light_preview: false,
+            group_preview: None,
         }
     }
 
@@ -1125,5 +1252,298 @@ mod tests {
     fn the_scene_canvas_is_80_by_50() {
         let canvas = Canvas::with_scale(SCENE_RENDER_SCALE);
         assert_eq!((canvas.width, canvas.height), (80, 50));
+    }
+}
+
+/// The group preview's runner side (#378).
+#[cfg(test)]
+mod group_preview_tests {
+    use super::*;
+    use canvas_proto::device::{DeviceKind, ZoneInfo, ZoneKind};
+    use canvas_proto::props::PropertySchema;
+    use canvas_proto::scene::{zone_light_id, Arrangement};
+
+    const RED: Rgb8 = Rgb8::new(255, 0, 0);
+    const BLUE: Rgb8 = Rgb8::new(0, 0, 255);
+
+    fn strip_device(id: &str, leds: u32) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId(id.to_string()),
+            name: id.to_string(),
+            vendor: "test".into(),
+            kind: DeviceKind::Other,
+            adapter: "fake".into(),
+            adapter_index: 0,
+            serial: String::new(),
+            location: String::new(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "zone0".into(),
+                kind: ZoneKind::Linear,
+                led_count: leds,
+                min_leds: leds,
+                max_leds: leds,
+                resizable: false,
+            }],
+            connected: true,
+        }
+    }
+
+    fn light(id: &str) -> Light {
+        let device_id = DeviceId(id.to_string());
+        Light {
+            id: zone_light_id(&device_id, 0),
+            device_id,
+            zone_index: 0,
+            leds: None,
+            name: None,
+            arrangement: Arrangement::Strip,
+            reversed: false,
+            kind: None,
+            copies: None,
+        }
+    }
+
+    /// Paints the left half of the canvas red and the right half blue; panics on `update` when
+    /// told to.
+    struct Halves {
+        panic: bool,
+    }
+
+    impl Effect for Halves {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test_halves".into(),
+                name: "Halves".into(),
+                description: String::new(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+        fn init(&mut self, _props: &Props) {}
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            if self.panic {
+                panic!("the effect broke");
+            }
+            let half = canvas.width / 2;
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    canvas.set(x, y, if x < half { [1.0, 0.0, 0.0] } else { [0.0, 0.0, 1.0] });
+                }
+            }
+        }
+    }
+
+    /// A scene of one group `id` over device `d1` (4 LEDs), playing `effect` at `brightness`.
+    fn scene_of(id: &str, effect: Option<Box<dyn Effect>>, brightness: u8) -> SceneState {
+        SceneState {
+            generation: 1,
+            lights: vec![light("d1")],
+            groups: vec![GroupSlot {
+                id: id.into(),
+                members: vec!["d1#z0".into()],
+                mode: GroupMode::FlowAcross,
+                brightness,
+                effect,
+                needs: InputNeeds::default(),
+                effect_generation: 1,
+                started: Instant::now(),
+                pending_props: None,
+                failed: None,
+            }],
+            fade_pending: false,
+        }
+    }
+
+    fn params(group_preview: Option<GroupTap>, now: Instant) -> FrameParams {
+        FrameParams {
+            dt: 1.0 / 30.0,
+            now,
+            brightness: 1.0,
+            warmth: [1.0; 3],
+            white_balance: Arc::new(HashMap::new()),
+            input_source: None,
+            want_light_preview: false,
+            group_preview,
+        }
+    }
+
+    /// One frame, as the engine's loop runs it; the frame's output comes back.
+    fn frame(scene: &mut SceneState, runner: &mut SceneRunner, params: &FrameParams) -> FrameOutput {
+        let generation = runner.generation();
+        let works = runner.take_works();
+        let input = scene.take_input(&[strip_device("d1", 4)], generation, works);
+        let output = runner.render(input, params);
+        let mut done = std::mem::take(runner.done());
+        let superseded = scene.put_back(&mut done);
+        assert!(superseded.is_empty(), "one frame supersedes no effect");
+        output
+    }
+
+    fn tap(index: usize, serial: u64) -> Option<GroupTap> {
+        Some(GroupTap { index, serial })
+    }
+
+    fn pixel(frame: &GroupFrame, x: u32, y: u32) -> Rgb8 {
+        let at = ((y * frame.width + x) * 3) as usize;
+        Rgb8::new(frame.rgb[at], frame.rgb[at + 1], frame.rgb[at + 2])
+    }
+
+    #[test]
+    fn nothing_is_built_while_no_group_is_selected() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        let mut runner = SceneRunner::new();
+        let start = Instant::now();
+        for i in 0..90 {
+            // A frame every 100 ms of fake time: far past the rate limit, so only the
+            // selection can be what holds the picture back.
+            let output = frame(&mut scene, &mut runner, &params(None, start + Duration::from_millis(100 * i)));
+            assert!(output.group_frame.is_none(), "frame {i} built a picture nobody asked for");
+        }
+        assert_eq!(runner.group_frames_built(), 0, "no picture was ever built");
+    }
+
+    #[test]
+    fn the_picture_is_the_groups_own_80_by_50_canvas() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        let mut runner = SceneRunner::new();
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), Instant::now()));
+        let picture = output.group_frame.expect("a picture");
+        assert_eq!((picture.width, picture.height), (80, 50));
+        assert_eq!(picture.rgb.len(), 80 * 50 * 3, "12,000 bytes");
+        assert_eq!(pixel(&picture, 0, 0), RED);
+        assert_eq!(pixel(&picture, 39, 49), RED);
+        assert_eq!(pixel(&picture, 40, 0), BLUE);
+        assert_eq!(pixel(&picture, 79, 49), BLUE);
+        assert_eq!((picture.generation, picture.serial), (1, 1));
+        assert_eq!(runner.group_frames_built(), 1);
+    }
+
+    #[test]
+    fn the_groups_brightness_is_applied_and_matches_the_lights() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 50);
+        let mut runner = SceneRunner::new();
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), Instant::now()));
+        let picture = output.group_frame.expect("a picture");
+        let leds = runner.take_frame(&DeviceId("d1".into()), 4).expect("the device frame");
+        // The device frame is 4 LEDs across the 80-pixel canvas: the first reads red pixels, the
+        // last blue ones. The picture is what they were handed, to the bit.
+        assert_eq!(leds[0], pixel(&picture, 0, 0), "the first LED and the picture's first pixel");
+        assert_eq!(leds[3], pixel(&picture, 79, 0), "the last LED and the picture's last pixel");
+        assert_eq!(pixel(&picture, 0, 0), Rgb8::new(128, 0, 0));
+        assert_eq!(pixel(&picture, 79, 0), Rgb8::new(0, 0, 128));
+    }
+
+    #[test]
+    fn an_off_group_sends_black_not_its_last_pixels() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        let mut runner = SceneRunner::new();
+        let now = Instant::now();
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), now));
+        assert_eq!(pixel(&output.group_frame.expect("lit"), 0, 0), RED);
+        // The group goes dark with its effect generation unchanged, so the runner does not clear
+        // the canvas: it keeps the last pixels, the picture must not.
+        scene.groups[0].effect = None;
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), now + Duration::from_secs(1)));
+        let picture = output.group_frame.expect("black, not nothing");
+        assert_eq!(picture.rgb.len(), 80 * 50 * 3);
+        assert!(picture.rgb.iter().all(|b| *b == 0), "an Off group is black");
+        assert!(
+            runner.groups[0].canvas.pixels.iter().any(|p| *p != [0.0; 3]),
+            "the canvas still holds the last pixels (why black must be sent)"
+        );
+    }
+
+    #[test]
+    fn a_failed_group_sends_black() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: true })), 100);
+        let mut runner = SceneRunner::new();
+        let now = Instant::now();
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), now));
+        let picture = output.group_frame.expect("black, not nothing");
+        assert!(picture.rgb.iter().all(|b| *b == 0), "the panicking frame is black");
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), now + Duration::from_secs(1)));
+        assert!(output.group_frame.expect("still black").rgb.iter().all(|b| *b == 0));
+    }
+
+    #[test]
+    fn a_pattern_group_sends_no_picture() {
+        use canvas_proto::pattern::{BuiltOn, Frame as PatternFrame, Motion, Pattern};
+        struct Dots(Pattern);
+        impl Effect for Dots {
+            fn schema(&self) -> PropertySchema {
+                PropertySchema {
+                    id: "pattern:Test".into(),
+                    name: "Test".into(),
+                    description: String::new(),
+                    needs: InputNeeds::default(),
+                    properties: vec![],
+                    presets: vec![],
+                    thumbnail: None,
+                }
+            }
+            fn init(&mut self, _props: &Props) {}
+            fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
+            fn as_pattern(&self) -> Option<&Pattern> {
+                Some(&self.0)
+            }
+        }
+        let pattern = Pattern {
+            id: "pattern:Test".into(),
+            built_on: BuiltOn { led_count: 4, arrangement: Arrangement::Strip, grid: None },
+            frames: vec![PatternFrame { colors: vec![RED; 4], hold: 0, extra: Default::default() }],
+            motion: Motion::none(),
+            extra: Default::default(),
+        };
+        let mut scene = scene_of("g", Some(Box::new(Dots(pattern))), 100);
+        let mut runner = SceneRunner::new();
+        let output = frame(&mut scene, &mut runner, &params(tap(0, 1), Instant::now()));
+        assert!(output.group_frame.is_none());
+        assert_eq!(runner.group_frames_built(), 0);
+    }
+
+    #[test]
+    fn a_group_the_scene_does_not_hold_sends_nothing() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        let mut runner = SceneRunner::new();
+        let output = frame(&mut scene, &mut runner, &params(tap(7, 1), Instant::now()));
+        assert!(output.group_frame.is_none(), "an index past the end is not a panic and not a picture");
+        assert_eq!(runner.group_frames_built(), 0);
+    }
+
+    #[test]
+    fn pictures_are_rate_limited_and_a_new_selection_is_not_kept_waiting() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        let mut runner = SceneRunner::new();
+        let t0 = Instant::now();
+        assert!(frame(&mut scene, &mut runner, &params(tap(0, 1), t0)).group_frame.is_some());
+        // 10 ms later: inside the 1/15 s interval.
+        let soon = t0 + Duration::from_millis(10);
+        assert!(frame(&mut scene, &mut runner, &params(tap(0, 1), soon)).group_frame.is_none());
+        // A takeover (a new serial) is answered at once.
+        assert!(frame(&mut scene, &mut runner, &params(tap(0, 2), soon)).group_frame.is_some());
+        // Past the interval the same selection gets its next picture.
+        let later = t0 + Duration::from_millis(100);
+        assert!(frame(&mut scene, &mut runner, &params(tap(0, 2), later)).group_frame.is_some());
+        assert_eq!(runner.group_frames_built(), 3);
+    }
+
+    #[test]
+    fn a_rebuilt_scene_stamps_its_own_generation_on_the_picture() {
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        let mut runner = SceneRunner::new();
+        let t0 = Instant::now();
+        let first = frame(&mut scene, &mut runner, &params(tap(0, 1), t0)).group_frame.expect("a picture");
+        assert_eq!(first.generation, 1);
+        // The engine replaced the scene: a new generation, and the picture says so, so the
+        // engine can drop a picture that was built for the scene that is gone.
+        let mut scene = scene_of("g", Some(Box::new(Halves { panic: false })), 100);
+        scene.generation = 2;
+        let second = frame(&mut scene, &mut runner, &params(tap(0, 1), t0 + Duration::from_secs(1)))
+            .group_frame
+            .expect("a picture");
+        assert_eq!(second.generation, 2);
     }
 }

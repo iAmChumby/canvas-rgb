@@ -143,9 +143,12 @@ pub async fn guard(State(app): State<Arc<App>>, request: Request, next: Next) ->
     // The previews are WebSockets, and a browser cannot set headers on a WebSocket handshake:
     // the token rides in the query string and the route's handler checks it. The bearer check
     // has to let the handshake through, or no editor can ever open a preview. The per-light feed
-    // is one of them; the host and origin checks above still apply to both.
+    // and the group preview are two of them; the host and origin checks above still apply to
+    // all of them.
     let is_preview = method == Method::GET
-        && (uri.path() == routes::PREVIEW || uri.path() == routes::PREVIEW_LIGHTS);
+        && (uri.path() == routes::PREVIEW
+            || uri.path() == routes::PREVIEW_LIGHTS
+            || uri.path() == routes::PREVIEW_GROUP);
     if !is_status && !is_preview {
         let presented = request
             .headers()
