@@ -7,7 +7,9 @@
 use crate::device::DeviceInfo;
 use crate::fans::{FanMode, FanProfile, FansStatus};
 use crate::props::{InputNeeds, Preset, Props, PropertySchema};
-use crate::scene::{Arrangement, ChainPartKind, Light, LightId, Scene};
+use crate::scene::{
+    Arrangement, ChainPartKind, GroupMode, Light, LightId, Plays, Scene, GROUP_BRIGHTNESS_MAX,
+};
 use crate::traits::GroupState;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -167,8 +169,10 @@ pub mod routes {
     /// `GET` [`super::ScenesResponse`]; `POST` [`super::SceneCreate`] makes a scene and answers it.
     pub const SCENES: &str = "/api/v1/scenes";
     /// `PUT` [`super::ScenePut`] replaces a scene whole: `409 conflict` with the current scene
-    /// when `expected_rev` is stale, `422 validation` when a scene rule is broken. `DELETE`
-    /// refuses the last scene with `409`.
+    /// when `expected_rev` is stale, `422 validation` when a scene rule is broken (the HTML-group
+    /// limit is the daemon's own check, with its own sentence). With `dry_run` it runs every
+    /// check, saves nothing and answers a [`super::SceneDryRun`]. `DELETE` refuses the last
+    /// scene with `409`.
     pub const SCENE: &str = "/api/v1/scenes/{id}";
     /// `PUT` [`super::SceneActivePut`]: sets a scene (with a fade).
     pub const SCENE_ACTIVE: &str = "/api/v1/scenes/active";
@@ -933,7 +937,8 @@ pub struct ScenesResponse {
 }
 
 /// `POST` [`routes::SCENES`]. With `copy_of`, the new scene copies that scene's groups under
-/// new ids; without it, one group of every light, set to Off.
+/// new ids; with `groups` (#377), the new scene holds exactly those groups; without either, one
+/// group of every light, set to Off. `copy_of` and `groups` together are refused with `422`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SceneCreate {
@@ -941,6 +946,36 @@ pub struct SceneCreate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub copy_of: Option<String>,
+    /// The groups the new scene holds, in order. The daemon mints each group's id and runs the
+    /// scene rules and the HTML-group limit before it saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub groups: Option<Vec<NewGroup>>,
+    /// Run every check and save nothing: the answer is a [`SceneDryRun`] with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// One group of a scene being made with [`SceneCreate::groups`]: a [`Group`] without its id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NewGroup {
+    pub name: String,
+    pub members: Vec<LightId>,
+    pub plays: Plays,
+    /// Left out: [`GroupMode::FlowAcross`], as a [`Group`] reads it.
+    #[serde(default)]
+    #[ts(optional, as = "Option<GroupMode>")]
+    pub mode: GroupMode,
+    /// 0..=100. Left out: 100, as a [`Group`] reads it.
+    #[serde(default = "default_new_group_brightness")]
+    #[ts(optional, as = "Option<u8>")]
+    pub brightness: u8,
+}
+
+fn default_new_group_brightness() -> u8 {
+    GROUP_BRIGHTNESS_MAX
 }
 
 /// `PUT` [`routes::SCENE`].
