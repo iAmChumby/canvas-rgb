@@ -1334,6 +1334,8 @@ function patternFits(s: DemoState, group: Group): LightFit[] {
   for (const member of group.members) {
     const light = s.lights.find((l) => l.light.id === member);
     if (!light) continue;
+    // The daemon leaves a light with no LEDs out of the fits: it plays nothing there.
+    if (!light.connected || light.led_count <= 0) continue;
     fits.push({
       light: member,
       fit: fitKind(pattern.built_on, light.led_count, light.light.arrangement),

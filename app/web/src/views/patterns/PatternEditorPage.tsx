@@ -55,15 +55,14 @@ export function PatternEditorPage() {
     };
   }, []);
 
-  const save = useCallback(async (document: Pattern) => {
-    try {
-      const saved = await api.putPattern(document.id, document);
-      setPattern(saved);
-      await refreshPatterns();
-      setError(null);
-    } catch (e) {
-      setError(messageOf(e));
-    }
+  // The save's promise goes to the editor, which shows a failure beside its Save key and keeps
+  // the strokes: the page never replaces the editor with an error line.
+  const save = useCallback(async (document: Pattern): Promise<void> => {
+    const saved = await api.putPattern(document.id, document);
+    setPattern(saved);
+    setError(null);
+    // It keeps its own error: a save that landed is a save that landed, whatever the list does.
+    await refreshPatterns();
   }, []);
 
   if (error !== null) return <p className={s.pageLine}>{error}</p>;
@@ -74,7 +73,7 @@ export function PatternEditorPage() {
       key={pattern.id}
       pattern={pattern}
       note={note}
-      onSave={(document) => void save(document)}
+      onSave={save}
       onCancel={() => router.push("/effects/")}
     />
   );

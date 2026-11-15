@@ -663,6 +663,80 @@ async fn delete_is_refused_while_any_scene_plays_it_and_names_the_scenes() {
     assert!(rig.app.patterns.get("pattern:Intake").is_some(), "it is still there");
 }
 
+/// The saved pattern's id in other case: the store matches a group's id ignoring ASCII case, so
+/// the daemon must too.
+const LOWER_INTAKE: &str = "pattern:intake";
+
+/// A rig with one active scene and both groups painting solid, so the only group that names the
+/// pattern is the one a test gives it to.
+async fn rig_one_scene() -> Rig {
+    rig_with_patterns(
+        vec![pattern("Intake")],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("left", &["fake:a#z0"], "solid", color(RED)),
+                    group("right", &["fake:b#z0"], "solid", color(RED)),
+                ],
+            }],
+        },
+    )
+    .await
+}
+
+/// Puts `main` whole, with the right group playing `effect` as given: the case a group stores.
+async fn put_main_playing(rig: &Rig, effect: &str) {
+    let scene = Scene {
+        id: "main".into(),
+        name: "Main".into(),
+        rev: 1,
+        groups: vec![
+            group("left", &["fake:a#z0"], "solid", color(RED)),
+            group("right", &["fake:b#z0"], effect, Props::new()),
+        ],
+    };
+    let body = serde_json::json!({
+        "expected_rev": 1,
+        "scene": serde_json::to_value(scene).unwrap(),
+    });
+    let (status, answer) =
+        send(rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+}
+
+#[tokio::test]
+async fn an_edit_reaches_a_group_that_stores_the_pattern_id_in_other_case() {
+    let rig = rig_one_scene().await;
+    put_main_playing(&rig, LOWER_INTAKE).await;
+    // The group plays it: the store found the pattern whatever the case, so the lights show it.
+    shows_marked(&rig.b, LEDS as usize, 0, rgb(RED), "the group storing the id in other case").await;
+
+    let blue = Rgb8::new(0, 0, 200);
+    let (status, answer) = put_pattern_body(&rig, INTAKE, &pattern_with("Intake", LEDS, blue)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    shows_marked(&rig.b, LEDS as usize, 0, blue, "the group after the edit").await;
+}
+
+#[tokio::test]
+async fn a_delete_is_refused_for_a_group_that_stores_the_pattern_id_in_other_case() {
+    let rig = rig_one_scene().await;
+    put_main_playing(&rig, LOWER_INTAKE).await;
+    shows_marked(&rig.b, LEDS as usize, 0, rgb(RED), "the group storing the id in other case").await;
+
+    let (status, answer) = send(&rig, "DELETE", &pattern_path(INTAKE), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("Main"), "the refusal names the scene: {message}");
+    assert!(message.contains("Delete it anyway"), "and what a forced delete does: {message}");
+    assert!(rig.app.patterns.get(INTAKE).is_some(), "it is still there");
+}
+
 #[tokio::test]
 async fn a_forced_delete_removes_the_pattern_and_its_favourite() {
     let rig = rig().await;
@@ -993,6 +1067,40 @@ async fn the_flags_follow_a_resize_without_a_save() {
     let fits = group_fits(&rig).await;
     assert_eq!(fits["right"][0].fit, FitKind::Stretched, "the 24-LED light is stretched now");
     assert_eq!(fits["right"][0].light, "fake:b#z0");
+}
+
+#[tokio::test]
+async fn a_light_with_no_leds_has_no_fit() {
+    // B's zone has no LEDs and C's device is gone (an unplugged fan lists no zone): the engine
+    // plays nothing on either, so neither is exact and neither is called stretched. A keeps its
+    // fit, and the group is still the lights that play.
+    let rig = rig_full(
+        vec![pattern("Intake")],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![group(
+                    "all",
+                    &["fake:a#z0", "fake:b#z0", "fake:c#z0"],
+                    INTAKE,
+                    Props::new(),
+                )],
+            }],
+        },
+        vec![device(A), device_of(B, 0)],
+        vec![light(A), light(B), light("fake:c")],
+    )
+    .await;
+    let fits = group_fits(&rig).await;
+    assert_eq!(
+        fits.get("all"),
+        Some(&vec![LightFit { light: "fake:a#z0".into(), fit: FitKind::Exact }]),
+        "only the light that has LEDs carries a fit"
+    );
 }
 
 #[tokio::test]

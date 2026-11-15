@@ -825,7 +825,9 @@ pub async fn scenes_playing(app: &App, effect: &str) -> Vec<(String, String)> {
         .iter()
         .filter(|scene| {
             scene.groups.iter().any(|group| match &group.plays {
-                Plays::Effect { effect: playing, .. } => playing == effect,
+                // The store matches a pattern's id ignoring ASCII case (`Patterns::get`), so a
+                // group that names it in other case still plays it: the refusal must see it too.
+                Plays::Effect { effect: playing, .. } => playing.eq_ignore_ascii_case(effect),
                 Plays::Off => false,
             })
         })
@@ -1521,7 +1523,9 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
     let mut changed = false;
     for group in &scene.groups {
         let Plays::Effect { effect, props } = &group.plays else { continue };
-        if effect != id {
+        // A group that names the pattern in other case plays it (`Patterns::get` matches that
+        // way), so the edit must reach it: compare as the store does.
+        if !effect.eq_ignore_ascii_case(id) {
             continue;
         }
         // A group the takeover holds keeps the draft: its change lands when the takeover ends.
@@ -1559,6 +1563,10 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
 
 /// The fit of each of a group's member lights against the pattern it plays. Empty for a group
 /// that plays no pattern, and for one whose pattern is gone (the group is dark and says why).
+///
+/// A light with no LEDs is left out: its device is not connected, or its zone reports none, so
+/// the engine plays nothing there. It is neither exact nor flagged, and the picker's count is of
+/// the lights the pattern lands on.
 fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]) -> Vec<LightFit> {
     let Plays::Effect { effect, .. } = &group.plays else {
         return Vec::new();
@@ -1572,27 +1580,23 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
     group
         .members
         .iter()
-        .map(|member| {
-            match lights.iter().find(|light| &light.id == member) {
-                Some(light) => LightFit {
-                    light: member.clone(),
-                    fit: canvas_proto::pattern::fit_kind(
-                        &pattern.built_on,
-                        canvas_core::arrangement::light_led_count(light, devices),
-                        light.arrangement,
-                    ),
-                },
-                // A member the daemon does not hold has no LEDs; the arrangement is unknown, so
-                // the fit is only ever about a count of zero here.
-                None => LightFit {
-                    light: member.clone(),
-                    fit: canvas_proto::pattern::fit_kind(
-                        &pattern.built_on,
-                        0,
-                        canvas_proto::scene::Arrangement::Strip,
-                    ),
-                },
+        .filter_map(|member| {
+            let Some(light) = lights.iter().find(|light| &light.id == member) else {
+                // A member the daemon does not hold has no LEDs to play on.
+                return None;
+            };
+            let led_count = canvas_core::arrangement::light_led_count(light, devices);
+            if led_count == 0 {
+                return None;
             }
+            Some(LightFit {
+                light: member.clone(),
+                fit: canvas_proto::pattern::fit_kind(
+                    &pattern.built_on,
+                    led_count,
+                    light.arrangement,
+                ),
+            })
         })
         .collect()
 }
