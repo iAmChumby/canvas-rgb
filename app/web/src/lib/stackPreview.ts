@@ -125,7 +125,16 @@ async function connect(): Promise<void> {
     connecting = false;
     return;
   }
-  const ws = new WebSocket(url);
+  // The constructor throws on an address it cannot parse: the claim goes back and the retry
+  // runs, or the feed would never connect again.
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(url);
+  } catch {
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
   ws.binaryType = "arraybuffer";
   ws.onopen = () => setProblem(null);
   ws.onmessage = (event: MessageEvent) => {

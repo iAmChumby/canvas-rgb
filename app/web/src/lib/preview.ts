@@ -139,7 +139,16 @@ async function connect(): Promise<void> {
   // Once the socket has been refused the state stays "refused": a retry must not paper over the
   // reason the canvas is showing.
   if (refusals === 0) setStatus({ state: "connecting", error: null });
-  const ws = new WebSocket(url);
+  // The constructor throws on an address it cannot parse: the claim goes back and the retry
+  // runs, or the feed would never connect again.
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(url);
+  } catch {
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
   ws.binaryType = "arraybuffer";
   ws.onmessage = (ev: MessageEvent) => {
     if (ev.data instanceof ArrayBuffer) {

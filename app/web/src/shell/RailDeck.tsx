@@ -174,7 +174,7 @@ function LightsPanel({
   // Why the step buttons rest, in a sentence: the label is the tooltip and the button's
   // accessible name, so it has to read as a sentence on its own.
   const resting = mixed
-    ? "the groups play different effects."
+    ? "the groups are not all playing the same effect."
     : nonePlays
       ? "every group of the scene is off."
       : null;

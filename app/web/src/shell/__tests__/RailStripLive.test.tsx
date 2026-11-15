@@ -315,10 +315,10 @@ describe("the deck with groups playing different effects", () => {
     const next = screen.getByRole("button", { name: /Next effect/ });
     const previous = screen.getByRole("button", { name: /Previous effect/ });
     expect(next.getAttribute("aria-label")).toBe(
-      "Next effect is unavailable: the groups play different effects.",
+      "Next effect is unavailable: the groups are not all playing the same effect.",
     );
     expect(previous.getAttribute("aria-label")).toBe(
-      "Previous effect is unavailable: the groups play different effects.",
+      "Previous effect is unavailable: the groups are not all playing the same effect.",
     );
   });
 

@@ -25,6 +25,8 @@ const CONFIG: ApiConfig = { base_url: "http://127.0.0.1:9430", token: "tok" };
 
 class FakeSocket {
   static opened: FakeSocket[] = [];
+  /** The next constructions throw, as the browser's does on an address it cannot parse. */
+  static refuse = false;
   binaryType = "";
   onopen: (() => void) | null = null;
   onmessage: ((event: MessageEvent) => void) | null = null;
@@ -32,6 +34,7 @@ class FakeSocket {
   onerror: (() => void) | null = null;
   closed = false;
   constructor(readonly url: string) {
+    if (FakeSocket.refuse) throw new SyntaxError("the address is not valid");
     FakeSocket.opened.push(this);
   }
   close(): void {
@@ -49,6 +52,7 @@ let requests: TokenRequest[] = [];
 
 beforeEach(() => {
   FakeSocket.opened = [];
+  FakeSocket.refuse = false;
   requests = [];
   api.dropApiConfig.mockClear();
   api.apiConfig.mockReset();
@@ -163,6 +167,24 @@ describe("the per-light feed", () => {
     expect(FakeSocket.opened).toHaveLength(1);
 
     feed.unmount();
+  });
+
+  it("connects again after the socket could not be made", async () => {
+    const feed = renderHook(() => useLightFeed());
+    FakeSocket.refuse = true;
+    await answer(requests[0]!);
+    expect(FakeSocket.opened).toHaveLength(0);
+
+    // The claim on the connect was given back: showing the window asks the tray again.
+    FakeSocket.refuse = false;
+    visibility("hidden");
+    visibility("visible");
+    expect(requests).toHaveLength(2);
+    await answer(requests[1]!);
+    expect(FakeSocket.opened).toHaveLength(1);
+
+    feed.unmount();
+    expect(FakeSocket.opened[0]!.closed).toBe(true);
   });
 
   it("opens no socket when the last holder goes while the token request is pending", async () => {
