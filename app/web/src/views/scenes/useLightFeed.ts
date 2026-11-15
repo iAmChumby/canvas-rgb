@@ -8,7 +8,7 @@
 // animation frame without a render. In a plain browser the demo draws its own colours from the
 // demo scene.
 
-import { useEffect, useState } from "react";
+import { useEffect } from "react";
 import { apiConfig, dropApiConfig } from "@/lib/api";
 import { routes } from "@/proto/routes";
 import { isDemo } from "@/lib/host";
@@ -152,139 +152,173 @@ export function demoLightColours(seconds: number): Map<string, Uint8Array> {
   return out;
 }
 
+/** What listens for a new picture of the lights: the sidebar strip paints from it, outside React. */
+const listeners = new Set<() => void>();
+
+/** Tells every listener the lights have a new picture, or have lost theirs. */
+function announce(): void {
+  for (const listener of listeners) listener();
+}
+
 /**
- * Opens the per-light feed while the component is mounted and answers with the lookup. The
- * lookup keeps the same identity for the life of the component. The socket stays closed while
- * the window is hidden.
+ * Calls `listener` after every frame of the feed (and when the feed loses its colours), until
+ * the returned function is called. The lookup is read inside it; nothing here renders.
+ */
+export function onLightFrame(listener: () => void): () => void {
+  listeners.add(listener);
+  return () => {
+    listeners.delete(listener);
+  };
+}
+
+// One feed for the whole window: the colours and the lookup over them are made once, and the
+// socket is open while at least one component holds the feed. The Scenes page and the sidebar
+// strip both hold it, so opening the page never opens a second socket.
+const sharedStore = new Map<string, Uint8Array>();
+const sharedLookup: LightColours = (id) => sharedStore.get(id) ?? null;
+let holders = 0;
+let stopShared: (() => void) | null = null;
+
+/** Opens the socket (or the demo's clock) and answers with the function that closes it again. */
+function openFeed(store: Map<string, Uint8Array>): () => void {
+  let stopped = false;
+  let socket: WebSocket | null = null;
+  let retry: ReturnType<typeof setTimeout> | null = null;
+  let timer: ReturnType<typeof setInterval> | null = null;
+  let failures = 0;
+  let names: ReadonlyMap<number, string> = new Map();
+
+  const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+
+  /**
+   * The socket is gone: the colours on the canvas are stale, and the index belongs to a
+   * daemon that may come back with the lights in another order. Both go, so a frame that
+   * arrives before the new index never reaches a light of the old order.
+   */
+  const forget = () => {
+    store.clear();
+    names = new Map();
+    announce();
+  };
+
+  const close = () => {
+    if (retry) {
+      clearTimeout(retry);
+      retry = null;
+    }
+    if (timer) {
+      clearInterval(timer);
+      timer = null;
+    }
+    if (socket) {
+      socket.onclose = null;
+      socket.onerror = null;
+      socket.onmessage = null;
+      socket.close();
+      socket = null;
+    }
+    forget();
+  };
+
+  const schedule = () => {
+    if (stopped || retry || !visible()) return;
+    retry = setTimeout(() => {
+      retry = null;
+      void connect();
+    }, retryWait(failures));
+    failures += 1;
+  };
+
+  const connect = async (): Promise<void> => {
+    if (stopped || socket || !visible()) return;
+    let url: string;
+    try {
+      const cfg = await apiConfig();
+      url = `${cfg.base_url.replace(/^http/, "ws")}${routes.previewLights}?token=${encodeURIComponent(cfg.token)}`;
+    } catch {
+      schedule();
+      return;
+    }
+    // The wait for the token may have outlived the component or the window.
+    if (stopped || socket || !visible()) return;
+    const ws = new WebSocket(url);
+    ws.binaryType = "arraybuffer";
+    ws.onopen = () => {
+      failures = 0;
+    };
+    ws.onmessage = (event: MessageEvent) => {
+      if (typeof event.data === "string") {
+        const next = decodeLightIndex(event.data);
+        if (!next) return;
+        names = next;
+        // A light the daemon no longer names has no colours to show.
+        const known = new Set(next.values());
+        for (const id of store.keys()) if (!known.has(id)) store.delete(id);
+      } else if (event.data instanceof ArrayBuffer) {
+        decodeLightFrame(event.data, names, store);
+      }
+      announce();
+    };
+    ws.onclose = () => {
+      socket = null;
+      // The socket is gone: the colours and the index go with it.
+      forget();
+      // The tray may have handed out a new token: ask again.
+      dropApiConfig();
+      schedule();
+    };
+    socket = ws;
+  };
+
+  const start = () => {
+    if (stopped || socket || timer) return;
+    if (isDemo()) {
+      const t0 = performance.now();
+      const tick = () => {
+        const next = demoLightColours((performance.now() - t0) / 1000);
+        store.clear();
+        for (const [id, rgb] of next) store.set(id, rgb);
+        announce();
+      };
+      tick();
+      timer = setInterval(tick, 1000 / 15);
+      return;
+    }
+    void connect();
+  };
+
+  const onVisibility = () => {
+    if (visible()) start();
+    else close();
+  };
+
+  start();
+  document.addEventListener("visibilitychange", onVisibility);
+  return () => {
+    stopped = true;
+    document.removeEventListener("visibilitychange", onVisibility);
+    close();
+    store.clear();
+  };
+}
+
+/**
+ * Holds the per-light feed while the component is mounted and answers with the lookup. Every
+ * holder shares one socket and one lookup (the same identity for the life of the window); the
+ * last holder to go closes it. The socket stays closed while the window is hidden.
  */
 export function useLightFeed(): LightColours {
-  // The map and the lookup over it are made once; the state holds them so the lookup keeps its
-  // identity and nothing reads a ref during render.
-  const [feed] = useState(() => {
-    const store = new Map<string, Uint8Array>();
-    const lookup: LightColours = (id) => store.get(id) ?? null;
-    return { store, lookup };
-  });
-
   useEffect(() => {
-    const store = feed.store;
-    let stopped = false;
-    let socket: WebSocket | null = null;
-    let retry: ReturnType<typeof setTimeout> | null = null;
-    let timer: ReturnType<typeof setInterval> | null = null;
-    let failures = 0;
-    let names: ReadonlyMap<number, string> = new Map();
-
-    const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
-
-    /**
-     * The socket is gone: the colours on the canvas are stale, and the index belongs to a
-     * daemon that may come back with the lights in another order. Both go, so a frame that
-     * arrives before the new index never reaches a light of the old order.
-     */
-    const forget = () => {
-      store.clear();
-      names = new Map();
-    };
-
-    const close = () => {
-      if (retry) {
-        clearTimeout(retry);
-        retry = null;
-      }
-      if (timer) {
-        clearInterval(timer);
-        timer = null;
-      }
-      if (socket) {
-        socket.onclose = null;
-        socket.onerror = null;
-        socket.onmessage = null;
-        socket.close();
-        socket = null;
-      }
-      forget();
-    };
-
-    const schedule = () => {
-      if (stopped || retry || !visible()) return;
-      retry = setTimeout(() => {
-        retry = null;
-        void connect();
-      }, retryWait(failures));
-      failures += 1;
-    };
-
-    const connect = async (): Promise<void> => {
-      if (stopped || socket || !visible()) return;
-      let url: string;
-      try {
-        const cfg = await apiConfig();
-        url = `${cfg.base_url.replace(/^http/, "ws")}${routes.previewLights}?token=${encodeURIComponent(cfg.token)}`;
-      } catch {
-        schedule();
-        return;
-      }
-      // The wait for the token may have outlived the component or the window.
-      if (stopped || socket || !visible()) return;
-      const ws = new WebSocket(url);
-      ws.binaryType = "arraybuffer";
-      ws.onopen = () => {
-        failures = 0;
-      };
-      ws.onmessage = (event: MessageEvent) => {
-        if (typeof event.data === "string") {
-          const next = decodeLightIndex(event.data);
-          if (!next) return;
-          names = next;
-          // A light the daemon no longer names has no colours to show.
-          const known = new Set(next.values());
-          for (const id of store.keys()) if (!known.has(id)) store.delete(id);
-        } else if (event.data instanceof ArrayBuffer) {
-          decodeLightFrame(event.data, names, store);
-        }
-      };
-      ws.onclose = () => {
-        socket = null;
-        // The socket is gone: the colours and the index go with it.
-        forget();
-        // The tray may have handed out a new token: ask again.
-        dropApiConfig();
-        schedule();
-      };
-      socket = ws;
-    };
-
-    const start = () => {
-      if (stopped || socket || timer) return;
-      if (isDemo()) {
-        const t0 = performance.now();
-        const tick = () => {
-          const next = demoLightColours((performance.now() - t0) / 1000);
-          store.clear();
-          for (const [id, rgb] of next) store.set(id, rgb);
-        };
-        tick();
-        timer = setInterval(tick, 1000 / 15);
-        return;
-      }
-      void connect();
-    };
-
-    const onVisibility = () => {
-      if (visible()) start();
-      else close();
-    };
-
-    start();
-    document.addEventListener("visibilitychange", onVisibility);
+    holders += 1;
+    if (holders === 1) stopShared = openFeed(sharedStore);
     return () => {
-      stopped = true;
-      document.removeEventListener("visibilitychange", onVisibility);
-      close();
-      store.clear();
+      holders -= 1;
+      if (holders === 0) {
+        stopShared?.();
+        stopShared = null;
+      }
     };
-  }, [feed]);
+  }, []);
 
-  return feed.lookup;
+  return sharedLookup;
 }

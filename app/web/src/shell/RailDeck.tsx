@@ -37,10 +37,16 @@ export function RailDeck() {
   const paused = status?.power === "paused";
   // With scenes the deck names the scene, not an effect: every group plays its own.
   const sceneName = status?.active_scene?.name ?? null;
-  const sceneGroups = sceneName
-    ? (scenes?.scenes.find((x) => x.id === (status?.active_scene?.id ?? scenes.active))?.groups.length ?? null)
+  const activeScene = sceneName
+    ? (scenes?.scenes.find((x) => x.id === (status?.active_scene?.id ?? scenes.active)) ?? null)
     : null;
-  // The effect the first group of the scene plays: what the "next effect" step starts from.
+  const sceneGroups = activeScene ? activeScene.groups.length : null;
+  // Groups that play different effects: the step buttons would put one effect on every group and
+  // lose the others, and "the" effect to step from is only the first group's, so they rest.
+  const mixed =
+    activeScene !== null &&
+    new Set(activeScene.groups.map((g) => (g.plays.type === "effect" ? g.plays.effect : "off"))).size > 1;
+  // The effect the scene's groups play when they all play the same: what the step starts from.
   const activeId = status?.active_effects?.[0] ?? null;
   const active = effects?.find((e) => e.id === activeId) ?? null;
 
@@ -99,6 +105,8 @@ export function RailDeck() {
           activeName={sceneName ?? active?.name ?? null}
           presetId={sceneName ? null : activeId}
           groups={sceneGroups}
+          scene={sceneName !== null}
+          mixed={mixed}
           devices={status?.devices_connected ?? null}
           known={status !== null}
           hasEffects={(effects?.length ?? 0) > 0}
@@ -122,6 +130,8 @@ function LightsPanel({
   activeName,
   presetId,
   groups,
+  scene,
+  mixed,
   devices,
   known,
   hasEffects,
@@ -135,6 +145,10 @@ function LightsPanel({
   presetId: string | null;
   /** The active scene's group count: the count the row shows in place of the devices. */
   groups: number | null;
+  /** True while a scene is active: the strip reads the lights. */
+  scene: boolean;
+  /** The scene's groups play different effects: stepping would flatten them to one. */
+  mixed: boolean;
   devices: number | null;
   known: boolean;
   hasEffects: boolean;
@@ -166,7 +180,7 @@ function LightsPanel({
 
   return (
     <div className="rail-deck-panel" role="group" aria-label="Lights">
-      <RailStrip effectId={activeId} paused={paused} />
+      <RailStrip scene={scene} effectId={activeId} paused={paused} />
 
       <div className="rail-deck-row">
         <span className="rail-deck-name">
@@ -188,9 +202,9 @@ function LightsPanel({
 
       <div className="rail-deck-transport">
         <IconButton
-          label="Previous effect"
+          label={mixed ? "Previous effect (each group plays its own)" : "Previous effect"}
           icon={<SkipBack size={16} />}
-          disabled={!hasEffects}
+          disabled={!hasEffects || mixed}
           onClick={() => void onStep(-1)}
         />
         <Button
@@ -202,9 +216,9 @@ function LightsPanel({
           <Swap labels={["Pause", "Resume"]} at={paused ? 1 : 0} />
         </Button>
         <IconButton
-          label="Next effect"
+          label={mixed ? "Next effect (each group plays its own)" : "Next effect"}
           icon={<SkipForward size={16} />}
-          disabled={!hasEffects}
+          disabled={!hasEffects || mixed}
           onClick={() => void onStep(1)}
         />
       </div>
