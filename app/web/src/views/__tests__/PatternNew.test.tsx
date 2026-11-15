@@ -157,7 +157,7 @@ describe("a new pattern", () => {
     expect(tile).toBeTruthy();
     fireEvent.click(await screen.findByRole("button", { name: "Delete pattern" }));
     // The daemon refuses and names the scenes; nothing has gone yet.
-    const refusal = await screen.findByText(/played by Gaming/);
+    const refusal = await screen.findByText(/Intake plays in Gaming/);
     expect(refusal.textContent).toContain("Gaming");
     expect(screen.getByRole("button", { name: "Edit the pattern Intake" })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: "Delete anyway" }));

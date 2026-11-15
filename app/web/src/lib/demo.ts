@@ -2213,7 +2213,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         fail(
           409,
           "conflict",
-          `${pattern.id} is played by ${names}; delete it with ?force=true and those groups go dark`,
+          `${pattern.id.replace(/^pattern:/, "")} plays in ${names}. Delete it anyway and the groups that play it go dark.`,
         );
       }
       delete s.patterns[pattern.id];
