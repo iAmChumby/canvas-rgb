@@ -9,6 +9,9 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - The sidebar strip shows your lights' real colours in a scene (#379)
+### Changed
+
+- A scene can have two groups playing HTML effects (#370)
 
 ## [0.16.0] - 2026-11-15
 

@@ -204,6 +204,14 @@ pub mod routes {
     /// the scene or the lights change); then binary frames: per light a `u16 LE` index, a
     /// `u16 LE` LED count, then that many RGB triples. At most 15 a second.
     pub const PREVIEW_LIGHTS: &str = "/api/v1/preview/lights";
+    /// WebSocket (#378). The picture ONE group draws, as it is handed to the LEDs (the group's
+    /// own 80x50 canvas times the group's brightness; black for an Off or failed group; no frame
+    /// for a pattern group). Query: `token`, and [`crate::consts::GROUP_PREVIEW_QUERY`] (the
+    /// group id). Binary messages in the [`PREVIEW`] format: `u16 LE width, u16 LE height,
+    /// width*height*3 RGB bytes`, at most [`crate::consts::PREVIEW_MAX_FPS`]. Its own sink: the
+    /// effects editor's [`PREVIEW`] socket is not touched. The newest group socket wins; the
+    /// older one is closed with `1013`. The handler is the daemon's.
+    pub const PREVIEW_GROUP: &str = "/api/v1/preview/group";
     /// `PATCH` with a `Props` body: an effect's starting values (`EffectsFile.saved`). A group
     /// already playing the effect keeps its own.
     pub const EFFECT_DEFAULTS: &str = "/api/v1/effects/{id}/defaults";
@@ -219,6 +227,18 @@ pub mod routes {
     pub const CHAIN_SETUP_COMMIT: &str = "/api/v1/chains/{device}/{zone}/setup/commit";
     /// `POST` [`super::SetupEmpty`]: nothing is plugged into this header.
     pub const CHAIN_SETUP_EMPTY: &str = "/api/v1/chains/{device}/{zone}/setup/empty";
+}
+
+#[cfg(test)]
+mod preview_group_tests {
+    use super::*;
+
+    #[test]
+    fn the_group_preview_route_and_its_query_key_are_named() {
+        assert_eq!(routes::PREVIEW_GROUP, "/api/v1/preview/group");
+        assert_eq!(crate::consts::GROUP_PREVIEW_QUERY, "group");
+        assert!(routes::PREVIEW_GROUP.starts_with(routes::PREVIEW.trim_end_matches("/preview")));
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]

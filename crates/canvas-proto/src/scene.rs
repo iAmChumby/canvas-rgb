@@ -38,13 +38,12 @@ pub const DEFAULT_SCENE_NAME: &str = "Everything";
 pub const DEFAULT_GROUP_NAME: &str = "Everything";
 /// The most a group's brightness may be.
 pub const GROUP_BRIGHTNESS_MAX: u8 = 100;
-/// The most groups of one scene that may play an HTML effect. Each is a QuickJS runtime whose own
-/// script is the cost (about 5.5 to 6.7 ms a frame for the stock effects, whatever the canvas
-/// size; `docs/benchmark.md`, "Scenes: cost per group"). One is what is proved to fit a 20-group
-/// scene; two is unproven until the bench runs through the real engine with every stock effect
-/// (Scenes plan, Task 4 Step 5). Raise it only on that evidence. The daemon also counts a
-/// stack's HTML layers.
-pub const SCENE_HTML_MAX: usize = 1;
+/// The most groups of one scene that may play an HTML effect (#370). Each is a QuickJS runtime
+/// whose own script is the cost (about 5.5 to 6.7 ms a frame for the stock effects, whatever the
+/// canvas size; `docs/benchmark.md`, "Scenes: cost per group"). The daemon enforces it
+/// (`check_html_limit` in `crates/canvas-daemon/src/scenes.rs`) and counts a stack's HTML layers
+/// too; [`validate_scene`] does not, so a scene over the limit is still a valid file.
+pub const SCENE_HTML_MAX: usize = 2;
 /// The id prefix of an HTML effect.
 pub const HTML_EFFECT_PREFIX: &str = "html:";
 /// Chain setup (0.15.0): the earlier length of a header held raised by an open setup, beside
@@ -283,12 +282,10 @@ pub enum SceneError {
     DuplicateId { id: String },
     #[error("the brightness of group {group} is over {GROUP_BRIGHTNESS_MAX}")]
     BrightnessRange { group: String },
-    #[error("more than {SCENE_HTML_MAX} groups play an HTML effect")]
-    TooManyHtml { count: usize },
 }
 
 /// How many groups of `scene` play an HTML effect (by id; a stack's own HTML layers are the
-/// daemon's to count).
+/// daemon's to count). The daemon compares it with [`SCENE_HTML_MAX`]; the spine does not.
 pub fn html_groups(scene: &Scene) -> usize {
     scene
         .groups
@@ -298,8 +295,9 @@ pub fn html_groups(scene: &Scene) -> usize {
 }
 
 /// Checks the rules a scene keeps: names fit, group ids are unique, every group has a member,
-/// every member is a known light, no light is in two groups, and at most [`SCENE_HTML_MAX`]
-/// groups play an HTML effect.
+/// every member is a known light and no light is in two groups. The HTML-group limit
+/// ([`SCENE_HTML_MAX`]) is not checked here: the daemon owns it, so a scene over the limit stays a
+/// valid file and the user reads the daemon's sentence.
 pub fn validate_scene(scene: &Scene, lights: &[Light]) -> Result<(), SceneError> {
     if scene.name.chars().count() > SCENE_NAME_MAX {
         return Err(SceneError::NameTooLong { what: format!("scene {}", scene.id) });
@@ -328,10 +326,6 @@ pub fn validate_scene(scene: &Scene, lights: &[Light]) -> Result<(), SceneError>
                 return Err(SceneError::LightTwice { light: member.clone() });
             }
         }
-    }
-    let html = html_groups(scene);
-    if html > SCENE_HTML_MAX {
-        return Err(SceneError::TooManyHtml { count: html });
     }
     Ok(())
 }
@@ -429,27 +423,33 @@ mod tests {
         assert_eq!(validate_scene(&dup, &lights()), Err(SceneError::DuplicateId { id: "g1".into() }));
     }
 
+    fn html_scene(count: usize) -> (Scene, Vec<Light>) {
+        let names = ["a", "b", "c", "d", "e"];
+        let groups = (0..count)
+            .map(|i| {
+                let mut g = group(&format!("g{i}"), &[names[i]]);
+                g.plays = Plays::Effect { effect: format!("html:fx{i}"), props: Props::new() };
+                g
+            })
+            .collect();
+        (scene(groups), names.iter().map(|n| light(n)).collect())
+    }
+
     #[test]
-    fn an_html_group_over_the_limit_is_refused() {
-        let html = |id: &str, member: &str| {
-            let mut g = group(id, &[member]);
-            g.plays = Plays::Effect { effect: format!("html:{id}"), props: Props::new() };
-            g
-        };
-        let mut built_in = group("g4", &["d"]);
-        built_in.plays = Plays::Effect { effect: "aurora".into(), props: Props::new() };
-        let mut ls = lights();
-        ls.push(light("d"));
-        let at_max: Vec<Group> =
-            ["a", "b", "c"].iter().take(SCENE_HTML_MAX).enumerate().map(|(i, m)| html(&format!("g{i}"), m)).collect();
-        let mut ok = at_max.clone();
-        ok.push(built_in.clone());
-        assert_eq!(html_groups(&scene(ok.clone())), SCENE_HTML_MAX);
-        assert_eq!(validate_scene(&scene(ok), &ls), Ok(()));
-        let mut over = at_max;
-        over.push(html("gx", "c"));
-        over.push(built_in);
-        assert_eq!(validate_scene(&scene(over), &ls), Err(SceneError::TooManyHtml { count: SCENE_HTML_MAX + 1 }));
+    fn two_groups_may_play_an_html_effect() {
+        assert_eq!(SCENE_HTML_MAX, 2, "#370: a scene runs two HTML effects");
+    }
+
+    /// The HTML count is the daemon's to enforce (`check_html_limit`), because only the daemon sees
+    /// a stack's HTML layers. A scene over the limit is still a valid file: it loads and is shown,
+    /// and the daemon refuses to save or set it with its own sentence.
+    #[test]
+    fn a_scene_over_the_html_limit_still_validates() {
+        let (over, ls) = html_scene(SCENE_HTML_MAX + 1);
+        assert_eq!(html_groups(&over), SCENE_HTML_MAX + 1);
+        assert_eq!(validate_scene(&over, &ls), Ok(()));
+        let (at_max, ls) = html_scene(SCENE_HTML_MAX);
+        assert_eq!(validate_scene(&at_max, &ls), Ok(()));
     }
 
     #[test]
