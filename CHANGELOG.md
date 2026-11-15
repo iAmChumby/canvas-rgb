@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Every message that appears and then goes away looks and behaves the same, including the "Updated to" greeting, which now shows one thing the release changed instead of repeating the version (#366)
+- The sidebar strip shows your lights' real colours in a scene (#379)
 
 ## [0.16.0] - 2026-11-15
 
