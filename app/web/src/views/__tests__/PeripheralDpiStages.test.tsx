@@ -114,7 +114,6 @@ function mouse(id: string, count: number): PeripheralDetail {
   const values: PeripheralDetail["values"] = { "dpi-stage-count": { type: "number", value: count } };
   for (let i = 1; i <= count; i += 1) {
     values[`dpi-stage-${i}`] = { type: "number", value: FIGURES[i - 1] ?? i * 100 };
-    values[`dpi-stage-${i}-colour`] = { type: "string", value: "#ef3fff" };
   }
   values["dpi-active-stage"] = { type: "choice", value: "1" };
   return {
