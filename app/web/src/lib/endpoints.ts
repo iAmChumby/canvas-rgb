@@ -10,7 +10,6 @@ import type { PatchOutput } from "@/proto/PatchOutput";
 import type { DevicesResponse } from "@/proto/DevicesResponse";
 import type { PatchZone } from "@/proto/PatchZone";
 import type { IdentifyRequest } from "@/proto/IdentifyRequest";
-import type { OnboardingSession } from "@/proto/OnboardingSession";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { ActivateEffect } from "@/proto/ActivateEffect";
@@ -72,13 +71,9 @@ import type { AudioTestLease } from "@/proto/AudioTestLease";
 import type { AudioTestRequest } from "@/proto/AudioTestRequest";
 import type { AudioTestState } from "@/proto/AudioTestState";
 
-/** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
-const ONBOARDING_SESSION = "/api/v1/onboarding/session";
-
 /**
  * The chain routes (`routes::CHAINS`, `routes::CHAIN_SETUP*`). `proto/routes.ts` mirrors the
- * spine by hand and does not carry them yet, so they are spelled here, as the onboarding session
- * above is.
+ * spine by hand and does not carry them yet, so they are spelled here.
  */
 const CHAINS = "/api/v1/chains";
 /** `POST` starts a session on one header, `DELETE` cancels it. `{zone}` is the zone index. */
@@ -303,9 +298,6 @@ export const api = {
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),
-  /** While active, every light is black except what identify lights; resend every 2 s (the daemon ends it after 5 s). */
-  onboardingSession: (body: OnboardingSession) =>
-    request<unknown>("POST", ONBOARDING_SESSION, body),
 
   /** Every numeric display with its config and the value it shows now. */
   displays: () => request<DisplayStatus[]>("GET", routes.displays),
