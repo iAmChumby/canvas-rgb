@@ -42,6 +42,11 @@ pub const SCENES_SET: &[&str] = &["scenes", "set"];
 pub const SCENES_ORDER: &[&str] = &["scenes", "order"];
 /// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]` (#368).
 pub const SCENES_GROUP_MOVE: &[&str] = &["scenes", "group", "move"];
+/// `canvas-rgb effects source <id>`: prints an effect's HTML source, so a skill can read the
+/// stock effects and tune them (#377).
+pub const EFFECTS_SOURCE: &[&str] = &["effects", "source"];
+/// `canvas-rgb scenes group order <scene> <group>...`: sets the order of a scene's groups (#384).
+pub const SCENES_GROUP_ORDER: &[&str] = &["scenes", "group", "order"];
 /// `--group <name>`, repeatable, on the commands that play an effect: play it on those groups
 /// of the active scene only (`ActivateEffect.groups`).
 pub const GROUP_FLAG: &str = "--group";

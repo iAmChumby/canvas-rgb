@@ -1094,7 +1094,7 @@ mod scene_skill_tests {
         let all = [
             SCENES_LIST, SCENES_SET, LIGHTS_LIST, SCENES_CREATE, SCENES_EDIT, SCENES_DELETE,
             EFFECTS_LIST, EFFECTS_ACTIVATE, EFFECTS_DELETE, EFFECTS_PRESET_LIST,
-            EFFECTS_PRESET_SAVE, EFFECTS_PRESET_DELETE,
+            EFFECTS_PRESET_SAVE, EFFECTS_PRESET_DELETE, EFFECTS_SOURCE, SCENES_GROUP_ORDER,
         ];
         let mut seen = std::collections::HashSet::new();
         for name in all {
@@ -1271,7 +1271,7 @@ mod scenes_ops_tests {
     #[test]
     fn the_scene_ops_cli_names_are_distinct_from_the_old_ones() {
         use crate::cli::*;
-        let all = [SCENES_LIST, SCENES_SET, SCENES_ORDER, SCENES_GROUP_MOVE];
+        let all = [SCENES_LIST, SCENES_SET, SCENES_ORDER, SCENES_GROUP_MOVE, SCENES_GROUP_ORDER, EFFECTS_SOURCE];
         let mut seen = std::collections::HashSet::new();
         for name in all {
             assert!(seen.insert(name), "{name:?} is named twice");
