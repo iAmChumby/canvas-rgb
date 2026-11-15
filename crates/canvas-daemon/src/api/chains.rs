@@ -302,10 +302,13 @@ pub async fn commit_setup(
         )));
     }
 
-    // The supervisor's sizes and the setup's hold change together at the end: neither may see
-    // the committed length beside a stale raise.
-    let mut sizes = app.zones.write().await;
-    let mut holds = app.zone_holds.write().await;
+    // The hold follows the header to its final length before the resize, so the supervisor reads
+    // "as wanted" throughout. No guard on the sizes or the holds is kept across an adapter call:
+    // the supervisor reads both under the adapter lock, so holding one here while waiting for the
+    // adapter would deadlock.
+    let key = (id.clone(), zone);
+    let raised = app.zone_holds.read().await.get(&key).copied().unwrap_or(max_leds);
+    app.zone_holds.write().await.insert(key.clone(), plan.final_leds);
 
     // The second and last resize of the setup.
     let resized = {
@@ -313,15 +316,16 @@ pub async fn commit_setup(
         adapter.set_zone_size(&device_id, zone, plan.final_leds).await
     };
     if let Err(e) = resized {
-        // Nothing was written: put the header back to the length the restore record holds and
-        // leave the session (hold, record, gate session) open for a retry.
+        // Nothing was written. The session (hold, record, gate session) stays open for a retry,
+        // so the header goes back to the raised length the setup holds.
+        app.zone_holds.write().await.insert(key.clone(), raised);
         let back = {
             let mut adapter = app.adapter.lock().await;
-            adapter.set_zone_size(&device_id, zone, restore.leds).await
+            adapter.set_zone_size(&device_id, zone, raised).await
         };
         if let Err(back) = back {
             tracing::warn!(
-                device = %id, zone, leds = restore.leds, error = %back,
+                device = %id, zone, leds = raised, error = %back,
                 "the header could not be put back after the failed resize; the session still holds it"
             );
         }
@@ -361,7 +365,7 @@ pub async fn commit_setup(
         }
         if rolled_back {
             crate::chain_records::delete_intent(&home);
-            holds.remove(&(id.clone(), zone));
+            app.zone_holds.write().await.remove(&key);
             tracing::info!(device = %id, zone, "the commit could not be saved: its files and the header are back");
             return Err(ApiFailure::service_unavailable(format!("the chain was not saved: {e}")));
         }
@@ -370,10 +374,9 @@ pub async fn commit_setup(
         )));
     }
 
-    sizes.entry(id.clone()).or_default().insert(zone, plan.final_leds);
-    holds.remove(&(id.clone(), zone));
-    drop(holds);
-    drop(sizes);
+    // The saved size first, then the hold goes: the supervisor never sees the header unwanted.
+    app.zones.write().await.entry(id.clone()).or_default().insert(zone, plan.final_leds);
+    app.zone_holds.write().await.remove(&key);
 
     if let Err(e) = rediscover(&app).await {
         // The files landed; the list catches up on the next refresh. Say so rather than fail a
