@@ -85,3 +85,87 @@ describe("the What's new notes", () => {
     expect(screen.getByText("No notes were published for 0.17.0.")).toBeTruthy();
   });
 });
+
+describe("the notes grouped by area", () => {
+  it("writes each area of a section once, in the order the areas first appear", () => {
+    const { container } = render(<WhatsNewPanel version="0.16.0" date={PUB_DATE} notes={NOTES} />);
+    const first = container.querySelector(".notes-sec");
+    const labels = [...(first?.querySelectorAll(".notes-area") ?? [])].map((el) => el.textContent);
+    expect(labels).toEqual(["Chains", "Scenes", "Effects", "Command line", "Patterns"]);
+  });
+
+  it("puts the items that name no area in one group at the top of the section", () => {
+    const { container } = render(<WhatsNewPanel version="0.16.0" date={PUB_DATE} notes={NOTES} />);
+    const first = container.querySelector(".notes-sec");
+    const groups = [...(first?.querySelectorAll(".notes-group") ?? [])];
+    expect(groups).toHaveLength(6);
+    expect(groups[0]?.querySelector(".notes-area")).toBeNull();
+    expect(groups[0]?.querySelectorAll(".notes-item")).toHaveLength(2);
+    expect(groups.slice(1).map((g) => g.querySelector(".notes-area")?.textContent)).toEqual([
+      "Chains",
+      "Scenes",
+      "Effects",
+      "Command line",
+      "Patterns",
+    ]);
+  });
+
+  it("writes the area of a group that holds one item as well", () => {
+    const { container } = render(<WhatsNewPanel version="0.16.0" date={PUB_DATE} notes={NOTES} />);
+    const patterns = [...container.querySelectorAll(".notes-group")].find(
+      (g) => g.querySelector(".notes-area")?.textContent === "Patterns",
+    );
+    expect(patterns?.querySelectorAll(".notes-item")).toHaveLength(1);
+  });
+
+  it("takes the area's name off the sentence", () => {
+    const { container } = render(<WhatsNewPanel version="0.16.0" date={PUB_DATE} notes={NOTES} />);
+    const chains = [...container.querySelectorAll(".notes-group")].find(
+      (g) => g.querySelector(".notes-area")?.textContent === "Chains",
+    );
+    const sentence = chains?.querySelector(".notes-text")?.textContent ?? "";
+    expect(sentence).toBe("Tell the app what is on a header in three steps: drag, type a number, confirm.");
+  });
+});
+
+describe("the notes' links", () => {
+  it("draws two issue links in one sentence without a duplicate key warning", () => {
+    const errors: string[] = [];
+    const spy = vi.spyOn(console, "error").mockImplementation((...args: unknown[]) => {
+      errors.push(args.map((a) => String(a)).join(" "));
+    });
+    try {
+      render(<WhatsNewPanel version="1.0.0" date={null} notes={"### Fixed\n\n- The same fix as #1 and #2 now. (#3)"} />);
+    } finally {
+      spy.mockRestore();
+    }
+    expect(errors).toEqual([]);
+  });
+
+  it("catches a refused opener instead of leaving a rejected promise behind", async () => {
+    const seen: unknown[] = [];
+    const onNode = (reason: unknown) => {
+      seen.push(reason);
+    };
+    const onWindow = (e: Event) => {
+      seen.push((e as PromiseRejectionEvent).reason);
+      e.preventDefault();
+    };
+    process.on("unhandledRejection", onNode);
+    window.addEventListener("unhandledrejection", onWindow);
+    const invoke = vi.fn(async () => {
+      throw new Error("the opener refuses");
+    });
+    window.__TAURI__ = { core: { invoke }, event: { listen: vi.fn(async () => () => undefined) } };
+    try {
+      render(<WhatsNewPanel version="0.16.0" date={PUB_DATE} notes={NOTES} />);
+      fireEvent.click(screen.getAllByRole("link", { name: "Issue #338 on GitHub" })[0] as HTMLElement);
+      await waitFor(() => expect(invoke).toHaveBeenCalled());
+      await new Promise((r) => setTimeout(r, 20));
+    } finally {
+      process.off("unhandledRejection", onNode);
+      window.removeEventListener("unhandledrejection", onWindow);
+    }
+    expect(seen).toEqual([]);
+  });
+});

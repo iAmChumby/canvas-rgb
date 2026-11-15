@@ -3,7 +3,14 @@
 import { useId, useMemo, type CSSProperties, type MouseEvent } from "react";
 import { Panel } from "@/components/Panel";
 import { openExternal } from "@/lib/host";
-import { issueUrl, noteDate, parseRelease, type Inline, type NoteItem } from "@/lib/releaseNotes";
+import {
+  groupByArea,
+  issueUrl,
+  noteDate,
+  parseRelease,
+  type Inline,
+  type NoteItem,
+} from "@/lib/releaseNotes";
 
 /** What a changelog heading means, as a token: the mark beside the section's name. */
 function sectionTone(title: string): string {
@@ -14,17 +21,26 @@ function sectionTone(title: string): string {
   return "var(--work)";
 }
 
+/**
+ * Opens an address outside the app. The opener can refuse — the tray's plugin may be missing, or
+ * the address may be one it will not take — and that must not leave a rejected promise behind, so
+ * the refusal is swallowed here.
+ */
+function openAway(url: string): void {
+  void openExternal(url).catch(() => undefined);
+}
+
 /** An issue reference: the address is real, and a press opens it in the person's browser. */
-function issueLink(number: number, className: string, text: string) {
+function issueLink(number: number, className: string, text: string, key: string | number) {
   return (
     <a
-      key={number}
+      key={key}
       className={className}
       href={issueUrl(number)}
       aria-label={`Issue #${number} on GitHub`}
       onClick={(e: MouseEvent<HTMLAnchorElement>) => {
         e.preventDefault();
-        void openExternal(issueUrl(number));
+        openAway(issueUrl(number));
       }}
     >
       {text}
@@ -50,14 +66,16 @@ function Runs({ parts }: { parts: Inline[] }) {
                 href={p.href}
                 onClick={(e: MouseEvent<HTMLAnchorElement>) => {
                   e.preventDefault();
-                  void openExternal(p.href);
+                  openAway(p.href);
                 }}
               >
                 {p.text}
               </a>
             );
           case "issue":
-            return issueLink(p.number, "notes-issue fig", p.text);
+            // The key is the run's place in the sentence, not the issue number: two runs of the
+            // same issue in one sentence would otherwise share a key.
+            return issueLink(p.number, "notes-issue fig", p.text, i);
           default:
             return <span key={i}>{p.text}</span>;
         }
@@ -78,7 +96,7 @@ function NoteRow({ item }: { item: NoteItem }) {
       </span>
       {item.refs.length > 0 && (
         <span className="notes-refs">
-          {item.refs.map((n) => issueLink(n, "notes-ref fig", `#${n}`))}
+          {item.refs.map((n, i) => issueLink(n, "notes-ref fig", `#${n}`, i))}
         </span>
       )}
     </li>
@@ -135,11 +153,18 @@ export function WhatsNewPanel({
           <h4 className="notes-sec-title" id={`${id}-${i}`}>
             <span className="notes-sec-name">{section.title}</span>
           </h4>
-          <ul className="notes-list">
-            {section.items.map((item, j) => (
-              <NoteRow key={j} item={item} />
+          <div className="notes-groups">
+            {groupByArea(section.items).map((group, gi) => (
+              <div className="notes-group" key={group.area ?? `none-${gi}`}>
+                {group.area && <div className="notes-area fig">{group.area}</div>}
+                <ul className="notes-list">
+                  {group.items.map((item, j) => (
+                    <NoteRow key={j} item={item} />
+                  ))}
+                </ul>
+              </div>
             ))}
-          </ul>
+          </div>
         </section>
       ))}
     </Panel>

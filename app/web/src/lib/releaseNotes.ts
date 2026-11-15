@@ -16,6 +16,8 @@ export type Inline =
   | { kind: "issue"; text: string; number: number };
 
 export interface NoteItem {
+  /** The area the item belongs to, when the line starts with one ("Chains: …"). */
+  area: string | null;
   /** The sentence, with the issue references written after it taken off. */
   parts: Inline[];
   /** The issues named at the end of the line, in the order they are written. */
@@ -82,6 +84,8 @@ function splitRefs(text: string): { body: string; refs: number[] } {
   const refs: number[] = [];
   for (const hit of (m[1] ?? "").matchAll(/\d+/g)) {
     const n = Number(hit[0]);
+    // Issue 0 is not an issue: a list that names it names no issue at all, and stays words.
+    if (n === 0) return { body: text.trim(), refs: [] };
     if (Number.isSafeInteger(n) && !refs.includes(n)) refs.push(n);
   }
   return { body: text.slice(0, m.index).trim(), refs };
@@ -89,8 +93,8 @@ function splitRefs(text: string): { body: string; refs: number[] } {
 
 // `code`, **bold**, [words](https://…), and #123. A link whose address is not https stays text:
 // the notes have no business opening anything else. Only the first seen run wins, so a `#` inside
-// code is never turned into a link.
-const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https:\/\/[^\s)]+)\)|#(\d+)/g;
+// code is never turned into a link. `#0` is no issue either, so it stays text.
+const INLINE = /`([^`]+)`|\*\*([^*]+)\*\*|\[([^\]]+)\]\((https:\/\/[^\s)]+)\)|#([1-9]\d*)/g;
 
 /** Splits one item's words into text, `code`, **bold**, links and issue references. */
 export function parseInline(text: string): Inline[] {
@@ -109,10 +113,78 @@ export function parseInline(text: string): Inline[] {
   return out;
 }
 
-/** One bullet: its words, and the issues written after them. */
+/**
+ * The area an item names at its start, when it names one. The rule is narrow on purpose: at most
+ * two words, a capital first letter, no more than 20 characters, and no code, link or issue
+ * reference in it. "Chains: tell the app what is on a header" names the area "Chains";
+ * "The app opens on Scenes: your groups" names none, because five words come before the colon.
+ */
+function readArea(text: string): { area: string | null; rest: string } {
+  const colon = text.indexOf(":");
+  if (colon <= 0) return { area: null, rest: text };
+  const prefix = text.slice(0, colon).trim();
+  if (!prefix || prefix.length > 20) return { area: null, rest: text };
+  if (!/^[A-Z]/.test(prefix)) return { area: null, rest: text };
+  if (prefix.split(/\s+/).length > 2) return { area: null, rest: text };
+  if (/[`[\]#()]/.test(prefix)) return { area: null, rest: text };
+  return { area: prefix, rest: text.slice(colon + 1).replace(/^\s+/, "") };
+}
+
+/** A sentence starts with a capital: the area's name is gone, so the rest of the line does. */
+function sentenceCase(parts: Inline[]): Inline[] {
+  for (let i = 0; i < parts.length; i++) {
+    const p = parts[i];
+    if (!p || p.kind !== "text") continue;
+    const letter = /[A-Za-z]/.exec(p.text);
+    if (!letter) return parts;
+    const at = letter.index;
+    const out = [...parts];
+    out[i] = { ...p, text: p.text.slice(0, at) + p.text[at].toUpperCase() + p.text.slice(at + 1) };
+    return out;
+  }
+  return parts;
+}
+
+/** One bullet: its area, its words, and the issues written after them. */
 export function parseItem(raw: string): NoteItem {
   const { body, refs } = splitRefs(raw);
-  return { parts: parseInline(body), refs };
+  const { area, rest } = readArea(body);
+  const parts = parseInline(rest);
+  return { area, parts: area ? sentenceCase(parts) : parts, refs };
+}
+
+/** One group of a section's items: the area they share, or none. */
+export interface NoteGroup {
+  /** The area the group's items name, or null for the items that name none. */
+  area: string | null;
+  items: NoteItem[];
+}
+
+/**
+ * The items of a section, grouped by the area they name: the items that name no area come
+ * first, then each area in the order it first appears. The items of an area stay together even
+ * when the file interleaves them with other areas.
+ */
+export function groupByArea(items: NoteItem[]): NoteGroup[] {
+  const groups: NoteGroup[] = [];
+  const byArea = new Map<string, NoteGroup>();
+  let plain: NoteGroup | null = null;
+  for (const item of items) {
+    if (!item.area) {
+      plain ??= { area: null, items: [] };
+      plain.items.push(item);
+      continue;
+    }
+    let group = byArea.get(item.area);
+    if (!group) {
+      group = { area: item.area, items: [] };
+      byArea.set(item.area, group);
+      groups.push(group);
+    }
+    group.items.push(item);
+  }
+  if (plain) groups.unshift(plain);
+  return groups;
 }
 
 interface RawSection {
@@ -172,7 +244,9 @@ export function parseRelease(md: string): ReleaseNotes {
     }
     const section = ensure();
     const last = section.lines.length - 1;
-    if (open && /^\s+/.test(line) && last >= 0) section.lines[last] += ` ${trimmed.trim()}`;
+    // A line that follows a bullet continues it, indented or not: a sentence that wrapped in the
+    // changelog is one item, not two.
+    if (open && last >= 0) section.lines[last] += ` ${trimmed.trim()}`;
     else section.lines.push(trimmed.trim());
     open = false;
   }

@@ -46,7 +46,9 @@ describe("a release section of the changelog", () => {
     const [first] = parseRelease(notes).sections[0]?.items ?? [];
     expect(first?.refs).toEqual([338]);
     const text = (first?.parts ?? []).map((p) => p.text).join("");
-    expect(text).toBe("Chains: tell the app what is on a header in three steps: drag, type a number, confirm.");
+    // The area the line names is written once for its group, so the sentence itself starts at
+    // "Tell the app".
+    expect(text).toBe("Tell the app what is on a header in three steps: drag, type a number, confirm.");
     expect(text).not.toContain("#338");
   });
 
@@ -103,6 +105,7 @@ describe("one item's inline words", () => {
 
   it("keeps HTML in a line as words, not as markup", () => {
     expect(parseItem("<b>bold</b> and <img src=x>")).toEqual({
+      area: null,
       parts: [{ kind: "text", text: "<b>bold</b> and <img src=x>" }],
       refs: [],
     });

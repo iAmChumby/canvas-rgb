@@ -104,8 +104,10 @@
 }
 
 /* The release notes (#365): the release's own heading, then one labelled section per changelog
-   heading. Each item's issue links sit in their own column, so a list is scanned down its right
-   edge instead of read through, and every line is held to a readable measure. Tokens only. */
+   heading. Inside a section the items are grouped by the area they name, and each area is written
+   once as a small label. The issue links sit in their own column at the right edge of the panel,
+   so a list is scanned down its right edge instead of read through, and every sentence is held to
+   a readable measure. Tokens only. */
 .notes-release {
   display: flex;
   flex-wrap: wrap;
@@ -165,20 +167,39 @@
   background: var(--tone, var(--line-2));
 }
 
+/* The groups of one section: the items that name no area first, then each area in the order it
+   first appears. The groups are held apart; the items inside one sit close together. */
+.notes-groups {
+  display: grid;
+  gap: var(--s4);
+  margin-top: var(--s3);
+}
+
+/* The area a group belongs to: mono small capitals, like the title printed on the case. */
+.notes-area {
+  margin-bottom: var(--s2);
+  color: var(--mute);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
 .notes-list {
   display: grid;
   gap: var(--s2);
-  max-width: 64ch;
-  margin: var(--s3) 0 0;
+  margin: 0;
   padding: 0;
   list-style: none;
 }
 
+/* The sentence keeps its measure; the issue column sits at the right edge of the panel. */
 .notes-item {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
+  grid-template-columns: minmax(0, 64ch) auto;
   column-gap: var(--s3);
   align-items: start;
+  justify-content: space-between;
 }
 
 .notes-text {
@@ -254,17 +275,26 @@
   outline-offset: 2px;
 }
 
-/* A phone has no room for the second column: the links sit under their sentence, where the
-   chip is still set apart from the words. */
+/* A phone has no room for the second column: the chips sit at the end of the sentence, in the
+   same block, so an item is one thing to read and not two rows. */
 @media (max-width: 520px) {
   .notes-item {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: var(--s2);
+    display: block;
+    text-wrap: pretty;
+  }
+
+  .notes-text {
+    display: inline;
   }
 
   .notes-refs {
-    justify-content: flex-start;
+    display: inline;
+    margin-left: var(--s2);
     padding-top: 0;
+  }
+
+  .notes-ref + .notes-ref {
+    margin-left: var(--s1);
   }
 }
 
