@@ -106,14 +106,16 @@ describe("the store's answers", () => {
   });
 
   it("stops asking a daemon without the scene routes until its version changes", async () => {
+    // The first status read sets this daemon's version, so the test does not depend on an earlier
+    // test having set one.
     api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
     api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
     api.lights.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/lights"));
 
-    // The daemon's version is known before it answers 404.
-    await refreshStatus();
     await refreshScenes();
     await refreshLights();
+    await refreshStatus();
     expect(api.scenes.list).toHaveBeenCalledTimes(1);
     expect(api.lights.list).toHaveBeenCalledTimes(1);
 
@@ -135,6 +137,22 @@ describe("the store's answers", () => {
     await refreshLights();
     expect(api.scenes.list).toHaveBeenCalledTimes(3);
     expect(api.lights.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("asks the scene routes again when the daemon comes back after a failed status read", async () => {
+    api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+
+    // The daemon is down for one read, then answers again at the same version: a rebuilt dev
+    // daemon keeps its version, and it may have the routes now.
+    api.status.mockRejectedValueOnce(new Error("connection refused"));
+    await refreshStatus();
+    await refreshStatus();
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
   });
 });
 
