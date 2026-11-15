@@ -451,21 +451,19 @@ fn strip_cells_and_band(bands: usize, index: usize) -> (Vec<(u32, u32)>, (u32, u
         copies: None,
     };
     let plan = canvas_core::arrangement::build_group_plan(
-        &[light.id.clone()],
+        std::slice::from_ref(&light.id),
         GroupMode::FlowAcross,
-        &[light],
-        &[dev],
+        std::slice::from_ref(&light),
+        std::slice::from_ref(&dev),
     );
     let scale = canvas_core::SCENE_RENDER_SCALE;
     let cells = plan.lights[0]
         .leds
         .iter()
         .map(|led| {
-            let [bx0, by0, bx1, by1] = led.bounds;
+            let [bx0, _by0, bx1, _by1] = led.bounds;
             let x0 = (((bx0 * scale) - 0.5).ceil() as i64).clamp(0, 79) as u32;
-            let y0 = (((by0 * scale) - 0.5).ceil() as i64).clamp(0, 49) as u32;
             let x1 = ((((bx1 * scale) - 0.5).floor() as i64).clamp(0, 79) as u32).max(x0);
-            let y1 = ((((by1 * scale) - 0.5).floor() as i64).clamp(0, 49) as u32).max(y0);
             (x0, x1)
         })
         .collect();

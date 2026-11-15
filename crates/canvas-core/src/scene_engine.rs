@@ -1873,7 +1873,7 @@ mod tests {
 
         // R2: Fire's level on the strip, against the old full-height band.
         let fire_stats =
-            measure_cells(Box::new(canvas_effects::fire::Fire::with_seed(372)), None, None, &[cells.clone()], rule);
+            measure_cells(Box::new(canvas_effects::fire::Fire::with_seed(372)), None, None, std::slice::from_ref(&cells), rule);
         let fire = fire_stats[0].levels().iter().sum::<f64>() / 8.0;
         let old_stats = measure_cells(
             Box::new(canvas_effects::fire::Fire::with_seed(372)),
@@ -1891,7 +1891,7 @@ mod tests {
                 Box::new(canvas_effects::audio_spectrum::AudioSpectrum::new()),
                 None,
                 Some(*magnitude),
-                &[cells.clone()],
+                std::slice::from_ref(&cells),
                 rule,
             );
             let levels = stats[0].levels();
@@ -2380,7 +2380,7 @@ mod tests {
         println!("#372 effect | new rule range | old range | new rule change | old change | new rule level | old level");
         for measured in effects {
             let (candidate, old) =
-                measure_effect(measured.effect, measured.props, measured.audio, &[cells.clone()], rule);
+                measure_effect(measured.effect, measured.props, measured.audio, std::slice::from_ref(&cells), rule);
             let candidate_range = candidate[0].widest();
             let old_range = old.widest();
             let candidate_change = candidate[0].flicker();
