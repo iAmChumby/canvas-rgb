@@ -37,6 +37,63 @@ impl PreviewRegistry {
     }
 }
 
+/// The group preview's one place (`GET /api/v1/preview/group`, #378): at most one socket streams
+/// a group's picture, and the newest socket takes the place from the one before it.
+///
+/// The engine holds one group selection, so the slot and the engine's selection change together,
+/// under the slot's lock: a takeover and the old socket's release cannot cross.
+#[derive(Default)]
+pub struct GroupPreviewSlot {
+    inner: Mutex<GroupSlotInner>,
+}
+
+#[derive(Default)]
+struct GroupSlotInner {
+    /// The next owner number.
+    next: u64,
+    /// The socket that holds the place: its number, and the signal that tells it a newer socket
+    /// took the place.
+    owner: Option<(u64, tokio::sync::oneshot::Sender<()>)>,
+}
+
+impl GroupPreviewSlot {
+    /// Takes the place for a new socket and points the engine at `group` with `sink`. A socket
+    /// that held the place is told to close. Returns the new owner's number and the receiver that
+    /// fires when a newer socket takes the place from it.
+    pub fn take(
+        &self,
+        engine: &dyn Engine,
+        group: String,
+        sink: Arc<dyn PreviewSink>,
+    ) -> (u64, tokio::sync::oneshot::Receiver<()>) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        inner.next += 1;
+        let id = inner.next;
+        let (taken_tx, taken_rx) = tokio::sync::oneshot::channel();
+        if let Some((_, previous)) = inner.owner.replace((id, taken_tx)) {
+            // The old socket may be gone already; then there is nobody to tell.
+            let _ = previous.send(());
+        }
+        engine.set_group_preview(Some(group), Some(sink));
+        (id, taken_rx)
+    }
+
+    /// Gives the place back. Only the owner clears the engine's selection: a socket that was
+    /// taken over leaves the newer socket's selection alone.
+    pub fn release(&self, engine: &dyn Engine, id: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.owner.as_ref().is_some_and(|(owner, _)| *owner == id) {
+            inner.owner = None;
+            engine.set_group_preview(None, None);
+        }
+    }
+
+    /// Whether a socket holds the place.
+    pub fn is_open(&self) -> bool {
+        self.inner.lock().unwrap_or_else(|e| e.into_inner()).owner.is_some()
+    }
+}
+
 /// The longest a fans route waits on the service for one exchange while it holds `fans_last`
 /// (issue #225). A healthy service answers in milliseconds; past this the route answers 503.
 pub const FANS_LOCK_PIPE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
@@ -91,6 +148,8 @@ pub struct App {
     pub preview_subs: PreviewRegistry,
     /// The stack preview engine's subscribers (`GET /preview?stack=1`).
     pub stack_subs: PreviewRegistry,
+    /// The group preview socket (`GET /api/v1/preview/group`): one at a time, newest wins.
+    pub group_preview: GroupPreviewSlot,
     /// The stack preview engine and the stack it runs (D95.4.4).
     pub stack_preview: crate::preview::StackPreview,
     /// The screen and audio captures. They only run while an effect needs them.
@@ -286,6 +345,7 @@ impl App {
             chain_setup: tokio::sync::Mutex::new(()),
             leftovers_replayed: AtomicBool::new(false),
             preview_subs: PreviewRegistry::default(),
+            group_preview: GroupPreviewSlot::default(),
             stack_subs: PreviewRegistry::default(),
             stack_preview: crate::preview::StackPreview::new(),
             inputs,
@@ -441,6 +501,7 @@ impl App {
             devices_total: self.devices_total().await,
             preview_subscribers: self.preview_subs.subscribers()
                 + self.stack_subs.subscribers()
+                + u32::from(self.group_preview.is_open())
                 + self.scene.feed.watchers() as u32,
             active_scene,
             active_effects,
