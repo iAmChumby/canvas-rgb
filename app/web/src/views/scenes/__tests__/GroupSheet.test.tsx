@@ -41,6 +41,7 @@ import { GroupSheet } from "@/views/scenes/GroupSheet";
 import { useScene } from "@/views/scenes/useScene";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import type { LightFit } from "@/proto/LightFit";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Props } from "@/proto/props";
@@ -74,6 +75,7 @@ const clone = <T,>(value: T): T => structuredClone(value);
 
 const FIRST = DEMO_LIGHTS[0];
 const SECOND = DEMO_LIGHTS[1];
+const THIRD = DEMO_LIGHTS[2];
 
 /** The scene the fake daemon holds: two groups, each with one device, each playing Aurora. */
 function scene(): Scene {
@@ -131,7 +133,47 @@ const DETAIL: EffectDetail = {
 const EFFECTS: EffectSummary[] = [
   { id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" },
   { id: "fire", name: "Fire", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" },
+  // The pattern the first group plays (0.16.0): built on a ring of 12.
+  {
+    id: "pattern:Intake",
+    name: "Intake",
+    description: "Pattern, ring of 12",
+    needs: { screen: false, audio: false },
+    favorite: false,
+    kind: "pattern",
+    built_on: { led_count: 12, arrangement: "ring" },
+  },
 ];
+
+/** The label of the control that shares a group's effect across its lights. */
+const MODE_LABEL = "How this group's lights share the effect";
+
+/** The scene the fake daemon answers with from now on, and the store's copy of it. */
+function serve(next: ScenesResponse): void {
+  api.scenes.list.mockResolvedValue(clone(next));
+  patchSnap({ scenes: clone(next), scenesError: null });
+}
+
+/**
+ * The demo scene with three devices in its first group, playing `pattern:Intake` with the mode it
+ * stored before it did, and the flags the daemon sends for it.
+ */
+function patternAnswer(fits: LightFit[]): ScenesResponse {
+  const s = scene();
+  const first = s.groups[0];
+  if (!first) return answer();
+  first.members = [FIRST?.light.id ?? "", SECOND?.light.id ?? "", THIRD?.light.id ?? ""];
+  first.mode = "each_its_own";
+  first.plays = { type: "effect", effect: "pattern:Intake", props: {} };
+  return {
+    active: s.id,
+    scenes: [s],
+    group_states: [
+      { id: first.id, failed: null, fits },
+      { id: "g-two", failed: null, fits: [] },
+    ],
+  };
+}
 
 /** The rev the fake daemon is at. */
 let serverRev = 7;
@@ -314,5 +356,54 @@ describe("the open group", () => {
       await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "aurora" }));
       cleanup();
     }
+  });
+
+  // Plan Task 11: the open group of a pattern says how the pattern lands on each device, hides a
+  // mode that does not apply, and keeps the mode the group stored for when it plays a canvas
+  // effect again.
+  it("the open group shows a flag on each stretched device", async () => {
+    const fits: LightFit[] = [
+      { light: FIRST?.light.id ?? "", fit: "stretched" },
+      { light: SECOND?.light.id ?? "", fit: "other_shape" },
+      { light: THIRD?.light.id ?? "", fit: "one_led" },
+    ];
+    serve(patternAnswer(fits));
+    open("g-one");
+    await screen.findByRole("dialog");
+    const rows = [...document.querySelectorAll("[data-member]")];
+    expect(rows).toHaveLength(3);
+    // Nothing is hidden: every device of the group carries what the pattern does to it.
+    expect(rows[0]?.textContent).toContain("Stretched");
+    expect(rows[1]?.textContent).toContain("Built for a different shape");
+    expect(rows[2]?.textContent).toContain("One LED shows the first colour");
+  });
+
+  it("the mode control is hidden for a group playing a pattern and returns for a canvas effect", async () => {
+    serve(patternAnswer([]));
+    open("g-one");
+    await screen.findByRole("dialog");
+    // Every device plays the whole pattern, so how the lights share the effect has no meaning.
+    expect(screen.queryByRole("radiogroup", { name: MODE_LABEL })).toBeNull();
+    cleanup();
+    serve(answer());
+    open("g-two");
+    expect(await screen.findByRole("radiogroup", { name: MODE_LABEL })).toBeTruthy();
+  });
+
+  it("the stored mode survives playing a pattern and back", async () => {
+    serve(patternAnswer([]));
+    open("g-one");
+    await screen.findByRole("dialog");
+    expect(screen.queryByRole("radiogroup", { name: MODE_LABEL })).toBeNull();
+    // Back to a canvas effect: the mode the group kept is the one it plays.
+    fireEvent.click(screen.getByTestId("sheet-effect"));
+    fireEvent.click(await screen.findByRole("button", { name: /Fire/ }));
+    await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "fire" }));
+    const sent = api.scenes.put.mock.calls.at(-1)?.[1] as { scene: Scene };
+    expect(sent.scene.groups.find((g) => g.id === "g-one")?.mode).toBe("each_its_own");
+    const group = await screen.findByRole("radiogroup", { name: MODE_LABEL });
+    expect(within(group).getByRole("radio", { name: "each its own" }).getAttribute("aria-checked")).toBe(
+      "true",
+    );
   });
 });

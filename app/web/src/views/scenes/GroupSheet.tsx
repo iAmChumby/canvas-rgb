@@ -28,7 +28,7 @@ import { fillDefaults } from "@/lib/presetMatch";
 import { effectNameOf } from "@/lib/status";
 import { useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
-import { EffectPicker, useEffectDetail } from "@/views/scenes/EffectPicker";
+import { EffectPicker, isPatternEffect, useEffectDetail } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import { MemberList } from "@/views/scenes/MemberList";
 import { groupGoneMessage } from "@/views/scenes/groupEdit";
@@ -133,6 +133,9 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   });
 
   const effectId = group?.plays.type === "effect" ? group.plays.effect : null;
+  // A pattern plays the whole pattern on every device: the group's stored mode is kept, but it is
+  // not shown, because there is nothing it could change.
+  const pattern = effectId !== null && isPatternEffect(effectId);
   /** The count that asks for the effect's detail again: its presets change under the sheet. */
   const [reload, setReload] = useState(0);
   const effect = useEffectDetail(effectId, reload);
@@ -154,7 +157,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
         if (g) g.name = clean;
       }, "Rename the group");
     },
-    [edit, group?.name, groupId],
+    [edit, group?.name, groupId, setRenaming],
   );
 
   /** The group goes: the scene keeps its other groups. */
@@ -324,18 +327,21 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                   onClick={() => setStep("effect")}
                 >
                   <span className="one-line">{effectName}</span>
+                  {pattern && <Chip>Pattern</Chip>}
                 </Button>
-                <Segmented<GroupMode>
-                  label="How this group's lights share the effect"
-                  value={group.mode}
-                  options={MODES}
-                  onChange={(mode) =>
-                    edit((draft) => {
-                      const g = draft.groups.find((x) => x.id === groupId);
-                      if (g) g.mode = mode;
-                    }, "Change how the lights share the effect")
-                  }
-                />
+                {!pattern && (
+                  <Segmented<GroupMode>
+                    label="How this group's lights share the effect"
+                    value={group.mode}
+                    options={MODES}
+                    onChange={(mode) =>
+                      edit((draft) => {
+                        const g = draft.groups.find((x) => x.id === groupId);
+                        if (g) g.mode = mode;
+                      }, "Change how the lights share the effect")
+                    }
+                  />
+                )}
               </div>
 
               <div className={s.sheetFader}>
@@ -349,7 +355,8 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                 <span className={`${s.sheetPct} fig`}>{group.brightness}%</span>
               </div>
 
-              {effectId && effect && (
+              {/* A pattern has no settings and no presets (0.16.0): only a canvas effect has them. */}
+              {effectId && effect && !pattern && (
                 <section className={s.sheetBlock}>
                   <h3 className={s.sheetBlockTitle}>The effect</h3>
                   <PropertyControls
@@ -360,7 +367,7 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                 </section>
               )}
 
-              {effectId && effect && (
+              {effectId && effect && !pattern && (
                 <Presets
                   effectId={effectId}
                   builtIn={effect.schema.presets}
