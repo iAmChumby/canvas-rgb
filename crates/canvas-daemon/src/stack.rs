@@ -261,14 +261,12 @@ impl Mask {
                 // averages over.
                 let x0 = ((bx0 - 0.5).ceil() as i64).clamp(0, max_x);
                 let y0 = ((by0 - 0.5).ceil() as i64).clamp(0, max_y);
-                let x1 = ((bx1 - 0.5).floor() as i64).clamp(0, max_x);
-                let y1 = ((by1 - 0.5).floor() as i64).clamp(0, max_y);
-                if x1 < x0 || y1 < y0 {
-                    // An empty region averages the nearest pixel, so the mask is that pixel.
-                    let (x, y) = nearest();
-                    self.set(x, y);
-                    return;
-                }
+                let x1 = ((bx1 - 0.5).floor() as i64).clamp(0, max_x).max(x0);
+                let y1 = ((by1 - 0.5).floor() as i64).clamp(0, max_y).max(y0);
+                // `sampling::sample_area` raises an empty axis to its first pixel, one axis at a
+                // time, so a cell thinner than a pixel in one direction (a strip LED, #372) still
+                // reads the pixel it is over in the other. The mask is those pixels, not the
+                // nearest one on both axes.
                 for y in y0..=y1 {
                     for x in x0..=x1 {
                         self.set(x, y);
@@ -1848,6 +1846,24 @@ mod tests {
             .into_iter()
             .collect(),
         }
+    }
+
+    /// A cell thinner than a pixel in one direction but not the other (a strip LED of #372) is
+    /// masked at the pixel `sampling::sample_leds` reads, not at the nearest pixel.
+    #[test]
+    fn a_cell_thin_in_one_direction_masks_the_pixel_the_sampler_reads() {
+        // Centre (24.69, 25.0); x spans 24.49..24.90 (holds pixel 24's centre, 24.5), y spans
+        // 24.80..25.20 (holds no pixel centre). The sampler reads (24, 25); the nearest pixel is (25, 25).
+        let led = geometry::LedSample { center_x: 24.69, center_y: 25.0, bounds: [24.49, 24.80, 24.90, 25.20], sampled: true };
+        let mut mask = Mask::new(80, 50);
+        mask.add_led(&led, SamplingMode::AreaAverage);
+        assert!(mask.contains(24, 25), "the pixel the sampler reads");
+        assert!(!mask.contains(25, 25), "not the nearest pixel");
+        let mut canvas = vec![[0.0f32; 3]; 80 * 50];
+        canvas[25 * 80 + 24] = [1.0, 0.0, 0.0];
+        let mut out = Vec::new();
+        canvas_core::sampling::sample_leds(&canvas, 80, 50, &[led], SamplingMode::AreaAverage, &mut out);
+        assert_eq!(out[0].r, 255, "the sampler reads that pixel");
     }
 
     /// A group the book does not hold resolves to nothing: "not in this group".
