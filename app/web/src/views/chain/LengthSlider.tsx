@@ -46,7 +46,8 @@ export function LengthSlider({
   return (
     <div className={s.fader} onKeyDownCapture={shiftMove}>
       <div className={s.reading}>
-        <span className={s.count} data-testid="chain-length">
+        {/* As wide as the longest length's digits: the count grows in place, "LEDs" never moves. */}
+        <span className={s.count} data-testid="chain-length" style={{ minWidth: `${String(max).length}ch` }}>
           <AnimatedNumber value={value} />
         </span>
         <span className={s.countWord}>LEDs</span>
