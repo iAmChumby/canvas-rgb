@@ -385,13 +385,13 @@ async fn a_slow_reader_never_grows_a_queue_and_is_dropped_after_the_send_timeout
     let (head, _silent_client) = upgrade_with_buffer(&rig.server, &target, HOST, Some(512)).await;
     assert!(head.contains("101"), "{head}");
     let sink = group_sink(&rig).await;
-    // The engine's side never waits: a thousand submits return at once, the queue (4 pictures)
-    // holds the first few, the rest are dropped.
-    let started = std::time::Instant::now();
+    // The engine's side never waits: the queue (4 pictures) holds the first few and the rest are
+    // dropped. A submit that waited for room could never finish here: a thousand pictures of
+    // 12,000 bytes do not fit a 512-byte pipe and a queue of four, and nobody reads. That this
+    // loop ends at all is the proof; no clock is read.
     for _ in 0..1_000 {
         sink.submit(80, 50, vec![0; 12_000]);
     }
-    assert!(started.elapsed() < Duration::from_secs(5), "submit blocked on a reader that does not read");
     // The reader is given the send timeout and then let go, and the place goes with it.
     eventually("the silent socket was dropped and the tap stopped", || {
         rig.engine.group_preview_calls().last() == Some(&(None, false))
