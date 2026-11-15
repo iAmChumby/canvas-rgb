@@ -14,7 +14,7 @@ use canvas_proto::api::{
 };
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
-    validate_scene, Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX, SCENE_NAME_MAX,
+    Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, SCENE_NAME_MAX,
 };
 use canvas_proto::stack::STACK_ID_PREFIX;
 use std::sync::Arc;
@@ -185,12 +185,10 @@ pub async fn put_scene(
     }
     let mut new = put.scene;
     new.rev = old.rev + 1;
-    check_names(&new)?;
     {
         let store = app.store.read().await;
-        validate_scene(&new, &store.lights.lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
+        scenes::check_saveable(&app, &new, &store.lights.lights)?;
     }
-    scenes::check_html_limit(&app, &new).map_err(ApiFailure::validation)?;
     fit_group_props(&app, &mut new)?;
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
@@ -204,25 +202,6 @@ pub async fn put_scene(
         }
     }
     Ok(Json(new))
-}
-
-/// A scene and its groups have a name, within the length the create route keeps.
-fn check_names(scene: &Scene) -> ApiResult<()> {
-    if scene.name.trim().is_empty() {
-        return Err(ApiFailure::validation("a scene needs a name"));
-    }
-    if scene.name.chars().count() > SCENE_NAME_MAX {
-        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
-    }
-    for group in &scene.groups {
-        if group.name.trim().is_empty() {
-            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
-        }
-        if group.name.chars().count() > GROUP_NAME_MAX {
-            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
-        }
-    }
-    Ok(())
 }
 
 /// The caps and the schema fit a props patch applies, for every group of a whole scene. A stack

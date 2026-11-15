@@ -265,6 +265,7 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
             arrangement: canvas_proto::scene::Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         })
         .collect();
     let members: Vec<String> = lights.iter().map(|l| l.id.clone()).collect();

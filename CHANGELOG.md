@@ -6,11 +6,20 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
+- Peripherals: the DPI stages sit in even columns at every window size, so the mouse's settings no longer reshuffle the panels beside them. (#373)
+- Peripherals: a device with a long name keeps its row in the page, cutting the name with an ellipsis. (#373)
+- Peripherals: the "Read again" tooltip says what a read really does, and nothing claims the mouse pauses for seconds. (#374)
+- Peripherals: the tooltip promises the stutter only for the mouse, the one device whose read has been watched. (#374)
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+
 ### Fixed
 
+- Every message looks the same, and the update notice no longer repeats the version (#366)
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
 - Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
 - The sidebar strip shows your lights' real colours in a scene (#379)

@@ -129,7 +129,8 @@
   gap: var(--s2);
   border-radius: var(--r-md);
   color: var(--dim);
-  font: 600 var(--t15) / 1 var(--fu);
+  /* The type is the shared tab key's (`.tab-key` in app.css): this page sets the key's box,
+     never its own font, so the scene key cannot drift from the other tabs in the app (#373). */
 }
 
 .strip button.sceneKey::before {
