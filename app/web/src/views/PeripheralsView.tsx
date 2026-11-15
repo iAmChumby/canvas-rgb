@@ -697,6 +697,13 @@ function PeripheralDetail({
   const readsOff = !reads;
   const showsSettings = !unread && !readsOff;
   const noun = nounOf(info.kind);
+  // The "Read again" tooltip (#374). Only the mouse's read is known to hitch: it is five report
+  // exchanges with the pointer's own reports among them. The pad's read is 36 chunks of its
+  // profile image with no pointer in it, so the pad's tooltip promises the read and no more
+  // (#387).
+  const readAgainWords = isMouse
+    ? `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself. The ${noun} may stutter briefly while it reads.`
+    : `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself.`;
   const nowMs = useNowMs(30_000);
   const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
   const ago = readAt === null ? null : readAgo(readAt, nowMs);
@@ -823,11 +830,13 @@ function PeripheralDetail({
                 them (`crates/canvas-adapters/src/attack_shark_x6/mod.rs`: five reports, a 250 ms
                 wait for each grant and a 500 ms pause between the reports). The device is busy
                 with those exchanges while the read runs and is usable again when it ends; it is
-                never held still for the whole read. The wording says that, and says reading. */}
-            <Tooltip
-              label={`Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself. The ${noun} may stutter briefly while it reads.`}
-              className="rd-peri-tip"
-            >
+                never held still for the whole read. The wording says that, and says reading.
+                The stutter is the mouse's own report exchange and is claimed for the mouse only
+                (#387): the pad's read is 36 chunks of its profile image
+                (`crates/canvas-adapters/src/eightbitdo_ultimate2/mod.rs`) with no pointer in it,
+                and nothing has measured what its buttons do during one, so its tooltip promises
+                only the read. */}
+            <Tooltip label={readAgainWords} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"
@@ -962,7 +971,10 @@ function DpiPanel({
         optionLabel={choiceWord}
         onChange={onChange}
       />
-      <div className="dpi-stages" role="group" aria-label="DPI stages">
+      {/* The stage count is on the element so the columns are chosen from it (#387): the row is a
+          grid of equal cells, and a count that cannot fill its last row evenly (four, which would
+          be 3 + 1) takes two columns instead. */}
+      <div className="dpi-stages" role="group" aria-label="DPI stages" data-stages={stages.length}>
         {count === null && <UnreadValue label="DPI stages" />}
         {stages.map((s) => (
           <button

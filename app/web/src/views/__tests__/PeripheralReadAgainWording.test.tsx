@@ -81,6 +81,33 @@ function mouse(id: string, read: boolean): PeripheralDetail {
   };
 }
 
+/** One controller of the kind the app can configure, read already. */
+function pad(id: string): PeripheralDetail {
+  return {
+    info: {
+      id,
+      name: "8BitDo Ultimate 2 Wireless (XInput)",
+      vendor: "8BitDo",
+      kind: "game_controller",
+      adapter: "eightbitdo-ultimate-2",
+      serial: "",
+      location: "hid:2dc8:3106",
+      connected: true,
+    },
+    schema: {
+      device: id,
+      kind: "game_controller",
+      sections: [],
+      read_only: [],
+      unreported: [],
+    } as unknown as PeripheralDetail["schema"],
+    values: {},
+    access: { reads: true, writes: false },
+    problem: null,
+    read_at_ms: Date.now() as unknown as bigint,
+  };
+}
+
 /** The words of the tooltip on the control with this name. */
 function tipOf(control: HTMLElement): string {
   return control.closest(".tip")?.querySelector("[role='tooltip']")?.textContent ?? "";
@@ -113,6 +140,22 @@ describe("what the Peripherals page says about a read (#374)", () => {
     // A sentence, not a run-on: it starts with a capital and it has no semicolon in it.
     expect(words).toMatch(/^[A-Z]/);
     expect(words).not.toContain(";");
+  });
+
+  it("the controller's Read again tooltip promises the read and claims no stutter (#387)", async () => {
+    const id = "pad:wording";
+    api.peripherals.mockResolvedValue({ peripherals: [pad(id).info] });
+    api.peripheral.mockResolvedValue(pad(id));
+    const view = render(<PeripheralsView />);
+    const key = await screen.findByRole("button", { name: "Read again" });
+    const words = tipOf(key);
+    // The pad's read is 36 chunks of its profile image with no pointer in it, and nothing has
+    // measured what its buttons do during one: the tooltip says only what is known.
+    expect(words).toBe(
+      "Reads the settings from the controller again, to pick up changes made on the controller itself.",
+    );
+    expect(words).not.toMatch(/stutter/i);
+    expect(view.container.ownerDocument.body.textContent ?? "").not.toMatch(/stutter/i);
   });
 
   it("no wording on the page says the device is paused", async () => {

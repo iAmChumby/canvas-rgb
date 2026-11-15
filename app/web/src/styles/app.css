@@ -5957,10 +5957,14 @@ button.chip:hover {
   gap: var(--s2);
 }
 
-/* The key: its icon, its name, its battery and its state. */
+/* The key: its icon, its name, its battery and its state. The key is as wide as its name, up to
+   the width of the row: a long name ("8BitDo Ultimate 2 Wireless (2.4G receiver, idle)") is cut
+   with an ellipsis instead of growing the key past the row (#387), and the row itself scrolls
+   sideways when there are more keys than fit. */
 .rd-peri-keys .rd-devkey {
   flex: 0 0 auto;
   width: auto;
+  max-width: 100%;
   gap: var(--s2);
   padding: var(--s2) var(--s3);
   border-radius: var(--r-md);
@@ -5973,9 +5977,15 @@ button.chip:hover {
 
 .rd-devkey .peripheral-text {
   flex: 0 1 auto;
+  /* The name gives way before the key does, so the cut lands on the name and carries an
+     ellipsis (#387). */
+  min-width: 0;
 }
 
 .rd-devkey .peripheral-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -6452,21 +6462,34 @@ button.chip:hover {
   background: var(--c);
 }
 
-/* The mouse's DPI stages: a chip per stage, the active one marked. */
+/* The mouse's DPI stages: a chip per stage, the active one marked. Equal columns, not a wrapping
+   flex row (#387): a chip is as wide as its figure, so with `flex-wrap` a stage could land on a row
+   of its own — at 1440 the wider figures put "26000" alone on the third row, and the panel grew
+   40 px and reshuffled the columns beside it. Six stages are 3 + 3, five are 3 + 2, and two or
+   four are 2 + 2, so no row is left with one chip on it. A grid cell is never narrower than the
+   chip needs at the narrowest panel (390: about 103 px against the 72 px the chip's dot, figure
+   and padding take). */
 .dpi-stages {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--s2);
   margin-top: var(--s3);
   padding-top: var(--s3);
   border-top: 1px solid var(--line);
 }
 
+.dpi-stages[data-stages="2"],
+.dpi-stages[data-stages="4"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .dpi-chip {
   display: inline-flex;
   align-items: center;
-  gap: var(--s2);
-  padding: 0 var(--s3);
+  gap: var(--s1);
+  /* 8 px of the cell's width goes to each side, so a three-column row fits the panel at 1440
+     (252 px of content: 78.7 px a cell against the 76 px a chip takes). */
+  padding: 0 var(--s2);
   height: 32px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
@@ -6483,6 +6506,14 @@ button.chip:hover {
     border-color var(--release) var(--ease),
     background-color var(--release) var(--ease),
     box-shadow var(--release) var(--ease);
+}
+
+/* The figure takes what the dot leaves and sits against the cell's right edge: with a cell per
+   column, "800" and "26000" line up on their last digit, and the mono face's digits are tabular
+   (`.fig`). */
+.dpi-chip .fig {
+  flex: 1 1 auto;
+  text-align: end;
 }
 
 .dpi-chip:hover {
