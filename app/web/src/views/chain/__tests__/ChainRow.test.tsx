@@ -50,6 +50,7 @@ import type { ZoneInfo } from "@/proto/ZoneInfo";
 import { SEEN_LIGHTS_KEY } from "@/views/scenes/newLights";
 import { ScenesView } from "@/views/scenes/ScenesView";
 import { ChainRow } from "@/views/chain/ChainRow";
+import { chainKey, offeredChains } from "@/views/chain/offered";
 import { DevicesView } from "@/views/DevicesView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -300,6 +301,26 @@ describe("a header's row on Devices", () => {
 
     expect(api.lights.patch).toHaveBeenCalledWith(`${DEVICE}#z2p1`, { kind: "strip" });
     expect(api.chains.start).not.toHaveBeenCalled();
+  });
+
+  it("a setup opened from the row counts as that header's one offer", async () => {
+    await showDevices([chain(1, "JARGB 1", "not_set_up", [], 0)]);
+
+    await act(async () => {
+      fireEvent.click(within(rowOf("JARGB 1")).getByRole("button", { name: /^Set up/ }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await flush();
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Later" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
+
+    // The header was on screen: the app does not offer it by itself on the next visit to Scenes.
+    expect(offeredChains().has(chainKey(DEVICE, 1))).toBe(true);
   });
 });
 
