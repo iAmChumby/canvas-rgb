@@ -4,4 +4,10 @@ import type { ChainPartKind } from "./ChainPartKind";
 /**
  * One part as the owner described it.
  */
-export type SetupPart = { name: string, kind: ChainPartKind, leds: number, };
+export type SetupPart = { name: string, kind: ChainPartKind, leds: number, 
+/**
+ * How many times the header shows this run (#381, #382): 8 fans that all show the same
+ * 8 LEDs are ONE part of 8 LEDs with `copies: 8`. Left out (or 1): once. At most
+ * [`crate::scene::COPIES_MAX`]; 2 or more only when this is the header's only part.
+ */
+copies?: number, };

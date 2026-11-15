@@ -38,6 +38,32 @@ pub const SCENES_LIST: &[&str] = &["scenes", "list"];
 /// `canvas-rgb scenes set <name>`: sets a scene by name, case-insensitively; no match prints
 /// the list and fails.
 pub const SCENES_SET: &[&str] = &["scenes", "set"];
+/// `canvas-rgb scenes order <scene>...`: names every scene once in the new order (#371).
+pub const SCENES_ORDER: &[&str] = &["scenes", "order"];
+/// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]` (#368).
+pub const SCENES_GROUP_MOVE: &[&str] = &["scenes", "group", "move"];
+/// `canvas-rgb effects source <id>`: prints an effect's HTML source, so a skill can read the
+/// stock effects and tune them (#377).
+pub const EFFECTS_SOURCE: &[&str] = &["effects", "source"];
+/// `canvas-rgb scenes group order <scene> <group>...`: sets the order of a scene's groups (#384).
+pub const SCENES_GROUP_ORDER: &[&str] = &["scenes", "group", "order"];
 /// `--group <name>`, repeatable, on the commands that play an effect: play it on those groups
 /// of the active scene only (`ActivateEffect.groups`).
 pub const GROUP_FLAG: &str = "--group";
+/// `canvas-rgb lights list [--json]`: every light with its id, LED count and whether it is
+/// connected (#377).
+pub const LIGHTS_LIST: &[&str] = &["lights", "list"];
+/// `canvas-rgb scenes create <name> [--from <groups.json>] [--run <run>] [--dry-run]` (#377).
+pub const SCENES_CREATE: &[&str] = &["scenes", "create"];
+/// `canvas-rgb scenes edit <scene> --from <groups.json> --run <run> [--dry-run]` (#377).
+pub const SCENES_EDIT: &[&str] = &["scenes", "edit"];
+/// `canvas-rgb scenes delete <scene> --run <run> [--dry-run]` (#377).
+pub const SCENES_DELETE: &[&str] = &["scenes", "delete"];
+/// `canvas-rgb effects delete <id> [--keep-presets] --run <run>` (#377).
+pub const EFFECTS_DELETE: &[&str] = &["effects", "delete"];
+/// `canvas-rgb effects preset list <effect>` (#377).
+pub const EFFECTS_PRESET_LIST: &[&str] = &["effects", "preset", "list"];
+/// `canvas-rgb effects preset save <effect> <name> [--prop k=v]... --run <run>` (#377).
+pub const EFFECTS_PRESET_SAVE: &[&str] = &["effects", "preset", "save"];
+/// `canvas-rgb effects preset delete <effect> <name> --run <run>` (#377).
+pub const EFFECTS_PRESET_DELETE: &[&str] = &["effects", "preset", "delete"];

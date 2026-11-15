@@ -125,6 +125,7 @@ fn light(device: &str) -> Light {
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
@@ -475,7 +476,7 @@ async fn put_scene_applies_and_bumps_rev() {
     shows(&rig.a, rgb(RED), "before").await;
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "solid".into(), props: color(GREEN) };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(scene_of(answer).rev, 2);
@@ -494,7 +495,7 @@ async fn stale_rev_is_a_conflict() {
     let before = rig.app.store.read().await.scenes.clone();
     let mut scene = stored(&rig, "main").await;
     scene.name = "Renamed".into();
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 99 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 99, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(answer["error"], "conflict");
@@ -510,7 +511,7 @@ async fn a_light_in_two_groups_is_a_422() {
     let before = stored(&rig, "main").await;
     let mut scene = before.clone();
     scene.groups[1].members.push("fake:a#z0".into());
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     assert_eq!(answer["error"], "validation");
@@ -519,15 +520,112 @@ async fn a_light_in_two_groups_is_a_422() {
     assert!(!on_disk.exists(), "refused: nothing was written");
 }
 
+/// A scene's HTML groups are limited by the daemon (`check_html_limit`), not by the spine's
+/// `validate_scene` (#370): two save, and three are refused with the daemon's own sentence.
+const HTML_LIMIT_SENTENCE: &str = "at most 2 groups of a scene may play an HTML effect";
+
+/// A third light, so a scene can hold three groups. The rig's engine does not know it: the
+/// scene API only needs it in `lights.json`.
+async fn add_third_light(rig: &Rig) {
+    rig.app.store.write().await.lights.lights.push(light("fake:c"));
+}
+
+/// Adds a third group playing `effect` on a third light to the stored scene `id`, after start-up:
+/// the limit is two HTML groups, so a test that needs a scene "at the limit" holds two and one
+/// more is the change under test.
+async fn add_third_group(rig: &Rig, id: &str, effect: &str) {
+    add_third_light(rig).await;
+    let mut store = rig.app.store.write().await;
+    let scene = store.scenes.scenes.iter_mut().find(|s| s.id == id).expect("the scene is there");
+    scene.groups.push(group("third", &["fake:c#z0"], effect, Props::new()));
+}
+
 #[tokio::test]
-async fn two_html_groups_are_a_422() {
+async fn two_html_groups_save() {
     let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "html:mine".into(), props: Props::new() };
+    scene.groups[1].plays = Plays::Effect { effect: "html:audio".into(), props: Props::new() };
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let saved = stored(&rig, "main").await;
+    assert_eq!(saved.rev, 2, "saved");
+    assert_eq!(canvas_proto::scene::html_groups(&saved), 2);
+}
+
+#[tokio::test]
+async fn three_html_groups_are_a_422_with_the_daemons_sentence() {
+    let rig = rig().await;
+    add_third_light(&rig).await;
+    let before = stored(&rig, "main").await;
+    let mut scene = before.clone();
+    scene.groups[0].plays = Plays::Effect { effect: "html:one".into(), props: Props::new() };
+    scene.groups[1].plays = Plays::Effect { effect: "html:two".into(), props: Props::new() };
+    scene.groups.push(group("third", &["fake:c#z0"], "html:three", Props::new()));
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["error"], "validation");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains(HTML_LIMIT_SENTENCE) && message.contains("3 do"), "the daemon's sentence: {message}");
+    assert!(!message.contains("more than"), "not the spine's text: {message}");
+    assert_eq!(stored(&rig, "main").await, before, "refused: the stored groups are as they were");
+    assert!(!rig.home.path.join("scenes.json").exists(), "refused: nothing was written");
+}
+
+/// `scenes::check_saveable` is the one door every write path goes through (#391): it runs the
+/// spine's `validate_scene`, the name check and the HTML limit, and each refusal keeps the
+/// sentence it had when the PUT handler called the three separately.
+async fn saveable(rig: &Rig, scene: &Scene) -> Result<(), canvas_daemon::api::ApiFailure> {
+    let store = rig.app.store.read().await;
+    canvas_daemon::scenes::check_saveable(&rig.app, scene, &store.lights.lights)
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_three_html_groups_with_the_daemons_sentence() {
+    let rig = rig().await;
+    add_third_light(&rig).await;
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "html:one".into(), props: Props::new() };
     scene.groups[1].plays = Plays::Effect { effect: "html:two".into(), props: Props::new() };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
-    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    scene.groups.push(group("third", &["fake:c#z0"], "html:three", Props::new()));
+    let refused = saveable(&rig, &scene).await.expect_err("three HTML groups are refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.message.contains(HTML_LIMIT_SENTENCE) && refused.message.contains("3 do"), "{}", refused.message);
+    assert!(!refused.message.contains("more than"), "not the spine's text: {}", refused.message);
+    scene.groups.pop();
+    saveable(&rig, &scene).await.expect("two HTML groups are saveable");
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_a_repeated_group_id_with_the_spines_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    let first = scene.groups[0].id.clone();
+    scene.groups[1].id = first.clone();
+    let refused = saveable(&rig, &scene).await.expect_err("a repeated group id is refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.message, format!("two groups have the id {first}"));
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_an_unknown_light_with_the_spines_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].members = vec!["fake:nope#z0".into()];
+    let refused = saveable(&rig, &scene).await.expect_err("an unknown light is refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.message, "there is no light fake:nope#z0");
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_an_empty_scene_name_with_the_name_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.name = "  ".into();
+    let refused = saveable(&rig, &scene).await.expect_err("a blank name is refused");
+    assert_eq!(refused.message, "a scene needs a name");
 }
 
 // ---------------------------------------------------------------- create, delete, set
@@ -787,6 +885,9 @@ async fn a_stack_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() 
     scenes.scenes[0].groups[1].plays =
         Plays::Effect { effect: "html:mine".into(), props: Props::new() };
     let rig = rig_with(scenes).await;
+    // A third group plays an HTML effect too: with the stack still plain, the scene is AT the
+    // limit of two.
+    add_third_group(&rig, "main", "html:audio").await;
     // The stack is saved first: it has no HTML layer yet.
     let stack = serde_json::json!({
         "id": "stack:Html",
@@ -794,7 +895,7 @@ async fn a_stack_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() 
     });
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
-    // Now it has an HTML layer: the scene would run two HTML groups.
+    // Now it has an HTML layer: the scene would run three HTML groups.
     let stack = serde_json::json!({
         "id": "stack:Html",
         "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
@@ -996,6 +1097,7 @@ async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_li
     scenes.scenes[0].groups[1].plays =
         Plays::Effect { effect: "html:mine".into(), props: Props::new() };
     let rig = rig_with(scenes).await;
+    add_third_group(&rig, "main", "html:audio").await;
     // The stack is saved first: it has no HTML layer yet.
     let stack = serde_json::json!({
         "id": "stack:Html",
@@ -1004,7 +1106,7 @@ async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_li
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
 
-    // A draft of it with an HTML layer: the scene would run two HTML groups.
+    // A draft of it with an HTML layer: the scene would run three HTML groups.
     let body = serde_json::json!({
         "stack": {
             "id": "stack:Html",
@@ -1021,16 +1123,19 @@ async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_li
 }
 
 /// A stack with an HTML layer is refused when a scene that is not the active one plays it beside
-/// another HTML group: that scene would run two when the owner sets it.
+/// two other HTML groups: that scene would run three when the owner sets it.
 #[tokio::test]
 async fn a_stack_with_an_html_layer_is_refused_when_another_scene_plays_it() {
     let mut scenes = draft_scenes_file();
-    // The scene that is not active plays the stack beside an HTML effect.
+    // The scene that is not active plays the stack beside two HTML effects: at the limit of two
+    // once the stack has an HTML layer, it would run three.
     scenes.scenes[1].groups = vec![
         group("all", &["fake:a#z0"], "stack:Html", Props::new()),
         group("other", &["fake:b#z0"], "html:mine", Props::new()),
+        group("third", &["fake:c#z0"], "html:audio", Props::new()),
     ];
     let rig = rig_with(scenes).await;
+    add_third_light(&rig).await;
     let stack = serde_json::json!({
         "id": "stack:Html",
         "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
@@ -1047,18 +1152,18 @@ async fn a_stack_with_an_html_layer_is_refused_when_another_scene_plays_it() {
 #[tokio::test]
 async fn setting_a_scene_that_runs_too_many_html_groups_is_refused() {
     let mut scenes = draft_scenes_file();
-    // The scene that is not active runs two HTML groups.
+    // The scene that is not active runs three HTML groups.
     scenes.scenes[1].groups = vec![
         group("all", &["fake:a#z0"], "html:mine", Props::new()),
         group("other", &["fake:b#z0"], "html:audio", Props::new()),
+        group("third", &["fake:c#z0"], "html:more", Props::new()),
     ];
     let rig = rig_with(scenes).await;
+    add_third_light(&rig).await;
     let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-    assert!(
-        answer["message"].as_str().unwrap_or_default().contains("HTML"),
-        "{answer}"
-    );
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains(HTML_LIMIT_SENTENCE), "the daemon's sentence: {message}");
     assert_eq!(rig.app.store.read().await.scenes.active, "main", "the scene did not change");
 }
 
@@ -1157,7 +1262,7 @@ async fn a_scene_put_over_a_draft_ends_the_draft_on_the_engine() {
     // The save changes only the other group.
     let mut scene = stored(&rig, "main").await;
     scene.groups[1].brightness = 20;
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) =
         send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
@@ -1302,7 +1407,7 @@ async fn a_scene_save_ends_the_greeting_on_the_engine() {
 
     let mut scene = stored(&rig, "main").await;
     scene.groups[1].brightness = 20;
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) =
         send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
@@ -2162,14 +2267,14 @@ async fn put_scene_rebuilds_only_what_changed() {
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "solid".into(), props: color(GREEN) };
     scene.groups[1].brightness = 60;
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rig.app.scene.builds(), built, "new values and a new brightness rebuild nothing");
 
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props: Props::new() };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 2 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 2, dry_run: false }).unwrap();
     let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rig.app.scene.builds(), built + 1, "one group's new effect builds one effect");
@@ -2177,7 +2282,7 @@ async fn put_scene_rebuilds_only_what_changed() {
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].members.push("fake:b#z0".into());
     scene.groups.remove(1);
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 3 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 3, dry_run: false }).unwrap();
     let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rig.app.scene.builds(), built + 2, "a changed membership takes the one group that is left, built again");
@@ -2224,7 +2329,7 @@ async fn put_scene_caps_and_fits_the_props_like_a_patch() {
     }
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props: huge };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "10 000 keys: {answer}");
     assert_eq!(stored(&rig, "main").await.rev, 1, "refused: nothing changed");
@@ -2235,7 +2340,7 @@ async fn put_scene_caps_and_fits_the_props_like_a_patch() {
     props.insert("nonsense".into(), PropValue::Bool(true));
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     let answered = scene_of(answer);
@@ -2316,31 +2421,33 @@ fn plays(effect: &str) -> Plays {
 #[tokio::test]
 async fn a_stack_with_an_html_layer_counts_toward_the_html_limit() {
     let rig = rig_in(scenes_file(), &[("spark.html", SPARK)]).await;
+    add_third_group(&rig, "main", "solid").await;
     save_stack(&rig, "Glow", "html:spark").await;
     save_stack(&rig, "Plain", "solid").await;
     let path = route(routes::SCENE, &[("id", "main")]);
     let before = stored(&rig, "main").await;
 
-    // PUT: an HTML stack and an HTML effect are two HTML groups.
+    // PUT: an HTML stack and two HTML effects are three HTML groups (the limit is two).
     let mut scene = before.clone();
     scene.groups[0].plays = plays("stack:Glow");
     scene.groups[1].plays = plays("html:spark");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    scene.groups[2].plays = plays("html:spark");
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     assert!(answer["message"].as_str().is_some_and(|m| m.contains("HTML")), "{answer}");
     assert_eq!(stored(&rig, "main").await, before, "refused: nothing changed");
 
-    // A stack without an HTML layer is not one: two of them pass.
+    // A stack without an HTML layer is not one: two of them pass, beside a plain group.
     let mut scene = before.clone();
     scene.groups[0].plays = plays("stack:Plain");
     scene.groups[1].plays = plays("stack:Plain");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
 
-    // Activate on every group: two groups playing one HTML effect, or one HTML stack, is over the
-    // limit; so is naming a second group for an HTML effect while the first already plays one.
+    // Activate on every group: three groups playing one HTML effect, or one HTML stack, is over
+    // the limit of two.
     let before = stored(&rig, "main").await;
     for effect in ["html:spark", "stack:Glow"] {
         let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", effect)]), Some(serde_json::json!({}))).await;
@@ -2366,7 +2473,7 @@ async fn put_scene_refuses_empty_names() {
     for (what, change) in cases {
         let mut scene = before.clone();
         change(&mut scene);
-        let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+        let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
         let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{what}: {answer}");
     }
@@ -2416,7 +2523,7 @@ async fn a_dark_group_is_rebuilt_when_its_file_returns_and_a_save_names_it() {
     rig.app.user_effects.rescan(&rig.home.path.join("effects"));
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "html:spark".into(), props: color(GREEN) };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(state(&rig), None, "no longer named as failed");
@@ -2433,7 +2540,7 @@ async fn a_save_that_cannot_build_leaves_the_store_and_the_engine_agreeing() {
     shows(&rig.a, rgb(RED), "before").await;
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = plays("html:not-there");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(stored(&rig, "main").await.groups[0].plays, plays("html:not-there"), "the store keeps what was saved");
@@ -2461,7 +2568,7 @@ async fn status_lists_each_active_effect_once_and_only_from_the_active_scene() {
     // A second effect in the active scene is a second entry, in the scene's order.
     let mut scene = stored(&rig, "main").await;
     scene.groups[1].plays = plays("gradient");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(effects(&rig).await, vec!["solid".to_string(), "gradient".to_string()]);

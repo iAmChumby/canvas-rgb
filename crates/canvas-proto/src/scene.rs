@@ -38,13 +38,15 @@ pub const DEFAULT_SCENE_NAME: &str = "Everything";
 pub const DEFAULT_GROUP_NAME: &str = "Everything";
 /// The most a group's brightness may be.
 pub const GROUP_BRIGHTNESS_MAX: u8 = 100;
-/// The most groups of one scene that may play an HTML effect. Each is a QuickJS runtime whose own
-/// script is the cost (about 5.5 to 6.7 ms a frame for the stock effects, whatever the canvas
-/// size; `docs/benchmark.md`, "Scenes: cost per group"). One is what is proved to fit a 20-group
-/// scene; two is unproven until the bench runs through the real engine with every stock effect
-/// (Scenes plan, Task 4 Step 5). Raise it only on that evidence. The daemon also counts a
-/// stack's HTML layers.
-pub const SCENE_HTML_MAX: usize = 1;
+/// The most groups of one scene that may play an HTML effect (#370). Each is a QuickJS runtime
+/// whose own script is the cost (about 5.5 to 6.7 ms a frame for the stock effects, whatever the
+/// canvas size; `docs/benchmark.md`, "Scenes: cost per group"). Two is allowed on a 25 ms
+/// frame-time bar (a 40 fps floor for the worst pair of stock effects), not on the 16.6 ms bar:
+/// the slowest stock effects alone are `palette-knife` at 23.9 ms and `wet-smear` at 18.4 ms
+/// (`docs/benchmark.md`). The daemon enforces it (`check_html_limit` in
+/// `crates/canvas-daemon/src/scenes.rs`) and counts a stack's HTML layers too; [`validate_scene`]
+/// does not, so a scene over the limit is still a valid file.
+pub const SCENE_HTML_MAX: usize = 2;
 /// The id prefix of an HTML effect.
 pub const HTML_EFFECT_PREFIX: &str = "html:";
 /// Chain setup (0.15.0): the earlier length of a header held raised by an open setup, beside
@@ -53,6 +55,9 @@ pub const CHAIN_RESTORE_FILE: &str = "chain-restore.json";
 /// Chain setup: everything a commit needs to be undone, written before the final resize.
 /// Start-up rolls a leftover one back.
 pub const CHAIN_INTENT_FILE: &str = "chain-intent.json";
+/// The most times one run of LEDs may be shown by a header (`Light::copies`). A typo guard, not
+/// a hardware limit.
+pub const COPIES_MAX: u32 = 32;
 /// The longest a part's name may be, in characters.
 pub const PART_NAME_MAX: usize = GROUP_NAME_MAX;
 /// A setup session ends this long after its last light request (the app re-sends one every
@@ -166,6 +171,13 @@ pub struct Light {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kind: Option<ChainPartKind>,
+    /// How many times the header shows this light's samples (#381, #382): fans that all show the
+    /// same LEDs are one light with `copies` set to how many were counted. `None` and `Some(1)`
+    /// mean once. The engine writes `leds.len()` once whatever this says; it only counts, so a
+    /// scene still sees one light. At most [`COPIES_MAX`]; the daemon validates it on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copies: Option<u32>,
 }
 
 /// `lights.json`.
@@ -273,12 +285,10 @@ pub enum SceneError {
     DuplicateId { id: String },
     #[error("the brightness of group {group} is over {GROUP_BRIGHTNESS_MAX}")]
     BrightnessRange { group: String },
-    #[error("more than {SCENE_HTML_MAX} groups play an HTML effect")]
-    TooManyHtml { count: usize },
 }
 
 /// How many groups of `scene` play an HTML effect (by id; a stack's own HTML layers are the
-/// daemon's to count).
+/// daemon's to count). The daemon compares it with [`SCENE_HTML_MAX`]; the spine does not.
 pub fn html_groups(scene: &Scene) -> usize {
     scene
         .groups
@@ -287,9 +297,32 @@ pub fn html_groups(scene: &Scene) -> usize {
         .count()
 }
 
+/// Why a `copies` value is refused.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum CopiesError {
+    #[error("copies must be at least 1")]
+    Zero,
+    #[error("copies is {copies}; the most is {max}")]
+    AboveMax { copies: u32, max: u32 },
+}
+
+/// Checks a `copies` value an owner wrote (a setup part, #381 #382) and returns what to store:
+/// `None` and `Some(1)` both mean once and are stored as `None`; `Some(0)` and anything above
+/// [`COPIES_MAX`] are refused. Whether `copies` of 2 or more may sit beside other parts of the
+/// same header is the daemon's rule (`plan_commit`), not this one.
+pub fn check_copies(copies: Option<u32>) -> Result<Option<u32>, CopiesError> {
+    match copies {
+        None | Some(1) => Ok(None),
+        Some(0) => Err(CopiesError::Zero),
+        Some(n) if n > COPIES_MAX => Err(CopiesError::AboveMax { copies: n, max: COPIES_MAX }),
+        Some(n) => Ok(Some(n)),
+    }
+}
+
 /// Checks the rules a scene keeps: names fit, group ids are unique, every group has a member,
-/// every member is a known light, no light is in two groups, and at most [`SCENE_HTML_MAX`]
-/// groups play an HTML effect.
+/// every member is a known light and no light is in two groups. The HTML-group limit
+/// ([`SCENE_HTML_MAX`]) is not checked here: the daemon owns it, so a scene over the limit stays a
+/// valid file and the user reads the daemon's sentence.
 pub fn validate_scene(scene: &Scene, lights: &[Light]) -> Result<(), SceneError> {
     if scene.name.chars().count() > SCENE_NAME_MAX {
         return Err(SceneError::NameTooLong { what: format!("scene {}", scene.id) });
@@ -319,10 +352,6 @@ pub fn validate_scene(scene: &Scene, lights: &[Light]) -> Result<(), SceneError>
             }
         }
     }
-    let html = html_groups(scene);
-    if html > SCENE_HTML_MAX {
-        return Err(SceneError::TooManyHtml { count: html });
-    }
     Ok(())
 }
 
@@ -348,6 +377,7 @@ mod tests {
             arrangement: Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
@@ -418,27 +448,33 @@ mod tests {
         assert_eq!(validate_scene(&dup, &lights()), Err(SceneError::DuplicateId { id: "g1".into() }));
     }
 
+    fn html_scene(count: usize) -> (Scene, Vec<Light>) {
+        let names = ["a", "b", "c", "d", "e"];
+        let groups = (0..count)
+            .map(|i| {
+                let mut g = group(&format!("g{i}"), &[names[i]]);
+                g.plays = Plays::Effect { effect: format!("html:fx{i}"), props: Props::new() };
+                g
+            })
+            .collect();
+        (scene(groups), names.iter().map(|n| light(n)).collect())
+    }
+
     #[test]
-    fn an_html_group_over_the_limit_is_refused() {
-        let html = |id: &str, member: &str| {
-            let mut g = group(id, &[member]);
-            g.plays = Plays::Effect { effect: format!("html:{id}"), props: Props::new() };
-            g
-        };
-        let mut built_in = group("g4", &["d"]);
-        built_in.plays = Plays::Effect { effect: "aurora".into(), props: Props::new() };
-        let mut ls = lights();
-        ls.push(light("d"));
-        let at_max: Vec<Group> =
-            ["a", "b", "c"].iter().take(SCENE_HTML_MAX).enumerate().map(|(i, m)| html(&format!("g{i}"), m)).collect();
-        let mut ok = at_max.clone();
-        ok.push(built_in.clone());
-        assert_eq!(html_groups(&scene(ok.clone())), SCENE_HTML_MAX);
-        assert_eq!(validate_scene(&scene(ok), &ls), Ok(()));
-        let mut over = at_max;
-        over.push(html("gx", "c"));
-        over.push(built_in);
-        assert_eq!(validate_scene(&scene(over), &ls), Err(SceneError::TooManyHtml { count: SCENE_HTML_MAX + 1 }));
+    fn two_groups_may_play_an_html_effect() {
+        assert_eq!(SCENE_HTML_MAX, 2, "#370: a scene runs two HTML effects");
+    }
+
+    /// The HTML count is the daemon's to enforce (`check_html_limit`), because only the daemon sees
+    /// a stack's HTML layers. A scene over the limit is still a valid file: it loads and is shown,
+    /// and the daemon refuses to save or set it with its own sentence.
+    #[test]
+    fn a_scene_over_the_html_limit_still_validates() {
+        let (over, ls) = html_scene(SCENE_HTML_MAX + 1);
+        assert_eq!(html_groups(&over), SCENE_HTML_MAX + 1);
+        assert_eq!(validate_scene(&over, &ls), Ok(()));
+        let (at_max, ls) = html_scene(SCENE_HTML_MAX);
+        assert_eq!(validate_scene(&at_max, &ls), Ok(()));
     }
 
     #[test]
@@ -540,6 +576,42 @@ mod tests {
         assert_eq!(file.lights[0].kind, None);
         // A light with no kind writes no kind, so an 0.14.0 reader sees what it wrote.
         assert!(!serde_json::to_string(&file.lights[0]).unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn check_copies_stores_none_for_once_and_refuses_zero_and_above_the_cap() {
+        assert_eq!(check_copies(None), Ok(None));
+        assert_eq!(check_copies(Some(1)), Ok(None), "once is stored as none");
+        assert_eq!(check_copies(Some(2)), Ok(Some(2)));
+        assert_eq!(check_copies(Some(COPIES_MAX)), Ok(Some(COPIES_MAX)));
+        assert_eq!(check_copies(Some(0)), Err(CopiesError::Zero));
+        assert_eq!(
+            check_copies(Some(COPIES_MAX + 1)),
+            Err(CopiesError::AboveMax { copies: COPIES_MAX + 1, max: COPIES_MAX })
+        );
+        assert_eq!(check_copies(Some(u32::MAX)), Err(CopiesError::AboveMax { copies: u32::MAX, max: COPIES_MAX }));
+    }
+
+    #[test]
+    fn copies_round_trips_and_a_light_without_it_loads() {
+        assert_eq!(COPIES_MAX, 32);
+        let mut mirrored = light("a");
+        mirrored.leds = Some(LedSlice { start: 0, count: 8 });
+        mirrored.kind = Some(ChainPartKind::Other);
+        mirrored.copies = Some(8);
+        let json = serde_json::to_string(&mirrored).unwrap();
+        assert!(json.contains(r#""copies":8"#), "{json}");
+        assert_eq!(serde_json::from_str::<Light>(&json).unwrap(), mirrored);
+        // A light with no copies writes none, so an older reader sees what it always saw.
+        assert!(!serde_json::to_string(&light("b")).unwrap().contains("copies"));
+        // An 0.16.0 lights.json has no copies anywhere and loads as once.
+        let old = r#"{"schema_version":1,"lights":[{"id":"openrgb:mb#z0","device_id":"openrgb:mb","zone_index":0,"arrangement":"strip","kind":"fan"}]}"#;
+        let file: LightsFile = serde_json::from_str(old).unwrap();
+        assert_eq!(file.lights[0].copies, None);
+        // The new file round trips whole.
+        let whole = LightsFile { schema_version: LIGHTS_SCHEMA, lights: vec![mirrored, light("b")], chains: Vec::new() };
+        let json = serde_json::to_string(&whole).unwrap();
+        assert_eq!(serde_json::from_str::<LightsFile>(&json).unwrap(), whole);
     }
 
     #[test]

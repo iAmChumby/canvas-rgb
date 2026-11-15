@@ -95,6 +95,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
         arrangement: Arrangement::default_for(&zone.kind),
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
@@ -1752,14 +1753,47 @@ pub async fn check_stack_html_limit(
     Ok(())
 }
 
-/// `Err` with the sentence to show when `scene` plays more HTML effects than a scene may.
+/// `Err` with the sentence to show when `scene` plays more HTML effects than a scene may. The
+/// spine's `validate_scene` does not count them (#370), so every path that saves or sets a scene
+/// calls this, and the user reads this sentence.
 pub fn check_html_limit(app: &App, scene: &Scene) -> Result<(), String> {
     let count = html_group_count(scene, &|id| stack_has_html(&app.stacks, id));
     if count > SCENE_HTML_MAX {
-        return Err(format!(
-            "at most {SCENE_HTML_MAX} group{} of a scene may play an HTML effect (a stack with an HTML layer counts); {count} do",
-            if SCENE_HTML_MAX == 1 { "" } else { "s" }
-        ));
+        return Err(html_limit_sentence(count));
+    }
+    Ok(())
+}
+
+/// Every check a scene passes before it is written, in the order a save reports them: the
+/// spine's [`canvas_proto::scene::validate_scene`] against `lights`, the scene's and groups'
+/// names, then [`check_html_limit`]. Each failure is a 422 with the sentence its own check gives.
+///
+/// Every new write path (group move, `PUT /api/v1/scenes`, create with `groups`, undo) must call
+/// this and not the three checks one by one: a path that forgets one lets a scene onto the disk
+/// that the other paths refuse.
+pub fn check_saveable(app: &App, scene: &Scene, lights: &[Light]) -> Result<(), crate::api::ApiFailure> {
+    use crate::api::ApiFailure;
+    canvas_proto::scene::validate_scene(scene, lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
+    check_names(scene)?;
+    check_html_limit(app, scene).map_err(ApiFailure::validation)
+}
+
+/// A scene and its groups have a name, within the length the create route keeps.
+fn check_names(scene: &Scene) -> Result<(), crate::api::ApiFailure> {
+    use crate::api::ApiFailure;
+    if scene.name.trim().is_empty() {
+        return Err(ApiFailure::validation("a scene needs a name"));
+    }
+    if scene.name.chars().count() > SCENE_NAME_MAX {
+        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
+    }
+    for group in &scene.groups {
+        if group.name.trim().is_empty() {
+            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
+        }
+        if group.name.chars().count() > GROUP_NAME_MAX {
+            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
+        }
     }
     Ok(())
 }
@@ -2005,7 +2039,7 @@ pub(crate) mod tests {
         let ls = LightsFile {
             chains: Vec::new(),
             schema_version: LIGHTS_SCHEMA,
-            lights: ["a", "b", "c"].iter().map(|id| Light {
+            lights: ["a", "b", "c", "d"].iter().map(|id| Light {
                 id: (*id).into(),
                 device_id: canvas_proto::DeviceId("fake:1".into()),
                 zone_index: 0,
@@ -2014,6 +2048,7 @@ pub(crate) mod tests {
                 arrangement: Arrangement::Strip,
                 reversed: false,
                 kind: None,
+                copies: None,
             }).collect(),
         };
         let g = |id: &str, member: &str, effect: &str| Group {
@@ -2024,6 +2059,7 @@ pub(crate) mod tests {
             mode: GroupMode::FlowAcross,
             brightness: 100,
         };
+        // One group over the limit: SCENE_HTML_MAX HTML groups, a built-in one, then one more.
         let mut file = ScenesFile {
             schema_version: SCENES_SCHEMA,
             active: "s".into(),
@@ -2031,18 +2067,20 @@ pub(crate) mod tests {
                 id: "s".into(),
                 name: "s".into(),
                 rev: 1,
-                groups: vec![g("g1", "a", "html:ink-drop"), g("g2", "b", "aurora"), g("g3", "c", "html:wet-smear")],
+                groups: vec![
+                    g("g1", "a", "html:ink-drop"),
+                    g("g2", "b", "aurora"),
+                    g("g3", "c", "html:wet-smear"),
+                    g("g4", "d", "html:palette-knife"),
+                ],
             }],
         };
         let changes = repair(&mut file, &ls);
         let plays: Vec<bool> = file.scenes[0].groups.iter().map(|g| g.plays == Plays::Off).collect();
-        // With a limit of one, the first HTML group keeps playing and the second goes Off.
-        let mut expect = vec![false, false, false];
-        if SCENE_HTML_MAX < 2 {
-            expect[2] = true;
-        }
-        assert_eq!(plays, expect);
-        assert_eq!(changes.iter().filter(|c| c.contains("set to Off")).count(), expect.iter().filter(|x| **x).count());
+        // The first SCENE_HTML_MAX HTML groups keep playing; the next goes Off.
+        assert_eq!(SCENE_HTML_MAX, 2);
+        assert_eq!(plays, vec![false, false, false, true]);
+        assert_eq!(changes.iter().filter(|c| c.contains("set to Off")).count(), 1);
         assert_eq!(canvas_proto::scene::validate_scene(&file.scenes[0], &ls.lights), Ok(()));
     }
 

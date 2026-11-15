@@ -600,6 +600,10 @@ impl Engine for CoreEngine {
         info!(enabled, "light preview changed");
     }
 
+    /// Does nothing yet: #378 fills in the per-group tap (the group's canvas times its
+    /// brightness, at most `PREVIEW_MAX_FPS` a second, through a sink of its own).
+    fn set_group_preview(&self, _group: Option<String>, _sink: Option<Arc<dyn PreviewSink>>) {}
+
     fn group_states(&self) -> Vec<GroupState> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state
