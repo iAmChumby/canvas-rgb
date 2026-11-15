@@ -52,6 +52,25 @@ describe("the dots of a device", () => {
     expect(radius).toBeGreaterThan(150);
   });
 
+  it("a long strip wraps into the rows that give the largest dots the box holds", () => {
+    // The editor's surface at 1440 x 900: a strip of 300 is painted one LED at a time, so its
+    // dots must be big enough to hit, not a band of specks across the middle.
+    const width = 1190;
+    const height = 650;
+    const dots = layoutDots(builtOn(300, "strip"), width, height);
+    expect(dots).toHaveLength(300);
+    expect(dots[0]!.r).toBeGreaterThanOrEqual(15);
+    for (const dot of dots) {
+      expect(dot.x - dot.r).toBeGreaterThanOrEqual(0);
+      expect(dot.x + dot.r).toBeLessThanOrEqual(width);
+      expect(dot.y - dot.r).toBeGreaterThanOrEqual(0);
+      expect(dot.y + dot.r).toBeLessThanOrEqual(height);
+    }
+    // A short strip still sits in one row.
+    const short = layoutDots(builtOn(30, "strip"), width, height);
+    expect(new Set(short.map((dot) => dot.y)).size).toBe(1);
+  });
+
   it("a strip longer than the width wraps into rows and keeps every dot reachable", () => {
     const width = 300;
     const height = 260;

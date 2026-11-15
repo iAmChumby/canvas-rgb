@@ -74,8 +74,11 @@
 }
 
 .figure {
+  display: inline-block;
   font-size: var(--t16);
   color: var(--ink);
+  font-variant-numeric: tabular-nums;
+  text-align: right;
 }
 
 .tallyWords {

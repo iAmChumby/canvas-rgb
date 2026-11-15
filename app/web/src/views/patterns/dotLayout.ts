@@ -38,6 +38,9 @@ export const MAX_R = 20;
  */
 export const SLOP = 4;
 
+/** A dot a finger or a mouse hits without aiming: a long strip wraps until its dots are this big. */
+export const COMFORT_R = 15;
+
 /** The gap between two dots, in CSS pixels. */
 const GAP = 2;
 
@@ -125,32 +128,37 @@ function ringDots(n: number, w: number, h: number): Dot[] {
   return dots;
 }
 
-/** A strip: one row across the middle, or rows of a wrapped strip. */
+/**
+ * A strip: left to right, in the fewest rows that give a dot of `COMFORT_R` (or, when no row
+ * count does, the rows that give the largest dot the box holds). A short strip is one row across
+ * the middle; a long one wraps into a block, so a strip of 300 is painted LED by LED rather than
+ * as a band of specks.
+ */
 function stripDots(n: number, w: number, h: number): Dot[] {
-  const step = w / n;
-  if (step >= 2 * MIN_R + GAP) {
-    const r = Math.min(
-      Math.min(MAX_R, Math.max(MIN_R, step * 0.4)),
-      Math.max(0.5, h / 2 - 1),
-    );
-    const y = h / 2;
-    return Array.from({ length: n }, (_, j) => ({ index: j, x: (j + 0.5) * step, y, r }));
+  let rows = 1;
+  let best = 0;
+  for (let k = 1; k <= n; k++) {
+    const cell = Math.min(w / Math.ceil(n / k), h / k);
+    if (cell > best) {
+      best = cell;
+      rows = k;
+    }
+    // Big enough to hit: a strip stays as close to one line as it can.
+    if ((cell - GAP) / 2 >= COMFORT_R) break;
+    // Past the square, more rows only shrink the cell.
+    if (h / k < w / Math.ceil(n / k)) break;
   }
-  // Wrapped: as many LEDs per row as the box holds at the smallest dot, then rows of that.
-  const perRow = Math.max(1, Math.floor((w + GAP) / (2 * MIN_R + GAP)));
-  const rows = Math.ceil(n / perRow);
+  const perRow = Math.ceil(n / rows);
   const cellW = w / perRow;
   const cellH = h / rows;
-  const r = Math.min(
-    Math.min(MAX_R, Math.max(MIN_R, (cellW - GAP) / 2)),
-    Math.max(0.5, (cellH - GAP) / 2),
-  );
-  const rowGap = Math.min(cellH, 2 * r + GAP);
-  const top = (h - rows * rowGap) / 2 + rowGap / 2;
+  const r = Math.max(0.5, Math.min(MAX_R, (Math.min(cellW, cellH) - GAP) / 2));
+  // Rows sit as close as their dots allow, the block centred in the box.
+  const pitch = Math.min(cellH, Math.max(2 * r + GAP, Math.min(cellW, cellH)));
+  const top = (h - rows * pitch) / 2 + pitch / 2;
   return Array.from({ length: n }, (_, j) => ({
     index: j,
     x: ((j % perRow) + 0.5) * cellW,
-    y: top + Math.floor(j / perRow) * rowGap,
+    y: top + Math.floor(j / perRow) * pitch,
     r,
   }));
 }
