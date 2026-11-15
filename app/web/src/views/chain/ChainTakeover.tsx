@@ -31,6 +31,7 @@ import { useCallback, useEffect, useState } from "react";
 
 import { getSnap, refreshChains, useSnap } from "@/lib/store";
 import type { ChainView } from "@/proto/ChainView";
+import type { Status } from "@/proto/Status";
 import { ChainSetup } from "@/views/chain/ChainSetup";
 import { chainKey, markChainOffered, offeredChains } from "@/views/chain/offered";
 import { chainSetupRequest, consumeChainSetupRequest, useChainSetupVisit } from "@/views/chain/request";
@@ -48,14 +49,19 @@ function idOf(chain: ChainView): string {
  * the owner asked for (or that the app may offer by itself).
  *
  * The header on screen is among them: it is not in `shownBefore` until the visit leaves it.
+ *
+ * The takeover is the first run's answer, so it waits for the hello to be behind the owner, and
+ * the launch's own "Later" shuts it for the rest of the launch.
  */
 function offerableFor(
+  status: Status | null,
   chains: ChainView[] | null,
   shownBefore: readonly string[],
   asked: boolean,
   wanted: string | null,
   offered: ReadonlySet<string>,
 ): ChainView[] {
+  if (!status?.onboarding_complete || chainLaterThisLaunch()) return [];
   if (!chains) return [];
   return chains.filter((chain) => {
     if (chain.state !== "not_set_up") return false;
@@ -103,7 +109,7 @@ function ChainVisit({
   // The headers the app has already offered by itself, or the owner has put off.
   const offered = offeredChains();
 
-  const offerable = offerableFor(chains, shownBefore, asked, wanted, offered);
+  const offerable = offerableFor(status, chains, shownBefore, asked, wanted, offered);
   const next = offerable[0] ?? null;
   const shown = pinned !== null ? (chains?.find((chain) => idOf(chain) === pinned) ?? null) : next;
 
@@ -137,7 +143,7 @@ function ChainVisit({
     const at = shown;
     if (!at) return;
     const now = getSnap().chains?.find((chain) => idOf(chain) === idOf(at))?.state;
-    const rest = offerableFor(getSnap().chains, shownBefore, asked, wanted, offered).filter(
+    const rest = offerableFor(getSnap().status, getSnap().chains, shownBefore, asked, wanted, offered).filter(
       (chain) => idOf(chain) !== idOf(at),
     );
     // The header is remembered whatever closed it: the app does not offer it by itself again.

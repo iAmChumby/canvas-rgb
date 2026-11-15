@@ -45,6 +45,11 @@ function newLaunchId(): string {
  * storage of its own) makes a new one. The page's own copy is only the fallback for a browser
  * that keeps no session storage: there the id cannot change while the page lives, which is the
  * same rule.
+ *
+ * The page keeps no copy of the id while the session storage works, so that a launch ends with
+ * the session storage and not with the page. That is what keeps the launch's own "Later" from
+ * outliving the launch it was said in (#380), and so what leaves the header's own record as the
+ * thing that keeps a header shut.
  */
 export function launchId(): string {
   try {
