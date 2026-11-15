@@ -9,6 +9,9 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+### Fixed
+
+- The sidebar strip shows your lights' real colours in a scene (#379)
 
 ## [0.16.0] - 2026-11-15
 
