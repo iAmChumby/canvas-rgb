@@ -428,7 +428,7 @@ export const DEVICES: DeviceInfo[] = [
     zones: [zone(0, "Strip", { type: "linear" }, 60, 60, 60, false)],
   },
   {
-    // A strip on a header with one zone that can be resized: the Devices list shows its Size key
+    // A strip on a header with one zone that can be resized: the Devices list offers its chain setup
     // in the device's own row, since it has no row of zones under it.
     id: "openrgb:strip-2",
     name: "NZXT Hue 2 Strip",

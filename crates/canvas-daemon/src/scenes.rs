@@ -2,7 +2,7 @@
 //! `scenes.json`, and the default scene.
 //!
 //! Ids are plain and deterministic, like the layout ids before them (`default`, then the owner's
-//! own names): a slug of a name, with `-2`, `-3` â€¦ when it is taken. Nothing here draws a random
+//! own names): a slug of a name, with `-2`, `-3` … when it is taken. Nothing here draws a random
 //! number, so a test can name the id it expects.
 
 use std::collections::HashSet;
@@ -37,7 +37,7 @@ pub fn slug(name: &str) -> String {
     }
 }
 
-/// `base`, or `base-2`, `base-3` â€¦ the first one `taken` does not hold. Deterministic.
+/// `base`, or `base-2`, `base-3` … the first one `taken` does not hold. Deterministic.
 pub fn fresh_id<'a>(base: &str, taken: impl IntoIterator<Item = &'a str>) -> String {
     let taken: HashSet<&str> = taken.into_iter().collect();
     if !taken.contains(base) {
@@ -107,7 +107,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
 /// 0.15.0) gets no light at all: adding one here would put back the whole-zone light the answer
 /// was about. A zone with no record behaves exactly as it did before chains existed.
 ///
-/// Only whole-zone lights are made here. A split-zone light (`â€¦p{n}`) is not recreated: if
+/// Only whole-zone lights are made here. A split-zone light (`…p{n}`) is not recreated: if
 /// `lights.json` is lost, a split zone comes back as one whole-zone light, and the slices'
 /// labels, arrangements and `reversed` flags are gone (the files hold the only copy).
 pub fn sync_lights(lights: &mut LightsFile, devices: &[DeviceInfo]) -> Vec<LightId> {

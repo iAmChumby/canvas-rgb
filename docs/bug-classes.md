@@ -299,7 +299,7 @@ second on the status poll, so the effect tears down and starts again before it c
   Regression test: `components/__tests__/Toast.test.tsx` (the editor's first unit test, run in CI).
 - **Class fix:** not yet (one bug). Sibling search found no second case: every other effect with a
   callback dependency only re-binds a listener, is guarded by a ref, or is a `useMemo` (`CommandPalette.tsx:96`,
-  `Popover.tsx:113`, `IdentifyWalker.tsx:144` re-bind listeners; `OnboardingGate.tsx:23`,
+  `Popover.tsx:113`, `IdentifyWalker.tsx:144` (removed in #338) re-bind listeners; `OnboardingGate.tsx:23`,
   `LayoutView.tsx:922`, `Onboarding.tsx:310` are ref-guarded one-time actions).
 
 - [#295](https://github.com/iAmChumby/canvas-rgb/issues/295): the fan header editor was keyed on the
