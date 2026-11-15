@@ -31,7 +31,7 @@ use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props};
-use canvas_proto::scene::{GroupMode, Light, LightId, SCENE_FADE_MS};
+use canvas_proto::scene::{Arrangement, GroupMode, Light, LightId, SCENE_FADE_MS};
 use canvas_proto::traits::{
     AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, ScreenFrame,
 };
@@ -39,6 +39,7 @@ use tracing::warn;
 
 use crate::arrangement::{build_group_plan, GroupPlan};
 use crate::engine::{guarded_call, panic_text, report_effect_panic};
+use crate::pattern_fit::fit_colors;
 use crate::sampling;
 
 /// The render scale every group's canvas runs at in scene mode: 0.25 is an 80x50 canvas, the
@@ -223,8 +224,52 @@ struct RunGroup {
     plan: GroupPlan,
     /// One buffer per light of the plan: the light's colours after the group's brightness.
     colors: Vec<Vec<Rgb8>>,
+    /// The LED count and arrangement of each light of the plan, in `plan.lights` order: what a
+    /// pattern is fitted to.
+    shapes: Vec<(u32, Arrangement)>,
+    /// Whether each light of the plan is `reversed`, in `plan.lights` order. A pattern is stored
+    /// in position order, so a reversed light's fitted colours are flipped.
+    reversed: Vec<bool>,
+    /// The fitted colours of each light of the plan, in the device's LED order and before the
+    /// group's brightness. Filled when a pattern is fitted; empty for a canvas effect.
+    fitted: Vec<Vec<Rgb8>>,
     /// The effect generation the canvas was last cleared for.
     seen_effect_generation: u64,
+}
+
+impl RunGroup {
+    /// Fits the group's pattern to every light of its plan: once per change, never per frame.
+    /// `fitted` ends in the device's LED order (each light's own `reversed` applied) and before
+    /// the group's brightness.
+    fn fit_group(&mut self, effect: Option<&dyn Effect>) {
+        let Some(pattern) = effect.and_then(|e| e.as_pattern()) else {
+            // A canvas effect, or no effect: nothing is fitted.
+            self.fitted.clear();
+            return;
+        };
+        let Some(frame) = pattern.frames.first() else {
+            // `validate_pattern` refuses a pattern with no frames; a group given one anyway is
+            // black rather than a panic on the render thread.
+            self.fitted.clear();
+            return;
+        };
+        let source = &frame.colors;
+        let fitted: Vec<Vec<Rgb8>> = self
+            .shapes
+            .iter()
+            .enumerate()
+            .map(|(index, (leds, arrangement))| {
+                let mut colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
+                // The pattern is stored in position order; a reversed light's frame runs the
+                // other way, so its fitted colours are flipped once, here.
+                if self.reversed.get(index).copied().unwrap_or(false) {
+                    colors.reverse();
+                }
+                colors
+            })
+            .collect();
+        self.fitted = fitted;
+    }
 }
 
 /// One device's frame, being built.
@@ -425,10 +470,24 @@ impl SceneRunner {
                 scale_plan(&mut plan, SCENE_RENDER_SCALE);
                 let colors =
                     plan.lights.iter().map(|l| vec![Rgb8::BLACK; l.leds.len()]).collect();
+                // What a pattern is fitted to, read from the lights the plan was built from.
+                let mut shapes = Vec::with_capacity(plan.lights.len());
+                let mut reversed = Vec::with_capacity(plan.lights.len());
+                for samples in &plan.lights {
+                    let light = rebuild.lights.iter().find(|l| l.id == samples.light);
+                    shapes.push((
+                        samples.leds.len() as u32,
+                        light.map(|l| l.arrangement).unwrap_or(Arrangement::Strip),
+                    ));
+                    reversed.push(light.is_some_and(|l| l.reversed));
+                }
                 RunGroup {
                     canvas: Canvas::with_scale(SCENE_RENDER_SCALE),
                     plan,
                     colors,
+                    shapes,
+                    reversed,
+                    fitted: Vec::new(),
                     seen_effect_generation: u64::MAX,
                 }
             })
@@ -581,57 +640,72 @@ fn run_group(
     screen: &Option<Arc<ScreenFrame>>,
     audio: &Option<Arc<AudioSpectrum>>,
 ) -> (GroupDone, bool) {
-    // A new effect never starts from the previous effect's frame.
+    let mut effect = work.effect;
+    let is_pattern = effect.as_deref().and_then(|e| e.as_pattern()).is_some();
+    // A new effect never starts from the previous effect's frame. A pattern is fitted here too:
+    // a new effect, a new plan and a resized zone all change the generation, and a frame never
+    // does. A pattern never draws on its canvas, so the canvas is not cleared for one.
     if group.seen_effect_generation != work.effect_generation {
         group.seen_effect_generation = work.effect_generation;
-        group.canvas.fill([0.0; 3]);
+        if !is_pattern {
+            group.canvas.fill([0.0; 3]);
+        }
+        group.fit_group(effect.as_deref());
     }
 
-    let mut effect = work.effect;
     let mut failure: Option<String> = None;
-    if let Some(e) = effect.as_mut() {
-        if let Some(props) = work.pending_props.as_ref() {
-            if let Err(payload) = guarded_call(|| e.init(props)) {
-                report_effect_panic(e.as_ref(), "init", &payload);
-                failure = Some(panic_text(&payload));
-            }
-        }
-        if failure.is_none() {
-            let inputs = Inputs {
-                time: work.started.elapsed().as_secs_f64(),
-                screen: screen.clone(),
-                audio: audio.clone(),
-            };
-            let canvas = &mut group.canvas;
-            if let Err(payload) = guarded_call(|| e.update(dt, canvas, &inputs)) {
-                report_effect_panic(e.as_ref(), "update", &payload);
-                failure = Some(panic_text(&payload));
-            }
-        }
-    }
-
-    // A group with no effect, or one that has failed, is black.
-    let live = !work.failed && failure.is_none() && effect.is_some();
-    let factor = f32::from(work.brightness.min(100)) / 100.0;
-    for (light, out) in group.plan.lights.iter().zip(group.colors.iter_mut()) {
-        if live {
-            sampling::sample_leds(
-                &group.canvas.pixels,
-                group.canvas.width,
-                group.canvas.height,
-                &light.leds,
-                SCENE_SAMPLING,
-                out,
-            );
-            if factor < 1.0 {
-                for c in out.iter_mut() {
-                    let f = c.to_f32();
-                    *c = Rgb8::from_f32([f[0] * factor, f[1] * factor, f[2] * factor]);
+    // A pattern is read, never drawn: `init` and `update` are not called for one.
+    if !is_pattern {
+        if let Some(e) = effect.as_mut() {
+            if let Some(props) = work.pending_props.as_ref() {
+                if let Err(payload) = guarded_call(|| e.init(props)) {
+                    report_effect_panic(e.as_ref(), "init", &payload);
+                    failure = Some(panic_text(&payload));
                 }
             }
-        } else {
-            out.clear();
-            out.resize(light.leds.len(), Rgb8::BLACK);
+            if failure.is_none() {
+                let inputs = Inputs {
+                    time: work.started.elapsed().as_secs_f64(),
+                    screen: screen.clone(),
+                    audio: audio.clone(),
+                };
+                let canvas = &mut group.canvas;
+                if let Err(payload) = guarded_call(|| e.update(dt, canvas, &inputs)) {
+                    report_effect_panic(e.as_ref(), "update", &payload);
+                    failure = Some(panic_text(&payload));
+                }
+            }
+        }
+    }
+
+    // A group with no effect, or one that has failed, is black. A pattern group copies the
+    // colours fitted for each light; a canvas group samples the canvas.
+    let live = !work.failed && failure.is_none() && effect.is_some();
+    let factor = f32::from(work.brightness.min(100)) / 100.0;
+    for (index, (light, out)) in
+        group.plan.lights.iter().zip(group.colors.iter_mut()).enumerate()
+    {
+        match group.fitted.get(index).map(Vec::as_slice) {
+            Some(fitted) if live && !fitted.is_empty() => {
+                out.clear();
+                out.extend_from_slice(fitted);
+                scale_light(out, factor);
+            }
+            _ if live => {
+                sampling::sample_leds(
+                    &group.canvas.pixels,
+                    group.canvas.width,
+                    group.canvas.height,
+                    &light.leds,
+                    SCENE_SAMPLING,
+                    out,
+                );
+                scale_light(out, factor);
+            }
+            _ => {
+                out.clear();
+                out.resize(light.leds.len(), Rgb8::BLACK);
+            }
         }
     }
 
@@ -647,11 +721,24 @@ fn run_group(
     )
 }
 
+/// Multiplies every colour of one light by the group's brightness (`factor` is 0.0..=1.0).
+fn scale_light(colors: &mut [Rgb8], factor: f32) {
+    if factor < 1.0 {
+        for c in colors.iter_mut() {
+            let f = c.to_f32();
+            *c = Rgb8::from_f32([f[0] * factor, f[1] * factor, f[2] * factor]);
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use canvas_proto::device::{DeviceKind, ZoneInfo, ZoneKind};
+    use canvas_proto::pattern::{BuiltOn, Frame as PatternFrame, Motion, Pattern};
+    use canvas_proto::props::PropertySchema;
     use canvas_proto::scene::{zone_light_id, Arrangement};
+    use std::sync::atomic::{AtomicU32, Ordering};
 
     fn strip_device(id: &str, leds: u32) -> DeviceInfo {
         DeviceInfo {
@@ -722,12 +809,269 @@ mod tests {
         }
     }
 
-    /// One frame: the scene hands the runner its groups, the runner renders them.
+    /// One frame: the scene hands the runner its groups, the runner renders them, and the effects
+    /// go back to the scene as the engine's loop puts them back.
     fn frame(scene: &mut SceneState, runner: &mut SceneRunner, devices: &[DeviceInfo]) {
+        frame_with(scene, runner, devices, &params());
+    }
+
+    fn frame_with(
+        scene: &mut SceneState,
+        runner: &mut SceneRunner,
+        devices: &[DeviceInfo],
+        params: &FrameParams,
+    ) {
         let generation = runner.generation();
         let works = runner.take_works();
         let input = scene.take_input(devices, generation, works);
-        runner.render(input, &params());
+        runner.render(input, params);
+        let mut done = std::mem::take(runner.done());
+        let superseded = scene.put_back(&mut done);
+        assert!(superseded.is_empty(), "one frame supersedes no effect");
+    }
+
+    // ------------------------------------------------------------ patterns (0.16.0, #339)
+
+    const RED: Rgb8 = Rgb8::new(255, 0, 0);
+    const GREEN: Rgb8 = Rgb8::new(0, 255, 0);
+    const BLUE: Rgb8 = Rgb8::new(0, 0, 255);
+
+    /// `n` colours, no two alike and none of them off.
+    fn ramp(n: usize) -> Vec<Rgb8> {
+        (0..n).map(|i| Rgb8::new((i % 256) as u8, (i / 256) as u8, 1)).collect()
+    }
+
+    /// The whole of zone 0 of device `id`, as a ring.
+    fn ring(id: &str) -> Light {
+        let mut light = light(id);
+        light.arrangement = Arrangement::Ring;
+        light
+    }
+
+    /// A pattern of one frame, built on `leds` LEDs of `arrangement`.
+    fn pattern_on(leds: u32, arrangement: Arrangement, colors: Vec<Rgb8>) -> Pattern {
+        pattern_with(vec![PatternFrame { colors, hold: 0, extra: Default::default() }], leds, arrangement)
+    }
+
+    fn pattern_with(frames: Vec<PatternFrame>, leds: u32, arrangement: Arrangement) -> Pattern {
+        Pattern {
+            id: "pattern:Test".into(),
+            built_on: BuiltOn { led_count: leds, arrangement, grid: None },
+            frames,
+            motion: Motion::none(),
+            extra: Default::default(),
+        }
+    }
+
+    /// A pattern as an effect: the engine reads its colours and never calls `init` or `update`.
+    struct PatternTestEffect {
+        pattern: Pattern,
+        inits: Arc<AtomicU32>,
+        updates: Arc<AtomicU32>,
+    }
+
+    impl PatternTestEffect {
+        fn new(pattern: Pattern) -> Self {
+            Self { pattern, inits: Arc::new(AtomicU32::new(0)), updates: Arc::new(AtomicU32::new(0)) }
+        }
+    }
+
+    impl Effect for PatternTestEffect {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: self.pattern.id.clone(),
+                name: self.pattern.name().to_string(),
+                description: "A test pattern.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {
+            self.inits.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {
+            self.updates.fetch_add(1, Ordering::AcqRel);
+        }
+
+        fn as_pattern(&self) -> Option<&Pattern> {
+            Some(&self.pattern)
+        }
+    }
+
+    /// One group of `members`, playing `effect` at `brightness`.
+    fn state_playing(
+        members: &[&str],
+        lights: Vec<Light>,
+        effect: Option<Box<dyn Effect>>,
+        brightness: u8,
+    ) -> SceneState {
+        let mut scene = state(members, lights);
+        scene.groups[0].effect = effect;
+        scene.groups[0].brightness = brightness;
+        scene
+    }
+
+    fn take(runner: &mut SceneRunner, id: &str, leds: u32) -> Vec<Rgb8> {
+        runner.take_frame(&DeviceId(id.into()), leds as usize).expect("a frame of the right length")
+    }
+
+    #[test]
+    fn a_pattern_group_writes_its_colours_by_led() {
+        let mut colors = vec![Rgb8::BLACK; 12];
+        colors[0] = RED;
+        let effect = PatternTestEffect::new(pattern_on(12, Arrangement::Ring, colors));
+        let (inits, updates) = (effect.inits.clone(), effect.updates.clone());
+        let mut scene =
+            state_playing(&["d1#z0"], vec![ring("d1")], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 12)];
+        frame(&mut scene, &mut runner, &devices);
+        let frame = take(&mut runner, "d1", 12);
+        assert_eq!(frame[0], RED, "{frame:?}");
+        assert!(frame[1..].iter().all(|c| *c == Rgb8::BLACK), "{frame:?}");
+        assert_eq!(inits.load(Ordering::Acquire), 0, "a pattern is never initialised");
+        assert_eq!(updates.load(Ordering::Acquire), 0, "a pattern never draws a canvas");
+        let canvas = &runner.groups[0].canvas;
+        assert!(
+            canvas.pixels.iter().all(|p| *p == [0.0; 3]),
+            "a pattern's canvas is never filled or sampled"
+        );
+    }
+
+    #[test]
+    fn a_pattern_plays_identically_on_every_light_of_its_kind() {
+        let source = ramp(12);
+        let effect = PatternTestEffect::new(pattern_on(12, Arrangement::Ring, source.clone()));
+        let mut scene = state_playing(
+            &["d1#z0", "d2#z0", "d3#z0"],
+            vec![ring("d1"), ring("d2"), ring("d3")],
+            Some(Box::new(effect)),
+            100,
+        );
+        let mut runner = SceneRunner::new();
+        let devices =
+            vec![strip_device("d1", 12), strip_device("d2", 12), strip_device("d3", 12)];
+        frame(&mut scene, &mut runner, &devices);
+        for id in ["d1", "d2", "d3"] {
+            let frame = take(&mut runner, id, 12);
+            assert_eq!(frame, source, "{id} plays the pattern as built");
+        }
+    }
+
+    #[test]
+    fn off_leds_stay_black() {
+        let mut colors = vec![Rgb8::BLACK; 16];
+        colors[4] = GREEN;
+        colors[9] = RED;
+        let effect = PatternTestEffect::new(pattern_on(16, Arrangement::Strip, colors));
+        let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 16)];
+        frame(&mut scene, &mut runner, &devices);
+        let frame = take(&mut runner, "d1", 16);
+        for (i, color) in frame.iter().enumerate() {
+            let want = match i {
+                4 => GREEN,
+                9 => RED,
+                _ => Rgb8::BLACK,
+            };
+            assert_eq!(*color, want, "LED {i}: {frame:?}");
+        }
+    }
+
+    #[test]
+    fn group_brightness_and_global_stages_apply_after_the_pattern() {
+        let source = vec![Rgb8::new(200, 200, 200); 12];
+        let effect = PatternTestEffect::new(pattern_on(12, Arrangement::Ring, source));
+        let mut scene =
+            state_playing(&["d1#z0"], vec![ring("d1")], Some(Box::new(effect)), 50);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 12)];
+        let mut params = params();
+        params.brightness = 0.5;
+        params.warmth = [1.0, 0.5, 0.5];
+        params.white_balance =
+            Arc::new(HashMap::from([(DeviceId("d1".into()), [1.0, 1.0, 0.5])]));
+        frame_with(&mut scene, &mut runner, &devices, &params);
+        let frame = take(&mut runner, "d1", 12);
+        // 200 at the group's 50% is 100; the global stages take it to 50 red, 25 green and
+        // 200 x 0.125 = 25 (then the white balance's half) = 13 blue.
+        for c in &frame {
+            assert!((49..=51).contains(&c.r), "red at 50: {frame:?}");
+            assert!((24..=26).contains(&c.g), "green at 25: {frame:?}");
+            assert!((12..=14).contains(&c.b), "blue at 13: {frame:?}");
+        }
+    }
+
+    #[test]
+    fn a_stretched_light_gets_the_stretched_colours() {
+        let source = ramp(12);
+        let effect = PatternTestEffect::new(pattern_on(12, Arrangement::Ring, source.clone()));
+        let mut scene =
+            state_playing(&["d1#z0"], vec![ring("d1")], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 24)];
+        frame(&mut scene, &mut runner, &devices);
+        let frame = take(&mut runner, "d1", 24);
+        assert_eq!(frame.len(), 24);
+        assert_eq!(frame[0], source[0], "the top LED stays at the top");
+        assert_eq!(frame[1], source[1]);
+        assert_eq!(frame[12], source[6], "half way round stays half way round");
+        // Round ties up, so the LED just short of the wrap reads the pattern's last colour.
+        assert_eq!(frame[22], source[11]);
+    }
+
+    #[test]
+    fn a_two_frame_pattern_plays_its_first_frame() {
+        let first = ramp(12);
+        let mut second = vec![BLUE; 12];
+        second[0] = GREEN;
+        let pattern = pattern_with(
+            vec![
+                PatternFrame { colors: first.clone(), hold: 250, extra: Default::default() },
+                PatternFrame { colors: second, hold: 250, extra: Default::default() },
+            ],
+            12,
+            Arrangement::Strip,
+        );
+        let effect = PatternTestEffect::new(pattern);
+        let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 12)];
+        for _ in 0..5 {
+            frame(&mut scene, &mut runner, &devices);
+            let frame = take(&mut runner, "d1", 12);
+            assert_eq!(frame, first, "0.16.0 plays frame 0");
+        }
+    }
+
+    #[test]
+    fn a_reversed_light_shows_the_pattern_the_other_way_round() {
+        let mut colors = vec![Rgb8::BLACK; 12];
+        colors[0] = RED;
+        let effect = PatternTestEffect::new(pattern_on(12, Arrangement::Strip, colors));
+        let mut reversed = light("d2");
+        reversed.reversed = true;
+        let mut scene = state_playing(
+            &["d1#z0", "d2#z0"],
+            vec![light("d1"), reversed],
+            Some(Box::new(effect)),
+            100,
+        );
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 12), strip_device("d2", 12)];
+        frame(&mut scene, &mut runner, &devices);
+        let plain = take(&mut runner, "d1", 12);
+        let flipped = take(&mut runner, "d2", 12);
+        assert_eq!(plain[0], RED, "the plain light shows LED 0 at the start: {plain:?}");
+        assert_eq!(flipped[11], RED, "the reversed light shows it at the end: {flipped:?}");
+        assert_eq!(flipped[0], Rgb8::BLACK);
+        assert!(plain[1..].iter().all(|c| *c == Rgb8::BLACK));
+        assert!(flipped[..11].iter().all(|c| *c == Rgb8::BLACK));
     }
 
     /// A frame built for the old LED count of a zone is never handed to a sink that expects the

@@ -309,6 +309,7 @@ fn device(id: &str, zones: Vec<ZoneInfo>) -> DeviceInfo {
 mod scene {
     use super::*;
     use canvas_proto::consts::PREVIEW_MAX_FPS;
+    use canvas_proto::pattern::{BuiltOn, FitKind, Frame as PatternFrame, Motion, Pattern};
     use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light, SCENE_FADE_MS};
     use canvas_proto::traits::{Engine, EngineGroup, LightFrame, LightPreviewSink};
 
@@ -388,6 +389,68 @@ mod scene {
 
     fn solid(color: [f32; 3]) -> Option<Box<dyn Effect>> {
         Some(Box::new(SolidEffect::new(color, Arc::new(AtomicBool::new(false)))))
+    }
+
+    // ------------------------------------------------------------ patterns (0.16.0, #339)
+
+    /// `n` colours, no two alike and none of them off.
+    fn ramp(n: usize) -> Vec<Rgb8> {
+        (0..n).map(|i| Rgb8::new((i % 256) as u8, (i / 256) as u8, 1)).collect()
+    }
+
+    /// The whole of zone 0 of device `id`, as a ring.
+    fn ring_of(id: &str) -> Light {
+        let mut light = light_of(id);
+        light.arrangement = Arrangement::Ring;
+        light
+    }
+
+    /// A pattern of one frame, built on `leds` LEDs of `arrangement`.
+    fn pattern_on(leds: u32, arrangement: Arrangement, colors: Vec<Rgb8>) -> Pattern {
+        Pattern {
+            id: "pattern:Test".into(),
+            built_on: BuiltOn { led_count: leds, arrangement, grid: None },
+            frames: vec![PatternFrame { colors, hold: 0, extra: Default::default() }],
+            motion: Motion::none(),
+            extra: Default::default(),
+        }
+    }
+
+    /// A pattern as an effect: the engine reads its colours and draws nothing.
+    struct PatternEffect {
+        pattern: Pattern,
+    }
+
+    impl Effect for PatternEffect {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: self.pattern.id.clone(),
+                name: self.pattern.name().to_string(),
+                description: "A test pattern.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(
+            &mut self,
+            _dt: f32,
+            _canvas: &mut Canvas,
+            _inputs: &canvas_proto::traits::Inputs,
+        ) {
+        }
+
+        fn as_pattern(&self) -> Option<&Pattern> {
+            Some(&self.pattern)
+        }
+    }
+
+    fn playing(pattern: Pattern) -> Option<Box<dyn Effect>> {
+        Some(Box::new(PatternEffect { pattern }))
     }
 
     /// Two devices `d1`, `d2` of 12 LEDs, each with its own sink.
@@ -1255,6 +1318,229 @@ mod scene {
             frame.iter().all(|c| (49..=51).contains(&c.r)),
             "the device's frame carries the global one too: {frame:?}"
         );
+        engine.shutdown();
+    }
+
+    // ------------------------------------------------------------ patterns (0.16.0, #339)
+
+    /// The spec's "no separate keepalive", checked: the group runs on the existing loop, so the
+    /// adapters keep getting frames with nothing changing.
+    #[test]
+    fn a_pattern_group_keeps_sending_frames_at_the_loop_rate() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let want = ramp(12);
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group(
+                "a",
+                &["d1#z0"],
+                playing(pattern_on(12, Arrangement::Strip, want.clone())),
+            )],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 0));
+        let started = Instant::now();
+        let first = sink.frame_count();
+        while started.elapsed() < Duration::from_secs(1) {
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        let seconds = started.elapsed().as_secs_f64();
+        let frames = sink.frame_count() - first;
+        assert!(
+            f64::from(frames) >= 0.8 * 60.0 * seconds,
+            "{frames} frames in {seconds:.3} s at 60 fps: the group stopped sending"
+        );
+        let all_frames = sink.all_frames();
+        assert!(
+            all_frames[first as usize..].iter().all(|f| f == &want),
+            "every frame with nothing changing is the pattern: {:?}",
+            &all_frames[first as usize..]
+        );
+        engine.shutdown();
+    }
+
+    /// A replaced pattern is fitted again and plays at once: the frame after the swap is the new
+    /// pattern, never a stale one and never a mix.
+    #[test]
+    fn replacing_the_pattern_refits_at_once() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group("a", &["d1#z0"], playing(pattern_on(12, Arrangement::Strip, vec![RED; 12])))],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, RED))));
+        engine.set_group_effect(
+            "a",
+            playing(pattern_on(12, Arrangement::Strip, vec![BLUE; 12])),
+            &Props::new(),
+        );
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| all(&f, BLUE))),
+            "the new pattern plays at once: {:?}",
+            sink.last()
+        );
+        assert!(
+            sink.all_frames().iter().all(|f| all(f, RED) || all(f, BLUE)),
+            "no stale or mixed frame: {:?}",
+            sink.all_frames()
+        );
+        engine.shutdown();
+    }
+
+    /// Review Focus 1: a part of a split zone changes its LED count while its group plays a
+    /// pattern. The fit is worked out again, the part is stretched, no frame of the old length is
+    /// sent, no panic.
+    #[test]
+    fn a_resized_light_is_refitted_without_a_stale_frame() {
+        let engine = spawn(settings(60));
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let source = ramp(12);
+        engine.set_scene(
+            vec![ring_of("d1")],
+            vec![strip_device("d1", 12)],
+            vec![group(
+                "a",
+                &["d1#z0"],
+                playing(pattern_on(12, Arrangement::Ring, source.clone())),
+            )],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| f.len() == 12)));
+        let before = sink.frame_count() as usize;
+        engine.set_scene(
+            vec![ring_of("d1")],
+            vec![strip_device("d1", 20)],
+            vec![group(
+                "a",
+                &["d1#z0"],
+                playing(pattern_on(12, Arrangement::Ring, source.clone())),
+            )],
+            false,
+        );
+        let seen = sink.frame_count() as usize;
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() as usize > seen + 5));
+        let frames = sink.all_frames();
+        let after = &frames[before..];
+        let first_new =
+            after.iter().position(|f| f.len() == 20).expect("a frame of the new length");
+        assert!(
+            after[..first_new].iter().all(|f| f.len() == 12),
+            "only the old plan's frames before the refit: {:?}",
+            &after[..first_new]
+        );
+        assert!(
+            after[first_new..].iter().all(|f| f.len() == 20),
+            "no frame of the old length after the refit: {:?}",
+            &after[first_new..]
+        );
+        let last = sink.last().expect("a frame");
+        assert_eq!(last[0], source[0], "the top LED stays at the top: {last:?}");
+        assert_eq!(last[19], source[11], "the last LED reads the last colour: {last:?}");
+        // What the daemon flags the light from (its `group_states` fills the flag itself).
+        assert_eq!(
+            FitKind::Stretched,
+            canvas_proto::pattern::fit_kind(
+                &BuiltOn { led_count: 12, arrangement: Arrangement::Ring, grid: None },
+                20,
+                Arrangement::Ring,
+            )
+        );
+        engine.shutdown();
+    }
+
+    /// A pattern group and a canvas group write their own LEDs of one device's frame.
+    #[test]
+    fn a_pattern_group_and_a_canvas_group_share_one_device_frame() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d0", 24)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d0".into()), sink.clone());
+        engine.set_scene(
+            vec![slice_light("d0", 0, 0, 12), slice_light("d0", 0, 12, 12)],
+            devices,
+            vec![
+                group("p", &["d0#z0s0"], playing(pattern_on(12, Arrangement::Strip, vec![RED; 12]))),
+                group("c", &["d0#z0s12"], solid([0.0, 0.0, 1.0])),
+            ],
+            false,
+        );
+        let mut want = vec![RED; 12];
+        want.extend(vec![BLUE; 12]);
+        assert!(
+            wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| f == want)),
+            "last = {:?}",
+            sink.last()
+        );
+        engine.shutdown();
+    }
+
+    #[test]
+    fn the_light_preview_carries_pattern_colours_after_group_brightness() {
+        let engine = spawn(settings(60));
+        engine.set_brightness(50);
+        let devices = vec![strip_device("d1", 12)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let lights = RecordingLights::new();
+        engine.set_light_preview(Some(lights.clone()));
+        let mut g = group(
+            "a",
+            &["d1#z0"],
+            playing(pattern_on(12, Arrangement::Strip, vec![Rgb8::new(200, 200, 200); 12])),
+        );
+        g.brightness = 50;
+        engine.set_scene(vec![light_of("d1")], devices, vec![g], false);
+        assert!(wait_until(FIRST_FRAME_WAIT, || lights.count() > 0 && sink.frame_count() > 0));
+        let preview = lights.last().expect("a light frame");
+        let (id, colours) = &preview.lights[0];
+        assert_eq!(id, "d1#z0");
+        assert!(
+            colours.iter().all(|c| (99..=101).contains(&c.r)),
+            "the preview carries the group's brightness: {colours:?}"
+        );
+        let frame = sink.last().expect("a frame");
+        assert!(
+            frame.iter().all(|c| (49..=51).contains(&c.r)),
+            "the device's frame carries the global one too: {frame:?}"
+        );
+        engine.shutdown();
+    }
+
+    /// Unit part of a split zone: the pattern's colours start at the part's `frame_start`.
+    #[test]
+    fn a_pattern_on_a_split_zones_part_writes_at_its_frame_start() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d0", 24)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d0".into()), sink.clone());
+        let source = ramp(12);
+        engine.set_scene(
+            vec![slice_light("d0", 0, 12, 12)],
+            devices,
+            vec![group(
+                "a",
+                &["d0#z0s12"],
+                playing(pattern_on(12, Arrangement::Strip, source.clone())),
+            )],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.last().is_some_and(|f| f.len() == 24)));
+        let frame = sink.last().expect("a frame");
+        assert!(
+            all(&frame[..12], Rgb8::BLACK),
+            "the zone's first 12 LEDs belong to nobody: {frame:?}"
+        );
+        assert_eq!(&frame[12..], &source[..], "the part's LEDs play the pattern");
         engine.shutdown();
     }
 }
