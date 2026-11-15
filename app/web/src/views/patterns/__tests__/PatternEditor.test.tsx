@@ -242,6 +242,48 @@ describe("the pattern editor", () => {
     expect(calls[1]!.seq).toBeGreaterThan(calls[0]!.seq);
   });
 
+  it("a save that fails keeps the strokes and the dirty mark and says why", async () => {
+    const onSave = vi.fn().mockRejectedValue(new Error("the daemon could not write it"));
+    const { canvas, dots } = show(ring(), { onSave });
+    await settle();
+
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await settle();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    // The sentence is the editor's own, in the row its other notes use, and the mark still says
+    // the document is unsaved.
+    expect(screen.getByText("the daemon could not write it")).toBeTruthy();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+    // The stroke is still the editor's: the next beat carries it.
+    await act(async () => {
+      vi.advanceTimersByTime(5_000);
+    });
+    expect(lit(coloursOf(api.putPatternDraft.mock.calls.at(-1)![0].pattern))).toEqual([0]);
+  });
+
+  it("a save that lands clears the dirty mark", async () => {
+    const onSave = vi.fn().mockResolvedValue(undefined);
+    const { canvas, dots } = show(ring(), { onSave });
+    await settle();
+
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(screen.getByRole("button", { name: "Save" }));
+    await settle();
+
+    expect(onSave).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("No unsaved changes")).toBeTruthy();
+  });
+
   it("closing the editor deletes the draft", async () => {
     const { view } = show();
     await settle();

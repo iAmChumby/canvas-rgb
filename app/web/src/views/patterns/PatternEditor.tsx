@@ -50,6 +50,8 @@ export function PatternEditor({
   const heartbeat = useRef(HEARTBEAT_MS);
   const [daemonNote, setDaemonNote] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  /** A save that did not land: the document on the lights is not the saved one. */
+  const [saveProblem, setSaveProblem] = useState<string | null>(null);
 
   /** Puts a stroke on the lights: the page's epoch and the next sequence. */
   const send = useCallback(
@@ -114,16 +116,22 @@ export function PatternEditor({
   const name = pattern.id.startsWith(PATTERN_ID_PREFIX) ? pattern.id.slice(PATTERN_ID_PREFIX.length) : pattern.id;
   const leds = pattern.built_on.led_count;
   const lit = editor.colours.filter((colour) => (parseHex(colour) ?? BLACK_HEX) !== BLACK_HEX).length;
-  const line = problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
+  const line = saveProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
+  const failed = saveProblem !== null || problem !== null;
 
-  /** Hands the document up, and clears the unsaved mark once the save lands. */
+  /**
+   * Hands the document up and clears the unsaved mark only once the save lands: a save that fails
+   * says why in the row the editor's other notes use, and leaves the strokes and the mark as they
+   * are, so nothing painted is lost and Save can be pressed again.
+   */
   const save = async () => {
     if (!onSave) return;
     try {
       await onSave(editor.pattern);
+      setSaveProblem(null);
       editor.markSaved();
     } catch (error) {
-      setProblem(messageOf(error));
+      setSaveProblem(messageOf(error));
     }
   };
 
@@ -163,10 +171,11 @@ export function PatternEditor({
         </div>
       </header>
 
-      {/* The daemon's own sentence (no device of this kind, another window has the lights). The row
-          keeps its height either way, so the device never moves when a sentence arrives. */}
+      {/* The daemon's own sentence (no device of this kind, another window has the lights), or a
+          save that did not land. The row keeps its height either way, so the device never moves
+          when a sentence arrives. */}
       <p className={s.noteRow} role="status">
-        {line !== null && <span className={problem !== null ? s.problem : s.note}>{line}</span>}
+        {line !== null && <span className={failed ? s.problem : s.note}>{line}</span>}
       </p>
 
       <div className={s.stage}>
