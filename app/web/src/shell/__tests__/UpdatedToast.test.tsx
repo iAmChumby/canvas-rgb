@@ -179,8 +179,33 @@ describe("the updated-to toast", () => {
     expect(bannerNotice()).toBe(false);
   });
 
-  it("is not drawn on the Updates page, even while updated_to is still set", () => {
-    mountUpdated("/updates/");
+  it("keeps one line when the release has no notes: the title and What's new only", () => {
+    // #389: `notes` is typed string, but the wire can hand over nothing at all. An empty second
+    // line would leave a gap under the title where a sentence should be.
+    for (const notes of ["", undefined]) {
+      const state = updatedState();
+      patchSnap({
+        update: { ...state, updated_to: { ...state.updated_to!, notes: notes as unknown as string } },
+      });
+      const view = render(<Shelf />);
+      settle();
+      const notice = laneNotice() as HTMLElement;
+      expect(notice, `notes: ${String(notes)}`).not.toBeNull();
+      expect(notice.textContent).toContain(`Updated to ${versionOf()}`);
+      expect(within(notice).getByRole("button", { name: /What.s new/ })).toBeTruthy();
+      expect(within(notice).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+      // The card's words are its title alone: no detail line, empty or otherwise.
+      expect(notice.querySelector(".notify-detail"), `notes: ${String(notes)}`).toBeNull();
+      expect(notice.querySelector(".notify-text")?.children.length).toBe(1);
+      view.unmount();
+      act(() => {
+        dismissNotifications();
+        vi.advanceTimersByTime(600);
+      });
+    }
+  });
+
+  it("is not drawn on the Updates page, even while updated_to is still set", () => {    mountUpdated("/updates/");
     settle();
     expect(laneNotice()).toBeNull();
     expect(bannerNotice()).toBe(false);

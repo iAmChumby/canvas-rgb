@@ -57,13 +57,44 @@ export type Inline = { kind: "text" | "code" | "strong"; text: string };
 /** How much of a note fits on one line of a toast before it is cut. */
 export const NOTE_LINE_MAX = 64;
 
+/** How much of a note must stand before the ellipsis for the cut to read as a phrase. */
+export const NOTE_CUT_MIN = 24;
+
+/** A cut mark that ends a clause: `,`, `;`, `:`, a full stop, or the word "and". */
+const CLAUSE = /[,;:]|\.(?=\s|$)|\s+and\s+/g;
+
+/**
+ * One note on one line. A note that fits is shown whole; a longer one is cut at the last clause
+ * mark that leaves a phrase, so the line ends where the sentence takes a breath instead of
+ * stopping before its object (#389: "…looks for a newer release at start and once…"). With no
+ * such mark it cuts at the last space, and a single word longer than the line is cut at the line
+ * as the last resort. The cut word is never a fragment of the one that follows.
+ */
+function onOneLine(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const tidy = (part: string): string => part.replace(/[\s,;:.…-]+$/, "");
+  // Everything after the mark goes; the mark itself is the sentence taking its breath.
+  let cut = -1;
+  for (const m of text.matchAll(CLAUSE)) {
+    const end = m[0].trim() === "and" ? m.index : m.index + 1;
+    if (end > max) break;
+    if (tidy(text.slice(0, end)).length >= NOTE_CUT_MIN) cut = end;
+  }
+  if (cut > 0) return `${tidy(text.slice(0, cut))}…`;
+  const space = text.lastIndexOf(" ", max);
+  if (space > 0) return `${tidy(text.slice(0, space))}…`;
+  return `${tidy(text.slice(0, max))}…`;
+}
+
 /**
  * The first note of a release, on one line, for the place that has room for one line and no more
  * (the "Updated to" toast). It is the release's own first item: something true about what
  * changed, where the toast used to repeat the version the title already gave (#366). Null when
- * the notes hold nothing a person can read.
+ * the notes hold nothing a person can read, and when there are no notes at all (`undefined` at
+ * runtime: the wire is not the type).
  */
 export function firstNote(md: string, max = NOTE_LINE_MAX): string | null {
+  if (typeof md !== "string") return null;
   for (const block of parseNotes(md)) {
     for (const item of block.items) {
       const words = parseInline(item)
@@ -72,10 +103,7 @@ export function firstNote(md: string, max = NOTE_LINE_MAX): string | null {
         .replace(/\s+/g, " ")
         .trim();
       if (words === "") continue;
-      if (words.length <= max) return words;
-      const cut = words.slice(0, max);
-      const space = cut.lastIndexOf(" ");
-      return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,;:.-]+$/, "")}…`;
+      return onOneLine(words, max);
     }
   }
   return null;

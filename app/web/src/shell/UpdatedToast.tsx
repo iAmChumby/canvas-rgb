@@ -40,8 +40,9 @@ export function UpdatedToast() {
   const onUpdates = pathname.endsWith("/updates/");
   const version = update?.updated_to?.version ?? null;
   // The second line: one thing the release changed, from its own notes. It is not the version
-  // again (#366: "You have 0.16.0." under "Updated to 0.16.0" said nothing).
-  const note = update?.updated_to ? firstNote(update.updated_to.notes) : null;
+  // again (#366: "You have 0.16.0." under "Updated to 0.16.0" said nothing). A release with no
+  // notes hands over nothing, and the toast keeps its one line (#389: the wire is not the type).
+  const note = update?.updated_to ? firstNote(update.updated_to.notes ?? "") : null;
   const mountedPath = useRef(pathname);
 
   // The first navigation the person makes to another page sends the notice. The app's own page
