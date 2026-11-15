@@ -14,6 +14,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Scenes: tune an effect inside its group, and make groups and scenes from your own devices. (#310)
 - Command line: `canvas-rgb scenes list` shows the scenes with the active one marked, `canvas-rgb scenes set <name>` sets one by name (case does not matter), and `canvas-rgb status` names the active scene (#310)
 - Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names, whether the group comes before or after the effect's properties (#310)
+- Patterns: paint the colour of every LED of a device, and see each stroke on the real lights.
 
 ### Changed
 
