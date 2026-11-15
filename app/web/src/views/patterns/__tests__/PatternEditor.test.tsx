@@ -218,6 +218,30 @@ describe("the pattern editor", () => {
     expect(lit(frame.colors)).toEqual([4]);
   });
 
+  it("a beat before the next render carries the newest colours", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    api.putPatternDraft.mockClear();
+
+    // The stroke's frame and the heartbeat land in one batch, before React re-renders and runs an
+    // effect: the beat must carry the stroke's document, never the colours of the render it began
+    // in, which the daemon would take as the newer stroke.
+    await act(async () => {
+      fireEvent.pointerDown(canvas, at(dots[0]!));
+      fireEvent.pointerUp(canvas, { pointerId: 1 });
+      for (const cb of [...pending.values()]) cb(0);
+      pending.clear();
+      vi.advanceTimersByTime(5_000);
+      await Promise.resolve();
+    });
+
+    const calls = api.putPatternDraft.mock.calls.map((call) => call[0] as { pattern: Pattern; seq: number });
+    expect(calls.length).toBe(2);
+    expect(lit(coloursOf(calls[0]!.pattern))).toEqual([0]);
+    expect(lit(coloursOf(calls[1]!.pattern))).toEqual([0]);
+    expect(calls[1]!.seq).toBeGreaterThan(calls[0]!.seq);
+  });
+
   it("closing the editor deletes the draft", async () => {
     const { view } = show();
     await settle();

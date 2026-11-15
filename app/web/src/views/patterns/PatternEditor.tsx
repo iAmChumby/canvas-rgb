@@ -72,14 +72,20 @@ export function PatternEditor({
     [epoch],
   );
 
-  const draft = useCallback((document: Pattern) => void send(document), [send]);
+  /**
+   * The newest document, for the heartbeat's own PUT: moved with every draft that goes out, so a
+   * beat that lands between a stroke and its render sends that stroke and never the colours the
+   * render began in.
+   */
+  const latest = useRef<Pattern>(pattern);
+  const draft = useCallback(
+    (document: Pattern) => {
+      latest.current = document;
+      void send(document);
+    },
+    [send],
+  );
   const editor = usePatternEditor(pattern, { onDraft: draft });
-  /** The document as it is now, for the heartbeat's own PUT. */
-  const latest = useRef(editor.pattern);
-
-  useEffect(() => {
-    latest.current = editor.pattern;
-  }, [editor.pattern]);
 
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
   // of the current document every `heartbeat_ms`, which is what keeps the lease alive while the
