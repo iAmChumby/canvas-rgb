@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Effects with thin moving lines, like Rain, show more of their motion on strips and fans in a group set to each its own. (#372)
+- Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 - A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#372)
 
 ## [0.16.0] - 2026-11-15

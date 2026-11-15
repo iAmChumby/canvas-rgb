@@ -735,10 +735,13 @@ fn scale_light(colors: &mut [Rgb8], factor: f32) {
 mod tests {
     use super::*;
     use canvas_proto::device::{DeviceKind, ZoneInfo, ZoneKind};
+    use canvas_proto::layout::{CANVAS_HEIGHT, CANVAS_WIDTH};
     use canvas_proto::pattern::{BuiltOn, Frame as PatternFrame, Motion, Pattern};
     use canvas_proto::props::PropertySchema;
     use canvas_proto::scene::{zone_light_id, Arrangement};
     use std::sync::atomic::{AtomicU32, Ordering};
+
+    use crate::geometry::LedSample;
 
     fn strip_device(id: &str, leds: u32) -> DeviceInfo {
         DeviceInfo {
@@ -1198,9 +1201,8 @@ mod tests {
 
     /// Every LED of an 8-LED strip in "each its own" must move with Rain's thin lines. Before
     /// the fix a strip LED averaged a full-height column holding about 19 streaks and its
-    /// range was about 15 of 255.
+    /// range was about 6 of 255.
     #[test]
-    #[ignore = "#372: the square cell reaches 12-18 of 255 on an 8-LED strip, short of the 30 this asserts; run with --ignored"]
     fn rain_animates_every_led_of_a_strip_in_each_its_own() {
         let mut scene = rain_scene(&["d1"], GroupMode::EachItsOwn);
         let mut runner = SceneRunner::new();
@@ -1221,7 +1223,6 @@ mod tests {
 
     /// Flow across with two strips: each strip is half the canvas and still animates.
     #[test]
-    #[ignore = "#372: the square cell reaches 12-18 of 255 on an 8-LED strip, short of the 30 this asserts; run with --ignored"]
     fn rain_still_animates_two_strips_in_flow_across() {
         let mut scene = rain_scene(&["d1", "d2"], GroupMode::FlowAcross);
         let mut runner = SceneRunner::new();
@@ -1262,44 +1263,182 @@ mod tests {
         }
     }
 
-    /// A gradient that is constant along y reads the same whatever height the cell has: the
-    /// new square cell gives what the old full-height band gave, within 1/255.
+    /// A gradient that runs top to bottom, the same on every column.
+    struct VerticalRamp;
+
+    impl Effect for VerticalRamp {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test-vertical-ramp".into(),
+                name: "Vertical Ramp".into(),
+                description: "A vertical gradient.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            for y in 0..canvas.height {
+                let t = y as f32 / (canvas.height - 1) as f32;
+                for x in 0..canvas.width {
+                    canvas.set(x, y, [t, 1.0 - t, 0.25 + 0.5 * t]);
+                }
+            }
+        }
+    }
+
+    /// One flat colour over the whole canvas.
+    struct FlatColour;
+
+    impl Effect for FlatColour {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test-flat-colour".into(),
+                name: "Flat Colour".into(),
+                description: "One colour everywhere.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            canvas.fill([0.2, 0.4, 0.6]);
+        }
+    }
+
+    /// The value of the ramp at a position on the canvas, in 8-bit.
+    ///
+    /// The ramp paints pixel `p` with the value of `t = p / (length - 1)`, and a pixel's
+    /// centre is at `p + 0.5`, so the gradient's value at a position `x` is the one of
+    /// `t = (x - 0.5) / (length - 1)`.
+    fn ramp_value_at(t: f32) -> [i32; 3] {
+        [
+            (t * 255.0 + 0.5).floor() as i32,
+            ((1.0 - t) * 255.0 + 0.5).floor() as i32,
+            ((0.25 + 0.5 * t) * 255.0 + 0.5).floor() as i32,
+        ]
+    }
+
+    /// A horizontal linear gradient gives every LED the gradient's value at the LED's own
+    /// centre, within 2/255 (#372).
+    ///
+    /// The cell is a small square at the LED, so the LED reads where it stands. The old
+    /// full-height band gave the mean of the LED's share of the picture, which is a
+    /// different number: that is the truth the cap changed, and this is what it is now.
     #[test]
-    fn a_horizontal_gradient_reads_the_same_in_a_square_cell_and_a_full_height_band() {
+    fn a_horizontal_gradient_gives_each_led_the_gradients_value_at_its_centre() {
         for mode in [GroupMode::EachItsOwn, GroupMode::FlowAcross] {
-            let mut scene = state_playing(
-                &["d1#z0", "d2#z0"],
-                vec![light("d1"), light("d2")],
-                Some(Box::new(HorizontalRamp)),
-                100,
-            );
+            let mut scene =
+                state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(HorizontalRamp)), 100);
             scene.groups[0].mode = mode;
             let mut runner = SceneRunner::new();
-            let devices = vec![strip_device("d1", 12), strip_device("d2", 12)];
+            let devices = vec![strip_device("d1", 12)];
             frame(&mut scene, &mut runner, &devices);
+            let (centres, width) = {
+                let group = &runner.groups[0];
+                let centres =
+                    group.plan.lights[0].leds.iter().map(|led| led.center_x).collect::<Vec<f32>>();
+                (centres, group.canvas.width as f32)
+            };
             let now = take(&mut runner, "d1", 12);
-            // The old definition: the same cells stretched to the canvas' whole height.
-            let group = &runner.groups[0];
-            let mut band = group.plan.lights[0].leds.clone();
-            let height = group.canvas.height as f32;
-            for led in &mut band {
-                led.bounds[1] = 0.0;
-                led.bounds[3] = height;
-            }
-            let mut before = Vec::new();
-            sampling::sample_leds(
-                &group.canvas.pixels,
-                group.canvas.width,
-                group.canvas.height,
-                &band,
-                SCENE_SAMPLING,
-                &mut before,
-            );
-            assert_eq!(now.len(), before.len());
-            for (led, (a, b)) in now.iter().zip(&before).enumerate() {
-                for (x, y) in [(a.r, b.r), (a.g, b.g), (a.b, b.b)] {
-                    assert!(x.abs_diff(y) <= 1, "{mode:?} LED {led}: {a:?} against {b:?}");
+            for (led, (centre, colour)) in centres.iter().zip(&now).enumerate() {
+                let want = ramp_value_at((centre - 0.5) / (width - 1.0));
+                for (got, expect) in [colour.r, colour.g, colour.b].into_iter().zip(want) {
+                    assert!(
+                        i32::from(got).abs_diff(expect) <= 2,
+                        "{mode:?} LED {led}: {colour:?} against {expect} at x {centre}"
+                    );
                 }
+            }
+        }
+    }
+
+    /// A flat colour reads the same on every LED, whatever cell it has (#372).
+    #[test]
+    fn a_flat_colour_reads_the_same_on_every_led() {
+        for mode in [GroupMode::EachItsOwn, GroupMode::FlowAcross] {
+            let mut scene =
+                state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(FlatColour)), 100);
+            scene.groups[0].mode = mode;
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8)];
+            frame(&mut scene, &mut runner, &devices);
+            let now = take(&mut runner, "d1", 8);
+            let want = Rgb8::from_f32([0.2, 0.4, 0.6]);
+            for (led, colour) in now.iter().enumerate() {
+                assert_eq!(*colour, want, "{mode:?} LED {led}: {now:?}");
+            }
+        }
+    }
+
+    /// A vertical linear gradient gives every LED the value at mid-height, within 2/255:
+    /// a strip's LEDs all stand at mid-height (#372).
+    #[test]
+    fn a_vertical_gradient_gives_every_led_the_mid_height_value() {
+        for mode in [GroupMode::EachItsOwn, GroupMode::FlowAcross] {
+            let mut scene =
+                state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(VerticalRamp)), 100);
+            scene.groups[0].mode = mode;
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 12)];
+            frame(&mut scene, &mut runner, &devices);
+            let (centres, height) = {
+                let group = &runner.groups[0];
+                let centres =
+                    group.plan.lights[0].leds.iter().map(|led| led.center_y).collect::<Vec<f32>>();
+                (centres, group.canvas.height as f32)
+            };
+            let now = take(&mut runner, "d1", 12);
+            for (led, (centre, colour)) in centres.iter().zip(&now).enumerate() {
+                let want = ramp_value_at((centre - 0.5) / (height - 1.0));
+                for (got, expect) in [colour.r, colour.g, colour.b].into_iter().zip(want) {
+                    assert!(
+                        i32::from(got).abs_diff(expect) <= 2,
+                        "{mode:?} LED {led}: {colour:?} against {expect} at y {centre}"
+                    );
+                }
+            }
+        }
+    }
+
+    /// A 240-LED strip's cells are narrower than the cap already, so the cap changes
+    /// nothing in width: the cell is still the LED's share of the slot. What changes is
+    /// its height: the cell is the square of that share, not the whole height of the slot
+    /// as the old band was (#372).
+    #[test]
+    fn a_240_led_strip_keeps_its_cell_width_and_loses_the_full_height() {
+        let share = CANVAS_WIDTH as f32 / 240.0;
+        for mode in [GroupMode::EachItsOwn, GroupMode::FlowAcross] {
+            let plan = build_group_plan(
+                &["d1#z0".to_string()],
+                mode,
+                &[light("d1")],
+                &[strip_device("d1", 240)],
+            );
+            for led in &plan.lights[0].leds {
+                let [x0, y0, x1, y1] = led.bounds;
+                assert!(
+                    (x1 - x0 - share).abs() < 0.05,
+                    "{mode:?}: the cell is {} wide, not {share}",
+                    x1 - x0
+                );
+                assert!(
+                    (y1 - y0 - share).abs() < 0.05,
+                    "{mode:?}: the cell is {} tall, not {share}",
+                    y1 - y0
+                );
+                assert!(
+                    y1 - y0 < CANVAS_HEIGHT as f32,
+                    "{mode:?}: the cell is the whole height of the slot again"
+                );
             }
         }
     }
@@ -1332,6 +1471,383 @@ mod tests {
                     assert!(x1 - x0 > 0.0 && y1 - y0 > 0.0, "zero area: {what}");
                 }
             }
+        }
+    }
+
+    // ------------------------------------------- what the cap costs each effect (#372)
+
+    /// The cells of a strip for a given cell side, in the scaled canvas units.
+    fn strip_cells(side: f32, slot_x: f32, slot_w: f32, n: usize) -> Vec<LedSample> {
+        let share = slot_w / n as f32;
+        let scale = SCENE_RENDER_SCALE;
+        let mid = CANVAS_HEIGHT as f32 / 2.0;
+        (0..n)
+            .map(|j| {
+                let x = slot_x + share * (j as f32 + 0.5);
+                LedSample {
+                    center_x: x * scale,
+                    center_y: mid * scale,
+                    bounds: [
+                        (x - side / 2.0) * scale,
+                        (mid - side / 2.0) * scale,
+                        (x + side / 2.0) * scale,
+                        (mid + side / 2.0) * scale,
+                    ],
+                    sampled: true,
+                }
+            })
+            .collect()
+    }
+
+    /// Sweeps the cell side and prints the widest channel range every LED of an 8-LED
+    /// strip shows under Rain, for the two group modes.
+    #[test]
+    #[ignore = "#372: a sweep of the cap, run by hand"]
+    fn sweep_the_cap_for_rain() {
+        for (mode, slots) in [
+            (GroupMode::EachItsOwn, vec![(0.0f32, 320.0f32)]),
+            (GroupMode::FlowAcross, vec![(0.0f32, 160.0f32), (160.0f32, 160.0f32)]),
+        ] {
+            let mut scene = rain_scene(&["d1", "d2"], mode);
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8), strip_device("d2", 8)];
+            let sides = [12.0f32, 10.0, 9.0, 8.0, 7.0, 6.0, 5.0, 4.0, 3.0, 2.0];
+            let mut stats: Vec<Vec<Stats>> = sides
+                .iter()
+                .map(|_| slots.iter().map(|_| Stats::new(8)).collect())
+                .collect();
+            for index in 0..RAIN_WARMUP_FRAMES + 120 {
+                frame(&mut scene, &mut runner, &devices);
+                if index < RAIN_WARMUP_FRAMES {
+                    continue;
+                }
+                let group = &runner.groups[0];
+                for (side_index, side) in sides.iter().enumerate() {
+                    for (slot_index, (slot_x, slot_w)) in slots.iter().enumerate() {
+                        let cells = strip_cells(*side, *slot_x, *slot_w, 8);
+                        let mut colours = Vec::new();
+                        sampling::sample_leds(
+                            &group.canvas.pixels,
+                            group.canvas.width,
+                            group.canvas.height,
+                            &cells,
+                            SCENE_SAMPLING,
+                            &mut colours,
+                        );
+                        let entry = &mut stats[side_index][slot_index];
+                        entry.add(&colours);
+                    }
+                }
+            }
+            for (side_index, side) in sides.iter().enumerate() {
+                let mut all: Vec<u8> = Vec::new();
+                for entry in &stats[side_index] {
+                    all.extend(entry.widest());
+                }
+                println!(
+                    "#372 sweep {mode:?} side {side}: min {} max {} all {all:?}",
+                    all.iter().min().unwrap_or(&0),
+                    all.iter().max().unwrap_or(&0)
+                );
+            }
+        }
+    }
+
+    /// What one sampling of one effect showed: for every LED the widest channel range it
+    /// showed over the counted frames, the mean absolute frame-to-frame change it made
+    /// (the flicker the cap can cost), and the mean level it showed.
+    #[derive(Default)]
+    struct Stats {
+        /// The per-channel (min, max) every LED showed.
+        ranges: Vec<[(u8, u8); 3]>,
+        /// The sum of the frame-to-frame changes every LED made.
+        changes: Vec<f64>,
+        /// The sum of the mean channel level every LED showed.
+        levels: Vec<f64>,
+        /// The frames counted.
+        counted: usize,
+        /// The frame pairs counted.
+        frames: usize,
+        /// The last frame counted.
+        last: Option<Vec<Rgb8>>,
+    }
+
+    impl Stats {
+        /// The stats of a sampling of `leds` LEDs.
+        fn new(leds: usize) -> Self {
+            Stats {
+                ranges: vec![[(255u8, 0u8); 3]; leds],
+                changes: vec![0.0; leds],
+                levels: vec![0.0; leds],
+                counted: 0,
+                frames: 0,
+                last: None,
+            }
+        }
+
+        /// Adds one frame's colours.
+        fn add(&mut self, colours: &[Rgb8]) {
+            for (index, (range, colour)) in self.ranges.iter_mut().zip(colours).enumerate() {
+                for (slot, v) in range.iter_mut().zip([colour.r, colour.g, colour.b]) {
+                    slot.0 = slot.0.min(v);
+                    slot.1 = slot.1.max(v);
+                }
+                let level = (f64::from(colour.r) + f64::from(colour.g) + f64::from(colour.b)) / 3.0;
+                self.levels[index] += level;
+            }
+            self.counted += 1;
+            if let Some(previous) = self.last.replace(colours.to_vec()) {
+                for (index, (a, b)) in previous.iter().zip(colours).enumerate() {
+                    let change = (f64::from(a.r) - f64::from(b.r)).abs()
+                        + (f64::from(a.g) - f64::from(b.g)).abs()
+                        + (f64::from(a.b) - f64::from(b.b)).abs();
+                    self.changes[index] += change / 3.0;
+                }
+                self.frames += 1;
+            }
+        }
+
+        /// The widest channel range every LED showed.
+        fn widest(&self) -> Vec<u8> {
+            self.ranges
+                .iter()
+                .map(|r| r.iter().map(|(lo, hi)| hi.saturating_sub(*lo)).max().unwrap_or(0))
+                .collect()
+        }
+
+        /// The mean absolute frame-to-frame change every LED made.
+        fn mean_change(&self) -> Vec<f64> {
+            let frames = self.frames.max(1) as f64;
+            self.changes.iter().map(|c| c / frames).collect()
+        }
+
+        /// The mean level every LED showed, in 0..255.
+        fn levels(&self) -> Vec<f64> {
+            let counted = self.counted.max(1) as f64;
+            self.levels.iter().map(|l| l / counted).collect()
+        }
+
+        /// The mean of the per-LED mean changes: the flicker of the whole strip.
+        fn flicker(&self) -> f64 {
+            let changes = self.mean_change();
+            if changes.is_empty() {
+                return 0.0;
+            }
+            changes.iter().sum::<f64>() / changes.len() as f64
+        }
+    }
+
+    /// The old sampling of #372: a cell as wide as the LED's share of the slot and as
+    /// tall as the whole slot, the full-height band.
+    fn old_band_cells(n: usize) -> Vec<LedSample> {
+        let share = CANVAS_WIDTH as f32 / n as f32;
+        let scale = SCENE_RENDER_SCALE;
+        (0..n)
+            .map(|j| {
+                let x = share * (j as f32 + 0.5);
+                LedSample {
+                    center_x: x * scale,
+                    center_y: CANVAS_HEIGHT as f32 / 2.0 * scale,
+                    bounds: [
+                        (x - share / 2.0) * scale,
+                        0.0,
+                        (x + share / 2.0) * scale,
+                        CANVAS_HEIGHT as f32 * scale,
+                    ],
+                    sampled: true,
+                }
+            })
+            .collect()
+    }
+
+    /// Measures one effect on an 8-LED strip in "each its own", for the capped cell and
+    /// for the old full-height band, over the same frames: the two samplings read the same
+    /// canvas, so the difference is the sampling and nothing else.
+    fn measure_effect(effect: Box<dyn Effect>, props: Option<Props>, audio: bool) -> (Stats, Stats) {
+        let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(effect), 100);
+        scene.groups[0].mode = GroupMode::EachItsOwn;
+        scene.groups[0].needs = InputNeeds { screen: false, audio };
+        if let Some(props) = props {
+            scene.groups[0].pending_props = Some(props);
+        }
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+        let band = old_band_cells(8);
+        let mut capped = Stats::new(8);
+        let mut old = Stats::new(8);
+        for index in 0..RAIN_WARMUP_FRAMES + 120 {
+            if audio {
+                frame_with_spectrum(&mut scene, &mut runner, &devices);
+            } else {
+                frame(&mut scene, &mut runner, &devices);
+            }
+            let now = take(&mut runner, "d1", 8);
+            // The old band reads the same canvas the capped cell reads.
+            let group = &runner.groups[0];
+            let mut before = Vec::new();
+            sampling::sample_leds(
+                &group.canvas.pixels,
+                group.canvas.width,
+                group.canvas.height,
+                &band,
+                SCENE_SAMPLING,
+                &mut before,
+            );
+            if index >= RAIN_WARMUP_FRAMES {
+                capped.add(&now);
+                old.add(&before);
+            }
+        }
+        (capped, old)
+    }
+
+    /// A source that publishes a spectrum with a run of loud bands: the Audio Spectrum
+    /// effect draws one bar per band, and a strip's LED reads a small cell of the
+    /// picture (#372), so the fake has to publish something the strip can read.
+    struct FakeSpectrum;
+
+    impl InputSource for FakeSpectrum {
+        fn screen(&self) -> Option<Arc<ScreenFrame>> {
+            None
+        }
+
+        fn audio(&self) -> Option<Arc<AudioSpectrum>> {
+            let centers: Vec<f32> = (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect();
+            let magnitudes: Vec<f32> =
+                (0..32).map(|i| if (8..24).contains(&i) { 1.0 } else { 0.0 }).collect();
+            Some(Arc::new(AudioSpectrum { centers_hz: centers, magnitudes }))
+        }
+    }
+
+    /// One frame with a spectrum for the effects that need one.
+    fn frame_with_spectrum(
+        scene: &mut SceneState,
+        runner: &mut SceneRunner,
+        devices: &[DeviceInfo],
+    ) {
+        let mut params = params();
+        params.input_source = Some(Arc::new(FakeSpectrum));
+        frame_with(scene, runner, devices, &params);
+    }
+
+    /// Measures every built-in effect on an 8-LED strip in "each its own" and prints the
+    /// table: the widest channel range every LED shows over 120 frames after the warm-up,
+    /// and the mean frame-to-frame change, for the capped cell and for the old band.
+    ///
+    /// This is a measurement, not a verdict, so it is ignored by the suite. Run it with:
+    /// `cargo test -p canvas-core -- --ignored --nocapture --test-threads=1 measure_every_effect`
+    /// One effect to measure: its name, the effect, the props it runs with, and whether
+    /// it needs a spectrum.
+    struct Measured {
+        name: &'static str,
+        effect: Box<dyn Effect>,
+        props: Option<Props>,
+        audio: bool,
+    }
+
+    #[test]
+    #[ignore = "#372: a measurement of the cap's cost, run by hand"]
+    fn measure_every_effect_on_a_strip() {
+        let effects: Vec<Measured> = vec![
+            Measured {
+                name: "Solid",
+                effect: Box::new(canvas_effects::solid::Solid::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Gradient",
+                effect: Box::new(canvas_effects::gradient::Gradient::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Gradient (scrolling, 20)",
+                effect: Box::new(canvas_effects::gradient::Gradient::new()),
+                props: Some(Props::from([(
+                    "scroll_speed".to_string(),
+                    canvas_proto::props::PropValue::Number(20.0),
+                )])),
+                audio: false,
+            },
+            Measured {
+                name: "Rainbow Wave",
+                effect: Box::new(canvas_effects::rainbow_wave::RainbowWave::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Spiral",
+                effect: Box::new(canvas_effects::spiral::Spiral::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Breathing",
+                effect: Box::new(canvas_effects::breathing::Breathing::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Color Cycle",
+                effect: Box::new(canvas_effects::color_cycle::ColorCycle::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Aurora",
+                effect: Box::new(canvas_effects::aurora::Aurora::new()),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Rain",
+                effect: Box::new(canvas_effects::rain::Rain::with_seed(372)),
+                props: Some(purple_rain_props()),
+                audio: false,
+            },
+            Measured {
+                name: "Fire",
+                effect: Box::new(canvas_effects::fire::Fire::with_seed(372)),
+                props: None,
+                audio: false,
+            },
+            Measured {
+                name: "Audio Spectrum",
+                effect: Box::new(canvas_effects::audio_spectrum::AudioSpectrum::new()),
+                props: None,
+                audio: true,
+            },
+        ];
+        println!("#372 effect | capped range | old range | capped change | old change | capped level | old level");
+        for measured in effects {
+            let (capped, old) = measure_effect(measured.effect, measured.props, measured.audio);
+            let capped_range = capped.widest();
+            let old_range = old.widest();
+            let capped_change = capped.flicker();
+            let old_change = old.flicker();
+            let capped_level = capped.levels();
+            let old_level = old.levels();
+            println!(
+                "#372 {} | {}..{} | {}..{} | {capped_change:.3} | {old_change:.3} | {}..{} | {}..{}",
+                measured.name,
+                capped_range.iter().min().unwrap_or(&0),
+                capped_range.iter().max().unwrap_or(&0),
+                old_range.iter().min().unwrap_or(&0),
+                old_range.iter().max().unwrap_or(&0),
+                capped_level.iter().cloned().fold(f64::MAX, f64::min).round() as i64,
+                capped_level.iter().cloned().fold(f64::MIN, f64::max).round() as i64,
+                old_level.iter().cloned().fold(f64::MAX, f64::min).round() as i64,
+                old_level.iter().cloned().fold(f64::MIN, f64::max).round() as i64,
+            );
+            println!(
+                "#372 {} per LED: capped {capped_range:?} change {:?} level {:?} | old {old_range:?} change {:?} level {:?}",
+                measured.name,
+                capped.mean_change(),
+                capped_level.iter().map(|l| l.round()).collect::<Vec<f64>>(),
+                old.mean_change(),
+                old_level.iter().map(|l| l.round()).collect::<Vec<f64>>(),
+            );
         }
     }
 }

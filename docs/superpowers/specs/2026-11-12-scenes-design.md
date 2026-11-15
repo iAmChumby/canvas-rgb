@@ -167,8 +167,10 @@ New: the engine runs the active scene.
     as wide as that member's share of the group's LEDs.
   - Each its own: every member's slot is the whole canvas.
   - Inside a slot: a strip runs left to right at mid-height and each LED averages a square
-    cell centred on it (as wide as the LED's share of the slot, no taller than the slot), a ring
-    is the largest circle that fits, a grid fills the slot, a single LED reads the slot's
+    cell centred on it (a square of at most 10 units on a side: an LED is a point on the
+    picture, not a column through it), a ring
+    is the largest circle that fits and each LED averages a square cell centred on it (at most
+    10 units on a side), a grid fills the slot, a single LED reads the slot's
     centre. Reversed flips the order.
 - **Frames merge per adapter device.** Lights from different groups can share one adapter device
   (two fans on one header). The engine builds each device's frame from all the groups that own

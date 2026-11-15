@@ -180,7 +180,11 @@ struct SpectrumSource {
 impl SpectrumSource {
     fn new() -> Self {
         let centers: Vec<f32> = (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect();
-        let magnitudes: Vec<f32> = (0..32).map(|i| if i == 16 { 1.0 } else { 0.0 }).collect();
+        // A run of loud bands, not one narrow bar: a strip's LED reads a small cell of
+        // the picture (#372), so the fake has to publish something the strip's LEDs can
+        // read. One band is a two-pixel bar, and it fell between two of the LEDs.
+        let magnitudes: Vec<f32> =
+            (0..32).map(|i| if (8..24).contains(&i) { 1.0 } else { 0.0 }).collect();
         Self {
             audio: Arc::new(AudioSpectrum {
                 centers_hz: centers,

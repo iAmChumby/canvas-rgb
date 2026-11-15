@@ -1962,8 +1962,27 @@ mod tests {
         let group = map.groups.get("g").expect("the group's map");
         let a = group.devices.get(&DeviceId("a".into())).expect("device a has a mask");
         let b = group.devices.get(&DeviceId("b".into())).expect("device b has a mask");
-        assert!(a.contains(10, 25), "device a's own LEDs are covered");
-        assert!(!b.contains(10, 25), "device b is outside a's mask");
+        // The pixels a device's mask holds are the ones its LEDs' cells cover, and an LED
+        // reads the pixel at its own centre (#372: the cell is a small square at the LED,
+        // so the mask holds the pixel the sampler reads).
+        let plan = canvas_core::arrangement::build_group_plan(
+            &["a#z0".to_string(), "b#z0".to_string()],
+            canvas_proto::scene::GroupMode::FlowAcross,
+            &lights,
+            &devices,
+        );
+        let scale = canvas_core::SCENE_RENDER_SCALE;
+        let mut covered = 0;
+        for samples in plan.lights.iter().filter(|l| l.device_id == DeviceId("a".into())) {
+            for led in &samples.leds {
+                let x = (led.center_x * scale).round() as u32;
+                let y = (led.center_y * scale).round() as u32;
+                assert!(a.contains(x, y), "device a's own LED at {x},{y} is covered");
+                assert!(!b.contains(x, y), "device b is outside a's mask");
+                covered += 1;
+            }
+        }
+        assert_eq!(covered, 4, "every one of device a's LEDs was checked");
         assert!((group.width, group.height) == (80, 50), "the group canvas at the scene's scale");
     }
 

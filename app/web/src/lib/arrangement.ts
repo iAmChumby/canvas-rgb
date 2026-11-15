@@ -38,6 +38,21 @@ export const CANVAS_HEIGHT = 200;
 export const RING_INSET = 4;
 
 /**
+ * The biggest cell an LED averages over, in canvas units.
+ *
+ * An LED is a point on the picture, the way SignalRGB and OpenRGB's effect engine
+ * treat it: it reads the colour where it stands, not a band of the picture. A wide cell
+ * averages thin moving detail away, so Rain's falling lines never reached an 8-LED
+ * strip (#372). Seven units is about one and three quarter pixels of the scene canvas,
+ * and it is the smallest cell that clears the bar of 30 (of 255) that a strip LED has
+ * to move for Rain.
+ *
+ * The cap is on the cell only: a strip's LEDs still stand spread over the whole slot,
+ * and a ring's still stand on its circle.
+ */
+export const STRIP_CELL_MAX = 7;
+
+/**
  * The most LEDs one zone may plan for.
  *
  * A zone reports its own LED count, and a damaged or misbehaving device can report a
@@ -215,34 +230,45 @@ function buildLightLeds(
 }
 
 /**
- * A strip: left to right at mid-height, each LED in the middle of its own cell. The cell is
- * `slot.w / n` wide and as tall as it is wide, at most the slot's height, centred on the LED.
+ * A strip: left to right at mid-height, each LED in the middle of its own cell.
+ *
+ * The LED stands at the middle of its share of the slot, and the cell it reads is a
+ * square of at most `STRIP_CELL_MAX` units, centred on the LED at mid-height: an LED is
+ * a position on the picture, not a column through it (#372).
  */
 function stripSamples(slot: Slot, n: number): LedSample[] {
-  const cellW = slot.w / n;
-  const cellH = Math.min(cellW, slot.h);
+  // Where the LED stands: its share of the slot, spread over the whole slot.
+  const share = slot.w / n;
+  // The cell it reads: a square, at most the cap, at most the slot's height.
+  const side = Math.min(share, slot.h, STRIP_CELL_MAX);
   const y = slot.y + slot.h / 2;
   const leds: LedSample[] = [];
   for (let j = 0; j < n; j++) {
-    const x = slot.x + cellW * (j + 0.5);
+    const x = slot.x + share * (j + 0.5);
     leds.push({
       center_x: x,
       center_y: y,
-      bounds: clampCell(x - cellW / 2, y - cellH / 2, x + cellW / 2, y + cellH / 2),
+      bounds: clampCell(x - side / 2, y - side / 2, x + side / 2, y + side / 2),
       sampled: true,
     });
   }
   return leds;
 }
 
-/** A ring: the largest circle that fits the slot, from the top, clockwise. */
+/**
+ * A ring: the largest circle that fits the slot, from the top, clockwise.
+ *
+ * The cell is the square of one LED's share of the circle, at most the cap: a ring of
+ * few LEDs has a wide share of the circle, and a cell that wide averages the picture
+ * away (#372).
+ */
 function ringSamples(slot: Slot, n: number): LedSample[] {
   const cx = slot.x + slot.w / 2;
   const cy = slot.y + slot.h / 2;
   // The circle keeps a 4px inset from the slot's edges.
   const r = Math.max(0, (Math.min(slot.w, slot.h) - 2 * RING_INSET) / 2);
   // The LED's cell: a square as wide as the LEDs are apart around the circle.
-  const side = Math.min((Math.PI * 2 * r) / n, 2 * r);
+  const side = Math.min((Math.PI * 2 * r) / n, 2 * r, STRIP_CELL_MAX);
   const leds: LedSample[] = [];
   for (let j = 0; j < n; j++) {
     // -90° is the top of the circle; the angle grows clockwise (y grows downward).
