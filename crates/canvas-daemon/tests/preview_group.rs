@@ -231,6 +231,24 @@ async fn a_wrong_host_is_refused_with_the_status_the_existing_previews_give() {
 }
 
 #[tokio::test]
+async fn a_foreign_origin_is_refused_with_the_status_the_existing_previews_give() {
+    let rig = rig("foreign-origin").await;
+    // The helper writes the Host line; a second header line rides in with it. A page on another
+    // origin that opens this socket sends its own Origin, and the right token does not help it.
+    let from_elsewhere = format!("{HOST}
+Origin: https://evil.example");
+    let existing = refusal(&rig, &format!("{}?token={TOKEN}", routes::PREVIEW), &from_elsewhere).await;
+    let lights = refusal(&rig, &format!("{}?token={TOKEN}", routes::PREVIEW_LIGHTS), &from_elsewhere).await;
+    let group =
+        refusal(&rig, &format!("{}?token={TOKEN}&group=left", routes::PREVIEW_GROUP), &from_elsewhere).await;
+    assert_eq!(existing.0, 403);
+    assert_eq!(existing.1, canvas_proto::api::error_codes::FORBIDDEN_ORIGIN);
+    assert_eq!(group, existing);
+    assert_eq!(group, lights);
+    assert!(rig.engine.group_preview_calls().is_empty());
+}
+
+#[tokio::test]
 async fn the_query_token_exemption_covers_the_group_path_and_no_other_path() {
     let rig = rig("exemption").await;
     // The group socket opens on the query token alone (no Authorization header).

@@ -56,7 +56,6 @@ struct SinkEntry {
     led_count: u32,
 }
 
-/// Everything the render thread reads and the API mutates.
 /// The group preview's selection (#378): which group, where its picture goes, and which call
 /// chose it.
 struct GroupPreview {
@@ -65,6 +64,7 @@ struct GroupPreview {
     serial: u64,
 }
 
+/// Everything the render thread reads and the API mutates.
 struct State {
     fps: u32,
     power: Power,
