@@ -25,18 +25,25 @@ Caveats (each one favours the vendor apps):
   is open; it is released when the window closes (confirmed: no WebView2 child under the tray).
 - One 60 s window each; CPU numbers of this size move with background load. RAM is the robust number.
 
-## Scenes: cost per group (2026-11-12, GAMING, Ryzen 7 7800X3D, 8 cores / 16 threads)
+## Scenes: cost per group (2026-11-12 and 2026-11-14, GAMING, Ryzen 7 7800X3D, 8 cores / 16 threads)
 
 Method: `crates/canvas-core/src/scene_bench.rs`, ignored tests, run through the build lock:
 `cargo test -p canvas-core --release -- --ignored --nocapture --test-threads=1 bench_scene`
 
 One scene frame: every group runs its own effect on its own canvas, then its LEDs are sampled from that
 canvas (area average; whether it is the costliest of the three sampling modes for a scene is unknown).
-30 warm-up frames, then 300 timed frames. The times are every group's effect update and LED sampling
-together; the rest of the engine's frame (brightness, warmth, white balance, device frames) is not timed
-here (Task 4 Step 5 timed it: see "The whole frame through `CoreEngine`"). The built-in effect is `aurora`; the HTML effect is the daemon's own stock file, one QuickJS
-runtime per group. An HTML effect runs its script at 60 Hz, so at 30 fps each HTML group runs two script
-frames per engine frame, which is why the 60 fps column is about half the 30 fps one for HTML.
+30 warm-up frames, then 300 timed frames (900 in the stock-effect table, three runs each). The times
+are every group's effect update and LED sampling together; the rest of the engine's frame (brightness,
+warmth, white balance, device frames) is not timed here (Task 4 Step 5 timed it: see "The whole frame
+through `CoreEngine`"). The built-in effect is `aurora`; the HTML effect is the daemon's own stock file,
+one QuickJS runtime per group. An HTML effect runs its script at 60 Hz, so at 30 fps each HTML group
+runs two script frames per engine frame, which is why the 60 fps column is about half the 30 fps one for
+HTML.
+
+Two clocks are measured. The tables below step every effect by a fixed 1/30 s, which is the engine's
+step on a quiet machine. The "engine's clock" table steps every effect by the real time between two
+frame starts, on the engine's own tick schedule (`crates/canvas-core/src/engine.rs`, the render loop,
+and `crate::timer::FrameTimer`), which is what the engine does and what carries the timer jitter.
 
 The render scale is the engine's own setting (`Canvas::with_scale`): 1.0 is a 320x200 canvas, 0.5 is
 160x100 and 0.25 is 80x50. The sample regions move with it, as the engine's own plan does. The three stock
@@ -97,39 +104,133 @@ frame. Everything else is the effect's own script. The first bench called this "
 than the pixels"; measured, it is the script (its JavaScript and the pixels it paints), and the render
 scale does not touch it.
 
-### 20 groups, k of them HTML
+### 20 groups, k of them HTML: every stock effect
 
-`k` groups run `ink-drop` and 20-k run `aurora`, at 30 fps. The search walks k up until one k misses the
-bar (16.6 ms, half a 30 fps frame), so the largest k that fits is measured and not guessed:
+The limit on HTML groups per scene has to hold for every stock effect, not for `ink-drop` alone, so
+this table measures 20 groups with `k` of them HTML and 20-k running `aurora`, for `k` from 0 to 4
+with no early stop, for each of the three stock effects and for the worst case (two different
+effects in one scene, the two with the highest p95: `wet-smear` and `palette-knife`, in turn), at the
+two scales the decision uses.
+
+Method: `bench_scene_stock_k_table` (quarter and half scale), 900 frames, release, through the build
+lock. 900 frames is 30 s of scene time at 30 fps, which is what Palette Knife's 24 s cycle needs to
+be inside the window (`crates/canvas-daemon/stock-effects/palette-knife.html`: one cycle is
+`3 * (HOLD + TRANS)` T-units and the clock runs `sp / 60` a frame). The table is run three times and
+no row is averaged: a row is a measurement only if every run agrees. Every row prints how many HTML
+groups dropped a frame (a script that ran past the runtime's own budget): 0 in every row of every run.
+
+p95 in ms, the three runs of 2026-11-14 in order, the bar is 16.6 ms:
+
+| Scale | Mix | 0 HTML | 1 HTML | 2 HTML | 3 HTML | 4 HTML | largest k at or under 16.6 ms in all three runs |
+|---|---|---|---|---|---|---|---|
+| 0.25 | `ink-drop` | 0.634 / 0.642 / 0.631 | 4.993 / 5.079 / 5.027 | 9.314 / 9.258 / 9.315 | 13.476 / 13.525 / 13.587 | 17.905 / 17.812 / 17.934 | **3** |
+| 0.25 | `palette-knife` | 0.560 / 0.566 / 0.574 | 7.700 / 7.589 / 7.652 | 14.699 / 14.970 / 15.147 | 22.093 / 21.949 / 22.268 | 29.112 / 29.492 / 29.640 | **2** |
+| 0.25 | `wet-smear` | 0.598 / 0.604 / 0.575 | 7.051 / 7.018 / 7.145 | 13.462 / 13.333 / 13.524 | 19.823 / 20.018 / 19.696 | 26.195 / 26.425 / 26.681 | **2** |
+| 0.25 | `wet-smear` + `palette-knife` | 0.572 / 0.572 / 0.623 | 7.093 / 7.273 / 7.370 | 12.579 / 12.811 / 13.139 | 18.606 / 17.927 / 18.049 | 24.803 / 24.985 / 24.874 | **2** |
+| 0.5 | `ink-drop` | 2.151 / 2.336 / 2.262 | 6.531 / 6.604 / 6.405 | 10.923 / 10.552 / 11.019 | 15.165 / 14.861 / 15.277 | 19.479 / 19.261 / 20.114 | **3** |
+| 0.5 | `palette-knife` | 2.261 / 2.102 / 2.215 | 9.034 / 9.064 / 9.280 | 16.339 / 15.940 / 16.369 | 27.646 / 23.125 / 23.725 | 31.137 / 31.492 / 30.832 | **2** |
+| 0.5 | `wet-smear` | 2.220 / 2.158 / 2.119 | 8.461 / 8.650 / 8.602 | 15.141 / 15.097 / 15.556 | 21.280 / 21.451 / 21.817 | 28.244 / 28.428 / 28.672 | **2** |
+| 0.5 | `wet-smear` + `palette-knife` | 2.253 / 2.278 / 2.192 | 8.264 / 8.334 / 8.756 | 14.160 / 14.372 / 14.329 | 20.042 / 19.667 / 19.466 | 26.777 / 26.891 / 26.665 | **2** |
+
+Every line, verbatim, is in the report of the run (`.build/reports/scenes-t1c.md`, in the main
+checkout); the shape of a row is:
+
+```
+20 groups, 2 HTML + 18 built-in, palette-knife at scale 0.25: 900 frames -> mean 8.045 ms/frame, p95 14.699 ms/frame, 0 dropped frames
+```
+
+**That table is an idle machine, and the limit has to hold on a busy one.** The same rows measured on
+2026-11-12, with other work on the machine (about 31% of it busy), read up to 3.9 ms higher: at 0.25,
+`palette-knife` at 2 HTML groups read 18.527, 18.205 and 18.187 ms (over the bar in all three runs)
+against 14.699, 14.970 and 15.147 ms here, and `ink-drop` at 3 read 18.063, 16.808 and 16.307 ms against
+13.476, 13.525 and 13.587 ms; at 0.5, `wet-smear` at 2 read 20.215, 19.436 and 19.185 ms against
+15.141, 15.097 and 15.556 ms. A limit that holds only when the machine is idle is not a limit for a
+shared PC, so the largest k that holds in every run, idle or busy, is:
+
+| Scale | `ink-drop` | `palette-knife` | `wet-smear` | `wet-smear` + `palette-knife` |
+|---|---|---|---|---|
+| 0.25 | **2** | **1** | **2** | **2** |
+| 0.5 | **2** | **1** | **1** | **1** |
+
+**The evidence does not support 2 HTML groups for every stock effect.** `palette-knife` misses the bar
+at 2 on a busy machine at 0.25, `wet-smear` misses it at 2 on a busy machine at 0.5, and the whole-frame
+run through `CoreEngine` above misses it for both of them at the scene's own scale. The mixed row is
+not the worst case: `wet-smear` costs about the same in every frame, while `palette-knife` costs much
+more in the 3.2 s of every 8 s cycle in which it lays a new painting over the old one, so mixing the
+two spreads the cost over the frames and lowers the peak. `palette-knife` on its own puts that peak
+into every frame that costs.
+
+### The same table on the engine's own clock
+
+The table above steps every effect by a fixed 1/30 s. The engine does not: it starts every frame on a
+tick schedule and steps the effect by the real time between two frame starts
+(`crates/canvas-core/src/engine.rs`, the render loop, and `crate::timer::FrameTimer`, the timer it
+sleeps on). That step carries the timer jitter, and the HTML runtime turns the step into whole 60 Hz
+script frames (`canvas-html`'s accumulator: `accumulator += dt * 60`, four frames at most), so a step
+that runs a little over 1/30 s makes the runtime run a third script frame now and then.
+
+Method: `bench_scene_stock_k_table_engine_clock` (quarter and half scale), 900 frames, one run, release,
+through the build lock. The frames are paced by the engine's own timer, so a row takes 30 s of
+wall-clock time. p95 in ms, on the same (idle) machine as the table above:
+
+| Scale | Mix | 0 HTML | 1 HTML | 2 HTML | 3 HTML | 4 HTML | largest k at or under 16.6 ms |
+|---|---|---|---|---|---|---|---|
+| 0.25 | `ink-drop` | 0.671 | 5.467 | 9.753 | 13.962 | 19.085 | **3** |
+| 0.25 | `palette-knife` | 0.681 | 8.311 | 15.329 | 22.031 | 29.619 | **2** |
+| 0.25 | `wet-smear` | 0.671 | 7.397 | 13.742 | 20.255 | 27.423 | **2** |
+| 0.25 | `wet-smear` + `palette-knife` | 0.672 | 7.589 | 13.139 | 18.243 | 24.966 | **2** |
+| 0.5 | `ink-drop` | 2.494 | 6.886 | 11.196 | 15.625 | 19.887 | **3** |
+| 0.5 | `palette-knife` | 2.364 | 9.771 | 16.720 | 23.917 | 31.106 | **1** |
+| 0.5 | `wet-smear` | 2.381 | 8.597 | 14.882 | 21.508 | 27.964 | **2** |
+| 0.5 | `wet-smear` + `palette-knife` | 2.255 | 8.896 | 14.499 | 19.789 | 26.270 | **2** |
+
+**The engine's own step costs 0.2 to 0.6 ms a frame more than the fixed step** (the mean of every row
+that holds 1, 2 or 3 HTML groups: the HTML runtime runs a third script frame now and then), and it
+changes the limit in one cell: `palette-knife` at 0.5 with 2 HTML groups reads 16.720 ms on the
+engine's clock against 15.940 to 16.369 ms on the fixed step, which is over the bar. The difference is
+inside the table's own run-to-run spread (up to 2.5 ms), so the engine's jitter does not move the
+limit, but it does mean a limit set at the bar has no room in it.
+
+The render scale with `ink-drop` alone, 300 frames, one run of 2026-11-14
+(`bench_scene_html_mix_by_scale`, which now walks every k from 0 to 4 and stops at nothing, so no cell
+is left unmeasured):
 
 | Scale | all built-in p95 | 1 HTML p95 | 2 HTML p95 | 3 HTML p95 | 4 HTML p95 | largest k at or under 16.6 ms |
 |---|---|---|---|---|---|---|
-| 1.0 | 10.121 | 15.526 | 21.502 | (misses) | | **1** |
-| 0.5 | 2.716 | 8.702 | 14.934 | 20.904 | | **2** |
-| 0.25 | 0.698 | 7.027 | 13.221 | 19.763 | | **2** |
+| 1.0 | 8.142 | 11.374 | 16.030 | 19.689 | 24.157 | **2** |
+| 0.5 | 2.155 | 6.646 | 10.727 | 15.028 | 19.421 | **3** |
+| 0.25 | 0.688 | 5.098 | 9.664 | 13.723 | 18.173 | **3** |
 
-All the numbers, verbatim, from the run:
+The numbers, verbatim, from the run:
 
 ```
-20 groups, all built-in (aurora) at scale 1   : 300 frames -> mean 9.448 ms/frame, p95 10.121 ms/frame
-20 groups, 1 HTML + 19 built-in at scale 1   : 300 frames -> mean 14.493 ms/frame, p95 15.526 ms/frame
-20 groups, 2 HTML + 18 built-in at scale 1   : 300 frames -> mean 19.522 ms/frame, p95 21.502 ms/frame
-scale 1: the largest k with a p95 at or under 16.6 ms is 1
-20 groups, all built-in (aurora) at scale 0.5 : 300 frames -> mean 2.450 ms/frame, p95 2.716 ms/frame
-20 groups, 1 HTML + 19 built-in at scale 0.5 : 300 frames -> mean 7.723 ms/frame, p95 8.702 ms/frame
-20 groups, 2 HTML + 18 built-in at scale 0.5 : 300 frames -> mean 13.143 ms/frame, p95 14.934 ms/frame
-20 groups, 3 HTML + 17 built-in at scale 0.5 : 300 frames -> mean 18.536 ms/frame, p95 20.904 ms/frame
-scale 0.5: the largest k with a p95 at or under 16.6 ms is 2
-20 groups, all built-in (aurora) at scale 0.25: 300 frames -> mean 0.647 ms/frame, p95 0.698 ms/frame
-20 groups, 1 HTML + 19 built-in at scale 0.25: 300 frames -> mean 6.127 ms/frame, p95 7.027 ms/frame
-20 groups, 2 HTML + 18 built-in at scale 0.25: 300 frames -> mean 11.410 ms/frame, p95 13.221 ms/frame
-20 groups, 3 HTML + 17 built-in at scale 0.25: 300 frames -> mean 17.068 ms/frame, p95 19.763 ms/frame
-scale 0.25: the largest k with a p95 at or under 16.6 ms is 2
+20 groups, all built-in (aurora) at scale 1   : 300 frames -> mean 7.076 ms/frame, p95 8.142 ms/frame
+20 groups, 0 HTML + 20 built-in at scale 1   : 300 frames -> mean 7.067 ms/frame, p95 7.913 ms/frame
+20 groups, 1 HTML + 19 built-in at scale 1   : 300 frames -> mean 10.463 ms/frame, p95 11.374 ms/frame
+20 groups, 2 HTML + 18 built-in at scale 1   : 300 frames -> mean 14.554 ms/frame, p95 16.030 ms/frame
+20 groups, 3 HTML + 17 built-in at scale 1   : 300 frames -> mean 17.764 ms/frame, p95 19.689 ms/frame
+20 groups, 4 HTML + 16 built-in at scale 1   : 300 frames -> mean 21.316 ms/frame, p95 24.157 ms/frame
+scale 1: the largest k with a p95 at or under 16.6 ms is 2
+20 groups, all built-in (aurora) at scale 0.5 : 300 frames -> mean 1.833 ms/frame, p95 2.155 ms/frame
+20 groups, 0 HTML + 20 built-in at scale 0.5 : 300 frames -> mean 1.844 ms/frame, p95 2.183 ms/frame
+20 groups, 1 HTML + 19 built-in at scale 0.5 : 300 frames -> mean 5.682 ms/frame, p95 6.646 ms/frame
+20 groups, 2 HTML + 18 built-in at scale 0.5 : 300 frames -> mean 9.301 ms/frame, p95 10.727 ms/frame
+20 groups, 3 HTML + 17 built-in at scale 0.5 : 300 frames -> mean 13.147 ms/frame, p95 15.028 ms/frame
+20 groups, 4 HTML + 16 built-in at scale 0.5 : 300 frames -> mean 16.797 ms/frame, p95 19.421 ms/frame
+scale 0.5: the largest k with a p95 at or under 16.6 ms is 3
+20 groups, all built-in (aurora) at scale 0.25: 300 frames -> mean 0.507 ms/frame, p95 0.688 ms/frame
+20 groups, 0 HTML + 20 built-in at scale 0.25: 300 frames -> mean 0.522 ms/frame, p95 0.664 ms/frame
+20 groups, 1 HTML + 19 built-in at scale 0.25: 300 frames -> mean 4.373 ms/frame, p95 5.098 ms/frame
+20 groups, 2 HTML + 18 built-in at scale 0.25: 300 frames -> mean 8.241 ms/frame, p95 9.664 ms/frame
+20 groups, 3 HTML + 17 built-in at scale 0.25: 300 frames -> mean 11.928 ms/frame, p95 13.723 ms/frame
+20 groups, 4 HTML + 16 built-in at scale 0.25: 300 frames -> mean 15.856 ms/frame, p95 18.173 ms/frame
+scale 0.25: the largest k with a p95 at or under 16.6 ms is 3
 ```
 
-The render scale is what the built-in groups cost: 20 built-in groups fall from 10.121 ms p95 at 320x200
-to 2.716 ms at 160x100 and 0.698 ms at 80x50, a built-in group from 0.459 ms to 0.123 ms to 0.032 ms a
-frame. It is not what the HTML groups cost.
+The render scale is what the built-in groups cost: 20 built-in groups fall from 8.142 ms p95 at 320x200
+to 2.155 ms at 160x100 and 0.688 ms at 80x50. A built-in group is a twentieth of the means of those
+rows: 0.354 ms (7.076 ms over 20 groups), 0.092 ms (1.833) and 0.025 ms (0.507). It is not what the
+HTML groups cost: an HTML group costs the same at every scale.
 
 ### The whole frame through `CoreEngine` (Scenes Task 4, Step 5)
 
@@ -275,23 +376,27 @@ pub const SCENE_RENDER_SCALE: f32 = 0.25;
 **The decision.** `SCENE_RENDER_SCALE = 0.25` and `SCENE_SAMPLING = AreaAverage`, both fixed in
 `scene_engine.rs`. `SCENE_HTML_MAX = 1`: the whole-frame run above puts two of the three stock effects over the bar at 2.
 
-The reason for the scale: an HTML group costs 5.4 to 6.7 ms at every scale, so the scale cannot buy an HTML group back, and 20 built-in groups fall from 10.1 ms p95 at 320x200 to 0.70 ms at 80x50.
+The reason for the scale: an HTML group costs 5.4 to 6.7 ms at every scale, so the scale cannot buy an HTML group back, and 20 built-in groups fall from 8.1 ms p95 at 320x200 to 0.69 ms at 80x50.
 The reason for the sampling: area average is what every number here timed, so the numbers hold for it; nearest and bilinear were not timed.
 
-Why 0.25 and not 0.5: in the k-table above both scales fit 2 HTML groups and miss at 3, so the extra
-pixels of 0.5 buy no group, and 0.25 leaves more of the bar free (13.221 ms p95 for 2 HTML groups against
-14.934 ms at 0.5). The built-in groups cost about 14 times less at 0.25 than at 1.0.
+Why 0.25 and not 0.5: the extra pixels of 0.5 buy no group. At 0.25 the two-HTML-group p95, the worst
+of three runs, is 9.3 ms (`ink-drop`), 13.5 ms (`wet-smear`), 15.1 ms (`palette-knife`) and 13.1 ms (the
+mixed row); at 0.5 the same four are 11.0, 15.6, 16.4 and 14.4 ms. The built-in groups cost about 14
+times less at 0.25 than at 1.0.
 
-Why 1 and not 2, yet (the review on PR #318):
-- These numbers time only the effects' `update` and the LED sampling. The engine's frame also applies
-  the brightness, warmth and white balance, builds each device's frame and hands it to the device's
-  writer; none of that is timed here.
-- The mixed rows use `ink-drop` only; `wet-smear` costs more a group (6.5 ms mean against 5.4 ms).
-- The one clean run at 2 HTML groups and 0.25 is 13.221 ms p95. Another reading quoted for this case
-  (11.231 ms) and the 16.102 ms for 3 groups come from a run spoiled by another build on the machine and
-  are not counted.
-Task 4 Step 5 timed the whole frame through `CoreEngine` with each stock HTML effect (the section above). It
-found `palette-knife` and `wet-smear` over the bar at 2 HTML groups, so the limit stays at 1.
+Why 1 and not 2:
+- The whole-frame run through `CoreEngine` with each stock HTML effect (Task 4 Step 5, the section
+  above) found `palette-knife` and `wet-smear` over the bar at 2 HTML groups, in all three runs each.
+- The group-level table says the same, effect by effect. The largest k with a p95 at or under 16.6 ms
+  in every run, idle or busy, is, at 0.25, **2** for `ink-drop`, **1** for `palette-knife`, **2** for
+  `wet-smear` and **2** for the mixed row; at 0.5 it is **2** for `ink-drop` and **1** for the other
+  three. On an idle machine alone the table would allow 2 for every stock effect at 0.25 and 3 for
+  `ink-drop`, but the limit has to hold on a shared machine too.
+- The engine's own clock leaves no room either: `palette-knife` at 0.5 with 2 HTML groups reads
+  16.720 ms on it, over the bar, against 15.940 to 16.369 ms on the fixed step.
+- So the evidence does not support 2 HTML groups for every stock effect, and the limit stays at 1. It
+  would rise to 2 on a machine where every stock effect fits at 2 in three clean runs, on the engine's
+  own clock, and with room in the bar.
 
 What a scene loses at 0.25, measured and not:
 
@@ -316,7 +421,7 @@ The spec's order, with what each one does to the measured numbers:
 
 - (a) A smaller canvas for a group with 30 LEDs or fewer. It does not touch an HTML group: an HTML group's
   cost is the same at 80x50 as at 320x200. It does help the built-in groups a lot: 20 of them cost
-  10.121 ms p95 at 320x200 and 0.698 ms at 80x50. So it is worth doing for the built-in groups and it is
+  8.142 ms p95 at 320x200 and 0.688 ms at 80x50. So it is worth doing for the built-in groups and it is
   worth nothing for the HTML ones.
 - (b) Half frame rate for groups that are not shown in the preview. At best it halves the HTML cost: the
   60 fps rows are that same workload with one script frame per group per engine frame, still 65.272 ms for
@@ -331,3 +436,11 @@ The machine is shared, and the HTML group's cost moves with the load on it: the 
 machine; the 20-group all-built-in p95 was 9.347 ms and 10.150 ms. The mixed case moved less: 13.796 ms
 against 15.697 ms for 1 HTML group + 19 built-in at 1.0. Readings from a run spoiled by another build are
 left out. One run per case is not enough to call a limit that sits near the bar: Task 4 Step 5 ran three (see "The whole frame through `CoreEngine`").
+
+The stock-effect table ran three times per row, and the three readings of a row differ by 0.05 to 2.5 ms
+p95 (at most 1.8 ms for the rows that decide the limit at 0.25: `ink-drop` at 3 HTML groups, 13.476,
+13.525 and 13.587 ms). Every row of every run had 0 dropped frames. The bigger movement is the machine:
+the same rows read up to 3.9 ms higher on 2026-11-12, with other work on the machine (about 31% of it
+busy), than on 2026-11-14 with it idle. The tables above this section are from the first bench's run
+(2026-11-12, a busy machine): the 20 built-in groups at 320x200 read 9.189 ms mean and 10.150 ms p95
+there, against 7.076 ms and 8.142 ms in the scale table's run on the idle machine.
