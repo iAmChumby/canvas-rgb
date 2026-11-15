@@ -123,7 +123,7 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
     // only the layouts do, and the import migrates them with its own devices.
     let (lights, scenes) = crate::storage::scenes_for_export(&store);
     let bundle = ExportBundle {
-        patterns: Vec::new(),
+        patterns: app.patterns.all(),
         schema_version: canvas_proto::config::EXPORT_SCHEMA,
         exported_at: crate::storage::export_timestamp(),
         app_version: crate::version(),
@@ -263,6 +263,24 @@ pub async fn config_import(
         stacks.push(stack);
     }
 
+    // The patterns in the bundle keep the rules a PUT does: each one is checked, and two
+    // patterns of the bundle may not share a name, ignoring case, exactly as a save refuses.
+    let mut patterns: Vec<canvas_proto::pattern::Pattern> = Vec::new();
+    for pattern in &bundle.patterns {
+        canvas_proto::pattern::validate_pattern(pattern)
+            .map_err(|error| ApiFailure::validation(format!("{}: {error}", pattern.id)))?;
+        if patterns
+            .iter()
+            .any(|saved| saved.name().eq_ignore_ascii_case(pattern.name()))
+        {
+            return Err(ApiFailure::validation(format!(
+                "{:?} is the name of two patterns in the bundle, ignoring case",
+                pattern.name()
+            )));
+        }
+        patterns.push(pattern.clone());
+    }
+
     let home = app.store.read().await.home.clone();
     crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
         .map_err(|e| match &e {
@@ -275,6 +293,10 @@ pub async fn config_import(
         })?;
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
+    // A bundle from before patterns has none, and importing it replaces the saved patterns with
+    // none, as it does the stacks.
+    crate::patterns::write_file(&home, &patterns)
+        .map_err(|e| ApiFailure::internal(format!("could not save the patterns: {e}")))?;
 
     // A draft on the lights holds the layout's effect from before the import as its prior,
     // and the import brings a layout of its own. The draft ends here, before the store is
@@ -318,6 +340,8 @@ pub async fn config_import(
         // The stacks are read again from the file the import wrote, so the library shows them at
         // once and the next frame resolves them against the new layout.
         app.stacks.reload_with(&known);
+        // The patterns too: the file the import wrote is what every group builds from now.
+        app.patterns.reload();
         // The import keeps this machine's audio-source pick (B1): the daemon
         // matches the kept-on-disk pick, like a restart does.
         let audio_source = app.store.read().await.config.audio_source.clone();

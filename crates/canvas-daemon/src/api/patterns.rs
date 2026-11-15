@@ -1,0 +1,180 @@
+//! The pattern routes: list, read, save and delete a saved pattern (0.16.0).
+//!
+//! A pattern is written whole and read whole, as a stack is: the editor holds the draft and
+//! saves once, so a stroke never lands as a half-saved pattern. The file is written atomically
+//! through [`crate::storage::write_json`], like every other saved file.
+
+use axum::extract::{Path, Query, State};
+use axum::Json;
+use canvas_proto::api::{
+    DeletePatternQuery, DeletePatternResponse, PatternsResponse,
+};
+use canvas_proto::pattern::{Pattern, PATTERN_ID_PREFIX};
+use std::sync::Arc;
+
+use crate::api::{effects, ApiFailure, ApiResult};
+use crate::state::App;
+use crate::patterns::PatternsError;
+
+/// `GET /api/v1/patterns`.
+pub async fn list_patterns(State(app): State<Arc<App>>) -> Json<PatternsResponse> {
+    Json(PatternsResponse { patterns: app.patterns.all() })
+}
+
+/// `GET /api/v1/patterns/{id}`: the whole pattern, by `pattern:<name>` or by name.
+pub async fn get_pattern(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<Pattern>> {
+    let pattern = app
+        .patterns
+        .get(&id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no pattern with the id or name {id}")))?;
+    Ok(Json(pattern))
+}
+
+/// `PUT /api/v1/patterns/{id}`.
+///
+/// The whole document in, the saved pattern out. The path id is `pattern:<name>` or the bare
+/// name; a body whose id differs from the path is a 422, because a save never renames. 409 when
+/// the name is another pattern's, ignoring case; 422 for a pattern that breaks a rule, with the
+/// sentence. A PUT of a new name creates it: 404 is not used.
+pub async fn put_pattern(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
+) -> ApiResult<Json<Pattern>> {
+    // The body is read as bytes, so a body that is not a pattern is answered with the API's own
+    // error shape and its reason, not axum's plain text.
+    let bytes = crate::api::limited_body(body, effects::IMPORT_BODY_LIMIT)?;
+    let pattern: Pattern = serde_json::from_slice(&bytes)
+        .map_err(|e| ApiFailure::validation(format!("the body is not a pattern: {e}")))?;
+
+    let canonical = if id.starts_with(PATTERN_ID_PREFIX) {
+        id.clone()
+    } else {
+        format!("{PATTERN_ID_PREFIX}{id}")
+    };
+    if pattern.id != canonical {
+        return Err(ApiFailure::validation(format!(
+            "the pattern's id in the body ({}) does not match the path ({canonical})",
+            pattern.id
+        )));
+    }
+
+    let saved = app.patterns.put(pattern).map_err(|error| match error {
+        PatternsError::Invalid(message) => ApiFailure::validation(message),
+        PatternsError::Conflict(message) => ApiFailure::conflict(message),
+        PatternsError::Io(message) => {
+            ApiFailure::internal(format!("could not save the pattern: {message}"))
+        }
+    })?;
+    tracing::info!(pattern = %saved.id, "a pattern was saved");
+    Ok(Json(saved))
+}
+
+/// `DELETE /api/v1/patterns/{id}`.
+///
+/// A pattern a group of **any** scene plays is only deleted with `?force=true`: that group would
+/// go dark. The refusal names the scenes, so the owner knows where the pattern is used. A forced
+/// delete removes the pattern and its favourite, and the group that played it goes dark with a
+/// note, as a deleted stack's does.
+pub async fn delete_pattern(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+    Query(query): Query<DeletePatternQuery>,
+) -> ApiResult<Json<DeletePatternResponse>> {
+    let pattern = app
+        .patterns
+        .get(&id)
+        .ok_or_else(|| ApiFailure::not_found(format!("no pattern with the id or name {id}")))?;
+
+    // The delete replaces what is on the lights: the draft gate is held across it, so a draft is
+    // not put over by accident.
+    let _gate = app.draft.gate().lock().await;
+
+    // Every group of every scene: a pattern in a scene that is not active is still in use.
+    let named_by = crate::scenes::scenes_playing(&app, &pattern.id).await;
+    if !named_by.is_empty() && !query.force {
+        let names: Vec<String> = named_by.iter().map(|(_, name)| name.clone()).collect();
+        return Err(ApiFailure::conflict(format!(
+            "{} is played by a group of {}; delete it with ?force=true and that group will go dark",
+            pattern.id,
+            names.join(", ")
+        )));
+    }
+
+    // Its favourite is keyed by the id and would be unreachable with it gone. It goes first: a
+    // failed write of effects.json puts it back and leaves the pattern alone.
+    let mut store = app.store.write().await;
+    let effects_before = store.effects.clone();
+    let before = store.effects.favorites.len();
+    store.effects.favorites.retain(|favorite| favorite != &pattern.id);
+    let favorite_removed = store.effects.favorites.len() != before;
+    if let Err(e) = store.save_effects() {
+        store.effects = effects_before;
+        return Err(ApiFailure::internal(format!(
+            "the pattern was left as it was: {e}"
+        )));
+    }
+
+    let removed = match app.patterns.delete(&pattern.id) {
+        Ok(Some(removed)) => removed,
+        Ok(None) => {
+            store.effects = effects_before;
+            let _ = store.save_effects();
+            return Err(ApiFailure::not_found(format!(
+                "no pattern with the id or name {id}"
+            )));
+        }
+        Err(e) => {
+            // The pattern file was not written: put its favourite back too.
+            store.effects = effects_before;
+            let _ = store.save_effects();
+            return Err(ApiFailure::internal(format!(
+                "the pattern could not be deleted, and nothing was removed: {e}"
+            )));
+        }
+    };
+    drop(store);
+
+    // A draft of this pattern holds the lights: it ends here, before the pattern is gone, or it
+    // would put a pattern that cannot be built any more back on the lights.
+    if app.draft.snapshot().is_some_and(|slot| drafts_pattern(&slot.id, &removed.id)) {
+        let ended = crate::draft::stop_locked(&app, None).await;
+        if let Some(ended) = ended.ended {
+            if let Some(note) = ended.note {
+                tracing::warn!(%note, "the draft ended when the pattern it showed was deleted");
+            }
+        }
+    }
+
+    // A pattern a group plays ends with that group dark and a note, the ending a deleted stack
+    // gets: the scene goes on again, the group cannot build its effect any more, and the others
+    // run. A draft that holds the lights keeps them: the scene waits for it.
+    let mut note = None;
+    if !named_by.is_empty() {
+        if !app.draft.is_active() {
+            crate::scenes::apply_active_ungated(&app, false).await;
+        }
+        note = Some(format!(
+            "{} was deleted while a group played it, so that group is dark",
+            removed.id
+        ));
+        tracing::warn!(pattern = %removed.id, "a pattern a group played was deleted");
+    }
+    tracing::info!(pattern = %removed.id, favorite_removed, "a pattern was deleted");
+
+    Ok(Json(DeletePatternResponse {
+        ok: true,
+        id: removed.id,
+        favorite_removed,
+        note,
+    }))
+}
+
+/// True when a draft's slot is this pattern's: the editor's own slot during a pattern draft
+/// (`draft:pattern:<name>`), or the pattern itself, which a later step may use.
+fn drafts_pattern(slot: &str, pattern_id: &str) -> bool {
+    slot == pattern_id || slot == format!("draft:{pattern_id}")
+}

@@ -15,7 +15,6 @@ use canvas_proto::api::{
 };
 use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
-use canvas_proto::layout::LedSlice;
 use canvas_proto::pattern::{BuiltOn, Frame, Motion, Pattern};
 use canvas_proto::props::{PropValue, Props};
 use canvas_proto::scene::{
@@ -309,6 +308,18 @@ async fn shows(sink: &Rec, want: Rgb8, what: &str) {
     );
 }
 
+/// Waits (real time) until `sink`'s newest frame has `LEDS` LEDs and every one of them is black.
+async fn goes_dark(sink: &Rec, what: &str) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        if sink.last().is_some_and(|f| f.len() == LEDS as usize && f.iter().all(|c| *c == Rgb8::BLACK)) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("{what} never went dark; last frame starts {:?}", sink.last().map(|f| f[..3.min(f.len())].to_vec()));
+}
+
 /// The group state of the active scene, by group id, from `GET /api/v1/scenes`.
 async fn group_states(rig: &Rig) -> std::collections::BTreeMap<String, Option<String>> {
     let (status, body) = send(rig, "GET", routes::SCENES, None).await;
@@ -341,7 +352,7 @@ async fn a_pattern_is_in_the_effects_list_with_its_kind_and_built_on() {
         pattern.built_on,
         Some(BuiltOn { led_count: LEDS, arrangement: Arrangement::Ring, grid: None })
     );
-    assert!(pattern.needs.screen == false && pattern.needs.audio == false);
+    assert!(!pattern.needs.screen && !pattern.needs.audio);
     // A canvas effect says so, and names no device.
     let solid = list.effects.iter().find(|e| e.id == "solid").expect("solid is in the list");
     assert_eq!(solid.kind, EffectKind::Canvas);
@@ -464,17 +475,257 @@ fn the_snapshot_keeps_patterns_json() {
     let _ = std::fs::remove_dir_all(&home);
 }
 
-/// A light that is a part of a split zone: the frame writer skips the LEDs before its start.
-#[allow(dead_code)]
-fn part(device: &str, start: u32, count: u32) -> Light {
-    Light {
-        id: format!("{device}#z0p1"),
-        device_id: DeviceId(device.into()),
-        zone_index: 0,
-        leds: Some(LedSlice { start, count }),
-        name: None,
-        arrangement: Arrangement::Ring,
-        reversed: false,
-        kind: None,
+// ---------------------------------------------------------------- Task 5: the routes
+
+fn pattern_path(id: &str) -> String {
+    route(routes::PATTERN, &[("id", id)])
+}
+
+fn saved(body: &serde_json::Value) -> Pattern {
+    serde_json::from_value(body.clone()).expect("the body is a Pattern")
+}
+
+fn listed(body: &serde_json::Value) -> PatternsResponse {
+    serde_json::from_value(body.clone()).expect("the body is a PatternsResponse")
+}
+
+fn deleted(body: &serde_json::Value) -> DeletePatternResponse {
+    serde_json::from_value(body.clone()).expect("the body is a DeletePatternResponse")
+}
+
+#[tokio::test]
+async fn put_creates_get_reads_and_the_list_has_it() {
+    let rig = rig().await;
+    let warm = pattern("Warm");
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        &pattern_path("pattern:Warm"),
+        Some(serde_json::to_value(&warm).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(saved(&answer), warm, "the saved pattern comes back");
+
+    // By the id, and by the bare name.
+    let (status, answer) = send(&rig, "GET", &pattern_path("pattern:Warm"), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(saved(&answer), warm);
+    let (status, answer) = send(&rig, "GET", &pattern_path("Warm"), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(saved(&answer), warm, "the name finds it, ignoring case and the prefix");
+
+    let (status, answer) = send(&rig, "GET", routes::PATTERNS, None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let ids: Vec<String> = listed(&answer).patterns.into_iter().map(|p| p.id).collect();
+    assert_eq!(ids, ["pattern:Intake", "pattern:Warm"], "both are listed, in the file's order");
+
+    // It is in the library too, as a pattern.
+    let (_, list) = send(&rig, "GET", routes::EFFECTS, None).await;
+    let list: EffectsResponse = serde_json::from_value(list).unwrap();
+    let entry = list.effects.iter().find(|e| e.id == "pattern:Warm").expect("the new pattern is listed");
+    assert_eq!(entry.kind, EffectKind::Pattern);
+}
+
+#[tokio::test]
+async fn a_body_naming_another_id_is_a_422() {
+    let rig = rig().await;
+    let mut body = pattern("Warm");
+    body.id = "pattern:Other".into();
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        &pattern_path("pattern:Warm"),
+        Some(serde_json::to_value(&body).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("pattern:Other"), "the sentence names the body's id: {message}");
+    assert!(message.contains("pattern:Warm"), "and the path's: {message}");
+    assert!(rig.app.patterns.get("pattern:Warm").is_none(), "nothing was saved");
+}
+
+#[tokio::test]
+async fn a_name_taken_ignoring_case_is_a_409() {
+    let rig = rig().await;
+    // The id differs from `pattern:Intake` (case matters to an id), so this is the name conflict
+    // and not the path check.
+    let shouty = pattern("INTAKE");
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        &pattern_path("pattern:INTAKE"),
+        Some(serde_json::to_value(&shouty).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    assert_eq!(answer["error"], "conflict");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("INTAKE") || message.contains("ignoring case"), "{message}");
+    assert!(
+        !rig.app.patterns.all().iter().any(|p| p.id == "pattern:INTAKE"),
+        "nothing was saved"
+    );
+}
+
+#[tokio::test]
+async fn a_frame_of_the_wrong_length_is_a_422() {
+    let rig = rig().await;
+    let mut short = pattern("Short");
+    short.frames[0].colors.pop();
+    let (status, answer) = send(
+        &rig,
+        "PUT",
+        &pattern_path("pattern:Short"),
+        Some(serde_json::to_value(&short).unwrap()),
+    )
+    .await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("11") && message.contains("12"), "the sentence counts them: {message}");
+    assert!(rig.app.patterns.get("pattern:Short").is_none(), "nothing was saved");
+}
+
+#[tokio::test]
+async fn delete_is_refused_while_any_scene_plays_it_and_names_the_scenes() {
+    // `pattern:Intake` is played by a group of `Main` and by a group of `Other`, and `Other` is
+    // not the active scene: a pattern in a scene that is not active is still in use.
+    let rig = rig().await;
+    let (status, answer) = send(&rig, "DELETE", &pattern_path("pattern:Intake"), None).await;
+    assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains("Main"), "the refusal names Main: {message}");
+    assert!(message.contains("Other"), "and Other: {message}");
+    assert!(message.contains("force"), "and says how to force it: {message}");
+    assert!(rig.app.patterns.get("pattern:Intake").is_some(), "it is still there");
+}
+
+#[tokio::test]
+async fn a_forced_delete_removes_the_pattern_and_its_favourite() {
+    let rig = rig().await;
+    let body = serde_json::json!({ "favorite": true });
+    let (status, answer) =
+        send(&rig, "PUT", &route(routes::EFFECT_FAVORITE, &[("id", INTAKE)]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let (status, answer) =
+        send(&rig, "DELETE", &format!("{}?force=true", pattern_path(INTAKE)), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let answer = deleted(&answer);
+    assert!(answer.ok);
+    assert_eq!(answer.id, INTAKE);
+    assert!(answer.favorite_removed, "its favourite went with it");
+    assert!(answer.note.is_some(), "the answer says a group went dark: {:?}", answer.note);
+
+    let (status, _) = send(&rig, "GET", &pattern_path(INTAKE), None).await;
+    assert_eq!(status, StatusCode::NOT_FOUND, "it is gone");
+    assert!(rig.app.patterns.get(INTAKE).is_none());
+    assert!(
+        !rig.app.store.read().await.effects.favorites.iter().any(|f| f == INTAKE),
+        "the favourite is gone from effects.json too"
+    );
+    let on_disk = std::fs::read_to_string(rig.home.path.join("patterns.json")).unwrap();
+    assert!(!on_disk.contains("Intake"), "{on_disk}");
+    let (_, list) = send(&rig, "GET", routes::EFFECTS, None).await;
+    let list: EffectsResponse = serde_json::from_value(list).unwrap();
+    assert!(!list.effects.iter().any(|e| e.id == INTAKE), "and from the library");
+}
+
+#[tokio::test]
+async fn a_forced_delete_of_a_played_pattern_darkens_that_group_only() {
+    let rig = rig().await;
+    // The left group paints solid red: it is the group the delete must leave alone.
+    shows(&rig.a, rgb(RED), "the left group before").await;
+
+    let (status, answer) =
+        send(&rig, "DELETE", &format!("{}?force=true", pattern_path(INTAKE)), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // The group that played it is dark and says why; the group next to it still paints.
+    let states = group_states(&rig).await;
+    let failed = states.get("right").cloned().flatten().expect("the right group is dark and says why");
+    assert!(failed.contains(INTAKE), "the failure names the pattern: {failed}");
+    assert_eq!(states.get("left"), Some(&None), "the other group is not failed");
+    shows(&rig.a, rgb(RED), "the left group after").await;
+    // Its device is handed black frames: a dark group still renders every tick.
+    goes_dark(&rig.b, "the right device").await;
+}
+
+#[tokio::test]
+async fn a_bundle_round_trips_patterns_and_a_0_15_bundle_imports_with_none() {
+    let rig = rig().await;
+    let (status, bundle) = send(&rig, "GET", routes::CONFIG_EXPORT, None).await;
+    assert_eq!(status, StatusCode::OK, "{bundle}");
+    assert_eq!(bundle["patterns"].as_array().map(Vec::len), Some(1), "the export carries the patterns");
+    assert_eq!(bundle["patterns"][0]["id"], serde_json::json!(INTAKE));
+
+    // A bundle from before patterns has none, and importing it replaces the saved patterns with
+    // none, as it does the stacks.
+    let mut old = bundle.clone();
+    old.as_object_mut().unwrap().remove("patterns");
+    let (status, answer) = send(&rig, "POST", routes::CONFIG_IMPORT, Some(old)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(rig.app.patterns.all().is_empty(), "no patterns after the old bundle");
+    let on_disk = std::fs::read_to_string(rig.home.path.join("patterns.json")).unwrap();
+    assert!(!on_disk.contains("Intake"), "{on_disk}");
+    let (_, list) = send(&rig, "GET", routes::PATTERNS, None).await;
+    assert!(listed(&list).patterns.is_empty());
+
+    // A bundle with a pattern imports it, and the store reads it back.
+    let mut with_one = bundle.clone();
+    with_one["patterns"] = serde_json::json!([serde_json::to_value(pattern("Return")).unwrap()]);
+    let (status, answer) = send(&rig, "POST", routes::CONFIG_IMPORT, Some(with_one)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.patterns.all().iter().map(|p| p.id.clone()).collect::<Vec<_>>(),
+        ["pattern:Return"]
+    );
+    let (status, answer) = send(&rig, "GET", &pattern_path("pattern:Return"), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(saved(&answer).name(), "Return");
+
+    // A bundle whose pattern breaks a rule is refused before anything is written.
+    let mut broken = bundle;
+    let mut bad = pattern("Bad");
+    bad.frames.clear();
+    broken["patterns"] = serde_json::json!([
+        serde_json::to_value(pattern("Fine")).unwrap(),
+        serde_json::to_value(&bad).unwrap()
+    ]);
+    let (status, answer) = send(&rig, "POST", routes::CONFIG_IMPORT, Some(broken)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(rig.app.patterns.get("pattern:Fine").is_none(), "nothing was imported");
+    assert!(rig.app.patterns.get("pattern:Return").is_some(), "the patterns as they were");
+}
+
+#[tokio::test]
+async fn an_unknown_future_field_survives_a_put_and_a_get() {
+    let rig = rig().await;
+    let body = serde_json::json!({
+        "id": "pattern:Spin",
+        "built_on": { "led_count": 2, "arrangement": "ring" },
+        "frames": [
+            { "colors": ["#ff0000", "#00ff00"], "hold": 250, "label": "first" },
+            { "colors": ["#0000ff", "#ffffff"], "hold": 250 }
+        ],
+        "motion": { "type": "rotate", "speed": 2 },
+        "tags": ["warm"]
+    });
+    let (status, answer) = send(&rig, "PUT", &pattern_path("pattern:Spin"), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let (status, answer) = send(&rig, "GET", &pattern_path("pattern:Spin"), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let text = answer.to_string();
+    for kept in ["label", "rotate", "speed", "tags"] {
+        assert!(text.contains(kept), "{kept} was dropped by the read: {text}");
+    }
+    assert_eq!(answer["frames"].as_array().map(Vec::len), Some(2), "both frames are kept");
+
+    let on_disk = std::fs::read_to_string(rig.home.path.join("patterns.json")).unwrap();
+    for kept in ["label", "rotate", "speed", "tags"] {
+        assert!(on_disk.contains(kept), "{kept} was dropped on disk: {on_disk}");
     }
 }
+
