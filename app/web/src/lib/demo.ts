@@ -129,6 +129,8 @@ const APP_VERSION = "0.13.1";
 const SCHEMA_VERSION = 1;
 /** `pattern:` + the name, as the spine writes it. */
 const PATTERN_ID_PREFIX = "pattern:";
+/** The daemon's sentence when a pattern's kind has nothing plugged in (0.16.0). */
+const NO_DEVICE_OF_KIND = "no device of this kind is connected";
 /** The spine's limits (`canvas_proto::pattern`). */
 const PATTERN_NAME_MAX = 60;
 const PATTERN_LEDS_MAX = 4096;
@@ -363,11 +365,21 @@ function initialState(): DemoState {
   }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   const stacks = seededStacks(s, effects);
+  const patterns = seededPatterns(s);
   const chainScenarios = applyChainScenarios(
     DEMO_CHAINS.map((chain) => structuredClone(chain)),
     sceneScenarios.lights,
     sceneScenarios.scenes,
   );
+  // `?state=patterns`: the case fans play `pattern:Intake`, so a pattern is in the library, on the
+  // lights and in a scene at once. The inspector opens on it, and deleting it is refused by the
+  // scene's own name.
+  if (patterns["pattern:Intake"]) {
+    for (const scene of chainScenarios.scenes) {
+      const group = scene.groups.find((g) => g.id === "g-case");
+      if (group) group.plays = { type: "effect", effect: "pattern:Intake", props: {} };
+    }
+  }
   // `?state=pattern-fits` and its siblings: a scene whose groups play a pattern, so the picker's
   // marks and the group's flags can be seen (demoScenarios has the four states).
   const patternScenarios = applyPatternScenarios(
@@ -381,7 +393,7 @@ function initialState(): DemoState {
     devices: applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
     effects,
     stacks,
-    patterns: seededPatterns(s),
+    patterns,
     favorites,
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
@@ -1001,8 +1013,20 @@ function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown)
   return bad();
 }
 
+/**
+ * `?state=pattern-unplugged`: the DRAM sticks are out of the machine, so one kind of device has
+ * no light connected at all - the device step still offers it and says so. The state itself is
+ * untouched: this is how the lights read, not a change to them.
+ */
+function unpluggedLights(lights: LightView[]): LightView[] {
+  if (!scenario().has("pattern-unplugged")) return lights;
+  return lights.map((view) =>
+    view.led_count === 8 && view.light.arrangement === "strip" ? { ...view, connected: false } : view,
+  );
+}
+
 function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
-  if (seg.length === 1 && method === "GET") return { lights: s.lights };
+  if (seg.length === 1 && method === "GET") return { lights: unpluggedLights(s.lights) };
   if (seg[1] === "flash" && method === "POST") return { ok: true };
   if (seg.length === 2 && method === "PATCH") {
     const view = s.lights.find((l) => l.light.id === seg[1]);
@@ -1859,7 +1883,20 @@ export async function demoRequest(method: string, path: string, body: unknown): 
               seq,
             };
           }
-          return { ...draftStatus(s), applied };
+          // The daemon's own note when no device of the pattern's kind is plugged in: the editor
+          // still opens on it, and says why the lights it would paint are dark.
+          const document = req.pattern;
+          const plugged = unpluggedLights(s.lights).some(
+            (view) =>
+              view.connected &&
+              view.led_count === document.built_on.led_count &&
+              view.light.arrangement === document.built_on.arrangement,
+          );
+          return {
+            ...draftStatus(s),
+            applied,
+            ...(plugged ? {} : { note: NO_DEVICE_OF_KIND }),
+          };
         }
         // `?state=draft-beat-fail`: the first beat starts the draft, the rest fail, so the
         // expiring banner and the daemon's own restore can be seen.
@@ -2176,7 +2213,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         fail(
           409,
           "conflict",
-          `${pattern.id} is played by ${names}; delete it with ?force=true and those groups go dark`,
+          `${pattern.id.replace(/^pattern:/, "")} plays in ${names}. Delete it anyway and the groups that play it go dark.`,
         );
       }
       delete s.patterns[pattern.id];
