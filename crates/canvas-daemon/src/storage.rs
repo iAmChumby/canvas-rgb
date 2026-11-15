@@ -825,33 +825,58 @@ impl Store {
         Ok(())
     }
 
-    /// Writes a chain plan's `scenes.json` then `lights.json`, through the store's own save paths,
-    /// and keeps the in-memory copies with what landed on disk (#338).
+    /// Writes a chain plan's `scenes.json`, `lights.json` and then `zones.json`, through the
+    /// store's own save paths, and keeps the in-memory copies with what landed on disk (#338).
+    ///
+    /// `zone` is the header the plan is for, with its final length; it is written to `zones.json`
+    /// only when the other two files landed. `None` writes no `zones.json` at all (the empty-header
+    /// plan keeps the header's length as it is).
     ///
     /// The same refusals as [`Store::save_scenes`] and [`Store::save_lights`] apply: a file that
     /// could not be read at start, or scenes that only live in memory, are not written, and the
-    /// answer is that error (the route says 503). If the scenes land and the lights do not, the
-    /// scenes are written back from memory, so a refusal cannot leave the two files disagreeing
-    /// about which lights exist. Task 7b adds the `zones.json` write and the snapshot rollback
-    /// around this call.
-    pub fn apply_chain_plan(&mut self, plan: &crate::chain_plan::CommitPlan) -> std::io::Result<()> {
+    /// answer is that error (the route says 503). A failed write puts memory back and writes the
+    /// files that had already landed back from it, so a refusal cannot leave the three files
+    /// disagreeing about which lights exist or how long a header is. The caller's snapshot and
+    /// rollback (Task 7b) put back what a crash mid-write leaves.
+    pub fn apply_chain_plan(
+        &mut self,
+        plan: &crate::chain_plan::CommitPlan,
+        zone: Option<(&canvas_proto::DeviceId, u32, u32)>,
+    ) -> std::io::Result<()> {
         let before_lights = self.lights.clone();
         let before_scenes = self.scenes.clone();
+        let before_zones = self.zones.clone();
         self.lights = plan.lights.clone();
         self.scenes = plan.scenes.clone();
+        if let Some((device, index, leds)) = zone {
+            self.zones.sizes.entry(device.0.clone()).or_default().insert(index, leds);
+        }
         if let Err(e) = self.save_scenes() {
             self.lights = before_lights;
             self.scenes = before_scenes;
+            self.zones = before_zones;
             return Err(e);
         }
         if let Err(e) = self.save_lights() {
             self.lights = before_lights;
             self.scenes = before_scenes;
+            self.zones = before_zones;
             // Put the earlier scenes back too: the lights on disk are still the earlier ones, and
             // the two files must name the same lights. A save_scenes that refuses here is the
             // same refusal that would have stopped the first write, so it cannot fail alone.
             let _ = self.save_scenes();
             return Err(e);
+        }
+        if zone.is_some() {
+            if let Err(e) = self.save_zones() {
+                self.lights = before_lights;
+                self.scenes = before_scenes;
+                self.zones = before_zones;
+                // The three files name one hardware map: the two that landed go back to it too.
+                let _ = self.save_scenes();
+                let _ = self.save_lights();
+                return Err(e);
+            }
         }
         Ok(())
     }

@@ -93,6 +93,7 @@ pub fn router(app: Arc<App>) -> Router {
             post(chains::start_setup).delete(chains::cancel_setup),
         )
         .route(routes::CHAIN_SETUP_LIGHT, post(chains::light_setup))
+        .route(routes::CHAIN_SETUP_COMMIT, post(chains::commit_setup))
         .route(routes::CHAIN_SETUP_EMPTY, post(chains::empty_setup))
         .route(routes::STACKS, get(stacks::list_stacks))
         .route(

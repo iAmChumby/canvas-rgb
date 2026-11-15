@@ -324,6 +324,17 @@ pub fn effective_sizes(saved: &ZoneSizes, holds: &ZoneHolds) -> ZoneSizes {
     sizes
 }
 
+/// The saved sizes with the holds overlaid, read now. Callers hold the adapter lock, so no one
+/// who takes these two locks may hold either while waiting for the adapter (#338).
+async fn current_sizes(
+    zone_sizes: &tokio::sync::RwLock<ZoneSizes>,
+    holds: &tokio::sync::RwLock<ZoneHolds>,
+) -> ZoneSizes {
+    let saved = zone_sizes.read().await.clone();
+    let held = holds.read().await.clone();
+    effective_sizes(&saved, &held)
+}
+
 /// Re-reads the device list on a live connection. A saved zone size that the device doesn't
 /// have yet (a device that appeared since connect) is applied, then the list is read again.
 async fn refresh_devices(
@@ -512,9 +523,11 @@ pub async fn supervise_with_rescans<D, L>(
         let from_rescan = !waiting.is_empty();
         // Every attempt is "connecting"; `Down` only follows a failure.
         on_link(LinkState::Connecting).await;
-        let sizes = effective_sizes(&zone_sizes.read().await.clone(), &holds.read().await.clone());
         let (result, cut) = within(waiting.iter().map(|r| r.budget).max(), async {
             let mut guard = adapter.lock().await;
+            // Read under the adapter lock: a setup inserts its hold before it takes the lock to
+            // raise, so sizes read here can never be older than a raise the device already has.
+            let sizes = current_sizes(&zone_sizes, &holds).await;
             connect_and_prepare(guard.as_mut(), &sizes).await
         })
         .await;
@@ -558,9 +571,9 @@ pub async fn supervise_with_rescans<D, L>(
                             // answer: one discovery answers them all, and none of them waits for
                             // another's turn (#233).
                             let mut group = vec![rescan];
-                            let sizes = effective_sizes(&zone_sizes.read().await.clone(), &holds.read().await.clone());
                             let (result, cut) = within(group.iter().map(|r| r.budget).max(), async {
                                 let mut guard = adapter.lock().await;
+                                let sizes = current_sizes(&zone_sizes, &holds).await;
                                 rescan_devices(guard.as_mut(), &sizes).await
                             })
                             .await;
@@ -594,10 +607,9 @@ pub async fn supervise_with_rescans<D, L>(
                     if !ticks.is_multiple_of(10) {
                         continue;
                     }
-                    let sizes =
-                        effective_sizes(&zone_sizes.read().await.clone(), &holds.read().await.clone());
                     let refreshed = {
                         let mut guard = adapter.lock().await;
+                        let sizes = current_sizes(&zone_sizes, &holds).await;
                         refresh_devices(guard.as_mut(), &sizes).await
                     };
                     match refreshed {
