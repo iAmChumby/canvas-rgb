@@ -1,7 +1,10 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkPeripheralValue, demoRequest } from "@/lib/demo";
 import type { DemoPeripheral } from "@/lib/peripheralFixtures";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import type { EffectsResponse } from "@/proto/EffectsResponse";
+import type { Pattern } from "@/proto/Pattern";
+import type { PatternsResponse } from "@/proto/PatternsResponse";
 
 // The demo backend's own words. The editor shows them behind a disclosure, and they are the
 // only words a person reads when nothing answers: they say canvas-rgb, not "the daemon".
@@ -17,6 +20,93 @@ describe("the demo backend's words", () => {
     }
     expect(message).toMatch(/canvas-rgb/);
     expect(message).not.toMatch(/daemon/i);
+  });
+});
+
+describe("the demo's patterns (#339)", () => {
+  /**
+   * A fresh demo backend with `?state=patterns`: the demo keeps one state per page, and this file's
+   * earlier tests have already opened theirs. `vi.resetModules` gives this test the page a browser
+   * opens on that address.
+   */
+  async function patternsDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/effects/?state=patterns");
+    return import("@/lib/demo");
+  }
+
+  it("demo mode serves two patterns and a library with one", async () => {
+    const demo = await patternsDemo();
+    const list = (await demo.demoRequest("GET", "/api/v1/patterns", undefined)) as PatternsResponse;
+    expect(list.patterns).toHaveLength(2);
+    const ring = list.patterns.find((p) => p.id === "pattern:Intake");
+    const strip = list.patterns.find((p) => p.id === "pattern:Underglow");
+    expect(ring?.built_on).toEqual({ led_count: 12, arrangement: "ring" });
+    expect(strip?.built_on).toEqual({ led_count: 30, arrangement: "strip" });
+    // A ring of 12 with one marked LED, a strip of 30 with three.
+    expect(ring?.frames[0]?.colors).toHaveLength(12);
+    expect(ring?.frames[0]?.colors.filter((c) => c !== "#000000")).toHaveLength(1);
+    expect(strip?.frames[0]?.colors).toHaveLength(30);
+    expect(strip?.frames[0]?.colors.filter((c) => c !== "#000000")).toHaveLength(3);
+
+    // The library lists both as patterns, each with what it was built on, beside the canvas ones.
+    const effects = (await demo.demoRequest("GET", "/api/v1/effects", undefined)) as EffectsResponse;
+    const patterns = effects.effects.filter((e) => e.kind === "pattern");
+    expect(patterns.map((e) => e.id).sort()).toEqual(["pattern:Intake", "pattern:Underglow"]);
+    expect(patterns.find((e) => e.id === "pattern:Intake")?.built_on).toEqual({
+      led_count: 12,
+      arrangement: "ring",
+    });
+    expect(patterns.find((e) => e.id === "pattern:Intake")?.description).toBe("Pattern, ring of 12");
+    expect(patterns.find((e) => e.id === "pattern:Intake")?.needs).toEqual({ screen: false, audio: false });
+    expect(effects.effects.find((e) => e.id === "aurora")?.kind).toBe("canvas");
+
+    // One pattern by its id, and by its bare name.
+    const one = (await demo.demoRequest("GET", "/api/v1/patterns/pattern%3AIntake", undefined)) as Pattern;
+    expect(one.id).toBe("pattern:Intake");
+    const byName = (await demo.demoRequest("GET", "/api/v1/patterns/Intake", undefined)) as Pattern;
+    expect(byName.id).toBe("pattern:Intake");
+  });
+
+  it("putPattern sends the whole document and returns the saved one", async () => {
+    await patternsDemo();
+    const { api } = await import("@/lib/endpoints");
+    // A document with what this version does not know: a motion other than none, an unknown key on
+    // the pattern and one on its frame.
+    const document = {
+      id: "pattern:Intake",
+      built_on: { led_count: 3, arrangement: "ring" },
+      frames: [{ colors: ["#ff0000", "#000000", "#000000"], hold: 0, label: "the one that plays" }],
+      motion: { type: "rotate", speed: 2 },
+      tags: ["front"],
+    } as unknown as Pattern;
+
+    const saved = await api.putPattern("pattern:Intake", document);
+
+    expect(saved.id).toBe("pattern:Intake");
+    expect(saved.frames[0]?.colors).toEqual(["#ff0000", "#000000", "#000000"]);
+    expect(saved).toMatchObject({ motion: { type: "rotate", speed: 2 }, tags: ["front"] });
+    expect((saved.frames[0] as unknown as { label: string }).label).toBe("the one that plays");
+    // What was saved is what the next read answers, whole.
+    expect(await api.pattern("pattern:Intake")).toEqual(saved);
+
+    // A name another pattern has, ignoring case, is a 409, as the daemon's is.
+    const taken = await api
+      .putPattern("pattern:intake", { ...document, id: "pattern:intake" })
+      .then(() => null, (e: unknown) => e);
+    expect((taken as ApiFailure).status).toBe(409);
+
+    // A frame that is not the length the pattern was built on is a 422, with the daemon's sentence.
+    const short = await api
+      .putPattern("pattern:Short", {
+        id: "pattern:Short",
+        built_on: { led_count: 4, arrangement: "ring" },
+        frames: [{ colors: ["#ff0000"], hold: 0 }],
+        motion: { type: "none" },
+      })
+      .then(() => null, (e: unknown) => e);
+    expect((short as ApiFailure).status).toBe(422);
+    expect(messageOf(short)).toMatch(/frame 1 has 1 colours; the device it was built on has 4 LEDs/);
   });
 });
 

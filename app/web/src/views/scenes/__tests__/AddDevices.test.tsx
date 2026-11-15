@@ -75,7 +75,7 @@ function fake(): UseScene & { calls: Record<string, unknown[][]> } {
     scene: active,
     scenes: [clone(active)],
     unassigned: [],
-    states: active.groups.map((g) => ({ id: g.id, failed: null })),
+    states: active.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
     edit: (change: (draft: Scene) => void, label: string) => {
       const draft = clone(active);
       change(draft);
