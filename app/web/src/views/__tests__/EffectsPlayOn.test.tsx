@@ -70,7 +70,7 @@ function group(id: string, name: string, plays?: string): Group {
 
 function scenesWith(groups: Group[]): ScenesResponse {
   const scene: Scene = { id: "s", name: "Scene", rev: 1, groups };
-  return { active: "s", scenes: [scene], group_states: groups.map((g) => ({ id: g.id, failed: null })) };
+  return { active: "s", scenes: [scene], group_states: groups.map((g) => ({ id: g.id, failed: null, fits: [] })) };
 }
 
 async function mount(active: string) {

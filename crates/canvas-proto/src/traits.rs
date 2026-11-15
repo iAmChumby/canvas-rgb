@@ -109,6 +109,10 @@ pub trait Effect: Send {
     fn init(&mut self, props: &Props);
     /// Draws one frame. `dt` is seconds since the previous frame.
     fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs);
+    /// `Some` for a pattern (0.16.0): the engine reads its colours and never calls `update`.
+    fn as_pattern(&self) -> Option<&crate::pattern::Pattern> {
+        None
+    }
 }
 
 pub type EffectFactory = fn() -> Box<dyn Effect>;
@@ -146,6 +150,9 @@ pub struct EngineGroup {
 pub struct GroupState {
     pub id: String,
     pub failed: Option<String>,
+    /// How a pattern lands on each light of the group (0.16.0). Empty for a canvas effect.
+    #[serde(default)]
+    pub fits: Vec<crate::pattern::LightFit>,
 }
 
 /// Each light's colours for the editor's live LEDs, after the group's brightness and before

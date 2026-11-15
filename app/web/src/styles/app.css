@@ -9027,6 +9027,13 @@ button.chip:hover {
   border-color: var(--a3);
 }
 
+/* A pattern is the second kind of effect (0.16.0): its own hue, so a tile's kind reads at a
+   glance beside a stack's. */
+.chip-pattern {
+  color: var(--a2);
+  border-color: var(--a2);
+}
+
 .rd-unsaved {
   font-size: var(--t14);
   white-space: nowrap;

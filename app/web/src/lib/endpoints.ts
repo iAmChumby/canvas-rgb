@@ -64,6 +64,9 @@ import type { StacksResponse } from "@/proto/StacksResponse";
 import type { DeleteStackResponse } from "@/proto/DeleteStackResponse";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
+import type { Pattern } from "@/proto/Pattern";
+import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { DeletePatternResponse } from "@/proto/DeletePatternResponse";
 import type { AudioSource } from "@/proto/AudioSource";
 import type { AudioSources } from "@/proto/AudioSources";
 import type { ResolvedAudioSource } from "@/proto/ResolvedAudioSource";
@@ -76,6 +79,12 @@ import type { AudioTestState } from "@/proto/AudioTestState";
  * spine by hand and does not carry them yet, so they are spelled here.
  */
 const CHAINS = "/api/v1/chains";
+/**
+ * The pattern routes (`routes::PATTERNS`, `routes::PATTERN`, 0.16.0). `proto/routes.ts` mirrors the
+ * spine by hand and does not carry them yet, so they are spelled here, as the chains above are.
+ */
+const PATTERNS = "/api/v1/patterns";
+const patternPath = (id: string): string => `${PATTERNS}/${encodeURIComponent(id)}`;
 /** `POST` starts a session on one header, `DELETE` cancels it. `{zone}` is the zone index. */
 const chainSetup = (device: string, zone: number): string =>
   `${CHAINS}/${encodeURIComponent(device)}/${zone}/setup`;
@@ -211,6 +220,33 @@ export const api = {
       "DELETE",
       epoch ? `${routes.stackPreview}?epoch=${encodeURIComponent(epoch)}` : routes.stackPreview,
     ),
+
+  /**
+   * Every saved pattern, whole (0.16.0). A pattern is a colour per LED of one device: the editor
+   * draws its dots from these colours, so there is no summary shape and no thumbnail.
+   */
+  patterns: () => request<PatternsResponse>("GET", PATTERNS),
+  /** One pattern, by its `pattern:` id or its bare name. */
+  pattern: (id: string) => request<Pattern>("GET", patternPath(id)),
+  /** The whole document in, the saved pattern out (409 on a taken name, 422 on a broken frame). */
+  putPattern: (id: string, body: Pattern) => request<Pattern>("PUT", patternPath(id), body),
+  /** Removes a pattern and its favourite; `force` is needed while a scene still plays it. */
+  deletePattern: (id: string, force = false) =>
+    request<DeletePatternResponse>(
+      "DELETE",
+      `${patternPath(id)}${force ? "?force=true" : ""}`,
+    ),
+  /**
+   * Puts a pattern on the lights as a draft, one stroke per PUT: the draft's own epoch and a rising
+   * `seq`, so a stroke that arrives late never replaces a newer one. A pattern draft carries no
+   * HTML and no props.
+   */
+  putPatternDraft: (body: { pattern: Pattern; epoch: string; seq: number }) =>
+    request<DraftStatus>("PUT", routes.effectsDraft, {
+      html: "",
+      props: {},
+      ...body,
+    } satisfies DraftRequest),
 
   scenes: {
     /** Every scene, the active one's id and how its groups are doing. */

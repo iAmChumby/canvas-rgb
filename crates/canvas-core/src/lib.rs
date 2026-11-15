@@ -16,6 +16,7 @@ pub mod arrangement;
 mod engine;
 pub mod effect_guard;
 pub mod geometry;
+pub mod pattern_fit;
 pub mod sampling;
 pub(crate) mod scene_engine;
 /// The scene canvas's scale and sampling, which the daemon's stack masks must match.

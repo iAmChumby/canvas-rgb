@@ -444,12 +444,15 @@ describe("the stack builder", () => {
     await screen.findByRole("heading", { name: "Sunset glow" });
   });
 
-  it("opens a new stack straight from the header's New effect key", async () => {
+  it("opens a new stack from the header's New effect key, through its menu", async () => {
     await renderEffects("?state=complete,stack");
     fireEvent.click(await screen.findByRole("button", { name: "New effect" }));
+    // The menu is the first level now: Stack, Pattern, Code.
+    const menu = await screen.findByRole("dialog", { name: "New effect" });
+    fireEvent.click(within(menu).getByRole("button", { name: "Stack" }));
     await screen.findByTestId("stack-builder");
     expect(screen.getByRole("heading", { name: "New stack" })).toBeTruthy();
-    // There is no one-item menu any more, and the two HTML ways live under More > Advanced.
+    // There is no one-item menu any more, and the code ways live behind Code.
     expect(document.querySelector(".eff-new-menu")).toBeNull();
     expect(screen.queryByText("Blank HTML file")).toBeNull();
     expect(screen.queryByRole("button", { name: "Copy an effect…" })).toBeNull();

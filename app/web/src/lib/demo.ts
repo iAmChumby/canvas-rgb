@@ -14,8 +14,13 @@ import {
   applyChainScenarios,
   applyDeviceScenarios,
   applyFanScenarios,
+  applyPatternScenarios,
   applySceneScenarios,
   applyStatusScenarios,
+  PATTERN_FRONT_FANS,
+  PATTERN_FITS,
+  PATTERN_FLAGS,
+  PATTERN_GONE,
   conflictClearsMs,
   daemonDown,
   emptyArea,
@@ -51,6 +56,7 @@ import { scriptBody } from "@/lib/effectSource";
 import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
 import type { Scene } from "@/proto/Scene";
+import type { Group } from "@/proto/Group";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { ScenePut } from "@/proto/ScenePut";
 import type { SceneCreate } from "@/proto/SceneCreate";
@@ -98,6 +104,11 @@ import type { EffectPreviewResponse } from "@/proto/EffectPreviewResponse";
 import type { DraftRequest } from "@/proto/DraftRequest";
 import type { DraftStatus } from "@/proto/DraftStatus";
 import type { Stack } from "@/proto/Stack";
+import type { Pattern } from "@/proto/Pattern";
+import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { DeletePatternResponse } from "@/proto/DeletePatternResponse";
+import type { LightFit } from "@/proto/LightFit";
+import { fitKind, kindWords } from "@/lib/patternFit";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
 import type { StackSummary } from "@/proto/StackSummary";
@@ -116,6 +127,14 @@ const BASE = "/api/v1";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
 const APP_VERSION = "0.13.1";
 const SCHEMA_VERSION = 1;
+/** `pattern:` + the name, as the spine writes it. */
+const PATTERN_ID_PREFIX = "pattern:";
+/** The daemon's sentence when a pattern's kind has nothing plugged in (0.16.0). */
+const NO_DEVICE_OF_KIND = "no device of this kind is connected";
+/** The spine's limits (`canvas_proto::pattern`). */
+const PATTERN_NAME_MAX = 60;
+const PATTERN_LEDS_MAX = 4096;
+const PATTERN_FRAMES_MAX = 256;
 
 function scenario(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -129,6 +148,8 @@ interface DemoState {
   effects: Record<string, DemoEffect>;
   /** The saved effect stacks, by `stack:` id. */
   stacks: Record<string, Stack>;
+  /** The saved patterns, by `pattern:` id (0.16.0). */
+  patterns: Record<string, Pattern>;
   favorites: Set<string>;
   saved: Record<string, Props>;
   /** The owner's presets per effect, in the order they were saved. */
@@ -176,13 +197,15 @@ interface DemoState {
     leaseUntil: number;
     /** A stack draft carries the stack, its epoch and its sequence (D95.4.5). */
     stack?: Stack;
+    /** A pattern draft carries the pattern, its epoch and its sequence (0.16.0). */
+    pattern?: Pattern;
     epoch?: string;
     seq?: number;
   } | null;
   /** The preview requests answered, so a test can count them. */
   previews: number;
   /** The draft requests made, so a test can count them and read what they carried. */
-  draftCalls: { method: string; at: number; props?: Props; htmlBytes?: number }[];
+  draftCalls: { method: string; at: number; props?: Props; htmlBytes?: number; pattern?: string }[];
   /** The sentence the next draft ending carries (a prior that could not be restored). */
   draftNote: string | null;
   /** `?state=draft-running` has put its draft on the lights once. */
@@ -244,6 +267,56 @@ function seededStackPresets(
   };
 }
 
+/**
+ * `?state=patterns` (or any token that starts with `pattern`) turns the seeded patterns on, as
+ * `?state=stack` turns the stacks on: two patterns the library and the editor can be seen on, a
+ * ring of 12 with one LED marked and a strip of 30 with three. A page without the token has none,
+ * so every other state of the editor looks as it did before patterns.
+ */
+function patternScenarios(scenario: Set<string>): boolean {
+  for (const token of scenario) if (token.startsWith("pattern")) return true;
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("pattern");
+}
+
+/** A pattern's one frame, all off but the LEDs named: index to colour. */
+function patternFrame(leds: number, marked: Record<number, string>): Pattern["frames"][number] {
+  return {
+    colors: Array.from({ length: leds }, (_, i) => marked[i] ?? "#000000"),
+    hold: 0,
+  };
+}
+
+function seededPatterns(scenario: Set<string>): Record<string, Pattern> {
+  if (!patternScenarios(scenario)) return {};
+  const intake: Pattern = {
+    id: "pattern:Intake",
+    built_on: { led_count: 12, arrangement: "ring" },
+    // One LED marked: the first one, at the top of the ring.
+    frames: [patternFrame(12, { 0: "#ff2d55" })],
+    motion: { type: "none" },
+  };
+  const underglow: Pattern = {
+    id: "pattern:Underglow",
+    built_on: { led_count: 30, arrangement: "strip" },
+    // Three LEDs marked: the two ends and the middle, so a stretch shows as a move of the ends.
+    frames: [patternFrame(30, { 0: "#00d8ff", 15: "#0066ff", 29: "#a300ff" })],
+    motion: { type: "none" },
+  };
+  // The fans' own pattern: a ring of 40, the demo case fans' count, so it fits them exactly. Only
+  // the fan states ask it for: a plain `?state=patterns` keeps the demo's two.
+  if (scenario.has(PATTERN_FITS) || scenario.has(PATTERN_FLAGS) || scenario.has(PATTERN_GONE)) {
+    const frontFans: Pattern = {
+      id: PATTERN_FRONT_FANS,
+      built_on: { led_count: 40, arrangement: "ring" },
+      frames: [patternFrame(40, { 0: "#00ff9c", 20: "#00d8ff" })],
+      motion: { type: "none" },
+    };
+    return { [intake.id]: intake, [underglow.id]: underglow, [frontFans.id]: frontFans };
+  }
+  return { [intake.id]: intake, [underglow.id]: underglow };
+}
+
 function initialState(): DemoState {
   const s = scenario();
   const effects: Record<string, DemoEffect> = {};
@@ -292,10 +365,26 @@ function initialState(): DemoState {
   }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   const stacks = seededStacks(s, effects);
+  const patterns = seededPatterns(s);
   const chainScenarios = applyChainScenarios(
     DEMO_CHAINS.map((chain) => structuredClone(chain)),
     sceneScenarios.lights,
     sceneScenarios.scenes,
+  );
+  // `?state=patterns`: the case fans play `pattern:Intake`, so a pattern is in the library, on the
+  // lights and in a scene at once. The inspector opens on it, and deleting it is refused by the
+  // scene's own name.
+  if (patterns["pattern:Intake"]) {
+    for (const scene of chainScenarios.scenes) {
+      const group = scene.groups.find((g) => g.id === "g-case");
+      if (group) group.plays = { type: "effect", effect: "pattern:Intake", props: {} };
+    }
+  }
+  // `?state=pattern-fits` and its siblings: a scene whose groups play a pattern, so the picker's
+  // marks and the group's flags can be seen (demoScenarios has the four states).
+  const patternScenarios = applyPatternScenarios(
+    { scenes: chainScenarios.scenes, active: sceneScenarios.active },
+    chainScenarios.lights,
   );
   return {
     settings: { ...INITIAL_SETTINGS },
@@ -307,12 +396,13 @@ function initialState(): DemoState {
     ),
     effects,
     stacks,
+    patterns,
     favorites,
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
-    scenes: chainScenarios.scenes,
-    activeScene: sceneScenarios.active,
+    scenes: patternScenarios.scenes,
+    activeScene: patternScenarios.active,
     lights: chainScenarios.lights,
     chains: chainScenarios.chains,
     setup: null,
@@ -476,14 +566,17 @@ function draftStatus(s: DemoState): DraftStatus {
   const slow = scenario().has("slow-draft");
   const heartbeat = fast ? 300 : slow ? 600 : 5000;
   const stack = draft?.stack;
+  // A pattern draft's slot id is `draft:` + the pattern's id, as the daemon's is.
+  const pattern = draft?.pattern;
+  const id = stack ? stack.id : pattern ? `draft:${pattern.id}` : draft ? `draft:${draft.hash}` : "";
   return {
     active: draft !== null,
-    ...(draft ? { id: stack ? stack.id : `draft:${draft.hash}`, source_hash: draft.hash } : {}),
+    ...(draft ? { id, source_hash: draft.hash } : {}),
     props: draft ? { ...draft.props } : {},
     lease_remaining_ms: draft ? Math.max(0, draft.leaseUntil - Date.now()) : 0,
     heartbeat_ms: heartbeat,
     lease_ms: fast ? 900 : 15000,
-    ...(stack ? { epoch: draft?.epoch, seq: draft?.seq } : {}),
+    ...(stack || pattern ? { epoch: draft?.epoch, seq: draft?.seq } : {}),
   };
 }
 
@@ -795,13 +888,22 @@ function scenesAnswer(s: DemoState): ScenesResponse {
   return {
     active: s.activeScene,
     scenes: s.scenes,
-    group_states: (active?.groups ?? []).map((g) => ({
-      id: g.id,
-      failed:
-        g.plays.type === "effect" && !s.effects[g.plays.effect] && !s.stacks[g.plays.effect]
-          ? `the effect ${g.plays.effect} is not installed`
-          : null,
-    })),
+    group_states: (active?.groups ?? []).map((g) => {
+      const effect = g.plays.type === "effect" ? g.plays.effect : null;
+      const pattern = effect !== null ? s.patterns[effect] : undefined;
+      let failed: string | null = null;
+      if (effect !== null && !s.effects[effect] && !s.stacks[effect] && !pattern) {
+        failed = effect.startsWith(PATTERN_ID_PREFIX)
+          ? `the pattern ${effect} is gone`
+          : `the effect ${effect} is not installed`;
+      }
+      return {
+        id: g.id,
+        failed,
+        // The fit flags of a group that plays a pattern (0.16.0); none for a canvas effect.
+        fits: pattern ? patternFits(s, g) : [],
+      };
+    }),
   };
 }
 
@@ -914,8 +1016,20 @@ function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown)
   return bad();
 }
 
+/**
+ * `?state=pattern-unplugged`: the DRAM sticks are out of the machine, so one kind of device has
+ * no light connected at all - the device step still offers it and says so. The state itself is
+ * untouched: this is how the lights read, not a change to them.
+ */
+function unpluggedLights(lights: LightView[]): LightView[] {
+  if (!scenario().has("pattern-unplugged")) return lights;
+  return lights.map((view) =>
+    view.led_count === 8 && view.light.arrangement === "strip" ? { ...view, connected: false } : view,
+  );
+}
+
 function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
-  if (seg.length === 1 && method === "GET") return { lights: s.lights };
+  if (seg.length === 1 && method === "GET") return { lights: unpluggedLights(s.lights) };
   if (seg[1] === "flash" && method === "POST") return { ok: true };
   if (seg.length === 2 && method === "PATCH") {
     const view = s.lights.find((l) => l.light.id === seg[1]);
@@ -1105,6 +1219,8 @@ function effectOrNotFound(id: string): DemoEffect {
   const s = st();
   const stack = s.stacks[id];
   if (stack) return stackAsEffect(stack, s.effects);
+  const pattern = patternOrNone(id);
+  if (pattern) return patternAsEffect(pattern);
   const e = s.effects[id];
   if (!e) fail(404, "not_found", `no effect with id ${id}`);
   return e;
@@ -1120,6 +1236,112 @@ function stackOrNotFound(id: string): Stack {
   );
   if (!found) fail(404, "not_found", `no stack with the id or name ${id}`);
   return found;
+}
+
+/** A pattern by its id or its name, ignoring case, as the daemon's store finds it. */
+function patternOrNotFound(id: string): Pattern {
+  const found = patternOrNone(id);
+  if (!found) fail(404, "not_found", `no pattern with the id or name ${id}`);
+  return found;
+}
+
+function patternOrNone(id: string): Pattern | null {
+  const wanted = id.trim().toLowerCase();
+  const name = (p: Pattern): string => p.id.slice(PATTERN_ID_PREFIX.length);
+  return (
+    Object.values(st().patterns).find(
+      (p) => p.id.toLowerCase() === wanted || name(p).toLowerCase() === wanted,
+    ) ?? null
+  );
+}
+
+/**
+ * The rules `validate_pattern` keeps, with the daemon's own sentences: the prefix and a name of 1
+ * to 60 characters, 1 to 4096 LEDs, 1 to 256 frames, and exactly `built_on.led_count` colours in
+ * every frame. A broken pattern is a 422 and leaves a running draft alone.
+ */
+function checkPattern(p: Pattern): void {
+  if (!p.id.startsWith(PATTERN_ID_PREFIX)) {
+    fail(422, "validation", `a pattern's id starts with "${PATTERN_ID_PREFIX}"`);
+  }
+  const name = p.id.slice(PATTERN_ID_PREFIX.length);
+  if (name.trim().length === 0) fail(422, "validation", "a pattern needs a name");
+  if ([...name].length > PATTERN_NAME_MAX) {
+    fail(422, "validation", `a pattern's name is at most ${PATTERN_NAME_MAX} characters`);
+  }
+  const count = p.built_on.led_count;
+  if (count < 1 || count > PATTERN_LEDS_MAX) {
+    fail(422, "validation", `a pattern is built on 1 to ${PATTERN_LEDS_MAX} LEDs, not ${count}`);
+  }
+  if (p.frames.length === 0) fail(422, "validation", "a pattern needs a frame");
+  if (p.frames.length > PATTERN_FRAMES_MAX) {
+    fail(
+      422,
+      "validation",
+      `a pattern holds at most ${PATTERN_FRAMES_MAX} frames, not ${p.frames.length}`,
+    );
+  }
+  p.frames.forEach((frame, i) => {
+    if (frame.colors.length !== count) {
+      fail(
+        422,
+        "validation",
+        `frame ${i + 1} has ${frame.colors.length} colours; the device it was built on has ${count} LEDs`,
+      );
+    }
+  });
+}
+
+/** The library's `EffectSummary` for a pattern: a pattern has no settings, and says its kind. */
+function patternEffectSummary(pattern: Pattern) {
+  return {
+    id: pattern.id,
+    name: pattern.id.slice(PATTERN_ID_PREFIX.length),
+    description: `Pattern, ${kindWords(pattern.built_on)}`,
+    needs: { screen: false, audio: false },
+    favorite: false,
+    kind: "pattern" as const,
+    built_on: { ...pattern.built_on },
+  };
+}
+
+/**
+ * The pattern as one `DemoEffect`, so the effect routes (detail, favourite, activate) serve it.
+ * It has no properties: 0.16.0 gives a pattern no settings and no presets.
+ */
+function patternAsEffect(pattern: Pattern): DemoEffect {
+  const summary = patternEffectSummary(pattern);
+  return {
+    schema: {
+      id: pattern.id,
+      name: summary.name,
+      description: summary.description,
+      needs: summary.needs,
+      properties: [],
+      presets: [],
+    },
+    defaults: {},
+    summary,
+  };
+}
+
+/** What `GET /scenes` says of a group that plays a pattern: one fit per member light. */
+function patternFits(s: DemoState, group: Group): LightFit[] {
+  const id = group.plays.type === "effect" ? group.plays.effect : undefined;
+  const pattern = id ? s.patterns[id] : undefined;
+  if (!pattern) return [];
+  const fits: LightFit[] = [];
+  for (const member of group.members) {
+    const light = s.lights.find((l) => l.light.id === member);
+    if (!light) continue;
+    // The daemon leaves a light with no LEDs out of the fits: it plays nothing there.
+    if (!light.connected || light.led_count <= 0) continue;
+    fits.push({
+      light: member,
+      fit: fitKind(pattern.built_on, light.led_count, light.light.arrangement),
+    });
+  }
+  return fits;
 }
 
 function currentProps(e: DemoEffect): Props {
@@ -1554,7 +1776,16 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         .map((e) => ({ ...e.summary, favorite: s.favorites.has(e.schema.id) }));
       // A saved stack is in the library after the user effects (D95.4.2).
       for (const stack of Object.values(s.stacks)) {
-        list.push({ ...stackEffectSummary(stack, s.effects), favorite: s.favorites.has(stack.id) });
+        list.push({
+          ...stackEffectSummary(stack, s.effects),
+          favorite: s.favorites.has(stack.id),
+          // A stack is drawn on the canvas: it is a canvas effect, as the daemon says.
+          kind: "canvas",
+        });
+      }
+      // A pattern is an effect too (0.16.0): it says its kind and what it was built on.
+      for (const pattern of Object.values(s.patterns)) {
+        list.push({ ...patternEffectSummary(pattern), favorite: s.favorites.has(pattern.id) });
       }
       return { effects: list, active: s.activeEffect, failed: s.failedEffects };
     }
@@ -1604,7 +1835,14 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       if (method === "PUT") {
         const req = body as DraftRequest;
-        const call = { method, at: Date.now(), props: { ...req.props }, htmlBytes: req.html.length, stack: req.stack };
+        const call = {
+          method,
+          at: Date.now(),
+          props: { ...req.props },
+          htmlBytes: req.html.length,
+          stack: req.stack,
+          pattern: req.pattern?.id,
+        };
         s.draftCalls.push(call);
         (globalThis as { __draft?: unknown[] }).__draft?.push(call);
         // A stack draft (D95.4.5): the same epoch/seq rule as the preview, and a dropped PUT
@@ -1636,6 +1874,47 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         }
         if (req.html.length > IMPORT_MAX_BYTES) {
           fail(422, "validation", `the draft is ${req.html.length} bytes; the limit is ${IMPORT_MAX_BYTES}`);
+        }
+        // A pattern draft (0.16.0): the same epoch/seq rule as a stack's, and the pattern's own
+        // colours go on the lights of its kind. Exactly one of html, stack and pattern is set.
+        if (req.pattern) {
+          if (req.html.length > 0) {
+            fail(422, "validation", "a draft carries exactly one of html, stack and pattern");
+          }
+          checkPattern(req.pattern);
+          const lease = scenario().has("fast-draft") ? 900 : 15_000;
+          const epoch = req.epoch ?? "";
+          const seq = req.seq ?? 0;
+          let applied = true;
+          if (s.draft?.pattern && s.draft.epoch === epoch && seq <= (s.draft.seq ?? 0)) applied = false;
+          if (applied) {
+            if (s.draft === null) s.draftStopFailed = false;
+            s.draft = {
+              html: "",
+              props: {},
+              hash: demoHash(
+                `${req.pattern.id}|${JSON.stringify(req.pattern.frames[0]?.colors ?? [])}`,
+              ),
+              leaseUntil: Date.now() + lease,
+              pattern: structuredClone(req.pattern),
+              epoch,
+              seq,
+            };
+          }
+          // The daemon's own note when no device of the pattern's kind is plugged in: the editor
+          // still opens on it, and says why the lights it would paint are dark.
+          const document = req.pattern;
+          const plugged = unpluggedLights(s.lights).some(
+            (view) =>
+              view.connected &&
+              view.led_count === document.built_on.led_count &&
+              view.light.arrangement === document.built_on.arrangement,
+          );
+          return {
+            ...draftStatus(s),
+            applied,
+            ...(plugged ? {} : { note: NO_DEVICE_OF_KIND }),
+          };
         }
         // `?state=draft-beat-fail`: the first beat starts the draft, the rest fail, so the
         // expiring banner and the daemon's own restore can be seen.
@@ -1901,6 +2180,68 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (before && before.reads !== !!next.reads) keptReads.delete(id);
       s.peripheralAccess[id] = { reads: !!next.reads, writes: !!next.writes };
       return s.peripheralAccess[id];
+    }
+    return bad();
+  }
+
+  if (head === "patterns") {
+    if (seg.length === 1 && method === "GET") {
+      const answer: PatternsResponse = {
+        patterns: Object.values(s.patterns)
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      };
+      return answer;
+    }
+    const id = seg[1] ?? "";
+    if (seg.length === 2 && method === "GET") {
+      return structuredClone(patternOrNotFound(id));
+    }
+    if (seg.length === 2 && method === "PUT") {
+      const next = body as Pattern;
+      // A save never renames: the path is the id, and the body has to agree with it.
+      const name = id.startsWith(PATTERN_ID_PREFIX) ? id.slice(PATTERN_ID_PREFIX.length) : id;
+      const pathId = `${PATTERN_ID_PREFIX}${name}`;
+      if (next.id !== pathId) {
+        fail(
+          422,
+          "validation",
+          `the id in the body is ${next.id}; the path is ${pathId}, and a save never renames`,
+        );
+      }
+      checkPattern(next);
+      const clash = Object.values(s.patterns).find(
+        (p) =>
+          p.id !== next.id &&
+          p.id.slice(PATTERN_ID_PREFIX.length).toLowerCase() === name.toLowerCase(),
+      );
+      if (clash) fail(409, "conflict", `${name} is already another pattern's name, ignoring case`);
+      // The whole document is kept: a second frame, a motion other than none and any later field
+      // go back out as they came in, as the daemon's file keeps them.
+      s.patterns[next.id] = structuredClone(next);
+      return structuredClone(s.patterns[next.id]);
+    }
+    if (seg.length === 2 && method === "DELETE") {
+      const pattern = patternOrNotFound(id);
+      const playing = s.scenes.filter((scene) =>
+        scene.groups.some((g) => g.plays.type === "effect" && g.plays.effect === pattern.id),
+      );
+      if (playing.length > 0 && url.searchParams.get("force") !== "true") {
+        const names = playing.map((scene) => scene.name).join(", ");
+        fail(
+          409,
+          "conflict",
+          `${pattern.id.replace(/^pattern:/, "")} plays in ${names}. Delete it anyway and the groups that play it go dark.`,
+        );
+      }
+      delete s.patterns[pattern.id];
+      const favorite_removed = s.favorites.delete(pattern.id);
+      delete s.userPresets[pattern.id];
+      if (s.activeEffect === pattern.id) s.activeEffect = null;
+      // A draft of the deleted pattern ends first, as the daemon's does.
+      if (s.draft?.pattern?.id === pattern.id) s.draft = null;
+      const answer: DeletePatternResponse = { ok: true, id: pattern.id, favorite_removed };
+      return answer;
     }
     return bad();
   }
@@ -2242,6 +2583,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         },
         displays: s.displayConfig ? [{ ...s.displayConfig }] : [],
         stacks: [],
+        patterns: Object.values(s.patterns).map((p) => structuredClone(p)),
       };
       return bundle;
     }

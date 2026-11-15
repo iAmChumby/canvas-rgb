@@ -944,7 +944,7 @@
 .cmdk-group {
   padding: var(--s3) var(--s3) var(--s1);
   color: var(--mute);
-  font-size: var(--t12);
+  font-size: 12px;
   font-weight: 600;
   letter-spacing: 0.06em;
   text-transform: uppercase;
@@ -1183,6 +1183,22 @@
   aspect-ratio: 16 / 10;
   background: var(--sunk);
   overflow: hidden;
+}
+
+/* A pattern's kind ("ring of 12"), printed on its dots like a label on a panel. */
+.effect-card-kind {
+  position: absolute;
+  left: 8px;
+  bottom: 6px;
+  font-family: var(--fm);
+  font-size: 12px;
+  line-height: 1;
+  padding: 3px 6px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--mute);
+  pointer-events: none;
 }
 
 /* The tile fills the preview; it never decides how tall the preview is, so a thumbnail that

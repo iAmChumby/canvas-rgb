@@ -1,8 +1,9 @@
 "use client";
 
-// New from code (D2.3): a blank file second, a copy of an existing HTML effect first. A Rust
-// built-in has no HTML source to copy (the route answers 404), so only `html:` effects are
-// offered. Reading a copy's source has its own wait and its own error.
+// New from code: the "Code" branch of New effect. A blank file is the second key, a copy of an
+// existing HTML effect the first. A Rust built-in has no HTML source to copy (the route answers
+// 404), so only `html:` effects are offered. Reading a copy's source has its own wait and its own
+// error.
 
 import { CaretLeft, CopySimple, FilePlus } from "@phosphor-icons/react";
 import { BusyIcon, Button, IconButton } from "@/components/Button";
@@ -48,7 +49,7 @@ export function NewEffectChooser({
 
       <Panel title="Copy an effect" className="eff-choose-panel">
         <p className="dim eff-choose-sub">
-          A user or stock HTML effect. Its author and licence line stay at the top of the file.
+          An HTML effect from your library. Its author and licence line stay at the top of the file.
         </p>
         {html.length === 0 ? (
           <p className="dim eff-choose-empty">There is no HTML effect to copy yet. Start blank instead.</p>

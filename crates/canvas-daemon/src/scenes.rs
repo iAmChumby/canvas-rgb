@@ -8,6 +8,7 @@
 use std::collections::HashSet;
 
 use canvas_proto::device::{DeviceInfo, ZoneInfo};
+use canvas_proto::pattern::LightFit;
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
     zone_light_id, Arrangement, ChainState, Group, GroupMode, Light, LightId, LightsFile, Plays,
@@ -517,7 +518,7 @@ impl Drop for LightWatch {
 fn build_effect(app: &App, id: &str, group: Option<&str>) -> Result<(Box<dyn Effect>, InputNeeds), String> {
     app.scene.builds.fetch_add(1, Ordering::SeqCst);
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::create_effect(&app.user_effects, &app.stacks, id, group)
+        crate::create_effect(&app.user_effects, &app.stacks, &app.patterns, id, group)
     }))
     .map_err(|payload| format!("the effect panicked while it loaded: {}", crate::panic_payload_text(&payload)))??;
     let schema = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -535,7 +536,7 @@ pub fn needs_of(app: &App, scene: &Scene) -> InputNeeds {
     let mut needs = InputNeeds::default();
     for group in &scene.groups {
         if let Plays::Effect { effect, .. } = &group.plays {
-            if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+            if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, effect) {
                 needs.screen |= schema.needs.screen;
                 needs.audio |= schema.needs.audio;
             }
@@ -824,7 +825,9 @@ pub async fn scenes_playing(app: &App, effect: &str) -> Vec<(String, String)> {
         .iter()
         .filter(|scene| {
             scene.groups.iter().any(|group| match &group.plays {
-                Plays::Effect { effect: playing, .. } => playing == effect,
+                // The store matches a pattern's id ignoring ASCII case (`Patterns::get`), so a
+                // group that names it in other case still plays it: the refusal must see it too.
+                Plays::Effect { effect: playing, .. } => playing.eq_ignore_ascii_case(effect),
                 Plays::Off => false,
             })
         })
@@ -994,7 +997,7 @@ impl Takeover<'_> {
 fn group_needs(app: &App, group: &Group) -> InputNeeds {
     let mut needs = InputNeeds::default();
     if let Plays::Effect { effect, .. } = &group.plays {
-        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, effect) {
             needs.screen |= schema.needs.screen;
             needs.audio |= schema.needs.audio;
         }
@@ -1225,6 +1228,165 @@ fn build_and_set_with(
     Ok(())
 }
 
+/// Puts a pattern draft on the lights: every light the pattern fits exactly shows it, and the
+/// active scene's other lights stay on at a dim level.
+///
+/// First call: the whole scene goes on again with (a) one group,
+/// [`canvas_proto::pattern::PATTERN_EDIT_GROUP`], holding every light whose fit against the
+/// pattern's `built_on` is `Exact` and playing the draft, and (b) the active scene's groups with
+/// those lights taken out of their members (a group left empty is dropped) at their own
+/// brightness times [`canvas_proto::pattern::PATTERN_EDIT_DIM_PERCENT`] / 100.
+///
+/// A later call for the pattern already on the lights (a stroke) swaps the group's effect with
+/// `engine.set_group_effect` and builds nothing: painting stays cheap.
+///
+/// Returns the number of lights lit; zero means no device of that kind exists.
+pub async fn apply_pattern_takeover(
+    app: &Arc<App>,
+    pattern: &canvas_proto::pattern::Pattern,
+) -> Result<usize, String> {
+    let (scene, lights, devices) = {
+        let store = app.store.read().await;
+        (
+            active_scene(&store.scenes).clone(),
+            store.lights.lights.clone(),
+            app.devices.read().await.clone(),
+        )
+    };
+    let lit: Vec<LightId> = lights
+        .iter()
+        .filter(|light| {
+            canvas_proto::pattern::fit_kind(
+                &pattern.built_on,
+                canvas_core::arrangement::light_led_count(light, &devices),
+                light.arrangement,
+            ) == canvas_proto::pattern::FitKind::Exact
+        })
+        .map(|light| light.id.clone())
+        .collect();
+
+    // A stroke of the pattern already on the lights: the engine holds the pattern's group, with
+    // the members this pattern fits, so one swap is the whole change.
+    let held = app.scene.held();
+    let same_draft = app.draft.snapshot().is_some_and(|slot| {
+        matches!(
+            &slot.kind,
+            crate::draft::SlotKind::Pattern { pattern_id } if pattern_id == &pattern.id
+        )
+    });
+    if same_draft && held.groups.iter().any(|group| group == canvas_proto::pattern::PATTERN_EDIT_GROUP) {
+        app.engine.set_group_effect(
+            canvas_proto::pattern::PATTERN_EDIT_GROUP,
+            Some(Box::new(crate::pattern_effect::PatternEffect::new(pattern.clone()))),
+            &Props::new(),
+        );
+        // The takeover is the same one, and the generation moves so a guard does not put the
+        // scene over it.
+        app.scene.land_takeover(held);
+        app.scene.notify();
+        return Ok(lit.len());
+    }
+
+    // The whole scene goes on again. A dimmed group's effect may be a stack with HTML layers, so
+    // it is built on a blocking thread.
+    let built = {
+        let app = Arc::clone(app);
+        let scene = scene.clone();
+        let pattern = pattern.clone();
+        let lit = lit.clone();
+        tokio::task::spawn_blocking(move || {
+            build_pattern_takeover(&app, &scene, &pattern, &lit)
+        })
+        .await
+    };
+    let PatternTakeover { groups, failures, needs, held: held_groups } = built
+        .map_err(|error| format!("the pattern takeover task failed: {error}"))??;
+    app.stacks.clear_running();
+    app.inputs.apply_needs(needs);
+    app.engine.set_scene(lights, devices, groups, false);
+    *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
+    // Every group the takeover made is the takeover's, the pattern's own and the dimmed ones: a
+    // scene change and a pattern edit both wait for it to end.
+    app.scene.land_takeover(Held { groups: held_groups.clone(), takeover: held_groups });
+    app.scene.notify();
+    Ok(lit.len())
+}
+
+/// What a pattern takeover built: the groups the engine is handed, why any dimmed group is dark,
+/// what the captures are needed for, and the ids of the groups the takeover made its own.
+struct PatternTakeover {
+    groups: Vec<EngineGroup>,
+    failures: BTreeMap<String, String>,
+    needs: InputNeeds,
+    held: Vec<String>,
+}
+
+/// The groups of a pattern takeover: the pattern's own group and the scene's groups at their dim
+/// level, with the lights the pattern fits taken out of them.
+fn build_pattern_takeover(
+    app: &App,
+    scene: &Scene,
+    pattern: &canvas_proto::pattern::Pattern,
+    lit: &[LightId],
+) -> Result<PatternTakeover, String> {
+    let mut groups = Vec::with_capacity(scene.groups.len() + 1);
+    let mut held = Vec::with_capacity(scene.groups.len() + 1);
+    let mut needs = InputNeeds::default();
+    let mut failures = BTreeMap::new();
+    // No light of the pattern's kind: no group of its own. There is nothing to show, and a group
+    // with no member cannot be planned.
+    if !lit.is_empty() {
+        groups.push(EngineGroup {
+            id: canvas_proto::pattern::PATTERN_EDIT_GROUP.to_string(),
+            members: lit.to_vec(),
+            mode: GroupMode::FlowAcross,
+            brightness: GROUP_BRIGHTNESS_MAX,
+            effect: Some(Box::new(crate::pattern_effect::PatternEffect::new(pattern.clone()))),
+            props: Props::new(),
+        });
+        held.push(canvas_proto::pattern::PATTERN_EDIT_GROUP.to_string());
+    }
+    let dim = |brightness: u8| -> u8 {
+        (brightness as u16 * canvas_proto::pattern::PATTERN_EDIT_DIM_PERCENT as u16 / 100) as u8
+    };
+    for group in &scene.groups {
+        let members: Vec<LightId> = group
+            .members
+            .iter()
+            .filter(|member| !lit.contains(member))
+            .cloned()
+            .collect();
+        if members.is_empty() {
+            continue;
+        }
+        let (effect, props) = match &group.plays {
+            Plays::Off => (None, Props::new()),
+            Plays::Effect { effect: id, props } => match build_effect(app, id, Some(&group.id)) {
+                Ok((built, group_needs)) => {
+                    needs.screen |= group_needs.screen;
+                    needs.audio |= group_needs.audio;
+                    (Some(built), props.clone())
+                }
+                Err(why) => {
+                    tracing::warn!(group = %group.id, effect = %id, error = %why, "a group's effect could not be built; the group is dark");
+                    failures.insert(group.id.clone(), why);
+                    (None, props.clone())
+                }
+            },
+        };
+        groups.push(EngineGroup {
+            id: group.id.clone(),
+            members,
+            mode: group.mode,
+            brightness: dim(group.brightness),
+            effect,
+            props,
+        });
+        held.push(group.id.clone());
+    }
+    Ok(PatternTakeover { groups, failures, needs, held })
+}
+
 /// Builds one instance of a takeover's effect, on a blocking thread: building an HTML effect
 /// runs its scripts, which must not block the async workers. The group id is the one the
 /// instance is for: a stack resolves its layers in that group's canvas.
@@ -1332,15 +1494,127 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
     app.scene.notify();
 }
 
+/// After a pattern is saved or deleted: every group of the active scene that plays `id` takes the
+/// new one, or goes dark with the failure text when the pattern is gone.
+///
+/// A group a takeover holds is left alone: the takeover's own end applies the active scene, which
+/// builds the saved pattern. A group of a scene that is not active takes the change when that
+/// scene is applied. Nothing here writes the scene: the store already names the pattern.
+pub async fn pattern_changed(app: &Arc<App>, id: &str) {
+    // The scene order, as a save takes it: a scene write and this change never interleave.
+    let _lock = app.scene.lock().await;
+    let scene = {
+        let store = app.store.read().await;
+        active_scene(&store.scenes).clone()
+    };
+    let held = app.scene.held();
+    let scene_groups: Vec<String> = scene.groups.iter().map(|g| g.id.clone()).collect();
+    // A takeover holds groups that are not the scene's (the takeover group of every light): the
+    // engine has no scene group to change, and the takeover's end applies the scene, which builds
+    // the pattern as it is now.
+    if held.groups != scene_groups {
+        tracing::debug!(
+            pattern = %id,
+            "a takeover holds the lights; the pattern reaches its groups when the scene goes back"
+        );
+        return;
+    }
+    let mut failures = app.scene.failures();
+    let mut changed = false;
+    for group in &scene.groups {
+        let Plays::Effect { effect, props } = &group.plays else { continue };
+        // A group that names the pattern in other case plays it (`Patterns::get` matches that
+        // way), so the edit must reach it: compare as the store does.
+        if !effect.eq_ignore_ascii_case(id) {
+            continue;
+        }
+        // A group the takeover holds keeps the draft: its change lands when the takeover ends.
+        if held.takeover.contains(&group.id) {
+            continue;
+        }
+        changed = true;
+        let built = {
+            let app = Arc::clone(app);
+            let id = effect.clone();
+            let group = group.id.clone();
+            tokio::task::spawn_blocking(move || build_effect(&app, &id, Some(&group))).await
+        };
+        let built = built.unwrap_or_else(|e| Err(format!("the build task failed: {e}")));
+        match built {
+            Ok((made, _)) => {
+                failures.remove(&group.id);
+                app.engine.set_group_effect(&group.id, Some(made), props);
+            }
+            Err(why) => {
+                // A pattern that is gone is a build failure like a missing HTML file: only this
+                // group is dark, and the API names it.
+                tracing::warn!(group = %group.id, pattern = %effect, error = %why, "a group's pattern is gone; the group is dark");
+                failures.insert(group.id.clone(), why);
+                app.engine.set_group_effect(&group.id, None, props);
+            }
+        }
+    }
+    if !changed {
+        return;
+    }
+    *app.scene.failures.lock().unwrap_or_else(|e| e.into_inner()) = failures;
+    app.scene.notify();
+}
+
+/// The fit of each of a group's member lights against the pattern it plays. Empty for a group
+/// that plays no pattern, and for one whose pattern is gone (the group is dark and says why).
+///
+/// A light with no LEDs is left out: its device is not connected, or its zone reports none, so
+/// the engine plays nothing there. It is neither exact nor flagged, and the picker's count is of
+/// the lights the pattern lands on.
+fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]) -> Vec<LightFit> {
+    let Plays::Effect { effect, .. } = &group.plays else {
+        return Vec::new();
+    };
+    if !effect.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+        return Vec::new();
+    }
+    let Some(pattern) = app.patterns.get(effect) else {
+        return Vec::new();
+    };
+    group
+        .members
+        .iter()
+        .filter_map(|member| {
+            let Some(light) = lights.iter().find(|light| &light.id == member) else {
+                // A member the daemon does not hold has no LEDs to play on.
+                return None;
+            };
+            let led_count = canvas_core::arrangement::light_led_count(light, devices);
+            if led_count == 0 {
+                return None;
+            }
+            Some(LightFit {
+                light: member.clone(),
+                fit: canvas_proto::pattern::fit_kind(
+                    &pattern.built_on,
+                    led_count,
+                    light.arrangement,
+                ),
+            })
+        })
+        .collect()
+}
+
 /// How the groups of `scene` are doing: dark because the effect could not be built, or because it
 /// panicked while it ran. One entry per group, in the scene's order.
-pub fn group_states(app: &App, scene: &Scene) -> Vec<GroupState> {
+///
+/// A group that plays a pattern carries the fit of each of its member lights, worked out from
+/// `lights` and the devices as they are now: nothing is cached, so a resize shows at the next read.
+pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> Vec<GroupState> {
     let built = app.scene.failures();
     let running = app.engine.group_states();
+    let devices = app.devices.read().await.clone();
     scene
         .groups
         .iter()
         .map(|g| GroupState {
+            fits: group_fits(app, g, lights, &devices),
             id: g.id.clone(),
             failed: built
                 .get(&g.id)

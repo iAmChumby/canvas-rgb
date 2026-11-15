@@ -254,6 +254,7 @@ export function stackEffectSummary(stack: Stack, effects: Record<string, DemoEff
     description: count === 0 ? "No layers yet" : `${count} ${count === 1 ? "layer" : "layers"}: ${names.join(", ")}`,
     needs: { screen: false, audio: false },
     favorite: false,
+    kind: "canvas" as const,
   };
 }
 

@@ -419,3 +419,83 @@ export function applyChainScenarios(
     })),
   };
 }
+
+// ---- patterns (0.16.0) ----
+//
+// The picker's fit marks and a group's flags, one token each. The demo's own scenes play canvas
+// effects, so a pattern state is its own scene, "Patterns", on the demo's lights: two 40-LED
+// fans, a 16-LED fan, a 60-LED strip and a one-LED mouse.
+//
+//   pattern-fits     the two 40-LED fans play a ring of 40: every device fits ("Fits")
+//   pattern-stretch  the same fans play a ring of 12: both would be stretched
+//   pattern-flags    one group with every flag: exact, stretched, another shape and one LED
+//   pattern-gone     a group whose pattern was deleted: dark, and its row says why
+
+export const PATTERN_FITS = "pattern-fits";
+export const PATTERN_STRETCH = "pattern-stretch";
+export const PATTERN_FLAGS = "pattern-flags";
+export const PATTERN_GONE = "pattern-gone";
+
+/** The pattern the fit states play: a ring of 40, seeded by the demo. */
+export const PATTERN_FRONT_FANS = "pattern:Front fans";
+/** The pattern the stretch state plays: a ring of 12, seeded by the demo. */
+export const PATTERN_INTAKE = "pattern:Intake";
+/** The pattern the gone state played: nothing ever seeds it. */
+export const PATTERN_REMOVED = "pattern:Removed";
+
+/** The id of a device's light in the lights list, or null when the device is not there. */
+function lightOfDevice(lights: LightView[], device: string): string | null {
+  return lights.find((l) => l.light.device_id === device)?.light.id ?? null;
+}
+
+/** A group playing one pattern, as the page reads it. */
+function patternGroup(id: string, name: string, members: (string | null)[], effect: string): Group {
+  return {
+    id,
+    name,
+    members: members.filter((m): m is string => m !== null),
+    plays: { type: "effect", effect, props: {} },
+    mode: "flow_across",
+    brightness: 100,
+  };
+}
+
+/**
+ * Applies the pattern scenarios: the active scene becomes "Patterns", whose groups play a pattern
+ * so the picker's marks and the group's flags can be seen. Nothing is added without a token, so
+ * every other state looks as it did before patterns.
+ */
+export function applyPatternScenarios(
+  base: { scenes: Scene[]; active: string },
+  lights: LightView[],
+): { scenes: Scene[]; active: string } {
+  const wanted = [PATTERN_FITS, PATTERN_STRETCH, PATTERN_FLAGS, PATTERN_GONE].filter(has);
+  if (wanted.length === 0) return base;
+  const fan1 = lightOfDevice(lights, "openrgb:fan-hub-1");
+  const fan2 = lightOfDevice(lights, "openrgb:fan-hub-2");
+  const fan3 = lightOfDevice(lights, "openrgb:fan-hub-3");
+  const strip = lightOfDevice(lights, "openrgb:strip-1");
+  const mouse = lightOfDevice(lights, "openrgb:mouse-1");
+
+  const groups: Group[] = [];
+  if (has(PATTERN_FITS)) {
+    groups.push(patternGroup("g-pat-fit", "Front fans", [fan1, fan2], PATTERN_FRONT_FANS));
+  }
+  if (has(PATTERN_STRETCH)) {
+    groups.push(patternGroup("g-pat-stretch", "Intake fans", [fan1, fan2], PATTERN_INTAKE));
+  }
+  if (has(PATTERN_FLAGS)) {
+    // One device of each landing: 40-LED ring, 16-LED ring, 60-LED strip, one LED.
+    groups.push(
+      patternGroup("g-pat-flags", "Every flag", [fan1, fan3, strip, mouse], PATTERN_FRONT_FANS),
+    );
+  }
+  if (has(PATTERN_GONE)) {
+    groups.push(patternGroup("g-pat-gone", "Removed pattern", [fan2, fan3], PATTERN_REMOVED));
+  }
+  if (groups.length === 0) return base;
+
+  const scenes = structuredClone(base.scenes);
+  scenes.push({ id: "patterns", name: "Patterns", rev: 1, groups });
+  return { scenes, active: "patterns" };
+}

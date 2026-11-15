@@ -105,7 +105,7 @@ function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, 
     scene: active,
     scenes: clone(DEMO_SCENES.scenes),
     unassigned: DEMO_LIGHTS.filter((l) => !held.has(l.light.id)),
-    states: active.groups.map((g): GroupState => ({ id: g.id, failed: null })),
+    states: active.groups.map((g): GroupState => ({ id: g.id, failed: null, fits: [] })),
     edit: (change: (draft: Scene) => void, label: string) => {
       const draft = clone(active);
       change(draft);
@@ -183,7 +183,7 @@ describe("the Scenes page", () => {
 
   it("Unassigned is absent when every light is in a group", () => {
     const one = clone(DEMO_SCENES.scenes[1] as Scene);
-    mount(fake({ scene: one, unassigned: [], states: one.groups.map((g) => ({ id: g.id, failed: null })) }));
+    mount(fake({ scene: one, unassigned: [], states: one.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) }));
     expect(screen.queryByTestId("unassigned-row")).toBeNull();
   });
 
@@ -202,7 +202,7 @@ describe("the Scenes page", () => {
   it("a failed group shows the daemon's own words when its effect is installed", () => {
     const base = fake();
     const first = (base.scene as Scene).groups[0];
-    mount(fake({ states: [{ id: first?.id ?? "", failed: "the effect could not start" }] }));
+    mount(fake({ states: [{ id: first?.id ?? "", failed: "the effect could not start", fits: [] }] }));
     expect(screen.getByText("the effect could not start")).toBeTruthy();
   });
 
@@ -215,6 +215,7 @@ describe("the Scenes page", () => {
         states: evening.groups.map((g) => ({
           id: g.id,
           failed: g.id === lost?.id ? "the effect html:glow-removed is not installed" : null,
+          fits: [],
         })),
       }),
     );
@@ -397,8 +398,7 @@ describe("the Scenes page", () => {
     expect(labels).not.toContain("Revert");
   });
 
-  it("the row's picker puts the preview back when it closes", async () => {
-    const use = fake();
+  it("the row's picker puts the preview back when it closes", async () => {    const use = fake();
     mount(use);
     fireEvent.click(screen.getByRole("button", { name: /plays Aurora/ }));
     await screen.findByTestId("effect-picker");
@@ -474,5 +474,54 @@ describe("the Scenes page", () => {
     expect(screen.queryByRole("region", { name: "Hello" })).toBeNull();
     expect(screen.getByTestId("unassigned-row")).toBeTruthy();
     expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0);
+  });
+
+  // Plan Task 11: a group that plays a pattern says so on its row, and a group whose pattern was
+  // deleted is dark with the reason the daemon gives, in the words the page already uses.
+  it("a group whose pattern is gone shows why", () => {
+    const one = gaming();
+    const first = one.groups[0];
+    const second = one.groups[1];
+    if (!first || !second) throw new Error("the demo scene has too few groups");
+    one.groups = [
+      { ...first, plays: { type: "effect", effect: "pattern:Intake", props: {} } },
+      { ...second, plays: { type: "effect", effect: "pattern:Removed", props: {} } },
+    ];
+    patchSnap({
+      effects: [
+        ...DEMO_EFFECTS,
+        {
+          id: "pattern:Intake",
+          name: "Intake",
+          description: "Pattern, ring of 12",
+          needs: { screen: false, audio: false },
+          favorite: false,
+          kind: "pattern",
+          built_on: { led_count: 12, arrangement: "ring" },
+        } as EffectSummary,
+      ],
+    });
+    mount(
+      fake({
+        scene: one,
+        states: [
+          { id: first.id, failed: null, fits: [] },
+          { id: second.id, failed: "the pattern pattern:Removed is gone", fits: [] },
+        ],
+      }),
+    );
+
+    const patternRow = rows()[0] as HTMLElement;
+    expect(within(patternRow).getByText("Pattern")).toBeTruthy();
+    // The mode does not apply to a pattern: its words are hidden from the eye and from a reader,
+    // and the cell stays where it was, so the row's other controls do not move.
+    expect(patternRow.querySelector('[data-hidden="true"]')?.textContent).toContain("flow across");
+
+    const lostRow = rows()[1] as HTMLElement;
+    expect(within(lostRow).getByRole("button", { name: /plays Missing effect/ })).toBeTruthy();
+    expect(within(lostRow).getByText("This effect is no longer installed.")).toBeTruthy();
+    // The daemon's reason, with the pattern's id in it, is a tooltip and never the text.
+    expect(lostRow.innerHTML).toContain("the pattern pattern:Removed is gone");
+    expect(document.body.textContent).not.toContain("pattern:Removed");
   });
 });

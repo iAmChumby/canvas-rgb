@@ -1,0 +1,177 @@
+{
+  "rule": "crates/canvas-proto/src/pattern.rs fit_kind: the same LED count and arrangement is exact; a light of one LED is one_led; the same arrangement is stretched; anything else is other_shape. The order matters: a light of one LED is one_led even when its arrangement differs, and a pattern built on one LED of another arrangement is other_shape.",
+  "source": [
+    "crates/canvas-proto/src/pattern.rs, fit_kind_follows_the_rule_order",
+    "crates/canvas-core/src/pattern_fit.rs, the fit_colors tests (each asserts a fit kind by what the colours do)"
+  ],
+  "cases": [
+    {
+      "name": "a ring of 12 on a ring of 12",
+      "from": "pattern.rs fit_kind_follows_the_rule_order",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "target_leds": 12,
+      "target": "ring",
+      "fit": "exact"
+    },
+    {
+      "name": "a ring of 12 on a ring of 24",
+      "from": "pattern.rs fit_kind_follows_the_rule_order, pattern_fit.rs a_ring_stretched_to_double_keeps_the_top_led_at_the_top",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "target_leds": 24,
+      "target": "ring",
+      "fit": "stretched"
+    },
+    {
+      "name": "a ring of 12 on a strip of 12",
+      "from": "pattern.rs fit_kind_follows_the_rule_order",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "target_leds": 12,
+      "target": "strip",
+      "fit": "other_shape"
+    },
+    {
+      "name": "a ring of 12 on a single LED",
+      "from": "pattern.rs fit_kind_follows_the_rule_order, pattern_fit.rs a_single_led_takes_the_first_colour_that_is_on",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "target_leds": 1,
+      "target": "single",
+      "fit": "one_led"
+    },
+    {
+      "name": "a single LED on a single LED",
+      "from": "pattern.rs fit_kind_follows_the_rule_order",
+      "built_on": { "led_count": 1, "arrangement": "single" },
+      "target_leds": 1,
+      "target": "single",
+      "fit": "exact"
+    },
+    {
+      "name": "a ring of 12 on a ring of one LED",
+      "from": "pattern.rs fit_kind_follows_the_rule_order, pattern_fit.rs a_single_led_takes_the_first_colour_that_is_on",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "target_leds": 1,
+      "target": "ring",
+      "fit": "one_led"
+    },
+    {
+      "name": "a ring of 24 on a ring of 12",
+      "from": "pattern_fit.rs a_ring_stretched_to_half_reads_every_second_led",
+      "built_on": { "led_count": 24, "arrangement": "ring" },
+      "target_leds": 12,
+      "target": "ring",
+      "fit": "stretched"
+    },
+    {
+      "name": "a strip of 10 on a strip of 25",
+      "from": "pattern_fit.rs a_strip_stretch_maps_first_to_first_and_last_to_last",
+      "built_on": { "led_count": 10, "arrangement": "strip" },
+      "target_leds": 25,
+      "target": "strip",
+      "fit": "stretched"
+    },
+    {
+      "name": "a strip of 25 on a strip of 10",
+      "from": "pattern_fit.rs a_strip_stretch_maps_first_to_first_and_last_to_last",
+      "built_on": { "led_count": 25, "arrangement": "strip" },
+      "target_leds": 10,
+      "target": "strip",
+      "fit": "stretched"
+    },
+    {
+      "name": "a strip of 60 on a ring of 60",
+      "from": "pattern_fit.rs a_different_arrangement_stretches_by_led_order",
+      "built_on": { "led_count": 60, "arrangement": "strip" },
+      "target_leds": 60,
+      "target": "ring",
+      "fit": "other_shape"
+    },
+    {
+      "name": "a grid of 5 by 4 on a grid of 20",
+      "from": "pattern.rs fit_kind (a grid is its count and arrangement; the cell map is not read)",
+      "built_on": { "led_count": 20, "arrangement": "grid", "grid": { "width": 5, "height": 4 } },
+      "target_leds": 20,
+      "target": "grid",
+      "fit": "exact"
+    },
+    {
+      "name": "a grid of 5 by 4 on a grid of 24",
+      "from": "pattern.rs fit_kind (a grid stretched by LED order)",
+      "built_on": { "led_count": 20, "arrangement": "grid", "grid": { "width": 5, "height": 4 } },
+      "target_leds": 24,
+      "target": "grid",
+      "fit": "stretched"
+    },
+    {
+      "name": "a grid of 5 by 4 on a strip of 20",
+      "from": "pattern.rs fit_kind",
+      "built_on": { "led_count": 20, "arrangement": "grid", "grid": { "width": 5, "height": 4 } },
+      "target_leds": 20,
+      "target": "strip",
+      "fit": "other_shape"
+    },
+    {
+      "name": "a grid of 5 by 4 on a grid of 2 by 10 with 20 LEDs",
+      "from": "pattern.rs fit_kind reads the count and the arrangement, never the cell map",
+      "built_on": { "led_count": 20, "arrangement": "grid", "grid": { "width": 5, "height": 4 } },
+      "target_leds": 20,
+      "target": "grid",
+      "fit": "exact"
+    },
+    {
+      "name": "a strip of 30 on a single LED",
+      "from": "pattern.rs fit_kind",
+      "built_on": { "led_count": 30, "arrangement": "strip" },
+      "target_leds": 1,
+      "target": "single",
+      "fit": "one_led"
+    },
+    {
+      "name": "a single LED on a strip of 30",
+      "from": "pattern_fit.rs a_one_led_source_fills_every_led (the count differs, so the arrangement decides)",
+      "built_on": { "led_count": 1, "arrangement": "single" },
+      "target_leds": 30,
+      "target": "strip",
+      "fit": "other_shape"
+    },
+    {
+      "name": "a ring of 300 on a strip of 300",
+      "from": "pattern_fit.rs fit_colors_agrees_with_fit_kind_on_when_it_copies",
+      "built_on": { "led_count": 300, "arrangement": "ring" },
+      "target_leds": 300,
+      "target": "strip",
+      "fit": "other_shape"
+    },
+    {
+      "name": "a ring of 2 on a ring of 3",
+      "from": "pattern_fit.rs the_output_length_is_always_target_leds",
+      "built_on": { "led_count": 2, "arrangement": "ring" },
+      "target_leds": 3,
+      "target": "ring",
+      "fit": "stretched"
+    },
+    {
+      "name": "a ring of 4096 on a ring of 4096",
+      "from": "pattern_fit.rs a_4096_led_ring_stretches_without_overflow",
+      "built_on": { "led_count": 4096, "arrangement": "ring" },
+      "target_leds": 4096,
+      "target": "ring",
+      "fit": "exact"
+    },
+    {
+      "name": "a ring of 4096 on a ring of 4095",
+      "from": "pattern_fit.rs a_4096_led_ring_stretches_without_overflow",
+      "built_on": { "led_count": 4096, "arrangement": "ring" },
+      "target_leds": 4095,
+      "target": "ring",
+      "fit": "stretched"
+    },
+    {
+      "name": "a ring of 12 on a grid of 20",
+      "from": "pattern_fit.rs an_all_off_pattern_is_all_off (a ring onto a grid is another shape)",
+      "built_on": { "led_count": 12, "arrangement": "ring" },
+      "target_leds": 20,
+      "target": "grid",
+      "fit": "other_shape"
+    }
+  ]
+}

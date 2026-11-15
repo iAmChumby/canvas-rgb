@@ -343,6 +343,12 @@
   color: var(--mute);
 }
 
+/* A group playing a pattern has no mode: the words stay in their cell, so nothing beside them
+   moves, and they are invisible and silent. */
+.mode[data-hidden="true"] {
+  visibility: hidden;
+}
+
 .fader {
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto;
@@ -988,6 +994,44 @@
   line-height: 1.25;
 }
 
+/* What a pattern was built on and how it lands on this group: one small line under its name.
+   Both marks are the same size, so the row's height never depends on which one it carries. */
+.pickMeta {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.pickKind {
+  color: var(--mute);
+  font: 400 13px / 1.2 var(--fm);
+}
+
+/* The fit: a small LED, then the words. Green when every device takes the pattern exactly, amber
+   when some would be stretched. */
+.pickFit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--warn);
+  font: 400 13px / 1.2 var(--fm);
+}
+
+.pickFit[data-fits="true"] {
+  color: var(--ok);
+}
+
+.pickFitLed {
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
+}
+
 /* The effect the group plays now. */
 .pickLive {
   color: var(--mute);
@@ -1080,6 +1124,31 @@
 .memberLeds {
   color: var(--mute);
   font-size: var(--t14);
+}
+
+/* How the group's pattern lands on this device: a small mark under its LED count. It is the third
+   line of a pattern group's device and no line at all for a canvas effect's. */
+.memberFit {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
+  color: var(--warn);
+  font: 400 13px / 1.2 var(--fm);
+}
+
+.memberFit[data-fit="exact"] {
+  color: var(--ok);
+}
+
+.memberFit::before {
+  content: "";
+  flex: none;
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 6px currentColor;
 }
 
 .memberEmpty {

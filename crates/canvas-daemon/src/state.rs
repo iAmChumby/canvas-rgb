@@ -125,6 +125,9 @@ pub struct App {
     /// The saved effect stacks (`stacks.json`) and the runtime state a stack shares: the area
     /// book, the live map of the stack on the engine, and the frame rate its budget uses.
     pub stacks: Arc<crate::stacks::Stacks>,
+    /// The saved patterns (`patterns.json`, 0.16.0): a colour per LED, built on one kind of
+    /// device. Read at start-up beside the stacks and written whole on every save.
+    pub patterns: Arc<crate::patterns::Patterns>,
     /// The folder the user HTML effects live in. The import writes here and the
     /// delete removes from here, so both work on the folder the daemon watches.
     pub effects_dir: PathBuf,
@@ -241,6 +244,10 @@ impl App {
         let stacks = Arc::new(crate::stacks::Stacks::new(store.home.clone()));
         stacks.set_fps(store.config.settings.fps);
         stacks.reload(&user_effects);
+        // The patterns are read beside the stacks, before the API answers: a pattern a scene
+        // plays has to be there for the first build of the scene.
+        let patterns = Arc::new(crate::patterns::Patterns::new(store.home.clone()));
+        patterns.reload();
         // B1: the persisted audio-source pick applies at startup, so it
         // survives a restart (silently — no capture is running yet).
         let audio_source = store.config.audio_source.clone();
@@ -294,6 +301,7 @@ impl App {
             quit_tx,
             user_effects,
             stacks,
+            patterns,
             effects_dir: crate::paths::effects_dir(),
             effect_writes: tokio::sync::Mutex::new(()),
             openrgb_child: Mutex::new(None),

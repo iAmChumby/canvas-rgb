@@ -216,6 +216,12 @@ impl SchemaVersioned for canvas_proto::stack::StackFile {
     }
 }
 
+impl SchemaVersioned for canvas_proto::pattern::PatternsFile {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+}
+
 impl SchemaVersioned for DisplaysFile {
     fn schema_version(&self) -> u32 {
         self.schema_version
@@ -280,6 +286,9 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         LIGHTS_FILE,
         SCENES_FILE,
         canvas_proto::stack::STACKS_FILE,
+        // The patterns travel with the bundle too (0.16.0): an import replaces them, so the ones
+        // this machine had must stay recoverable.
+        canvas_proto::pattern::PATTERNS_FILE,
         DISPLAYS_FILE,
         PERIPHERALS_FILE,
         "fans.last.toml",
@@ -923,6 +932,7 @@ pub fn export_bundle(home: &Path, fans: FansFile) -> ExportBundle {
     let store = Store::load_from(home);
     let (lights, scenes) = scenes_for_export(&store);
     ExportBundle {
+        patterns: Vec::new(),
         schema_version: EXPORT_SCHEMA,
         exported_at: chrono_like_timestamp(),
         app_version: env!("CARGO_PKG_VERSION").to_string(),
@@ -1481,6 +1491,7 @@ power = "running"
     #[test]
     fn an_import_with_out_of_range_settings_is_refused() {
         let bundle = |settings: Settings| ExportBundle {
+            patterns: Vec::new(),
             schema_version: EXPORT_SCHEMA,
             exported_at: "2026-11-08T00:00:00Z".into(),
             app_version: "0.0.0".into(),
@@ -1530,6 +1541,7 @@ power = "running"
         write_toml(&dir.join(CONFIG_FILE), &current).unwrap();
         // A bundle from another machine (its settings, no audio_source at all).
         let bundle = ExportBundle {
+            patterns: Vec::new(),
             schema_version: EXPORT_SCHEMA,
             exported_at: "2026-11-05T00:00:00Z".into(),
             app_version: "0.0.0".into(),
@@ -1678,6 +1690,7 @@ power = "running"
         scenes: Option<ScenesFile>,
     ) -> ExportBundle {
         ExportBundle {
+            patterns: Vec::new(),
             schema_version: EXPORT_SCHEMA,
             exported_at: "2026-11-12T00:00:00Z".into(),
             app_version: "0.13.0".into(),
