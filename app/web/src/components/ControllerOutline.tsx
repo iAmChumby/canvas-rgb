@@ -315,24 +315,32 @@ export function ControllerOutline({
       <div className="pad-readouts">
         <span className="pad-readout">
           <span className="pad-readout-name">L</span>
-          <span className="pad-readout-axis">X</span>
-          <span className="pad-readout-value" data-pad-stick="lx">
-            +0
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">X</span>
+            <span className="pad-readout-value" data-pad-stick="lx">
+              +0
+            </span>
           </span>
-          <span className="pad-readout-axis">Y</span>
-          <span className="pad-readout-value" data-pad-stick="ly">
-            +0
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">Y</span>
+            <span className="pad-readout-value" data-pad-stick="ly">
+              +0
+            </span>
           </span>
         </span>
         <span className="pad-readout">
           <span className="pad-readout-name">R</span>
-          <span className="pad-readout-axis">X</span>
-          <span className="pad-readout-value" data-pad-stick="rx">
-            +0
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">X</span>
+            <span className="pad-readout-value" data-pad-stick="rx">
+              +0
+            </span>
           </span>
-          <span className="pad-readout-axis">Y</span>
-          <span className="pad-readout-value" data-pad-stick="ry">
-            +0
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">Y</span>
+            <span className="pad-readout-value" data-pad-stick="ry">
+              +0
+            </span>
           </span>
         </span>
       </div>

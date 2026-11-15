@@ -6689,10 +6689,16 @@ button.chip:hover {
 .pad-readout {
   display: inline-flex;
   align-items: baseline;
-  gap: var(--s1);
+  gap: var(--s2);
   color: var(--mute);
   font-family: var(--fm);
   font-size: var(--t14);
+}
+
+.pad-readout-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
 }
 
 .pad-readout-name {

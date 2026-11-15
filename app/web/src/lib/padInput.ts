@@ -398,12 +398,16 @@ function pageVisible(): boolean {
  */
 export function usePadInput(options: PadInputOptions = {}): PadInput {
   const optionsRef = useRef(options);
-  optionsRef.current = options;
   const painters = useRef(new Set<PadPainter>());
   const frameRef = useRef<PadFrame | null>(null);
   const [status, setStatus] = useState<PadStatus>("wake");
   const [frame, setFrame] = useState<PadFrame | null>(null);
   const [source, setSource] = useState<PadSource | null>(null);
+
+  // The options are read when the loop starts, and again when it is started again.
+  useEffect(() => {
+    optionsRef.current = options;
+  });
 
   const register = useCallback((painter: PadPainter) => {
     painters.current.add(painter);

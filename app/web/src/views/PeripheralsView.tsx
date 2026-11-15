@@ -1021,8 +1021,14 @@ function ControllerPanel({
   const profile = plain(known(values, "active-profile"));
   const profileSection =
     profile === null ? undefined : detail.schema.sections.find((s) => s.id === `profile-${String(profile)}`);
-  const paddles = (profileSection?.properties ?? []).filter((p) => p.key.includes("-paddle-"));
-  const rows: PropertyDef[] = [...(buttons?.properties ?? []), ...paddles];
+  const paddles = useMemo(
+    () => (profileSection?.properties ?? []).filter((p) => p.key.includes("-paddle-")),
+    [profileSection],
+  );
+  const rows: PropertyDef[] = useMemo(
+    () => [...(buttons?.properties ?? []), ...paddles],
+    [buttons, paddles],
+  );
   const rowRefs = useRef(new Map<string, HTMLDivElement | null>());
 
   const planButtons: PadButton[] = rows.map((p) => ({
@@ -1056,7 +1062,9 @@ function ControllerPanel({
     [rows, values],
   );
   const mapRowsRef = useRef(mapRows);
-  mapRowsRef.current = mapRows;
+  useEffect(() => {
+    mapRowsRef.current = mapRows;
+  }, [mapRows]);
 
   /**
    * Writes the pad's state into the drawing: the keys that are held, the travel of the two
@@ -1113,7 +1121,8 @@ function ControllerPanel({
     plan.setAttribute("data-live", frame.connected ? "true" : "false");
   }, []);
 
-  useEffect(() => pad.register(paint), [pad.register, paint]);
+  const register = pad.register;
+  useEffect(() => register(paint), [register, paint]);
 
   return (
     <Panel title={detail.info.name}>
