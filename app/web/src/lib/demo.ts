@@ -14,8 +14,13 @@ import {
   applyChainScenarios,
   applyDeviceScenarios,
   applyFanScenarios,
+  applyPatternScenarios,
   applySceneScenarios,
   applyStatusScenarios,
+  PATTERN_FRONT_FANS,
+  PATTERN_FITS,
+  PATTERN_FLAGS,
+  PATTERN_GONE,
   conflictClearsMs,
   daemonDown,
   emptyArea,
@@ -298,6 +303,17 @@ function seededPatterns(scenario: Set<string>): Record<string, Pattern> {
     frames: [patternFrame(30, { 0: "#00d8ff", 15: "#0066ff", 29: "#a300ff" })],
     motion: { type: "none" },
   };
+  // The fans' own pattern: a ring of 40, the demo case fans' count, so it fits them exactly. Only
+  // the fan states ask it for: a plain `?state=patterns` keeps the demo's two.
+  if (scenario.has(PATTERN_FITS) || scenario.has(PATTERN_FLAGS) || scenario.has(PATTERN_GONE)) {
+    const frontFans: Pattern = {
+      id: PATTERN_FRONT_FANS,
+      built_on: { led_count: 40, arrangement: "ring" },
+      frames: [patternFrame(40, { 0: "#00ff9c", 20: "#00d8ff" })],
+      motion: { type: "none" },
+    };
+    return { [intake.id]: intake, [underglow.id]: underglow, [frontFans.id]: frontFans };
+  }
   return { [intake.id]: intake, [underglow.id]: underglow };
 }
 
@@ -364,6 +380,12 @@ function initialState(): DemoState {
       if (group) group.plays = { type: "effect", effect: "pattern:Intake", props: {} };
     }
   }
+  // `?state=pattern-fits` and its siblings: a scene whose groups play a pattern, so the picker's
+  // marks and the group's flags can be seen (demoScenarios has the four states).
+  const patternScenarios = applyPatternScenarios(
+    { scenes: chainScenarios.scenes, active: sceneScenarios.active },
+    chainScenarios.lights,
+  );
   return {
     settings: { ...INITIAL_SETTINGS },
     onboardingComplete: onboarded,
@@ -376,8 +398,8 @@ function initialState(): DemoState {
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
-    scenes: chainScenarios.scenes,
-    activeScene: sceneScenarios.active,
+    scenes: patternScenarios.scenes,
+    activeScene: patternScenarios.active,
     lights: chainScenarios.lights,
     chains: chainScenarios.chains,
     setup: null,

@@ -17,18 +17,26 @@ use crate::state::App;
 use crate::user_effects::UserEffects;
 
 /// Every effect's schema: the twelve built-ins first, then the user HTML effects sorted by
-/// name, then the saved stacks (D95.4.2). The registry is read once per call: it is cheap
-/// (twelve effects) and always reflects the current build.
+/// name, then the saved stacks (D95.4.2), then the saved patterns (0.16.0). The registry is read
+/// once per call: it is cheap (twelve effects) and always reflects the current build.
 ///
 /// A stack's schema is derived from the effects its layers name (D95.4.3), and never from
 /// another stack: a stack cannot contain a stack, so a nested layer contributes no property.
-pub fn schemas(user: &UserEffects, stacks: &crate::stacks::Stacks) -> Vec<PropertySchema> {
+/// A pattern's schema is its id, its name and what it was built on, with no property at all.
+pub fn schemas(
+    user: &UserEffects,
+    stacks: &crate::stacks::Stacks,
+    patterns: &crate::patterns::Patterns,
+) -> Vec<PropertySchema> {
     let mut all: Vec<PropertySchema> =
         canvas_effects::registry().into_iter().map(|f| f().schema()).collect();
     all.extend(user.schemas());
     let effects = all.clone();
     for stack in stacks.all() {
         all.push(crate::stack::schema_for(&stack, &|id| find_among(&effects, id)));
+    }
+    for pattern in patterns.all() {
+        all.push(crate::pattern_effect::schema(&pattern));
     }
     all
 }
@@ -49,10 +57,11 @@ fn find_among(all: &[PropertySchema], id: &str) -> Option<PropertySchema> {
 pub fn find_schema(
     user: &UserEffects,
     stacks: &crate::stacks::Stacks,
+    patterns: &crate::patterns::Patterns,
     id: &str,
 ) -> Option<PropertySchema> {
     let id = id.trim();
-    let mut all = schemas(user, stacks);
+    let mut all = schemas(user, stacks, patterns);
     all.extend(canvas_effects::onboard::hidden_schemas());
     find_among(&all, id)
 }
@@ -82,19 +91,30 @@ fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
 }
 
 /// `GET /api/v1/effects`.
+///
+/// A pattern is listed with the effects, tagged with its kind and the device it was built on
+/// (0.16.0): the picker's fit marks and the library's dot tile read that, and the page offers
+/// one list rather than a second library.
 pub async fn list_effects(State(app): State<Arc<App>>) -> Json<EffectsResponse> {
     let store = app.store.read().await;
     let favorites = store.effects.favorites.clone();
-    let effects: Vec<EffectSummary> = schemas(&app.user_effects, &app.stacks)
+    let patterns = app.patterns.all();
+    let effects: Vec<EffectSummary> = schemas(&app.user_effects, &app.stacks, &app.patterns)
         .into_iter()
-        .map(|s| EffectSummary {
-            built_on: None,
-            kind: canvas_proto::api::EffectKind::Canvas,
-            favorite: favorites.iter().any(|f| f == &s.id),
-            id: s.id,
-            name: s.name,
-            description: s.description,
-            needs: s.needs,
+        .map(|s| {
+            let built = patterns.iter().find(|p| p.id.eq_ignore_ascii_case(&s.id));
+            EffectSummary {
+                kind: match built {
+                    Some(_) => canvas_proto::api::EffectKind::Pattern,
+                    None => canvas_proto::api::EffectKind::Canvas,
+                },
+                built_on: built.map(|p| p.built_on.clone()),
+                favorite: favorites.iter().any(|f| f == &s.id),
+                id: s.id,
+                name: s.name,
+                description: s.description,
+                needs: s.needs,
+            }
         })
         .collect();
     // The first effect the active scene plays, in the scene's order: what the library marks as
@@ -110,7 +130,7 @@ pub async fn get_effect(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<EffectDetail>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let store = app.store.read().await;
     let favorite = store.effects.favorites.iter().any(|f| f == &schema.id);
@@ -139,7 +159,7 @@ pub async fn activate(
     Path(id): Path<String>,
     Json(request): Json<ActivateEffect>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
 
     // A stack runs its file's layer values, namespaced into one props map (D95.4.3): the file's
@@ -289,8 +309,14 @@ pub async fn patch_defaults(
     Json(props): Json<Props>,
 ) -> ApiResult<Json<serde_json::Value>> {
     check_preset_caps(&props)?;
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    if schema.id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+        return Err(ApiFailure::validation(format!(
+            "{} is a pattern; a pattern has no settings, so it has no starting values",
+            schema.id
+        )));
+    }
     if schema.id.starts_with(canvas_proto::stack::STACK_ID_PREFIX) {
         return Err(ApiFailure::conflict(format!(
             "{} is a stack; its values live in the stack builder, not in the starting values",
@@ -314,7 +340,7 @@ pub async fn put_favorite(
     Path(id): Path<String>,
     Json(request): Json<SetFavorite>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     {
         let mut store = app
@@ -341,7 +367,7 @@ pub async fn put_effect(
     Path(id): Path<String>,
     Json(detail): Json<EffectDetail>,
 ) -> ApiResult<Json<serde_json::Value>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     {
         let mut store = app
@@ -531,8 +557,15 @@ pub async fn create_preset(
     Path(id): Path<String>,
     Json(request): Json<PresetCreate>,
 ) -> ApiResult<Json<PresetsResponse>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
+    // A pattern has no settings to save as a preset, so it has no presets in 0.16.0.
+    if schema.id.starts_with(canvas_proto::pattern::PATTERN_ID_PREFIX) {
+        return Err(ApiFailure::validation(format!(
+            "{} is a pattern; a pattern has no settings, so it has no presets",
+            schema.id
+        )));
+    }
     let name = clean_preset_name(&request.name)?;
     check_preset_caps(&request.props)?;
     let props = fit_props_to_schema(&schema, request.props, &name);
@@ -560,7 +593,7 @@ pub async fn replace_preset(
     Path((id, name)): Path<(String, String)>,
     Json(request): Json<PresetReplace>,
 ) -> ApiResult<Json<PresetsResponse>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let rename_to = request.rename_to.as_deref().map(clean_preset_name).transpose()?;
     check_preset_caps(&request.props)?;
@@ -594,7 +627,7 @@ pub async fn delete_preset(
     State(app): State<Arc<App>>,
     Path((id, name)): Path<(String, String)>,
 ) -> ApiResult<Json<PresetsResponse>> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     let mut store = app.store.write().await;
     let mut list = store.effects.presets.get(&schema.id).cloned().unwrap_or_default();
@@ -616,7 +649,7 @@ pub async fn thumbnail(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
 ) -> ApiResult<axum::response::Response> {
-    let schema = find_schema(&app.user_effects, &app.stacks, &id)
+    let schema = find_schema(&app.user_effects, &app.stacks, &app.patterns, &id)
         .ok_or_else(|| ApiFailure::not_found(format!("no effect with the id or name {id}")))?;
     // The tile moves with the user effects and with the stacks: a stack edited in the builder is
     // a different picture, even though the effects folder did not change (D95.4.10).

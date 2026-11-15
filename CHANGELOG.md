@@ -16,6 +16,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names, whether the group comes before or after the effect's properties (#310)
 - Patterns: paint the colour of every LED of a device, and see each stroke on the real lights.
 - Effects: New effect offers Stack, Pattern or Code; a pattern is built on one of your devices and lives in the library.
+- Scenes: patterns appear in a group's effect picker, marked when they fit, and a stretched device says so.
 
 ### Changed
 

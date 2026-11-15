@@ -383,7 +383,7 @@ pub fn structure_of(app: &App, stack: &Stack) -> String {
 
 /// The merged props a stack's layers start with (D95.4.3).
 pub fn props_of(app: &App, stack: &Stack) -> Props {
-    crate::stack::stack_props(stack, &|id| crate::api::effects::find_schema(&app.user_effects, &app.stacks, id))
+    crate::stack::stack_props(stack, &|id| crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, id))
 }
 
 /// `PUT /api/v1/stacks/preview` (D95.4.4).

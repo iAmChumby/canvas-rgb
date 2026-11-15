@@ -129,7 +129,10 @@ export function PatternEditor({
           <span className={s.kind}>{kindWords(pattern.built_on)}</span>
         </div>
         <div className={s.tally}>
-          <span className={s.figure}>{lit}</span>
+          {/* As wide as the total's digits, so the count never resizes its own box. */}
+          <span className={s.figure} style={{ minWidth: `${String(leds).length}ch` }}>
+            {lit}
+          </span>
           <span className={s.tallyWords}>
             of {leds} on
           </span>

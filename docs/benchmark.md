@@ -238,6 +238,39 @@ The separate `aurora only` run (`bench_engine_scene_builtin`) also ran. Its firs
 filter, and its second run read p95 8.103 ms with a 41 ms max while the machine was busy; the `0 HTML`
 rows above are the three clean readings of the same 20 built-in groups (0.844 to 1.302 ms p95).
 
+### Patterns: cost per group (0.16.0, #339)
+
+Method: the same `scene_frame_bench.rs` and command, through the build lock, with
+`bench_engine_scene_pattern`:
+`cargo test -p canvas-core --release -- --ignored --nocapture --test-threads=1 bench_engine_scene_pattern`
+
+20 groups on 20 devices of one 60-LED strip each, and every group plays a pattern of 60 LEDs built on
+a strip of 60 (an exact fit, so the run costs the pattern path and not a stretch). A pattern has no
+canvas: the fit is worked out once, when the effect is installed, and a frame copies each light's
+fitted colours, applies the group's brightness, merges the device frames and runs the global stages,
+as for any effect. The canvas is neither filled nor sampled. 30 warm-up frames, then 900 timed
+frames, three runs, with the same brightness, warmth and white balance as the rows above.
+
+| Run | mean | p95 | max | late frames |
+|---|---|---|---|---|
+| 1 | 0.023 ms | 0.032 ms | 0.051 ms | 0 |
+| 2 | 0.026 ms | 0.033 ms | 0.414 ms | 0 |
+| 3 | 0.029 ms | 0.037 ms | 0.546 ms | 0 |
+
+The worst p95 of the three runs is **0.037 ms**: about 0.2% of a 30 fps frame, and 23 to 35 times
+below the 20 built-in groups' 0.844 to 1.302 ms, because a pattern group copies 60 colours where a
+built-in group draws and samples a canvas. Measured 2026-11-15 on the same Ryzen 7 7800X3D, while
+other work ran on the machine.
+
+The lines, verbatim:
+
+```
+patterns | 20 groups, all pattern | run 1 | 900 frames | mean 0.023 ms | p95 0.032 ms | max 0.051 ms | late frames 0
+patterns | 20 groups, all pattern | run 2 | 900 frames | mean 0.026 ms | p95 0.033 ms | max 0.414 ms | late frames 0
+patterns | 20 groups, all pattern | run 3 | 900 frames | mean 0.029 ms | p95 0.037 ms | max 0.546 ms | late frames 0
+patterns | worst p95 of 3 runs 0.037 ms | at or under, in all runs, the 16.6 ms bar
+```
+
 ### The LED count of a group
 
 At scale 0.25, 12, 24 and 60 LEDs a group, the k-table again:
