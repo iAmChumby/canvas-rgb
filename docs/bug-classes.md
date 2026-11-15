@@ -690,6 +690,70 @@ scroll, so the content was clipped and unreachable.
   that holds a 120 px panel and fails when a row does not report it. Settings has rows for the
   states that make a panel taller (`settings-mic`, `settings-listen`, `settings-update`,
   `settings-dev`, `settings-failed`).
+- A fourth mechanism, same cause: a box whose size comes from its content, and the content changes
+  with the state. **The rule: a control keeps one size when its content changes.** A panel that is
+  as wide as its content moves whenever that content changes, so the panel gets one width, and a
+  figure that changes gets a fixed slot.
+  [#367](https://github.com/iAmChumby/canvas-rgb/issues/367): the Scenes effect picker is a panel as
+  wide as its content, and the line under its list says what the lights show, so pointing at a row
+  moved the whole menu (313.45 px at rest to 373.52 px over "Screen Ambience", measured on
+  origin/main in headless Chromium: the static export served on loopback, the menu opened and each
+  row hovered in turn). Two things took the space: that line, whose words change with
+  the pointer, and the PLAYING tag, which is drawn only on the row the group plays and moves to the
+  row under the pointer while the preview runs - the row's third grid track was `auto`, so the tag
+  took the room it needed.
+  [#369](https://github.com/iAmChumby/canvas-rgb/issues/369): the colour picker. The hex code had no
+  width of its own, and the picker around it changed size while a colour was dragged: the quick
+  swatches are the other colours of the same effect, and the one that matched the colour in the
+  field was dropped, so the row of swatches lost an entry and the popover lost 34 px of height.
+  The size was one cause; the report - "the colour square looks like it shrinks and grows every
+  time the hex code changes" - was the reveal from #187. The swatch's box never moved (32 px; the
+  picker's preview 24 px, measured every frame of a two-second drag), but the mask animation ran
+  again for every value of the stream: the preview was keyed by the colour and replayed about
+  every 180 ms. A reveal belongs to a change that lands once; a stream shows the colour at once.
+- **Class fix, fourth mechanism:** done (#367, #369). The picker's PLAYING tag sits in a fixed grid
+  track (64 px) and the menu's width is set in the stylesheet
+  (`app/web/src/views/scenes/scenes.module.css`), so every row and the menu itself are one size in
+  every state. The hex code has a width of its own (7ch) with tabular digits, the swatch beside it
+  never gives up its size (`flex: 0 0 auto`), and the quick swatches keep their count - the one
+  that matches is marked, not dropped - so the picker keeps one size. One test over the editor's
+  stylesheets (`app/web/src/styles/__tests__/layoutShift.test.ts`) checks the widths the boxes are
+  given, and carries the class guard: no `:hover`, `:focus` or `:active` rule in any stylesheet of
+  the editor changes the size of a box (hover-only content must not take space), and every panel
+  whose content is live has one width. Siblings found by the search and fixed the same way: the
+  status details panel (the frame rate, the frame time and the device count are live), the audio
+  readings panel (the meter's cells, the figure in dB and the bands) and the fan bulk result panel
+  (the duty each header runs at). Left, with the reason: every other panel is as wide as its
+  content, which cannot change while the panel is open - the failed-files list, the fan profiles,
+  the New effect menu, Play on, the scene and group menus, the effect and mask choosers (already
+  `width: 320px`) and the "add to another group" menu. The layout itself is measured in headless
+  Chromium: the static export is served on loopback, the menu opened, every row hovered in turn,
+  and each box measured with `getBoundingClientRect()` before and after (the samples for #367 and
+  #369 sit beside the screenshots in `.build/screens`, in the main checkout, which is gitignored).
+- A fifth mechanism, same cause: a control's type comes from a different source than its
+  neighbours' type, so two controls of the same kind are drawn in two different faces.
+  [#373](https://github.com/iAmChumby/canvas-rgb/issues/373): the device keys on Peripherals were
+  a raw `<button>` with no font of its own, so the browser's stylesheet gave them its default face
+  (Arial 13.33 px) while the scene keys on Scenes, the same kind of control, were set in the app's
+  own face at the body size.
+- **Class fix, fourth mechanism:** the type of a tab is one shared class, `.tab-key`
+  (`app/web/src/styles/app.css`), and no page sets a tab's font for itself: the scene key's own
+  `font:` shorthand is gone (`app/web/src/views/scenes/scenes.module.css`), and the device key
+  takes the shared class (`app/web/src/views/PeripheralsView.tsx`). One rule keeps every control
+  in the app's face (`button { font-family: var(--fu) }`): a `<button>` does not inherit a font from
+  the page, so a control that says nothing about its type is drawn in the system font. The sibling
+  search found 29 such controls on the nine pages (the device key, the DPI chip, and the icon
+  buttons, switches and swatches); after the fix a headless pass over every page finds 0 (the
+  number fields stay in the app's mono face, which is the app's rule for figures).
+- **The check, fourth mechanism** (`app/web/src/views/__tests__/PeripheralTabsType.test.tsx`):
+  it renders both tab rows — the Peripherals device row and the Scenes strip — and asks *every*
+  button in each for `.tab-key`, so a new raw `<button>` tab fails it (proved by adding one to
+  each row, watching both cases fail, and taking it out again). The pinned "+" key in the Scenes
+  strip is the one button that is not a tab, and it is named as the exception. The rule that
+  `.tab-key` declares, and the `button` reset, are read from `app.css` instead of rendered:
+  jsdom has no stylesheet. The "0 controls in the system face" number above is *not* this test's
+  job — it comes from the headless scan over every page's controls, which is the check to re-run
+  after a control is added.
 
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 
@@ -823,3 +887,38 @@ retries can wait for one busy answer.
 - Left: the installed-app checks on #97 (Back/Forward and mouse back with unsaved code, the close/reload
   warning, CSS `round()` in WebView2), the phone code layer and screen readers need the installed app
   and are out of the fakes' reach. #97 carries no `cause:` label (not applied; left to the main agent).
+
+### `cause:hand-rolled-notice`: a message that comes and goes, drawn outside the notification lane
+
+The editor has one notification lane: `app/web/src/components/Notify.tsx` owns the policy (tone, life,
+hold while the pointer is on it) and sonner owns the look, the stacking, the motion and the swipe. A notice
+built anywhere else gets its own markup, its own timer and its own look, so the app says the same kind of
+thing three ways and Luke asks for one toast again (#168, #125, #12, #366). The notice itself may be a
+toast (it appears and goes), or a standing banner (it waits for a key or for its condition to end); the
+class is the handmade *clock*, not the words.
+
+- [#168](https://github.com/iAmChumby/canvas-rgb/issues/168): sonner arrived behind one wrapper, but the
+  "Updated to X.Y.Z" greeting stayed a `Banner` with its own hold, fade and removal timers
+  (`app/web/src/shell/GlobalBanners.tsx:129-197`), so it was not a toast at all.
+- [#125](https://github.com/iAmChumby/canvas-rgb/issues/125): that banner sat over the release notes it
+  linked to, and stayed until it was pressed. A `position: fixed` notice over `app.css:778-785` covers
+  whatever is under it; a toast in the lane does not, and it is not drawn on `/updates/` at all.
+- [#12](https://github.com/iAmChumby/canvas-rgb/issues/12): the first toast host restarted its own timer
+  on every status poll, so a toast never cleared. The lane's clock is module state, not an effect, so a
+  re-render cannot restart it (`app/web/src/components/Notify.tsx:118-147`).
+- [#366](https://github.com/iAmChumby/canvas-rgb/issues/366): the last two. The update toast said
+  "You have 0.16.0." under "Updated to 0.16.0", and the preset strip printed its own "Deleted X / Undo"
+  line beside the same toast on its own 8 s timer (`app/web/src/views/EffectsView.tsx:367-373`,
+  `app/web/src/views/PresetStrip.tsx:325-341`).
+- **Class fix:** done (#366). Every toast goes through `notify()` and has one anatomy: icon, title,
+  optional description, optional action, close. How long a message stays is `NOTE_MS` or `lifeMs`, never a
+  component's timer. `app/web/src/test/toastGuard.test.ts` reads every source file and fails on a second
+  `sonner` import (through `from`, `import()` or `require()`), a second toast body (`notify-*`), a
+  `<Banner>` outside the shell and the scene list, or a `setTimeout` that clears a message: a state set to
+  `null`, `false`, `undefined` or `""`, or a call named `clear*`, `dismiss*` or `hide*`, on a delay of two
+  seconds or more, a delay named by a `const` in the same file, or a delay the file does not define.
+  `Banner` is a standing notice
+  and no longer takes a leaving fade. Sibling search for the timer shape (`git grep -n "setTimeout" app/web/src`)
+  found no other message clock: the rest are debounces, animation flags, retries and the fixture's install
+  walk. Left: the fan service's "Fan control is unavailable" notice stays a banner because it reports a
+  running condition, not a moment (#168's decision); it is untouched.

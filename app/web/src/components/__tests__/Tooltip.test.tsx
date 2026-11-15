@@ -60,8 +60,11 @@ describe("Tooltip (#271)", () => {
 
   it("wraps a bubble the window has no room for and keeps it inside", () => {
     viewport(390, 844);
-    // The Peripherals "Read again" label laid out on one line: 774.8px in a 390px window.
-    const { bubble } = show(rect(129.5, 218.2, 116, 28), 774.8, 30.3);
+    // The Peripherals "Read again" label laid out on one line, measured in the static export at
+    // 1920x1040 (headless Chromium, the label in the bubble's own 14px face): 853 px of text,
+    // 871 px with the bubble's 8 px side padding and 1 px border. In a 390 px window that is
+    // wider than the window, so the bubble has to wrap.
+    const { bubble } = show(rect(129.5, 218.2, 116, 28), 871, 30.3);
     expect(bubble.style.maxWidth).toBe("374px");
     expect(bubble.style.whiteSpace).toBe("normal");
     expect(Number.parseFloat(bubble.style.left)).toBe(8 - 129.5);
@@ -70,16 +73,17 @@ describe("Tooltip (#271)", () => {
   it("places a wrapped bubble by its wrapped height, measured after the wrap", () => {
     viewport(390, 844);
     const { container } = render(
-      <Tooltip label="asks the device for its settings again">
+      <Tooltip label="Reads the settings from the mouse again, to pick up changes made on the mouse itself. The mouse may stutter briefly while it reads.">
         <button type="button">Read again</button>
       </Tooltip>,
     );
     const tip = container.querySelector(".tip") as HTMLElement;
     const bubble = container.querySelector(".tip-bubble") as HTMLElement;
     vi.spyOn(tip, "getBoundingClientRect").mockReturnValue(rect(129.5, 218.2, 116, 28));
-    // One line until it wraps; three lines of 374px once the component lets it wrap.
+    // The same measured 871 px on one line (30.3 px tall: the 20.3 px line and the padding);
+    // three lines of 374 px once the component lets it wrap.
     vi.spyOn(bubble, "getBoundingClientRect").mockImplementation(() =>
-      bubble.style.whiteSpace === "normal" ? rect(0, 0, 374, 90) : rect(0, 0, 774.8, 30.3),
+      bubble.style.whiteSpace === "normal" ? rect(0, 0, 374, 90) : rect(0, 0, 871, 30.3),
     );
     tip.dispatchEvent(new Event("pointerenter"));
     // Above the trigger by the gap and the wrapped height: 218.2 - 6 - 90 = 122.2, so -96 inside the tip.

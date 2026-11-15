@@ -2,15 +2,26 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { onFrame } from "@/lib/preview";
+import { getSnap } from "@/lib/store";
 import { loadThumb } from "@/lib/thumbs";
+import { onLightFrame, useLightFeed, type LightColours } from "@/views/scenes/useLightFeed";
+import type { LightView } from "@/proto/LightView";
+import type { Scene } from "@/proto/Scene";
 
 /**
- * The strip of the running effect's colours.
+ * The strip of the running lights' colours.
  *
- * The colours are the light itself: the live preview feed when it is arriving, and the
- * effect's own thumbnail when it is not (the socket can be refused). Twelve cells, one for
- * each column of the picture, so the strip reads as the effect rather than as a list of
- * colours.
+ * With a scene (the normal case) the strip shows the lights themselves: the real LED colours of
+ * the active scene, from the per-light feed. The scene's groups are laid end to end in the
+ * scene's order (each group's lights in their order, each light's LEDs in theirs), and the
+ * twelve cells are twelve equal slices of that one run, so the strip stands for the whole scene.
+ * A light that is not connected has no colours in the feed and adds nothing. Until the first
+ * frame arrives the cells rest at the neutral well colour; they never show a guess.
+ *
+ * Without a scene the strip falls back to what it was before scenes: the full-canvas preview
+ * feed when it is arriving, and the effect's own thumbnail when it is not (the socket can be
+ * refused). Twelve cells, one for each column of the picture, so the strip reads as the effect
+ * rather than as a list of colours.
  *
  * The cells are painted by hand, not by React: the feed runs at fifteen frames a second and
  * a re-render for each one would cost more than the picture is worth.
@@ -74,16 +85,89 @@ function sampleColumns(rgb: Uint8Array, w: number, h: number, cells: number): st
   return out;
 }
 
-export function RailStrip({ effectId, paused }: { effectId: string | null; paused: boolean }) {
-  const cells = useRef<(HTMLSpanElement | null)[]>([]);
+/**
+ * The LEDs of a scene as one run of RGB triples: its groups in order, each group's lights in
+ * order, each light's LEDs in order. A light with no colours (not connected, or the feed has not
+ * named it yet) contributes nothing.
+ */
+export function sceneRun(scene: Scene | null, lights: LightView[] | null, colours: LightColours): Uint8Array {
+  const parts: Uint8Array[] = [];
+  let bytes = 0;
+  const byId = new Map((lights ?? []).map((l) => [l.light.id, l]));
+  for (const group of scene?.groups ?? []) {
+    for (const id of group.members) {
+      const view = byId.get(id);
+      if (view && !view.connected) continue;
+      const rgb = colours(id);
+      if (!rgb || rgb.length < 3) continue;
+      parts.push(rgb);
+      bytes += rgb.length - (rgb.length % 3);
+    }
+  }
+  const out = new Uint8Array(bytes);
+  let at = 0;
+  for (const rgb of parts) {
+    const whole = rgb.length - (rgb.length % 3);
+    out.set(rgb.subarray(0, whole), at);
+    at += whole;
+  }
+  return out;
+}
 
+/** The twelve cells, painted by hand through `paint`; an empty colour puts a cell back to rest. */
+function useCells() {
+  const cells = useRef<(HTMLSpanElement | null)[]>([]);
   const paint = useCallback((colours: string[]) => {
-    for (let i = 0; i < colours.length; i++) {
+    for (let i = 0; i < CELLS; i++) {
       const el = cells.current[i];
-      const colour = colours[i];
-      if (el && colour) el.style.backgroundColor = colour;
+      if (!el) continue;
+      // No inline colour: the cell shows the neutral well colour of the stylesheet.
+      el.style.backgroundColor = colours[i] ?? "";
     }
   }, []);
+  const setRef = useCallback(
+    (i: number) => (el: HTMLSpanElement | null) => {
+      cells.current[i] = el;
+    },
+    [],
+  );
+  return { paint, setRef };
+}
+
+function Cells({ paused, setRef }: { paused: boolean; setRef: (i: number) => (el: HTMLSpanElement | null) => void }) {
+  return (
+    <span className="rail-strip" data-paused={paused ? "true" : "false"} aria-hidden="true">
+      {Array.from({ length: CELLS }, (_, i) => (
+        <span key={i} className="rail-strip-cell" ref={setRef(i)} />
+      ))}
+    </span>
+  );
+}
+
+/** The strip while a scene is active: the real LED colours, one shared feed. */
+function SceneStrip({ paused }: { paused: boolean }) {
+  const feed = useLightFeed();
+  const { paint, setRef } = useCells();
+
+  useEffect(() => {
+    const draw = () => {
+      const snap = getSnap();
+      const activeId = snap.status?.active_scene?.id ?? snap.scenes?.active ?? null;
+      const scene = snap.scenes?.scenes.find((x) => x.id === activeId) ?? null;
+      const run = sceneRun(scene, snap.lights, feed);
+      const leds = run.length / 3;
+      paint(leds === 0 ? [] : sampleColumns(run, leds, 1, CELLS));
+    };
+    draw();
+    return onLightFrame(draw);
+  }, [feed, paint]);
+
+  return <Cells paused={paused} setRef={setRef} />;
+}
+
+/** The strip with no scene: the canvas preview feed, else the effect's thumbnail. */
+function CanvasStrip({ effectId, paused }: { effectId: string | null; paused: boolean }) {
+  const { paint, setRef } = useCells();
 
   useEffect(() => {
     let stopped = false;
@@ -111,17 +195,18 @@ export function RailStrip({ effectId, paused }: { effectId: string | null; pause
     };
   }, [effectId, paint]);
 
-  return (
-    <span className="rail-strip" data-paused={paused ? "true" : "false"} aria-hidden="true">
-      {Array.from({ length: CELLS }, (_, i) => (
-        <span
-          key={i}
-          className="rail-strip-cell"
-          ref={(el) => {
-            cells.current[i] = el;
-          }}
-        />
-      ))}
-    </span>
-  );
+  return <Cells paused={paused} setRef={setRef} />;
+}
+
+export function RailStrip({
+  scene,
+  effectId,
+  paused,
+}: {
+  /** True while a scene is active: the strip then reads the lights, never a thumbnail. */
+  scene: boolean;
+  effectId: string | null;
+  paused: boolean;
+}) {
+  return scene ? <SceneStrip paused={paused} /> : <CanvasStrip effectId={effectId} paused={paused} />;
 }

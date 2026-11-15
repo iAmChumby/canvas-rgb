@@ -189,7 +189,8 @@ export const api = {
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),
   /**
    * What one peripheral is, what it has and what it holds now. The daemon answers with the
-   * values it kept; `fresh` makes it read the device (a read stalls the pointer for seconds).
+   * values it kept; `fresh` makes it read the device (a read is a series of short report
+   * exchanges, and the device may stutter briefly while it reads).
    */
   peripheral: (id: string, opts?: { fresh?: boolean }) =>
     request<PeripheralDetail>("GET", routes.peripheral(id) + (opts?.fresh ? "?fresh=true" : "")),

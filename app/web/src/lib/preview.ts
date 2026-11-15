@@ -45,6 +45,10 @@ const listeners = new Set<FrameListener>();
 const statusListeners = new Set<() => void>();
 let active = false;
 let socket: WebSocket | null = null;
+// A connect is waiting for the token: the socket is set only after that wait, so the wait
+// itself is claimed. Without the claim a second call in that window would open a second
+// socket and lose the first one.
+let connecting = false;
 let reconnect: ReturnType<typeof setTimeout> | null = null;
 let demoTimer: ReturnType<typeof setInterval> | null = null;
 let lastFrame: Frame | null = null;
@@ -112,7 +116,9 @@ function parseFrame(buf: ArrayBuffer): Frame | null {
 }
 
 async function connect(): Promise<void> {
-  if (!active || socket) return;
+  if (!active || socket || connecting) return;
+  // The claim is taken before the wait for the token and given back on every way out.
+  connecting = true;
   let url: string;
   let baseUrl: string;
   try {
@@ -121,13 +127,28 @@ async function connect(): Promise<void> {
     const wsBase = baseUrl.replace(/^http/, "ws");
     url = `${wsBase}${routes.preview}?token=${encodeURIComponent(cfg.token)}`;
   } catch {
+    connecting = false;
     scheduleReconnect();
+    return;
+  }
+  // The wait for the token may have outlived the feed: the socket is not opened then.
+  if (!active || socket) {
+    connecting = false;
     return;
   }
   // Once the socket has been refused the state stays "refused": a retry must not paper over the
   // reason the canvas is showing.
   if (refusals === 0) setStatus({ state: "connecting", error: null });
-  const ws = new WebSocket(url);
+  // The constructor throws on an address it cannot parse: the claim goes back and the retry
+  // runs, or the feed would never connect again.
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(url);
+  } catch {
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
   ws.binaryType = "arraybuffer";
   ws.onmessage = (ev: MessageEvent) => {
     if (ev.data instanceof ArrayBuffer) {
@@ -149,6 +170,7 @@ async function connect(): Promise<void> {
     if (active) scheduleReconnect();
   };
   socket = ws;
+  connecting = false;
 }
 
 /**

@@ -82,9 +82,12 @@ describe("the Effects view with presets", () => {
     fireEvent.click(await screen.findByRole("button", { name: "Delete" }));
     await waitFor(() => expect(screen.queryByRole("button", { name: "Apply preset Late shift 3" })).toBeNull());
     expect(key("Slow dusk").getAttribute("aria-pressed")).toBe("true");
-    // The strip and the toast each offer Undo; using one removes the other.
+    // One way back, and one only: the notification lane's (#366). The strip used to print its own
+    // "Deleted Late shift 3 / Undo" line beside the same toast, on its own 8 s timer.
     const undos = await screen.findAllByRole("button", { name: /Undo/ });
-    expect(undos.length).toBe(2);
+    expect(undos.length).toBe(1);
+    // The strip's own line says what the lights run, never what was deleted.
+    expect(document.querySelector(".preset-line")?.textContent ?? "").not.toContain("Deleted");
     fireEvent.click(undos[0] as HTMLElement);
     await screen.findByRole("button", { name: "Apply preset Late shift 3" });
     await waitFor(() => expect(screen.queryAllByRole("button", { name: /Undo/ }).length).toBe(0));

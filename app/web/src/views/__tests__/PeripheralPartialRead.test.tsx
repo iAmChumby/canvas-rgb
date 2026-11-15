@@ -314,6 +314,6 @@ describe("the not-read dash", () => {
     // The tooltip is the sibling bubble, shown by `.tip:focus-within` (styles/app.css).
     const tip = dash.closest(".tip") as HTMLElement;
     expect(tip.contains(document.activeElement)).toBe(true);
-    expect(tip.querySelector('[role="tooltip"]')?.textContent).toBe("not read from the device");
+    expect(tip.querySelector('[role="tooltip"]')?.textContent).toBe("Not read from the device.");
   });
 });
