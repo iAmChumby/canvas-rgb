@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- The What's new notes read as formatted sections with the version at the top and a link to the issue behind each change. (#365)
+
 ## [0.16.0] - 2026-11-15
 
 ### Added
