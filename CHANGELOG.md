@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+
 ### Fixed
 
 - Every message looks the same, and the update notice no longer repeats the version (#366)
