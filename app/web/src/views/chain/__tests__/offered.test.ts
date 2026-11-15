@@ -71,6 +71,23 @@ describe("the record of the headers the app has offered", () => {
     expect(written.size).toBe(0);
   });
 
+  it("keeps a mark it could not write when the storage's own text changes", () => {
+    const written = new Map<string, string>();
+    useStorage(
+      () => {
+        throw new Error("no storage");
+      },
+      (key) => written.get(key) ?? null,
+    );
+
+    markChainOffered(chainKey(DEVICE, 4));
+    // Another window wrote the record in the meantime.
+    written.set(CHAIN_OFFERED_KEY, JSON.stringify([chainKey(DEVICE, 9)]));
+
+    expect(offeredChains().has(chainKey(DEVICE, 9))).toBe(true);
+    expect(offeredChains().has(chainKey(DEVICE, 4))).toBe(true);
+  });
+
   it("is written to the storage when it can be used", () => {
     markChainOffered(chainKey(DEVICE, 3));
 

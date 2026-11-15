@@ -303,7 +303,7 @@ describe("a header's row on Devices", () => {
     expect(api.chains.start).not.toHaveBeenCalled();
   });
 
-  it("closing the setup from the row writes no record", async () => {
+  it("a setup opened from the row counts as that header's one offer", async () => {
     await showDevices([chain(1, "JARGB 1", "not_set_up", [], 0)]);
 
     await act(async () => {
@@ -319,8 +319,8 @@ describe("a header's row on Devices", () => {
     });
     expect(screen.queryByRole("region", SETUP)).toBeNull();
 
-    // The row writes nothing: the record of a header the owner put off is the takeover's business.
-    expect(offeredChains().has(chainKey(DEVICE, 1))).toBe(false);
+    // The header was on screen: the app does not offer it by itself on the next visit to Scenes.
+    expect(offeredChains().has(chainKey(DEVICE, 1))).toBe(true);
   });
 });
 

@@ -42,6 +42,7 @@ import type { Status } from "@/proto/Status";
 import { StandingNotices } from "@/shell/GlobalBanners";
 import { ChainTakeover } from "@/views/chain/ChainTakeover";
 import { chainLaterThisLaunch } from "@/views/editor/flow";
+import { cancelNavigation, hasPendingNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -282,5 +283,25 @@ describe("the chain takeover", () => {
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
     await flush();
     expect(api.chains.start).toHaveBeenCalledTimes(2);
+  });
+
+  it("a page change the owner cancels leaves no request behind", async () => {
+    await show([chain(1, "JARGB 1", "not_set_up")]);
+    await press("Later");
+    patchSnap({ status: { ...STATUS, show_zone_panel: true } as Status, devices: [] });
+    render(<StandingNotices />);
+
+    // An editor with unsaved work holds the page change, and the owner keeps editing.
+    setNavigationGuard(() => false);
+    try {
+      await press("Set up");
+      expect(screen.queryByRole("region", SETUP)).toBeNull();
+      cancelNavigation();
+      await flush();
+      expect(hasPendingNavigation()).toBe(false);
+      expect(screen.queryByRole("region", SETUP)).toBeNull();
+    } finally {
+      setNavigationGuard(null);
+    }
   });
 });

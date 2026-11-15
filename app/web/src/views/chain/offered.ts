@@ -29,7 +29,7 @@ export function chainKey(deviceId: string, zoneIndex: number): string {
 let cachedRaw: string | null | undefined;
 let cached: Set<string> | null = null;
 
-/** The marks this page has made, kept for the life of the page when the storage cannot be used. */
+/** The marks this page made and could not write, kept for the life of the page. */
 const memory = new Set<string>();
 
 function stored(): Set<string> {
@@ -50,6 +50,8 @@ function stored(): Set<string> {
   } catch {
     set = new Set();
   }
+  // A mark this page made and could not write is still a mark.
+  for (const key of memory) set.add(key);
   cached = set;
   return set;
 }
@@ -64,12 +66,14 @@ export function markChainOffered(key: string): void {
   const set = stored();
   if (set.has(key)) return;
   set.add(key);
-  memory.add(key);
   const text = JSON.stringify([...set]);
   try {
     window.localStorage.setItem(CHAIN_OFFERED_KEY, text);
     cachedRaw = text;
+    // Written: the storage holds it now, for this window and the next.
+    memory.clear();
   } catch {
     // Not remembered across a window: the mark stays in memory for the life of this page.
+    memory.add(key);
   }
 }
