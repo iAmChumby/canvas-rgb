@@ -6,6 +6,11 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
+- Peripherals: the "Read again" tooltip says what a read really does, and nothing claims the mouse pauses for seconds. (#374)
+
 ## [0.16.0] - 2026-11-15
 
 ### Added
