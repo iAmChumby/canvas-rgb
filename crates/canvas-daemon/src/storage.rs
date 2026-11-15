@@ -216,6 +216,12 @@ impl SchemaVersioned for canvas_proto::stack::StackFile {
     }
 }
 
+impl SchemaVersioned for canvas_proto::pattern::PatternsFile {
+    fn schema_version(&self) -> u32 {
+        self.schema_version
+    }
+}
+
 impl SchemaVersioned for DisplaysFile {
     fn schema_version(&self) -> u32 {
         self.schema_version
@@ -280,6 +286,9 @@ pub fn snapshot(home: &Path, label: &str) -> std::io::Result<PathBuf> {
         LIGHTS_FILE,
         SCENES_FILE,
         canvas_proto::stack::STACKS_FILE,
+        // The patterns travel with the bundle too (0.16.0): an import replaces them, so the ones
+        // this machine had must stay recoverable.
+        canvas_proto::pattern::PATTERNS_FILE,
         DISPLAYS_FILE,
         PERIPHERALS_FILE,
         "fans.last.toml",

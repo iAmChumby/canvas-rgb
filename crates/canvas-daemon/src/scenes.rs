@@ -517,7 +517,7 @@ impl Drop for LightWatch {
 fn build_effect(app: &App, id: &str, group: Option<&str>) -> Result<(Box<dyn Effect>, InputNeeds), String> {
     app.scene.builds.fetch_add(1, Ordering::SeqCst);
     let built = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-        crate::create_effect(&app.user_effects, &app.stacks, id, group)
+        crate::create_effect(&app.user_effects, &app.stacks, &app.patterns, id, group)
     }))
     .map_err(|payload| format!("the effect panicked while it loaded: {}", crate::panic_payload_text(&payload)))??;
     let schema = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -535,7 +535,7 @@ pub fn needs_of(app: &App, scene: &Scene) -> InputNeeds {
     let mut needs = InputNeeds::default();
     for group in &scene.groups {
         if let Plays::Effect { effect, .. } = &group.plays {
-            if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+            if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, effect) {
                 needs.screen |= schema.needs.screen;
                 needs.audio |= schema.needs.audio;
             }
@@ -994,7 +994,7 @@ impl Takeover<'_> {
 fn group_needs(app: &App, group: &Group) -> InputNeeds {
     let mut needs = InputNeeds::default();
     if let Plays::Effect { effect, .. } = &group.plays {
-        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, effect) {
+        if let Some(schema) = crate::api::effects::find_schema(&app.user_effects, &app.stacks, &app.patterns, effect) {
             needs.screen |= schema.needs.screen;
             needs.audio |= schema.needs.audio;
         }
