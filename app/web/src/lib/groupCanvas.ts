@@ -31,7 +31,7 @@ export interface CanvasLight {
   zone_index: number;
   arrangement: Arrangement;
   reversed: boolean;
-  /** The box the light's LEDs cover: its slot, or the cells of its matrix. */
+  /** The box the light covers: its slot (a strip's whole height), or the cells of its matrix. */
   box: CanvasBox;
   /** Each sampled LED's centre, in canvas units. */
   leds: { x: number; y: number }[];
@@ -87,9 +87,13 @@ export function buildGroupCanvas(
       boxes.push({ x: led.bounds[0], y: led.bounds[1], width: led.bounds[2] - led.bounds[0], height: led.bounds[3] - led.bounds[1] });
       leds.push({ x: led.center_x, y: led.center_y });
     }
-    const box = unionBox(boxes);
+    const cells = unionBox(boxes);
     // A light with no sampled LED has no place on the canvas: the daemon draws it black.
-    if (!box) continue;
+    if (!cells) continue;
+    // A strip's LEDs read small square cells at mid-height (#372), but the light still owns its
+    // whole slot: the frame, the hit test and the area picker keep the full height.
+    const box =
+      view.light.arrangement === "strip" ? { ...cells, y: 0, height: CANVAS_HEIGHT } : cells;
     out.push({
       id: view.light.id,
       label: view.label,

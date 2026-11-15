@@ -153,11 +153,14 @@ describe("the arrangement planner (#310)", () => {
         Math.abs(lastCell!.bounds[2] - CANVAS_WIDTH),
         `${light.light} ends at ${lastCell!.bounds[2]}`,
       ).toBeLessThan(0.05);
-      expect(Math.abs(firstCell.bounds[1]), `${light.light} starts at ${firstCell.bounds[1]}`).toBeLessThan(
-        0.05,
-      );
+      // Vertically the cell is a square centred at mid-height, at most the slot (#372).
+      const cellH = Math.min(CANVAS_WIDTH / light.leds.length, CANVAS_HEIGHT);
       expect(
-        Math.abs(lastCell!.bounds[3] - CANVAS_HEIGHT),
+        Math.abs(firstCell.bounds[1] - (CANVAS_HEIGHT - cellH) / 2),
+        `${light.light} starts at ${firstCell.bounds[1]}`,
+      ).toBeLessThan(0.05);
+      expect(
+        Math.abs(lastCell!.bounds[3] - (CANVAS_HEIGHT + cellH) / 2),
         `${light.light} ends at ${lastCell!.bounds[3]}`,
       ).toBeLessThan(0.05);
     }
