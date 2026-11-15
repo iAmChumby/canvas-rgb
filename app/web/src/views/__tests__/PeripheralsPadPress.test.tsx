@@ -303,7 +303,10 @@ describe("the controller drawing", () => {
   });
 
   it("lights the button a paddle is mapped to, and never the paddle itself", async () => {
-    const values = { ...fixture.values, "profile-1-paddle-1": { type: "choice", value: "a" } };
+    const values: Record<string, PropValue> = {
+      ...fixture.values,
+      "profile-1-paddle-1": { type: "choice", value: "a" },
+    };
     await open(detailWith(values));
 
     // The browser reports the paddle after the standard seventeen buttons.

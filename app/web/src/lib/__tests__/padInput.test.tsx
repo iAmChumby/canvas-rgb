@@ -49,7 +49,8 @@ afterEach(() => {
 /** The frames the page was given, one for each change. */
 function Harness({ pad, seen }: { pad: StubPad; seen: PadFrame[] }) {
   const input = usePadInput({ getGamepads: () => [pad.read()] });
-  useEffect(() => input.register((frame) => seen.push(frame)), [input.register]);
+  const register = input.register;
+  useEffect(() => register((frame) => seen.push(frame)), [register, seen]);
   return <div data-testid="status">{input.status}</div>;
 }
 
