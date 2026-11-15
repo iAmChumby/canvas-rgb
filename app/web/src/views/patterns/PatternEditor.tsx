@@ -52,19 +52,37 @@ export function PatternEditor({
   const [problem, setProblem] = useState<string | null>(null);
   /** A save that did not land: the document on the lights is not the saved one. */
   const [saveProblem, setSaveProblem] = useState<string | null>(null);
+  /** How many answers in a row said this editor's stroke is not on the lights. */
+  const notApplied = useRef(0);
 
   /** Puts a stroke on the lights: the page's epoch and the next sequence. */
   const send = useCallback(
     async (document: Pattern) => {
       seq.current += 1;
       const at = seq.current;
+      /**
+       * True when the answer says the lights are another page's. A stroke the daemon answered
+       * `applied: false` because a newer stroke of this same page went first is not another
+       * window: the answer names the epoch that owns the draft, and only a different one is a
+       * supersede. When it names none, two answers in a row are the only sign there is.
+       */
+      const anotherWindow = (answer: { applied?: boolean; active?: boolean; epoch?: string | null }): boolean => {
+        if (answer.applied !== false && answer.active !== false) {
+          notApplied.current = 0;
+          return false;
+        }
+        notApplied.current += 1;
+        if (answer.epoch !== undefined && answer.epoch !== null) return answer.epoch !== epoch;
+        return notApplied.current >= 2;
+      };
       try {
         const answer = await api.putPatternDraft({ pattern: document, epoch, seq: at });
         if (!alive.current) return;
         if (answer.heartbeat_ms > 0) heartbeat.current = answer.heartbeat_ms;
-        if (answer.applied === false) setDaemonNote(SUPERSEDED);
+        if (anotherWindow(answer)) setDaemonNote(SUPERSEDED);
         else if (answer.note) setDaemonNote(answer.note);
-        if (answer.active === false) setDaemonNote(SUPERSEDED);
+        // A stroke that landed makes an earlier "another window has the lights" note stale.
+        else if (answer.applied === true) setDaemonNote(null);
         setProblem(null);
       } catch (error) {
         if (!alive.current) return;

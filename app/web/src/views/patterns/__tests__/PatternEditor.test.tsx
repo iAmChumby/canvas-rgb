@@ -284,6 +284,55 @@ describe("the pattern editor", () => {
     expect(screen.getByText("No unsaved changes")).toBeTruthy();
   });
 
+  it("another window's draft is named, and a stroke of this page's own is not", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    const our = api.putPatternDraft.mock.calls[0]![0].epoch as string;
+    // The daemon names the epoch that owns the lights: one that is not this editor's is another
+    // window.
+    api.putPatternDraft.mockResolvedValue(status({ applied: false, epoch: "fedcba9876543210" }));
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText(/another window has the lights/)).toBeTruthy();
+
+    // A later stroke that the daemon answers as superseded by a newer one of this same page is
+    // this editor's own older stroke, so the note goes: the newest colours are on the lights.
+    api.putPatternDraft.mockResolvedValue(status({ applied: true, epoch: our }));
+    fireEvent.pointerDown(canvas, at(dots[1]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.queryByText(/another window has the lights/)).toBeNull();
+  });
+
+  it("a stroke overtaken by a newer stroke of this page is not another window", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    const our = api.putPatternDraft.mock.calls[0]![0].epoch as string;
+    api.putPatternDraft.mockResolvedValue(status({ applied: false, epoch: our }));
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.queryByText(/another window has the lights/)).toBeNull();
+  });
+
+  it("a draft the answer cannot place is another window's after two in a row", async () => {
+    const { canvas, dots } = show();
+    await settle();
+    // No epoch in the answer: the page cannot tell whose draft it is, so one stroke that did not
+    // land is not enough to say another window has the lights.
+    api.putPatternDraft.mockResolvedValue(status({ applied: false, active: false }));
+    fireEvent.pointerDown(canvas, at(dots[0]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.queryByText(/another window has the lights/)).toBeNull();
+
+    fireEvent.pointerDown(canvas, at(dots[1]!));
+    fireEvent.pointerUp(canvas, { pointerId: 1 });
+    await frames();
+    expect(screen.getByText(/another window has the lights/)).toBeTruthy();
+  });
+
   it("closing the editor deletes the draft", async () => {
     const { view } = show();
     await settle();
