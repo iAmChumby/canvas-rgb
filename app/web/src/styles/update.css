@@ -103,41 +103,120 @@
   margin: var(--s2) 0 0;
 }
 
-/* The release notes: a short bar marks each item, in the tone of its heading. */
-.notes-list {
+/* The release notes (#365): the release's own heading, then one labelled section per changelog
+   heading. Inside a section the items are grouped by the area they name, and each area is written
+   once as a small label. The issue links sit in their own column at the right edge of the panel,
+   so a list is scanned down its right edge instead of read through, and every sentence is held to
+   a readable measure. Tokens only. */
+.notes-release {
   display: flex;
-  flex-direction: column;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--s1) var(--s3);
+}
+
+.notes-version {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--t22);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+}
+
+.notes-date {
+  color: var(--mute);
+  font-size: var(--t14);
+}
+
+.notes-date::before {
+  content: "·";
+  margin-right: var(--s2);
+  color: var(--line-2);
+}
+
+.notes-sec {
+  margin-top: var(--s5);
+  padding-top: var(--s4);
+  border-top: 1px solid var(--line);
+}
+
+/* The release's heading is the first thing in the card: no rule above the first section. */
+.notes-sec:first-of-type {
+  margin-top: var(--s4);
+  padding-top: 0;
+  border-top: 0;
+}
+
+.notes-sec-title {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--t14);
+  font-weight: 600;
+}
+
+/* The mark takes its section's tone; the words stay ink, so the label reads as a label. */
+.notes-sec-title::before {
+  content: "";
+  flex: 0 0 auto;
+  width: 10px;
+  height: 2px;
+  border-radius: 2px;
+  background: var(--tone, var(--line-2));
+}
+
+/* The groups of one section: the items that name no area first, then each area in the order it
+   first appears. The groups are held apart; the items inside one sit close together. */
+.notes-groups {
+  display: grid;
+  gap: var(--s4);
+  margin-top: var(--s3);
+}
+
+/* The area a group belongs to: mono small capitals, like the title printed on the case. */
+.notes-area {
+  margin-bottom: var(--s2);
+  color: var(--mute);
+  font-size: var(--t14);
+  font-weight: 500;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.notes-list {
+  display: grid;
   gap: var(--s2);
   margin: 0;
   padding: 0;
   list-style: none;
-  color: var(--dim);
-  font-size: var(--t15);
 }
 
-.notes-list li {
-  position: relative;
-  padding-left: var(--s4);
+/* The sentence keeps its measure; the issue column sits at the right edge of the panel. */
+.notes-item {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: var(--s3);
+  align-items: start;
+  justify-content: space-between;
+}
+
+.notes-text {
+  max-width: 64ch;
+  color: var(--dim);
+  font-size: var(--t15);
+  line-height: 1.5;
   text-wrap: pretty;
 }
 
-.notes-list li::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 0.7em;
-  width: 8px;
-  height: 2px;
-  background: var(--tone, var(--line-2));
-}
-
-.notes-list strong {
+.notes-text strong {
   color: var(--ink);
   font-weight: 600;
 }
 
 /* The same chip as `.effect-hint code` (motion.css): its padding, radius, ground and colour. */
-.notes-list code {
+.notes-text code {
   padding: 1px 4px;
   border-radius: 4px;
   background: var(--sunk);
@@ -145,6 +224,79 @@
   font-family: var(--fm);
   font-size: var(--t14);
   overflow-wrap: anywhere;
+}
+
+.notes-link,
+.notes-issue {
+  color: var(--a1);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
+.notes-issue:hover,
+.notes-link:hover {
+  color: var(--ink);
+}
+
+/* The issue links of one item: their own column, one row, right-aligned. */
+.notes-refs {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--s1);
+  padding-top: 2px;
+}
+
+.notes-ref {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border-radius: 6px;
+  background: var(--sunk);
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1;
+  text-decoration: none;
+  white-space: nowrap;
+  transition:
+    color var(--dur-fast) var(--ease),
+    background var(--dur-fast) var(--ease);
+}
+
+.notes-ref:hover {
+  color: var(--ink);
+  background: var(--raised);
+}
+
+.notes-ref:focus-visible,
+.notes-issue:focus-visible,
+.notes-link:focus-visible {
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* A phone has no room for the second column: the chips sit at the end of the sentence, in the
+   same block, so an item is one thing to read and not two rows. */
+@media (max-width: 520px) {
+  .notes-item {
+    display: block;
+    text-wrap: pretty;
+  }
+
+  .notes-text {
+    display: inline;
+  }
+
+  .notes-refs {
+    display: inline;
+    margin-left: var(--s2);
+    padding-top: 0;
+  }
+
+  .notes-ref + .notes-ref {
+    margin-left: var(--s1);
+  }
 }
 
 /* The key while the update runs: fully lit and still, so the progress reads as the key's own

@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Popover } from "@/components/Popover";
-import { ColorPicker, type ColorSwatch } from "@/components/ColorPicker";
+import { ColorPicker, type ColorChangeMode, type ColorSwatch } from "@/components/ColorPicker";
 import { motionOffNow, readCssMs } from "@/lib/motion";
 import { BLACK_HEX, isHex } from "@/lib/color";
 
@@ -35,24 +35,20 @@ export function ColorField({
   const lastRef = useRef(hex);
   const escapedRef = useRef(false);
 
-  // The wipe (issue #187, rule 9): `base` is the colour beneath the swatch,
-  // and a wipe overlay carries the incoming colour over it. The overlay is
-  // mounted only from the first real change after mount (first mount is
-  // static), and it is keyed by a wipe generation, not by the colour: while
-  // a wipe runs, further changes update its target without remounting it, so
-  // dragging in the picker does not replay the reveal on every intermediate
-  // hex. When the wipe ends the incoming colour is promoted to the base. The
-  // change bookkeeping runs while rendering (the Crossfade pattern, as in
-  // Popover/Select); only the promotion waits, in an effect.
+  // The wipe (issue #187, rule 9): `base` is the colour beneath the swatch, and a wipe overlay
+  // carries the incoming colour over it. The reveal belongs to a change that lands once (#369):
+  // it plays for a quick swatch or a hex typed and committed - the two choices the picker names -
+  // and never while the colour is changing continuously. A drag in the picker, a held key, a
+  // preset applied, a run of values from the daemon: the new colour simply shows. Reduced motion
+  // never wipes at all. The decision for the picker's own changes is made in its callback; a
+  // value from anywhere else is taken in while rendering (the Crossfade pattern, as in
+  // Popover/Select), and only the promotion waits, in an effect.
   const [wipe, setWipe] = useState({ base: hex, target: hex, wiping: false, wipeId: 0, lastHex: hex });
   if (hex !== wipe.lastHex) {
-    if (hex === wipe.base) {
-      setWipe({ ...wipe, lastHex: hex, wiping: false });
-    } else if (!wipe.wiping) {
-      setWipe({ base: wipe.base, target: hex, lastHex: hex, wiping: true, wipeId: wipe.wipeId + 1 });
-    } else {
-      setWipe({ ...wipe, target: hex, lastHex: hex });
-    }
+    // The field did not make this change: a preset, a reset, a value read back, a feed from the
+    // daemon. It cannot tell one of those from a run of them, and a pulse is worse than no
+    // reveal, so the colour shows at once.
+    setWipe({ base: hex, target: hex, wiping: false, wipeId: wipe.wipeId, lastHex: hex });
   }
   useEffect(() => {
     if (!wipe.wiping) return;
@@ -87,6 +83,21 @@ export function ColorField({
     onCommit?.(lastRef.current);
   };
 
+  // The picker says how each value was made. A change that lands once reveals; a value of a
+  // stream shows at once and mounts no overlay, so nothing replays (#369).
+  const change = (next: string, mode: ColorChangeMode) => {
+    const target = next.toLowerCase();
+    setWipe((w) => {
+      if (target === w.lastHex) return w;
+      if (mode === "continuous" || motionOffNow() || target === w.base) {
+        return { base: target, target, wiping: false, wipeId: w.wipeId, lastHex: target };
+      }
+      if (w.wiping) return { ...w, target, lastHex: target };
+      return { ...w, target, wiping: true, wipeId: w.wipeId + 1, lastHex: target };
+    });
+    onChange(next);
+  };
+
   return (
     <span className="color">
       <button
@@ -108,7 +119,7 @@ export function ColorField({
       </button>
       <span className="color-hex">{hex}</span>
       <Popover anchor={swatchRef} open={open} onClose={close} label={label} className="picker-pop">
-        <ColorPicker label={label} value={hex} swatches={swatches} onChange={onChange} />
+        <ColorPicker label={label} value={hex} swatches={swatches} onChange={change} />
       </Popover>
     </span>
   );

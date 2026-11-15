@@ -15,6 +15,12 @@ beforeAll(() => {
     addEventListener: () => {},
     removeEventListener: () => {},
   })) as unknown as typeof window.matchMedia;
+  // jsdom has no ResizeObserver; the popover watches its own size with one.
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
 });
 
 const schema: PropertySchema = {
@@ -70,6 +76,43 @@ describe("PropertyControls (#106)", () => {
     expect(setup({ angle: { type: "number", value: -90 } }).dial.getAttribute("aria-valuenow")).toBe("0");
     cleanup();
     expect(setup({ angle: { type: "number", value: 405 } }).dial.getAttribute("aria-valuenow")).toBe("0");
+  });
+});
+
+describe("PropertyControls: the colour picker keeps one size (#369)", () => {
+  afterEach(cleanup);
+
+  const colours: PropertySchema = {
+    ...schema,
+    properties: [
+      { key: "one", label: "Colour 1", kind: { type: "color", default: "#ff0000" } },
+      { key: "two", label: "Colour 2", kind: { type: "color", default: "#00ff00" } },
+    ],
+  };
+
+  it("offers the other colour of the effect for every colour in the field", () => {
+    const { container, rerender } = render(
+      <PropertyControls
+        schema={colours}
+        values={{ one: { type: "color", value: "#111111" } }}
+        onChange={vi.fn()}
+      />,
+    );
+    // The picker opens over the field: the other colour of the effect is one click away.
+    fireEvent.click(container.querySelector(".color-swatch") as HTMLButtonElement);
+    const swatches = () => document.querySelectorAll(".picker-swatch").length;
+    expect(swatches()).toBe(1);
+    // The colour in the field becomes the other colour. The list keeps its length - the swatch
+    // that matches is marked, not dropped - so the picker does not grow and shrink (#369).
+    rerender(
+      <PropertyControls
+        schema={colours}
+        values={{ one: { type: "color", value: "#00ff00" } }}
+        onChange={vi.fn()}
+      />,
+    );
+    expect(swatches()).toBe(1);
+    expect(document.querySelector('.picker-swatch[aria-current="true"]')).toBeTruthy();
   });
 });
 

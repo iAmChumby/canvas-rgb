@@ -7,7 +7,6 @@ import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
 import { UpdatesShape } from "@/components/LoadShapes";
 import { canUpdate, openLogsFolder, tauriHost, updateCheckNow, updateDismissUpdated, updateInstall, updateSkip } from "@/lib/host";
-import { parseInline, parseNotes, type NoteBlock } from "@/lib/releaseNotes";
 import { messageOf } from "@/lib/errors";
 import { refreshUpdate, useSnap } from "@/lib/store";
 import { sendUpdate } from "@/lib/updateActions";
@@ -26,39 +25,11 @@ import {
 } from "@/lib/updateWords";
 import type { UpdateState } from "@/proto/UpdateState";
 import { PageTitle } from "@/shell/PageHeader";
+import { WhatsNewPanel } from "@/views/updates/ReleaseNotes";
 
 /** How long the tray has to answer before the page says that it did not. */
 export const TRAY_TIMEOUT_MS = 5000;
 
-/** The panel title tone: what a heading of the changelog means, as a token. */function noteTone(title: string): string {
-  const t = title.toLowerCase();
-  if (t.startsWith("add")) return "var(--ok)";
-  if (t.startsWith("fix")) return "var(--warn)";
-  if (t.startsWith("remov") || t.startsWith("deprecat") || t.startsWith("secur")) return "var(--down)";
-  return "var(--work)";
-}
-
-function NotePanel({ block }: { block: NoteBlock }) {
-  return (
-    <Panel title={block.title}>
-      <ul className="notes-list" style={{ "--tone": noteTone(block.title) } as React.CSSProperties}>
-        {block.items.map((item, i) => (
-          <li key={i}>
-            {parseInline(item).map((p, j) =>
-              p.kind === "code" ? (
-                <code key={j}>{p.text}</code>
-              ) : p.kind === "strong" ? (
-                <strong key={j}>{p.text}</strong>
-              ) : (
-                <span key={j}>{p.text}</span>
-              ),
-            )}
-          </li>
-        ))}
-      </ul>
-    </Panel>
-  );
-}
 
 /** The Update now key, and the 4 px slot under it that fills from real bytes. No spinner. */
 function UpdateKey({ u }: { u: UpdateState }) {
@@ -176,7 +147,6 @@ export function UpdatesView() {
 
   const avail = u.available;
   const notesOf = avail ?? u.updated_to ?? seenNotes;
-  const blocks = notesOf ? parseNotes(notesOf.notes) : [];
   const acts = canUpdate();
   const busy = isInstalling(u);
 
@@ -263,14 +233,9 @@ export function UpdatesView() {
         </div>
 
         <div className="stack rd-updates-notes">
-          {notesOf &&
-            (blocks.length > 0 ? (
-              blocks.map((b, i) => <NotePanel key={`${b.title}-${i}`} block={b} />)
-            ) : (
-              <Panel title="What's new">
-                <p className="mute">No notes were published for {notesOf.version}.</p>
-              </Panel>
-            ))}
+          {notesOf && (
+            <WhatsNewPanel version={notesOf.version} date={notesOf.pub_date} notes={notesOf.notes} />
+          )}
         </div>
       </div>
     </div>
