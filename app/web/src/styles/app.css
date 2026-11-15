@@ -26,6 +26,14 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* A control does not take the page's face on its own: the browser's stylesheet gives a button
+   its own default font, so a key that says nothing about its type is drawn in the system font
+   and not in the app's (#373). Every button is set in the app's own face here; a control that
+   wants another one says so in its own class. */
+button {
+  font-family: var(--fu);
+}
+
 h1,
 h2,
 h3,
@@ -1301,6 +1309,18 @@ button.chip:hover {
 .chip-html {
   color: var(--a2);
   border-color: var(--a2);
+}
+
+/* The tab key: the type every tab in the app is set in (#373). The scene keys on Scenes and the
+   device keys on Peripherals are the same kind of control, so they are set the same way: the
+   app's own face, at the body size, in one weight, with no letter spacing of its own. A page
+   sets its own box, never its own font, so a tab cannot drift from the tab beside it. */
+.tab-key {
+  font-family: var(--fu);
+  font-size: var(--t15);
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1;
 }
 
 .badge {
@@ -6288,7 +6308,6 @@ button.chip:hover {
 }
 
 .peripheral-name {
-  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6453,6 +6472,11 @@ button.chip:hover {
   border-radius: var(--r-sm);
   background: var(--raised);
   color: var(--ink);
+  /* The chip's own type, the same as the shared chip's (#373): the browser's stylesheet gives
+     a button its own default font, so a chip that says nothing about its type is drawn in the
+     system font. The figure inside it keeps the mono face. */
+  font: inherit;
+  font-size: var(--t14);
   cursor: pointer;
   box-shadow: 0 var(--skirt-h) 0 var(--skirt);
   transition:

@@ -50,10 +50,8 @@ afterEach(() => {
   vi.useRealTimers();
 });
 
-const MOUSE_OFF_TEXT =
-  "canvas-rgb reads this mouse's settings only when you turn reading on; reading pauses the mouse for a few seconds.";
-const PAD_OFF_TEXT =
-  "canvas-rgb reads this controller's settings only when you turn reading on; reading pauses the controller for a few seconds.";
+const MOUSE_OFF_TEXT = "The mouse's settings are read only when you turn reading on.";
+const PAD_OFF_TEXT = "The controller's settings are read only when you turn reading on.";
 
 /**
  * A mouse with a DPI section, a lighting colour and a read-only profile. `reads` is its access;
