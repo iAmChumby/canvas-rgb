@@ -42,7 +42,8 @@
 //! cargo test -p canvas-core --release -- --ignored --nocapture --test-threads=1 bench_engine_scene_<name>
 //! ```
 //!
-//! where `<name>` is `builtin`, `ink_drop`, `palette_knife` or `wet_smear`.
+//! where `<name>` is `builtin`, `ink_drop`, `palette_knife`, `wet_smear` or `pattern` (20 groups,
+//! every one playing a pattern of 60 LEDs).
 
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -50,6 +51,7 @@ use std::time::{Duration, Instant};
 
 use canvas_proto::color::{Rgb8, WhiteBalance};
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
+use canvas_proto::pattern::{BuiltOn, Frame, Motion, Pattern};
 use canvas_proto::props::Props;
 use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
 use canvas_proto::traits::{
@@ -99,6 +101,46 @@ impl FrameSink for CountSink {
 struct WatchedHtml {
     inner: canvas_html::HtmlEffect,
     dropped: Arc<AtomicBool>,
+}
+
+/// A pattern as an effect: the engine reads its colours and draws nothing.
+struct PatternBench {
+    pattern: Pattern,
+}
+
+impl Effect for PatternBench {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: self.pattern.id.clone(),
+            name: self.pattern.name().to_string(),
+            description: "A benchmark pattern.".into(),
+            needs: Default::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, _canvas: &mut Canvas, _inputs: &Inputs) {}
+
+    fn as_pattern(&self) -> Option<&Pattern> {
+        Some(&self.pattern)
+    }
+}
+
+/// A pattern of `LEDS` colours built on one `LEDS`-LED strip, no two colours alike: every group
+/// fits it exactly, so the run costs the pattern path and not a stretch.
+fn bench_pattern() -> Pattern {
+    let colors = (0..LEDS).map(|i| Rgb8::new((i % 256) as u8, (i / 256) as u8, 1)).collect();
+    Pattern {
+        id: "pattern:bench".into(),
+        built_on: BuiltOn { led_count: LEDS, arrangement: Arrangement::Strip, grid: None },
+        frames: vec![Frame { colors, hold: 0, extra: Default::default() }],
+        motion: Motion::none(),
+        extra: Default::default(),
+    }
 }
 
 impl Effect for WatchedHtml {
@@ -173,9 +215,19 @@ fn percentile(sorted: &[f32], q: f32) -> f32 {
 
 /// One run: a spawned engine with the scene set, 20 groups, `k` of them playing `html`.
 fn run_once(html: Option<(&str, &str)>, k: usize) -> Run {
+    run_with(html, k, false)
+}
+
+/// One run with every group playing a pattern of `LEDS` LEDs.
+fn run_pattern_once() -> Run {
+    run_with(None, 0, true)
+}
+
+fn run_with(html: Option<(&str, &str)>, k: usize, all_pattern: bool) -> Run {
     let devices: Vec<DeviceInfo> = (0..GROUPS).map(device).collect();
     let lights: Vec<Light> = devices.iter().map(light).collect();
     let flags: Vec<Arc<AtomicBool>> = (0..k).map(|_| Arc::new(AtomicBool::new(false))).collect();
+    let pattern = all_pattern.then(bench_pattern);
 
     let engine = spawn_core(EngineSettings {
         fps: FPS,
@@ -202,13 +254,17 @@ fn run_once(html: Option<(&str, &str)>, k: usize) -> Run {
         .iter()
         .enumerate()
         .map(|(i, light)| {
-            let effect: Box<dyn Effect> = match html {
-                Some((id, source)) if i < k => Box::new(WatchedHtml {
-                    inner: canvas_html::HtmlEffect::from_source(id, source, &Props::new())
-                        .expect("the stock HTML effect loads"),
-                    dropped: Arc::clone(&flags[i]),
-                }),
-                _ => canvas_effects::create("aurora").expect("aurora builds"),
+            let effect: Box<dyn Effect> = if let Some(pattern) = &pattern {
+                Box::new(PatternBench { pattern: pattern.clone() })
+            } else {
+                match html {
+                    Some((id, source)) if i < k => Box::new(WatchedHtml {
+                        inner: canvas_html::HtmlEffect::from_source(id, source, &Props::new())
+                            .expect("the stock HTML effect loads"),
+                        dropped: Arc::clone(&flags[i]),
+                    }),
+                    _ => canvas_effects::create("aurora").expect("aurora builds"),
+                }
             };
             EngineGroup {
                 id: format!("g{i}"),
@@ -292,6 +348,28 @@ fn bench(name: &str, html: Option<(&str, &str)>) {
 #[ignore]
 fn bench_engine_scene_builtin() {
     bench("aurora only", None);
+}
+
+/// 20 groups, every one playing a pattern of 60 LEDs: the pattern path's cost per group.
+#[test]
+#[ignore]
+fn bench_engine_scene_pattern() {
+    let mut p95s = Vec::new();
+    let mut clean = true;
+    for run_number in 1..=RUNS {
+        let run = run_pattern_once();
+        println!(
+            "patterns | {GROUPS} groups, all pattern | run {run_number} | {FRAMES} frames | mean {:.3} ms | p95 {:.3} ms | max {:.3} ms | late frames {}",
+            run.mean, run.p95, run.max, run.late,
+        );
+        p95s.push(run.p95);
+        clean &= run.p95 <= BAR_MS;
+    }
+    let worst = p95s.iter().copied().fold(f32::MIN, f32::max);
+    println!(
+        "patterns | worst p95 of {RUNS} runs {worst:.3} ms | {} the {BAR_MS} ms bar",
+        if clean { "at or under, in all runs," } else { "OVER, in at least one run," },
+    );
 }
 
 #[test]

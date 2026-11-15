@@ -50,7 +50,7 @@ fn monotonic_clock() -> Clock {
     Arc::new(move || started.elapsed())
 }
 
-/// What a draft is: one HTML file (#2) or a whole stack (#95, D95.4.5).
+/// What a draft is: one HTML file (#2), a whole stack (#95, D95.4.5), or a pattern (0.16.0).
 #[derive(Clone)]
 pub enum SlotKind {
     /// `draft:` + the source hash. Never a saved effect's id.
@@ -66,12 +66,17 @@ pub enum SlotKind {
         structure: String,
         live: LiveStack,
     },
+    /// A pattern as the editor holds it: the id it is for. Its colours are on the engine, in the
+    /// group the takeover made ([`canvas_proto::pattern::PATTERN_EDIT_GROUP`]); a stroke of the
+    /// same pattern swaps that group's effect and builds nothing.
+    Pattern { pattern_id: String },
 }
 
 /// A draft on the lights, with what it took over from.
 #[derive(Clone)]
 pub struct Slot {
-    /// `draft:` + the source hash for HTML, or `stack:` + the name for a stack.
+    /// `draft:` + the source hash for HTML, `stack:` + the name for a stack, or `draft:` + the
+    /// pattern's id (`draft:pattern:Intake`) for a pattern.
     pub id: String,
     pub props: Props,
     /// The effect the draft took over: the id a group's `Plays` names, when the draft is that
@@ -88,11 +93,12 @@ pub struct Slot {
 
 impl Slot {
     /// The identity a `DraftStatus` reports: the source hash for HTML, the structure hash for a
-    /// stack (neither is a props or live-value hash, D95.4.6).
+    /// stack, the pattern's id for a pattern (D95.4.6).
     pub fn source_hash(&self) -> &str {
         match &self.kind {
             SlotKind::Html { source_hash, .. } => source_hash,
             SlotKind::Stack { structure, .. } => structure,
+            SlotKind::Pattern { pattern_id } => pattern_id,
         }
     }
 
@@ -100,7 +106,7 @@ impl Slot {
     pub fn html_source(&self) -> Option<&str> {
         match &self.kind {
             SlotKind::Html { source, .. } => Some(source),
-            SlotKind::Stack { .. } => None,
+            SlotKind::Stack { .. } | SlotKind::Pattern { .. } => None,
         }
     }
 
@@ -108,7 +114,7 @@ impl Slot {
     fn stored_source_hash(&self) -> Option<&str> {
         match &self.kind {
             SlotKind::Html { source_hash, .. } => Some(source_hash),
-            SlotKind::Stack { .. } => None,
+            SlotKind::Stack { .. } | SlotKind::Pattern { .. } => None,
         }
     }
 
@@ -124,7 +130,7 @@ impl Slot {
     /// The structure hash, for a stack draft.
     pub fn structure(&self) -> Option<&str> {
         match &self.kind {
-            SlotKind::Html { .. } => None,
+            SlotKind::Html { .. } | SlotKind::Pattern { .. } => None,
             SlotKind::Stack { structure, .. } => Some(structure),
         }
     }
@@ -256,6 +262,12 @@ impl Draft {
     /// A new draft is on the lights: the last ending's note is no longer news.
     fn clear_ending(&self) {
         *self.last_note.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+
+    /// The note `status` reports while a draft runs: the editor's own (the pattern editor has no
+    /// device of its kind), until the next ending replaces it. `None` clears it.
+    fn set_note(&self, note: Option<String>) {
+        *self.last_note.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = note;
     }
 
     /// The note from the last ending, until the next draft starts.
@@ -905,6 +917,60 @@ fn stack_takeover_builder(
     })
 }
 
+/// The note a pattern draft's answer carries when the daemon holds no device of its kind: the
+/// draft still starts, and every light stays at the scene's dim level.
+pub const NO_DEVICE_NOTE: &str = "no device of this kind is connected";
+
+/// Puts a pattern on the lights as the draft (0.16.0).
+///
+/// Every light of the pattern's kind shows it, and the active scene's other lights stay on at
+/// [`canvas_proto::pattern::PATTERN_EDIT_DIM_PERCENT`] of their brightness
+/// ([`crate::scenes::apply_pattern_takeover`]). A stroke of the same pattern swaps one group's
+/// effect and builds nothing, so painting is cheap.
+///
+/// The epoch order is the stack draft's: a PUT from an older epoch, or a sequence the route
+/// already saw, is superseded and answers `false`. A pattern that breaks a rule is a 422 before
+/// anything is touched, so a running draft is left alone.
+pub async fn put_pattern(
+    app: &Arc<App>,
+    pattern: &canvas_proto::pattern::Pattern,
+    epoch: &str,
+    seq: u64,
+) -> Result<bool, PutError> {
+    canvas_proto::pattern::validate_pattern(pattern)
+        .map_err(|error| PutError::Validation(error.to_string()))?;
+
+    let _gate = app.draft.gate.lock().await;
+    expire_locked(app).await;
+    // The newest page owns the slot: an older epoch, or a sequence the route already saw, is
+    // superseded (D95.4.4's rule, the same watermark the stack draft uses).
+    if !app.draft.epochs.offer(epoch, seq) {
+        return Ok(false);
+    }
+
+    let lit = crate::scenes::apply_pattern_takeover(app, pattern)
+        .await
+        .map_err(PutError::Internal)?;
+    // The lease starts when the stroke reaches the lights, not when the request arrived.
+    let lease_until = app.draft.now() + canvas_proto::consts::DRAFT_LEASE;
+    let slot = Slot {
+        // The editor's own slot, not a saved effect's id: `draft:` + the pattern's id.
+        id: format!("{}{}", canvas_proto::consts::DRAFT_ID_PREFIX, pattern.id),
+        props: Props::new(),
+        effect_id: Some(pattern.id.clone()),
+        groups: vec![canvas_proto::pattern::PATTERN_EDIT_GROUP.to_string()],
+        lease_until,
+        kind: SlotKind::Pattern { pattern_id: pattern.id.clone() },
+    };
+    *app.draft.lock() = Some(slot.clone());
+    app.draft.clear_ending();
+    app.draft.set_note((lit == 0).then(|| NO_DEVICE_NOTE.to_string()));
+    // A pattern draft started after an onboarding greeting outranks its restore.
+    app.transient.cancel();
+    tracing::info!(draft = %slot.id, seq, lit, "a pattern draft is on the lights");
+    Ok(true)
+}
+
 /// What `DELETE /effects/draft` did.
 pub struct StopOutcome {
     /// False when the page that asked does not own the draft: nothing ended, and the draft of
@@ -1207,7 +1273,9 @@ pub fn status(app: &App) -> canvas_proto::api::DraftStatus {
     match app.draft.snapshot() {
         Some(slot) => {
             let (epoch, seq) = match (&slot.kind, watermark) {
-                (SlotKind::Stack { .. }, Some((epoch, seq))) => (Some(epoch), Some(seq)),
+                (SlotKind::Stack { .. } | SlotKind::Pattern { .. }, Some((epoch, seq))) => {
+                    (Some(epoch), Some(seq))
+                }
                 _ => (None, None),
             };
             canvas_proto::api::DraftStatus {

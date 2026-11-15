@@ -1121,6 +1121,7 @@ fn scene_needs(rig: &Rig, scene: &Scene) -> canvas_proto::InputNeeds {
         let Some(schema) = canvas_daemon::api::effects::find_schema(
             &rig.app.user_effects,
             &rig.app.stacks,
+            &rig.app.patterns,
             effect,
         ) else {
             continue;

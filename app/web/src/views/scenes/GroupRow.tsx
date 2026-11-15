@@ -5,10 +5,11 @@ import { useRef, useState } from "react";
 import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button, IconButton } from "@/components/Button";
+import { Chip } from "@/components/Chip";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Popover } from "@/components/Popover";
 import { Slider } from "@/components/Slider";
-import { EffectPicker } from "@/views/scenes/EffectPicker";
+import { EffectPicker, isPatternEffect } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
@@ -112,6 +113,9 @@ export function GroupRow({
   onBrightness,
 }: GroupRowProps) {
   const off = group.plays.type === "off";
+  // A pattern plays the whole pattern on every device of the group, so the mode means nothing
+  // for it: the words are kept for a screen reader's silence and the cell's own width.
+  const pattern = effectId !== undefined && isPatternEffect(effectId);
   const ModeIcon = group.mode === "flow_across" ? ArrowsHorizontal : CopySimple;
   const [picking, setPicking] = useState(false);
   const pickerAnchor = useRef<HTMLButtonElement>(null);
@@ -152,8 +156,14 @@ export function GroupRow({
           onClick={() => setPicking((v) => !v)}
         >
           <span className="one-line">{effectName}</span>
+          {pattern && <Chip>Pattern</Chip>}
         </Button>
-        <span className={`${s.mode} fig`} title={MODE_WORDS[group.mode]}>
+        <span
+          className={`${s.mode} fig`}
+          title={pattern ? undefined : MODE_WORDS[group.mode]}
+          aria-hidden={pattern || undefined}
+          data-hidden={pattern ? "true" : undefined}
+        >
           <ModeIcon size={16} aria-hidden="true" />
           <span className={`one-line ${s.modeText}`}>{MODE_WORDS[group.mode]}</span>
         </span>

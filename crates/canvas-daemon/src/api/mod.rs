@@ -13,6 +13,7 @@ pub mod effects;
 pub mod fans;
 pub mod lights;
 pub mod output;
+pub mod patterns;
 pub mod peripherals;
 pub mod preview;
 pub mod scenes;
@@ -95,6 +96,14 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::CHAIN_SETUP_LIGHT, post(chains::light_setup))
         .route(routes::CHAIN_SETUP_EMPTY, post(chains::empty_setup))
         .route(routes::STACKS, get(stacks::list_stacks))
+        .route(routes::PATTERNS, get(patterns::list_patterns))
+        .route(
+            routes::PATTERN,
+            get(patterns::get_pattern)
+                .put(patterns::put_pattern)
+                .delete(patterns::delete_pattern)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
         .route(
             routes::STACK_PREVIEW,
             put(stack_preview::put_stack_preview)
