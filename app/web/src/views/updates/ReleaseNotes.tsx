@@ -1,6 +1,7 @@
 "use client";
 
 import { useId, useMemo, type CSSProperties, type MouseEvent } from "react";
+import { notify } from "@/components/Notify";
 import { Panel } from "@/components/Panel";
 import { openExternal } from "@/lib/host";
 import {
@@ -23,11 +24,11 @@ function sectionTone(title: string): string {
 
 /**
  * Opens an address outside the app. The opener can refuse — the tray's plugin may be missing, or
- * the address may be one it will not take — and that must not leave a rejected promise behind, so
- * the refusal is swallowed here.
+ * the address may be one it will not take — and that must not leave a rejected promise behind.
+ * The person pressed a link and nothing opened, so the page says so.
  */
 function openAway(url: string): void {
-  void openExternal(url).catch(() => undefined);
+  void openExternal(url).catch(() => notify("The link could not be opened in your browser.", "warn"));
 }
 
 /** An issue reference: the address is real, and a press opens it in the person's browser. */

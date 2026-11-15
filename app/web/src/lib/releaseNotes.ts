@@ -130,8 +130,12 @@ function readArea(text: string): { area: string | null; rest: string } {
   return { area: prefix, rest: text.slice(colon + 1).replace(/^\s+/, "") };
 }
 
-/** A sentence starts with a capital: the area's name is gone, so the rest of the line does. */
+/**
+ * A sentence starts with a capital: the area's name is gone, so the rest of the line does. A line
+ * that starts with code (a command) keeps its words as written: the command is the first word.
+ */
 function sentenceCase(parts: Inline[]): Inline[] {
+  if (parts[0]?.kind !== "text") return parts;
   for (let i = 0; i < parts.length; i++) {
     const p = parts[i];
     if (!p || p.kind !== "text") continue;

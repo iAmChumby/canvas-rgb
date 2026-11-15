@@ -27,6 +27,12 @@ describe("the area a line names", () => {
     expect(rn.parseItem("Command line: `canvas-rgb status` names the active scene").area).toBe("Command line");
   });
 
+  it("keeps the words as written when the line starts with a command", () => {
+    const item = rn.parseItem("Command line: `canvas-rgb scenes list` shows the scenes");
+    expect(item.area).toBe("Command line");
+    expect(words(item)).toBe("canvas-rgb scenes list shows the scenes");
+  });
+
   it("reads no area when five words come before the colon", () => {
     const item = rn.parseItem("The app opens on Scenes: your groups, their live lights and what each one plays.");
     expect(item.area).toBeNull();

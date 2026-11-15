@@ -5,6 +5,13 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+
+const notes = vi.hoisted(() => ({ notify: vi.fn(() => "id") }));
+vi.mock("@/components/Notify", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("@/components/Notify")>()),
+  notify: notes.notify,
+}));
+
 import { WhatsNewPanel } from "@/views/updates/ReleaseNotes";
 
 const changelog = readFileSync(resolve(process.cwd(), "../../CHANGELOG.md"), "utf8").replace(/\r\n/g, "\n");
@@ -161,7 +168,10 @@ describe("the notes' links", () => {
       render(<WhatsNewPanel version="0.16.0" date={PUB_DATE} notes={NOTES} />);
       fireEvent.click(screen.getAllByRole("link", { name: "Issue #338 on GitHub" })[0] as HTMLElement);
       await waitFor(() => expect(invoke).toHaveBeenCalled());
-      await new Promise((r) => setTimeout(r, 20));
+      // The refusal is told to the person, not dropped.
+      await waitFor(() =>
+        expect(notes.notify).toHaveBeenCalledWith("The link could not be opened in your browser.", "warn"),
+      );
     } finally {
       process.off("unhandledRejection", onNode);
       window.removeEventListener("unhandledrejection", onWindow);

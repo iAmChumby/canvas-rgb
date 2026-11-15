@@ -179,7 +179,7 @@
 .notes-area {
   margin-bottom: var(--s2);
   color: var(--mute);
-  font-size: 13px;
+  font-size: var(--t14);
   font-weight: 500;
   letter-spacing: 0.08em;
   text-transform: uppercase;
