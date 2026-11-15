@@ -139,7 +139,10 @@ function sentenceCase(parts: Inline[]): Inline[] {
     if (!letter) return parts;
     const at = letter.index;
     const out = [...parts];
-    out[i] = { ...p, text: p.text.slice(0, at) + p.text[at].toUpperCase() + p.text.slice(at + 1) };
+    out[i] = {
+      ...p,
+      text: p.text.slice(0, at) + p.text.charAt(at).toUpperCase() + p.text.slice(at + 1),
+    };
     return out;
   }
   return parts;

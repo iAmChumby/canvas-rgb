@@ -196,13 +196,14 @@
 /* The sentence keeps its measure; the issue column sits at the right edge of the panel. */
 .notes-item {
   display: grid;
-  grid-template-columns: minmax(0, 64ch) auto;
+  grid-template-columns: minmax(0, 1fr) auto;
   column-gap: var(--s3);
   align-items: start;
   justify-content: space-between;
 }
 
 .notes-text {
+  max-width: 64ch;
   color: var(--dim);
   font-size: var(--t15);
   line-height: 1.5;
