@@ -730,6 +730,30 @@ scroll, so the content was clipped and unreachable.
   Chromium: the static export is served on loopback, the menu opened, every row hovered in turn,
   and each box measured with `getBoundingClientRect()` before and after (the samples for #367 and
   #369 sit beside the screenshots in `.build/screens`, in the main checkout, which is gitignored).
+- A fifth mechanism, same cause: a control's type comes from a different source than its
+  neighbours' type, so two controls of the same kind are drawn in two different faces.
+  [#373](https://github.com/iAmChumby/canvas-rgb/issues/373): the device keys on Peripherals were
+  a raw `<button>` with no font of its own, so the browser's stylesheet gave them its default face
+  (Arial 13.33 px) while the scene keys on Scenes, the same kind of control, were set in the app's
+  own face at the body size.
+- **Class fix, fourth mechanism:** the type of a tab is one shared class, `.tab-key`
+  (`app/web/src/styles/app.css`), and no page sets a tab's font for itself: the scene key's own
+  `font:` shorthand is gone (`app/web/src/views/scenes/scenes.module.css`), and the device key
+  takes the shared class (`app/web/src/views/PeripheralsView.tsx`). One rule keeps every control
+  in the app's face (`button { font-family: var(--fu) }`): a `<button>` does not inherit a font from
+  the page, so a control that says nothing about its type is drawn in the system font. The sibling
+  search found 29 such controls on the nine pages (the device key, the DPI chip, and the icon
+  buttons, switches and swatches); after the fix a headless pass over every page finds 0 (the
+  number fields stay in the app's mono face, which is the app's rule for figures).
+- **The check, fourth mechanism** (`app/web/src/views/__tests__/PeripheralTabsType.test.tsx`):
+  it renders both tab rows — the Peripherals device row and the Scenes strip — and asks *every*
+  button in each for `.tab-key`, so a new raw `<button>` tab fails it (proved by adding one to
+  each row, watching both cases fail, and taking it out again). The pinned "+" key in the Scenes
+  strip is the one button that is not a tab, and it is named as the exception. The rule that
+  `.tab-key` declares, and the `button` reset, are read from `app.css` instead of rendered:
+  jsdom has no stylesheet. The "0 controls in the system face" number above is *not* this test's
+  job — it comes from the headless scan over every page's controls, which is the check to re-run
+  after a control is added.
 
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 
