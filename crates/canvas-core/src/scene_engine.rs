@@ -1125,4 +1125,211 @@ mod tests {
         let canvas = Canvas::with_scale(SCENE_RENDER_SCALE);
         assert_eq!((canvas.width, canvas.height), (80, 50));
     }
+
+    // ------------------------------------------------ strip sampling (#372)
+
+    /// Purple Rain, the scene that showed only the microphone moving: Density 252, Speed
+    /// 247, drops #552b7b over #1b003c.
+    fn purple_rain_props() -> Props {
+        use canvas_proto::props::PropValue;
+        Props::from([
+            ("drop_color".to_string(), PropValue::Color(Rgb8::new(0x55, 0x2b, 0x7b))),
+            ("background".to_string(), PropValue::Color(Rgb8::new(0x1b, 0x00, 0x3c))),
+            ("density".to_string(), PropValue::Number(252.0)),
+            ("speed".to_string(), PropValue::Number(247.0)),
+        ])
+    }
+
+    /// Frames run before the ranges are counted: 4 s at 30 fps, past Rain's fill-in.
+    const RAIN_WARMUP_FRAMES: usize = 120;
+
+    /// A group of `ids` (each a strip), playing seeded Purple Rain in `mode`.
+    fn rain_scene(ids: &[&str], mode: GroupMode) -> SceneState {
+        let members: Vec<String> = ids.iter().map(|id| format!("{id}#z0")).collect();
+        let member_refs: Vec<&str> = members.iter().map(String::as_str).collect();
+        let mut scene = state_playing(
+            &member_refs,
+            ids.iter().map(|id| light(id)).collect(),
+            Some(Box::new(canvas_effects::rain::Rain::with_seed(372))),
+            100,
+        );
+        scene.groups[0].mode = mode;
+        scene.groups[0].pending_props = Some(purple_rain_props());
+        scene
+    }
+
+    /// Runs `frames` frames at 30 fps and returns, for each LED of each device in `ids`
+    /// (id and LED count), the per channel (min, max) it showed.
+    fn run_ranges(
+        scene: &mut SceneState,
+        runner: &mut SceneRunner,
+        devices: &[DeviceInfo],
+        ids: &[(&str, u32)],
+        frames: usize,
+    ) -> Vec<Vec<[(u8, u8); 3]>> {
+        let mut ranges: Vec<Vec<[(u8, u8); 3]>> =
+            ids.iter().map(|(_, leds)| vec![[(255u8, 0u8); 3]; *leds as usize]).collect();
+        // Rain starts with its drops above the canvas and needs about three seconds to fill it;
+        // those frames show the fill-in, not the steady rain, so they are run and not counted.
+        for _ in 0..RAIN_WARMUP_FRAMES {
+            frame(scene, runner, devices);
+        }
+        for _ in 0..frames {
+            frame(scene, runner, devices);
+            for ((id, leds), device) in ids.iter().zip(ranges.iter_mut()) {
+                for (range, c) in device.iter_mut().zip(take(runner, id, *leds)) {
+                    for (slot, v) in range.iter_mut().zip([c.r, c.g, c.b]) {
+                        slot.0 = slot.0.min(v);
+                        slot.1 = slot.1.max(v);
+                    }
+                }
+            }
+        }
+        ranges
+    }
+
+    /// The largest per-channel range of each LED.
+    fn widest(ranges: &[[(u8, u8); 3]]) -> Vec<u8> {
+        ranges
+            .iter()
+            .map(|r| r.iter().map(|(lo, hi)| hi.saturating_sub(*lo)).max().unwrap_or(0))
+            .collect()
+    }
+
+    /// Every LED of an 8-LED strip in "each its own" must move with Rain's thin lines. Before
+    /// the fix a strip LED averaged a full-height column holding about 19 streaks and its
+    /// range was about 15 of 255.
+    #[test]
+    fn rain_animates_every_led_of_a_strip_in_each_its_own() {
+        let mut scene = rain_scene(&["d1"], GroupMode::EachItsOwn);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+        let ranges = run_ranges(&mut scene, &mut runner, &devices, &[("d1", 8)], 120).remove(0);
+        for (led, r) in ranges.iter().enumerate() {
+            eprintln!(
+                "#372 each-its-own LED {led}: r {}..{} g {}..{} b {}..{}",
+                r[0].0, r[0].1, r[1].0, r[1].1, r[2].0, r[2].1
+            );
+        }
+        let widest = widest(&ranges);
+        eprintln!("#372 each-its-own widest channel range per LED: {widest:?}");
+        for (led, w) in widest.iter().enumerate() {
+            assert!(*w >= 30, "LED {led} moved only {w} of 255 in 120 frames: {widest:?}");
+        }
+    }
+
+    /// Flow across with two strips: each strip is half the canvas and still animates.
+    #[test]
+    fn rain_still_animates_two_strips_in_flow_across() {
+        let mut scene = rain_scene(&["d1", "d2"], GroupMode::FlowAcross);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8), strip_device("d2", 8)];
+        let ranges = run_ranges(&mut scene, &mut runner, &devices, &[("d1", 8), ("d2", 8)], 120);
+        let all: Vec<u8> = ranges.iter().flat_map(|r| widest(r)).collect();
+        eprintln!("#372 flow-across widest channel range per LED: {all:?}");
+        for (led, w) in all.iter().enumerate() {
+            assert!(*w >= 30, "LED {led} moved only {w} of 255 in 120 frames: {all:?}");
+        }
+    }
+
+    /// An effect that paints a left-to-right ramp, the same on every row.
+    struct HorizontalRamp;
+
+    impl Effect for HorizontalRamp {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test-ramp".into(),
+                name: "Ramp".into(),
+                description: "A horizontal gradient.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            for y in 0..canvas.height {
+                for x in 0..canvas.width {
+                    let t = x as f32 / (canvas.width - 1) as f32;
+                    canvas.set(x, y, [t, 1.0 - t, 0.25 + 0.5 * t]);
+                }
+            }
+        }
+    }
+
+    /// A gradient that is constant along y reads the same whatever height the cell has: the
+    /// new square cell gives what the old full-height band gave, within 1/255.
+    #[test]
+    fn a_horizontal_gradient_reads_the_same_in_a_square_cell_and_a_full_height_band() {
+        for mode in [GroupMode::EachItsOwn, GroupMode::FlowAcross] {
+            let mut scene = state_playing(
+                &["d1#z0", "d2#z0"],
+                vec![light("d1"), light("d2")],
+                Some(Box::new(HorizontalRamp)),
+                100,
+            );
+            scene.groups[0].mode = mode;
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 12), strip_device("d2", 12)];
+            frame(&mut scene, &mut runner, &devices);
+            let now = take(&mut runner, "d1", 12);
+            // The old definition: the same cells stretched to the canvas' whole height.
+            let group = &runner.groups[0];
+            let mut band = group.plan.lights[0].leds.clone();
+            let height = group.canvas.height as f32;
+            for led in &mut band {
+                led.bounds[1] = 0.0;
+                led.bounds[3] = height;
+            }
+            let mut before = Vec::new();
+            sampling::sample_leds(
+                &group.canvas.pixels,
+                group.canvas.width,
+                group.canvas.height,
+                &band,
+                SCENE_SAMPLING,
+                &mut before,
+            );
+            assert_eq!(now.len(), before.len());
+            for (led, (a, b)) in now.iter().zip(&before).enumerate() {
+                for (x, y) in [(a.r, b.r), (a.g, b.g), (a.b, b.b)] {
+                    assert!(x.abs_diff(y) <= 1, "{mode:?} LED {led}: {a:?} against {b:?}");
+                }
+            }
+        }
+    }
+
+    /// A 240-LED strip has cells narrower than one logical unit: every cell is still a real
+    /// area inside the canvas, with finite numbers.
+    #[test]
+    fn a_240_led_strip_has_no_nan_no_stray_cell_and_no_empty_cell() {
+        for mode in [GroupMode::EachItsOwn, GroupMode::FlowAcross] {
+            for arrangement in [Arrangement::Strip, Arrangement::Ring] {
+                let mut l = light("d1");
+                l.arrangement = arrangement;
+                let plan = build_group_plan(
+                    &[l.id.clone()],
+                    mode,
+                    &[l],
+                    &[strip_device("d1", 240)],
+                );
+                let leds = &plan.lights[0].leds;
+                assert_eq!(leds.len(), 240);
+                for (i, led) in leds.iter().enumerate() {
+                    let [x0, y0, x1, y1] = led.bounds;
+                    let what = format!("{mode:?} {arrangement:?} LED {i}: {led:?}");
+                    assert!(
+                        [led.center_x, led.center_y, x0, y0, x1, y1].iter().all(|v| v.is_finite()),
+                        "{what}"
+                    );
+                    assert!(x0 >= 0.0 && y0 >= 0.0, "{what}");
+                    assert!(x1 <= 320.0 && y1 <= 200.0, "{what}");
+                    assert!(x1 - x0 > 0.0 && y1 - y0 > 0.0, "zero area: {what}");
+                }
+            }
+        }
+    }
 }
