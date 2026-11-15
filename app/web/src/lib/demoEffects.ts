@@ -232,7 +232,7 @@ export function parseUserEffect(id: string, html: string): DemoEffect {
   return {
     schema,
     defaults,
-    summary: { id, name, description, needs: schema.needs, favorite: false },
+    summary: { id, name, description, needs: schema.needs, favorite: false, kind: "canvas" },
   };
 }
 

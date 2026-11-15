@@ -84,8 +84,8 @@ beforeEach(() => {
   api.effectThumbnail.mockResolvedValue(new ArrayBuffer(0));
   patchSnap({
     effects: [
-      { id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false },
-      { id: "other", name: "Other", description: "", needs: { screen: false, audio: false }, favorite: false },
+      { id: "aurora", name: "Aurora", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" },
+      { id: "other", name: "Other", description: "", needs: { screen: false, audio: false }, favorite: false, kind: "canvas" },
     ],
     effectsError: null,
     effectsFailed: [],
