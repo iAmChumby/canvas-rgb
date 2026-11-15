@@ -849,8 +849,11 @@ class is the handmade *clock*, not the words.
 - **Class fix:** done (#366). Every toast goes through `notify()` and has one anatomy: icon, title,
   optional description, optional action, close. How long a message stays is `NOTE_MS` or `lifeMs`, never a
   component's timer. `app/web/src/test/toastGuard.test.ts` reads every source file and fails on a second
-  `sonner` import, a second toast body (`notify-*`), a `<Banner>` outside the shell and the scene list, or
-  a `setTimeout` of two seconds or more that clears a state to `null`/`false`. `Banner` is a standing notice
+  `sonner` import (through `from`, `import()` or `require()`), a second toast body (`notify-*`), a
+  `<Banner>` outside the shell and the scene list, or a `setTimeout` that clears a message: a state set to
+  `null`, `false`, `undefined` or `""`, or a call named `clear*`, `dismiss*` or `hide*`, on a delay of two
+  seconds or more, a delay named by a `const` in the same file, or a delay the file does not define.
+  `Banner` is a standing notice
   and no longer takes a leaving fade. Sibling search for the timer shape (`git grep -n "setTimeout" app/web/src`)
   found no other message clock: the rest are debounces, animation flags, retries and the fixture's install
   walk. Left: the fan service's "Fan control is unavailable" notice stays a banner because it reports a
