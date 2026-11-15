@@ -9,7 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
-- Colour picker: the swatch keeps one size while the hex code changes, and the picker no longer grows and shrinks as you drag a colour. (#369)
+- Colour picker: the colour square no longer pulses while you drag a colour. (#369)
 
 ## [0.16.0] - 2026-11-15
 

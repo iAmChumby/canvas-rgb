@@ -58,13 +58,29 @@ function rules(text: string, at = ""): Rule[] {
 
 const appCss = rules(read("src/styles/app.css").replace(/\/\*[\s\S]*?\*\//g, ""));
 const scenesCss = rules(read("src/views/scenes/scenes.module.css").replace(/\/\*[\s\S]*?\*\//g, ""));
-const motionCss = rules(read("src/styles/motion.css").replace(/\/\*[\s\S]*?\*\//g, ""));
 
 const decl = (r: Rule, prop: string) =>
   new RegExp(String.raw`(^|[;\s])` + prop + String.raw`\s*:\s*([^;]+)`).exec(r.body)?.[2]?.trim();
 const forSelector = (list: Rule[], sel: string) => list.filter((r) => r.selectors.includes(sel));
 const hasDecl = (list: Rule[], prop: string, value?: string) =>
   list.some((r) => (value === undefined ? decl(r, prop) !== undefined : decl(r, prop) === value));
+
+/**
+ * A width that names a real size, not a keyword that hands the size back to the content. The
+ * point of the guards below is that a box keeps one size, and `auto`, `none`, `fit-content`,
+ * `max-content` and `min-content` all make it as big as what it holds - the bug itself. A
+ * `min()`/`clamp()`/`calc()` with a length in it is a real size.
+ */
+const CONTENT_SIZES = ["auto", "none", "fit-content", "max-content", "min-content", "inherit", "initial", "unset", "revert"];
+const realSize = (value: string | undefined): boolean => {
+  if (value === undefined) return false;
+  const v = value.trim().toLowerCase();
+  if (CONTENT_SIZES.includes(v)) return false;
+  return /(\d+\.?\d*)(px|ch|em|rem|%)/.test(v);
+};
+/** The message a failing check gives: the declaration it read, so a keyword is named. */
+const sizeWords = (sel: string, value: string | undefined) =>
+  `${sel} is sized by its content (width: ${value ?? "nothing"})`;
 
 describe("the Scenes effect picker keeps one width (#367)", () => {
   it("the row's PLAYING column is a fixed track, not one that grows with the tag", () => {
@@ -80,13 +96,38 @@ describe("the Scenes effect picker keeps one width (#367)", () => {
     }
   });
 
+  it("a long effect name stays on one line, and the hint keeps its two", () => {
+    // An HTML effect's name is its file's `<title>`: the spine caps a group at 40 characters and a
+    // stack at 60, but an effect's own name has no cap, so the row has to hold any name. One line
+    // with an ellipsis, and the whole name on the row's title.
+    const name = forSelector(scenesCss, ".pickName");
+    expect(name.length).toBeGreaterThan(0);
+    for (const r of name) {
+      expect(decl(r, "white-space"), ".pickName wraps, so a long name makes its row taller").toBe("nowrap");
+      expect(decl(r, "text-overflow")).toBe("ellipsis");
+      expect(decl(r, "overflow")).toBe("hidden");
+    }
+    expect(read("src/views/scenes/EffectPicker.tsx")).toContain("title={effect.name}");
+    // The line under the list names the effect, so a long name is what grows the menu instead.
+    // Two lines are reserved and the rest is clamped, whatever the name.
+    const hint = forSelector(scenesCss, ".pickerHint");
+    expect(hint.length).toBeGreaterThan(0);
+    for (const r of hint) {
+      expect(decl(r, "min-height"), ".pickerHint reserves a minimum, so a long name grows it").toBeUndefined();
+      expect(decl(r, "height")).toBe("2.6em");
+      expect(decl(r, "-webkit-line-clamp")).toBe("2");
+    }
+  });
+
   it("the menu is as wide as the design says, not as wide as its content", () => {
     // The panel is as wide as its content, so the line under the list - which says what the
-    // lights show - moved the whole menu. The width is set in the stylesheet instead.
+    // lights show - moved the whole menu. The width is set in the stylesheet instead, and it is
+    // a size, not a keyword that hands the width back to the content (#369 review).
     const popover = forSelector(scenesCss, ".pickerPopover");
     expect(popover.length).toBeGreaterThan(0);
     for (const r of popover) {
-      expect(decl(r, "width"), ".pickerPopover has no width").toBeDefined();
+      const width = decl(r, "width");
+      expect(realSize(width), sizeWords(".pickerPopover", width)).toBe(true);
       expect(decl(r, "max-width"), ".pickerPopover has no max-width").toBeDefined();
     }
   });
@@ -137,16 +178,20 @@ describe("the class guard: a menu or a figure that changes must not change a box
 
   it("every panel whose content is live has one width", () => {
     // A panel as wide as its content moves whenever that content changes. These panels hold
-    // readings and figures that change while they are open, so their width is set.
+    // readings and figures that change while they are open, so their width is set - and set to a
+    // size, not to a keyword that would hand the width back to the content (#369 review).
     for (const [list, sel] of [
       [appCss, ".strip-details"],
       [appCss, ".audio-popover"],
-      [motionCss, ".fan-bulk-popover"],
+      [appCss, ".fan-bulk-popover"],
       [scenesCss, ".pickerPopover"],
     ] as [Rule[], string][]) {
       const found = forSelector(list, sel);
       expect(found.length, `${sel} has no rule`).toBeGreaterThan(0);
-      for (const r of found) expect(decl(r, "width"), `${sel} has no width`).toBeDefined();
+      for (const r of found) {
+        const width = decl(r, "width");
+        expect(realSize(width), sizeWords(sel, width)).toBe(true);
+      }
     }
   });
 });

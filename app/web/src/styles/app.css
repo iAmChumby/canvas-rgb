@@ -1590,11 +1590,6 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
-/* The compact form (UI finding 4): the Source select sits in the panel head's
-   action slot, and one row under it carries the state words, the Listen
-   toggle and the "Show readings" button. The panel is about 90 px tall and
-   its height does not change between states: the state line is one line,
-   ellipsised, in a fixed-height row. */
 /* The audio readings panel. The readings are live - the meter's cells, the figure in dB and the
    bands - so the panel has one width (#369): a panel as wide as its content moves every time a
    reading changes. */
@@ -1602,6 +1597,17 @@ button.chip:hover {
   width: min(320px, calc(100vw - 16px));
 }
 
+/* The fan bulk panel hangs under the Fans page's key: the duty each header runs at is live, so
+   the panel has one width too (#369). Its list and rows stay with the rest of the fan bulk. */
+.fan-bulk-popover {
+  width: min(320px, calc(100vw - 16px));
+}
+
+/* The compact form (UI finding 4): the Source select sits in the panel head's
+   action slot, and one row under it carries the state words, the Listen
+   toggle and the "Show readings" button. The panel is about 90 px tall and
+   its height does not change between states: the state line is one line,
+   ellipsised, in a fixed-height row. */
 .audio-compact {
   padding-block: var(--s2);
 }

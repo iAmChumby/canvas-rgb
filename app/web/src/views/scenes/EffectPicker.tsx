@@ -349,6 +349,7 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     key={effect.id}
                     type="button"
                     className={s.pickRow}
+                    title={effect.name}
                     data-blocked={blocked ? "true" : undefined}
                     aria-pressed={held}
                     aria-disabled={blocked || undefined}

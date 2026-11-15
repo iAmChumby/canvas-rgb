@@ -697,7 +697,8 @@ scroll, so the content was clipped and unreachable.
   [#367](https://github.com/iAmChumby/canvas-rgb/issues/367): the Scenes effect picker is a panel as
   wide as its content, and the line under its list says what the lights show, so pointing at a row
   moved the whole menu (313.45 px at rest to 373.52 px over "Screen Ambience", measured on
-  origin/main with the script below). Two things took the space: that line, whose words change with
+  origin/main in headless Chromium: the static export served on loopback, the menu opened and each
+  row hovered in turn). Two things took the space: that line, whose words change with
   the pointer, and the PLAYING tag, which is drawn only on the row the group plays and moves to the
   row under the pointer while the preview runs - the row's third grid track was `auto`, so the tag
   took the room it needed.
@@ -705,6 +706,11 @@ scroll, so the content was clipped and unreachable.
   width of its own, and the picker around it changed size while a colour was dragged: the quick
   swatches are the other colours of the same effect, and the one that matched the colour in the
   field was dropped, so the row of swatches lost an entry and the popover lost 34 px of height.
+  The size was one cause; the report - "the colour square looks like it shrinks and grows every
+  time the hex code changes" - was the reveal from #187. The swatch's box never moved (32 px; the
+  picker's preview 24 px, measured every frame of a two-second drag), but the mask animation ran
+  again for every value of the stream: the preview was keyed by the colour and replayed about
+  every 180 ms. A reveal belongs to a change that lands once; a stream shows the colour at once.
 - **Class fix, fourth mechanism:** done (#367, #369). The picker's PLAYING tag sits in a fixed grid
   track (64 px) and the menu's width is set in the stylesheet
   (`app/web/src/views/scenes/scenes.module.css`), so every row and the menu itself are one size in
@@ -720,8 +726,10 @@ scroll, so the content was clipped and unreachable.
   (the duty each header runs at). Left, with the reason: every other panel is as wide as its
   content, which cannot change while the panel is open - the failed-files list, the fan profiles,
   the New effect menu, Play on, the scene and group menus, the effect and mask choosers (already
-  `width: 320px`) and the "add to another group" menu. The layout itself is measured by a headless
-  Chromium script (`.build/screens/367-369/measure-367-369.mjs`, in the main checkout).
+  `width: 320px`) and the "add to another group" menu. The layout itself is measured in headless
+  Chromium: the static export is served on loopback, the menu opened, every row hovered in turn,
+  and each box measured with `getBoundingClientRect()` before and after (the samples for #367 and
+  #369 sit beside the screenshots in `.build/screens`, in the main checkout, which is gitignored).
 
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 
