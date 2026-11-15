@@ -1738,8 +1738,10 @@ button.chip:hover {
 
 /* The colour wipe (issue #187, rule 9): the new colour reveals over the old
    one behind a circular mask opening from the swatch's centre, instead of a
-   flat cross-fade. The overlay is keyed by the wipe, not the colour; the base
-   takes the new colour when the wipe ends. With motion off it opens at once. */
+   flat cross-fade. It is drawn only for a change that lands once (#369): a
+   stream of values - a drag, a held key, a feed from the daemon - shows the
+   new colour at once and mounts no overlay, so nothing replays. With motion
+   off it is never drawn. */
 @keyframes swatch-wipe {
   from {
     clip-path: circle(0% at 50% 50%);
@@ -1865,11 +1867,11 @@ button.chip:hover {
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--c);
-  /* The same mask reveal as the swatch (issue #187, rule 9): the preview is
-     keyed by the colour in ColorPicker, so each change wipes in. */
+  /* The same mask reveal as the swatch (issue #187, rule 9). It is added for a change that
+     lands once (#369); a drag or a held key updates the colour in place and never adds it. */
 }
 
-/* The picker's preview wipes only on a change, never when the picker opens. */
+/* The picker's preview wipes only on a choice made once, never when the picker opens. */
 .picker-preview.wipe {
   animation: swatch-wipe var(--dur) var(--ease) both;
 }

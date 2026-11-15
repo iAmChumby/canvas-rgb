@@ -546,19 +546,18 @@ describe("rule 9: a colour change reveals with a mask wipe (#187)", () => {
     }
   });
 
-  it("while a wipe is running, further changes update the wipe target without remounting it", () => {
+  it("a run of changes lands at once: the colour shows, and no second reveal is mounted", () => {
     vi.useFakeTimers();
     try {
       const { container, rerender } = render(<ColorField value="#ff0000" label="Colour" onChange={() => {}} />);
       rerender(<ColorField value="#00ff00" label="Colour" onChange={() => {}} />);
       const swipe = container.querySelector(".color-wipe") as HTMLElement;
       expect(swipe).toBeTruthy();
+      // A second value in the same breath is the same move, not a new choice (#369): the reveal
+      // is dropped rather than replayed, and the colour shows at once. A run of values - a drag,
+      // a held key, a feed from the daemon - must never pulse the swatch.
       rerender(<ColorField value="#0000ff" label="Colour" onChange={() => {}} />);
-      expect(container.querySelector(".color-wipe")).toBe(swipe);
-      expect((container.querySelector(".color-wipe") as HTMLElement).dataset.hex).toBe("#0000ff");
-      act(() => {
-        vi.advanceTimersByTime(300);
-      });
+      expect(container.querySelector(".color-wipe")).toBeNull();
       const swatch = container.querySelector(".color-swatch") as HTMLElement;
       expect(swatch.style.getPropertyValue("--c")).toBe("#0000ff");
     } finally {

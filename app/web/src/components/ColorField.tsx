@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties } from "react";
 import { Popover } from "@/components/Popover";
-import { ColorPicker, type ColorSwatch } from "@/components/ColorPicker";
+import { ColorPicker, type ColorChangeMode, type ColorSwatch } from "@/components/ColorPicker";
 import { motionOffNow, readCssMs } from "@/lib/motion";
 import { BLACK_HEX, isHex } from "@/lib/color";
 
@@ -35,23 +35,44 @@ export function ColorField({
   const lastRef = useRef(hex);
   const escapedRef = useRef(false);
 
-  // The wipe (issue #187, rule 9): `base` is the colour beneath the swatch,
-  // and a wipe overlay carries the incoming colour over it. The overlay is
-  // mounted only from the first real change after mount (first mount is
-  // static), and it is keyed by a wipe generation, not by the colour: while
-  // a wipe runs, further changes update its target without remounting it, so
-  // dragging in the picker does not replay the reveal on every intermediate
-  // hex. When the wipe ends the incoming colour is promoted to the base. The
-  // change bookkeeping runs while rendering (the Crossfade pattern, as in
-  // Popover/Select); only the promotion waits, in an effect.
-  const [wipe, setWipe] = useState({ base: hex, target: hex, wiping: false, wipeId: 0, lastHex: hex });
+  // The wipe (issue #187, rule 9): `base` is the colour beneath the swatch, and a wipe overlay
+  // carries the incoming colour over it. The reveal belongs to a change that lands once (#369):
+  // it plays for a quick swatch, a preset applied or a hex typed and committed, and never while
+  // the colour is changing continuously - a drag in the picker, a held key, a run of values from
+  // the daemon - where the new colour simply shows. Reduced motion never wipes at all. The
+  // change bookkeeping runs while rendering (the Crossfade pattern, as in Popover/Select); only
+  // the promotion waits, in an effect.
+  const [wipe, setWipe] = useState<{
+    base: string;
+    target: string;
+    wiping: boolean;
+    wipeId: number;
+    lastHex: string;
+    /** When the change before this one landed, or null before the first one. */
+    at: number | null;
+  }>({ base: hex, target: hex, wiping: false, wipeId: 0, lastHex: hex, at: null });
+  // How the picker said the next value was made. A value from anywhere else is "external": a
+  // preset, a reset, a read back from the daemon - the field cannot tell one of those from a run
+  // of them, so a run is what the clock below is for.
+  const pendingRef = useRef<{ hex: string; mode: ColorChangeMode } | null>(null);
   if (hex !== wipe.lastHex) {
-    if (hex === wipe.base) {
-      setWipe({ ...wipe, lastHex: hex, wiping: false });
-    } else if (!wipe.wiping) {
-      setWipe({ base: wipe.base, target: hex, lastHex: hex, wiping: true, wipeId: wipe.wipeId + 1 });
+    const pending = pendingRef.current;
+    pendingRef.current = null;
+    const mode = pending && pending.hex === hex ? pending.mode : "external";
+    const at = performance.now();
+    const gap = readCssMs("--dur", 180);
+    const streaming =
+      motionOffNow() ||
+      mode === "continuous" ||
+      (mode === "external" && wipe.at !== null && at - wipe.at < gap);
+    if (streaming || hex === wipe.base) {
+      // The new colour shows at once: no overlay, so nothing replays.
+      setWipe({ base: hex, target: hex, wiping: false, wipeId: wipe.wipeId, lastHex: hex, at });
+    } else if (wipe.wiping) {
+      // A second choice landing inside a running reveal retargets it: one reveal per move.
+      setWipe({ ...wipe, target: hex, lastHex: hex, at });
     } else {
-      setWipe({ ...wipe, target: hex, lastHex: hex });
+      setWipe({ ...wipe, target: hex, wiping: true, wipeId: wipe.wipeId + 1, lastHex: hex, at });
     }
   }
   useEffect(() => {
@@ -87,6 +108,13 @@ export function ColorField({
     onCommit?.(lastRef.current);
   };
 
+  // The picker's own changes say what they are; the field passes them on and remembers the mode
+  // for the value that comes back.
+  const change = (next: string, mode: ColorChangeMode) => {
+    pendingRef.current = { hex: next.toLowerCase(), mode };
+    onChange(next);
+  };
+
   return (
     <span className="color">
       <button
@@ -108,7 +136,7 @@ export function ColorField({
       </button>
       <span className="color-hex">{hex}</span>
       <Popover anchor={swatchRef} open={open} onClose={close} label={label} className="picker-pop">
-        <ColorPicker label={label} value={hex} swatches={swatches} onChange={onChange} />
+        <ColorPicker label={label} value={hex} swatches={swatches} onChange={change} />
       </Popover>
     </span>
   );

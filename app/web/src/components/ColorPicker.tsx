@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { hexToHsv, hsvToHex, parseHex, type Hsv } from "@/lib/color";
-import { readCssMs } from "@/lib/motion";
+import { motionOffNow, readCssMs } from "@/lib/motion";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /** A colour the effect already uses, offered as a one-click choice. */
@@ -10,6 +10,13 @@ export interface ColorSwatch {
   hex: string;
   label?: string;
 }
+
+/**
+ * How a colour reached the field. `continuous` is one value of a stream - a pointer drag on the
+ * square or the strip, a held arrow key - and `discrete` is one choice made once: a quick swatch
+ * clicked, a hex typed and committed. The reveal belongs to the second kind only (#369).
+ */
+export type ColorChangeMode = "continuous" | "discrete";
 
 /** How far one arrow press moves a handle, in percent. */
 const FINE = 1;
@@ -31,7 +38,7 @@ export function ColorPicker({
   label: string;
   value: string;
   swatches?: ColorSwatch[];
-  onChange: (hex: string) => void;
+  onChange: (hex: string, mode: ColorChangeMode) => void;
 }) {
   const [hsv, setHsv] = useState<Hsv>(() => hexToHsv(value));
   const [draft, setDraft] = useState<string | null>(null);
@@ -41,15 +48,23 @@ export function ColorPicker({
   const queuedRef = useRef<string | null>(null);
   const sentRef = useRef<string | null>(null);
   const liveRef = useRef<Hsv>(hsv);
-  // The wipe (issue #187, rule 9): the preview's reveal replays at most once
-  // per --dur while a handle is dragged (draggingRef is set by the pointer
-  // down/up handlers below); a committed change (a swatch, the hex field, a
-  // key press) is not a drag and replays at once.
+  // The wipe (issue #187, rule 9): a reveal belongs to a change that lands once (#369). Every
+  // emitter below says which kind it is; a stream of values - a drag on the square or the strip,
+  // a held arrow key - lands at once, and the preview is not replaced.
   const [prevKey, setPrevKey] = useState(() => hsvToHex(hsv));
   // The preview wipes only after a real change, never on the picker's first render.
   const [wiped, setWiped] = useState(false);
-  const draggingRef = useRef(false);
-  const lastReplayRef = useRef(0);
+  const handledRef = useRef(prevKey);
+  // When the last change happened (and the one before it), and how it was made.
+  const changeRef = useRef<{ at: number | null; prevAt: number | null; mode: ColorChangeMode | "external" }>({
+    at: null,
+    prevAt: null,
+    mode: "continuous",
+  });
+  const note = (mode: ColorChangeMode | "external") => {
+    const prev = changeRef.current;
+    changeRef.current = { at: performance.now(), prevAt: prev.at, mode };
+  };
 
   // A value that arrives from outside (the field was reset, an import changed it) is taken
   // over; the value this picker sent is left alone.
@@ -57,6 +72,9 @@ export function ColorPicker({
     if (sentRef.current !== null && sentRef.current === value) return;
     const next = hexToHsv(value, liveRef.current.h);
     liveRef.current = next;
+    // The picker did not make this change: it is a preset applied, a reset, or a value read
+    // back. One of them is a choice made once, and shows; a run of them is a stream (#369).
+    note("external");
     setHsv(next);
   }, [value]);
 
@@ -72,7 +90,7 @@ export function ColorPicker({
     queuedRef.current = null;
     if (hex) {
       sentRef.current = hex;
-      onChange(hex);
+      onChange(hex, "continuous");
     }
   };
 
@@ -86,6 +104,8 @@ export function ColorPicker({
     setHsv(next);
     const hex = hsvToHex(next);
     sentRef.current = hex;
+    // A pointer drag or a held key: one value in a stream, never a reveal of its own.
+    note("continuous");
     stream(hex);
   };
 
@@ -101,7 +121,7 @@ export function ColorPicker({
       queuedRef.current = null;
       if (hex) {
         sentRef.current = hex;
-        onChange(hex);
+        onChange(hex, "continuous");
       }
     },
     // The cleanup must run once, when the picker goes away: a change that depends on
@@ -123,7 +143,6 @@ export function ColorPicker({
   const onSvDown = (e: PointerEvent<HTMLDivElement>) => {
     cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
-    draggingRef.current = true;
     const next = svAt(e.clientX, e.clientY);
     if (next) now(next);
   };
@@ -135,7 +154,6 @@ export function ColorPicker({
   };
 
   const onSvUp = (e: PointerEvent<HTMLDivElement>) => {
-    draggingRef.current = false;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
@@ -165,7 +183,6 @@ export function ColorPicker({
   const onHueDown = (e: PointerEvent<HTMLDivElement>) => {
     cancelPress(e, { focus: true });
     e.currentTarget.setPointerCapture(e.pointerId);
-    draggingRef.current = true;
     const h = hueAt(e.clientX);
     if (h !== null) now({ ...liveRef.current, h });
   };
@@ -177,7 +194,6 @@ export function ColorPicker({
   };
 
   const onHueUp = (e: PointerEvent<HTMLDivElement>) => {
-    draggingRef.current = false;
     if (e.currentTarget.hasPointerCapture(e.pointerId)) e.currentTarget.releasePointerCapture(e.pointerId);
   };
 
@@ -201,25 +217,27 @@ export function ColorPicker({
   // A short text is still being typed, so it is not called wrong yet.
   const valid = draft === null || draft.trim().length < 4 || parseHex(draft) !== null;
 
-  // The wipe throttle: a committed colour change replays the preview's reveal
-  // at once; while dragging, the reveal replays at most once per --dur, so
-  // rapid intermediate hexes do not restart the mask on every frame. The clock
-  // starts at the first change while dragging, so a change mid-drag does not
-  // replay merely because the page has been open a while.
+  // The reveal, decided per change (#369): it plays for a change that lands once - a quick
+  // swatch, a typed hex - and never for a direction of travel - a drag on the square or the
+  // strip, a held arrow key, or two changes in the same breath. A stream shows the new colour at
+  // once, and the preview keeps its node: no key, so no replay. Reduced motion never wipes.
   useEffect(() => {
-    if (prevKey === hex) return;
-    if (draggingRef.current) {
-      const nowMs = performance.now();
-      if (lastReplayRef.current === 0) {
-        lastReplayRef.current = nowMs;
-        return;
-      }
-      if (nowMs - lastReplayRef.current < readCssMs("--dur", 180)) return;
-      lastReplayRef.current = nowMs;
+    if (handledRef.current === hex) return;
+    handledRef.current = hex;
+    const c = changeRef.current;
+    const gap = readCssMs("--dur", 180);
+    const streaming =
+      motionOffNow() ||
+      c.mode === "continuous" ||
+      (c.mode === "external" && c.prevAt !== null && c.at !== null && c.at - c.prevAt < gap);
+    if (streaming) {
+      if (wiped) setWiped(false);
+      return;
     }
     setPrevKey(hex);
     setWiped(true);
-  }, [hex, prevKey]);
+    // `wiped` is read to clear a stale reveal; it is set here, and the guard above stops a loop.
+  }, [hex, wiped]);
 
   /**
    * Takes the typed text and makes it the colour. The text is read from the field itself, so
@@ -234,7 +252,9 @@ export function ColorPicker({
     liveRef.current = next;
     setHsv(next);
     sentRef.current = parsed;
-    onChange(parsed);
+    // A code typed and committed lands once, so it reveals.
+    note("discrete");
+    onChange(parsed, "discrete");
   };
 
   const svStyle = {
@@ -333,7 +353,9 @@ export function ColorPicker({
                   liveRef.current = next;
                   setHsv(next);
                   sentRef.current = swHex;
-                  onChange(swHex);
+                  // A swatch clicked is one choice, made once: it reveals.
+                  note("discrete");
+                  onChange(swHex, "discrete");
                 }}
               />
             );
