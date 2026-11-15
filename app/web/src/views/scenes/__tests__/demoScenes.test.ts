@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { demoRequest } from "@/lib/demo";
 import { ApiFailure } from "@/lib/errors";
 import type { Scene } from "@/proto/Scene";
+import type { GroupMoved } from "@/proto/GroupMoved";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 
 // The demo backend answers the scene routes the way the daemon will (the spine's routes), so
@@ -78,5 +79,70 @@ describe("the demo's scene routes", () => {
     );
     expect(refused).toBeInstanceOf(ApiFailure);
     expect((refused as ApiFailure).status).toBe(422);
+  });
+
+  it("moves a group to another scene and answers the way the daemon does", async () => {
+    const { answer, scene } = await active();
+    const target = answer.scenes.find((s) => s.id !== scene.id);
+    if (!target) throw new Error("the demo has no other scene");
+    const group = scene.groups[0];
+    if (!group) throw new Error("the demo scene has no groups");
+    const moved = (await demoRequest(
+      "POST",
+      `/api/v1/scenes/${scene.id}/groups/${group.id}/move`,
+      {
+        to: target.id,
+        copy: false,
+        expected_rev_from: scene.rev,
+        expected_rev_to: target.rev,
+      },
+    )) as GroupMoved;
+    expect(moved.saved).toBe(true);
+    expect(moved.group_id).toBe(group.id);
+    expect(moved.scenes[0]?.groups.some((g) => g.id === group.id)).toBe(false);
+    expect(moved.scenes[1]?.groups.at(-1)?.id).toBe(group.id);
+    // The scene the group left is the way it was.
+    expect(moved.before[0]?.groups.some((g) => g.id === group.id)).toBe(true);
+  });
+
+  it("refuses a move to the same scene, and a stale rev with 409", async () => {
+    const { scene } = await active();
+    const group = scene.groups[0];
+    if (!group) throw new Error("the demo scene has no groups");
+    await expect(
+      demoRequest("POST", `/api/v1/scenes/${scene.id}/groups/${group.id}/move`, {
+        to: scene.id,
+        copy: false,
+        expected_rev_from: scene.rev,
+        expected_rev_to: scene.rev,
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+    await expect(
+      demoRequest("POST", `/api/v1/scenes/${scene.id}/groups/${group.id}/move`, {
+        to: "focus",
+        copy: false,
+        expected_rev_from: scene.rev - 1,
+        expected_rev_to: 1,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("puts the scenes in another order, and refuses a stale one", async () => {
+    const { answer } = await active();
+    const ids = answer.scenes.map((s) => s.id);
+    const order = [ids[2]!, ids[0]!, ids[1]!];
+    const written = (await demoRequest("PUT", "/api/v1/scenes", {
+      order,
+      expected_order: ids,
+    })) as ScenesResponse;
+    expect(written.scenes.map((s) => s.id)).toEqual(order);
+    // The order that is not a permutation is refused.
+    await expect(
+      demoRequest("PUT", "/api/v1/scenes", { order: [ids[0]!], expected_order: order }),
+    ).rejects.toMatchObject({ status: 422 });
+    // An order another window changed is refused too.
+    await expect(
+      demoRequest("PUT", "/api/v1/scenes", { order: ids, expected_order: ids }),
+    ).rejects.toMatchObject({ status: 409 });
   });
 });

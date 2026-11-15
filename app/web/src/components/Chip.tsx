@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode, Ref } from "react";
+import type { DragEvent, KeyboardEvent, PointerEvent, ReactNode, Ref } from "react";
 
 /** A small label that is also a toggle when `onClick` is given. */
 export function Chip({
@@ -12,8 +12,12 @@ export function Chip({
   pending,
   className,
   onClick,
+  onPointerDown,
+  onKeyDown,
+  onDragStart,
   label,
   title,
+  dataScene,
   ref,
 }: {
   children: ReactNode;
@@ -26,9 +30,17 @@ export function Chip({
   pending?: boolean;
   className?: string;
   onClick?: () => void;
+  /** The pointer pressed the chip: a drag starts here (#371). */
+  onPointerDown?: (event: PointerEvent<HTMLButtonElement>) => void;
+  /** A key was pressed on the chip. */
+  onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  /** The browser tried to drag the chip away: a chip is a control, not a picture. */
+  onDragStart?: (event: DragEvent<HTMLButtonElement>) => void;
   label?: string;
   /** The native tooltip. It explains the chip without changing its name. */
   title?: string;
+  /** What this chip stands for, in the page's own words (the scene key's id). */
+  dataScene?: string;
   ref?: Ref<HTMLButtonElement>;
 }) {
   const cls = ["chip", html && "chip-html", pressed && "chip-on", marked && "chip-marked", pending && "chip-pending", className]
@@ -45,7 +57,11 @@ export function Chip({
         disabled={pending}
         aria-label={label}
         title={title}
+        data-scene={dataScene}
         onClick={onClick}
+        onPointerDown={onPointerDown}
+        onKeyDown={onKeyDown}
+        onDragStart={onDragStart}
       >
         {icon}
         {children}
@@ -53,7 +69,7 @@ export function Chip({
     );
   }
   return (
-    <span className={cls}>
+    <span className={cls} data-scene={dataScene}>
       {icon}
       {children}
     </span>
