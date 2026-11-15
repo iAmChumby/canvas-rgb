@@ -163,6 +163,8 @@
 }
 
 .count {
+  display: inline-block;
+  text-align: right;
   color: var(--live);
   font-family: var(--fm);
   font-size: var(--t40);
