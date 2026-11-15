@@ -161,7 +161,10 @@ function control(
   switch (kind.type) {
     case "color": {
       const hex = value.type === "color" ? value.value : kind.default;
-      // The other colours of the same effect are one click away inside the picker.
+      // The other colours of the same effect are one click away inside the picker. The list is
+      // the same length for every colour (#369): a swatch that matched the colour in the field
+      // used to be dropped, and the picker grew and shrank as the colour changed. The swatch that
+      // matches is kept and marked as the current one instead.
       const quick: ColorSwatch[] = [];
       for (const other of schema.properties) {
         if (other.key === key || other.kind.type !== "color") continue;
@@ -170,7 +173,7 @@ function control(
         if (fromDevice && !held) continue;
         const otherHex = held && held.type === "color" ? held.value : other.kind.default;
         const parsed = parseHex(otherHex);
-        if (!parsed || parsed === hex.toLowerCase()) continue;
+        if (!parsed) continue;
         quick.push({ hex: parsed, label: other.label });
       }
       return (
