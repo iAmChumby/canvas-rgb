@@ -825,7 +825,9 @@ pub async fn scenes_playing(app: &App, effect: &str) -> Vec<(String, String)> {
         .iter()
         .filter(|scene| {
             scene.groups.iter().any(|group| match &group.plays {
-                Plays::Effect { effect: playing, .. } => playing == effect,
+                // The store matches a pattern's id ignoring ASCII case (`Patterns::get`), so a
+                // group that names it in other case still plays it: the refusal must see it too.
+                Plays::Effect { effect: playing, .. } => playing.eq_ignore_ascii_case(effect),
                 Plays::Off => false,
             })
         })
@@ -1521,7 +1523,9 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
     let mut changed = false;
     for group in &scene.groups {
         let Plays::Effect { effect, props } = &group.plays else { continue };
-        if effect != id {
+        // A group that names the pattern in other case plays it (`Patterns::get` matches that
+        // way), so the edit must reach it: compare as the store does.
+        if !effect.eq_ignore_ascii_case(id) {
             continue;
         }
         // A group the takeover holds keeps the draft: its change lands when the takeover ends.
