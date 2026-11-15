@@ -1357,9 +1357,13 @@ async fn start_up_rolls_back_a_leftover_intent() {
         "the supervisor's sizes are the restored ones"
     );
     assert_eq!(chain_state(&rig, 0).await, None, "the chain is not set up any more");
-    let answer = chains(&rig).await;
-    assert_eq!(answer.chains[0].leds, EARLIER);
-    assert_eq!(answer.chains[0].state, ChainSetupState::NotSetUp);
+    // The device list catches up with the header after the rollback's own re-read; a list the
+    // supervisor read before it can land in between, so the answer is waited for, not sampled.
+    assert!(
+        wait_for(Duration::from_secs(30), || async { chains(&rig).await.chains[0].leds == EARLIER }).await,
+        "the device list still carries the interrupted commit's length"
+    );
+    assert_eq!(chains(&rig).await.chains[0].state, ChainSetupState::NotSetUp);
 }
 
 /// Review Focus 4 in the files: setting the same chain up again with fewer parts keeps the ids by
