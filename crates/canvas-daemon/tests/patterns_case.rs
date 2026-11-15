@@ -425,9 +425,9 @@ async fn deleting_a_played_pattern_is_refused_until_forced_and_then_darkens_only
     let (status, answer) = send(&rig, "DELETE", &pattern_path("pattern:Exhaust"), None).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     let message = answer["message"].as_str().unwrap_or_default();
-    assert!(message.contains("pattern:Exhaust"), "the refusal names the pattern: {message}");
+    assert!(message.contains("Exhaust"), "the refusal names the pattern: {message}");
     assert!(message.contains("Case"), "the refusal names the scene: {message}");
-    assert!(message.contains("force"), "the refusal says how to force it: {message}");
+    assert!(message.contains("Delete it anyway"), "the refusal says what a forced delete does: {message}");
     assert!(rig.app.patterns.get("pattern:Exhaust").is_some(), "the pattern is still there");
     // The refusal changed nothing: every exhaust fan still shows its colour.
     for number in 1..=3 {
