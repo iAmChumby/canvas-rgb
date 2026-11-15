@@ -17,8 +17,11 @@ const { api, notifySpy } = vi.hoisted(() => ({
       setActive: vi.fn(),
       patchGroupProps: vi.fn(),
       putGroupBrightness: vi.fn(),
+      moveGroup: vi.fn(),
+      write: vi.fn(),
     },
     lights: { list: vi.fn(), patch: vi.fn(), flash: vi.fn() },
+    stacks: vi.fn(),
     effect: vi.fn(),
     createPreset: vi.fn(),
   },
@@ -178,6 +181,31 @@ function patternAnswer(fits: LightFit[]): ScenesResponse {
 /** The rev the fake daemon is at. */
 let serverRev = 7;
 
+/** The scene the group is in, and another scene it may go to. */
+function twoScenes(): ScenesResponse {
+  const s = scene();
+  const other: Scene = {
+    id: "evening",
+    name: "Evening",
+    rev: 2,
+    groups: [
+      {
+        id: "g-warm",
+        name: "Warm Wash",
+        members: [SECOND?.light.id ?? ""],
+        plays: { type: "effect", effect: "aurora", props: {} },
+        mode: "flow_across",
+        brightness: 100,
+      },
+    ],
+  };
+  return {
+    active: s.id,
+    scenes: [s, other],
+    group_states: s.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
+  };
+}
+
 beforeEach(() => {
   for (const group of Object.values(api.scenes)) group.mockReset();
   for (const fn of Object.values(api.lights)) fn.mockReset();
@@ -210,6 +238,7 @@ beforeEach(() => {
   api.lights.list.mockResolvedValue({ lights: clone(DEMO_LIGHTS) });
   api.lights.flash.mockResolvedValue({ ok: true });
   api.effect.mockResolvedValue(clone(DETAIL));
+  api.stacks.mockResolvedValue({ stacks: [] });
   patchSnap({
     scenes: answer(),
     scenesError: null,
@@ -319,8 +348,44 @@ describe("the open group", () => {
     expect(back.scene.groups.map((g) => g.id)).toEqual(["g-one", "g-two"]);
   });
 
-  it("says no Save and no Revert: every change is undoable", async () => {
+  it("the menu offers a move and a copy, and both are disabled with one scene", async () => {
     open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const move = await screen.findByRole("button", { name: /Move to scene/ });
+    const copy = await screen.findByRole("button", { name: /Copy to scene/ });
+    expect((move as HTMLButtonElement).disabled).toBe(true);
+    expect(move.getAttribute("title")).toBe("There is no other scene.");
+    expect((copy as HTMLButtonElement).disabled).toBe(true);
+    expect(copy.getAttribute("title")).toBe("There is no other scene.");
+  });
+
+  it("choosing Move to scene opens the step, and it lists the other scene", async () => {
+    api.scenes.list.mockResolvedValue(twoScenes());
+    patchSnap({ scenes: twoScenes(), scenesError: null });
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const move = await screen.findByRole("button", { name: /Move to scene/ });
+    expect((move as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(move);
+    // The step is open: it names the scene the group may go to, and what the move does.
+    expect(await screen.findByText("Move to Evening")).toBeTruthy();
+    expect(screen.getByText(/Adds 1 device\./)).toBeTruthy();
+  });
+
+  it("the step goes back to the group, and the way out of it is the sheet's own", async () => {
+    api.scenes.list.mockResolvedValue(twoScenes());
+    patchSnap({ scenes: twoScenes(), scenesError: null });
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Move to scene/ }));
+    await screen.findByText("Move to Evening");
+    // The header's key is the way back: the step closes into the group.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(screen.queryByText("Move to Evening")).toBeNull());
+    expect(screen.getByText("Presets")).toBeTruthy();
+  });
+
+  it("says no Save and no Revert: every change is undoable", async () => {    open("g-one");
     await screen.findByRole("dialog");
     const names = [...document.querySelectorAll("button")].map((b) =>
       (b.textContent ?? "").trim(),

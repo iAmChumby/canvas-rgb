@@ -1,0 +1,57 @@
+/*
+ * The move step: one row per other scene, the action and the line that says what it does.
+ *
+ * The rows are keys, not cards: a key and one line of mono under it. Nothing here has a radius
+ * of its own beyond the key's, and every colour is a token.
+ */
+
+/* The step's body: the lead and the rows. */
+.step {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.lead {
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.3;
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s4);
+}
+
+/* One scene: the action, and what it does under it. */
+.row {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+/* The action is the row's own width: the line under it never widens it. */
+.go {
+  width: 100%;
+  justify-content: flex-start;
+}
+
+/* What the move does: one line of figures, the way the rows of the page say their numbers. */
+.outcome {
+  margin: 0;
+  max-width: 100%;
+  color: var(--mute);
+  font-size: 13px;
+  line-height: 1.35;
+  overflow-wrap: anywhere;
+}
+
+/* A move the daemon would refuse: the line says why, in the daemon's own words. */
+.outcome[data-refused="true"] {
+  color: var(--warn);
+}
