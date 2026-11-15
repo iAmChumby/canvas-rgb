@@ -101,9 +101,9 @@ describe("#369: a stream of colour changes never replays the reveal", () => {
       [84, 66],
       [92, 74],
     ]) {
-      // A frame apart, the way a real drag streams its values.
+      // Two frames apart: the drag outlasts the 180 ms the old code waited between replays.
       act(() => {
-        vi.advanceTimersByTime(16);
+        vi.advanceTimersByTime(30);
       });
       fireEvent.pointerMove(square, { clientX: x, clientY: y, pointerId: 1 });
       expect(fieldWipes(), `no overlay after the drag reached ${x},${y}`).toBe(0);
@@ -141,6 +141,24 @@ describe("#369: a stream of colour changes never replays the reveal", () => {
     fireEvent.keyDown(field, { key: "Enter" });
     expect(fieldWipes(), "one commit, one reveal").toBe(1);
     expect(previewWipes()).toBe(1);
+  });
+
+  it("a value from outside, long after the last change, starts no wipe on the preview", () => {
+    vi.useFakeTimers();
+    const field = (value: string) => (
+      <ColorField label="Colour" value={value} swatches={[]} onChange={() => {}} />
+    );
+    const { container, rerender } = render(field("#ff0000"));
+    openPicker(container);
+    const first = preview();
+    act(() => {
+      vi.advanceTimersByTime(1000);
+    });
+    // A preset is applied while the picker is open.
+    rerender(field("#00ff00"));
+    expect(previewWipes(), "a preset shows at once").toBe(0);
+    expect(preview(), "the preview keeps its node").toBe(first);
+    expect(fieldWipes()).toBe(0);
   });
 
   it("with reduced motion a change starts no wipe at all", () => {

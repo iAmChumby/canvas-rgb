@@ -2,7 +2,7 @@
 
 import { useEffect, useRef, useState, type CSSProperties, type KeyboardEvent, type PointerEvent } from "react";
 import { hexToHsv, hsvToHex, parseHex, type Hsv } from "@/lib/color";
-import { motionOffNow, readCssMs } from "@/lib/motion";
+import { motionOffNow } from "@/lib/motion";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 
 /** A colour the effect already uses, offered as a one-click choice. */
@@ -56,14 +56,9 @@ export function ColorPicker({
   const [wiped, setWiped] = useState(false);
   const handledRef = useRef(prevKey);
   // When the last change happened (and the one before it), and how it was made.
-  const changeRef = useRef<{ at: number | null; prevAt: number | null; mode: ColorChangeMode | "external" }>({
-    at: null,
-    prevAt: null,
-    mode: "continuous",
-  });
+  const changeRef = useRef<{ mode: ColorChangeMode | "external" }>({ mode: "continuous" });
   const note = (mode: ColorChangeMode | "external") => {
-    const prev = changeRef.current;
-    changeRef.current = { at: performance.now(), prevAt: prev.at, mode };
+    changeRef.current = { mode };
   };
 
   // A value that arrives from outside (the field was reset, an import changed it) is taken
@@ -73,7 +68,7 @@ export function ColorPicker({
     const next = hexToHsv(value, liveRef.current.h);
     liveRef.current = next;
     // The picker did not make this change: it is a preset applied, a reset, or a value read
-    // back. One of them is a choice made once, and shows; a run of them is a stream (#369).
+    // back. The picker cannot tell one of them from a run of them, so it shows at once (#369).
     note("external");
     setHsv(next);
   }, [value]);
@@ -225,11 +220,11 @@ export function ColorPicker({
     if (handledRef.current === hex) return;
     handledRef.current = hex;
     const c = changeRef.current;
-    const gap = readCssMs("--dur", 180);
     const streaming =
       motionOffNow() ||
       c.mode === "continuous" ||
-      (c.mode === "external" && c.prevAt !== null && c.at !== null && c.at - c.prevAt < gap);
+      // A value from outside (a preset, a read back) shows at once, as it does on the field.
+      c.mode === "external";
     if (streaming) {
       // The colour shows at once: the class comes off and the node is kept, so nothing replays.
       setWiped(false);
