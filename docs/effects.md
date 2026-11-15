@@ -510,3 +510,91 @@ Check it before you install it:
 ```
 canvas-rgb effects check comet.html
 ```
+
+## Patterns
+
+A pattern is the other kind of effect. It is a colour for every LED of one device, not a
+picture. Paint it in the app on one of your devices, and a group plays it on every device of
+that kind. The rest of this page is about the saved file, the ids and how a pattern lands on
+a light; the app's editor is the way to build one.
+
+### The file
+
+Patterns live in one file in the data folder, beside `scenes.json` and `stacks.json`:
+
+```
+%APPDATA%\canvas-rgb\patterns.json
+```
+
+The file holds every pattern:
+
+```json
+{
+  "schema_version": 1,
+  "patterns": [
+    {
+      "id": "pattern:Intake",
+      "built_on": { "led_count": 4, "arrangement": "ring" },
+      "frames": [
+        { "colors": ["#d21e28", "#000000", "#000000", "#000000"], "hold": 0 }
+      ],
+      "motion": { "type": "none" }
+    }
+  ]
+}
+```
+
+- `id` is `pattern:` and the name. A save never renames: a new name is a new pattern. The
+  routes that take an id accept the id or the bare name, ignoring case.
+- `built_on` is the kind of device the pattern was built on: `led_count` and `arrangement`
+  (`ring`, `strip`, `grid` or `single`), plus `grid` (`{ "width": 5, "height": 4 }`) for a
+  grid. It is a snapshot; resizing or removing the device later does not change it.
+- `frames` is a list of frames. A frame is `colors`, one colour per LED in the order you see
+  the device in, and `hold` in milliseconds. 0.16.0 writes one frame with `hold` 0, and plays
+  it.
+- `motion` is `{ "type": "none" }` in 0.16.0.
+- Fields this version does not know are kept as they are, in a pattern and in the file, so a
+  file a later version wrote loses nothing when this version saves it again.
+
+### The fit
+
+Every device of a group is checked against `built_on` when the group plays the pattern. The
+rules apply in this order:
+
+1. **Exact**: the same LED count and the same arrangement. LED n gets colour n.
+2. **One LED**: the device has one LED. It takes the first colour that is on, and stays off
+   when every colour is off. A pattern built on one LED of the same arrangement is Exact,
+   and copies.
+3. **Stretched**: the same arrangement and another count. Each LED takes the colour of the
+   pattern LED at the same position. On a ring, LED 0 stays at the top and a LED a quarter of
+   the way round stays a quarter of the way round. On a strip, the first LED takes the first
+   colour and the last takes the last. A grid with another count is stretched in LED order
+   for now; a two-dimensional fit is a later release.
+4. **Other shape**: another arrangement. Laid along the LED order by the strip rule, whatever
+   the two shapes are. Equal counts copy, LED for LED.
+
+Nothing is refused. The open group says how each device landed: "Stretched", "Built for a
+different shape" or "One LED shows the first colour".
+
+### How a group plays one
+
+A group plays a pattern as it plays any effect: its effect is the pattern's id. Every device
+of the group shows the whole pattern, so the group's mode does nothing while a pattern plays
+(the app hides the control, and the saved mode is kept for when the group plays a canvas
+effect again). Group brightness, then global brightness, warmth and white balance apply
+exactly as they do to a canvas effect.
+
+Editing a saved pattern changes every group that plays it, at once. A pattern a group of any
+scene plays is only deleted with `?force=true`; the refusal names the scenes, and a forced
+delete leaves that group dark and says why.
+
+### What a later release may add
+
+The file already has room for more, and this version reads it without losing anything:
+
+- More frames, each with a `hold` in milliseconds, and a timeline in the editor. 0.16.0
+  plays the first frame.
+- Motion: `motion` may become rotate, breathe, blink or chase, with a speed. 0.16.0 keeps the
+  value whole and plays the first frame as it is.
+- More fields on a pattern or on a frame. A later release may add them; it may never change
+  the meaning of a field 0.16.0 writes.
