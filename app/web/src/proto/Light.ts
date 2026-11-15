@@ -24,4 +24,11 @@ reversed: boolean,
  * What the owner said this part is. `None` for a whole-zone light and for a light from
  * before 0.15.0.
  */
-kind?: ChainPartKind, };
+kind?: ChainPartKind, 
+/**
+ * How many times the header shows this light's samples (#381, #382): fans that all show the
+ * same LEDs are one light with `copies` set to how many were counted. `None` and `Some(1)`
+ * mean once. The engine writes `leds.len()` once whatever this says; it only counts, so a
+ * scene still sees one light. At most [`COPIES_MAX`]; the daemon validates it on write.
+ */
+copies?: number, };

@@ -193,6 +193,7 @@ fn light(device: &DeviceInfo) -> Light {
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 

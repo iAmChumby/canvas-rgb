@@ -95,6 +95,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
         arrangement: Arrangement::default_for(&zone.kind),
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
@@ -2014,6 +2015,7 @@ pub(crate) mod tests {
                 arrangement: Arrangement::Strip,
                 reversed: false,
                 kind: None,
+                copies: None,
             }).collect(),
         };
         let g = |id: &str, member: &str, effect: &str| Group {

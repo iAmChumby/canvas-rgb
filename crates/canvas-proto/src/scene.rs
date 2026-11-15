@@ -53,6 +53,9 @@ pub const CHAIN_RESTORE_FILE: &str = "chain-restore.json";
 /// Chain setup: everything a commit needs to be undone, written before the final resize.
 /// Start-up rolls a leftover one back.
 pub const CHAIN_INTENT_FILE: &str = "chain-intent.json";
+/// The most times one run of LEDs may be shown by a header (`Light::copies`). A typo guard, not
+/// a hardware limit.
+pub const COPIES_MAX: u32 = 32;
 /// The longest a part's name may be, in characters.
 pub const PART_NAME_MAX: usize = GROUP_NAME_MAX;
 /// A setup session ends this long after its last light request (the app re-sends one every
@@ -166,6 +169,13 @@ pub struct Light {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kind: Option<ChainPartKind>,
+    /// How many times the header shows this light's samples (#381, #382): fans that all show the
+    /// same LEDs are one light with `copies` set to how many were counted. `None` and `Some(1)`
+    /// mean once. The engine writes `leds.len()` once whatever this says; it only counts, so a
+    /// scene still sees one light. At most [`COPIES_MAX`]; the daemon validates it on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copies: Option<u32>,
 }
 
 /// `lights.json`.
@@ -348,6 +358,7 @@ mod tests {
             arrangement: Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
@@ -540,6 +551,28 @@ mod tests {
         assert_eq!(file.lights[0].kind, None);
         // A light with no kind writes no kind, so an 0.14.0 reader sees what it wrote.
         assert!(!serde_json::to_string(&file.lights[0]).unwrap().contains("kind"));
+    }
+
+    #[test]
+    fn copies_round_trips_and_a_light_without_it_loads() {
+        assert_eq!(COPIES_MAX, 32);
+        let mut mirrored = light("a");
+        mirrored.leds = Some(LedSlice { start: 0, count: 8 });
+        mirrored.kind = Some(ChainPartKind::Other);
+        mirrored.copies = Some(8);
+        let json = serde_json::to_string(&mirrored).unwrap();
+        assert!(json.contains(r#""copies":8"#), "{json}");
+        assert_eq!(serde_json::from_str::<Light>(&json).unwrap(), mirrored);
+        // A light with no copies writes none, so an older reader sees what it always saw.
+        assert!(!serde_json::to_string(&light("b")).unwrap().contains("copies"));
+        // An 0.16.0 lights.json has no copies anywhere and loads as once.
+        let old = r#"{"schema_version":1,"lights":[{"id":"openrgb:mb#z0","device_id":"openrgb:mb","zone_index":0,"arrangement":"strip","kind":"fan"}]}"#;
+        let file: LightsFile = serde_json::from_str(old).unwrap();
+        assert_eq!(file.lights[0].copies, None);
+        // The new file round trips whole.
+        let whole = LightsFile { schema_version: LIGHTS_SCHEMA, lights: vec![mirrored, light("b")], chains: Vec::new() };
+        let json = serde_json::to_string(&whole).unwrap();
+        assert_eq!(serde_json::from_str::<LightsFile>(&json).unwrap(), whole);
     }
 
     #[test]

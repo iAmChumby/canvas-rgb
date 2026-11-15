@@ -125,6 +125,7 @@ fn light(device: &str) -> Light {
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 

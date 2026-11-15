@@ -177,6 +177,12 @@ pub mod routes {
     pub const GROUP_PROPS: &str = "/api/v1/scenes/{id}/groups/{group}/props";
     /// `PUT` [`super::GroupBrightnessPut`]. As [`GROUP_PROPS`]: saved, `rev` + 1, answers the scene.
     pub const GROUP_BRIGHTNESS: &str = "/api/v1/scenes/{id}/groups/{group}/brightness";
+    /// `POST` [`super::GroupMove`]: moves or copies one group of scene `{id}` to another scene in
+    /// ONE save (both scenes land or neither), answers a [`super::GroupMoved`]. `404` for an
+    /// unknown scene or group, `409 conflict` (with `which`: `"from"` or `"to"`, and that scene)
+    /// when a rev is stale, `422 validation` for the same scene or a broken scene rule. With
+    /// `dry_run` every check runs, nothing is saved and `saved` is `false` (#368).
+    pub const GROUP_MOVE: &str = "/api/v1/scenes/{id}/groups/{group}/move";
     /// `GET` [`super::LightsResponse`].
     pub const LIGHTS: &str = "/api/v1/lights";
     /// `PATCH` [`super::LightPatch`].
@@ -1088,6 +1094,41 @@ pub struct SetupPart {
     pub name: String,
     pub kind: ChainPartKind,
     pub leds: u32,
+    /// How many times the header shows this run (#381, #382): 8 fans that all show the same
+    /// 8 LEDs are ONE part of 8 LEDs with `copies: 8`. Left out (or 1): once. At most
+    /// [`crate::scene::COPIES_MAX`]; 2 or more only when this is the header's only part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copies: Option<u32>,
+}
+
+#[cfg(test)]
+mod chain_copies_tests {
+    //! #381, #382: `copies` on the setup part.
+    use super::*;
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn a_setup_part_without_copies_loads_and_with_copies_round_trips() {
+        let old: SetupPart = serde_json::from_str(r#"{"name":"Fan","kind":"fan","leds":12}"#).unwrap();
+        assert_eq!(old.copies, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("copies"), "a part without copies writes none");
+        let mirror = SetupPart { name: "Same lights, shown 8 times".into(), kind: ChainPartKind::Other, leds: 8, copies: Some(8) };
+        assert!(round_trip(&mirror).contains(r#""copies":8"#));
+    }
+
+    #[test]
+    fn the_cap_is_what_the_design_names() {
+        assert_eq!(crate::scene::COPIES_MAX, 32);
+    }
 }
 
 /// `POST` [`routes::CHAIN_SETUP_COMMIT`]: parts in chain order; their LEDs add up to the final

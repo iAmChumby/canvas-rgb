@@ -464,6 +464,7 @@ mod tests {
             arrangement,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
