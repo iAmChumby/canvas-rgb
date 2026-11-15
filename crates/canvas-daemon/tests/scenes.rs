@@ -574,6 +574,60 @@ async fn three_html_groups_are_a_422_with_the_daemons_sentence() {
     assert!(!rig.home.path.join("scenes.json").exists(), "refused: nothing was written");
 }
 
+/// `scenes::check_saveable` is the one door every write path goes through (#391): it runs the
+/// spine's `validate_scene`, the name check and the HTML limit, and each refusal keeps the
+/// sentence it had when the PUT handler called the three separately.
+async fn saveable(rig: &Rig, scene: &Scene) -> Result<(), canvas_daemon::api::ApiFailure> {
+    let store = rig.app.store.read().await;
+    canvas_daemon::scenes::check_saveable(&rig.app, scene, &store.lights.lights)
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_three_html_groups_with_the_daemons_sentence() {
+    let rig = rig().await;
+    add_third_light(&rig).await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "html:one".into(), props: Props::new() };
+    scene.groups[1].plays = Plays::Effect { effect: "html:two".into(), props: Props::new() };
+    scene.groups.push(group("third", &["fake:c#z0"], "html:three", Props::new()));
+    let refused = saveable(&rig, &scene).await.expect_err("three HTML groups are refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.message.contains(HTML_LIMIT_SENTENCE) && refused.message.contains("3 do"), "{}", refused.message);
+    assert!(!refused.message.contains("more than"), "not the spine's text: {}", refused.message);
+    scene.groups.pop();
+    saveable(&rig, &scene).await.expect("two HTML groups are saveable");
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_a_repeated_group_id_with_the_spines_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    let first = scene.groups[0].id.clone();
+    scene.groups[1].id = first.clone();
+    let refused = saveable(&rig, &scene).await.expect_err("a repeated group id is refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.message, format!("two groups have the id {first}"));
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_an_unknown_light_with_the_spines_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].members = vec!["fake:nope#z0".into()];
+    let refused = saveable(&rig, &scene).await.expect_err("an unknown light is refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.message, "there is no light fake:nope#z0");
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_an_empty_scene_name_with_the_name_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.name = "  ".into();
+    let refused = saveable(&rig, &scene).await.expect_err("a blank name is refused");
+    assert_eq!(refused.message, "a scene needs a name");
+}
+
 // ---------------------------------------------------------------- create, delete, set
 
 #[tokio::test]

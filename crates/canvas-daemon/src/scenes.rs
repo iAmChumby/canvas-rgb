@@ -1764,6 +1764,40 @@ pub fn check_html_limit(app: &App, scene: &Scene) -> Result<(), String> {
     Ok(())
 }
 
+/// Every check a scene passes before it is written, in the order a save reports them: the
+/// spine's [`canvas_proto::scene::validate_scene`] against `lights`, the scene's and groups'
+/// names, then [`check_html_limit`]. Each failure is a 422 with the sentence its own check gives.
+///
+/// Every new write path (group move, `PUT /api/v1/scenes`, create with `groups`, undo) must call
+/// this and not the three checks one by one: a path that forgets one lets a scene onto the disk
+/// that the other paths refuse.
+pub fn check_saveable(app: &App, scene: &Scene, lights: &[Light]) -> Result<(), crate::api::ApiFailure> {
+    use crate::api::ApiFailure;
+    canvas_proto::scene::validate_scene(scene, lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
+    check_names(scene)?;
+    check_html_limit(app, scene).map_err(ApiFailure::validation)
+}
+
+/// A scene and its groups have a name, within the length the create route keeps.
+fn check_names(scene: &Scene) -> Result<(), crate::api::ApiFailure> {
+    use crate::api::ApiFailure;
+    if scene.name.trim().is_empty() {
+        return Err(ApiFailure::validation("a scene needs a name"));
+    }
+    if scene.name.chars().count() > SCENE_NAME_MAX {
+        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
+    }
+    for group in &scene.groups {
+        if group.name.trim().is_empty() {
+            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
+        }
+        if group.name.chars().count() > GROUP_NAME_MAX {
+            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
+        }
+    }
+    Ok(())
+}
+
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
