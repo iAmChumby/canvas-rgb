@@ -171,7 +171,6 @@ export function notify(
         text={text}
         tone={tone}
         action={action}
-        keeps={keeps}
         detail={options?.detail}
         onClose={options?.onClose}
       />
@@ -224,8 +223,6 @@ interface NotifyBodyProps {
   text: string;
   tone: NotifyTone;
   action?: NotifyAction;
-  /** True when the notification waits for the reader instead of a clock. */
-  keeps: boolean;
   /** A second line under the message. */
   detail?: string;
   /** Runs when the reader closes the message with its close key. */
@@ -234,9 +231,12 @@ interface NotifyBodyProps {
 
 /**
  * The body of a notification: the mark for its tone, the words, and the answers it carries. It
- * is the only part of a notification the app draws.
+ * is the only part of a notification the app draws, and it has one anatomy for every tone:
+ * icon, title, optional description, optional action, close (#366). A note has a close key too:
+ * a message the reader can stop reading is worth one key, and a lane whose cards differ is the
+ * hand-styled look this replaces.
  */
-function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBodyProps) {
+function NotifyBody({ id, text, tone, action, detail, onClose }: NotifyBodyProps) {
   const Icon = TONE_ICON[tone];
   return (
     <div
@@ -258,7 +258,7 @@ function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBo
         <Icon size={16} weight="fill" />
       </span>
       <span className="notify-text">
-        {detail ? <span className="notify-title">{text}</span> : text}
+        <span className="notify-title">{text}</span>
         {detail && <span className="notify-detail">{detail}</span>}
       </span>
       {action && (
@@ -274,19 +274,17 @@ function NotifyBody({ id, text, tone, action, keeps, detail, onClose }: NotifyBo
           {action.label}
         </Button>
       )}
-      {keeps && (
-        <IconButton
-          label="Dismiss"
-          tip={false}
-          size="sm"
-          className="notify-close"
-          icon={<X size={14} weight="bold" />}
-          onClick={() => {
-            onClose?.();
-            go(id);
-          }}
-        />
-      )}
+      <IconButton
+        label="Dismiss"
+        tip={false}
+        size="sm"
+        className="notify-close"
+        icon={<X size={14} weight="bold" />}
+        onClick={() => {
+          onClose?.();
+          go(id);
+        }}
+      />
     </div>
   );
 }

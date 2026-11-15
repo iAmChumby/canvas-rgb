@@ -26,6 +26,14 @@ body {
   text-rendering: optimizeLegibility;
 }
 
+/* A control does not take the page's face on its own: the browser's stylesheet gives a button
+   its own default font, so a key that says nothing about its type is drawn in the system font
+   and not in the app's (#373). Every button is set in the app's own face here; a control that
+   wants another one says so in its own class. */
+button {
+  font-family: var(--fu);
+}
+
 h1,
 h2,
 h3,
@@ -604,9 +612,17 @@ html[data-motion="reduced"] *::after {
   font-weight: 600;
 }
 
+/* The status details panel. Its figures are live (the frame rate, the frame time, the number of
+   devices), so the panel has one width (#369): a panel as wide as its content moves every time a
+   figure changes. */
+.strip-details {
+  width: min(320px, calc(100vw - 16px));
+}
+
+/* The value sits in a fixed column, so a figure that changes never moves the label beside it. */
 .strip-details-list {
   display: grid;
-  grid-template-columns: 1fr auto;
+  grid-template-columns: minmax(0, 1fr) 116px;
   gap: var(--s1) var(--s3);
   margin: 0;
   font-size: var(--t14);
@@ -807,13 +823,6 @@ html[data-motion="reduced"] *::after {
   border-radius: var(--r-md);
   background: color-mix(in srgb, var(--tone) 10%, var(--panel));
   animation: canvas-enter var(--dur) var(--ease) both;
-}
-
-/* The leaving half. The enter animation holds its last frame (fill both), which beats a plain
-   opacity declaration, so leaving swaps the animation instead of overriding a property. Under
-   reduced motion the global block zeroes the duration, so the banner is simply gone. */
-.banner[data-leaving="true"] {
-  animation: canvas-fade-out var(--dur) var(--ease) both;
 }
 
 .banner-icon {
@@ -1303,6 +1312,18 @@ button.chip:hover {
   border-color: var(--a2);
 }
 
+/* The tab key: the type every tab in the app is set in (#373). The scene keys on Scenes and the
+   device keys on Peripherals are the same kind of control, so they are set the same way: the
+   app's own face, at the body size, in one weight, with no letter spacing of its own. A page
+   sets its own box, never its own font, so a tab cannot drift from the tab beside it. */
+.tab-key {
+  font-family: var(--fu);
+  font-size: var(--t15);
+  font-weight: 600;
+  letter-spacing: normal;
+  line-height: 1;
+}
+
 .badge {
   display: inline-flex;
   align-items: center;
@@ -1582,6 +1603,19 @@ button.chip:hover {
   font-size: var(--t14);
 }
 
+/* The audio readings panel. The readings are live - the meter's cells, the figure in dB and the
+   bands - so the panel has one width (#369): a panel as wide as its content moves every time a
+   reading changes. */
+.audio-popover {
+  width: min(320px, calc(100vw - 16px));
+}
+
+/* The fan bulk panel hangs under the Fans page's key: the duty each header runs at is live, so
+   the panel has one width too (#369). Its list and rows stay with the rest of the fan bulk. */
+.fan-bulk-popover {
+  width: min(320px, calc(100vw - 16px));
+}
+
 /* The compact form (UI finding 4): the Source select sits in the panel head's
    action slot, and one row under it carries the state words, the Listen
    toggle and the "Show readings" button. The panel is about 90 px tall and
@@ -1709,7 +1743,8 @@ button.chip:hover {
   overflow: hidden;
   width: 32px;
   height: 32px;
-  flex: none;
+  /* The swatch never gives up its size (#369): it is the one fixed thing beside the hex. */
+  flex: 0 0 auto;
   padding: 0;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
@@ -1722,8 +1757,10 @@ button.chip:hover {
 
 /* The colour wipe (issue #187, rule 9): the new colour reveals over the old
    one behind a circular mask opening from the swatch's centre, instead of a
-   flat cross-fade. The overlay is keyed by the wipe, not the colour; the base
-   takes the new colour when the wipe ends. With motion off it opens at once. */
+   flat cross-fade. It is drawn only for a change that lands once (#369): a
+   stream of values - a drag, a held key, a feed from the daemon - shows the
+   new colour at once and mounts no overlay, so nothing replays. With motion
+   off it is never drawn. */
 @keyframes swatch-wipe {
   from {
     clip-path: circle(0% at 50% 50%);
@@ -1745,10 +1782,16 @@ button.chip:hover {
   border-color: var(--mute);
 }
 
+/* The hex value beside the swatch. It has one width (#369): the text is seven characters in a
+   monospace face with tabular digits, so the row beside the swatch is the same size for every
+   colour and the swatch never moves. */
 .color-hex {
+  width: 7ch;
+  flex: 0 0 auto;
   color: var(--dim);
   font-family: var(--fm);
   font-size: var(--t14);
+  font-variant-numeric: tabular-nums;
 }
 
 /* ---------- the colour picker ---------- */
@@ -1825,30 +1868,35 @@ button.chip:hover {
   gap: var(--s2);
 }
 
+/* The hex field. It never gives up its width either (#369): the field is as wide as the hex it
+   holds, so a shorter or longer code cannot resize the swatch beside it. */
 .picker-hex {
   flex: 1 1 auto;
-  min-width: 0;
+  min-width: 8ch;
   font-family: var(--fm);
+  font-variant-numeric: tabular-nums;
   text-align: left;
 }
 
 .picker-preview {
-  flex: none;
+  /* The colour the hex names: one size, whatever the code says (#369). */
+  flex: 0 0 auto;
   width: 24px;
   height: 24px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--c);
-  /* The same mask reveal as the swatch (issue #187, rule 9): the preview is
-     keyed by the colour in ColorPicker, so each change wipes in. */
+  /* The same mask reveal as the swatch (issue #187, rule 9). It is added for a change that
+     lands once (#369); a drag or a held key updates the colour in place and never adds it. */
 }
 
-/* The picker's preview wipes only on a change, never when the picker opens. */
+/* The picker's preview wipes only on a choice made once, never when the picker opens. */
 .picker-preview.wipe {
   animation: swatch-wipe var(--dur) var(--ease) both;
 }
 
-/* The other colours of the same effect, one click away. */
+/* The other colours of the same effect, one click away. The one that names the colour in the
+   field is marked (#369), so the list never changes length. */
 .picker-swatches {
   display: flex;
   flex-wrap: wrap;
@@ -1866,6 +1914,12 @@ button.chip:hover {
   transition:
     border-color var(--dur-fast) var(--ease),
     transform var(--dur-fast) var(--ease);
+}
+
+/* The swatch of the colour in the field: a ring, so it is told from the others. */
+.picker-swatch[aria-current="true"] {
+  outline: 2px solid var(--focus);
+  outline-offset: 1px;
 }
 
 .picker-swatch:hover {
@@ -5937,10 +5991,14 @@ button.chip:hover {
   gap: var(--s2);
 }
 
-/* The key: its icon, its name, its battery and its state. */
+/* The key: its icon, its name, its battery and its state. The key is as wide as its name, up to
+   the width of the row: a long name ("8BitDo Ultimate 2 Wireless (2.4G receiver, idle)") is cut
+   with an ellipsis instead of growing the key past the row (#387), and the row itself scrolls
+   sideways when there are more keys than fit. */
 .rd-peri-keys .rd-devkey {
   flex: 0 0 auto;
   width: auto;
+  max-width: 100%;
   gap: var(--s2);
   padding: var(--s2) var(--s3);
   border-radius: var(--r-md);
@@ -5953,9 +6011,15 @@ button.chip:hover {
 
 .rd-devkey .peripheral-text {
   flex: 0 1 auto;
+  /* The name gives way before the key does, so the cut lands on the name and carries an
+     ellipsis (#387). */
+  min-width: 0;
 }
 
 .rd-devkey .peripheral-name {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
@@ -6288,7 +6352,6 @@ button.chip:hover {
 }
 
 .peripheral-name {
-  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -6433,32 +6496,58 @@ button.chip:hover {
   background: var(--c);
 }
 
-/* The mouse's DPI stages: a chip per stage, the active one marked. */
+/* The mouse's DPI stages: a chip per stage, the active one marked. Equal columns, not a wrapping
+   flex row (#387): a chip is as wide as its figure, so with `flex-wrap` a stage could land on a row
+   of its own — at 1440 the wider figures put "26000" alone on the third row, and the panel grew
+   40 px and reshuffled the columns beside it. Six stages are 3 + 3, five are 3 + 2, and two or
+   four are 2 + 2, so no row is left with one chip on it. Every cell is wider than the chip's own
+   content at every panel width (the narrowest cell is 78.7 px at 1440, and a chip is its 2 px
+   border, 16 px of padding, the 10 px dot, a 4 px gap and its figure: 74 px for "26000"). */
 .dpi-stages {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: var(--s2);
   margin-top: var(--s3);
   padding-top: var(--s3);
   border-top: 1px solid var(--line);
 }
 
+.dpi-stages[data-stages="2"],
+.dpi-stages[data-stages="4"] {
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
 .dpi-chip {
   display: inline-flex;
   align-items: center;
-  gap: var(--s2);
-  padding: 0 var(--s3);
+  gap: var(--s1);
+  /* 8 px of the cell's width goes to each side, so a three-column row fits the panel at 1440
+     (252 px of content: 78.7 px a cell against the 74 px a chip takes). */
+  padding: 0 var(--s2);
   height: 32px;
   border: 1px solid var(--line-2);
   border-radius: var(--r-sm);
   background: var(--raised);
   color: var(--ink);
+  /* The chip's own type, the same as the shared chip's (#373): the browser's stylesheet gives
+     a button its own default font, so a chip that says nothing about its type is drawn in the
+     system font. The figure inside it keeps the mono face. */
+  font: inherit;
+  font-size: var(--t14);
   cursor: pointer;
   box-shadow: 0 var(--skirt-h) 0 var(--skirt);
   transition:
     border-color var(--release) var(--ease),
     background-color var(--release) var(--ease),
     box-shadow var(--release) var(--ease);
+}
+
+/* The figure takes what the dot leaves and sits against the cell's right edge: with a cell per
+   column, "800" and "26000" line up on their last digit, and the mono face's digits are tabular
+   (`.fig`). */
+.dpi-chip .fig {
+  flex: 1 1 auto;
+  text-align: end;
 }
 
 .dpi-chip:hover {

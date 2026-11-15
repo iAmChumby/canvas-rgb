@@ -90,7 +90,9 @@ export function SceneStrip({
           {scenes.map((scene) => (
             <Chip
               key={scene.id}
-              className={s.sceneKey}
+              // `tab-key` is the shared type of the app's tabs (#373): the scene key is set
+              // like every other tab, and this page sets only its box.
+              className={`${s.sceneKey} tab-key`}
               pressed={scene.id === active}
               label={scene.name}
               title={scene.name}
