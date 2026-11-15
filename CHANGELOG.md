@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
+
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
