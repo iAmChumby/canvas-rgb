@@ -118,20 +118,14 @@ export function ScenesView() {
 
   const { fresh, dismiss } = useNewLights(lights, unassigned);
 
-  // The headers the new lights are on that are not set up: the notice offers their setup, so the
-  // owner can tell the app what is plugged into a header before the light joins a group (#380).
-  const freshHeaders = useMemo(() => {
-    const out: { key: string; label: string }[] = [];
-    for (const l of fresh) {
-      const chain = chains?.find(
-        (c) => c.device_id === l.light.device_id && c.zone_index === l.light.zone_index,
-      );
-      if (!chain || chain.state !== "not_set_up") continue;
-      const key = chainKey(chain.device_id, chain.zone_index);
-      if (out.some((h) => h.key === key)) continue;
-      out.push({ key, label: chain.zone_name });
-    }
-    return out;
+  // The header a new light is on that is not set up: the notice offers its setup, so the owner can
+  // tell the app what is plugged into it before the light joins a group (#380). One key only: a
+  // notice is a line, and the other headers are on the Devices page.
+  const freshHeader = useMemo(() => {
+    const chain = fresh
+      .map((l) => chains?.find((c) => c.device_id === l.light.device_id && c.zone_index === l.light.zone_index))
+      .find((c) => c?.state === "not_set_up");
+    return chain ? { key: chainKey(chain.device_id, chain.zone_index), label: chain.zone_name } : null;
   }, [fresh, chains]);
 
   // A refused write says so in the toast lane, which floats: the page does not move for it.
@@ -477,7 +471,7 @@ export function ScenesView() {
                 fresh={fresh}
                 groups={scene.groups}
                 onAdd={addFresh}
-                setup={freshHeaders}
+                setup={freshHeader}
                 onSetUp={(key) => requestChainSetup(key)}
                 onDismiss={() => {
                   for (const l of fresh) dismiss(l.light.id);

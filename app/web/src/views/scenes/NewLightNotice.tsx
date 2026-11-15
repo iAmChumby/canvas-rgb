@@ -79,9 +79,9 @@ export function NewLightNotice({
   groups: Group[];
   onAdd: (groupId: string) => void;
   onDismiss: () => void;
-  /** The headers the new lights are on that are not set up: each one gets a key of its own. */
-  setup?: readonly { key: string; label: string }[];
-  /** Opens the setup of one of those headers. */
+  /** The header a new light is on that is not set up: it gets a key of its own. */
+  setup?: { key: string; label: string } | null;
+  /** Opens the setup of that header. */
   onSetUp?: (key: string) => void;
 }) {
   const shown = groups.slice(0, NOTICE_KEYS);
@@ -96,17 +96,16 @@ export function NewLightNotice({
         onDismiss={onDismiss}
         actions={
           <span className={s.noticeKeys}>
-            {setup?.map((header) => (
+            {setup && (
               <Button
-                key={header.key}
                 size="sm"
                 variant="primary"
                 icon={<Lightning size={14} aria-hidden="true" />}
-                onClick={() => onSetUp?.(header.key)}
+                onClick={() => onSetUp?.(setup.key)}
               >
-                Set up {header.label}
+                Set up {setup.label}
               </Button>
-            ))}
+            )}
             {shown.map((g) => (
               <Button key={g.id} size="sm" onClick={() => onAdd(g.id)}>
                 <span className="one-line">Add to {g.name}</span>
