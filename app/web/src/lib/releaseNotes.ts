@@ -54,6 +54,33 @@ export function parseNotes(md: string): NoteBlock[] {
 
 export type Inline = { kind: "text" | "code" | "strong"; text: string };
 
+/** How much of a note fits on one line of a toast before it is cut. */
+export const NOTE_LINE_MAX = 96;
+
+/**
+ * The first note of a release, on one line, for the place that has room for one line and no more
+ * (the "Updated to" toast). It is the release's own first item: something true about what
+ * changed, where the toast used to repeat the version the title already gave (#366). Null when
+ * the notes hold nothing a person can read.
+ */
+export function firstNote(md: string, max = NOTE_LINE_MAX): string | null {
+  for (const block of parseNotes(md)) {
+    for (const item of block.items) {
+      const words = parseInline(item)
+        .map((part) => part.text)
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (words === "") continue;
+      if (words.length <= max) return words;
+      const cut = words.slice(0, max);
+      const space = cut.lastIndexOf(" ");
+      return `${(space > max * 0.6 ? cut.slice(0, space) : cut).replace(/[\s,;:.-]+$/, "")}…`;
+    }
+  }
+  return null;
+}
+
 /** Splits one item into text, `code` and **bold**. A link keeps its words and loses its address. */
 export function parseInline(text: string): Inline[] {
   const out: Inline[] = [];

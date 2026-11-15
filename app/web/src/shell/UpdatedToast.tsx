@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { usePathname, useRouter } from "next/navigation";
 import { dismissNotification, notify } from "@/components/Notify";
 import { updateDismissUpdated } from "@/lib/host";
+import { firstNote } from "@/lib/releaseNotes";
 import { sendUpdate } from "@/lib/updateActions";
 import { requestNavigation, takeAppNavigation } from "@/lib/navigationGuard";
 import { useSnap } from "@/lib/store";
@@ -38,7 +39,9 @@ export function UpdatedToast() {
   const update = useSnap((s) => s.update);
   const onUpdates = pathname.endsWith("/updates/");
   const version = update?.updated_to?.version ?? null;
-  const current = update?.current_version ?? "";
+  // The second line: one thing the release changed, from its own notes. It is not the version
+  // again (#366: "You have 0.16.0." under "Updated to 0.16.0" said nothing).
+  const note = update?.updated_to ? firstNote(update.updated_to.notes) : null;
   const mountedPath = useRef(pathname);
 
   // The first navigation the person makes to another page sends the notice. The app's own page
@@ -67,13 +70,14 @@ export function UpdatedToast() {
           onClick: () => requestNavigation(() => router.push("/updates/")),
         },
         {
-          detail: `You have ${current}.`,
+          // One line from the release's own notes, or no second line at all.
+          ...(note ? { detail: note } : {}),
           lifeMs: UPDATED_TOAST_MS,
           onClose: () => void sendUpdate(updateDismissUpdated),
         },
       ),
     );
-  }, [version, onUpdates, current, router]);
+  }, [version, onUpdates, note, router]);
 
   return null;
 }

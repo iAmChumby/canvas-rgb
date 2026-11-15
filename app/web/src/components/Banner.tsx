@@ -6,7 +6,13 @@ import { IconButton } from "@/components/Button";
 
 export type Tone = "warn" | "down" | "work" | "ok";
 
-/** A full-width notice. `down` is the red service banner; `warn` the conflict notice. */
+/** A full-width notice. `down` is the red service banner; `warn` the conflict notice.
+ *
+ * It is a standing notice: it takes its own place in the page and stays while the condition holds
+ * or until the person dismisses it. Nothing here comes and goes on its own. A message that does
+ * (a success, an undo, the "Updated to" greeting) is a toast, drawn by `components/Notify.tsx`,
+ * and `src/test/toastGuard.test.ts` fails on a second handmade one (#366).
+ */
 export function Banner({
   tone,
   icon,
@@ -15,7 +21,6 @@ export function Banner({
   actions,
   dismissLabel,
   onDismiss,
-  leaving,
 }: {
   tone: Tone;
   icon: ReactNode;
@@ -24,12 +29,10 @@ export function Banner({
   actions?: ReactNode;
   dismissLabel?: string;
   onDismiss?: () => void;
-  /** Playing the leaving fade; the caller removes the banner once it has played. */
-  leaving?: boolean;
 }) {
   const style = { "--tone": `var(--${tone})` } as CSSProperties;
   return (
-    <div className="banner" style={style} role={tone === "down" ? "alert" : "status"} data-leaving={leaving ? "true" : undefined}>
+    <div className="banner" style={style} role={tone === "down" ? "alert" : "status"}>
       <span aria-hidden="true" className="banner-icon">
         {icon}
       </span>
