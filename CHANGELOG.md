@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Every message that appears and then goes away looks and behaves the same, including the "Updated to" greeting, which now shows one thing the release changed instead of repeating the version (#366)
+
 ## [0.16.0] - 2026-11-15
 
 ### Added

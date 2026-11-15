@@ -55,7 +55,7 @@ export function parseNotes(md: string): NoteBlock[] {
 export type Inline = { kind: "text" | "code" | "strong"; text: string };
 
 /** How much of a note fits on one line of a toast before it is cut. */
-export const NOTE_LINE_MAX = 96;
+export const NOTE_LINE_MAX = 64;
 
 /**
  * The first note of a release, on one line, for the place that has room for one line and no more

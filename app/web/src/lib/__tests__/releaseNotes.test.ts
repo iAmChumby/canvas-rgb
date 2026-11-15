@@ -6,7 +6,7 @@ import { firstNote, NOTE_LINE_MAX, parseInline, parseNotes } from "@/lib/release
 
 const NOTES = [
   "### Added",
-  "- Chains: tell the app what is on a header in three steps: drag, type a number, confirm.",
+  "- Chains: set up a header in three steps.",
   "- Patterns: paint the colour of every LED of a device.",
   "",
   "### Fixed",
@@ -15,9 +15,11 @@ const NOTES = [
 
 describe("firstNote", () => {
   it("is the release's first note, in plain words", () => {
-    expect(firstNote(NOTES)).toBe(
-      "Chains: tell the app what is on a header in three steps: drag, type a number, confirm.",
-    );
+    expect(firstNote(NOTES)).toBe("Chains: set up a header in three steps.");
+  });
+
+  it("cuts the same note when it is longer than the toast's line", () => {
+    expect(firstNote(NOTES.split("\n").slice(0, 2).join("\n"), 20)).toBe("Chains: set up a…");
   });
 
   it("loses the markup a toast cannot draw", () => {

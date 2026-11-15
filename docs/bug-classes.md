@@ -823,3 +823,35 @@ retries can wait for one busy answer.
 - Left: the installed-app checks on #97 (Back/Forward and mouse back with unsaved code, the close/reload
   warning, CSS `round()` in WebView2), the phone code layer and screen readers need the installed app
   and are out of the fakes' reach. #97 carries no `cause:` label (not applied; left to the main agent).
+
+### `cause:hand-rolled-notice`: a message that comes and goes, drawn outside the notification lane
+
+The editor has one notification lane: `app/web/src/components/Notify.tsx` owns the policy (tone, life,
+hold while the pointer is on it) and sonner owns the look, the stacking, the motion and the swipe. A notice
+built anywhere else gets its own markup, its own timer and its own look, so the app says the same kind of
+thing three ways and Luke asks for one toast again (#168, #125, #12, #366). The notice itself may be a
+toast (it appears and goes), or a standing banner (it waits for a key or for its condition to end); the
+class is the handmade *clock*, not the words.
+
+- [#168](https://github.com/iAmChumby/canvas-rgb/issues/168): sonner arrived behind one wrapper, but the
+  "Updated to X.Y.Z" greeting stayed a `Banner` with its own hold, fade and removal timers
+  (`app/web/src/shell/GlobalBanners.tsx:129-197`), so it was not a toast at all.
+- [#125](https://github.com/iAmChumby/canvas-rgb/issues/125): that banner sat over the release notes it
+  linked to, and stayed until it was pressed. A `position: fixed` notice over `app.css:778-785` covers
+  whatever is under it; a toast in the lane does not, and it is not drawn on `/updates/` at all.
+- [#12](https://github.com/iAmChumby/canvas-rgb/issues/12): the first toast host restarted its own timer
+  on every status poll, so a toast never cleared. The lane's clock is module state, not an effect, so a
+  re-render cannot restart it (`app/web/src/components/Notify.tsx:118-147`).
+- [#366](https://github.com/iAmChumby/canvas-rgb/issues/366): the last two. The update toast said
+  "You have 0.16.0." under "Updated to 0.16.0", and the preset strip printed its own "Deleted X / Undo"
+  line beside the same toast on its own 8 s timer (`app/web/src/views/EffectsView.tsx:367-373`,
+  `app/web/src/views/PresetStrip.tsx:325-341`).
+- **Class fix:** done (#366). Every toast goes through `notify()` and has one anatomy: icon, title,
+  optional description, optional action, close. How long a message stays is `NOTE_MS` or `lifeMs`, never a
+  component's timer. `app/web/src/test/toastGuard.test.ts` reads every source file and fails on a second
+  `sonner` import, a second toast body (`notify-*`), a `<Banner>` outside the shell and the scene list, or
+  a `setTimeout` of two seconds or more that clears a state to `null`/`false`. `Banner` is a standing notice
+  and no longer takes a leaving fade. Sibling search for the timer shape (`git grep -n "setTimeout" app/web/src`)
+  found no other message clock: the rest are debounces, animation flags, retries and the fixture's install
+  walk. Left: the fan service's "Fan control is unavailable" notice stays a banner because it reports a
+  running condition, not a moment (#168's decision); it is untouched.
