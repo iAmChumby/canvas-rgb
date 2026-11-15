@@ -176,8 +176,11 @@
   font-size: var(--t15);
 }
 
-/* The cap is 14 x 24; the slot answers the pointer over its whole height, which is the hit area. */
+/* The cap is 14 x 24; the slot answers the pointer over its whole height, which is the hit area.
+   `flex: none`: the shared slider grows along a row (`flex: 1 1 180px`), and in this column that
+   basis would be its height, pushing the step's keys below the fold on a phone. */
 .fader :global(.slider) {
+  flex: none;
   height: 44px;
 }
 

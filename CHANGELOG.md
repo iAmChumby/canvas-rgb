@@ -8,6 +8,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Chains: tell the app what is on a header in three steps: drag, type a number, confirm. (#338)
+- Chains: setup comes to you on first run, and Devices can redo any header. (#338)
 - Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
 - Effects: Play on chooses the groups; the builder shows the group you are tuning. (#310)
 - The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
