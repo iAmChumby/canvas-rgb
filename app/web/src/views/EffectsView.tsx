@@ -60,6 +60,9 @@ import { AnimatedNumber } from "@/components/AnimatedNumber";
 /** Live edits are sent this long after the last change (ms). */
 const PATCH_DEBOUNCE_MS = 60;
 
+/** How long a deleted preset can still be put back: the notification's own life, not a timer here. */
+const UNDO_MS = 8000;
+
 /** `PATTERN_ID_PREFIX` from the spine: a pattern's id is its name. */
 const PATTERN_ID_PREFIX = "pattern:";
 
@@ -363,14 +366,6 @@ export function EffectsView() {
     }
   };
 
-  // The preset deleted last, while it can still be put back (8 s).
-  const [undo, setUndoState] = useState<{ name: string; run: () => Promise<void> } | null>(null);
-  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const setUndo = (next: { name: string; run: () => Promise<void> } | null) => {
-    if (undoTimer.current) clearTimeout(undoTimer.current);
-    setUndoState(next);
-    if (next) undoTimer.current = setTimeout(() => setUndoState(null), 8000);
-  };
   const detailRef = useRef<EffectDetail | null>(null);
   useEffect(() => {
     detailRef.current = loaded && loaded.id === selectedId ? loaded.detail : null;
@@ -475,12 +470,12 @@ export function EffectsView() {
     }
     // The live values stay as they are; they just no longer belong to a preset.
     if (wasApplied) setApplied(id, null);
-    // One way back, shared by the notification and the strip: it works once, then both go.
+    // One way back, in the one place a message that comes and goes belongs: the notification
+    // lane. It works once, and it is on screen for the eight seconds it always was (#366).
     let used = false;
     const putBack = async () => {
       if (used) return;
       used = true;
-      setUndo(null);
       try {
         const r = await api.createPreset(id, { name, props: preset.props });
         setUserPresets(id, r.user_presets);
@@ -491,11 +486,10 @@ export function EffectsView() {
         throw e;
       }
     };
-    setUndo({ name, run: putBack });
     notify(`Deleted ${name}`, "info", {
       label: "Undo",
       onClick: () => void putBack().catch((e: unknown) => notify(messageOf(e), "down")),
-    });
+    }, { lifeMs: UNDO_MS });
   };
 
   const toggleFavorite = async (id: string, favorite: boolean) => {
@@ -1191,10 +1185,6 @@ export function EffectsView() {
               onRename={renamePreset}
               onDuplicate={duplicatePreset}
               onDelete={deletePreset}
-              undo={undo && detail.schema.id === selectedId ? { name: undo.name } : null}
-              onUndo={async () => {
-                if (undo) await undo.run();
-              }}
             />
           )}
 

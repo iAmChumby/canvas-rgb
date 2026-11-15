@@ -29,7 +29,7 @@ import type { Props } from "@/proto/props";
 type Naming = { kind: "save" } | { kind: "saveAs" } | { kind: "rename"; name: string };
 
 /** What the strip asks the daemon to do, in the words of its error ("Could not save ..."). */
-type Doing = "apply" | "save" | "update" | "rename" | "duplicate" | "delete" | "undo";
+type Doing = "apply" | "save" | "update" | "rename" | "duplicate" | "delete";
 
 /** How many changes the diff line spells out before it says "+N more". */
 const DIFF_SHOWN = 2;
@@ -47,7 +47,6 @@ function explain(e: unknown, doing: Doing): string {
     rename: "Not renamed",
     duplicate: "Not duplicated",
     delete: "Not deleted",
-    undo: "Not put back",
   };
   return `${failed[doing]}: ${reason}`;
 }
@@ -63,7 +62,8 @@ function explain(e: unknown, doing: Doing): string {
  *
  * The strip owns only what it shows (the name field, the open menu). Every change goes out
  * through a callback that returns when the daemon has answered; a callback that throws leaves
- * the field open with the message under it.
+ * the field open with the message under it. A preset that was deleted says so in the notification
+ * lane, with its Undo key (#366): the strip holds no message of its own that comes and goes.
  */
 export function PresetStrip({
   builtIn,
@@ -72,7 +72,6 @@ export function PresetStrip({
   live,
   running,
   disabled,
-  undo,
   onApply,
   onSave,
   onUpdate,
@@ -80,7 +79,6 @@ export function PresetStrip({
   onRename,
   onDuplicate,
   onDelete,
-  onUndo,
 }: {
   builtIn: Preset[];
   user: Preset[];
@@ -89,8 +87,6 @@ export function PresetStrip({
   live: Props;
   running: RunningPreset | null;
   disabled?: boolean;
-  /** The preset deleted last, while it can still be put back. The page owns it: the toast and the strip share one Undo. */
-  undo?: { name: string } | null;
   onApply: (name: string) => Promise<void>;
   /** Saves the live values under a new name. */
   onSave: (name: string) => Promise<void>;
@@ -100,7 +96,6 @@ export function PresetStrip({
   onRename: (name: string, to: string) => Promise<void>;
   onDuplicate: (name: string) => Promise<void>;
   onDelete: (name: string) => Promise<void>;
-  onUndo?: () => Promise<void>;
 }) {
   const narrow = useMediaQuery("(max-width: 720px)");
   const errorId = useId();
@@ -320,23 +315,6 @@ export function PresetStrip({
             onClick={() => void doReset()}
           />
         </span>
-      </>
-    );
-  } else if (undo && onUndo) {
-    line = (
-      <>
-        <span className="preset-status">
-          Deleted <span className="preset-status-name">{undo.name}</span>
-        </span>
-        <Button
-          size="sm"
-          icon={<ArrowCounterClockwise size={14} />}
-          busy={working === "undo"}
-          disabled={busy && working !== "undo"}
-          onClick={() => void attempt("undo", onUndo)}
-        >
-          Undo
-        </Button>
       </>
     );
   } else {
