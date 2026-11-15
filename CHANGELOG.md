@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.16.0] - 2026-11-15
+
 ### Added
 
 - Chains: tell the app what is on a header in three steps: drag, type a number, confirm. (#338)
@@ -16,14 +18,15 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Scenes: tune an effect inside its group, and make groups and scenes from your own devices. (#310)
 - Command line: `canvas-rgb scenes list` shows the scenes with the active one marked, `canvas-rgb scenes set <name>` sets one by name (case does not matter), and `canvas-rgb status` names the active scene (#310)
 - Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names, whether the group comes before or after the effect's properties (#310)
-- Patterns: paint the colour of every LED of a device, and see each stroke on the real lights.
-- Effects: New effect offers Stack, Pattern or Code; a pattern is built on one of your devices and lives in the library.
-- Scenes: patterns appear in a group's effect picker, marked when they fit, and a stretched device says so.
+- Patterns: paint the colour of every LED of a device, and see each stroke on the real lights. (#339)
+- Effects: New effect offers Stack, Pattern or Code; a pattern is built on one of your devices and lives in the library. (#339)
+- Scenes: patterns appear in a group's effect picker, marked when they fit, and a stretched device says so. (#339)
+- The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
 
 ### Changed
 
-- Chains: the daemon can hold a header while the app asks what is plugged into it, and puts the length back if the window closes.
-- Chains: set up a header's parts in one commit that either lands whole or leaves everything as it was.
+- Chains: the daemon can hold a header while the app asks what is plugged into it, and puts the length back if the window closes. (#338)
+- Chains: set up a header's parts in one commit that either lands whole or leaves everything as it was. (#338)
 - Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
 - Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
 - Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
@@ -32,16 +35,12 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
+- `canvas-rgb`: a command that cannot reach the daemon, or is never answered, now fails with a message that says which it was instead of waiting on the machine: a request gives up after 5 s to connect and 120 s in all, a connect that failed is tried three times (nothing was sent), a daemon that took the connection and went quiet says it did not answer within the limit, and an answer that cannot be read is a failure rather than an empty success (#328)
 
 ### Removed
 
 - The per-LED walk and the onboarding session. Chain setup replaces them. (#338)
 - Layout, its placement canvas and the part-placing setup. Saved layouts become scenes. (#310)
-- The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
-
-### Fixed
-
-- `canvas-rgb`: a command that cannot reach the daemon, or is never answered, now fails with a message that says which it was instead of waiting on the machine: a request gives up after 5 s to connect and 120 s in all, a connect that failed is tried three times (nothing was sent), a daemon that took the connection and went quiet says it did not answer within the limit, and an answer that cannot be read is a failure rather than an empty success (#328)
 
 ## [0.13.1] - 2026-11-11
 
@@ -351,7 +350,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...HEAD
+[0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
 [0.13.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.1...v0.12.0
