@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { dropApiConfig } from "@/lib/api";
 import { onStackPreviewFeed, startStackPreview, stopStackPreview } from "@/lib/stackPreview";
 import type { TauriGlobal } from "@/lib/host";
 
@@ -29,6 +30,8 @@ async function settle(): Promise<void> {
 beforeEach(() => {
   FakeSocket.opened = [];
   vi.useFakeTimers();
+  // The token is asked for again in every test: the answer is cached by the client.
+  dropApiConfig();
   (globalThis as { WebSocket?: unknown }).WebSocket = FakeSocket as unknown as typeof WebSocket;
   window.__TAURI__ = {
     core: { invoke: async () => ({ base_url: "http://127.0.0.1:9430", token: "tok" }) },
@@ -88,5 +91,26 @@ describe("the stack preview feed", () => {
     } finally {
       off();
     }
+  });
+
+  it("opens no socket when the builder is closed while the token request is pending", async () => {
+    // The token is held until the test says so.
+    let answer!: () => void;
+    const token = new Promise<{ base_url: string; token: string }>((resolve) => {
+      answer = () => resolve({ base_url: "http://127.0.0.1:9430", token: "tok" });
+    });
+    window.__TAURI__ = {
+      core: { invoke: () => token },
+      event: { listen: async () => () => undefined },
+    } as unknown as TauriGlobal;
+    startStackPreview();
+    await settle();
+    expect(FakeSocket.opened).toHaveLength(0);
+
+    // The builder is closed before the token arrives: no socket is opened for it.
+    stopStackPreview();
+    answer();
+    await settle();
+    expect(FakeSocket.opened).toHaveLength(0);
   });
 });

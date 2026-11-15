@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The sidebar strip shows your lights' real colours in a scene (#379)
+
 ## [0.16.0] - 2026-11-15
 
 ### Added
