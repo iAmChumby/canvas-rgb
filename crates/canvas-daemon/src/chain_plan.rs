@@ -12,8 +12,8 @@ use std::collections::HashSet;
 use canvas_proto::api::SetupPart;
 use canvas_proto::layout::LedSlice;
 use canvas_proto::scene::{
-    part_light_id, validate_scene, zone_light_id, ChainRecord, ChainState, Light, LightId,
-    LightsFile, ScenesFile, PART_NAME_MAX,
+    check_copies, part_light_id, validate_scene, zone_light_id, ChainRecord, ChainState,
+    CopiesError, Light, LightId, LightsFile, ScenesFile, PART_NAME_MAX,
 };
 use canvas_proto::DeviceId;
 
@@ -49,6 +49,9 @@ pub fn plan_commit(
     if parts.is_empty() {
         return Err(ChainPlanError::NoParts);
     }
+    // `copies` only counts (#382): 2 or more means the header repeats this one run, so the part is
+    // the header's only part. Every LED total below counts the run once, whatever `copies` says.
+    let mut copies = Vec::with_capacity(parts.len());
     for (index, part) in parts.iter().enumerate() {
         if part.leds == 0 {
             return Err(ChainPlanError::PartUnderOneLed { index });
@@ -56,6 +59,15 @@ pub fn plan_commit(
         if part.name.chars().count() > PART_NAME_MAX {
             return Err(ChainPlanError::NameTooLong { index });
         }
+        copies.push(check_copies(part.copies).map_err(|e| match e {
+            CopiesError::Zero => ChainPlanError::CopiesZero { index },
+            CopiesError::AboveMax { copies, max } => {
+                ChainPlanError::CopiesAboveMax { index, copies, max }
+            }
+        })?);
+    }
+    if parts.len() > 1 && copies.iter().any(Option::is_some) {
+        return Err(ChainPlanError::CopiesWithSeveralParts);
     }
     let total: u64 = parts.iter().map(|p| u64::from(p.leds)).sum();
     if total > u64::from(max_leds) {
@@ -88,7 +100,7 @@ pub fn plan_commit(
             arrangement: part.kind.arrangement(),
             reversed: previous.map(|l| l.reversed).unwrap_or(false),
             kind: Some(part.kind),
-            copies: None,
+            copies: copies[index],
         });
         start += part.leds;
     }
@@ -158,6 +170,13 @@ pub enum ChainPlanError {
     NameTooLong { index: usize },
     /// The split asks for more parts than the header has LEDs, or for none at all.
     CountAboveLength,
+    /// A row says it is shown 0 times.
+    CopiesZero { index: usize },
+    /// A row says it is shown more times than [`canvas_proto::scene::COPIES_MAX`].
+    CopiesAboveMax { index: usize, copies: u32, max: u32 },
+    /// A row is shown 2 or more times, and the header has other rows: a repeated run is the
+    /// header's only part.
+    CopiesWithSeveralParts,
     /// The planned scenes would not validate; the text is the validator's own message.
     Invalid(String),
 }
@@ -181,6 +200,20 @@ impl std::fmt::Display for ChainPlanError {
             ChainPlanError::CountAboveLength => write!(
                 f,
                 "a chain cannot have more parts than LEDs, and it needs at least one part"
+            ),
+            ChainPlanError::CopiesZero { index } => write!(
+                f,
+                "part {} is shown 0 times; count at least one orange light",
+                index + 1
+            ),
+            ChainPlanError::CopiesAboveMax { index, copies, max } => write!(
+                f,
+                "part {} is shown {copies} times, and the app counts up to {max}; count again",
+                index + 1
+            ),
+            ChainPlanError::CopiesWithSeveralParts => write!(
+                f,
+                "a run that the header repeats has to be the only part on that header"
             ),
             ChainPlanError::Invalid(text) => {
                 write!(f, "the scenes would not be valid: {text}")
@@ -742,5 +775,101 @@ mod tests {
         for scene in &empty.scenes.scenes {
             validate_scene(scene, &empty.lights.lights).expect("an emptied scene validates");
         }
+    }
+
+    /// A part that the header repeats: 8 LEDs, shown `copies` times.
+    fn mirrored(copies: Option<u32>) -> SetupPart {
+        SetupPart {
+            name: "Same lights, shown 8 times".into(),
+            kind: ChainPartKind::Other,
+            leds: 8,
+            copies,
+        }
+    }
+
+    fn one_zone() -> (LightsFile, ScenesFile) {
+        let d = device();
+        let lights = lights_file(vec![whole(&d, ZONE)]);
+        let scenes = scenes(vec![scene("desk", vec![group("front", &[zone_light_id(&d, ZONE).as_str()])])]);
+        (lights, scenes)
+    }
+
+    #[test]
+    fn a_mirror_row_is_one_light_of_eight_leds_and_the_header_ends_at_eight() {
+        let d = device();
+        let (lights, scenes) = one_zone();
+        let plan = plan_commit(&lights, &scenes, &d, ZONE, &[mirrored(Some(8))], 300)
+            .expect("a mirror row fits");
+        assert_eq!(plan.final_leds, 8, "the run counts once, never 64");
+        assert_eq!(plan.lights.lights.len(), 1);
+        let light = &plan.lights.lights[0];
+        assert_eq!(light.leds, Some(LedSlice { start: 0, count: 8 }));
+        assert_eq!(light.copies, Some(8));
+        assert_eq!(light.kind, Some(ChainPartKind::Other));
+        assert_eq!(light.arrangement, Arrangement::Strip);
+    }
+
+    #[test]
+    fn copies_zero_above_the_cap_and_beside_other_rows_are_refused_with_plain_sentences() {
+        let d = device();
+        let (lights, scenes) = one_zone();
+        let go = |parts: &[SetupPart]| plan_commit(&lights, &scenes, &d, ZONE, parts, 300);
+
+        let zero = go(&[mirrored(Some(0))]).unwrap_err();
+        assert_eq!(zero, ChainPlanError::CopiesZero { index: 0 });
+        assert_eq!(zero.to_string(), "part 1 is shown 0 times; count at least one orange light");
+
+        let high = go(&[mirrored(Some(canvas_proto::scene::COPIES_MAX + 1))]).unwrap_err();
+        assert_eq!(
+            high,
+            ChainPlanError::CopiesAboveMax { index: 0, copies: 33, max: 32 }
+        );
+        assert_eq!(
+            high.to_string(),
+            "part 1 is shown 33 times, and the app counts up to 32; count again"
+        );
+
+        let several = go(&[mirrored(Some(2)), part("Fan 2", ChainPartKind::Fan, 8)]).unwrap_err();
+        assert_eq!(several, ChainPlanError::CopiesWithSeveralParts);
+        assert_eq!(
+            several.to_string(),
+            "a run that the header repeats has to be the only part on that header"
+        );
+        // The order of the rows does not matter.
+        assert_eq!(
+            go(&[part("Fan 1", ChainPartKind::Fan, 8), mirrored(Some(2))]).unwrap_err(),
+            ChainPlanError::CopiesWithSeveralParts
+        );
+
+        // The cap itself is allowed, and once is stored as none.
+        assert!(go(&[mirrored(Some(canvas_proto::scene::COPIES_MAX))]).is_ok());
+        let once = go(&[mirrored(Some(1))]).expect("once is allowed");
+        assert_eq!(once.lights.lights[0].copies, None, "Some(1) is stored as none");
+    }
+
+    #[test]
+    fn copies_of_one_or_none_beside_other_rows_is_allowed_and_stores_none() {
+        let d = device();
+        let (lights, scenes) = one_zone();
+        let parts = [
+            SetupPart { copies: Some(1), ..part("Fan 1", ChainPartKind::Fan, 12) },
+            part("Fan 2", ChainPartKind::Fan, 12),
+        ];
+        let plan = plan_commit(&lights, &scenes, &d, ZONE, &parts, 300).expect("a series fits");
+        assert!(plan.lights.lights.iter().all(|l| l.copies.is_none()));
+        assert_eq!(plan.final_leds, 24);
+    }
+
+    #[test]
+    fn the_led_total_counts_a_mirrored_part_once_whatever_its_copies() {
+        let d = device();
+        let (lights, scenes) = one_zone();
+        // The header takes exactly 8: a plan that multiplied by copies would be 64 and refused.
+        let plan = plan_commit(&lights, &scenes, &d, ZONE, &[mirrored(Some(8))], 8)
+            .expect("8 LEDs fit a header of 8");
+        assert_eq!(plan.final_leds, 8);
+        let none = plan_commit(&lights, &scenes, &d, ZONE, &[mirrored(None)], 8).expect("fits");
+        assert_eq!(none.final_leds, plan.final_leds);
+        assert_eq!(none.lights.lights[0].leds, plan.lights.lights[0].leds);
     }
 }

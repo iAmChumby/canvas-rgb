@@ -1429,6 +1429,238 @@ async fn setting_up_again_keeps_part_identity_in_the_files() {
     assert_eq!(read_zones(&rig.home).sizes[BOARD][&0], FINAL);
 }
 
+// ---------------------------------------------------------------------------------------------
+// #381, #382: a header whose devices mirror each other, and the two-run session the counting uses
+// ---------------------------------------------------------------------------------------------
+
+/// Luke's JARGB 1: seven fans and a strip on a splitter, every one showing the same 8 LEDs. The
+/// owner counts 8 orange lights and 8 LEDs on one device, so the flow sends one row.
+fn mirror_row(copies: Option<u32>) -> SetupPart {
+    SetupPart {
+        name: "Same lights, shown 8 times".into(),
+        kind: ChainPartKind::Other,
+        leds: 8,
+        copies,
+    }
+}
+
+/// A mirrored header ends as ONE light of 8 LEDs with `copies` 8, and the header is resized to 8,
+/// never to 64. Fails if an implementation multiplies the LEDs by `copies`.
+#[tokio::test]
+async fn a_mirror_row_commits_one_light_and_resizes_to_eight() {
+    let rig = rig("mirror-commit", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let before = rig.server.resize_count(0);
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+
+    let answer = committed(&rig, 0, &setup.session, &[mirror_row(Some(8))]).await;
+
+    assert_eq!(answer.final_leds, 8, "the run counts once");
+    assert_eq!(answer.lights.len(), 1, "one light, not eight");
+    assert_eq!(answer.lights[0].led_count, 8);
+    assert_eq!(answer.lights[0].light.copies, Some(8));
+    assert_eq!(rig.server.resize_count(0), before + 2, "one raise and one resize, to 8");
+    assert_eq!(rig.server.zone_leds(0, 0), Some(8), "the header resized to 8, not 64");
+    let made = zone_parts(&read_lights(&rig.home), 0);
+    assert_eq!(made.len(), 1);
+    assert_eq!(made[0].id, part_id(1));
+    assert_eq!(made[0].leds, Some(LedSlice { start: 0, count: 8 }));
+    assert_eq!(made[0].copies, Some(8));
+    assert_eq!(made[0].kind, Some(ChainPartKind::Other), "devices, not fans");
+    assert_eq!(made[0].name.as_deref(), Some("Same lights, shown 8 times"));
+    assert_eq!(read_zones(&rig.home).sizes[BOARD][&0], 8);
+    assert_eq!(chain_state(&rig, 0).await, Some(ChainState::SetUp));
+    // The chain list reads the same: one part, 8 LEDs, and the header's own length is 8.
+    let listed = chains(&rig).await;
+    let first = listed.chains.iter().find(|chain| chain.zone_index == 0).expect("the header");
+    assert_eq!(first.leds, 8);
+    assert_eq!(first.parts.len(), 1);
+    assert_eq!(first.parts[0].light.copies, Some(8));
+}
+
+/// A `copies` of 0, above the cap, or of 2 or more beside other rows is a 4xx with a plain
+/// sentence, and it changes nothing; the cap itself is accepted and `Some(1)` is stored as none.
+#[tokio::test]
+async fn copies_zero_above_cap_and_beside_other_rows_are_refused() {
+    let rig = rig("mirror-refused", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    save_rig_files(&rig).await;
+    let lights_before = std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let resizes = rig.server.resize_count(0);
+
+    let fan = |leds: u32| SetupPart {
+        name: "Fan".into(),
+        kind: ChainPartKind::Fan,
+        leds,
+        copies: None,
+    };
+    let cases: [(&str, Vec<SetupPart>, &str); 4] = [
+        ("zero", vec![mirror_row(Some(0))], "shown 0 times"),
+        ("33", vec![mirror_row(Some(33))], "counts up to 32"),
+        ("two beside none", vec![mirror_row(Some(2)), fan(8)], "only part on that header"),
+        ("none beside two", vec![fan(8), mirror_row(Some(2))], "only part on that header"),
+    ];
+    for (name, parts, sentence) in cases {
+        let (status, body) = commit(&rig, 0, &setup.session, &parts).await;
+        assert!(status.is_client_error(), "{name}: {status} {body}");
+        let message = body["message"].as_str().unwrap_or_default();
+        assert!(message.contains(sentence), "{name}: the answer says why: {body}");
+    }
+    assert_eq!(rig.server.resize_count(0), resizes, "a refused commit resizes nothing");
+    assert_eq!(std::fs::read(rig.home.join(LIGHTS_FILE)).expect("lights.json"), lights_before);
+    assert_eq!(chain_state(&rig, 0).await, None, "nothing was set up");
+
+    // The session stayed open: the cap itself is accepted.
+    let capped = SetupPart { leds: 8, ..mirror_row(Some(32)) };
+    let answer = committed(&rig, 0, &setup.session, &[capped]).await;
+    assert_eq!(answer.lights[0].light.copies, Some(32));
+    assert_eq!(answer.final_leds, 8);
+
+    // And once is stored as none.
+    let again = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let answer = committed(&rig, 0, &again.session, &[mirror_row(Some(1))]).await;
+    assert_eq!(answer.lights[0].light.copies, None, "Some(1) is stored as none");
+}
+
+/// A series (three fans of 12) is stored with no `copies` anywhere in `lights.json`.
+#[tokio::test]
+async fn series_output_has_no_copies() {
+    let rig = rig("series-no-copies", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+    let fans: Vec<SetupPart> = (1..=3)
+        .map(|n| SetupPart {
+            name: format!("Fan {n}"),
+            kind: ChainPartKind::Fan,
+            leds: 12,
+            copies: None,
+        })
+        .collect();
+
+    let answer = committed(&rig, 0, &setup.session, &fans).await;
+
+    assert_eq!(answer.final_leds, 36);
+    assert_eq!(answer.lights.len(), 3);
+    let text = std::fs::read_to_string(rig.home.join(LIGHTS_FILE)).expect("lights.json");
+    assert!(!text.contains("copies"), "a series writes no copies: {text}");
+}
+
+/// A store loaded from `home`, ready to write: the scenes' wait for the first device list is over.
+fn store_loaded(home: &Path) -> Store {
+    let mut store = Store::load_from(home);
+    store.scenes_pending = None;
+    store
+}
+
+/// An old `lights.json` (no `copies` anywhere) loads and saves unchanged; a file with `copies`
+/// keeps it across a load and a save.
+#[test]
+fn an_old_lights_file_loads_and_a_copies_file_round_trips() {
+    let home = temp_home("copies-file");
+    let mut store = Store::at(&home);
+    store.lights = rig_lights();
+    store.save_lights().expect("lights.json");
+    let old = std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json");
+    assert!(!String::from_utf8_lossy(&old).contains("copies"), "an old file has no copies");
+
+    let loaded = store_loaded(&home);
+    assert_eq!(loaded.lights, rig_lights(), "an old file loads as it was");
+    assert!(loaded.lights.lights.iter().all(|l| l.copies.is_none()));
+    loaded.save_lights().expect("saves again");
+    assert_eq!(std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json"), old, "saved unchanged");
+
+    let mut mirrored = store_loaded(&home);
+    mirrored.lights.lights[0].copies = Some(8);
+    mirrored.save_lights().expect("saves copies");
+    let with = std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json");
+    assert!(String::from_utf8_lossy(&with).contains(r#""copies": 8"#), "copies is written");
+    let reloaded = store_loaded(&home);
+    assert_eq!(reloaded.lights.lights[0].copies, Some(8), "copies loads back");
+    reloaded.save_lights().expect("saves again");
+    assert_eq!(std::fs::read(home.join(LIGHTS_FILE)).expect("lights.json"), with, "and round-trips");
+    let _ = std::fs::remove_dir_all(&home);
+}
+
+/// The counting step's slide: a white trail (LEDs 0..N-1) and an orange end (LED N-1) are two runs
+/// in one light request, and the fake hardware shows exactly those LEDs. This path had no
+/// coverage on the daemon side before (guard: the runs path itself is old).
+#[tokio::test]
+async fn a_white_trail_and_an_orange_end_light_the_fake() {
+    let rig = rig("trail", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+
+    let orange = Rgb8::new(255, 77, 0);
+    let body = serde_json::json!({
+        "session": setup.session,
+        "runs": [
+            { "start": 0, "count": 7, "color": "#ffffff" },
+            { "start": 7, "count": 1, "color": "#ff4d00" },
+        ],
+    });
+    let (status, answer) = send(&rig, "POST", &light_path(0), Some(&body.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let lit = wait_until(Duration::from_secs(30), || {
+        let colors = rig.server.colors(0);
+        colors.len() == 360 && colors[7] == orange
+    })
+    .await;
+    assert!(lit, "the runs never reached the fake: {:?}", &rig.server.colors(0)[..10]);
+    let colors = rig.server.colors(0);
+    assert!(colors[..7].iter().all(|c| *c == Rgb8::WHITE), "the trail is white: {:?}", &colors[..8]);
+    assert_eq!(colors[7], orange, "the last LED is orange");
+    assert!(colors[8..].iter().all(|c| *c == Rgb8::BLACK), "nothing past the end is lit");
+}
+
+/// The counting step starts with ONE LED on. One run of count 1 lights only LED 0; a run that
+/// starts past the zone's end lights nothing (guard: `identify.rs` clamps runs to the zone).
+#[tokio::test]
+async fn one_led_start_lights_only_led_zero() {
+    let rig = rig("one-led", fake(EARLIER).await, true).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let setup = started(&rig, 0).await;
+    assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
+
+    let orange = Rgb8::new(255, 77, 0);
+    let one = serde_json::json!({
+        "session": setup.session,
+        "runs": [{ "start": 0, "count": 1, "color": "#ff4d00" }],
+    });
+    let (status, answer) = send(&rig, "POST", &light_path(0), Some(&one.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            let colors = rig.server.colors(0);
+            colors.len() == 360 && colors[0] == orange
+        })
+        .await,
+        "LED 0 never lit"
+    );
+    let colors = rig.server.colors(0);
+    assert!(colors[1..].iter().all(|c| *c == Rgb8::BLACK), "only LED 0 is on: {:?}", &colors[..4]);
+
+    let past = serde_json::json!({
+        "session": setup.session,
+        "runs": [{ "start": 300, "count": 1, "color": "#ff4d00" }],
+    });
+    let (status, answer) = send(&rig, "POST", &light_path(0), Some(&past.to_string())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            rig.server.colors(0).iter().take(300).all(|c| *c == Rgb8::BLACK)
+        })
+        .await,
+        "a run past the end must light nothing in the zone"
+    );
+}
+
 /// A stale session is a 409 and changes nothing: no resize, no file, no record.
 #[tokio::test]
 async fn commit_with_a_stale_session_is_a_409_and_changes_nothing() {
