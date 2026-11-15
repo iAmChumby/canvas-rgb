@@ -520,45 +520,28 @@ describe("rule 6: one pulse on success, none on failure (#187)", () => {
 });
 
 describe("rule 9: a colour change reveals with a mask wipe (#187)", () => {
-  it("no wipe on first mount; a change wipes the new colour over the previous one, then promotes it", () => {
-    vi.useFakeTimers();
-    try {
-      const { container, rerender } = render(<ColorField value="#ff0000" label="Colour" onChange={() => {}} />);
-      const swatch = container.querySelector(".color-swatch") as HTMLElement;
-      expect(swatch).toBeTruthy();
-      // First mount shows the colour directly: no wipe animation yet (F7).
-      expect(container.querySelector(".color-wipe"), "first mount must not animate").toBeNull();
-      expect(swatch.style.getPropertyValue("--c")).toBe("#ff0000");
-      rerender(<ColorField value="#00ff00" label="Colour" onChange={() => {}} />);
-      const wipe = container.querySelector(".color-wipe") as HTMLElement;
-      expect(wipe, "a committed change wipes in over the old colour").toBeTruthy();
-      expect(wipe.dataset.hex).toBe("#00ff00");
-      // The old colour is the base underneath while the wipe runs (F5).
-      expect(swatch.style.getPropertyValue("--c")).toBe("#ff0000");
-      // Once the wipe ends the new colour is promoted to the base.
-      act(() => {
-        vi.advanceTimersByTime(300);
-      });
-      expect(swatch.style.getPropertyValue("--c")).toBe("#00ff00");
-      expect(container.querySelector(".color-wipe")).toBeNull();
-    } finally {
-      vi.useRealTimers();
-    }
+  it("no wipe on first mount", () => {
+    const { container } = render(<ColorField value="#ff0000" label="Colour" onChange={() => {}} />);
+    const swatch = container.querySelector(".color-swatch") as HTMLElement;
+    expect(swatch).toBeTruthy();
+    // First mount shows the colour directly: no wipe animation yet (F7).
+    expect(container.querySelector(".color-wipe"), "first mount must not animate").toBeNull();
+    expect(swatch.style.getPropertyValue("--c")).toBe("#ff0000");
   });
 
-  it("a run of changes lands at once: the colour shows, and no second reveal is mounted", () => {
+  it("a value that arrives from outside shows at once: a preset, a read back, a feed (#369)", () => {
     vi.useFakeTimers();
     try {
       const { container, rerender } = render(<ColorField value="#ff0000" label="Colour" onChange={() => {}} />);
+      const swatch = container.querySelector(".color-swatch") as HTMLElement;
+      // The field cannot tell a preset applied from a run of values from the daemon, and a pulse
+      // is worse than no reveal, so it shows the colour it is given (#369). The reveal itself is
+      // the picker's own choices, in ColorWipeStream.test.tsx.
       rerender(<ColorField value="#00ff00" label="Colour" onChange={() => {}} />);
-      const swipe = container.querySelector(".color-wipe") as HTMLElement;
-      expect(swipe).toBeTruthy();
-      // A second value in the same breath is the same move, not a new choice (#369): the reveal
-      // is dropped rather than replayed, and the colour shows at once. A run of values - a drag,
-      // a held key, a feed from the daemon - must never pulse the swatch.
+      expect(container.querySelector(".color-wipe")).toBeNull();
+      expect(swatch.style.getPropertyValue("--c")).toBe("#00ff00");
       rerender(<ColorField value="#0000ff" label="Colour" onChange={() => {}} />);
       expect(container.querySelector(".color-wipe")).toBeNull();
-      const swatch = container.querySelector(".color-swatch") as HTMLElement;
       expect(swatch.style.getPropertyValue("--c")).toBe("#0000ff");
     } finally {
       vi.useRealTimers();
@@ -572,9 +555,10 @@ describe("rule 9: a colour change reveals with a mask wipe (#187)", () => {
     const first = container.querySelector(".picker-preview");
     expect(first).toBeTruthy();
     fireEvent.pointerDown(sq, { clientX: 10, clientY: 10, pointerId: 1 });
-    // The drag changes the hex at once, but the preview node is not replaced:
-    // the reveal replays at most once per --dur while dragging.
+    // The drag changes the hex at once, but the preview node is not replaced, and no reveal is
+    // added: a stream shows the new colour (#369).
     expect(container.querySelector(".picker-preview")).toBe(first);
+    expect(container.querySelector(".picker-preview.wipe")).toBeNull();
     fireEvent.pointerUp(sq, { clientX: 10, clientY: 10, pointerId: 1 });
   });
 });

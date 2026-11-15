@@ -121,6 +121,15 @@ describe("#369: a stream of colour changes never replays the reveal", () => {
     fireEvent.click(document.querySelectorAll(".picker-swatch")[1] as HTMLButtonElement);
     expect(fieldWipes(), "one choice, one reveal").toBe(1);
     expect(previewWipes(), "the preview reveals the chosen colour").toBe(1);
+    // The reveal ends on its own, and the swatch takes the chosen colour as its base.
+    act(() => {
+      vi.advanceTimersByTime(400);
+    });
+    expect(fieldWipes(), "the overlay comes off when the reveal ends").toBe(0);
+    const swatch = container.querySelector(".color-swatch") as HTMLElement;
+    expect(swatch.style.getPropertyValue("--c")).toBe(
+      (document.querySelectorAll(".picker-swatch")[1] as HTMLElement).style.getPropertyValue("--c"),
+    );
   });
 
   it("a hex typed and committed starts exactly one wipe", () => {

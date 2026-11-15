@@ -37,43 +37,18 @@ export function ColorField({
 
   // The wipe (issue #187, rule 9): `base` is the colour beneath the swatch, and a wipe overlay
   // carries the incoming colour over it. The reveal belongs to a change that lands once (#369):
-  // it plays for a quick swatch, a preset applied or a hex typed and committed, and never while
-  // the colour is changing continuously - a drag in the picker, a held key, a run of values from
-  // the daemon - where the new colour simply shows. Reduced motion never wipes at all. The
-  // change bookkeeping runs while rendering (the Crossfade pattern, as in Popover/Select); only
-  // the promotion waits, in an effect.
-  const [wipe, setWipe] = useState<{
-    base: string;
-    target: string;
-    wiping: boolean;
-    wipeId: number;
-    lastHex: string;
-    /** When the change before this one landed, or null before the first one. */
-    at: number | null;
-  }>({ base: hex, target: hex, wiping: false, wipeId: 0, lastHex: hex, at: null });
-  // How the picker said the next value was made. A value from anywhere else is "external": a
-  // preset, a reset, a read back from the daemon - the field cannot tell one of those from a run
-  // of them, so a run is what the clock below is for.
-  const pendingRef = useRef<{ hex: string; mode: ColorChangeMode } | null>(null);
+  // it plays for a quick swatch or a hex typed and committed - the two choices the picker names -
+  // and never while the colour is changing continuously. A drag in the picker, a held key, a
+  // preset applied, a run of values from the daemon: the new colour simply shows. Reduced motion
+  // never wipes at all. The decision for the picker's own changes is made in its callback; a
+  // value from anywhere else is taken in while rendering (the Crossfade pattern, as in
+  // Popover/Select), and only the promotion waits, in an effect.
+  const [wipe, setWipe] = useState({ base: hex, target: hex, wiping: false, wipeId: 0, lastHex: hex });
   if (hex !== wipe.lastHex) {
-    const pending = pendingRef.current;
-    pendingRef.current = null;
-    const mode = pending && pending.hex === hex ? pending.mode : "external";
-    const at = performance.now();
-    const gap = readCssMs("--dur", 180);
-    const streaming =
-      motionOffNow() ||
-      mode === "continuous" ||
-      (mode === "external" && wipe.at !== null && at - wipe.at < gap);
-    if (streaming || hex === wipe.base) {
-      // The new colour shows at once: no overlay, so nothing replays.
-      setWipe({ base: hex, target: hex, wiping: false, wipeId: wipe.wipeId, lastHex: hex, at });
-    } else if (wipe.wiping) {
-      // A second choice landing inside a running reveal retargets it: one reveal per move.
-      setWipe({ ...wipe, target: hex, lastHex: hex, at });
-    } else {
-      setWipe({ ...wipe, target: hex, wiping: true, wipeId: wipe.wipeId + 1, lastHex: hex, at });
-    }
+    // The field did not make this change: a preset, a reset, a value read back, a feed from the
+    // daemon. It cannot tell one of those from a run of them, and a pulse is worse than no
+    // reveal, so the colour shows at once.
+    setWipe({ base: hex, target: hex, wiping: false, wipeId: wipe.wipeId, lastHex: hex });
   }
   useEffect(() => {
     if (!wipe.wiping) return;
@@ -108,10 +83,18 @@ export function ColorField({
     onCommit?.(lastRef.current);
   };
 
-  // The picker's own changes say what they are; the field passes them on and remembers the mode
-  // for the value that comes back.
+  // The picker says how each value was made. A change that lands once reveals; a value of a
+  // stream shows at once and mounts no overlay, so nothing replays (#369).
   const change = (next: string, mode: ColorChangeMode) => {
-    pendingRef.current = { hex: next.toLowerCase(), mode };
+    const target = next.toLowerCase();
+    setWipe((w) => {
+      if (target === w.lastHex) return w;
+      if (mode === "continuous" || motionOffNow() || target === w.base) {
+        return { base: target, target, wiping: false, wipeId: w.wipeId, lastHex: target };
+      }
+      if (w.wiping) return { ...w, target, lastHex: target };
+      return { ...w, target, wiping: true, wipeId: w.wipeId + 1, lastHex: target };
+    });
     onChange(next);
   };
 

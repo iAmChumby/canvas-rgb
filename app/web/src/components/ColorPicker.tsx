@@ -231,7 +231,8 @@ export function ColorPicker({
       c.mode === "continuous" ||
       (c.mode === "external" && c.prevAt !== null && c.at !== null && c.at - c.prevAt < gap);
     if (streaming) {
-      if (wiped) setWiped(false);
+      // The colour shows at once: the class comes off and the node is kept, so nothing replays.
+      setWiped(false);
       return;
     }
     setPrevKey(hex);
