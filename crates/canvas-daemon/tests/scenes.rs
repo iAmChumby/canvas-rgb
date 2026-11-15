@@ -2805,6 +2805,9 @@ mod scene_ops {
     #[tokio::test]
     async fn move_of_an_unknown_group_or_scene_is_404() {
         let rig = ops_rig().await;
+        // The control: the same call with a real group answers (the route exists).
+        let (status, _) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, true)).await;
+        assert_eq!(status, StatusCode::OK);
         let (status, _) = mv(&rig, "main", "nope", mv_body("other", false, 1, 1, false)).await;
         assert_eq!(status, StatusCode::NOT_FOUND);
         let (status, _) = mv(&rig, "main", "left", mv_body("nowhere", false, 1, 1, false)).await;
@@ -3171,5 +3174,11 @@ mod scene_ops {
             assert_eq!(writer, reference, "{what}: the whole-list write answers as PUT /scenes/{{id}} does");
         }
         assert_eq!(all_scenes(&rig).await, before, "a refused request changed nothing");
+        // The control: with the token both routes answer, so the refusals above are the guard's
+        // and not a missing route's.
+        let (status, _) = send(&rig, "POST", &move_path, Some(mv_body("other", false, 1, 1, true))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["other", "main", "spare"]), None))).await;
+        assert_eq!(status, StatusCode::OK);
     }
 }
