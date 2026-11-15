@@ -6,6 +6,9 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Changed
+
+- What's new shows each release as sections grouped by area, with a link to each issue (#365)
 ### Fixed
 
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
