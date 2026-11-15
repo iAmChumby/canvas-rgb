@@ -20,6 +20,7 @@ import type { ChainView } from "@/proto/ChainView";
 import { ConfirmStep } from "@/views/chain/ConfirmStep";
 import { CountStep } from "@/views/chain/CountStep";
 import { LengthStep } from "@/views/chain/LengthStep";
+import { chainKey, markChainOffered } from "@/views/chain/offered";
 import { useChainSetup } from "@/views/chain/useChainSetup";
 import s from "@/views/chain/chain.module.css";
 
@@ -45,6 +46,9 @@ export function ChainSetup({ chain, onClose }: { chain: ChainView; onClose: () =
   /** Later puts the header back and closes. */
   const later = () => {
     setup.later();
+    // The header is remembered: the app does not offer it by itself again, and the owner said
+    // "not now" about it. The record is the header's own, so it survives the window (#380).
+    markChainOffered(chainKey(chain.device_id, chain.zone_index));
     onClose();
   };
 

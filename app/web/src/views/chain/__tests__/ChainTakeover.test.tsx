@@ -98,8 +98,12 @@ function part(position: number, name: string, leds: number, start: number, kind:
   };
 }
 
-/** One resizable header as the daemon lists it. */
-function chain(zone: number, name: string, state: ChainSetupState, parts: LightView[] = [], leds = 120): ChainView {
+/**
+ * One resizable header as the daemon lists it. `leds` is the length it has now: 0 means the app
+ * does not know how long the header is, which is what the flow's first step is for. A header that
+ * already has a size is never offered by itself (#380).
+ */
+function chain(zone: number, name: string, state: ChainSetupState, parts: LightView[] = [], leds = 0): ChainView {
   return {
     device_id: DEVICE,
     device_name: "MSI MYSTIC LIGHT",
@@ -186,7 +190,7 @@ describe("the chain takeover", () => {
     expect(api.chains.start).not.toHaveBeenCalled();
   });
 
-  it("Later closes it and it stays shut until the next launch", async () => {
+  it("Later closes it and the header is not offered again, in this launch or the next", async () => {
     const first = await show([chain(1, "JARGB 1", "not_set_up")]);
 
     await press("Later");
@@ -200,10 +204,11 @@ describe("the chain takeover", () => {
     expect(screen.queryByRole("region", SETUP)).toBeNull();
     cleanup();
 
-    // The next app start: the launch that said Later is not this one.
-    window.localStorage.clear();
+    // The next app start: a new launch, and the header is still put off (#380).
+    window.sessionStorage.clear();
     await show([chain(1, "JARGB 1", "not_set_up")]);
-    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
   });
 
   it("headers are offered one after another", async () => {

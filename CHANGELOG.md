@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Chains: the header setup comes up on its own only once per header, and saying Later, closing it or pressing Escape puts that header off for good, so it no longer comes back every time the app is opened from the tray. (#380)
+
 ## [0.16.0] - 2026-11-15
 
 ### Added

@@ -1,7 +1,7 @@
 "use client";
 
 import { useRef, useState, type Ref } from "react";
-import { CaretDown, Plus } from "@phosphor-icons/react";
+import { CaretDown, Lightning, Plus } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button } from "@/components/Button";
 import { Popover } from "@/components/Popover";
@@ -61,6 +61,9 @@ function MoreGroups({ groups, onAdd }: { groups: Group[]; onAdd: (groupId: strin
  * the first few, a menu for the rest. It sits at the foot of the list, under the Unassigned row the
  * light is in, so its arrival and its dismissal move no row above it. The "N new" key in the scene
  * strip scrolls to it and focuses it (`noticeRef`), which keeps it a few Tab stops from the top.
+ *
+ * A new light on a header that is not set up carries a key of its own: the app cannot see what is
+ * plugged into that header, and the owner can say so from here (#380).
  */
 export function NewLightNotice({
   fresh,
@@ -68,12 +71,18 @@ export function NewLightNotice({
   onAdd,
   onDismiss,
   noticeRef,
+  setup,
+  onSetUp,
 }: {
   noticeRef?: Ref<HTMLDivElement>;
   fresh: LightView[];
   groups: Group[];
   onAdd: (groupId: string) => void;
   onDismiss: () => void;
+  /** The headers the new lights are on that are not set up: each one gets a key of its own. */
+  setup?: readonly { key: string; label: string }[];
+  /** Opens the setup of one of those headers. */
+  onSetUp?: (key: string) => void;
 }) {
   const shown = groups.slice(0, NOTICE_KEYS);
   const rest = groups.slice(NOTICE_KEYS);
@@ -87,6 +96,17 @@ export function NewLightNotice({
         onDismiss={onDismiss}
         actions={
           <span className={s.noticeKeys}>
+            {setup?.map((header) => (
+              <Button
+                key={header.key}
+                size="sm"
+                variant="primary"
+                icon={<Lightning size={14} aria-hidden="true" />}
+                onClick={() => onSetUp?.(header.key)}
+              >
+                Set up {header.label}
+              </Button>
+            ))}
             {shown.map((g) => (
               <Button key={g.id} size="sm" onClick={() => onAdd(g.id)}>
                 <span className="one-line">Add to {g.name}</span>

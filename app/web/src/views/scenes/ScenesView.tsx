@@ -25,6 +25,8 @@ import { useScene } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
 import { Onboarding } from "@/views/editor/Onboarding";
 import { ChainTakeover } from "@/views/chain/ChainTakeover";
+import { chainKey } from "@/views/chain/offered";
+import { requestChainSetup } from "@/views/chain/request";
 import { shouldOpen } from "@/views/editor/flow";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
@@ -64,6 +66,7 @@ export function ScenesView() {
   const lightsError = useSnap((st) => st.lightsError);
   const answered = useSnap((st) => st.scenes);
   const scenesError = useSnap((st) => st.scenesError);
+  const chains = useSnap((st) => st.chains);
   const retrying = useSnap((st) => st.pending.includes("scenes"));
   const [openId, setOpenId] = useState<string | null>(null);
   // The first run's hello (#310): the page behind it is Scenes, so the greeting lives here.
@@ -114,6 +117,22 @@ export function ScenesView() {
   );
 
   const { fresh, dismiss } = useNewLights(lights, unassigned);
+
+  // The headers the new lights are on that are not set up: the notice offers their setup, so the
+  // owner can tell the app what is plugged into a header before the light joins a group (#380).
+  const freshHeaders = useMemo(() => {
+    const out: { key: string; label: string }[] = [];
+    for (const l of fresh) {
+      const chain = chains?.find(
+        (c) => c.device_id === l.light.device_id && c.zone_index === l.light.zone_index,
+      );
+      if (!chain || chain.state !== "not_set_up") continue;
+      const key = chainKey(chain.device_id, chain.zone_index);
+      if (out.some((h) => h.key === key)) continue;
+      out.push({ key, label: chain.zone_name });
+    }
+    return out;
+  }, [fresh, chains]);
 
   // A refused write says so in the toast lane, which floats: the page does not move for it.
   useEffect(() => {
@@ -458,6 +477,8 @@ export function ScenesView() {
                 fresh={fresh}
                 groups={scene.groups}
                 onAdd={addFresh}
+                setup={freshHeaders}
+                onSetUp={(key) => requestChainSetup(key)}
                 onDismiss={() => {
                   for (const l of fresh) dismiss(l.light.id);
                 }}

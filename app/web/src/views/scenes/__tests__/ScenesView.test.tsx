@@ -30,6 +30,13 @@ const scene = vi.hoisted(() => ({ current: null as unknown }));
 vi.mock("@/views/scenes/useScene", () => ({ useScene: () => scene.current }));
 vi.mock("@/views/scenes/useLightFeed", () => ({ useLightFeed: () => () => null }));
 
+const { chainSetup } = vi.hoisted(() => ({ chainSetup: { request: vi.fn() } }));
+vi.mock("@/views/chain/request", () => ({
+  requestChainSetup: chainSetup.request,
+  useChainSetupVisit: () => 0,
+  wantedChain: () => null,
+}));
+
 import { patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES } from "@/lib/fixtures";
 import { Rail } from "@/shell/Rail";
@@ -37,6 +44,7 @@ import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { SEEN_LIGHTS_KEY } from "@/views/scenes/newLights";
 import { ScenesView } from "@/views/scenes/ScenesView";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import type { ChainView } from "@/proto/ChainView";
 import type { Scene } from "@/proto/Scene";
 import type { Status } from "@/proto/Status";
 import type { LightView } from "@/proto/LightView";
@@ -92,6 +100,34 @@ const FRESH: LightView = {
 
 const gaming = (): Scene => clone(DEMO_SCENES.scenes[0] as Scene);
 
+/** A new light on a header: the whole-zone light of a header nobody has described yet. */
+const HEADER_DEVICE = "openrgb:MYSTIC-9";
+const HEADER_FRESH: LightView = {
+  light: {
+    id: `${HEADER_DEVICE}#z0`,
+    device_id: HEADER_DEVICE,
+    zone_index: 0,
+    arrangement: "strip",
+    reversed: false,
+  },
+  led_count: 8,
+  connected: true,
+  label: "MSI MYSTIC LIGHT · JAF",
+};
+
+/** That header as the daemon lists it: a size, and nothing set up. */
+const HEADER_CHAIN: ChainView = {
+  device_id: HEADER_DEVICE,
+  device_name: "MSI MYSTIC LIGHT",
+  zone_index: 0,
+  zone_name: "JAF",
+  state: "not_set_up",
+  leds: 8,
+  min_leds: 0,
+  max_leds: 240,
+  parts: [],
+};
+
 function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, unknown[][]> } {
   const calls: Record<string, unknown[][]> = {};
   const spy =
@@ -141,6 +177,7 @@ function mount(use: UseScene) {
 beforeEach(() => {
   window.localStorage.clear();
   window.history.replaceState({}, "", "/");
+  chainSetup.request.mockReset();
   api.effect.mockReset();
   api.effect.mockResolvedValue({
     schema: {
@@ -310,6 +347,18 @@ describe("the Scenes page", () => {
     withFresh();
     fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
     expect(screen.queryByRole("region", { name: /Desk lamp/ })).toBeNull();
+  });
+
+  it("the notice offers the setup of a header that is not set up, and the key asks for that header", () => {
+    const use = fake();
+    use.unassigned = [...use.unassigned, HEADER_FRESH];
+    patchSnap({ lights: [...clone(DEMO_LIGHTS), HEADER_FRESH], chains: [HEADER_CHAIN] });
+    mount(use);
+
+    const notice = screen.getByRole("region", { name: /JAF/ });
+    fireEvent.click(within(notice).getByRole("button", { name: "Set up JAF" }));
+
+    expect(chainSetup.request).toHaveBeenCalledWith(`${HEADER_DEVICE}#z0`);
   });
 
   it("a row's open key claims no disclosure it does not have", () => {
