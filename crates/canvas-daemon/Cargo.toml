@@ -79,7 +79,7 @@ gif = "0.14"
 base64 = "0.23"
 
 [target.'cfg(windows)'.dependencies]
-windows-core = "0.62"
+windows-core = "0.100"
 
 [dev-dependencies]
 tower = { version = "0.5", features = ["util"] }
