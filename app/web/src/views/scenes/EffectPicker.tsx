@@ -218,8 +218,12 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   const groupIsHtml = group?.plays.type === "effect" && runtimesOf(group.plays.effect) > 0;
   /** No runtime is left for this group: the HTML effects are shown and say why. */
   const htmlBlocked = !groupIsHtml && otherHtml >= SCENE_HTML_MAX;
-  /** What a blocked row says: the daemon's sentence, with this group's own runtime counted. */
+  /** Why a blocked row is blocked: the daemon's sentence, with this group's own runtime counted. */
   const blockedWords = htmlLimitSentence(otherHtml + 1);
+  /** What a blocked row itself says: short enough to be read whole beside the picture. */
+  const blockedNote = `${otherHtml} HTML already`;
+  /** A blocked row is pointed at or focused: the line under the list says why, in full. */
+  const [asksWhy, setAsksWhy] = useState(false);
 
   const preview = useCallback(
     (target: string, mine: number) => {
@@ -346,8 +350,14 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                   type="button"
                   className={s.pickRow}
                   aria-pressed={current === OFF}
-                  onPointerEnter={() => onHighlight(OFF)}
-                  onFocus={() => onHighlight(OFF)}
+                  onPointerEnter={() => {
+                    setAsksWhy(false);
+                    onHighlight(OFF);
+                  }}
+                  onFocus={() => {
+                    setAsksWhy(false);
+                    onHighlight(OFF);
+                  }}
                   onClick={() => choose(OFF)}
                 >
                   <span className={s.pickStrip} aria-hidden="true">
@@ -383,8 +393,16 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     data-blocked={blocked ? "true" : undefined}
                     aria-pressed={held}
                     aria-disabled={blocked || undefined}
-                    onPointerEnter={() => !blocked && onHighlight(effect.id)}
-                    onFocus={() => !blocked && onHighlight(effect.id)}
+                    onPointerEnter={() => {
+                      setAsksWhy(blocked);
+                      if (!blocked) onHighlight(effect.id);
+                    }}
+                    onPointerLeave={() => blocked && setAsksWhy(false)}
+                    onFocus={() => {
+                      setAsksWhy(blocked);
+                      if (!blocked) onHighlight(effect.id);
+                    }}
+                    onBlur={() => blocked && setAsksWhy(false)}
                     onClick={() => !blocked && choose(effect.id)}
                   >
                     <span className={s.pickStrip} aria-hidden="true">
@@ -402,10 +420,11 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     <span className={s.pickText}>
                       <span className={s.pickName}>{effect.name}</span>
                       {blocked && (
-                        // The daemon's own sentence, on one line: the row keeps its height
-                        // (#367), and the whole sentence is the line's own tooltip.
+                        // A few words that fit the row whole, so it keeps its height (#367). The
+                        // daemon's sentence is the note's tooltip, and the line under the list
+                        // says it in full while this row is pointed at or focused.
                         <span className={s.pickNote} title={blockedWords}>
-                          {blockedWords}
+                          {blockedNote}
                         </span>
                       )}
                       {!blocked && isHtmlEffect(effect.id) && <Chip html>HTML</Chip>}
@@ -427,8 +446,10 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
           </section>
         );
       })}
-      <p className={s.pickerHint}>
-        {shown
+      <p className={s.pickerHint} data-why={asksWhy || undefined}>
+        {asksWhy
+          ? blockedWords
+          : shown
           ? `The lights show ${shown.name}.`
           : highlight === OFF
             ? "The lights show nothing."

@@ -120,9 +120,9 @@ describe("the Scenes effect picker keeps one width (#367)", () => {
   });
 
   it("the line that says why a row cannot be chosen stays on one line (#370)", () => {
-    // The why is the daemon's sentence now, and a second line is taller than the strip beside it,
-    // so the row would grow: one line with an ellipsis and no reserved height of its own, and the
-    // whole sentence on the line's title.
+    // A second line is taller than the strip beside it, so the row would grow: the row says a few
+    // words on one line, with no reserved height of its own, and the daemon's whole sentence is on
+    // the line's title and on the line under the list, whose two lines are already reserved.
     const note = forSelector(scenesCss, ".pickNote");
     expect(note.length).toBeGreaterThan(0);
     for (const r of note) {
@@ -131,7 +131,9 @@ describe("the Scenes effect picker keeps one width (#367)", () => {
       expect(decl(r, "overflow")).toBe("hidden");
       expect(decl(r, "height")).toBeUndefined();
     }
-    expect(read("src/views/scenes/EffectPicker.tsx")).toContain("<span className={s.pickNote} title={blockedWords}>");
+    const picker = read("src/views/scenes/EffectPicker.tsx");
+    expect(picker).toContain("<span className={s.pickNote} title={blockedWords}>");
+    expect(picker).toContain("<p className={s.pickerHint} data-why={asksWhy || undefined}>");
   });
 
   it("the menu is as wide as the design says, not as wide as its content", () => {

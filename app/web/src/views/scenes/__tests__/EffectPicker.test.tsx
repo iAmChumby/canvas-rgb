@@ -317,8 +317,22 @@ describe("the effect picker", () => {
     render(<Harness />);
     const html = await screen.findByRole("button", { name: /Sample/ });
     expect(html.getAttribute("aria-disabled")).toBe("true");
-    // The daemon's own sentence, with this group's runtime counted: two others plus this one.
-    expect(screen.getByText(new RegExp(htmlLimitSentence(3)))).toBeTruthy();
+    // The row says it in a few words that fit, and carries the daemon's sentence as its tooltip:
+    // two others plus this one.
+    const note = within(html).getByText("2 HTML already");
+    expect(note.getAttribute("title")).toBe(htmlLimitSentence(3));
+    // Pointing at the row puts the whole sentence on the line under the list, and leaving it
+    // gives the line back.
+    expect(screen.queryByText(htmlLimitSentence(3))).toBeNull();
+    fireEvent.pointerEnter(html);
+    expect(screen.getByText(htmlLimitSentence(3)).getAttribute("data-why")).toBe("true");
+    fireEvent.pointerLeave(html);
+    expect(screen.queryByText(htmlLimitSentence(3))).toBeNull();
+    // The keyboard gets the same line.
+    fireEvent.focus(html);
+    expect(screen.getByText(htmlLimitSentence(3))).toBeTruthy();
+    fireEvent.blur(html);
+    expect(screen.queryByText(htmlLimitSentence(3))).toBeNull();
     // Clicking it does nothing at all: no preview and no choice.
     fireEvent.click(html);
     fireEvent.pointerEnter(html);
@@ -333,7 +347,7 @@ describe("the effect picker", () => {
     // One other group plays an HTML effect: the scene's second slot is this one's.
     const html = await screen.findByRole("button", { name: /Sample/ });
     expect(html.getAttribute("aria-disabled")).toBeNull();
-    expect(screen.queryByText(new RegExp(htmlLimitSentence(2)))).toBeNull();
+    expect(within(html).queryByText(/HTML already/)).toBeNull();
     fireEvent.click(html);
     await waitFor(() => expect(lastPlays()).toEqual({ type: "effect", effect: "html:sample" }));
   });
@@ -350,7 +364,9 @@ describe("the effect picker", () => {
     render(<Harness groupId="g-one" />);
     const html = await screen.findByRole("button", { name: /Sample/ });
     await waitFor(() => expect(html.getAttribute("aria-disabled")).toBe("true"));
-    expect(screen.getByText(new RegExp(htmlLimitSentence(SCENE_HTML_MAX + 1)))).toBeTruthy();
+    expect(within(html).getByText("2 HTML already").getAttribute("title")).toBe(
+      htmlLimitSentence(SCENE_HTML_MAX + 1),
+    );
   });
 
   // Plan Task 11: patterns are in the picker with the effects, under a heading of their own, and
