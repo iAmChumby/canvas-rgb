@@ -212,6 +212,10 @@ or acts as if a step worked without checking that it did.
   OpenRGB has found any device (`devices=0`), and the service moves on as if it had worked.
 - [#19](https://github.com/iAmChumby/canvas-rgb/issues/19): the daemon's exits leave no line, so
   the service's "crashed" is the only account and it is a guess.
+- [#419](https://github.com/iAmChumby/canvas-rgb/issues/419): a per-group save retried every group
+  a scene had dark without reading why it was dark, so a group the HTML limit left dark was rebuilt
+  and ran past the cap. Fixed: the retry reads the scene's own order
+  (`scenes::groups_over_the_html_limit`), so only a real build failure is tried again.
 - [#393](https://github.com/iAmChumby/canvas-rgb/issues/393): a keyboard the app drives itself
   also came through OpenRGB as a second device the daemon never drives, and the scenes code made
   a light for it without asking. Devices showed a nameless, not connected light. One question,

@@ -577,6 +577,32 @@ pub fn running_effect(scene: &Scene) -> Option<(String, Props)> {
         })
 }
 
+/// Which groups of `scene` take one of its [`SCENE_HTML_MAX`] HTML runtimes, true at the group's
+/// place in `scene.groups`. The groups kept from the last build of this scene come first, then the
+/// rest in the scene's own order: the order a scene that has never been built over the limit is
+/// seeded in (#384). A group takes its runtime before it is built, so a group whose build fails
+/// keeps its place, built or not.
+///
+/// **The one rule**, read by [`build_and_set`] to decide what runs and by
+/// [`groups_over_the_html_limit`] to tell a group the limit left dark from one whose build failed
+/// (#419). The two never disagree about which group is dark because there is one function here.
+fn html_runs(scene: &Scene, kept: &[String], slots_of: &dyn Fn(&str) -> usize) -> Vec<bool> {
+    let rank = |id: &str| kept.iter().position(|k| k == id).unwrap_or(usize::MAX);
+    let mut by_rank: Vec<usize> = (0..scene.groups.len()).collect();
+    by_rank.sort_by_key(|&at| (rank(&scene.groups[at].id), at));
+    let mut runtimes = 0usize;
+    let mut runs = vec![true; scene.groups.len()];
+    for at in by_rank {
+        let slots = group_html_runtimes(&scene.groups[at], slots_of);
+        if runtimes + slots > SCENE_HTML_MAX {
+            runs[at] = false;
+        } else {
+            runtimes += slots;
+        }
+    }
+    runs
+}
+
 /// Builds every group's effect and hands the scene to the engine. A group whose effect cannot be
 /// built is dark (`effect: None`) and named in the failures that come back; the others run.
 ///
@@ -598,22 +624,8 @@ fn build_and_set(app: &App, lights: &[Light], devices: &[DeviceInfo], scene: &Sc
     let mut failures = BTreeMap::new();
 
     // Which groups take an HTML runtime, decided before anything is built: the ones kept from the
-    // last build of this scene first, then the rest in the scene's own order. A group takes its
-    // runtime before it is built, so a group whose build fails keeps its place, built or not.
-    let kept = app.scene.html_kept(&scene.id);
-    let rank = |id: &str| kept.iter().position(|k| k == id).unwrap_or(usize::MAX);
-    let mut by_rank: Vec<usize> = (0..scene.groups.len()).collect();
-    by_rank.sort_by_key(|&at| (rank(&scene.groups[at].id), at));
-    let mut runtimes = 0usize;
-    let mut runs = vec![true; scene.groups.len()];
-    for at in by_rank {
-        let slots = group_html_runtimes(&scene.groups[at], &slots_of);
-        if runtimes + slots > SCENE_HTML_MAX {
-            runs[at] = false;
-        } else {
-            runtimes += slots;
-        }
-    }
+    // last build of this scene first, then the rest in the scene's own order ([`html_runs`]).
+    let runs = html_runs(scene, &app.scene.html_kept(&scene.id), &slots_of);
     let runs_html: Vec<String> = scene
         .groups
         .iter()
@@ -1493,6 +1505,32 @@ fn holds_groups(held: &[String], scene_groups: &[String]) -> bool {
     held.len() == scene_groups.len() && scene_groups.iter().all(|id| held.contains(id))
 }
 
+/// The groups of `scene` the HTML limit leaves dark, by group id: [`html_runs`]'s rule for the
+/// scene a save left, so [`apply_group_change`] can tell a group the limit left dark from one whose
+/// effect could not be built (#419). The groups kept from that scene's last build come first, which
+/// is the order [`build_and_set`] decided in (#384), not the scene's own order.
+fn groups_over_the_html_limit(app: &App, scene: &Scene) -> HashSet<String> {
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    let slots_of = |id: &str| saved_stack_slots(app, id, &known);
+    let runs = html_runs(scene, &app.scene.html_kept(&scene.id), &slots_of);
+    scene
+        .groups
+        .iter()
+        .zip(&runs)
+        .filter(|(_, runs)| !**runs)
+        .map(|(group, _)| group.id.clone())
+        .collect()
+}
+
+/// The effect a group's plays names, when it plays one. A pattern or a stack is an id like any
+/// other: whether it spends an HTML runtime is [`group_html_runtimes`]'s question.
+fn effect_named(plays: &Plays) -> Option<&str> {
+    match plays {
+        Plays::Effect { effect, .. } => Some(effect),
+        Plays::Off => None,
+    }
+}
+
 /// Brings the engine from `old` to `new`, the same scene saved with a change. It rebuilds only the
 /// groups that changed: a new value for the same effect (`set_group_props`), a new brightness, a
 /// group set to Off or to another effect (`set_group_effect` for that group alone). When a group
@@ -1525,18 +1563,29 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
         return;
     }
     let mut failures = app.scene.failures();
+    // The groups the HTML limit leaves dark, read from the scene the save left, in the order
+    // `build_and_set` decided in (#419, #384).
+    let over_the_limit = groups_over_the_html_limit(app, new);
     for after in &new.groups {
+        // A reorder pairs the groups by id, not by place (#384); a group the save removed is not
+        // here, and a group it added has no before, so the shape changed and the whole scene went
+        // on above.
         let Some(before) = old.groups.iter().find(|g| g.id == after.id) else { continue };
         // A group the takeover holds keeps the draft: its change lands when the takeover ends.
         if taken_over && held.contains(&after.id) {
             continue;
         }
-        // A group that is dark (its effect could not be built) is tried again on every save, even
-        // one that names the same effect: the file may be back.
+        // A group that is dark because its effect could not be built is tried again on every
+        // save, even one that names the same effect: the file may be back. A group the HTML limit
+        // left dark is not (#419): this save freed no runtime, so building it would put the
+        // engine over the cap the scene was loaded past. It is built again when its own effect
+        // changes, or when a full build decides it runs.
         let dark = failures.contains_key(&after.id);
-        if before.plays != after.plays || dark {
+        let limited =
+            dark && over_the_limit.contains(&after.id) && effect_named(&before.plays) == effect_named(&after.plays);
+        if before.plays != after.plays || (dark && !limited) {
             match (&before.plays, &after.plays) {
-                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && !dark => {
+                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && (!dark || limited) => {
                     app.engine.set_group_props(&after.id, props);
                 }
                 (_, Plays::Off) => {
