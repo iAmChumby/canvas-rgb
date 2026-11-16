@@ -31,7 +31,7 @@ vi.mock("@/lib/endpoints", () => ({ api }));
 vi.mock("@/components/Notify", () => ({ notify: notifySpy }));
 
 import { ApiFailure } from "@/lib/errors";
-import { getSnap, patchSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshScenes } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES, demoSceneProblem } from "@/lib/fixtures";
 import { htmlLimitSentence } from "@/lib/htmlLimit";
 import { NOTHING_MOVED, NOTHING_UNDONE, useScene } from "@/views/scenes/useScene";
@@ -1866,6 +1866,49 @@ describe("the move of a group and the order of the scenes", () => {
     expect(result.current.error).toBeNull();
   });
 
+  it("the strip follows the daemon's order again after the reorder", async () => {
+    // The daemon's order: the list and the write answer with it.
+    let held = clone(DEMO_SCENES.scenes);
+    const list = (): ScenesResponse => {
+      const scene = held.find((s) => s.id === DEMO_SCENES.active) ?? held[0];
+      return {
+        active: DEMO_SCENES.active,
+        scenes: clone(held),
+        group_states: scene?.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) ?? [],
+      };
+    };
+    const put = (order: string[]): void => {
+      const byId = new Map(held.map((s) => [s.id, s]));
+      held = order.map((id) => byId.get(id)).filter((s): s is Scene => s !== undefined);
+    };
+    api.scenes.list.mockImplementation(async () => list());
+    api.scenes.write.mockImplementation(async (body: ScenesWrite) => {
+      if (body.order) put(body.order);
+      return list();
+    });
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+    const before = result.current.scenes.map((s) => s.id);
+
+    // The scenes are put in another order.
+    const after = [before[1]!, before[0]!, before[2]!];
+    act(() => {
+      result.current.reorderScenes(after);
+    });
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+    // The daemon's answer is the order now, and the strip follows it.
+    await waitFor(() => expect(result.current.scenes.map((s) => s.id)).toEqual(after));
+
+    // Another window put the scenes in another order: the strip shows that one too.
+    const other = [before[2]!, before[0]!, before[1]!];
+    put(other);
+    await act(async () => {
+      await refreshScenes();
+    });
+    await waitFor(() => expect(result.current.scenes.map((s) => s.id)).toEqual(other));
+  });
+
   it("the dry run asks the daemon with its own dry run, and writes nothing", async () => {
     const rig = moveRig();
     api.scenes.list.mockImplementation(async () => listOf([rig.beforeMain, rig.beforeOther]));
@@ -2092,5 +2135,51 @@ describe("the move of a group and the order of the scenes", () => {
       }, "Rename the scene");
     });
     await waitFor(() => expect((notifySpy.mock.calls.at(-1) as unknown[])[2]).toBeUndefined());
+  });
+
+  it("the move's toast is said once, and a later change does not say it again", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+
+    // The toast is said once, with the Undo of the move.
+    await waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1));
+    const [text, tone, action] = notifySpy.mock.calls[0] as [
+      string,
+      string,
+      { label: string; onClick: () => void },
+    ];
+    expect(text).toBe("Moved LEFT to Other.");
+    expect(tone).toBe("ok");
+    expect(action.label).toBe("Undo");
+
+    // Another change came after the move: the toast says what happened and offers nothing.
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Mine";
+      }, "Rename the scene");
+    });
+    await waitFor(() => expect((notifySpy.mock.calls.at(-1) as unknown[])[2]).toBeUndefined());
+    const said = notifySpy.mock.calls.length;
+
+    // A later change does not say the move again: the toast is gone, and it stays gone.
+    await act(async () => {
+      result.current.edit((draft) => {
+        const group = draft.groups[0];
+        if (group) group.brightness = 40;
+      }, "Change the brightness");
+    });
+    expect(notifySpy).toHaveBeenCalledTimes(said);
   });
 });

@@ -501,6 +501,8 @@ export function useScene(): UseScene {
   const quiet = useRef(new Map<string, Array<() => void>>());
   /** The order the page shows while a reorder of this window is on its way. */
   const [localOrder, setLocalOrder] = useState<string[] | null>(null);
+  /** The same order, for the callbacks that run between renders. */
+  const localOrderRef = useRef<string[] | null>(null);
   /** The order the daemon last confirmed: what a write names as the order it was made from. */
   const knownOrder = useRef<string[]>([]);
   /** The order writes go one after the other: the next one names the order the last one sent. */
@@ -511,6 +513,11 @@ export function useScene(): UseScene {
    * the history back, so it may only be offered while the move is still on top.
    */
   const lastMove = useRef<{ text: string; tone: "ok" | "warn"; label: string } | null>(null);
+  /**
+   * Whether the toast of the last move offers the Undo now. The toast is said again only when
+   * that changes, so a move is said once and a later change does not bring it back.
+   */
+  const undoOffered = useRef(false);
   /** The timer that sends one order for a burst of key presses. */
   const orderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(false);
@@ -1575,14 +1582,23 @@ export function useScene(): UseScene {
       const tone = emptied ? "warn" : "ok";
       const label = copy ? COPY_STEP_LABEL : MOVE_STEP_LABEL;
       lastMove.current = { text, tone, label };
-      notify(text, tone, {
-        label: "Undo",
-        onClick: () => {
-          // The toast goes with its answer: it is not said again.
-          lastMove.current = null;
-          undo();
+      undoOffered.current = true;
+      notify(
+        text,
+        tone,
+        {
+          label: "Undo",
+          onClick: () => {
+            // The toast goes with its answer: it is not said again.
+            lastMove.current = null;
+            undoOffered.current = false;
+            undo();
+          },
         },
-      });
+        // The reader takes the toast away: the move is forgotten, so no later change says it
+        // again.
+        { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
+      );
       await refreshScenes();
       return answer;
     },
@@ -1604,24 +1620,43 @@ export function useScene(): UseScene {
    * Undo takes the top step of the history back, so it may only be offered while the move is
    * still on top. When another change came after the move, the toast says what happened and
    * offers nothing.
+   *
+   * The toast is said once: it is said again only when the Undo it offers changes, so a change
+   * that comes later does not bring back a toast that has gone.
    */
   useEffect(() => {
     const move = lastMove.current;
     if (!move) return;
+    const top = view.undoLabel === move.label;
+    if (top === undoOffered.current) return;
+    undoOffered.current = top;
     notify(
       move.text,
       move.tone,
-      view.undoLabel === move.label
+      top
         ? {
             label: "Undo",
             onClick: () => {
               lastMove.current = null;
+              undoOffered.current = false;
               undo();
             },
           }
         : undefined,
+      // The reader takes the toast away: the move is forgotten, so no later change says it
+      // again.
+      { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
     );
   }, [undo, view.undoLabel]);
+
+  /**
+   * Shows an order of this window while it is on its way, and forgets it when it is gone. The ref
+   * keeps the same order for the callbacks that run between renders.
+   */
+  const showLocalOrder = useCallback((order: string[] | null) => {
+    localOrderRef.current = order;
+    setLocalOrder(order);
+  }, []);
 
   /**
    * The daemon is told the order of the scenes, with the order it last confirmed. A window that
@@ -1653,22 +1688,22 @@ export function useScene(): UseScene {
         {
           label: "Put the scenes in another order",
           undo: async () => {
-            setLocalOrder(from);
+            showLocalOrder(from);
             const done = await writeOrder(from, to);
-            setLocalOrder(null);
+            showLocalOrder(null);
             return done;
           },
           redo: async () => {
-            setLocalOrder(to);
+            showLocalOrder(to);
             const done = await writeOrder(to, from);
-            setLocalOrder(null);
+            showLocalOrder(null);
             return done;
           },
         },
         false,
       );
     },
-    [pushCommand, writeOrder],
+    [pushCommand, showLocalOrder, writeOrder],
   );
 
   /**
@@ -1685,7 +1720,7 @@ export function useScene(): UseScene {
   const reorderScenes = useCallback(
     (order: string[], options?: { coalesce?: boolean }) => {
       if (knownOrder.current.length === 0 && (getSnap().scenes?.scenes.length ?? 0) === 0) return;
-      setLocalOrder(order);
+      showLocalOrder(order);
       const send = () => {
         const run = async () => {
           try {
@@ -1694,10 +1729,24 @@ export function useScene(): UseScene {
               : (getSnap().scenes?.scenes.map((s) => s.id) ?? []);
             if (expected.length === 0) return;
             const done = await writeOrder(order, expected);
-            if (done) pushOrderCommand(expected, order);
-            else setLocalOrder(null);
+            if (!done) {
+              showLocalOrder(null);
+              return;
+            }
+            pushOrderCommand(expected, order);
+            // The daemon's answer is the order now. When it is the order on the screen, the strip
+            // follows the daemon again, so the order another window makes shows as soon as it
+            // lands. When the daemon has another order, this window's order is old: it goes too.
+            const landed = (getSnap().scenes?.scenes ?? []).map((s) => s.id);
+            const local = localOrderRef.current;
+            if (
+              local &&
+              (landed.join("|") === local.join("|") || landed.join("|") !== order.join("|"))
+            ) {
+              showLocalOrder(null);
+            }
           } catch {
-            setLocalOrder(null);
+            showLocalOrder(null);
           }
         };
         orderChain.current = orderChain.current.then(run, run);
@@ -1712,7 +1761,7 @@ export function useScene(): UseScene {
       }
       send();
     },
-    [pushOrderCommand, writeOrder],
+    [pushOrderCommand, showLocalOrder, writeOrder],
   );
 
   // The order the daemon last confirmed. While a reorder of this window is on its way the
