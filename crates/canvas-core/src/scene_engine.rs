@@ -33,7 +33,8 @@ use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props};
 use canvas_proto::scene::{Arrangement, GroupMode, Light, LightId, SCENE_FADE_MS};
 use canvas_proto::traits::{
-    AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, ScreenFrame, StripRead,
+    AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, LightLeds, ScreenFrame,
+    StripRead,
 };
 use tracing::warn;
 
@@ -841,32 +842,52 @@ fn run_group(
                 scale_light(out, factor);
             }
             _ if live => {
-                // #400: an effect whose meaning is how high its picture reaches asks for the
-                // column, and then a strip light reads the mean of its cell's x-range over the
-                // canvas's full height. A ring keeps the cell: its LEDs sit on a circle, so a
-                // column would give the top and the bottom LED one colour. Every other effect,
-                // and every grid and single light in any group, reads the cell as before.
-                let column = work.strip_read == StripRead::Column
-                    && group.shapes.get(index).is_some_and(|(_, arrangement)| {
-                        matches!(*arrangement, Arrangement::Strip)
-                    });
-                if column {
-                    sampling::sample_led_columns(
-                        &group.canvas.pixels,
-                        group.canvas.width,
-                        group.canvas.height,
-                        &light.leds,
+                // #427: ask the effect for this light's own colours first. An effect that works
+                // them out itself (a mixed stack) answers true with one colour per LED in `out`;
+                // the canvas the stage shows is never touched. The default answers false and the
+                // light is sampled from the canvas exactly as before.
+                let arrangement = group
+                    .shapes
+                    .get(index)
+                    .map(|(_, arrangement)| *arrangement)
+                    .unwrap_or(Arrangement::Strip);
+                let answered = effect.as_mut().is_some_and(|e| {
+                    e.led_colours(
+                        LightLeds { id: &light.light, arrangement, leds: &light.leds },
                         out,
-                    );
-                } else {
-                    sampling::sample_leds(
-                        &group.canvas.pixels,
-                        group.canvas.width,
-                        group.canvas.height,
-                        &light.leds,
-                        SCENE_SAMPLING,
-                        out,
-                    );
+                    )
+                });
+                // The contract is one colour per LED; keep the frame the right size even if an
+                // effect answered true with a short or overlong vector.
+                if answered {
+                    out.resize(light.leds.len(), Rgb8::BLACK);
+                }
+                if !answered {
+                    // #400: an effect whose meaning is how high its picture reaches asks for the
+                    // column, and then a strip light reads the mean of its cell's x-range over the
+                    // canvas's full height. A ring keeps the cell: its LEDs sit on a circle, so a
+                    // column would give the top and the bottom LED one colour. Every other effect,
+                    // and every grid and single light in any group, reads the cell as before.
+                    let column = work.strip_read == StripRead::Column
+                        && arrangement == Arrangement::Strip;
+                    if column {
+                        sampling::sample_led_columns(
+                            &group.canvas.pixels,
+                            group.canvas.width,
+                            group.canvas.height,
+                            &light.leds,
+                            out,
+                        );
+                    } else {
+                        sampling::sample_leds(
+                            &group.canvas.pixels,
+                            group.canvas.width,
+                            group.canvas.height,
+                            &light.leds,
+                            SCENE_SAMPLING,
+                            out,
+                        );
+                    }
                 }
                 scale_light(out, factor);
             }
@@ -1664,6 +1685,67 @@ mod tests {
 
         fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
             canvas.fill([0.2, 0.4, 0.6]);
+        }
+    }
+
+    /// An effect that paints red on its canvas but answers its own LEDs with green (#427).
+    struct LedAnswer {
+        calls: Arc<AtomicU32>,
+    }
+
+    impl Effect for LedAnswer {
+        fn schema(&self) -> PropertySchema {
+            PropertySchema {
+                id: "test-led-answer".into(),
+                name: "LED Answer".into(),
+                description: "Answers its own LEDs.".into(),
+                needs: InputNeeds::default(),
+                properties: vec![],
+                presets: vec![],
+                thumbnail: None,
+            }
+        }
+
+        fn init(&mut self, _props: &Props) {}
+
+        fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+            canvas.fill([1.0, 0.0, 0.0]);
+        }
+
+        fn led_colours(&mut self, light: LightLeds<'_>, out: &mut Vec<Rgb8>) -> bool {
+            self.calls.fetch_add(1, Ordering::AcqRel);
+            out.clear();
+            out.resize(light.leds.len(), Rgb8::new(0, 255, 0));
+            true
+        }
+    }
+
+    /// #427: an effect that answers `led_colours` has its colours written instead of the canvas,
+    /// asked once per light, and scaled by the group's brightness like a sampled colour.
+    #[test]
+    fn an_effect_that_answers_led_colours_writes_them_instead_of_sampling() {
+        let answer = LedAnswer { calls: Arc::new(AtomicU32::new(0)) };
+        let calls = answer.calls.clone();
+        let mut scene =
+            state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(answer)), 100);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+        frame(&mut scene, &mut runner, &devices);
+        assert_eq!(calls.load(Ordering::Acquire), 1, "asked once for the one light");
+        let got = take(&mut runner, "d1", 8);
+        for (led, colour) in got.iter().enumerate() {
+            assert_eq!(*colour, Rgb8::new(0, 255, 0), "LED {led} took the answer, not the red canvas: {got:?}");
+        }
+
+        let answer = LedAnswer { calls: Arc::new(AtomicU32::new(0)) };
+        let mut scene =
+            state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(answer)), 50);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, &devices);
+        let got = take(&mut runner, "d1", 8);
+        let want = Rgb8::from_f32([0.0, 0.5, 0.0]);
+        for (led, colour) in got.iter().enumerate() {
+            assert_eq!(*colour, want, "LED {led} at half brightness: {got:?}");
         }
     }
 

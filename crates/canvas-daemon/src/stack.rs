@@ -19,6 +19,7 @@
 
 use canvas_core::geometry;
 use canvas_proto::api::{StackLayerState, StackLayerStatus};
+use canvas_proto::color::Rgb8;
 use canvas_proto::device::DeviceId;
 use canvas_proto::layout::{SamplingMode, CANVAS_HEIGHT, CANVAS_WIDTH};
 use canvas_proto::props::{InputNeeds, Props, PropertyDef, PropertySchema};
@@ -26,7 +27,7 @@ use canvas_proto::scene::Arrangement;
 use canvas_proto::stack::{
     BlendMode, LayerArea, LayerMask, MaskSource, Stack, STACK_ID_PREFIX, STACK_MAX_LAYERS,
 };
-use canvas_proto::traits::{Canvas, Effect, Inputs, StripRead};
+use canvas_proto::traits::{Canvas, Effect, Inputs, LightLeds, StripRead};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -963,6 +964,20 @@ pub struct StackEffect {
     /// disagree the stack answers the cell, and the strip shows the picture's cell at
     /// mid-height.
     read: StripRead,
+    /// Each layer's own strip read (#427), in layer order. The per-LED path reads a layer in its
+    /// own shape: a column layer over the full height, a cell layer over its cell.
+    layer_reads: Vec<StripRead>,
+    /// True when at least one painting layer answers the column and at least one answers the cell
+    /// (#427): only then does a strip need the per-LED path. A stack whose layers agree keeps the
+    /// single picture read, so a single Fire or a stack of all-column layers is unchanged.
+    mixed_reads: bool,
+    /// Scratch buffers for the per-LED path (#427), grown once and reused so the hot path
+    /// allocates nothing. `led_acc` is the accumulator of blended reads, `led_read` one layer's
+    /// read of all the light's LEDs.
+    led_acc: Vec<[f32; 3]>,
+    led_read: Vec<Rgb8>,
+    /// True once the per-LED read panicked: it logs once and the strip falls back to sampling.
+    led_panicked: bool,
 }
 
 impl StackEffect {
@@ -1102,6 +1117,8 @@ impl StackEffect {
         // that did not build paints nothing, so it does not hold the answer back.
         let mut painting = 0usize;
         let mut every_painting_layer_answers_the_column = true;
+        let mut any_column = false;
+        let mut any_cell = false;
         for (layer, read) in layers.iter().zip(layer_reads.iter()) {
             let paints = layer.values.visible
                 && layer.values.opacity > 0
@@ -1113,6 +1130,9 @@ impl StackEffect {
             painting += 1;
             if *read != StripRead::Column {
                 every_painting_layer_answers_the_column = false;
+                any_cell = true;
+            } else {
+                any_column = true;
             }
         }
         let read = if painting > 0 && every_painting_layer_answers_the_column {
@@ -1120,9 +1140,16 @@ impl StackEffect {
         } else {
             StripRead::Cell
         };
+        // A mixed stack is the one case that needs the per-LED path (#427).
+        let mixed_reads = any_column && any_cell;
         Self {
             stack_id: stack.id.clone(),
             layers,
+            layer_reads,
+            mixed_reads,
+            led_acc: Vec::new(),
+            led_read: Vec::new(),
+            led_panicked: false,
             live,
             areas,
             group: None,
@@ -1625,6 +1652,34 @@ impl Effect for StackEffect {
         self.read
     }
 
+    /// #427: the colours a strip light shows when this stack's layers read it differently.
+    ///
+    /// Only a strip light of a mixed stack is answered here: a fan or a keyboard keeps its cell
+    /// from the canvas, and a stack whose layers agree keeps its single picture read. The canvas
+    /// is never touched, so the stage picture and every other light are exactly as before.
+    fn led_colours(&mut self, light: LightLeds<'_>, out: &mut Vec<Rgb8>) -> bool {
+        if !self.mixed_reads || light.arrangement != Arrangement::Strip {
+            return false;
+        }
+        let handled = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            self.collect_led_colours(light, out)
+        }));
+        match handled {
+            Ok(answer) => answer,
+            Err(payload) => {
+                if !self.led_panicked {
+                    self.led_panicked = true;
+                    tracing::error!(
+                        stack = %self.stack_id,
+                        reason = %panic_text(&payload),
+                        "the stack's per-LED read panicked; the strip falls back to sampling the canvas"
+                    );
+                }
+                false
+            }
+        }
+    }
+
     fn init(&mut self, props: &Props) {
         // The stack's own start is guarded as each layer's is: `fit_canvases`, `clear_faults`,
         // `resolve_areas` and the status report are a panic turned into a black stack, logged
@@ -1745,6 +1800,92 @@ impl StackEffect {
         }
         self.resolve_areas();
         self.report_statuses();
+    }
+
+    /// Reads each painting layer its own way and blends the reads into one colour per LED
+    /// (#427). Called by [`Effect::led_colours`] for a strip light of a mixed stack, after the
+    /// frame has resolved its layers. The layer canvases and the buffers are reused; nothing is
+    /// allocated here and the group's picture canvas is never touched.
+    fn collect_led_colours(&mut self, light: LightLeds<'_>, out: &mut Vec<Rgb8>) -> bool {
+        let leds = light.leds;
+        let n = leds.len();
+        if n == 0 {
+            out.clear();
+            return true;
+        }
+        if self.resolved.is_empty() {
+            // No frame has resolved the layers yet; let the engine sample the canvas.
+            return false;
+        }
+        let StackEffect {
+            ref layers,
+            ref resolved,
+            ref layer_reads,
+            ref mut led_acc,
+            ref mut led_read,
+            ..
+        } = *self;
+        led_acc.clear();
+        led_acc.resize(n, [0.0; 3]);
+        out.clear();
+        out.resize(n, Rgb8::BLACK);
+        for index in 0..layers.len() {
+            let Some(entry) = resolved.get(index) else { continue };
+            let values = &entry.values;
+            if !values.visible || values.opacity == 0 || layers[index].built.is_none() {
+                continue;
+            }
+            if matches!(layers[index].hold, Hold::Faulted) {
+                continue;
+            }
+            let Some(area) = entry.area.as_ref() else { continue };
+            let canvas = &layers[index].canvas;
+            let column = layer_reads[index] == StripRead::Column;
+            led_read.clear();
+            led_read.reserve(n);
+            // Reuse the engine's own sampling helpers: a column layer over the full height, a
+            // cell layer over its cell, each read out of that layer's own canvas.
+            if column {
+                canvas_core::sampling::sample_led_columns(
+                    &canvas.pixels, canvas.width, canvas.height, leds, led_read,
+                );
+            } else {
+                canvas_core::sampling::sample_leds(
+                    &canvas.pixels,
+                    canvas.width,
+                    canvas.height,
+                    leds,
+                    canvas_core::SCENE_SAMPLING,
+                    led_read,
+                );
+            }
+            let alpha = f32::from(values.opacity.min(100)) / 100.0;
+            for i in 0..n {
+                if !leds[i].sampled {
+                    continue;
+                }
+                // A layer kept to a device or a zone paints only the LEDs its area covers; a
+                // whole-canvas or rectangular area has no per-LED mask and paints them all.
+                if let Some(mask) = &area.mask {
+                    let x = leds[i].center_x.round().max(0.0) as u32;
+                    let y = leds[i].center_y.round().max(0.0) as u32;
+                    let covered = if column {
+                        mask.contains_column(x, y)
+                    } else {
+                        mask.contains(x, y)
+                    };
+                    if !covered {
+                        continue;
+                    }
+                }
+                let source = led_read[i].to_f32();
+                led_acc[i] = blend_pixel(values.blend, led_acc[i], source, alpha);
+            }
+        }
+        for i in 0..n {
+            out[i] = Rgb8::from_f32(led_acc[i]);
+        }
+        true
     }
 
     /// One frame of the compositor's own work, run inside [`StackEffect::update`]'s guard.
