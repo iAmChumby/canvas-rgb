@@ -38,8 +38,11 @@ pub async fn list_devices(
     if app.rescan_requests.try_send(request).is_err() {
         return Err(ApiFailure::service_unavailable("the device watcher is not taking rescans"));
     }
-    // The supervisor answers within the budget, unless it is busy with its own refresh first.
-    let wait = app.rescan_budget + crate::openrgb_supervisor::RESCAN_QUEUE_WAIT;
+    // The supervisor waits for OpenRGB's detection to go quiet (at most the lane's cap, with no
+    // adapter lock) and then re-reads within the budget, unless it is busy with its own refresh
+    // first (#290).
+    let detect_cap = app.frame_lane.as_ref().map_or(std::time::Duration::ZERO, |lane| lane.rescan_timing().cap);
+    let wait = detect_cap + app.rescan_budget + crate::openrgb_supervisor::RESCAN_QUEUE_WAIT;
     let found = match tokio::time::timeout(wait, answer).await {
         Ok(Ok(Ok(found))) => found,
         Ok(Ok(Err(e))) => {

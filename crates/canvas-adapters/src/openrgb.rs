@@ -32,26 +32,78 @@ const MAX_LEDS_PER_CONTROLLER: u64 = u16::MAX as u64;
 /// How long a request waits for its reply before the call fails.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
-/// How long a rescan waits for OpenRGB to say detection finished before giving up (#290).
+/// How a rescan waits for OpenRGB's detection to be over (#290).
 ///
-/// This fits inside the daemon's `RESCAN_BUDGET` (5 s): a detection that never finishes leaves a
-/// little of that budget for the plain re-read of the device list, so the answer is still 200.
-const DETECT_TIMEOUT: Duration = Duration::from_secs(4);
+/// OpenRGB release_1.1 sends 101 and 103 only to a client that negotiated protocol 6 or later
+/// (`NetworkServer.cpp:4003-4006`, `:3949-3952`), and canvas-rgb negotiates 5. What a protocol 5
+/// client sees after packet 140 is `DEVICE_LIST_UPDATED` (100, ungated, `:4017`): once when the
+/// list is cleared and once as each controller registers again. So detection is over when the
+/// list has been quiet for [`settle`](Self::settle), and no packet says so.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RescanTiming {
+    /// How long after packet 140 the first list change may take. Detection starts by clearing
+    /// the list, which is immediate, so a silence this long means detection is off or refused:
+    /// the list was not touched. 1.5 s allows a busy server to take its time.
+    pub first: Duration,
+    /// How long the list must stay quiet before detection counts as settled. Controllers
+    /// register as each detector finishes; 750 ms is longer than the gap between two controllers
+    /// of one probe pass and short enough to feel immediate. A slower gap inside one detection
+    /// ends the wait early on a part list: the daemon then keeps its held list when the list
+    /// comes back empty, and its 5 s refresh catches up with the rest. Real timings are UNKNOWN
+    /// until Luke's hardware check.
+    pub settle: Duration,
+    /// The longest the whole wait takes. A detection still announcing changes at the cap is
+    /// reported as unsettled, and the caller keeps the list it holds.
+    pub cap: Duration,
+}
 
-/// The error text of a detection that did not finish in time. The daemon uses
-/// [`rescan_is_best_effort`] to tell this from a real failure.
+impl Default for RescanTiming {
+    fn default() -> Self {
+        Self { first: Duration::from_millis(1500), settle: Duration::from_millis(750), cap: Duration::from_secs(6) }
+    }
+}
+
+/// How often a rescan wait looks at whether the link is still up.
+const LINK_CHECK: Duration = Duration::from_millis(100);
+
+/// The error text of a rescan whose detection never began: no list change followed packet 140.
+pub const RESCAN_NOT_REDETECTED_MESSAGE: &str = "OpenRGB did not start detection";
+
+/// The error text of a detection that was still announcing list changes at the cap.
 pub const RESCAN_DETECT_TIMEOUT_MESSAGE: &str = "OpenRGB did not finish detection in time";
 
-/// Whether a `rescan()` error means "the hardware could not be asked to look again", which the
-/// caller logs and still answers with the list as it stands (200), rather than a real failure.
+/// What a rescan that did not re-detect left behind. See [`rescan_miss`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RescanMiss {
+    /// Nothing was re-detected and the list was not touched: the adapter cannot (the trait
+    /// default, a protocol too old) or OpenRGB started no detection. Reading the list is safe.
+    NotRedetected,
+    /// Detection began and never went quiet: OpenRGB's list is mid-detection, possibly empty or
+    /// part. Reading it now would hand back a shrunk list.
+    Unsettled,
+}
+
+/// Whether a `rescan()` error means "the hardware could not be asked to look again", and which
+/// kind. `None` is a real failure.
 ///
-/// The trait error type is in the spine, so the two cases that are safe to ignore are named here
-/// instead of in a new spine variant: an adapter that cannot re-detect (the trait default, or a
-/// protocol too old) and a detection that ran out of time. Both leave the link up; the daemon's
-/// next refresh reads whatever list OpenRGB has.
-pub fn rescan_is_best_effort(error: &AdapterError) -> bool {
-    matches!(error, AdapterError::Unsupported(_))
-        || matches!(error, AdapterError::Protocol(reason) if reason == RESCAN_DETECT_TIMEOUT_MESSAGE)
+/// The trait error type is in the spine, so the cases that are safe to ignore are named here
+/// instead of in a new spine variant. Both leave the link up.
+pub fn rescan_miss(error: &AdapterError) -> Option<RescanMiss> {
+    match error {
+        AdapterError::Unsupported(_) => Some(RescanMiss::NotRedetected),
+        AdapterError::Protocol(reason) if reason == RESCAN_NOT_REDETECTED_MESSAGE => Some(RescanMiss::NotRedetected),
+        AdapterError::Protocol(reason) if reason == RESCAN_DETECT_TIMEOUT_MESSAGE => Some(RescanMiss::Unsettled),
+        _ => None,
+    }
+}
+
+/// A rescan whose detection went quiet.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Redetected {
+    /// From packet 140 to the end of the quiet window.
+    pub settled_after: Duration,
+    /// How many list changes (100) the detection announced.
+    pub list_changes: u32,
 }
 
 /// How often `SET_CUSTOM_MODE` is sent again to a controller that is being streamed frames.
@@ -130,6 +182,8 @@ pub struct OpenRgbAdapter {
     link: Arc<Link>,
     /// The clocks the keepalive reads.
     clocks: Clocks,
+    /// How a rescan waits for detection to settle (#290).
+    rescan_timing: RescanTiming,
 }
 
 struct Link {
@@ -142,9 +196,12 @@ struct Link {
     /// answer the next request). The next writer drops the socket instead of writing into
     /// the middle of the half-written packet, and the supervisor reconnects.
     broken: AtomicBool,
-    /// Bumped by the reader when OpenRGB broadcasts that detection finished (`103`) or that the
-    /// device list changed (`100`). A rescan waits for one of these instead of a reply (#290).
-    detection: tokio::sync::watch::Sender<u64>,
+    /// Bumped by the reader of the current session on every `DEVICE_LIST_UPDATED` (100). A rescan
+    /// watches it for the list changes that detection announces (#290).
+    list_changed: tokio::sync::watch::Sender<u64>,
+    /// Bumped by the reader of the current session on `DETECTION_COMPLETE` (103), which OpenRGB
+    /// sends only to a client that negotiated protocol 6 or later (#290).
+    detection_complete: tokio::sync::watch::Sender<u64>,
 }
 
 struct Session {
@@ -383,14 +440,27 @@ impl OpenRgbAdapter {
             writer: tokio::sync::Mutex::new(None),
             request_gate: tokio::sync::Mutex::new(()),
             broken: AtomicBool::new(false),
-            detection: tokio::sync::watch::channel(0_u64).0,
+            list_changed: tokio::sync::watch::channel(0_u64).0,
+            detection_complete: tokio::sync::watch::channel(0_u64).0,
         });
         {
             let mut links = guard(&LINKS);
             links.retain(|link| link.strong_count() > 0);
             links.push(Arc::downgrade(&link));
         }
-        Self { host: host.to_string(), port, link, clocks: Clocks::system() }
+        Self { host: host.to_string(), port, link, clocks: Clocks::system(), rescan_timing: RescanTiming::default() }
+    }
+
+    /// Like [`new`](Self::new) with another way to wait for a rescan's detection to settle
+    /// (tests use short windows). Clones made afterwards, such as the frame lane, share it.
+    pub fn with_rescan_timing(mut self, timing: RescanTiming) -> Self {
+        self.rescan_timing = timing;
+        self
+    }
+
+    /// How a rescan on this adapter waits for detection to settle.
+    pub fn rescan_timing(&self) -> RescanTiming {
+        self.rescan_timing
     }
 
     /// Like [`new`](Self::new) with another keepalive interval (tests use a short one).
@@ -440,6 +510,84 @@ impl OpenRgbAdapter {
                 "frame has {} colors but {device} has {led_count} LEDs", colors.len())));
         }
         self.send_leds(controller.index, colors).await
+    }
+
+    /// Asks OpenRGB to look at the hardware again, then waits for its detection to go quiet
+    /// (#290), with no `&mut` on the adapter.
+    ///
+    /// The wait takes seconds, so the daemon runs it on the frame lane, a clone that shares this
+    /// link, and never under its adapter lock: that lock is what the keyboard's frame writer and
+    /// the API handlers wait on. [`DeviceAdapter::rescan`] is the same call for a caller that has
+    /// the adapter to itself.
+    ///
+    /// Packet 140 is client-only and gets no reply: it goes out through [`send`](Self::send),
+    /// never through `request`, which would wait five seconds for a reply that never comes and
+    /// break the link. What follows is read from the list changes the reader counts (see
+    /// [`RescanTiming`]): the first within `first` of the packet, or the call is
+    /// [`RESCAN_NOT_REDETECTED_MESSAGE`] and the list was never touched; then a quiet window of
+    /// `settle`, or the `cap` runs out and the call is [`RESCAN_DETECT_TIMEOUT_MESSAGE`]. Only
+    /// changes after packet 140 count, and nothing here resizes. The link stays up either way. A
+    /// protocol 4 server has no such packet and is refused as unsupported.
+    ///
+    /// Once detection began, the custom-mode cache is reset (settled or not): the controllers
+    /// that registered again are new to OpenRGB and sit in their built-in mode, so the next
+    /// frame to each must send `SET_CUSTOM_MODE` first.
+    pub async fn rescan_shared(&self) -> Result<Redetected, AdapterError> {
+        use tokio::time::{sleep_until, Instant};
+        self.require_connected()?;
+        if self.protocol_version() < 5 {
+            return Err(AdapterError::Unsupported("OpenRGB protocol 4 cannot re-detect devices"));
+        }
+        let timing = self.rescan_timing;
+        // Subscribe before writing and mark the current counts seen, so only a change that
+        // arrives after packet 140 counts.
+        let mut changes = self.link.list_changed.subscribe();
+        let mut complete = self.link.detection_complete.subscribe();
+        let _ = changes.borrow_and_update();
+        let _ = complete.borrow_and_update();
+        let started = Instant::now();
+        self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
+        let cap = started + timing.cap;
+        let mut list_changes = 0_u32;
+        let mut last_change: Option<Instant> = None;
+        let outcome = loop {
+            // The instant the wait ends if nothing more arrives: the first change is overdue, or
+            // the list has been quiet for the settle window.
+            let quiet_ends = match last_change {
+                None => started + timing.first,
+                Some(at) => at + timing.settle,
+            };
+            let wake = quiet_ends.min(cap).min(Instant::now() + LINK_CHECK);
+            tokio::select! {
+                changed = changes.changed() => {
+                    changed.map_err(|_| AdapterError::NotConnected)?;
+                    list_changes += 1;
+                    last_change = Some(Instant::now());
+                }
+                done = complete.changed() => {
+                    // A protocol 6 server says it is done: no quiet window to wait out.
+                    done.map_err(|_| AdapterError::NotConnected)?;
+                    break Ok(());
+                }
+                () = sleep_until(wake) => {
+                    self.require_connected()?;
+                    let now = Instant::now();
+                    // Woken only to look at the link: the wait goes on.
+                    if now < quiet_ends && now < cap {
+                        continue;
+                    }
+                    break match last_change {
+                        None => Err(AdapterError::Protocol(RESCAN_NOT_REDETECTED_MESSAGE.into())),
+                        Some(_) if quiet_ends <= cap => Ok(()),
+                        Some(_) => Err(AdapterError::Protocol(RESCAN_DETECT_TIMEOUT_MESSAGE.into())),
+                    };
+                }
+            }
+        };
+        if last_change.is_some() || outcome.is_ok() {
+            self.link.reset_custom_mode();
+        }
+        outcome.map(|()| Redetected { settled_after: started.elapsed(), list_changes })
     }
 
     fn require_connected(&self) -> Result<(), AdapterError> {
@@ -859,32 +1007,10 @@ impl DeviceAdapter for OpenRgbAdapter {
         Ok(controllers.iter().map(device_info).collect())
     }
 
-    /// Asks OpenRGB to look at the hardware again, then waits for its detection to finish (#290).
-    ///
-    /// Packet 140 is client-only and gets no reply: it goes out through [`send`](Self::send),
-    /// never through `request`, which would wait five seconds for a reply that never comes and
-    /// break the link. OpenRGB reports the end of detection as a broadcast (103 or 100), which the
-    /// reader turns into a signal on the link. A detection that never finishes times out after
-    /// [`DETECT_TIMEOUT`], inside the daemon's rescan budget, and leaves the link up so the plain
-    /// re-read can still answer. Protocol 4 has no such packet, so it is refused as unsupported.
+    /// Asks OpenRGB to look at the hardware again and waits for its detection to go quiet (#290).
+    /// See [`OpenRgbAdapter::rescan_shared`], which does the work with no `&mut` on the adapter.
     async fn rescan(&mut self) -> Result<(), AdapterError> {
-        self.require_connected()?;
-        if self.protocol_version() < 5 {
-            return Err(AdapterError::Unsupported("OpenRGB protocol 4 cannot re-detect devices"));
-        }
-        // Subscribe before writing: mark the current generation seen so only a broadcast that
-        // arrives after packet 140 ends the wait.
-        let mut detection = self.link.detection.subscribe();
-        let _ = detection.borrow_and_update();
-        self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
-        let finished = async {
-            detection.changed().await.map_err(|_| AdapterError::NotConnected)?;
-            Ok(())
-        };
-        match tokio::time::timeout(DETECT_TIMEOUT, finished).await {
-            Ok(result) => result,
-            Err(_) => Err(AdapterError::Protocol(RESCAN_DETECT_TIMEOUT_MESSAGE.into())),
-        }
+        self.rescan_shared().await.map(|_| ())
     }
 
     async fn write_frame(&mut self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
@@ -965,11 +1091,17 @@ impl crate::resume::ResumeBehavior for OpenRgbAdapter {
 async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
     while let Ok((device, packet_id, payload)) = read_packet(&mut read).await {
         // OpenRGB broadcasts these with no request id and no reply owed, so they can never
-        // complete a pending request (which carries a different packet id). 103 (detection
-        // complete) and 100 (device list updated) tell a waiting rescan that detection is done;
-        // 101 (detection started) and 102 (progress) carry no such news (#290).
+        // complete a pending request (which carries a different packet id). 100 (device list
+        // updated) and 103 (detection complete, protocol 6 and later) are what a waiting rescan
+        // reads; 101 (detection started) and 102 (progress) carry no such news (#290). Only the
+        // reader of the current session counts them: a reader that was overtaken by a
+        // reconnect must not wake a rescan that started on the new session.
         if matches!(packet_id, DEVICE_LIST_UPDATED | DETECTION_COMPLETE) {
-            link.detection.send_modify(|n| *n += 1);
+            if guard(&link.session).epoch != epoch {
+                return;
+            }
+            let signal = if packet_id == DEVICE_LIST_UPDATED { &link.list_changed } else { &link.detection_complete };
+            signal.send_modify(|n| *n += 1);
             continue;
         }
         if packet_id == DETECTION_STARTED {
@@ -1354,5 +1486,59 @@ mod keepalive_tests {
 
         frame(&mut adapter).await;
         assert_eq!(server.custom_mode_writes(0), 1, "the mode was set again for no reason");
+    }
+}
+
+// ---- #290: the reader signals a rescan only for the session it belongs to
+
+#[cfg(test)]
+mod rescan_signal_tests {
+    use super::*;
+    use tokio::io::AsyncWriteExt;
+    use tokio::net::TcpListener;
+
+    /// A link whose current session is `epoch`, a reader of `reader_epoch` on one end of a socket,
+    /// and the other end of that socket.
+    async fn reader_on(epoch: u64, reader_epoch: u64) -> (Arc<Link>, tokio::task::JoinHandle<()>, TcpStream) {
+        let adapter = OpenRgbAdapter::new("127.0.0.1", 1);
+        let link = Arc::clone(&adapter.link);
+        guard(&link.session).epoch = epoch;
+        let listener = TcpListener::bind(("127.0.0.1", 0)).await.expect("bind");
+        let port = listener.local_addr().expect("address").port();
+        let connecting = tokio::spawn(TcpStream::connect(("127.0.0.1", port)));
+        let (server, _) = listener.accept().await.expect("accept");
+        let (read, _write) = connecting.await.expect("task").expect("connect").into_split();
+        let reader = tokio::spawn(read_loop(read, Arc::clone(&link), reader_epoch));
+        (link, reader, server)
+    }
+
+    /// The reader of the current session counts a list change (the control for the test below).
+    #[tokio::test]
+    async fn the_reader_of_the_current_session_signals_a_list_change() {
+        let (link, _reader, mut server) = reader_on(1, 1).await;
+        let mut changes = link.list_changed.subscribe();
+        let _ = changes.borrow_and_update();
+        server.write_all(&encode_packet(0, DEVICE_LIST_UPDATED, &[]).expect("packet")).await.expect("write");
+        tokio::time::timeout(Duration::from_secs(5), changes.changed())
+            .await
+            .expect("the change was never counted")
+            .expect("the signal is alive");
+    }
+
+    /// A reader that a reconnect overtook must not wake a rescan that started on the new session:
+    /// it counts nothing and ends.
+    #[tokio::test]
+    async fn an_overtaken_reader_signals_nothing_and_ends() {
+        let (link, reader, mut server) = reader_on(2, 1).await;
+        let changes = link.list_changed.subscribe();
+        let complete = link.detection_complete.subscribe();
+        server.write_all(&encode_packet(0, DEVICE_LIST_UPDATED, &[]).expect("packet")).await.expect("write");
+        server.write_all(&encode_packet(0, DETECTION_COMPLETE, &[]).expect("packet")).await.expect("write");
+        tokio::time::timeout(Duration::from_secs(5), reader)
+            .await
+            .expect("the overtaken reader ends")
+            .expect("its task ends");
+        assert!(!changes.has_changed().expect("alive"), "an overtaken reader counted a list change");
+        assert!(!complete.has_changed().expect("alive"), "an overtaken reader counted a completion");
     }
 }

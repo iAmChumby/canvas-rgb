@@ -10,7 +10,7 @@ mod common;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
 use canvas_adapters::fake::FakeOpenRgbServer;
-use canvas_adapters::openrgb::OpenRgbAdapter;
+use canvas_adapters::openrgb::{OpenRgbAdapter, RescanTiming};
 use canvas_daemon::api;
 use canvas_daemon::openrgb_supervisor::RESCAN_BUDGET;
 use canvas_daemon::state::App;
@@ -64,9 +64,19 @@ impl Drop for Rig {
     }
 }
 
+/// Short detection windows so a rescan takes under a second (the fake's gap between two
+/// controllers registering is 10 ms). The daemon's own are `RescanTiming::default()`.
+fn quick() -> RescanTiming {
+    RescanTiming { first: Duration::from_millis(500), settle: Duration::from_millis(250), cap: Duration::from_secs(3) }
+}
+
 /// An app whose adapter is the real OpenRGB adapter on `port`, with the daemon's supervisor
 /// running. `budget` is how long a rescan may hold the adapter.
 async fn rig(name: &str, port: u16, budget: Duration) -> Rig {
+    rig_timed(name, port, budget, quick()).await
+}
+
+async fn rig_timed(name: &str, port: u16, budget: Duration, timing: RescanTiming) -> Rig {
     let home = std::env::temp_dir().join(format!("canvas-rgb-rescan-{name}-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&home);
     std::fs::create_dir_all(&home).expect("the temp directory is created");
@@ -78,7 +88,7 @@ async fn rig(name: &str, port: u16, budget: Duration) -> Rig {
     let mut app = App::new(
         store,
         engine.clone(),
-        Box::new(OpenRgbAdapter::new("127.0.0.1", port)),
+        Box::new(OpenRgbAdapter::new("127.0.0.1", port).with_rescan_timing(timing)),
         TOKEN.into(),
         "0.0.0-test".into(),
         tx,
@@ -339,4 +349,160 @@ async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
         .expect("the request task ends");
     assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
     server.stall_replies(false);
+}
+
+/// Makes OpenRGB slow, not dead: every reply it holds (see `hold_replies`) goes out exactly `by`
+/// after the request that asked for it. Abort the task to stop.
+fn delay_replies(server: &Arc<FakeOpenRgbServer>, by: Duration) -> tokio::task::JoinHandle<()> {
+    let server = Arc::clone(server);
+    tokio::spawn(async move {
+        loop {
+            while server.held_replies() == 0 {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+            tokio::time::sleep(by).await;
+            server.release_replies();
+        }
+    })
+}
+
+/// Starts `GET /api/v1/devices?rescan=1` and returns the task that waits for its status.
+fn start_rescan(rig: &Rig) -> tokio::task::JoinHandle<StatusCode> {
+    let router = rig.router.clone();
+    tokio::spawn(async move {
+        router.oneshot(request("/api/v1/devices?rescan=1")).await.expect("the router answers").status()
+    })
+}
+
+/// Waits until `ready` is true; the long limit only ends a test that would hang.
+async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !ready() {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("never happened: {what}"));
+}
+
+/// #290: the wait for OpenRGB's detection holds no adapter lock. The keyboard's frame writer takes
+/// that lock for every frame (`crates/canvas-daemon/src/writer.rs`, the non-OpenRGB path), so a
+/// rescan that held it for the wait froze the keyboard for seconds.
+///
+/// Detection never settles here, so the wait runs to the 3 s cap; the keyboard-style frame
+/// (a device id the composite serves natively) must be written inside one second of the rescan
+/// starting to wait.
+#[tokio::test]
+async fn a_keyboard_frame_is_not_blocked_while_a_rescan_waits_for_detection() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.hold_detection(true);
+    let rig = rig("keyboard-frame", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+
+    let rescan = start_rescan(&rig);
+    // Packet 140 is at OpenRGB: the supervisor is now waiting for the list to go quiet.
+    until("packet 140 reached OpenRGB", || server.rescan_count() == 1).await;
+
+    let (frames, rx) = tokio::sync::mpsc::channel(1);
+    let writer = tokio::spawn(canvas_daemon::writer::writer_loop(
+        rig.app.adapter.clone(),
+        DeviceId("royuan:keyboard".into()),
+        rx,
+        Arc::new(canvas_daemon::last_frame::LastFrame::default()),
+    ));
+    frames.send(vec![Rgb8::WHITE; 4]).await.expect("the writer takes the frame");
+    drop(frames);
+    tokio::time::timeout(Duration::from_secs(1), writer)
+        .await
+        .expect("the keyboard's frame waited on the adapter lock for the rescan's detection wait")
+        .expect("the writer ends");
+    assert!(!rescan.is_finished(), "the rescan was already over, so the frame proved nothing");
+    assert_eq!(rescan.await.expect("the request task ends"), StatusCode::OK);
+}
+
+/// #290: a detection that never settles leaves OpenRGB's list empty. The rescan answers 200 with
+/// the list the daemon holds, applies nothing, never reads the empty list, and the link stays up:
+/// the lights stay managed. The 5 s refresh then must not apply that empty list either.
+#[tokio::test]
+async fn a_detection_that_never_settles_keeps_the_held_list_and_the_lights() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.hold_detection(true);
+    let rig = rig("unsettled", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:one").await;
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one"], "the held list answers");
+    assert_eq!(server.rescan_count(), 1);
+    assert_eq!(server.reads_during_detection(), 0, "the rescan read the list while it was mid-detection");
+    assert_eq!(rig.app.devices.read().await.len(), 1, "the held list was replaced");
+    assert_eq!(sink_ids(&rig), ["openrgb:one"], "the device lost its frame sink");
+    assert!(rig.app.adapter.lock().await.is_connected(), "the rescan dropped the link");
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+
+    // The supervisor's own 5 s refresh reads the list OpenRGB still has mid-detection (empty) and
+    // must keep the longer list it holds.
+    until("the 5 s refresh read the mid-detection list", || server.reads_during_detection() >= 1).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(rig.app.devices.read().await.len(), 1, "the refresh applied a list that was mid-detection");
+    assert_eq!(sink_ids(&rig), ["openrgb:one"], "the refresh dropped the frame sink");
+}
+
+/// #290: the detection wait and the re-read have budgets of their own. Five sticks register again
+/// 300 ms apart, so detection takes about 1.9 s (the last one at 1.5 s, then the 400 ms quiet
+/// window); the re-read is six requests (the count and five controllers) whose replies come
+/// 200 ms late each, 1.2 s in all. The rescan budget is 2.5 s: a budget that had to cover both
+/// (3.1 s) would cut the re-read and drop the link, as it did.
+#[tokio::test]
+async fn a_slow_detection_does_not_eat_the_budget_of_the_re_read() {
+    let sticks: Vec<DeviceInfo> = ["one", "two", "three", "four", "five"].into_iter().map(stick).collect();
+    let server = Arc::new(FakeOpenRgbServer::start(sticks).await.expect("fake server"));
+    server.rescan_timing(Duration::from_millis(20), Duration::from_millis(300));
+    let timing = RescanTiming { first: Duration::from_secs(2), settle: Duration::from_millis(400), cap: Duration::from_secs(6) };
+    let rig = rig_timed("budgets", server.port(), Duration::from_millis(2500), timing).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+
+    // OpenRGB answers slowly: every reply of the re-read comes 200 ms after its request.
+    server.hold_replies(true);
+    let releasing = delay_replies(&server, Duration::from_millis(200));
+    let status = start_rescan(&rig).await.expect("the request task ends");
+    releasing.abort();
+    assert_eq!(status, StatusCode::OK, "the re-read was cut by the budget that detection used up");
+    assert!(rig.app.adapter.lock().await.is_connected(), "the rescan dropped the link");
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+    assert_eq!(rig.app.devices.read().await.len(), 5);
+}
+
+/// #290: a rescan that gives up on detection can never drop the link, even while OpenRGB answers
+/// slowly: the detection wait is outside the budget of the re-read, and a detection that never
+/// settles makes no re-read at all.
+#[tokio::test]
+async fn a_detection_timeout_with_slow_replies_still_keeps_the_link_and_the_held_list() {
+    let server = Arc::new(FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server"));
+    server.hold_detection(true);
+    let rig = rig("timeout-slow", server.port(), Duration::from_secs(2)).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+
+    server.hold_replies(true);
+    let releasing = delay_replies(&server, Duration::from_millis(400));
+    let status = start_rescan(&rig).await.expect("the request task ends");
+    releasing.abort();
+    assert_eq!(status, StatusCode::OK);
+    assert!(rig.app.adapter.lock().await.is_connected(), "a detection timeout dropped the link");
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+    assert_eq!(rig.app.devices.read().await.len(), 1, "the held list was replaced");
+}
+
+/// #290: the API waits for the supervisor past the detection wait too. A detection that runs to a
+/// 7 s cap is longer than the rescan budget (1 s) plus the queue wait (5 s) alone; the answer is
+/// still the held list (200), not "OpenRGB did not answer the rescan in time" (503).
+#[tokio::test]
+async fn the_api_waits_out_the_detection_cap_before_it_gives_up_on_the_supervisor() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.hold_detection(true);
+    let timing = RescanTiming { first: Duration::from_millis(500), settle: Duration::from_millis(250), cap: Duration::from_secs(7) };
+    let rig = rig_timed("api-wait", server.port(), Duration::from_secs(1), timing).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+
+    let (status, body) = get(&rig, "/api/v1/devices?rescan=1").await;
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 }

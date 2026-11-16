@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Devices: Rescan now asks OpenRGB to look for hardware again, so a device plugged in after OpenRGB started is found. (#290)
+- Devices: Rescan now asks OpenRGB to detect hardware again and waits for its device list to settle before reading it, and keeps the current list when OpenRGB has not settled. Checked against a fake OpenRGB only; a real-hardware check is still to do. (#290)
 - Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)
 - `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)
 - The "frame write failed" warning keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter still catches it. (#87)
