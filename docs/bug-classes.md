@@ -1015,17 +1015,26 @@ whose meaning is how high it reaches).
   Spectrum dark on a strip, because their picture sits at the bottom of the canvas.
 - [#407](https://github.com/iAmChumby/canvas-rgb/issues/407): a stack answered the cell for
   every one of its layers, so Fire or Audio Spectrum inside a stack still read dark on a strip.
-- **Class fix:** done (#400). The effect says how a strip reads it (`StripRead` in
-  `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names every built-in
-  with its read (`crates/canvas-effects/src/lib.rs`,
+- **Class fix:** done (#400), guarded again (#407). The effect says how a strip reads it
+  (`StripRead` in `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names
+  every built-in with its read (`crates/canvas-effects/src/lib.rs`,
   `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
   decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
-  on a strip to a measured level. A stack reads each of its layers with that layer's own read
-  (`crates/canvas-daemon/src/stack.rs`, `StackEffect::layer_reads` and `strip_led_colour`): the
-  layers' reads are blended per LED, and the compositor paints that colour where the engine
-  reads the LED. The area mask is built for the column as well, so a layer kept to a device or
-  a zone is painted over the strip LEDs' whole columns and not cut to the cell at mid-height,
-  and a light that is not a strip keeps reading the cells it read before. Tests in
-  `crates/canvas-daemon/tests/stacks.rs` hold a stack's Fire and Audio Spectrum on a strip to a
-  measured level, hold Rain's motion over a flame to the bar of #372, and hold a fan and a
-  keyboard to the colours they read before.
+  on a strip to a measured level. A stack answers the column when every layer that paints
+  answers it, and the cell otherwise (`crates/canvas-daemon/src/stack.rs`, `StackEffect::read`):
+  the picture is then drawn the way that read reads it, over the strip LEDs' columns or over the
+  area's own cells. The stack writes nothing into the group's canvas beyond its own layers, so
+  the picture the editor shows is the picture the lights read. The area mask is built for the
+  column as well, so a layer kept to a device or a zone is painted over the strip LEDs' whole
+  columns, and a light that is not a strip (a fan, a keyboard) keeps reading the cells it read
+  before. Tests in `crates/canvas-daemon/tests/stacks.rs` hold a stack's Fire and Audio Spectrum
+  on a strip to a measured level, hold Rain's motion over a flame to the bar of #372, hold a
+  fan and a keyboard to the colours they read before, and measure both orders of a mixed stack.
+- **The guard over the daemon's own effects** (`crates/canvas-daemon/src/strip_read_guard.rs`,
+  `every_effect_the_daemon_implements_answers_how_a_strip_reads_it`): every effect the daemon
+  implements is checked, and a scan over the daemon's own source fails with `file:line` when an
+  effect appears that the test does not cover. The stack follows the every-layer rule, the HTML
+  tile forwards the read of the effect it holds, and a pattern holds no effect. What the guard
+  does not cover: an effect in another crate that the daemon wraps without saying so, and the
+  blend of a stack whose layers answer differently (the stack answers the cell, and the top
+  layer's cell is what a strip shows).

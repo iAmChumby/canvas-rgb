@@ -375,12 +375,6 @@ fn with_area(mut layer: StackLayer, area: LayerArea) -> StackLayer {
     layer
 }
 
-/// A layer at another opacity: the stack blends the layers' reads at it.
-fn with_opacity(mut layer: StackLayer, opacity: u8) -> StackLayer {
-    layer.opacity = opacity;
-    layer
-}
-
 fn stack(id: &str, layers: Vec<StackLayer>) -> Stack {
     Stack { id: id.to_string(), layers }
 }
@@ -5172,6 +5166,38 @@ fn a_stack_whose_layer_is_audio_spectrum_reads_a_lit_strip() {
     assert!(peak > 15.0, "the strip shows the bars: peak {peak:.1}");
 }
 
+/// #407: a stack of a flame and the bars fills a strip too: both layers answer the column, so
+/// the stack answers it.
+#[test]
+fn a_stack_of_fire_and_audio_spectrum_reads_a_lit_strip() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let stack = stack(
+        "stack:Both",
+        vec![layer("l1", "fire"), layer("l2", "audio_spectrum")],
+    );
+    let mut effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas_for(&devices));
+    let mut props = Props::new();
+    props.insert("l1.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let mut canvas = group_canvas();
+    let spectrum = Arc::new(canvas_proto::traits::AudioSpectrum {
+        centers_hz: (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect(),
+        magnitudes: vec![0.25; 32],
+    });
+    let inputs = Inputs { time: 0.0, screen: None, audio: Some(spectrum) };
+    for _ in 0..30 {
+        effect.update(1.0 / 30.0, &mut canvas, &inputs);
+    }
+    let read = effect.strip_read();
+    let level = strip_level(&devices, &canvas, read);
+    let peak = strip_peak(&devices, &canvas, read);
+    println!(
+        "#407 the fire and the bars answer {read:?}: the strip shows {level:.1} (peak {peak:.1})"
+    );
+    assert_eq!(read, StripRead::Column, "every layer answers the column, so the stack does");
+    assert!(peak > 15.0, "the strip shows the flame and the bars: peak {peak:.1}");
+}
+
 /// #407: a layer kept to a zone is masked to that zone, and the mask is read with the layer's
 /// own reading, so the strip reads the flame and not only the cell at mid-height.
 #[test]
@@ -5285,64 +5311,80 @@ fn rain_over_fire_keeps_the_rains_motion_on_a_strip() {
     println!("#407 the rain over the fire reads as the rain alone: the worst LED is off by {worst}");
 }
 
-/// #407: a stack blends the layers' own reads per LED.
+/// #407: a stack that mixes a flame with another effect answers the cell, and the strip shows
+/// the top layer's cell.
 ///
-/// The fire under the rain at half opacity: the LED shows the rain's cell blended with the
-/// fire's column, and not the column of the two pictures blended.
+/// The stack draws one picture, so one read has to serve every layer: the flame answers the
+/// column, the rain the cell. The stack answers the cell when its layers disagree, and the
+/// strip reads the picture's cell at mid-height. With the flame on top that cell is the cold
+/// gap above the flame, so the strip reads dark; with the rain on top it is the rain's own
+/// cell, and the rain keeps moving.
+///
+/// The two orders are measured here, so the release note and the code say the same thing.
 #[test]
-fn a_stack_blends_the_layers_own_reads_per_led() {
+fn fire_over_rain_answers_the_cell_and_the_strip_shows_the_fires_cell() {
     let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
-    let mixed = stack(
-        "stack:Two",
-        vec![layer("l1", "fire"), with_opacity(layer("l2", "rain"), 50)],
-    );
+    // The rain under the flame: the flame is painted last, so at the Normal blend its cell is
+    // what the strip shows.
+    let mixed = stack("stack:Two", vec![layer("l1", "rain"), layer("l2", "fire")]);
     let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
-    // The same fire as the one below, so the two pictures are the two the blend is over.
-    let mut props = rain_props("l2");
-    props.insert("l1.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    let mut props = rain_props("l1");
+    props.insert("l2.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
     effect.init(&props);
     let mut canvas = group_canvas();
     for _ in 0..120 {
         effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
     }
-    let fire_only = stack("stack:Fire", vec![layer("l1", "fire")]);
-    let mut fire = stack_effect!(&fire_only, real_leaves(), live_for(&fire_only), areas_for(&devices));
-    fire.init(&fire_props());
-    let mut fire_canvas = group_canvas();
-    let mut rain = canvas_effects::rain::Rain::with_seed(372);
-    rain.init(&rain_props(""));
-    let mut rain_canvas = group_canvas();
-    for _ in 0..120 {
-        fire.update(1.0 / 30.0, &mut fire_canvas, &Inputs::default());
-        rain.update(1.0 / 30.0, &mut rain_canvas, &Inputs::default());
+    let read = effect.strip_read();
+    assert_eq!(read, StripRead::Cell, "the layers disagree, so the stack answers the cell");
+    let level = strip_level(&devices, &canvas, read);
+    let peak = strip_peak(&devices, &canvas, read);
+    println!(
+        "#407 the fire over the rain answers {read:?}: the strip shows {level:.1} (peak {peak:.1})"
+    );
+    // The cell at mid-height is the cold gap above the flame: the strip reads dark.
+    assert!(
+        level < 5.0,
+        "the strip shows the fire's cell, the cold gap above the flame: the level is {level:.1}"
+    );
+}
+
+/// #407: the rain over the flame keeps its motion on the strip, and the strip shows the rain's
+/// own cell.
+///
+/// The strip reads the picture's cell, and the rain is painted last at the Normal blend, so the
+/// cell is the rain's: the rain moves, and the bar is #372's.
+#[test]
+fn rain_over_fire_answers_the_cell_and_the_strip_shows_the_rains_cell() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let mixed = stack("stack:Two", vec![layer("l1", "fire"), layer("l2", "rain")]);
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+    let mut props = rain_props("l2");
+    props.insert("l1.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let mut canvas = group_canvas();
+    let mut trace = StripTrace::default();
+    for frame in 0..240 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        if frame >= 120 {
+            trace.push(&strip_colours(&devices, &canvas, StripRead::Cell));
+        }
     }
-    let blended = strip_colours(&devices, &canvas, effect.strip_read());
-    let fire_column = strip_colours(&devices, &fire_canvas, StripRead::Column);
-    let rain_cell = strip_colours(&devices, &rain_canvas, StripRead::Cell);
-    let mut worst = 0i32;
-    for (index, (got, (f, r))) in blended.iter().zip(fire_column.iter().zip(rain_cell.iter())).enumerate() {
-        let want = blend_pixel(
-            BlendMode::Normal,
-            [f32::from(f.r) / 255.0, f32::from(f.g) / 255.0, f32::from(f.b) / 255.0],
-            [f32::from(r.r) / 255.0, f32::from(r.g) / 255.0, f32::from(r.b) / 255.0],
-            0.5,
-        );
-        let want = canvas_proto::Rgb8::from_f32(want);
-        let delta = [
-            (i32::from(got.r) - i32::from(want.r)).abs(),
-            (i32::from(got.g) - i32::from(want.g)).abs(),
-            (i32::from(got.b) - i32::from(want.b)).abs(),
-        ]
-        .into_iter()
-        .max()
-        .unwrap_or(0);
-        worst = worst.max(delta);
+    let read = effect.strip_read();
+    assert_eq!(read, StripRead::Cell, "the layers disagree, so the stack answers the cell");
+    let ranges = trace.ranges();
+    let level = trace.level();
+    println!(
+        "#407 the rain over the fire answers {read:?}: the strip's LED ranges {ranges:?} of 255, \
+         the level is {level:.1}"
+    );
+    for (led, range) in ranges.iter().enumerate() {
         assert!(
-            delta <= 2,
-            "LED {index} reads {got:?}, the blend of the fire's column and the rain's cell is {want:?}"
+            *range >= 30,
+            "LED {led} moved only {range} of 255 in 120 frames: {ranges:?}, the bar is 30"
         );
     }
-    println!("#407 the stack blends the layers' own reads: the worst LED is off by {worst} of 255");
+    assert!(level > 0.0, "the strip is not dark: the level is {level:.1}");
 }
 
 /// #407: a rain alone in a stack reads exactly as a rain that is not in a stack.
@@ -5626,4 +5668,157 @@ fn a_fire_stack_reads_a_fan_exactly_as_before_and_the_strip_lit() {
         / strip.len() as f64;
     println!("#407 the fire stack answers {read:?}: the strip shows {level:.1}");
     assert!(level > 5.0, "the strip shows the flame: the level is {level:.1}");
+}
+
+/// #407: a flame kept to a device, and a fan in the same group.
+///
+/// The stack answers the column for the strip, and the fan is not a strip: it reads its cell.
+/// The layer is painted over the strip's columns, and over the fan's cell over the device's own
+/// box, so the fan reads exactly what it read before the change, and the strip is lit.
+///
+/// The goldens are the colours the fan read before #407: they are the same in a stack whose
+/// layer covers the whole canvas, and this test is the one that reaches the case where the
+/// layer is kept to a device.
+#[test]
+fn a_fire_layer_kept_to_a_device_reads_a_fan_exactly_as_before_and_the_strip_lit() {
+    let (devices, lights, plan) = strip_and_fan();
+    let areas = strip_and_fan_areas(&lights, &plan);
+    let stack = stack(
+        "stack:Fire",
+        vec![with_area(
+            layer("l1", "fire"),
+            LayerArea::Device { device: DeviceId("d".into()) },
+        )],
+    );
+    let mut effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas);
+    effect.init(&fire_props());
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let frame = stack::sample_group(&plan, &lights, &devices, &canvas);
+    let colours = frame.get(&DeviceId("d".into())).cloned().unwrap_or_default();
+    let ring = &colours[8..16];
+    for (index, colour) in ring.iter().enumerate() {
+        println!("#407 the fan beside the kept flame LED {index} reads {} {} {}", colour.r, colour.g, colour.b);
+    }
+    // The engine's own rule: the strip reads the column, the fan its cell.
+    let read = effect.strip_read();
+    let all = plan_colours(&plan, &lights, &canvas, read);
+    assert_eq!(&all[8..16], ring, "the fan reads the same by the engine's rule");
+    assert_eq!(
+        ring,
+        &[
+            canvas_proto::Rgb8::new(0, 0, 0),
+            canvas_proto::Rgb8::new(0, 0, 0),
+            canvas_proto::Rgb8::new(0, 0, 0),
+            canvas_proto::Rgb8::new(51, 7, 7),
+            canvas_proto::Rgb8::new(230, 76, 0),
+            canvas_proto::Rgb8::new(95, 14, 4),
+            canvas_proto::Rgb8::new(0, 0, 0),
+            canvas_proto::Rgb8::new(0, 0, 0),
+        ],
+        "the fan reads exactly as it did before"
+    );
+    // The strip reads the flame's column, and is lit.
+    let strip = &all[0..8];
+    let level: f64 = strip
+        .iter()
+        .map(|c| (f64::from(c.r) + f64::from(c.g) + f64::from(c.b)) / 3.0)
+        .sum::<f64>()
+        / strip.len() as f64;
+    println!("#407 the kept flame answers {read:?}: the strip shows {level:.1}");
+    assert!(level > 5.0, "the strip shows the flame: the level is {level:.1}");
+}
+
+/// An effect that panics when it is asked how a strip reads it.
+struct PanicsOnStripRead {
+    /// How many times the stack called the effect.
+    updates: Arc<AtomicUsize>,
+}
+
+impl Effect for PanicsOnStripRead {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "panics".into(),
+            name: "Panics".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        self.updates.fetch_add(1, Ordering::SeqCst);
+        canvas.set(0, 0, [1.0, 1.0, 1.0]);
+    }
+
+    fn strip_read(&self) -> StripRead {
+        panic!("this effect cannot say how a strip reads it");
+    }
+}
+
+/// #407: a layer whose `strip_read` panics is faulted the way the engine faults an effect that
+/// panics there: it is installed as failed, its picture is black, and it is not called again.
+/// The rest of the stack runs.
+#[test]
+fn a_layer_whose_strip_read_panics_is_faulted_and_the_stack_runs_the_rest() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let updates = Arc::new(AtomicUsize::new(0));
+    let leaves: LeafBuilder = Arc::new({
+        let updates = updates.clone();
+        move |id: &str| match id {
+            "panics" => Ok(Box::new(PanicsOnStripRead { updates: updates.clone() }) as Box<dyn Effect>),
+            "fire" => Ok(Box::new(canvas_effects::fire::Fire::with_seed(372)) as Box<dyn Effect>),
+            other => Err(format!("no effect with the id {other}")),
+        }
+    });
+    // The panicking layer is under the flame, so the flame's picture is what the strip shows.
+    let mixed = stack("stack:Two", vec![layer("l1", "panics"), layer("l2", "fire")]);
+    let mut effect = stack_effect!(&mixed, leaves, live_for(&mixed), areas_for(&devices));
+    let mut props = Props::new();
+    props.insert("l2.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    // The layer is installed as failed, with the text of the panic.
+    let (state, _) = effect.layer_status("l1").expect("the layer reports its state");
+    assert_eq!(state, StackLayerState::Faulted, "the layer that panicked is faulted");
+    // And it is not called again.
+    let mut canvas = group_canvas();
+    for _ in 0..30 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    assert_eq!(
+        updates.load(Ordering::SeqCst),
+        0,
+        "the faulted layer is not called again"
+    );
+    // The rest of the stack runs: the flame is on the strip.
+    let read = effect.strip_read();
+    let level = strip_level(&devices, &canvas, read);
+    println!("#407 the faulted layer answers {read:?}: the strip shows {level:.1}");
+    assert!(level > 5.0, "the flame layer still runs: the level is {level:.1}");
+
+    // A stack of only that layer shows a black picture.
+    let only = stack("stack:Only", vec![layer("l1", "panics")]);
+    let leaves: LeafBuilder = Arc::new({
+        let updates = updates.clone();
+        move |id: &str| match id {
+            "panics" => Ok(Box::new(PanicsOnStripRead { updates: updates.clone() }) as Box<dyn Effect>),
+            other => Err(format!("no effect with the id {other}")),
+        }
+    });
+    let mut only_effect = stack_effect!(&only, leaves, live_for(&only), areas_for(&devices));
+    only_effect.init(&Props::new());
+    let mut only_canvas = group_canvas();
+    for _ in 0..10 {
+        only_effect.update(1.0 / 30.0, &mut only_canvas, &Inputs::default());
+    }
+    assert!(
+        only_canvas.pixels.iter().all(|pixel| *pixel == [0.0, 0.0, 0.0]),
+        "the faulted layer's picture is black"
+    );
 }

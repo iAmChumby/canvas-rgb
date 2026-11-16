@@ -47,8 +47,9 @@ static ALLOCATOR: Counting = Counting;
 
 /// A layer that paints a vertical gradient and allocates nothing.
 ///
-/// The gradient matters: a column read and a cell read of it differ, so the compositor
-/// paints the strip LEDs (#407) and that work is in the measured frame.
+/// The gradient matters: a column read and a cell read of it differ, so the compositor draws
+/// the picture over the strip LEDs' columns when the stack answers the column (#407), and that
+/// work is in the measured frame.
 struct Gradient {
     /// True when the layer is read over the LED's column, false over its cell.
     column: bool,
@@ -148,7 +149,7 @@ fn a_frame_of_the_compositor_allocates_nothing() {
         layers: vec![layer("l1"), layer("l2")],
     };
     // One layer answers the column and the other the cell, so the stack answers the cell and
-    // paints every strip LED the blend of the two reads: the measured frame does that work.
+    // the picture is drawn over the area's own cells: the measured frame does that work.
     let leaves: LeafBuilder = Arc::new(|id: &str| {
         let column = id == "gradient";
         Ok(Box::new(Gradient { column }) as Box<dyn Effect>)
