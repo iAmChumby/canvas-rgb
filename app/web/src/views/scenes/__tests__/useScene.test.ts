@@ -2155,7 +2155,7 @@ describe("the move of a group and the order of the scenes", () => {
 
     // The toast is said once, with the Undo of the move.
     await waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1));
-    const [text, tone, action] = notifySpy.mock.calls[0] as [
+    const [text, tone, action] = notifySpy.mock.calls.at(0)! as [
       string,
       string,
       { label: string; onClick: () => void },

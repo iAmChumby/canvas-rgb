@@ -447,9 +447,10 @@ describe("the move step", () => {
     await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
     expect(use.dryRunMove).toHaveBeenCalledTimes(2);
 
-    // The confirm is refused.
+    // The confirm is refused: it carried the revisions of the answer that was on the row.
     fireEvent.click(row);
     await waitFor(() => expect(use.moveGroup).toHaveBeenCalledTimes(1));
+    expect(use.moveGroup).toHaveBeenLastCalledWith("g-desk", "evening", false, { from: 7, to: 2 });
 
     // Every row asks again: the answers on the rows are older than the daemon now is.
     await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
@@ -459,6 +460,22 @@ describe("the move step", () => {
     fireEvent.click(row);
     await waitFor(() => expect(use.moveGroup).toHaveBeenCalledTimes(2));
     expect(use.moveGroup).toHaveBeenLastCalledWith("g-desk", "evening", false, { from: 8, to: 3 });
+  });
+
+  it("the revisions are the ones of the scenes named, whatever order the answer gives them in", async () => {
+    const answer = dryAnswer("g-desk");
+    // The daemon's answer with the scenes the other way round: the scene the group is in is
+    // still the one at revision 7, and Evening the one at 2.
+    const swapped: GroupMoved = { ...answer, before: [answer.before[1]!, answer.before[0]!] };
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "answered", answer: swapped })),
+    });
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
+    const row = await screen.findByTestId("move-to-evening");
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(row);
+    await waitFor(() => expect(use.moveGroup).toHaveBeenCalled());
+    expect(use.moveGroup).toHaveBeenCalledWith("g-desk", "evening", false, { from: 7, to: 2 });
   });
 
   it("the step closes when its group is gone", async () => {
