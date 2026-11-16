@@ -91,6 +91,16 @@
   --live-h: 215;
   --live: hsl(var(--live-h) 78% 72%);
   --live-soft: hsl(var(--live-h) 55% 55% / 0.16);
+  /* The two inks a live-coloured key can take (#423). Pure black and pure white are the pair
+     that always leaves one of them at 4.58:1 or better on any background, whatever the hue;
+     app/web/src/lib/liveInk.ts names the better one on --on-live as the hue moves. Like the
+     colour field below, the pair is the colour model, not the theme, so both themes share it. */
+  --on-live-ink: #000000;
+  --on-live-paper: #ffffff;
+  --on-live: var(--on-live-ink);
+  /* The other ink of the pair: a hover or a press moves the face away from the text's colour,
+     so the state change raises the contrast instead of lowering it. */
+  --on-live-away: var(--on-live-paper);
   /* The fill of a key that is held (#375). It is the live hue at the lightness that lets the
      legend on it hold its contrast: --on-accent on this is near-black, and the fill against
      the well it stands on is 6:1 or better at every hue. */
@@ -215,6 +225,10 @@
   --down: #c8283a;
   --live: hsl(var(--live-h) 70% 42%);
   --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
+  /* The light live accent is deep, so it starts on the paper ink; the script moves it to ink for
+     the bright hues (yellow, green) where white drops below 4.5:1. */
+  --on-live: var(--on-live-paper);
+  --on-live-away: var(--on-live-ink);
   /* The fill of a key that is held (#375). The light theme's live hue is too light for white
      on it (2.2:1 at yellow), so the held key takes the deeper fill: white on it is 5.2:1 or
      better at every hue, and the fill against the well it stands on is 3.8:1 or better. */
@@ -271,6 +285,8 @@
     --down: #c8283a;
     --live: hsl(var(--live-h) 70% 42%);
     --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
+    --on-live: var(--on-live-paper);
+    --on-live-away: var(--on-live-ink);
     /* The fill of a key that is held (#375): the deeper fill, so white on it holds 5.2:1. */
     --live-press: hsl(var(--live-h) 70% 26%);
   }
