@@ -52,6 +52,16 @@ struct FakeState {
     /// Resizes that are waiting out `resize_delay`, with the connection to announce the new
     /// device list to.
     pending_resizes: Vec<PendingResize>,
+    /// How many `REQUEST_RESCAN_DEVICES` (140) packets the client sent.
+    rescan_count: u32,
+    /// The protocol version this server negotiates in the handshake.
+    server_protocol_version: u32,
+    /// While set, a rescan starts detection (101) but never finishes it: a real OpenRGB with
+    /// detection enabled that never completes (#290).
+    detection_hold: bool,
+    /// Devices OpenRGB has not found yet. A successful rescan's detection reveals them; until
+    /// then they are absent from the controller count and data (#290).
+    hidden: Vec<FakeDevice>,
 }
 
 #[derive(Clone, Copy)]
@@ -161,6 +171,10 @@ impl FakeOpenRgbServer {
             failing_resizes: false,
             resize_delay: std::time::Duration::ZERO,
             pending_resizes: Vec::new(),
+            rescan_count: 0,
+            server_protocol_version: CLIENT_MAX_PROTOCOL_VERSION,
+            detection_hold: false,
+            hidden: Vec::new(),
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
@@ -193,6 +207,29 @@ impl FakeOpenRgbServer {
         state.devices.push(FakeDevice::new(info));
         state.led_writes.push(0);
         state.resize_writes.push(0);
+    }
+
+    /// How many rescan packets (140) the client has sent.
+    pub fn rescan_count(&self) -> u32 {
+        guard(&self.state).rescan_count
+    }
+
+    /// Adds a device OpenRGB has not found yet. It is absent from the controller list until a
+    /// rescan's detection finishes, as a controller plugged in after OpenRGB started is (#290).
+    pub fn add_hidden_device(&self, info: DeviceInfo) {
+        guard(&self.state).hidden.push(FakeDevice::new(info));
+    }
+
+    /// While held, a rescan sends DETECTION_STARTED (101) but never the completion broadcast, so
+    /// the client's detection wait times out while the link stays up (#290).
+    pub fn hold_detection(&self, held: bool) {
+        guard(&self.state).detection_hold = held;
+    }
+
+    /// The protocol version this server answers the handshake with. 4 models an OpenRGB with no
+    /// rescan packet (#290).
+    pub fn server_protocol_version(&self, version: u32) {
+        guard(&self.state).server_protocol_version = version;
     }
 
     /// While `stalled`, the server reads every packet and answers none, as a real OpenRGB does
@@ -398,6 +435,33 @@ async fn serve(
             }
             let payload = buffer[HEADER_LEN..HEADER_LEN + size].to_vec();
             buffer.drain(..HEADER_LEN + size);
+            // Packet 140 gets no direct reply. OpenRGB instead broadcasts that detection started
+            // and, when it finishes, that it completed and that the device list changed. These
+            // are writes of their own, not the reply slot of a request, so a stalled/held reply
+            // does not hold them back (#290).
+            if packet_id == REQUEST_RESCAN_DEVICES {
+                let bytes = {
+                    let mut state = guard(&state);
+                    state.rescan_count += 1;
+                    let mut bytes = encode_packet(0, DETECTION_STARTED, &[]).unwrap_or_default();
+                    if !state.detection_hold {
+                        // Detection finished: the devices OpenRGB had not found are visible now.
+                        if !state.hidden.is_empty() {
+                            let hidden = std::mem::take(&mut state.hidden);
+                            state.devices.extend(hidden);
+                            let count = state.devices.len();
+                            state.led_writes.resize(count, 0);
+                            state.resize_writes.resize(count, 0);
+                        }
+                        bytes.extend_from_slice(&encode_packet(0, DETECTION_COMPLETE, &[]).unwrap_or_default());
+                        bytes.extend_from_slice(&device_list_updated());
+                    }
+                    bytes
+                };
+                stream.write_all(&bytes).await?;
+                stream.flush().await?;
+                continue;
+            }
             // A request leaves the client waiting for a reply; a frame does not. The count says
             // whether a frame arrived while the client was still waiting for one.
             {
@@ -474,10 +538,9 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
     }
     match packet_id {
         REQUEST_PROTOCOL_VERSION => {
-            let client = payload.get(..4).map_or(CLIENT_MAX_PROTOCOL_VERSION, |b| {
-                u32::from_le_bytes([b[0], b[1], b[2], b[3]])
-            });
-            reply(0, packet_id, &client.min(CLIENT_MAX_PROTOCOL_VERSION).to_le_bytes())
+            // The server answers with its own highest version; a 4 here models an old OpenRGB
+            // that cannot re-detect (#290).
+            reply(0, packet_id, &state.server_protocol_version.to_le_bytes())
         }
         REQUEST_CONTROLLER_COUNT => reply(0, packet_id, &(state.visible() as u32).to_le_bytes()),
         REQUEST_CONTROLLER_DATA => match state.devices.get(device as usize).filter(|_| (device as usize) < state.visible()) {

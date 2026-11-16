@@ -32,6 +32,28 @@ const MAX_LEDS_PER_CONTROLLER: u64 = u16::MAX as u64;
 /// How long a request waits for its reply before the call fails.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How long a rescan waits for OpenRGB to say detection finished before giving up (#290).
+///
+/// This fits inside the daemon's `RESCAN_BUDGET` (5 s): a detection that never finishes leaves a
+/// little of that budget for the plain re-read of the device list, so the answer is still 200.
+const DETECT_TIMEOUT: Duration = Duration::from_secs(4);
+
+/// The error text of a detection that did not finish in time. The daemon uses
+/// [`rescan_is_best_effort`] to tell this from a real failure.
+pub const RESCAN_DETECT_TIMEOUT_MESSAGE: &str = "OpenRGB did not finish detection in time";
+
+/// Whether a `rescan()` error means "the hardware could not be asked to look again", which the
+/// caller logs and still answers with the list as it stands (200), rather than a real failure.
+///
+/// The trait error type is in the spine, so the two cases that are safe to ignore are named here
+/// instead of in a new spine variant: an adapter that cannot re-detect (the trait default, or a
+/// protocol too old) and a detection that ran out of time. Both leave the link up; the daemon's
+/// next refresh reads whatever list OpenRGB has.
+pub fn rescan_is_best_effort(error: &AdapterError) -> bool {
+    matches!(error, AdapterError::Unsupported(_))
+        || matches!(error, AdapterError::Protocol(reason) if reason == RESCAN_DETECT_TIMEOUT_MESSAGE)
+}
+
 /// How often `SET_CUSTOM_MODE` is sent again to a controller that is being streamed frames.
 ///
 /// A starting value, to be measured (#5): the ENE DRAM sticks drop back to their built-in
@@ -120,6 +142,9 @@ struct Link {
     /// answer the next request). The next writer drops the socket instead of writing into
     /// the middle of the half-written packet, and the supervisor reconnects.
     broken: AtomicBool,
+    /// Bumped by the reader when OpenRGB broadcasts that detection finished (`103`) or that the
+    /// device list changed (`100`). A rescan waits for one of these instead of a reply (#290).
+    detection: tokio::sync::watch::Sender<u64>,
 }
 
 struct Session {
@@ -358,6 +383,7 @@ impl OpenRgbAdapter {
             writer: tokio::sync::Mutex::new(None),
             request_gate: tokio::sync::Mutex::new(()),
             broken: AtomicBool::new(false),
+            detection: tokio::sync::watch::channel(0_u64).0,
         });
         {
             let mut links = guard(&LINKS);
@@ -833,6 +859,34 @@ impl DeviceAdapter for OpenRgbAdapter {
         Ok(controllers.iter().map(device_info).collect())
     }
 
+    /// Asks OpenRGB to look at the hardware again, then waits for its detection to finish (#290).
+    ///
+    /// Packet 140 is client-only and gets no reply: it goes out through [`send`](Self::send),
+    /// never through `request`, which would wait five seconds for a reply that never comes and
+    /// break the link. OpenRGB reports the end of detection as a broadcast (103 or 100), which the
+    /// reader turns into a signal on the link. A detection that never finishes times out after
+    /// [`DETECT_TIMEOUT`], inside the daemon's rescan budget, and leaves the link up so the plain
+    /// re-read can still answer. Protocol 4 has no such packet, so it is refused as unsupported.
+    async fn rescan(&mut self) -> Result<(), AdapterError> {
+        self.require_connected()?;
+        if self.protocol_version() < 5 {
+            return Err(AdapterError::Unsupported("OpenRGB protocol 4 cannot re-detect devices"));
+        }
+        // Subscribe before writing: mark the current generation seen so only a broadcast that
+        // arrives after packet 140 ends the wait.
+        let mut detection = self.link.detection.subscribe();
+        let _ = detection.borrow_and_update();
+        self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
+        let finished = async {
+            detection.changed().await.map_err(|_| AdapterError::NotConnected)?;
+            Ok(())
+        };
+        match tokio::time::timeout(DETECT_TIMEOUT, finished).await {
+            Ok(result) => result,
+            Err(_) => Err(AdapterError::Protocol(RESCAN_DETECT_TIMEOUT_MESSAGE.into())),
+        }
+    }
+
     async fn write_frame(&mut self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError> {
         self.write_frame_shared(device, colors).await
     }
@@ -910,9 +964,15 @@ impl crate::resume::ResumeBehavior for OpenRgbAdapter {
 
 async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
     while let Ok((device, packet_id, payload)) = read_packet(&mut read).await {
-        // DEVICE_LIST_UPDATED needs no action here: every discover() and set_zone_size()
-        // re-enumerates, so the next call already sees the new device list.
-        if packet_id == DEVICE_LIST_UPDATED {
+        // OpenRGB broadcasts these with no request id and no reply owed, so they can never
+        // complete a pending request (which carries a different packet id). 103 (detection
+        // complete) and 100 (device list updated) tell a waiting rescan that detection is done;
+        // 101 (detection started) and 102 (progress) carry no such news (#290).
+        if matches!(packet_id, DEVICE_LIST_UPDATED | DETECTION_COMPLETE) {
+            link.detection.send_modify(|n| *n += 1);
+            continue;
+        }
+        if packet_id == DETECTION_STARTED {
             continue;
         }
         let reply = {

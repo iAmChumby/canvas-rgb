@@ -293,16 +293,31 @@ pub struct Rescan {
     pub reply: tokio::sync::oneshot::Sender<Result<Vec<DeviceInfo>, String>>,
 }
 
-/// A rescan the owner asked for (#233): asks OpenRGB for its devices again and returns them.
+/// A rescan the owner asked for (#233): asks OpenRGB to look at the hardware again, then returns
+/// the devices it reports (#290).
 ///
-/// On a live connection the list is read again (and a saved zone size a new device lacks is
-/// applied, as the 5 s refresh does). With no connection the adapter connects first, so a rescan
-/// is also a retry of the link. This reads what OpenRGB reports now; making OpenRGB look at the
-/// hardware again needs a `rescan` on the adapter trait, which lives in the spine.
+/// On a live connection OpenRGB is first asked to re-detect (`adapter.rescan()`), so a controller
+/// plugged in after OpenRGB started is found; then the list is read again (and a saved zone size a
+/// new device lacks is applied, as the 5 s refresh does). An adapter that cannot re-detect, or a
+/// detection that runs out of time, is logged and the plain re-read still answers with the list as
+/// it stands — the next refresh catches up. Any other failure keeps the #289 contract: 503 and
+/// the held list alone. With no connection the adapter connects first, so a rescan is also a retry
+/// of the link.
 pub async fn rescan_devices(
     adapter: &mut dyn DeviceAdapter,
     zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
 ) -> Result<Vec<DeviceInfo>, String> {
+    if adapter.is_connected() {
+        match adapter.rescan().await {
+            Ok(()) => tracing::info!("OpenRGB looked at the hardware again for the rescan"),
+            Err(error) if canvas_adapters::openrgb::rescan_is_best_effort(&error) => {
+                // Neither case changed what OpenRGB reports, so say what actually happened and
+                // read the list as it stands rather than claiming a re-detection (#290).
+                tracing::info!(error = %error, "OpenRGB could not re-detect its devices; reading the list as it stands");
+            }
+            Err(error) => return Err(format!("could not rescan OpenRGB devices: {error}")),
+        }
+    }
     if adapter.is_connected() {
         refresh_devices(adapter, zone_sizes).await
     } else {

@@ -51,7 +51,9 @@ pub async fn list_devices(
             return Err(ApiFailure::service_unavailable("OpenRGB did not answer the rescan in time"));
         }
     };
-    tracing::info!(count = found.len(), "the devices were rescanned");
+    // Report only what was checked: the supervisor's own line says whether OpenRGB actually
+    // re-detected anything (#290, `cause:unchecked-state`).
+    tracing::info!(count = found.len(), "answered with the device list the supervisor read");
     Ok(Json(DevicesResponse { devices: found }))
 }
 

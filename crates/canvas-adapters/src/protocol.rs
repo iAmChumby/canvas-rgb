@@ -18,6 +18,13 @@ pub const REQUEST_CONTROLLER_DATA: u32 = 1;
 pub const REQUEST_PROTOCOL_VERSION: u32 = 40;
 pub const SET_CLIENT_NAME: u32 = 50;
 pub const DEVICE_LIST_UPDATED: u32 = 100;
+/// OpenRGB's asynchronous detection broadcasts (protocol 5): the server sends these to every
+/// client while it re-detects hardware, with no request id in them (#290).
+pub const DETECTION_STARTED: u32 = 101;
+pub const DETECTION_COMPLETE: u32 = 103;
+/// Client-only, protocol 5, zero payload: asks OpenRGB to look at the hardware again. The server
+/// answers nothing directly; it broadcasts the detection packets above (#290).
+pub const REQUEST_RESCAN_DEVICES: u32 = 140;
 pub const RESIZE_ZONE: u32 = 1000;
 pub const UPDATE_LEDS: u32 = 1050;
 pub const SET_CUSTOM_MODE: u32 = 1100;

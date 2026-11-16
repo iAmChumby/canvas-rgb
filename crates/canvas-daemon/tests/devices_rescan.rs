@@ -172,6 +172,25 @@ async fn a_device_added_after_start_appears_only_after_a_rescan() {
     assert_eq!(rig.app.devices.read().await.len(), 2);
 }
 
+/// #290: a rescan makes OpenRGB look at the hardware again, so a device it had not found is put in
+/// the API's answer. The fake keeps the second stick hidden until packet 140 starts a detection
+/// that completes; a plain GET never reveals it.
+#[tokio::test]
+async fn a_rescan_that_makes_openrgb_re_detect_puts_the_new_device_in_the_answer() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.add_hidden_device(stick("two"));
+    let rig = rig("redetect", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    assert_eq!(ids(&rig, "/api/v1/devices").await, ["openrgb:one"]);
+    assert_eq!(server.rescan_count(), 0, "a plain read sent no rescan packet");
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"]);
+    assert_eq!(server.rescan_count(), 1, "the rescan asked OpenRGB to look at the hardware");
+    // The supervisor applied the new list, not just answered it.
+    assert_eq!(rig.app.devices.read().await.len(), 2);
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"]);
+}
+
 /// The rescan goes through the path every device list takes (#233): when it answers, the status,
 /// the zones and the frame sink are updated, with no supervisor tick in between.
 #[tokio::test]
