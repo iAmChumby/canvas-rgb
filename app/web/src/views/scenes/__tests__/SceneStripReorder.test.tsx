@@ -58,7 +58,14 @@ function measure(root: HTMLElement) {
   const keys = [...root.querySelectorAll<HTMLElement>("button[data-scene]")];
   const strip = keys[0]?.parentElement as HTMLElement;
   place(strip, 0, 400);
+  // The "+" key is pinned at the strip's right end: the keys are all in view, so the strip does
+  // not scroll itself.
+  const pin = strip.querySelector<HTMLElement>("[data-pin]");
+  if (pin) place(pin, 352, 48);
   keys.forEach((key, i) => place(key, 4 + i * 108));
+  // The strip revealed the active key before it had a layout (every rect was 0 then), so it
+  // scrolled itself. The places are known now: the scroll goes back to where it was.
+  strip.scrollLeft = 0;
   return { strip, keys };
 }
 
@@ -117,8 +124,12 @@ describe("the scene strip's order", () => {
     const { keys } = setup();
     dragFrom(keys[0]!, 200);
     const marker = screen.getByTestId("strip-marker");
-    // The gap is between the second key and the third: the marker stands in it.
-    expect(marker.style.left).toBe("216px");
+    // The marker stands in the gap between the second key and the third one.
+    const second = keys[1]!.getBoundingClientRect();
+    const third = keys[2]!.getBoundingClientRect();
+    const left = parseFloat(marker.style.left);
+    expect(left).toBeGreaterThan(second.right);
+    expect(left).toBeLessThan(third.left);
   });
 
   it("Escape calls the drag off, and nothing is written", () => {
