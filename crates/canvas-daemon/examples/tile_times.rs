@@ -36,10 +36,13 @@ fn main() {
         }
         let mut times = Vec::new();
         for _ in 0..reps {
-            let mut effect = make();
+            // Time the build too: the daemon charges the top-level script load (up to
+            // LOAD_BUDGET_MS, 2 s) to the same budget as the frames (#58), so a slot can be held
+            // for build + render. Timing only render_within understated the stock tiles.
             let started = std::time::Instant::now();
+            let mut effect = make();
             // The daemon's own call, with a budget long enough to time a render that would be given up.
-            let result = thumbnail::render_within(effect.as_mut(), &Props::new(), std::time::Duration::from_secs(600));
+            let result = thumbnail::render_within_started(effect.as_mut(), &Props::new(), std::time::Duration::from_secs(600), started);
             assert!(result.is_ok(), "{id}: {result:?}");
             times.push(started.elapsed().as_secs_f64());
         }
