@@ -7,6 +7,10 @@
 // strip shifts nothing around it. The drag ends with one write, and the click that ends it does
 // not set the scene.
 //
+// The key holds the pointer while the drag lasts (pointer capture), so the drag ends where the
+// pointer let go, even outside the window. It ends without a write when the pointer is taken
+// away: the window loses the focus, the pointer is cancelled, or the button is no longer down.
+//
 // A finger does not drag: the strip scrolls sideways on a phone, and the scene's menu is the path
 // there.
 
@@ -39,6 +43,10 @@ interface Press {
   id: string;
   /** The name on the key. */
   label: string;
+  /** The key that is pressed: it holds the pointer while the drag lasts. */
+  element: HTMLElement;
+  /** The pointer that pressed it. */
+  pointerId: number;
   /** Where the press began. */
   x: number;
   y: number;
@@ -47,6 +55,22 @@ interface Press {
   grabY: number;
   /** The width of the key. */
   width: number;
+}
+
+/** A key that can hold the pointer. */
+interface Capture {
+  setPointerCapture?: (pointerId: number) => void;
+  releasePointerCapture?: (pointerId: number) => void;
+}
+
+/** Lets the key go: the pointer is free again, whichever way the drag ended. */
+function releaseCapture(start: Press): void {
+  const el = start.element as unknown as Capture;
+  try {
+    el.releasePointerCapture?.(start.pointerId);
+  } catch {
+    // The pointer is not held any more: there is nothing to let go of.
+  }
 }
 
 /** The lifted key, and where its copy is. */
@@ -170,12 +194,22 @@ export function useStripReorder(
     press.current = {
       id: scene.id,
       label: scene.name,
+      element: event.currentTarget,
+      pointerId: event.pointerId,
       x: event.clientX,
       y: event.clientY,
       grabX: event.clientX - rect.left,
       grabY: event.clientY - rect.top,
       width: rect.width,
     };
+    // The key holds the pointer while the drag lasts: the drag ends where the pointer lets go,
+    // even outside the window.
+    const el = event.currentTarget as unknown as Capture;
+    try {
+      el.setPointerCapture?.(event.pointerId);
+    } catch {
+      // A window without pointer capture: the drag still ends on the pointerup.
+    }
     lifted.current = false;
     ended.current = false;
   }, []);
@@ -194,6 +228,12 @@ export function useStripReorder(
     const move = (event: PointerEvent) => {
       const start = press.current;
       if (!start) return;
+      // The pointer is not down any more: the button was let go of outside the window, or the
+      // drag was taken away. The drag ends here, without a write.
+      if (event.buttons === 0) {
+        stop(false);
+        return;
+      }
       if (!lifted.current) {
         // The pointer has travelled past the threshold: the key is lifted. The distance counts,
         // not the axes: a drag along the strip is a drag.
@@ -224,6 +264,8 @@ export function useStripReorder(
       const start = press.current;
       press.current = null;
       if (!start) return;
+      // The key lets the pointer go, whichever way the drag ended.
+      releaseCapture(start);
       if (!lifted.current) {
         // A press, not a drag: the key's own click sets the scene.
         setDrag(null);
@@ -244,6 +286,7 @@ export function useStripReorder(
     const key = (event: KeyboardEvent) => {
       if (event.key !== "Escape" || !press.current) return;
       // The drag is called off: nothing is written.
+      releaseCapture(press.current);
       press.current = null;
       lifted.current = false;
       gap.current = null;
@@ -253,16 +296,29 @@ export function useStripReorder(
 
     const up = () => stop(true);
     const cancel = () => stop(false);
+    // The window lost the focus: the drag is over, and nothing is written.
+    const blur = () => stop(false);
+    // The click that ends a drag is not a choice of a scene. The next press or key anywhere
+    // clears the flag, so a key the keyboard takes is a choice again.
+    const clearEnded = () => {
+      ended.current = false;
+    };
 
     window.addEventListener("pointermove", move);
     window.addEventListener("pointerup", up);
     window.addEventListener("pointercancel", cancel);
     window.addEventListener("keydown", key);
+    window.addEventListener("blur", blur);
+    window.addEventListener("keydown", clearEnded);
+    window.addEventListener("pointerdown", clearEnded);
     return () => {
       window.removeEventListener("pointermove", move);
       window.removeEventListener("pointerup", up);
       window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", key);
+      window.removeEventListener("blur", blur);
+      window.removeEventListener("keydown", clearEnded);
+      window.removeEventListener("pointerdown", clearEnded);
     };
   }, [gapAt, onReorder, orderWith, scenes, scrollNear]);
 

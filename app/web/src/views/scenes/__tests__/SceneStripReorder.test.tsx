@@ -86,7 +86,8 @@ function setup(onSet = vi.fn(), onReorder = vi.fn()) {
 /** A press on a key, and a drag that carries it past the threshold. */
 function dragFrom(key: HTMLElement, to: number) {
   fireEvent.pointerDown(key, { pointerType: "mouse", clientX: 10, clientY: 20, button: 0 });
-  fireEvent.pointerMove(window, { pointerType: "mouse", clientX: to, clientY: 20 });
+  // The button is down while the pointer travels.
+  fireEvent.pointerMove(window, { pointerType: "mouse", clientX: to, clientY: 20, buttons: 1 });
 }
 
 describe("the scene strip's order", () => {
@@ -115,9 +116,47 @@ describe("the scene strip's order", () => {
   it("a finger does not drag: the phone's path is the menu", () => {
     const { keys, onReorder } = setup();
     fireEvent.pointerDown(keys[0]!, { pointerType: "touch", clientX: 10, clientY: 20, button: 0 });
-    fireEvent.pointerMove(window, { pointerType: "touch", clientX: 200, clientY: 20 });
+    fireEvent.pointerMove(window, { pointerType: "touch", clientX: 200, clientY: 20, buttons: 1 });
     fireEvent.pointerUp(window, { pointerType: "touch", clientX: 200, clientY: 20 });
     expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it("the drag ends without a write when the window loses the focus", () => {
+    const { keys, onReorder } = setup();
+    dragFrom(keys[0]!, 200);
+    // Another window took the focus: the drag is over.
+    fireEvent.blur(window);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 200, clientY: 20 });
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it("the drag ends without a write when the pointer is no longer down", () => {
+    const { keys, onReorder } = setup();
+    dragFrom(keys[0]!, 200);
+    // The button was let go of outside the window: the pointer is not down any more.
+    fireEvent.pointerMove(window, { pointerType: "mouse", clientX: 220, clientY: 20, buttons: 0 });
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 220, clientY: 20 });
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it("the drag ends without a write when the pointer is cancelled", () => {
+    const { keys, onReorder } = setup();
+    dragFrom(keys[0]!, 200);
+    fireEvent.pointerCancel(window, { pointerType: "mouse", clientX: 200, clientY: 20 });
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 200, clientY: 20 });
+    expect(onReorder).not.toHaveBeenCalled();
+  });
+
+  it("a key the keyboard takes after a drag is a choice again", () => {
+    const { keys, onSet } = setup();
+    // The first key is dragged onto the second one: the drop gives no key a click.
+    dragFrom(keys[0]!, 200);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 200, clientY: 20 });
+    // The keyboard takes the third key. There is no pointer press to clear the flag, so the
+    // keydown does it.
+    fireEvent.keyDown(keys[2]!, { key: "Enter" });
+    fireEvent.click(keys[2]!);
+    expect(onSet).toHaveBeenCalledWith("c");
   });
 
   it("the drag shows a marker in the gap the key would land in", () => {
