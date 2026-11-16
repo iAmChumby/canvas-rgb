@@ -1180,16 +1180,18 @@ function ControllerPanel({
       <div className="pad-state" data-state={pad.status} role="status">
         <span className="pad-state-dot" aria-hidden="true" />
         <span className="pad-state-line">
-          <span className="pad-state-text">{PAD_STATUS_WORDS[pad.status]}</span>
+          <span className="pad-state-head">
+            <span className="pad-state-text">{PAD_STATUS_WORDS[pad.status]}</span>
+            {PAD_STUB_BUILT && pad.simulated && (
+              <span className="pad-badge" data-on="true">
+                <Chip>Simulated pad</Chip>
+              </span>
+            )}
+          </span>
           <span className="pad-state-note" hidden={padNote === null}>
             {padNote ?? ""}
           </span>
         </span>
-        {PAD_STUB_BUILT && pad.simulated && (
-          <span className="pad-badge" data-on="true">
-            <Chip>Simulated pad</Chip>
-          </span>
-        )}
       </div>
       <div className="pad-grid">
         <div className="pad-plan-wrap" ref={planRef}>

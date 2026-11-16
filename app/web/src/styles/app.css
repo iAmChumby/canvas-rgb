@@ -6779,7 +6779,8 @@ button.chip:hover {
  */
 .pad-state {
   display: flex;
-  align-items: center;
+  /* The status word stands on the strip's first line in every state; the dot and the note follow it. */
+  align-items: flex-start;
   gap: var(--s2);
   min-height: calc(var(--t14) * 3 * 1.45 + 2px);
   margin-bottom: var(--s3);
@@ -6798,6 +6799,8 @@ button.chip:hover {
   width: 8px;
   height: 8px;
   flex: none;
+  /* Centred on the first text line. */
+  margin-top: calc((var(--t14) * 1.45 - 8px) / 2);
   border-radius: 50%;
   background: var(--mute);
 }
@@ -6814,7 +6817,18 @@ button.chip:hover {
   background: var(--work);
 }
 
+/* The status word's own line: the badge of the harness build stands at its end, inside the line,
+   so it can never take width from the note or add a line to the strip. */
+.pad-state-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
 .pad-state-text {
+  flex: 1;
+  min-width: 0;
   color: var(--dim);
   font-size: var(--t14);
 }
@@ -6829,7 +6843,11 @@ button.chip:hover {
 /* The slot the badge stands in. It is only in a build made for the harness (#375), so the
    shipped strip gives its width to the words. */
 .pad-badge {
+  /* One text line tall whatever the chip is, so the line keeps its height. */
+  display: flex;
   flex: none;
+  align-items: center;
+  height: calc(var(--t14) * 1.45);
 }
 
 /* The row of the button that is held: it takes the live colour and says so at its edge. */
@@ -6898,7 +6916,8 @@ button.chip:hover {
 
 .pad-map {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  /* Wide enough for the longest label ("Paddle 1 (P1)"), the 128px select and the "pressed" slot. */
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: var(--s2) var(--s4);
 }
 
