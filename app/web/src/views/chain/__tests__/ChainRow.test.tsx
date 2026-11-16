@@ -310,6 +310,40 @@ describe("a header's row on Devices", () => {
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
   });
 
+  it("Escape inside the device count puts the value back and leaves the overlay open", async () => {
+    await showDevices([chain(1, "JARGB 1", "not_set_up", [], 0)]);
+
+    await act(async () => {
+      fireEvent.click(within(rowOf("JARGB 1")).getByRole("button", { name: /^Set up/ }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await flush();
+    // Counting the orange lights, the slide, then the devices step's count (review finding 1).
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    });
+    await flush(700);
+
+    const count = screen.getByRole("textbox", { name: "Devices on JARGB 1" }) as HTMLInputElement;
+    fireEvent.focus(count);
+    fireEvent.change(count, { target: { value: "4" } });
+    expect(count.value).toBe("4");
+
+    await act(async () => {
+      fireEvent.keyDown(count, { key: "Escape" });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // Escape was the field's own: the overlay is still open, the typed value is gone and the
+    // session was never cancelled.
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+    expect(count.value).toBe("1");
+    expect(api.chains.cancel).not.toHaveBeenCalled();
+  });
+
   it("a header whose devices mirror each other reads as one light shown several times", async () => {
     const mirror = part(2, 1, "Same lights, shown 8 times", 8, 0, "other");
     mirror.light.copies = 8;

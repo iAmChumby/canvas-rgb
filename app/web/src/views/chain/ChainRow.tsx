@@ -13,7 +13,7 @@
 // and has no second device to edit. Those edits go straight to `PATCH /api/v1/lights/{id}` and read
 // both lists back; the flow is not run for them.
 
-import { useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties } from "react";
 import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
 
@@ -164,6 +164,8 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
  */
 export function ChainRow({ chain }: { chain: ChainView }) {
   const [open, setOpen] = useState(false);
+  /** One callback for the overlay's life: Escape's listener depends on it and must not re-subscribe. */
+  const close = useCallback(() => setOpen(false), []);
   const state = chain.state;
   const count = chain.parts.length;
   /** How many times a header shows its one run: 8 for Luke's splitter, 1 for a series. */
@@ -216,7 +218,7 @@ export function ChainRow({ chain }: { chain: ChainView }) {
       )}
       {state === "set_up" && repeats > 1 && <p className={s.empty}>You cannot set one on its own.</p>}
 
-      {open && <Overlay chain={chain} onClose={() => setOpen(false)} />}
+      {open && <Overlay chain={chain} onClose={close} />}
     </div>
   );
 }
