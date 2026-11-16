@@ -71,6 +71,9 @@ its stick and trigger ranges.
 - An effect is one HTML file. `canvas-rgb effects check my-effect.html` tells you whether it parses,
   moves and shows more than one colour before you install it. The repo ships a Claude Code skill
   for writing them in `.claude/skills/canvas-rgb-effect`.
+- An agent can build a scene for you with the skill in
+  [`.claude/skills/canvas-rgb-scene/SKILL.md`](.claude/skills/canvas-rgb-scene/SKILL.md). It saves
+  a new scene, leaves your lights on the scene they had, and can undo what it made.
 
 ## Install
 
