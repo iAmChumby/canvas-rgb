@@ -153,7 +153,9 @@ The environments and the ruleset are **repository settings**, not files: an admi
 following, in this order. A repository that references an environment it does not have gets one
 created with no protection rules and no secrets
 ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)),
-so the signing step fails with "the UPDATE_SIGNING_KEY secret is not set" until this is done: it fails
+so until step 6 the sign jobs still read the repository secret (an environment secret only takes
+precedence over a repository secret of the same name) and signing works as before; from step 6 on, a
+sign job with no environment value fails with "the UPDATE_SIGNING_KEY secret is not set": it fails
 closed, and nothing signs.
 
 1. Create the `release` environment with no protected branch policy, so a custom one can be set:
