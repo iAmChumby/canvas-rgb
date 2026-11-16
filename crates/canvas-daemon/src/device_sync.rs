@@ -119,7 +119,7 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
         .filter(|d| {
             let driven = crate::is_driven(&d.id);
             if !driven && !sinks.contains_key(&d.id) {
-                tracing::info!(device = %d.id, "this device is never driven; it gets no frames");
+                tracing::info!(target: crate::logging::LOG_TARGET, device = %d.id, "this device is never driven; it gets no frames");
             }
             driven
         })
@@ -131,7 +131,7 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
         }
         app.engine.remove_sink(id);
         writer.abort();
-        tracing::info!(device = %id, "device gone; its frame sink is removed");
+        tracing::info!(target: crate::logging::LOG_TARGET, device = %id, "device gone; its frame sink is removed");
         false
     });
     for id in live {
@@ -152,7 +152,7 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
             id.clone(),
             Arc::new(crate::state::DeviceSink::with_gate(id.clone(), tx, app.identify.clone())),
         );
-        tracing::info!(device = %id, "device frame sink added");
+        tracing::info!(target: crate::logging::LOG_TARGET, device = %id, "device frame sink added");
         sinks.insert(id, writer);
     }
 }
