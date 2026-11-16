@@ -42,6 +42,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)
 - A brightness or props change beside a scene with more HTML effects than the limit allows no longer starts the extra effect. (#419)
 - Fire and Audio Spectrum fill a strip again, flame height and bar height included. Inside a stack they still read dark on a strip. (#400)
+- Scenes: the scene's name reads in full in the phone header; the state mark keeps its icon, and its tooltip and details panel name the fault in words. (#422)
 
 ## [0.16.0] - 2026-11-15
 

@@ -657,18 +657,10 @@
   }
 }
 
-/* A phone's strip drops the mark's words to one tick or icon. On this page a fault keeps its words
-   ("1 group dark", "Scenes not read") beside the icon: the row has the room, and a bare warning
-   mark names nothing. The strip's own rule keeps the all-clear to a tick. */
-@media (max-width: 720px) {
-  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-mark):not([data-tone="ok"]) :global(.strip-mark-text) {
-    display: inline;
-    max-width: 9ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
+/* A phone's strip keeps the mark to its icon on this page too (#422). The scene's name beside it
+   is the thing to read, and the mark's words took the room the name needed: "Evening" came out
+   "Eveni...". The mark's tooltip and accessible name still say the fault ("1 group dark"), and
+   tapping it opens the details panel, whose problem list says it in words. */
 
 /* ---------- an icon key in the page's own actions ---------- */
 
