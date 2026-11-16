@@ -28,7 +28,8 @@ this file says `canvas-rgb`.
    sentence (see step 6). Do not count HTML effects yourself and do not copy the number from this file: the
    daemon's sentence holds the current limit.
 5. **A delete touches only what the run made.** Every `delete` carries `--run`. The command line
-   refuses anything the run did not make, and a scene that is playing.
+   refuses anything the run did not make, a scene that is playing, and an effect that a scene plays
+   or a stack uses (step 10).
 6. **Say TRUE, FALSE or UNKNOWN.** A check you ran and read is TRUE or FALSE. A check you did not
    run is UNKNOWN, with the command that would settle it. Never say "should work".
 7. **You are not the judge of taste.** You measure. How a scene looks on the person's lights is
@@ -79,7 +80,9 @@ these into presets": ask nothing.
 
 - Use effect ids from `effects list`.
 - A NEW effect: write and check it with the `canvas-rgb-effect` skill, then
-  `canvas-rgb effects import my-effect.html --run <run>`. Never pass `--replace`.
+  `canvas-rgb effects import my-effect.html --run <run>`. Never pass `--replace`: with
+  `--run` a replace is refused unless that same run imported the effect, and without
+  `--run` it is a plain overwrite, with no record and no copy.
 - A stock or user HTML effect to tune: read its source into a new file, edit the copy, check it.
   ```
   canvas-rgb effects source html:ink-drop --out ink-drop-copy.html
@@ -96,7 +99,7 @@ these into presets": ask nothing.
   three bytes each (red, green, blue), so a frame is `width * height * 3` bytes. The defaults
   are 320 by 200 (`--width` and `--height` change them). Read the frames and compute the check
   in step 7, row 2 (`checks.md` says how). `dump-frames` knows the built-in effect ids only
-  (`crates/canvas-effects/src/lib.rs:77-85`; an `html:` id is refused) and draws
+  (`crates/canvas-effects/src/lib.rs:77-89`; an `html:` id is refused) and draws
   `screen_ambience` and `audio_spectrum` with default inputs, so call those UNKNOWN.
 - Save a winning look as a preset with a NEW name each time (at most 40 characters). Props are
   `--prop key=value`, once per key.
@@ -213,9 +216,19 @@ canvas-rgb effects preset delete html:ink-drop "Harbour ink" --run <run>
 canvas-rgb effects delete html:harbour --run <run>
 ```
 
-Scenes go first because an effect a scene plays cannot be deleted. `effects delete` takes the
-effect's presets with it unless you add `--keep-presets`. Each command refuses what the run did not
-make. The record of the run is the file `agent-runs/<run>.json` in the app's user folder
+Scenes go first because `effects delete` refuses an effect that a scene plays, and an effect that
+a stack uses as a layer or as a layer's mask, naming the scenes or the stacks (`refusals.md`).
+There is no stacks command here: a stack that names the run's effect is the person's, so say the
+sentence and leave the effect. `effects delete` takes the effect's presets with it unless you add
+`--keep-presets`. Each command refuses what the run did not make.
+
+One gap stays open, and the daemon does not close it: `effects delete` reads the scenes and the
+stacks, then sends the delete, and the daemon does not check again. A scene or a stack changed to
+use the effect between the two is not seen, and the effect is deleted anyway. So delete an effect
+only at the end of a run, right after a fresh `canvas-rgb scenes list --json`, and never an effect
+the run did not import.
+
+The record of the run is the file `agent-runs/<run>.json` in the app's user folder
 (`%APPDATA%\canvas-rgb`, or `CANVAS_RGB_HOME` when set; `crates/canvas-daemon/src/agent_run.rs`).
 Whole copies of every scene, preset and effect the run changed or deleted sit in the folder
 `agent-runs/<run>/`. There is no restore command; the copies are for a person to read. If the
