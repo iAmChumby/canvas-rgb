@@ -8,4 +8,8 @@ export type ScenePut = { scene: Scene,
 /**
  * The `rev` the change was made from.
  */
-expected_rev: number, };
+expected_rev: number, 
+/**
+ * Run every check and save nothing: the answer is a [`SceneDryRun`] with `saved: false`.
+ */
+dry_run?: boolean, };

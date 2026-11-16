@@ -97,6 +97,7 @@ fn fan_light_of(role: &Role, number: usize) -> Light {
         arrangement: Arrangement::Ring,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 

@@ -2146,6 +2146,7 @@ power = "running"
                     arrangement: Arrangement::Ring,
                     reversed: true,
                     kind: None,
+                    copies: None,
                 },
                 Light {
                     id: "openrgb:board#z0p2".into(),
@@ -2156,6 +2157,7 @@ power = "running"
                     arrangement: Arrangement::Strip,
                     reversed: false,
                     kind: None,
+                    copies: None,
                 },
             ],
         };
