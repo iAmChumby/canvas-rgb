@@ -145,11 +145,11 @@ pub fn html_builder() -> Builder {
 /// times what an ordinary effect's setup costs, so it exists to stop a script that never
 /// returns, and it is also short enough that a machine busy with a game load or a build can
 /// push a perfectly good effect past it — that is why a timed-out file is retried rather than
-/// refused. An import is a person waiting for an answer, so it gets one longer load before the
-/// file is written: ten seconds is five times the normal budget, enough for a machine that is
-/// several times slower at that moment, and still inside the editor's 60 s import deadline
-/// (`app/web/src/lib/api.ts`). A script that is still running after it never finishes loading,
-/// so saving it would only buy the same two seconds of work every retry.
+/// refused. An import is a person waiting for an answer, so a file the normal budget timed out
+/// on gets one load at ten seconds, five times the normal budget, before the import decides;
+/// that is still inside the editor's 60 s import deadline (`app/web/src/lib/api.ts`). Ten
+/// seconds is long enough that a script still running at the end of it did not finish loading,
+/// so saving it would only buy the same load again on every retry.
 pub const IMPORT_LOAD_BUDGET_MS: u64 = 10_000;
 
 /// The builder an import runs when the normal load ran out of time: the same load, held to
@@ -266,19 +266,6 @@ struct LoadedEffect {
     source: Arc<str>,
 }
 
-/// A file an import already built, handed to the rescan that follows the write.
-///
-/// The import's load may have used its longer budget, so building the same file again at the
-/// normal one could run out of time and report a file that just loaded as failed (#75).
-pub struct Preloaded {
-    /// The file that was written.
-    pub path: PathBuf,
-    /// The schema its load gave it.
-    pub schema: PropertySchema,
-    /// The source that was written, which Save hands back.
-    pub source: Arc<str>,
-}
-
 #[derive(Clone)]
 struct StockEffect {
     schema: PropertySchema,
@@ -366,25 +353,18 @@ impl ParseFailure {
 
 /// What an import's own load saw, before anything is written.
 pub enum ImportCheck {
-    /// The file loaded, inside the normal budget or the import's longer one.
-    Loaded(PropertySchema),
-    /// The normal load ran out of time and so did the import's longer one: the script never
-    /// finishes, so nothing is saved.
+    /// The file loads: inside the normal budget, or inside the import's longer one.
+    Loads,
+    /// The normal load ran out of time and so did the import's longer one: the script did
+    /// not finish loading within [`IMPORT_LOAD_BUDGET_MS`], so nothing is saved.
     NeverLoads(String),
     /// The file fails the same way every time, whatever the budget.
     Failed(String),
 }
 
-/// The schema the library holds for a built file: the effect's own, with the id the file
-/// gives it.
-fn schema_for(id: &str, effect: &dyn Effect) -> PropertySchema {
-    let mut schema = effect.schema();
-    schema.id = id.to_string();
-    schema
-}
-
 #[derive(Default)]
-struct State {    /// Files that parsed, by path.
+struct State {
+    /// Files that parsed, by path.
     loaded: BTreeMap<PathBuf, LoadedEffect>,
     /// Files that failed to parse, by path, with the error and when they may be tried again.
     failed: BTreeMap<PathBuf, Failure>,
@@ -611,16 +591,25 @@ impl UserEffects {
     /// Runs the library's builder on a file that is about to be imported, so the import
     /// judges it the way the loader will.
     ///
-    /// The normal budget is tried first. A load that ran out of time says the machine was
-    /// busy, or that the script never returns; one load at [`IMPORT_LOAD_BUDGET_MS`] tells
-    /// the two apart before anything is written (#75). Tests that inject a builder inject it
-    /// here too.
+    /// The normal budget is tried first. A load that ran out of time says either that the
+    /// machine was busy or that the script does not return; one load at
+    /// [`IMPORT_LOAD_BUDGET_MS`] tells the two apart before anything is written (#75).
+    ///
+    /// The longer load only decides whether the file is saved. Every load after the import —
+    /// the rescan, the lights, a tile (`UserEffects::create`, `crate::thumbnail`) — keeps
+    /// [`canvas_html::LOAD_BUDGET_MS`], so a file that needs longer than that is saved and
+    /// then reported as failed and retried, exactly as it was before this change. Accepting it
+    /// as loaded and installing it without that warning would leave an effect in the library
+    /// that the lights cannot run, with its group dark.
+    ///
+    /// Tests that inject a builder inject it here too.
     pub fn check_import(&self, id: &str, html: &str) -> ImportCheck {
         match (self.builder)(id, html) {
-            Ok(effect) => ImportCheck::Loaded(schema_for(id, effect.as_ref())),
+            Ok(_) => ImportCheck::Loads,
             Err(error) if crate::thumbnail::build_error_depends_on_load(&error) => {
                 match (self.import_builder)(id, html) {
-                    Ok(effect) => ImportCheck::Loaded(schema_for(id, effect.as_ref())),
+                    // The normal load only ran out of time: the machine was busy.
+                    Ok(_) => ImportCheck::Loads,
                     Err(long) if crate::thumbnail::build_error_depends_on_load(&long) => {
                         ImportCheck::NeverLoads(long)
                     }
@@ -654,16 +643,6 @@ impl UserEffects {
     /// a busy machine does not lose an effect for good. A file that fails the same way
     /// every time is left out until it changes.
     pub fn rescan(&self, dir: &Path) -> bool {
-        self.rescan_with(dir, None)
-    }
-
-    /// [`UserEffects::rescan`], with one file already built by the import that wrote it.
-    ///
-    /// The import's own load may have used [`IMPORT_LOAD_BUDGET_MS`], which is exactly what a
-    /// file whose load is a little slow needs. Building the same file again at the normal
-    /// budget would run out of time and put a file that just loaded into the failed list, so
-    /// the import hands the effect over instead. Every other file is parsed as usual.
-    pub fn rescan_with(&self, dir: &Path, preloaded: Option<Preloaded>) -> bool {
         let now = (self.clock)();
         // A stock effect whose load ran out of time is built again after the back-off.
         let mut changed = self.retry_stock(now);
@@ -679,19 +658,12 @@ impl UserEffects {
         };
 
         // The files whose stamp differs from what is already known, and the files whose
-        // load ran out of time and may be parsed again. A file the import already built is
-        // not built twice.
+        // load ran out of time and may be parsed again.
         let todo: Vec<(PathBuf, Stamp)> = {
             let state = read_lock(&self.state);
             listing
                 .iter()
                 .filter(|(path, stamp)| {
-                    if preloaded
-                        .as_ref()
-                        .is_some_and(|pre| pre.path.as_path() == path.as_path())
-                    {
-                        return false;
-                    }
                     let known = state.loaded.get(*path).is_some_and(|e| e.stamp == **stamp);
                     let failed = state.failed.get(*path);
                     let known = known
@@ -702,22 +674,13 @@ impl UserEffects {
                 .collect()
         };
 
-        let mut parsed: Vec<(PathBuf, Stamp, Result<LoadedEffect, ParseFailure>)> = todo
+        let parsed: Vec<(PathBuf, Stamp, Result<LoadedEffect, ParseFailure>)> = todo
             .into_iter()
             .map(|(path, stamp)| {
                 let result = self.parse(&path, stamp);
                 (path, stamp, result)
             })
             .collect();
-        if let Some(pre) = preloaded {
-            if let Some(stamp) = listing.get(&pre.path) {
-                parsed.push((
-                    pre.path,
-                    *stamp,
-                    Ok(LoadedEffect { stamp: *stamp, schema: pre.schema, source: pre.source }),
-                ));
-            }
-        }
 
         let mut state = write_lock(&self.state);
         let loaded_before = state.loaded.len();

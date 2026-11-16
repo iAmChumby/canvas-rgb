@@ -13,7 +13,6 @@ use canvas_proto::api::routes;
 use canvas_proto::props::Props;
 use common::{FakeAdapter, FakeEngine};
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use tower::ServiceExt;
 
@@ -178,7 +177,7 @@ async fn failed_effects(router: &axum::Router) -> Vec<(String, String)> {
 
 #[tokio::test]
 async fn an_imported_effect_lands_in_the_folder_and_in_the_library() {
-    let (router, _app, _home, folder) = build();
+    let (router, app, _home, folder) = build();
 
     let response = router
         .clone()
@@ -202,6 +201,19 @@ async fn an_imported_effect_lands_in_the_folder_and_in_the_library() {
 
     // And the effect is in the library.
     assert!(effect_ids(&router).await.contains(&"html:spark".to_string()));
+
+    // And it runs: the library builds it from the file it wrote, and its setup runs without
+    // a load timeout.
+    let mut built = canvas_daemon::create_effect(
+        &app.user_effects,
+        &app.stacks,
+        &app.patterns,
+        "html:spark",
+        None,
+    )
+    .expect("the imported effect builds");
+    built.init(&Props::new());
+    assert_eq!(built.schema().id, "html:spark");
 }
 
 #[tokio::test]
@@ -475,8 +487,8 @@ async fn a_reserved_name_is_refused_whatever_comes_after_the_first_dot() {
 const RUNAWAY: &str =
     "<html><head><title>Loop</title></head><body></body><script>while (true) {}</script></html>";
 
-/// A script that never finishes is refused, and nothing is written: saving it would only buy
-/// the same load again on every retry (#75).
+/// A script that does not finish loading inside the import's longer load is refused, and
+/// nothing is written: saving it would only buy the same load again on every retry (#75).
 #[tokio::test]
 async fn an_effect_whose_script_never_ends_is_refused_and_nothing_is_saved() {
     let (router, _app, _home, folder) = build();
@@ -493,7 +505,9 @@ async fn an_effect_whose_script_never_ends_is_refused_and_nothing_is_saved() {
     let body = json(response).await;
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
     assert!(
-        message.contains("never finishes loading") && !message.contains("timeout:"),
+        message.contains("did not finish loading within 10 s")
+            && message.contains("nothing was saved")
+            && !message.contains("timeout:"),
         "the answer says what happened in plain words: {message}"
     );
     // Nothing was written, and the file is not waiting to be retried.
@@ -681,8 +695,11 @@ async fn deleting_the_active_effect_falls_back_like_a_missing_file() {
 }
 
 /// A builder whose calls, counted from zero, run out of time when their number is in
-/// `times_out`; the others build the real effect. The import's own parse is one call and
-/// the rescan's parse of the same file is the next.
+/// `times_out`; the others build the real effect.
+///
+/// An import makes its normal load first (call 0 for a file that is not there yet) and, only
+/// because that ran out of time, one longer load (call 1). The rescan that follows the write
+/// parses the file again at the normal budget (call 2).
 fn timing_out_on(times_out: &'static [usize]) -> canvas_daemon::user_effects::Builder {
     let calls = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     let real = canvas_daemon::user_effects::html_builder();
@@ -710,8 +727,9 @@ async fn import(router: &axum::Router, file: &str, html: &str, replace: bool) ->
 /// and the file is untouched.
 #[tokio::test]
 async fn a_replace_whose_new_version_never_loads_is_refused_and_the_old_one_stays() {
-    // Calls: 0 import parse (v1 loads); 1 normal load, 2 longer load (v2 never loads).
-    let (router, _app, _home, folder) = build_with(Some(timing_out_on(&[1, 2])));
+    // Calls: 0 v1's import load, 1 v1's rescan; 2 v2's normal load, 3 v2's longer load. A
+    // replace whose new version does not finish inside the longer load is refused.
+    let (router, _app, _home, folder) = build_with(Some(timing_out_on(&[2, 3])));
     import(&router, "spark.html", VALID, false).await;
     let v2 = VALID.replace("<title>Spark</title>", "<title>Spark Two</title>");
     let response = router
@@ -726,15 +744,15 @@ async fn a_replace_whose_new_version_never_loads_is_refused_and_the_old_one_stay
     assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
     let body = json(response).await;
     let message = body.get("message").and_then(|v| v.as_str()).unwrap_or("");
-    assert!(message.contains("never finishes loading"), "{message}");
+    assert!(message.contains("did not finish loading within 10 s"), "{message}");
     // The file that was there is the version that loads, and it is still in the library.
     let written = std::fs::read_to_string(folder.join("spark.html")).expect("the file is there");
     assert_eq!(written, VALID);
     assert!(effect_ids(&router).await.contains(&"html:spark".to_string()), "v1 keeps running");
 }
 
-/// The normal load runs out of time but the import's one longer load succeeds: the effect is
-/// in the library, so the reply is the normal one, not "will be tried again".
+/// The normal load runs out of time but the import's one longer load succeeds: the file is
+/// saved and the rescan loads it, so the reply is the normal one, not "will be tried again".
 #[tokio::test]
 async fn an_import_whose_normal_load_timed_out_but_the_longer_one_loaded_is_a_normal_reply() {
     let (router, _app, _home, _folder) = build_with(Some(timing_out_on(&[0])));
@@ -753,34 +771,36 @@ fn loop_page(iterations: u64) -> String {
 }
 
 /// How long a load of `iterations` takes, in seconds, using the given builder.
-fn load_seconds(
-    builder: &canvas_daemon::user_effects::Builder,
-    iterations: u64,
-) -> f64 {
+///
+/// The probes run at the import's longer load budget, so a probe fails the test only if a
+/// load stalls for ten seconds; a machine that is merely slow makes the probes shorter, not
+/// the test red.
+fn load_seconds(builder: &canvas_daemon::user_effects::Builder, iterations: u64) -> f64 {
     let started = std::time::Instant::now();
     builder("html:probe", &loop_page(iterations))
-        .expect("the probe fits in the normal load budget");
+        .expect("the probe loads inside the import's 10 s budget");
     started.elapsed().as_secs_f64()
 }
 
 /// A script that needs longer than the normal load budget, but less than the import's longer
-/// one, is imported: the longer load succeeds, and the effect is in the library without a
-/// second, normal-budget load being run on it.
+/// one, is saved exactly as it was before this change: the rescan at the normal budget puts it
+/// in the failed list, in today's words, and the retry picks it up. It is not installed as
+/// loaded, because the lights and the tiles run every effect at the normal budget (#75).
 ///
 /// The script's cost is calibrated on this machine (a warm-up, the fixed cost of a load taken
 /// off, and the budget as the yardstick), so the test does not depend on how fast it is
 /// (class `cause:timing-test`, #51).
 #[tokio::test]
-async fn an_effect_a_little_slower_than_the_normal_budget_still_imports() {
-    let real = canvas_daemon::user_effects::html_builder();
+async fn an_effect_a_little_slower_than_the_normal_budget_is_saved_and_waiting_to_be_retried() {
+    let longer = canvas_daemon::user_effects::html_builder_with_import_load();
     // What a page costs before its script runs, and a warm-up.
-    let overhead = load_seconds(&real, 0);
-    let _ = load_seconds(&real, 1);
+    let overhead = load_seconds(&longer, 0);
+    let _ = load_seconds(&longer, 1);
     // The cost of one iteration, measured over a probe long enough that the fixed cost is a
     // small share of it.
     let mut probe = 100u64;
     let per_iter = loop {
-        let took = load_seconds(&real, probe);
+        let took = load_seconds(&longer, probe);
         let script = (took - overhead).max(0.0);
         if script >= 0.5 {
             break script / probe as f64;
@@ -789,41 +809,36 @@ async fn an_effect_a_little_slower_than_the_normal_budget_still_imports() {
     };
     // A script of about 3.2 s: past the 2 s normal budget, well inside the 10 s import one.
     let iterations = ((((3.2 - overhead).max(2.5)) / per_iter).round() as u64).max(1);
+    let html = loop_page(iterations);
 
     let (router, _app, _home, folder) = build();
-    let body = import(&router, "slow.html", &loop_page(iterations), false).await;
-    assert_eq!(body["effect"]["name"], "Slow", "the longer load gave the effect's own name");
-    assert_eq!(std::fs::read_dir(&folder).expect("the folder").count(), 1);
-    assert!(
-        effect_ids(&router).await.contains(&"html:slow".to_string()),
-        "the effect that loaded is in the library"
-    );
-    assert!(
-        failed_effects(&router).await.is_empty(),
-        "a file that just loaded is not waiting to be retried"
-    );
-}
+    let body = import(&router, "slow.html", &html, false).await;
 
-/// A file that loads inside the normal budget is built once for the import; the rescan that
-/// follows the write does not build it a second time.
-#[tokio::test]
-async fn a_normal_import_builds_the_file_once() {
-    let calls = Arc::new(AtomicUsize::new(0));
-    let builder: canvas_daemon::user_effects::Builder = {
-        let calls = calls.clone();
-        let real = canvas_daemon::user_effects::html_builder();
-        Arc::new(move |id: &str, html: &str| {
-            calls.fetch_add(1, Ordering::SeqCst);
-            real(id, html)
-        })
-    };
-    let (router, _app, _home, _folder) = build_with(Some(builder));
-    let body = import(&router, "spark.html", VALID, false).await;
-    assert_eq!(body["effect"]["name"], "Spark");
-    assert_eq!(
-        calls.load(Ordering::SeqCst),
-        1,
-        "the import loads the file once; the longer load and the rescan run nothing extra"
+    // The answer says what today's does: saved, took too long just now, tried again.
+    let description = body["effect"]["description"].as_str().unwrap_or_default();
+    assert!(
+        description.contains("was saved")
+            && description.contains("took too long to load just now")
+            && description.contains("will be tried again"),
+        "the answer says what is known: {description}"
     );
-    assert!(effect_ids(&router).await.contains(&"html:spark".to_string()));
+    assert_eq!(body["effect"]["name"], "slow");
+    // The save was not lost: the file is in the folder.
+    assert_eq!(std::fs::read_dir(&folder).expect("the folder").count(), 1);
+    assert_eq!(
+        std::fs::read_to_string(folder.join("slow.html")).expect("the file is there"),
+        html
+    );
+    // The rescan runs at the normal budget, so the file is in the failed list, not the library.
+    assert!(
+        !effect_ids(&router).await.contains(&"html:slow".to_string()),
+        "a file the lights cannot load is not installed as loaded"
+    );
+    let failed = failed_effects(&router).await;
+    assert_eq!(failed.len(), 1, "{failed:?}");
+    assert!(failed[0].0.ends_with("slow.html"), "{failed:?}");
+    assert!(
+        failed[0].1.contains("took too long to load just now") && failed[0].1.contains("will be tried again"),
+        "the failed list says why, in today's words: {failed:?}"
+    );
 }
