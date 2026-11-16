@@ -10,6 +10,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
 - The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
+- Scenes: the open group shows the picture its own effect draws, so you can tune it while you watch (#378)
 - Scenes: a group can be moved to another scene, or copied into it, from the group's own menu; each scene says what lands there and what leaves before you commit. (#368)
 - Scenes: the scene keys can be put in another order: drag one, use the arrow keys on it, or use the scene's own menu. (#371)
 - The command line can list your lights, create, edit and delete a scene from a file, and import, check, read and delete effects and save and delete presets, with a dry run that saves nothing; a run can only delete what it made. A new agent skill, `canvas-rgb-scene`, uses these commands to build a scene for you and leaves your lights on the scene they had. (#377)
@@ -39,8 +40,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 - A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
 - The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)
+- A brightness or props change beside a scene with more HTML effects than the limit allows no longer starts the extra effect. (#419)
 - Fire and Audio Spectrum fill a strip again, flame height and bar height included. Inside a stack they still read dark on a strip. (#400)
 - The text on a primary key stays readable as the lights change colour: every hue of both themes keeps 4.5:1 on the key, where yellow in the light theme dropped to 2.2:1. (#423)
+- Scenes: the scene's name reads in full in the phone header; the state mark keeps its icon, and its tooltip and details panel name the fault in words. (#422)
 
 ## [0.16.0] - 2026-11-15
 
