@@ -13,8 +13,10 @@ name: Test build
 #
 # The shape is release.yml's: every third-party action pinned to a full commit SHA, a read-only build job,
 # and the update signing key in one step of the sign job, which builds no project code. The key is an
-# environment secret of the `test-build` environment, and that environment's deployment policy allows the
-# `main` branch alone, so the sign job cannot deploy from any other ref whatever this file says (#234).
+# environment secret of the `test-build` environment, and only the sign job names that environment, so no
+# other job of this workflow can read it (#234). That environment allows the `main` branch alone, so a
+# test build is bounded by who can push to main: a `v*` tag rule would bound nothing here, because a tag's
+# name is a pattern, not a permission (docs/releasing.md).
 # Manual only. The build job runs npm lifecycle scripts and cargo build scripts, and the sign job signs what
 # they made with the release key, so a signed build is code that installs as SYSTEM with no prompt. A push
 # trigger would sign every main commit; a person starts this one, from main, when a test build is wanted.
@@ -149,10 +151,10 @@ jobs:
   # after checking that exe against the build job's .sha256. The signature carries the dev version
   # (--app-version), which the service reads back and compares with its own.
   #
-  # The key is the UPDATE_SIGNING_KEY secret of the `test-build` environment (#234). That environment's
-  # deployment policy allows `main` alone, so GitHub refuses this job from any other branch or tag, and
-  # the key the signing step reads below is the environment's value; a job outside this environment
-  # cannot read it, whatever the file says.
+  # The key is the UPDATE_SIGNING_KEY secret of the `test-build` environment (#234), and this is the only
+  # job that names that environment: no other job of this file can read the key, whatever the file says.
+  # The environment allows `main` alone, so a manual run or a call is signed only from main's code; who
+  # can push to main is that boundary, and a branch cannot reach it.
   sign:
     needs: build
     # Never signs a build of a branch: the key signs main's code only.

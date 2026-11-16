@@ -9,10 +9,12 @@ name: Release
 # only the publish job holds contents: write, and the site's build is started by a job of its own that holds
 # actions: write and does nothing else (#189).
 #
-# The update signing key is an environment secret of the `release` environment, and that environment's
-# deployment policy allows a `v*` tag alone, so the sign job is the only job that can read it and GitHub
-# refuses it from any other ref (#234). A repository secret of the same name would be readable from any
-# branch that edits this file; that is why the repository secret is gone.
+# The update signing key is an environment secret of the `release` environment, and only the sign job
+# names that environment, so no other job of this workflow can read the key (#234). The environment's
+# `v*` rule is a name pattern, not a permission: anyone who can push a tag named vX.Y.Z runs this
+# workflow from that tag, and its sign job would deploy. Who may create a `v*` tag is therefore the
+# boundary, and it is a repository ruleset on refs/tags/v* that only an admin can bypass (the settings
+# in docs/releasing.md), not a line in this file.
 on:
   push:
     tags:
@@ -101,9 +103,10 @@ jobs:
   # The tray's updater trusts one minisign key. The signature carries the version (--app-version), so a
   # tampered latest.json cannot pair a new version number with an older signed installer.
   # The private key is the UPDATE_SIGNING_KEY secret of the `release` environment (backup: outside the
-  # repo, see docs/releasing.md). The environment is the boundary: its deployment policy allows a `v*`
-  # tag alone, so a branch that pushes a tag-shaped ref or edits this file cannot deploy the job and
-  # cannot read the key (#234).
+  # repo, see docs/releasing.md). This job names the environment, so no other job of this workflow can
+  # read the key whatever the file says. The environment allows a `v*` tag, which is a name pattern:
+  # a person with push access can create one, so who may create a `v*` tag is the boundary, and the
+  # repository ruleset on refs/tags/v* is what restricts it to admins (#234).
   sign:
     needs: build
     runs-on: windows-latest
@@ -225,8 +228,11 @@ jobs:
   # "release: published" event cannot start it: this workflow publishes with GITHUB_TOKEN, and GitHub
   # does not start workflows from events that token creates.
   #
-  # It runs at the tag's own ref, not at `main`: main has moved on since the tag in general, and the site
-  # has to be built from the release commit whose version and hash it prints (#189).
+  # It runs at `main`, not at the tag. pages.yml deploys in the `github-pages` environment, and that
+  # environment's deployment policy allows the `main` branch alone: a dispatch at a tag ref is refused
+  # by GitHub and the site never updates after a release. A dispatch's build retries for the release's
+  # .sha256 asset instead of skipping without it (pages.yml:53), so main's page is built with this
+  # release's hash.
   #
   # A job of its own (#189): `actions: write` can start a workflow run, but also cancel and re-run every
   # run and delete artifacts and caches, so it is kept away from the third-party release action the
@@ -245,4 +251,4 @@ jobs:
           # The job has no checkout, so gh has no git remote to read the repository from and exits 1
           # with "not a git repository". GH_REPO names the repository instead.
           GH_REPO: ${{ github.repository }}
-        run: gh workflow run pages.yml --ref "$GITHUB_REF_NAME"
+        run: gh workflow run pages.yml --ref main

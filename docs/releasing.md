@@ -69,11 +69,14 @@ push and the release workflow runs it before it builds.
 4. Commit: `Release: 0.1.1`.
 5. Tag and push: `git tag v0.1.1` then `git push origin main v0.1.1`. The release workflow checks
    that the tag matches `Cargo.toml`, builds `canvas-rgb-setup-0.1.1.exe`, signs it in the `sign` job
-   (behind the `release` environment, whose tag rule is `v*`), writes `latest.json` and attaches the
-   installer, its `.sha256`, its `.sig` and `latest.json` to the GitHub release. The last job,
-   `dispatch-site`, then starts the site's build at the tag itself, so the page prints this release's
-   version and hash; it runs after the release exists and holds `actions: write` and nothing else, in a
-   job of its own so that permission never sits beside the third-party release action.
+   (behind the `release` environment; only an admin can create the tag, see the tag ruleset under
+   "The signing key" below), writes `latest.json` and attaches the installer, its `.sha256`, its `.sig`
+   and `latest.json` to the GitHub release. The last job, `dispatch-site`, then starts the site's build
+   at `main`, so the page prints this release's version and hash; it runs after the release exists and
+   holds `actions: write` and nothing else, in a job of its own so that permission never sits beside the
+   third-party release action. It dispatches `main` because `pages.yml` deploys in the `github-pages`
+   environment, whose deployment policy allows `main` alone: a dispatch at the tag is refused, and the
+   site would never update after a release.
 6. The workflow writes the release notes: the version's changelog section, then GitHub's list of merged
    pull requests. Check them with `gh release view vX.Y.Z --json body`; the body must start with the
    section's first line. The script fails the release (exit 1), naming the line, on: a `#` or `##`
@@ -114,38 +117,89 @@ the `.sig`, `latest.json` and `release-notes.md` as the `signature` artifact. Th
 
 The key is **an environment secret, not a repository secret** (#234). A repository secret can be read by
 any branch that edits the workflow file, and the guards in the file are only lines in the file: a
-dispatch runs the file from the ref it is dispatched on, and a tag runs the file from the tag. The
-boundary is an environment, because its deployment policy is a repository setting the file cannot widen.
+dispatch runs the file from the ref it is dispatched on, and a tag runs the file from the tag. An
+environment secret is read only by a job that names that environment, and the environment's deployment
+policy decides which refs may deploy.
 
 | Environment | Who names it | Deployment policy | Holds |
 |---|---|---|---|
 | `release` | `release.yml`'s `sign` job, and no other job | tag rule `v*`, and no branch rule | `UPDATE_SIGNING_KEY` |
 | `test-build` | `test-build.yml`'s `sign` job, and no other job | branch rule `main`, and no tag rule | `UPDATE_SIGNING_KEY` |
 
-GitHub refuses the deployment itself when the run's `GITHUB_REF` matches no rule of that kind
+**What that does and does not protect.** Every job that names neither environment is out of reach of
+the key: the two build jobs, the `publish` job, the site's dispatch job and the experimental publisher
+cannot read it, whatever a workflow file says. The policy itself reads the ref name, and nothing else.
+For `test-build` that is the whole boundary: only `main` may deploy, so who can push to `main` is who
+decides what gets signed. For `release` it is weaker than it looks. `v*` is a name pattern: any person
+with push access can create a tag named `v9.9.9`, the workflow runs from that tag, the sign job's ref
+matches the pattern, and it deploys. The environment never asks whose tag it is or what commit it names.
+**The real boundary is a tag ruleset on `refs/tags/v*` that lets only an admin create, update or delete
+those tags.** Without it, push access is signing access. Add it with the repository settings below.
+
+GitHub refuses the deployment when the run's `GITHUB_REF` matches no rule of that kind
 ([deployments and environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#deployment-branches-and-tags)),
-so a branch that edits `release.yml` and pushes a `v*` tag can name the environment and still be
-refused, and a branch dispatch of `test-build.yml` never reaches its sign job. A job that does not name
-the environment cannot read the secret at all
+and a job that does not name the environment cannot read the secret at all
 ([environment secrets](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#environment-secrets)).
-Neither the `publish` job nor the site's dispatch job names an environment, so neither can read the key.
 
 `test-build.yml` is also called by the experimental publisher, and a reusable workflow receives a
 secret only when its caller names it: the caller passes the name, and the sign job's environment
 secret is the value that wins, because an environment secret takes precedence over a repository
 secret of the same name
 ([reuse workflows](https://docs.github.com/en/actions/how-tos/reuse-automations/reuse-workflows#using-inputs-and-secrets-in-a-reusable-workflow)).
-The repository secret `UPDATE_SIGNING_KEY` is deleted once both environments hold the key (the last
-step of the repository settings below), so a caller that names it can only ever get the environment's
-value, and only from `main`.
+Once the repository secret is deleted (step 6 below), a caller that names it can only ever get the
+environment's value, and only from `main`.
 
-The environments are a **repository setting**, not a file: an admin creates both, adds the key to each
-under Environment secrets, and sets the policy in the table above. A repository that references an
-environment it does not have gets one created with no protection rules and no secrets
+The environments and the ruleset are **repository settings**, not files: an admin does all of the
+following, in this order. A repository that references an environment it does not have gets one
+created with no protection rules and no secrets
 ([managing environments](https://docs.github.com/en/actions/how-tos/deploy/configure-and-manage-deployments/manage-environments)),
-so until that is done the signing step fails with "the UPDATE_SIGNING_KEY secret is not set": it fails
-closed, and nothing signs. Do this before deleting the repository secret, so no release window loses
-signing.
+so the signing step fails with "the UPDATE_SIGNING_KEY secret is not set" until this is done: it fails
+closed, and nothing signs.
+
+1. Create the `release` environment with no protected branch policy, so a custom one can be set:
+   `gh api --method PUT repos/iAmChumby/canvas-rgb/environments/release -f 'deployment_branch_policy[protected_branches]=false' -f 'deployment_branch_policy[custom_branch_policies]=true'`
+2. Its one policy, a tag: `gh api --method POST repos/iAmChumby/canvas-rgb/environments/release/deployment-branch-policies -f name='v*' -f type=tag`
+3. Create `test-build` the same way, with a branch policy: the `PUT` of step 1 with
+   `environments/test-build`, then
+   `gh api --method POST repos/iAmChumby/canvas-rgb/environments/test-build/deployment-branch-policies -f name=main -f type=branch`
+4. Put the key in both, from the backup kept outside the repo: `gh secret set UPDATE_SIGNING_KEY --env release`,
+   then `gh secret set UPDATE_SIGNING_KEY --env test-build` (each prompts for the value).
+5. Add the tag ruleset, the real boundary: only the repository admin role may create, update or delete
+   a `refs/tags/v*` tag. The role's actor ID in this API is `5`:
+
+   ```powershell
+   @'
+   {
+     "name": "Release tags",
+     "target": "tag",
+     "enforcement": "active",
+     "conditions": { "ref_name": { "include": ["refs/tags/v*"], "exclude": [] } },
+     "rules": [
+       { "type": "creation" },
+       { "type": "update" },
+       { "type": "deletion" }
+     ],
+     "bypass_actors": [
+       { "actor_id": 5, "actor_type": "RepositoryRole", "bypass_mode": "always" }
+     ]
+   }
+   '@ | gh api --method POST repos/iAmChumby/canvas-rgb/rulesets --input -
+   ```
+
+6. Delete the repository secret: `gh secret delete UPDATE_SIGNING_KEY`. Both environments hold the key
+   after step 4, so nothing loses signing here. If a run then fails with "the UPDATE_SIGNING_KEY
+   secret is not set", a step above is missing: restore the old value from the backup with
+   `gh secret set UPDATE_SIGNING_KEY` (no `--env`), fix it, and delete it again.
+7. Prove that the environment secret is the one that signs: with the repository secret **already
+   deleted**, dispatch Test build from `main` (`gh workflow run test-build.yml --ref main`). A green
+   run there is the proof, because no repository secret exists to fall back on. A green run while the
+   repository secret still exists proves nothing about the environment: the same expression resolves
+   to the repository secret when the environment has no value of that name.
+8. Check it: `gh api repos/iAmChumby/canvas-rgb/environments` shows both environments, each with one
+   branch policy; `gh api repos/iAmChumby/canvas-rgb/environments/release/deployment-branch-policies`
+   shows the one tag policy; `gh api repos/iAmChumby/canvas-rgb/rulesets` shows the tag ruleset; and
+   `gh secret list` no longer lists `UPDATE_SIGNING_KEY`.
+9. Optional: a required reviewer on `release`, in Settings > Environments.
 
 The signing step reads the key from `TAURI_SIGNING_PRIVATE_KEY` and the password from
 `TAURI_SIGNING_PRIVATE_KEY_PASSWORD` (empty), with no `-f` or `-p` on the command line, and runs under
