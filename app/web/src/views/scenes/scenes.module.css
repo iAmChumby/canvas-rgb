@@ -960,6 +960,18 @@
   height: 44px;
 }
 
+/* A pattern's tile holds its dots and a three-line sentence, in the same 100 px: the dots are
+   shorter and the tile's padding and gap are tighter, so the sentence reads in full and the
+   tile (and the band with it) keeps its size. */
+.stage[data-state="pattern"] .stageMark {
+  gap: var(--s1);
+  padding: var(--s1);
+}
+
+.stage[data-state="pattern"] .stageDots {
+  height: 28px;
+}
+
 /* The caption under the picture: it is always there, so the picture's box never moves. */
 .stageCaption {
   margin: 0;
