@@ -1478,7 +1478,16 @@ pub fn scenes_create(api: &dyn Api, args: &CreateArgs, json: bool) -> Result<Out
             return Err(e);
         }
     };
-    let (saved, scene) = scene_answer(&answer, args.dry_run)?;
+    let (saved, scene) = match scene_answer(&answer, args.dry_run) {
+        Ok(done) => done,
+        Err(e) => {
+            // A real write the daemon says it did not save left nothing behind to account for.
+            if let (Some(record), true) = (record.as_mut(), says_not_saved(&answer)) {
+                clear_pending(record, "create", &key);
+            }
+            return Err(e);
+        }
+    };
     if let Some(mut record) = record {
         record.note(&scene);
         record.finish("create", &key);
@@ -1508,8 +1517,9 @@ pub fn scenes_edit(api: &dyn Api, args: &EditArgs, json: bool) -> Result<Output,
     let id = str_of(&found, "id").to_string();
     if record.made(&id).is_none() {
         return Err(CliError::Other(format!(
-            "{id} was not made by run {}; nothing changed",
-            args.run
+            "{id} was not made by run {}; nothing changed{}",
+            args.run,
+            pending_note(&record, &args.run)
         )));
     }
     let current: canvas_proto::scene::Scene = serde_json::from_value(found.clone())
@@ -1540,7 +1550,16 @@ pub fn scenes_edit(api: &dyn Api, args: &EditArgs, json: bool) -> Result<Output,
             return Err(e);
         }
     };
-    let (saved, scene) = scene_answer(&answer, args.dry_run)?;
+    let (saved, scene) = match scene_answer(&answer, args.dry_run) {
+        Ok(done) => done,
+        Err(e) => {
+            // A real write the daemon says it did not save left nothing behind to account for.
+            if !args.dry_run && says_not_saved(&answer) {
+                clear_pending(&mut record, "edit", &id);
+            }
+            return Err(e);
+        }
+    };
     if !args.dry_run {
         record.note(&scene);
         record.finish("edit", &id);
@@ -1559,30 +1578,17 @@ pub fn scenes_edit(api: &dyn Api, args: &EditArgs, json: bool) -> Result<Output,
 /// only the last one. The scene is copied into the run's folder, and the delete is saved to the
 /// record as pending, before the delete is sent.
 ///
-/// A scene the record does not list counts as the run's when the record holds a pending create
-/// of that name, the scene is not in the list the run first read, and it is still at `rev` 1:
-/// that is a create that was sent and never recorded.
+/// A scene the record does not list is never deleted, even when the record holds a pending
+/// create of its name: that create has no known outcome, and a scene of the same name may be
+/// one someone made by hand. The refusal says so, and the scene is left for the app.
 pub fn scenes_delete(api: &dyn Api, args: &DeleteArgs, json: bool) -> Result<Output, CliError> {
     let mut record = crate::agent_run::load(&args.run)?;
     let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
     let found = resolve_scene(&list, &args.scene, json)?;
     let id = str_of(&found, "id").to_string();
     let name = str_of(&found, "name").to_string();
-    let mut adopted = None;
-    let made = match record.made(&id).cloned() {
-        Some(made) => made,
-        None => match adoptable(&record, &found) {
-            Some((made, pending_name)) => {
-                adopted = Some(pending_name);
-                made
-            }
-            None => {
-                return Err(CliError::Other(format!(
-                    "{id} was not made by run {}; nothing changed",
-                    args.run
-                )));
-            }
-        },
+    let Some(made) = record.made(&id).cloned() else {
+        return Err(CliError::Other(delete_refusal(&record, &args.run, &id, &name)));
     };
     if list.get("active").and_then(|v| v.as_str()) == Some(id.as_str()) {
         return Err(CliError::Other(format!(
@@ -1611,69 +1617,72 @@ pub fn scenes_delete(api: &dyn Api, args: &DeleteArgs, json: bool) -> Result<Out
         }
         record.forget(&id);
         record.finish("delete", &id);
-        if let Some(pending_name) = &adopted {
-            record.finish("create", pending_name);
-        }
         record.save().map_err(|e| {
             CliError::Other(format!(
                 "the scene {id} was deleted, but its run record could not be written: {e}"
             ))
         })?;
     }
-    let adoption = adopted.as_ref().map(|_| {
-        format!(
-            "{id} was made by run {}: its create was sent but never written to the record, so the run owns it.",
-            args.run
-        )
-    });
     Ok(if json {
-        let mut document = serde_json::json!({ "saved": !args.dry_run, "run": args.run, "deleted": id });
-        if adoption.is_some() {
-            document["adopted"] = serde_json::Value::Bool(true);
-        }
-        Output::Json(document)
+        Output::Json(serde_json::json!({ "saved": !args.dry_run, "run": args.run, "deleted": id }))
     } else {
         let said = if args.dry_run { "would delete" } else { "deleted" };
-        let lead = adoption.map(|sentence| format!("{sentence}\n")).unwrap_or_default();
-        Output::Text(format!("{lead}{said} {id}\n"))
+        Output::Text(format!("{said} {id}\n"))
     })
 }
 
-/// The scene a record with a pending create may adopt: its entry is a `create` of the scene's
-/// name (case aside), the scene was not in the list the run first read, and it is at `rev` 1,
-/// where a create leaves it. Answers the scene as the run's, and the pending entry's name.
-fn adoptable(
-    record: &crate::agent_run::RunRecord,
-    found: &serde_json::Value,
-) -> Option<(crate::agent_run::MadeScene, String)> {
-    let id = str_of(found, "id");
-    let name = str_of(found, "name");
-    let rev = found.get("rev").and_then(|v| v.as_u64())?;
-    if rev != 1 || record.had_before(id) || id == "?" {
-        return None;
-    }
-    let pending = record
+/// The refusal for a scene the run's record does not list. When the record holds a pending
+/// create of this scene's name (case aside), it says that create has no known outcome and leaves
+/// the scene to the app; otherwise it names any pending writes the run holds.
+fn delete_refusal(record: &crate::agent_run::RunRecord, run: &str, id: &str, name: &str) -> String {
+    let same_name = record
         .pending
         .iter()
-        .find(|p| p.op == "create" && p.scene.trim().eq_ignore_ascii_case(name.trim()))?;
-    let made = crate::agent_run::MadeScene { id: id.to_string(), name: name.to_string(), rev };
-    Some((made, pending.scene.clone()))
+        .any(|p| p.op == "create" && p.scene.trim().eq_ignore_ascii_case(name.trim()));
+    if same_name {
+        return format!(
+            "{id} was not recorded as made by run {run}, and a create of \"{name}\" by this run has no known outcome, so nothing was deleted; delete it in the app if it is the run's."
+        );
+    }
+    format!("{id} was not made by run {run}; nothing changed{}", pending_note(record, run))
 }
 
-/// A write failed after its pending entry was saved. When the daemon refused it, or it never
-/// went out, the write did not happen: the entry is removed (the record is saved again; if that
-/// fails, the entry stays, which only says more). When the outcome is unknown (no answer, or a
-/// `5xx`) the entry stays, so the record shows a write that may have landed.
-fn settle_pending(record: &mut crate::agent_run::RunRecord, op: &str, scene: &str, error: &CliError) {
-    let unknown = match error {
-        CliError::NoAnswer(_) => true,
-        CliError::Api { status, .. } => *status >= 500,
-        _ => false,
-    };
-    if !unknown {
-        record.finish(op, scene);
-        let _ = record.save();
+/// A sentence naming the writes a run's record holds with no known outcome, or nothing when it
+/// holds none: ` Run x holds writes with no known outcome: create Night, delete movie.`
+fn pending_note(record: &crate::agent_run::RunRecord, run: &str) -> String {
+    if record.pending.is_empty() {
+        return String::new();
     }
+    let list: Vec<String> = record.pending.iter().map(|p| format!("{} {}", p.op, p.scene)).collect();
+    format!(". Run {run} holds writes with no known outcome: {}.", list.join(", "))
+}
+
+/// A write failed after its pending entry was saved. The entry is removed only when the write
+/// certainly did not happen: the daemon refused it (an API error under `500`), or nothing was
+/// ever connected to (`NotRunning`, `NotTrusted`). Every other failure keeps the entry, because
+/// the request may have reached the daemon first: no answer, a `5xx`, and an error the transport
+/// raised mid-request (a reset after the body went out). The record is saved again after the
+/// removal; if that fails, the entry stays, which only says more.
+fn settle_pending(record: &mut crate::agent_run::RunRecord, op: &str, scene: &str, error: &CliError) {
+    let refused = match error {
+        CliError::NotRunning(_) | CliError::NotTrusted(_) => true,
+        CliError::Api { status, .. } => *status < 500,
+        CliError::NoAnswer(_) | CliError::Other(_) => false,
+    };
+    if refused {
+        clear_pending(record, op, scene);
+    }
+}
+
+/// Removes a pending entry and saves the record; a failed save leaves the entry on disk.
+fn clear_pending(record: &mut crate::agent_run::RunRecord, op: &str, scene: &str) {
+    record.finish(op, scene);
+    let _ = record.save();
+}
+
+/// True when an answer says, in so many words, that the daemon did not save.
+fn says_not_saved(answer: &serde_json::Value) -> bool {
+    answer.get("saved").and_then(|v| v.as_bool()) == Some(false)
 }
 
 /// The parts of a version `major.minor.patch`, with a leading `v` and any `-pre` or `+build`
@@ -3528,6 +3537,9 @@ mod tests {
         status: serde_json::Value,
         /// Runs when a request other than a read arrives, before it is answered.
         on_write: Option<Box<dyn Fn()>>,
+        /// When set, a request other than a read fails with this error, after `on_write` ran:
+        /// the daemon saw the request, and the caller learns nothing of what it did.
+        write_error: Option<Box<dyn Fn() -> CliError>>,
         asked: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
         status_reads: std::sync::atomic::AtomicUsize,
     }
@@ -3539,6 +3551,7 @@ mod tests {
                 reply,
                 status: serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
                 on_write: None,
+                write_error: None,
                 asked: std::sync::Mutex::new(Vec::new()),
                 status_reads: std::sync::atomic::AtomicUsize::new(0),
             }
@@ -3561,6 +3574,12 @@ mod tests {
         /// Something to do when a write arrives, before the daemon answers it.
         fn on_write(mut self, hook: impl Fn() + 'static) -> Self {
             self.on_write = Some(Box::new(hook));
+            self
+        }
+
+        /// Makes every write fail with this error once the daemon has "seen" it.
+        fn write_fails_with(mut self, make: impl Fn() -> CliError + 'static) -> Self {
+            self.write_error = Some(Box::new(make));
             self
         }
 
@@ -3599,6 +3618,9 @@ mod tests {
             if method != "GET" {
                 if let Some(hook) = &self.on_write {
                     hook();
+                }
+                if let Some(make) = &self.write_error {
+                    return Err(make());
                 }
             }
             match &self.reply {
@@ -4094,6 +4116,7 @@ mod tests {
         let too_long = "a".repeat(65);
         for run in [
             "../x", "", too_long.as_str(), ".", ".x", "x.", "con", "NUL", "com1", "lpt9.json",
+            "com0", "LPT0", "conin$", "conout$",
         ] {
             let api = RunApi::answering(run_scenes(), a_saved_scene());
             let create = CreateArgs { name: "Night".into(), from: None, run: Some(run.to_string()), dry_run: false };
@@ -4385,55 +4408,193 @@ mod tests {
     }
 
     #[test]
-    fn a_scene_the_run_created_but_never_recorded_can_be_deleted_by_that_run() {
-        let home = TempHome::new("adopt");
+    fn a_scene_the_record_does_not_list_is_never_deleted_whatever_its_pending_create_says() {
+        let home = TempHome::new("no-adoption");
         let mut list = run_scenes();
         list["scenes"]
             .as_array_mut()
             .unwrap()
             .push(serde_json::json!({ "id": "night", "name": "Night", "rev": 1, "groups": [] }));
-        let pending = serde_json::json!([{ "op": "create", "scene": "Night" }]);
-        home.write("agent-runs/agent-1.json", &a_record_pending(serde_json::json!([]), "gaming", pending));
-        let api = RunApi::answering(list.clone(), serde_json::Value::Null);
-        let args = DeleteArgs { scene: "night".into(), run: "agent-1".into(), force: false, dry_run: false };
-        let text = text_of(scenes_delete(&api, &args, false).unwrap());
-        assert_eq!(
-            text,
-            "night was made by run agent-1: its create was sent but never written to the record, so the run owns it.\ndeleted night\n"
-        );
-        let (method, path, _) = api.write();
-        assert_eq!((method.as_str(), path.as_str()), ("DELETE", "/api/v1/scenes/night"));
-        assert!(record_json(&home).get("pending").is_none(), "the create is settled: {}", record_json(&home));
+        let night = DeleteArgs { scene: "night".into(), run: "agent-1".into(), force: false, dry_run: false };
+        let refusal = "night was not recorded as made by run agent-1, and a create of \"Night\" by this run has no known outcome, so nothing was deleted; delete it in the app if it is the run's.";
 
-        // Not at rev 1: someone changed it, so it is not provably the run's.
+        // A pending create of this name, the scene at rev 1, not in the first list: still refused.
+        // `--force` does not change that, and neither does `--json`.
+        let record = a_record_pending(
+            serde_json::json!([]),
+            "gaming",
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+        );
+        home.write("agent-runs/agent-1.json", &record);
+        let files = home.files();
+        for (force, json) in [(false, false), (true, false), (false, true)] {
+            let api = RunApi::answering(list.clone(), serde_json::Value::Null);
+            let args = DeleteArgs { scene: "night".into(), run: "agent-1".into(), force, dry_run: false };
+            let error = scenes_delete(&api, &args, json).expect_err("a scene the record does not list");
+            assert_eq!(error.to_string(), refusal, "force {force}, json {json}");
+            assert!(!error.to_string().contains('\n'), "one sentence");
+            assert!(
+                api.asked().iter().all(|(method, _, _)| method == "GET"),
+                "the fake got no delete request: {:?}",
+                api.asked()
+            );
+            assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record, "the record is as it was");
+            assert_eq!(home.files(), files, "no copy was written");
+        }
+
+        // The pending name matches without regard to case, and a changed rev makes no difference.
         let mut changed = list.clone();
         changed["scenes"][3]["rev"] = serde_json::json!(2);
         home.write(
             "agent-runs/agent-1.json",
-            &a_record_pending(serde_json::json!([]), "gaming", serde_json::json!([{ "op": "create", "scene": "Night" }])),
+            &a_record_pending(
+                serde_json::json!([]),
+                "gaming",
+                serde_json::json!([{ "op": "create", "scene": "NIGHT" }]),
+            ),
         );
         let api = RunApi::answering(changed, serde_json::Value::Null);
-        let error = scenes_delete(&api, &args, false).expect_err("rev 2 is not adopted");
-        assert_eq!(error.to_string(), "night was not made by run agent-1; nothing changed");
+        assert_eq!(scenes_delete(&api, &night, false).unwrap_err().to_string(), refusal);
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
 
-        // A scene that was in the list before the run is never adopted, whatever its name.
-        let mut at_rev_one = run_scenes();
-        at_rev_one["scenes"][2]["rev"] = serde_json::json!(1);
-        let api = RunApi::answering(at_rev_one, serde_json::Value::Null);
+        // A pending create of another name: the plain refusal, with the pending write named.
         home.write(
             "agent-runs/agent-1.json",
-            &a_record_pending(serde_json::json!([]), "gaming", serde_json::json!([{ "op": "create", "scene": "Sleep" }])),
+            &a_record_pending(
+                serde_json::json!([]),
+                "gaming",
+                serde_json::json!([{ "op": "create", "scene": "Other" }, { "op": "delete", "scene": "movie" }]),
+            ),
         );
-        let sleep = DeleteArgs { scene: "sleep".into(), run: "agent-1".into(), force: true, dry_run: false };
+        let api = RunApi::answering(list.clone(), serde_json::Value::Null);
         assert_eq!(
-            scenes_delete(&api, &sleep, false).unwrap_err().to_string(),
+            scenes_delete(&api, &night, false).unwrap_err().to_string(),
+            "night was not made by run agent-1; nothing changed. Run agent-1 holds writes with no known outcome: create Other, delete movie."
+        );
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
+
+        // No pending write: the plain refusal, with nothing added.
+        home.write("agent-runs/agent-1.json", &a_record(serde_json::json!([]), "gaming"));
+        let api = RunApi::answering(list.clone(), serde_json::Value::Null);
+        assert_eq!(
+            scenes_delete(&api, &night, false).unwrap_err().to_string(),
+            "night was not made by run agent-1; nothing changed"
+        );
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
+    }
+
+    #[test]
+    fn an_edit_of_a_scene_the_run_did_not_make_names_the_writes_the_run_holds() {
+        let home = TempHome::new("edit-names-pending");
+        let groups = a_groups_file(&home);
+        let edit = EditArgs { scene: "sleep".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record_pending(
+                serde_json::json!([]),
+                "gaming",
+                serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            ),
+        );
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        assert_eq!(
+            scenes_edit(&api, &edit, false).unwrap_err().to_string(),
+            "sleep was not made by run agent-1; nothing changed. Run agent-1 holds writes with no known outcome: create Night."
+        );
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"), "{:?}", api.asked());
+        // With nothing pending, the sentence is as it was.
+        home.write("agent-runs/agent-1.json", &a_record(serde_json::json!([]), "gaming"));
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        assert_eq!(
+            scenes_edit(&api, &edit, false).unwrap_err().to_string(),
             "sleep was not made by run agent-1; nothing changed"
         );
-        // And with no pending create, nothing is adopted.
-        home.write("agent-runs/agent-1.json", &a_record(serde_json::json!([]), "gaming"));
-        let api = RunApi::answering(list, serde_json::Value::Null);
-        assert!(scenes_delete(&api, &args, false).is_err());
-        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
+    }
+
+    #[test]
+    fn a_failure_the_daemon_may_have_seen_keeps_the_pending_entry_and_a_certain_refusal_clears_it() {
+        let home = TempHome::new("pending-other");
+        let made = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let create = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let delete = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: false, dry_run: false };
+
+        // An error the transport raised after the request went out (a reset, say) is `Other`:
+        // the write may have landed, so create, edit and delete all keep their entry.
+        let reset = || CliError::Other("connection reset by peer".to_string());
+        let api = RunApi::answering(run_scenes(), a_saved_scene()).write_fails_with(reset);
+        scenes_create(&api, &create, false).expect_err("reset");
+        assert_eq!(
+            record_json(&home)["pending"],
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            "Other after the write arrived keeps the create pending"
+        );
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::answering(run_scenes(), a_saved_scene()).write_fails_with(reset);
+        scenes_edit(&api, &edit, false).expect_err("reset");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "edit", "scene": "movie" }]));
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null).write_fails_with(reset);
+        scenes_delete(&api, &delete, false).expect_err("reset");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+
+        // No answer in time keeps it too.
+        home.write("agent-runs/agent-1.json", &made);
+        let slow = || CliError::NoAnswer("slow".to_string());
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null).write_fails_with(slow);
+        scenes_delete(&api, &delete, false).expect_err("no answer");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+
+        // A definite refusal clears it: the daemon not running, not trusted, or a 4xx.
+        for (label, make) in [
+            ("not running", (|| CliError::NotRunning("port".to_string())) as fn() -> CliError),
+            ("not trusted", || CliError::NotTrusted("someone else".to_string())),
+        ] {
+            home.write("agent-runs/agent-1.json", &made);
+            let api = RunApi::answering(run_scenes(), serde_json::Value::Null).write_fails_with(make);
+            scenes_delete(&api, &delete, false).expect_err(label);
+            assert!(record_json(&home).get("pending").is_none(), "{label} clears the pending delete");
+        }
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::failing(run_scenes(), 499, serde_json::json!({ "message": "no" }));
+        scenes_delete(&api, &delete, false).expect_err("499");
+        assert!(record_json(&home).get("pending").is_none(), "a status under 500 clears it");
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::failing(run_scenes(), 500, serde_json::json!({ "message": "no" }));
+        scenes_delete(&api, &delete, false).expect_err("500");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+    }
+
+    #[test]
+    fn a_real_write_answered_saved_false_clears_its_pending_entry() {
+        let home = TempHome::new("saved-false");
+        let not_saved = serde_json::json!({ "saved": false, "scene": a_saved_scene() });
+        let create = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let api = RunApi::answering(run_scenes(), not_saved.clone());
+        let error = scenes_create(&api, &create, false).expect_err("the daemon says it did not save");
+        assert_eq!(error.to_string(), "the daemon says it did not save the scene");
+        assert!(record_json(&home).get("pending").is_none(), "create: nothing was saved, so nothing is pending");
+
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let api = RunApi::answering(run_scenes(), not_saved);
+        let error = scenes_edit(&api, &edit, false).expect_err("the daemon says it did not save");
+        assert_eq!(error.to_string(), "the daemon says it did not save the scene");
+        assert!(record_json(&home).get("pending").is_none(), "edit: nothing was saved, so nothing is pending");
+
+        // An answer that is no scene says nothing about whether it saved: the entry stays.
+        let api = RunApi::answering(run_scenes(), serde_json::json!({ "unexpected": 1 }));
+        scenes_create(&api, &create, false).expect_err("not a scene");
+        assert_eq!(
+            record_json(&home)["pending"],
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            "only an explicit saved: false clears it"
+        );
     }
 
     #[test]

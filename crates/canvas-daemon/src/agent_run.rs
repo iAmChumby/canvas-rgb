@@ -3,7 +3,7 @@
 //!
 //! A run is named by `canvas-rgb ... --run <run>`: 1 to 64 of `A-Z`, `a-z`, `0-9`, `.`, `_` and
 //! `-`, never `..`, never a leading or trailing `.`, never a Windows device name (`con`, `nul`,
-//! `com1`...), checked before it is ever joined to a path. The record is
+//! `com0`...), checked before it is ever joined to a path. The record is
 //! `<home>/agent-runs/<run>.json`, where `<home>` is [`crate::paths::home`], so
 //! `CANVAS_RGB_HOME` moves it. Every scene an `edit` or a `delete` is about to change is
 //! written whole, first, to `<home>/agent-runs/<run>/<scene>.rev<rev>.json`: that copy is the
@@ -39,13 +39,13 @@ pub fn is_run_id(run: &str) -> bool {
 }
 
 /// True when the part of `name` before its first dot is a Windows device name (`con`, `prn`,
-/// `aux`, `nul`, `com1`-`com9`, `lpt1`-`lpt9`), in any case: `con.json` is the console too.
+/// `aux`, `nul`, `com0`-`com9`, `lpt0`-`lpt9`), in any case: `con.json` is the console too.
 fn is_device_name(name: &str) -> bool {
     let stem = name.split('.').next().unwrap_or_default().to_ascii_lowercase();
     matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
         || ["com", "lpt"].iter().any(|prefix| {
             stem.strip_prefix(prefix)
-                .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+                .is_some_and(|n| matches!(n, "0" | "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
         })
 }
 
@@ -160,14 +160,6 @@ impl RunRecord {
         }
     }
 
-    /// True when the scene was in the `before` list the run read at its first write.
-    pub fn had_before(&self, id: &str) -> bool {
-        self.before
-            .get("scenes")
-            .and_then(|v| v.as_array())
-            .is_some_and(|scenes| scenes.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)))
-    }
-
     /// What the record says about one scene, if the run made it.
     pub fn made(&self, id: &str) -> Option<&MadeScene> {
         self.scenes.iter().find(|scene| scene.id == id)
@@ -273,7 +265,7 @@ mod tests {
         for bad in [
             "", "..", "../x", "a/b", r"a\b", "a b", too_long.as_str(), "a..b", "café", "a:b",
             ".", ".x", "x.", "con", "CON", "Nul", "aux", "prn", "com1", "COM9", "lpt1", "LPT9", "con.json",
-            "nul.x.y",
+            "nul.x.y", "com0", "COM0", "lpt0", "Lpt0.txt", "conin$", "conout$", "con$",
         ] {
             assert!(!is_run_id(bad), "{bad:?} is not a run id");
         }
