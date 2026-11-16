@@ -41,14 +41,13 @@ export interface MoveStepProps {
 const FAILED_LINE = "Could not check this move.";
 
 /**
- * The key one row's answer is kept under: the mode and the scene.
+ * The key one row's answer is kept under: the scene, and the question the answer answers.
  *
- * The mode is part of it, so a row of the copy step never shows the answer of the move step, and
- * a step that switches between the two asks the daemon again instead of showing the other's
- * answer.
+ * The question is part of it, so a row of the copy step never shows the answer of the move step,
+ * and a row whose answer was made with an older revision never shows it either.
  */
-function rowKey(copy: boolean, id: string): string {
-  return `${copy ? "copy" : "move"}:${id}`;
+function rowKey(id: string, question: string): string {
+  return `${id}@${question}`;
 }
 
 /** The daemon's own refusal, when it refused. */
@@ -102,16 +101,21 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
   }, [scenes, targetIds]);
 
   /**
-   * The revisions the daemon has now: the scene the group is in, and every scene it may go to.
+   * The question the rows are asking: the mode, the scene the group is in, and the revision every
+   * scene is at.
    *
-   * A revision that moves means the answer on the row was made with an older one, so the step
-   * asks again: the next click must carry the revisions the daemon has, not the ones it had.
+   * A revision that moves means the answer on a row was made with an older one, so the question
+   * is a new one: the rows ask the daemon again, and the next click carries the revisions the
+   * daemon has now.
    */
-  const revsKey = useMemo(() => {
-    const parts = [`${scene?.id ?? ""}@${scene?.rev ?? -1}`];
+  const question = useMemo(() => {
+    const parts = [`${copy ? "copy" : "move"}`, `${scene?.id ?? ""}@${scene?.rev ?? -1}`];
     for (const target of others) parts.push(`${target.id}@${target.rev}`);
     return parts.join("|");
-  }, [scene?.id, scene?.rev, others]);
+  }, [copy, scene?.id, scene?.rev, others]);
+
+  /** The key one row's answer is kept under. */
+  const keyOf = useCallback((id: string) => rowKey(id, question), [question]);
 
   /** What the daemon answered for each scene: pending, answered, refused or failed. */
   const [checks, setChecks] = useState<Record<string, MoveCheck>>({});
@@ -161,7 +165,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
   /** Asks the daemon what a move to one scene would do. It writes nothing. */
   const ask = useCallback(
     async (toSceneId: string) => {
-      const key = rowKey(copy, toSceneId);
+      const key = keyOf(toSceneId);
       const born = (questions.current.get(key) ?? 0) + 1;
       questions.current.set(key, born);
       setChecks((c) => ({ ...c, [key]: { state: "pending" } }));
@@ -171,7 +175,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
       if (!mounted.current || questions.current.get(key) !== born) return;
       setChecks((c) => ({ ...c, [key]: answer }));
     },
-    [copy, groupId, use.dryRunMove],
+    [copy, groupId, keyOf, use.dryRunMove],
   );
 
   /** Asks the daemon about every scene again: the answers on the rows are older than the daemon's. */
@@ -183,7 +187,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
   // copying, and when a scene's revision moves under it.
   useEffect(() => {
     for (const id of targetIds) void ask(id);
-  }, [ask, targetIds, revsKey]);
+  }, [ask, targetIds]);
 
   /** How many of the group's devices are away: they move with the group, but they are not lit. */
   const away = useMemo(() => {
@@ -196,7 +200,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
   const commit = async (target: Scene) => {
     // One move at a time: a second one would carry the same revisions and be refused.
     if (moving.current) return;
-    const check = checks[rowKey(copy, target.id)];
+    const check = checks[keyOf(target.id)];
     if (!check || check.state !== "answered") return;
     moving.current = true;
     setBusy(target.id);
@@ -221,7 +225,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
       <p className={s.lead}>{copy ? "Pick the scene that gets a copy." : "Pick the scene it goes to."}</p>
       <div className={s.rows}>
         {others.map((target, i) => {
-          const check = checks[rowKey(copy, target.id)];
+          const check = checks[keyOf(target.id)];
           const state = check?.state ?? "pending";
           const refused = refusalOf(check);
           const answer = answerOf(check);
