@@ -882,16 +882,40 @@ fn page(iterations: u64, scripts: usize) -> String {
     )
 }
 
+/// Turn one probe load into a sample for the calibration loop: `None` means the scripts did
+/// not fit the load budget. Only a `Timeout` means that. Any other load error is a fault in
+/// the probe or the library, and silently reading it as a budget overrun hides the real
+/// failure (PR #69 review, follow-up #72); it must surface instead.
+fn load_outcome(result: &Result<canvas_html::HtmlEffect, canvas_html::HtmlError>, took: f64) -> Option<f64> {
+    match result {
+        Ok(_) => Some(took),
+        Err(canvas_html::HtmlError::Timeout(_)) => None,
+        Err(other) => panic!("the probe page failed to load with a reason that is not a timeout: {other}"),
+    }
+}
+
 /// How long the page takes to load, in seconds. `None` when the load ran out of time, which
 /// means the scripts did not fit in the load budget.
 fn load_seconds(iterations: u64, scripts: usize) -> Option<f64> {
     let start = std::time::Instant::now();
     let result = HtmlEffect::from_source("t", &page(iterations, scripts), &Props::new());
     let took = start.elapsed().as_secs_f64();
-    match result {
-        Ok(_) => Some(took),
-        Err(_) => None,
-    }
+    load_outcome(&result, took)
+}
+
+#[test]
+#[should_panic(expected = "reason that is not a timeout")]
+fn a_non_timeout_load_error_is_not_read_as_a_budget_overrun() {
+    // A script that throws fails to load with `HtmlError::Script`, not `Timeout`. The
+    // calibration loop reads `None` as "the scripts did not fit the budget", so mapping this
+    // error to `None` would report a load fault as a measurement. The probe must panic on it.
+    let html = r##"<head><title>T</title></head>
+<body><canvas id="c" width="4" height="4"></canvas></body>
+<script>throw new Error("a plain script fault");</script>"##;
+    let start = std::time::Instant::now();
+    let result = HtmlEffect::from_source("t", html, &Props::new());
+    let took = start.elapsed().as_secs_f64();
+    let _ = load_outcome(&result, took);
 }
 
 #[test]

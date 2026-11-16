@@ -257,7 +257,9 @@
   align-items: center;
   min-height: calc(100vh - var(--header-h));
   min-height: calc(100svh - var(--header-h));
-  border-bottom: 1px solid var(--line);
+  /* No bottom border: the field of light extends past the hero and fades out below it, so a
+     1px rule here showed through the pool as a dip (issue #63). The light fading into the
+     empty band below the hero is the transition; any rule here would show through it. */
 }
 
 /* The field of light behind the mark. It covers the whole hero, so the light can follow the
