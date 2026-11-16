@@ -139,11 +139,12 @@ describe("the plan's numbers on a phone", () => {
     expect(pressed!.body).toContain("var(--t14)");
   });
 
-  it("holds three lines of the strip at every width, so the note cannot move a panel", () => {
-    // One rule holds the height, at every width: three 14 px lines at the sheet's 1.45 line
-    // height, plus the 2 px between the status word and its note. A media block that wrote two
-    // lines again would show up as a second rule here, and the unreadable pad's note could
-    // then push the panels below it down when it wraps.
+  it("holds three lines of the strip at every width, by holding the height in one rule", () => {
+    // The width claim is this count: no width is measured here. The height lives in one rule
+    // with no media override, so it is the same at every width: three 14 px lines at the
+    // sheet's 1.45 line height, plus the 2 px between the status word and its note. A media
+    // block that wrote two lines again would show up as a second rule here, and the unreadable
+    // pad's note (61 characters, two lines at 390) could then push the panels below it down.
     const states = app.filter((rule) => rule.selectors.includes(".pad-state"));
     expect(states.length).toBe(1);
     expect(states[0]!.body).toMatch(/min-height: calc\(var\(--t14\) \* 3 \* 1\.45 \+ 2px\)/);
