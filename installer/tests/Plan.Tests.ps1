@@ -125,6 +125,19 @@ try {
         Assert-True $r.Out.Contains('WhatIf: nothing was changed')
         Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
     }
+
+    # The uninstall wrapper gets the same check setup.cmd has (#82): a wrapper that stopped passing
+    # its arguments through, or that hid the plan, would leave the page telling people about a
+    # command that no longer does what uninstall.ps1 does.
+    Test-Case 'uninstall.cmd -WhatIf runs uninstall.ps1 -WhatIf: exits 0, prints the plan, writes nothing' {
+        $cmdFile = Join-Path $PSScriptRoot '..\uninstall.cmd'
+        $line = 'set "ProgramData={0}" && set "APPDATA={1}" && "{2}" -WhatIf' -f $fakePd, $fakeAd, $cmdFile
+        $out = & cmd.exe /d /c $line 2>&1 | Out-String
+        Assert-Equal $LASTEXITCODE 0 $out
+        Assert-True $out.Contains('--restore-bios') "the wrapper ran uninstall.ps1: $out"
+        Assert-True $out.Contains('WhatIf: nothing was changed') $out
+        Assert-Equal @(Get-ChildItem -LiteralPath $fake -Recurse -Force).Count 2 'only the two empty folders may exist'
+    }
 } finally { Remove-Item -LiteralPath $fake -Recurse -Force -ErrorAction SilentlyContinue }
 
 Complete-Tests 'Plan'
