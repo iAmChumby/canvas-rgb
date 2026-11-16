@@ -1176,7 +1176,7 @@ function ControllerPanel({
 
   return (
     <Panel title={detail.info.name}>
-      {/* What the pad is doing: two lines held in every state, so nothing below it moves. */}
+      {/* What the pad is doing: three lines held in every state, so nothing below it moves. */}
       <div className="pad-state" data-state={pad.status} role="status">
         <span className="pad-state-dot" aria-hidden="true" />
         <span className="pad-state-line">

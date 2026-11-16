@@ -6773,19 +6773,19 @@ button.chip:hover {
 }
 
 /*
- * The strip that says what the pad is doing (#375). It is the same height in every state, so
- * the panels below it never move: two lines are held for the longest of the four, and the
- * second line of the same two carries the one note a state can add.
+ * The strip that says what the pad is doing (#375). It is the same height in every state and at
+ * every width, so the panels below it never move: three lines are held, plus the 2 px between
+ * the status word and its note, because the longest note wraps to two lines on a phone.
  */
 .pad-state {
   display: flex;
   align-items: center;
   gap: var(--s2);
-  min-height: calc(var(--t14) * 2 * 1.45);
+  min-height: calc(var(--t14) * 3 * 1.45 + 2px);
   margin-bottom: var(--s3);
 }
 
-/* The two lines of the strip, in one column, so the note sits under the state's own words. */
+/* The status line and its note, in one column, so the note sits under the state's own words. */
 .pad-state-line {
   flex: 1;
   min-width: 0;
@@ -6893,16 +6893,6 @@ button.chip:hover {
 
   .pad-print {
     font-size: 16px;
-  }
-}
-
-/*
- * The second line can wrap to two lines at a phone's width, so three lines are held in every
- * state here: the strip is the same height in all of them, and no panel below it moves.
- */
-@media (max-width: 620px) {
-  .pad-state {
-    min-height: calc(var(--t14) * 3 * 1.45);
   }
 }
 
