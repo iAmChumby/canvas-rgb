@@ -6285,11 +6285,12 @@ button.chip:hover {
   }
 }
 
-/* A desktop shell whose page is only 640 px wide (a 721-752 px window) is the one band where the
-   window is not a phone but the page is at the phone edge: the 639 px block above and the 720 px
-   window rules below both miss it, and the Access switches sat 21 px past the page (#89). Wrap the
-   head here too; the sections keep their columns. */
-@container page (max-width: 640px) {
+/* A desktop shell whose page is 641-660 px wide (a 753-772 px window) is the band where the window
+   is not a phone but the head still needs about 661 px to keep Access on one line: the 639 px block
+   above and the 720 px window rules below both miss it, and the Read/Change switches ran up to 20 px
+   past the page (#89). Wrap the head here too, with the same gap and alignment as the 639 px block so
+   pages 639 and 640 look the same; the sections keep their columns. */
+@container page (max-width: 660px) {
   .rd-peripherals .peripheral-head {
     flex-wrap: wrap;
   }
@@ -6300,6 +6301,8 @@ button.chip:hover {
     border-left: 0;
     flex: 1 1 100%;
     flex-wrap: wrap;
+    gap: var(--s3);
+    justify-content: flex-end;
   }
 }
 
@@ -6420,6 +6423,9 @@ button.chip:hover {
   display: flex;
   align-items: center;
   gap: var(--s3);
+  /* Let the Access switches drop to their own line whenever they stop fitting, at any window width.
+     While everything fits on one line the wrap never triggers, so wide windows look the same (#89). */
+  flex-wrap: wrap;
 }
 
 .peripheral-head-icon {
