@@ -529,6 +529,44 @@ mod tests {
     }
 
     #[test]
+    fn a_series_re_set_up_as_a_mirror_keeps_p1_and_drops_the_groups_it_empties() {
+        // Guard: this passes on the code it was added to. It is the coverage the mirror re-setup
+        // lacked: `rewrite_scenes` keeps `p1` where it is held, drops `p2` and `p3` where they are,
+        // drops the group they left empty, and the one light left is the mirror, with its copies.
+        let d = device();
+        let (p1, p2, p3) = (
+            part_light_id(&d, ZONE, 1),
+            part_light_id(&d, ZONE, 2),
+            part_light_id(&d, ZONE, 3),
+        );
+        let lights = lights_file(vec![
+            old_part(&d, ZONE, 1, (0, 8), "Fan 1", ChainPartKind::Fan, false),
+            old_part(&d, ZONE, 2, (8, 8), "Fan 2", ChainPartKind::Fan, false),
+            old_part(&d, ZONE, 3, (16, 8), "Fan 3", ChainPartKind::Fan, false),
+        ]);
+        let scenes = scenes(vec![scene(
+            "desk",
+            vec![
+                group("front", &[p1.as_str()]),
+                group("rear", &[p2.as_str(), p3.as_str()]),
+            ],
+        )]);
+
+        let plan = plan_commit(&lights, &scenes, &d, ZONE, &[mirrored(Some(8))], 300)
+            .expect("a mirror row fits");
+
+        assert_eq!(plan.lights.lights.len(), 1);
+        assert_eq!(plan.lights.lights[0].id, p1);
+        assert_eq!(plan.lights.lights[0].copies, Some(8));
+        assert_eq!(plan.final_leds, 8, "the run counts once, never 24");
+        assert_eq!(plan.scenes.scenes[0].groups.len(), 1, "the emptied group goes");
+        assert_eq!(plan.scenes.scenes[0].groups[0].id, "front");
+        assert_eq!(plan.scenes.scenes[0].groups[0].members, vec![p1.clone()]);
+        validate_scene(&plan.scenes.scenes[0], &plan.lights.lights)
+            .expect("a planned scene validates");
+    }
+
+    #[test]
     fn growing_a_chain_adds_unassigned_parts() {
         let d = device();
         let (p1, p2) = (part_light_id(&d, ZONE, 1), part_light_id(&d, ZONE, 2));
