@@ -12,15 +12,18 @@ name: Test build
 # committed.
 #
 # The shape is release.yml's: every third-party action pinned to a full commit SHA, a read-only build job,
-# and the update signing key in one step of the sign job, which builds no project code.
+# and the update signing key in one step of the sign job, which builds no project code. The key is an
+# environment secret of the `test-build` environment, and that environment's deployment policy allows the
+# `main` branch alone, so the sign job cannot deploy from any other ref whatever this file says (#234).
 # Manual only. The build job runs npm lifecycle scripts and cargo build scripts, and the sign job signs what
 # they made with the release key, so a signed build is code that installs as SYSTEM with no prompt. A push
 # trigger would sign every main commit; a person starts this one, from main, when a test build is wanted.
 #
 # The experimental publisher (#203) calls this workflow, so a signed test build is built and signed in
-# one place. The caller passes the signing key in; it is read in the sign step only, as it is here, and
-# the build job never sees it. The github context belongs to the caller, so the guards below (main
-# only) are the caller's: a publish from main builds and signs exactly what a manual test build would.
+# one place. The caller passes the secret's name in, which a reusable workflow requires, and the sign
+# job's environment secret is the value it reads; the build job never sees it. The github context
+# belongs to the caller, so the guards below (main only) are the caller's: a publish from main builds
+# and signs exactly what a manual test build would.
 #
 # The dev version is one source for both paths: the UTC clock at the moment the build job runs. The
 # run number counts up in every workflow on its own, so a manual test build (-dev.50) and a publish
@@ -38,6 +41,10 @@ on:
         type: boolean
         default: false
     secrets:
+      # A reusable workflow gets a secret only if its caller names it, so the publisher passes this
+      # name. The value the sign job reads is the `test-build` environment secret, which takes
+      # precedence over a repository secret of the same name (GitHub: Reuse workflows, "Using inputs
+      # and secrets in a reusable workflow"). required: true fails the run when a caller forgets it.
       UPDATE_SIGNING_KEY:
         required: true
     outputs:
@@ -141,12 +148,18 @@ jobs:
   # from a committed lockfile (integrity hashes, no install scripts) and signs the exe the build job made,
   # after checking that exe against the build job's .sha256. The signature carries the dev version
   # (--app-version), which the service reads back and compares with its own.
+  #
+  # The key is the UPDATE_SIGNING_KEY secret of the `test-build` environment (#234). That environment's
+  # deployment policy allows `main` alone, so GitHub refuses this job from any other branch or tag, and
+  # the key the signing step reads below is the environment's value; a job outside this environment
+  # cannot read it, whatever the file says.
   sign:
     needs: build
     # Never signs a build of a branch: the key signs main's code only.
     if: github.ref == 'refs/heads/main'
     runs-on: windows-latest
     timeout-minutes: 10
+    environment: test-build
     permissions:
       contents: read
     steps:

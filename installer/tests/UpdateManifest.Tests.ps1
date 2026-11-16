@@ -503,24 +503,29 @@ function Get-PermissionViolations {
 # violation: the test reads what a line IS (its text before the first colon, quotes off), so it needs no
 # list of forbidden spellings. `if`, `continue-on-error`, `"\x69f"` and a working-directory on a step that has none today all fail.
 # Perm is the keys a job's permissions may hold, and it is per job: only the publish job may hold
-# `actions`, because the publish job starts the site's build and a dispatch needs that permission. The
-# publish job's steps may hold `env` for the same step, which carries the token it dispatches with.
+# `contents: write`, and only the job that starts the site's build may hold `actions: write` (#189).
 # PermValue is the values those keys may hold: read, write or none. The sign job holds the update
-# signing key, so it never holds a write; the build job is read-only; only the publish job writes.
+# signing key, so it never holds a write; the build job is read-only; only the publish job writes the
+# release and only the dispatch job starts a run.
 $workflowTopKeys = @('name', 'on', 'permissions', 'jobs')
 $workflowAllowed = @{
-    build   = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory'); Perm = @('contents'); PermValue = @('read', 'none') }
-    sign    = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes'); Perm = @('contents'); PermValue = @('read', 'none') }
-    publish = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents', 'actions'); PermValue = @('read', 'write', 'none') }
+    build         = @{ Job = @('runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'working-directory'); Perm = @('contents'); PermValue = @('read', 'none') }
+    # The signing key is an environment secret of `release`, whose deployment policy allows a `v*` tag
+    # alone, so the job must name it (#234).
+    sign          = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'environment', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env', 'timeout-minutes'); Perm = @('contents'); PermValue = @('read', 'none') }
+    publish       = @{ Job = @('needs', 'runs-on', 'permissions', 'steps'); Step = @('name', 'uses', 'with', 'run', 'shell', 'env'); Perm = @('contents'); PermValue = @('read', 'write', 'none') }
+    # The job that starts the site's build: actions: write and nothing that could use it (#189).
+    'dispatch-site' = @{ Job = @('needs', 'runs-on', 'timeout-minutes', 'permissions', 'steps'); Step = @('name', 'env', 'run'); Perm = @('contents', 'actions'); PermValue = @('read', 'write') }
 }
 
 # The steps that may run in another folder, and the folder each runs in: the build job's npm ci
 # step, and no other. The key allowlist above allows a working-directory on any build step, so this
 # is the rule that says where one may stand.
 $workflowWorkingDir = @{
-    build   = @('npm ci|app/web')
-    sign    = @()
-    publish = @()
+    build         = @('npm ci|app/web')
+    sign          = @()
+    publish       = @()
+    'dispatch-site' = @()
 }
 
 # The publish job's steps, in the order they must run. The order is a rule, not a style: a step
@@ -531,8 +536,7 @@ $publishStepOrder = @(
     'actions/download-artifact[signature]',
     'name:Checksum still matches',
     'name:The release notes are there',
-    'softprops/action-gh-release',
-    'name:Build the site'
+    'softprops/action-gh-release'
 )
 
 # The release step's with: block: the inputs it may hold, and the value each may hold. The files
@@ -585,6 +589,8 @@ function Get-WorkflowViolations {
     # working-directory.
     foreach ($v in @(Get-SecretViolations $Text)) { $found += $v }
     foreach ($v in @(Get-SignVersionViolations $Text)) { $found += $v }
+    foreach ($v in @(Get-SignEnvironmentViolations $Text)) { $found += $v }
+    foreach ($v in @(Get-DispatchViolations $Text)) { $found += $v }
     foreach ($v in @(Get-PublishOrderViolations $Text)) { $found += $v }
     foreach ($v in @(Get-ReleaseInputViolations $Text)) { $found += $v }
     foreach ($v in @(Get-WorkingDirectoryViolations $Text)) { $found += $v }
@@ -616,6 +622,64 @@ function Get-SignVersionViolations {
             $arg = $one.Groups[2].Value
             if ($arg -cne '$v') { $found += "job [sign], step [$label]: the version [$arg] is not [`$v], the version of the tag" }
         }
+    }
+    return $found
+}
+
+# The signing key is an environment secret of the `release` environment, and that environment's
+# deployment policy allows a `v*` tag alone (#234). The job that reads the key has to name the
+# environment: with no line, the key would have to live in a repository secret again, which any branch
+# that edits this file can read. Exactly one environment, and its name is the one whose deployment
+# policy is the boundary. GitHub refuses the deployment itself from any other ref, so the name is the
+# whole rule: the policy is a repository setting the file cannot carry.
+function Get-SignEnvironmentViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    if (-not $info.Jobs.ContainsKey('sign')) { return @() }
+    $envs = @()
+    foreach ($line in ($info.Jobs['sign'] -split "`n")) {
+        if ($line -match '^ {4}environment:\s*(.+)$') { $envs += (Get-PermissionValue $Matches[1]) }
+    }
+    if ($envs.Count -ne 1) {
+        return @("job [sign] declares $($envs.Count) environments: the signing key is an environment secret, so the job names exactly one, release")
+    }
+    if ($envs[0] -cne 'release') {
+        return @("job [sign] runs in the environment [$($envs[0])], not [release]: that is the environment whose deployment policy allows the v* tag the job runs on")
+    }
+    return @()
+}
+
+# The site's build is started by a job of its own (#189). `actions: write` starts a run, and also
+# cancels and re-runs every run and deletes artifacts and caches, so it is kept away from the job that
+# runs the third-party release action and reads the release artifacts. The dispatch job checks out
+# nothing, runs no action at all, and names the tag's own ref: main has moved on since the tag, and the
+# site has to print the version and hash of the release commit.
+function Get-DispatchViolations {
+    param([string]$Text)
+    $info = Get-WorkflowJobsFromText $Text
+    if (-not $info.Jobs.ContainsKey('publish')) { return @() }
+    $found = @()
+    foreach ($line in ($info.Jobs['publish'] -split "`n")) {
+        if ($line -match '^ {6}actions:') {
+            $found += "job [publish] holds [$($line.Trim())]: the dispatch belongs to the job that runs no third-party action"
+        }
+    }
+    if (-not $info.Jobs.ContainsKey('dispatch-site')) {
+        return @($found + "the workflow has no dispatch-site job: no job with actions: write and nothing else starts the site")
+    }
+    $steps = @(Get-WorkflowSteps $info.Jobs['dispatch-site'])
+    foreach ($s in $steps) {
+        if ($s -match '(?m)^\s*-\s*uses:') {
+            $found += 'job [dispatch-site] runs an action: the job that holds actions: write runs none'
+        }
+    }
+    $runs = @($steps | ForEach-Object { Get-StepRunAll $_ } | Where-Object { $_.Trim() -ne '' })
+    if ($runs.Count -ne 1) {
+        $found += "job [dispatch-site] runs $($runs.Count) commands, it runs one"
+    } elseif ($runs[0] -notmatch 'gh workflow run pages\.yml') {
+        $found += "job [dispatch-site] runs [$($runs[0])], not the site's build"
+    } elseif ($runs[0] -notmatch '\$GITHUB_REF_NAME') {
+        $found += 'the site''s build is not started at the tag''s own ref: main at dispatch time is not the release commit'
     }
     return $found
 }
@@ -809,9 +873,9 @@ function Get-SecretViolations {
 # the key and everything under it.
 function Set-SignPermissions {
     param([string]$Text, [string]$Block)
-    $anchor = "  sign:`n    needs: build`n    runs-on: windows-latest`n    timeout-minutes: 10`n    permissions:`n      contents: read`n"
+    $anchor = "  sign:`n    needs: build`n    runs-on: windows-latest`n    timeout-minutes: 10`n    environment: release`n    permissions:`n      contents: read`n"
     if (-not $Text.Contains($anchor)) { throw 'the sign job has no permissions block to replace' }
-    return $Text.Replace($anchor, "  sign:`n    needs: build`n    runs-on: windows-latest`n    timeout-minutes: 10`n" + $Block)
+    return $Text.Replace($anchor, "  sign:`n    needs: build`n    runs-on: windows-latest`n    timeout-minutes: 10`n    environment: release`n" + $Block)
 }
 
 # A copy of a workflow's text with the top-level permissions block replaced.
@@ -1000,12 +1064,16 @@ try {
         $wf = $info.Text
         $jobs = $info.Jobs
         Assert-True ($jobs.ContainsKey('build') -and $jobs.ContainsKey('sign') -and $jobs.ContainsKey('publish')) 'build, sign and publish jobs'
-        # The secret is read once in the whole file, in the sign job.
+        # The key is read once in the whole file, in the sign job.
         Assert-Equal @([regex]::Matches($wf, 'UPDATE_SIGNING_KEY')).Count 2 'UPDATE_SIGNING_KEY: the env line and an error message'
         Assert-Equal @([regex]::Matches($wf, 'secrets\.')).Count 1 'the key is the only secret the workflow reads'
         Assert-True ($jobs['sign'].Contains('secrets.UPDATE_SIGNING_KEY')) 'key read in the sign job'
+        # The key is an environment secret, and the sign job names the environment (#234). The tag rule
+        # on it is a repository setting; the job's line is what the file can prove.
+        Assert-True ($jobs['sign'] -match '(?m)^    environment: release\s*$') 'the sign job runs in the release environment'
         Assert-True (-not $jobs['build'].Contains('UPDATE_SIGNING_KEY') -and -not $jobs['build'].Contains('TAURI_SIGNING')) 'build job never sees the key'
         Assert-True (-not $jobs['publish'].Contains('UPDATE_SIGNING_KEY') -and -not $jobs['publish'].Contains('TAURI_SIGNING')) 'publish job never sees the key'
+        Assert-True (-not $jobs['dispatch-site'].Contains('UPDATE_SIGNING_KEY')) 'the dispatch job never sees the key'
         Assert-True (-not $jobs['build'].Contains('signer sign')) 'build job does not sign'
         Assert-True ($wf -notmatch '(?m)^\s*(?:- )?run:.*\bnpx\b' -and $wf -notmatch '(?m)^\s+npx\b') 'no npx anywhere'
         # Sign job: no project build, a locked install without lifecycle scripts, the key in one step only.
@@ -1036,6 +1104,11 @@ try {
         # Publish gets both artifacts and uploads the same four files.
         Assert-True ($jobs['publish'] -match 'needs: \[build, sign\]') 'publish needs build and sign'
         Assert-True ($jobs['publish'].Contains('name: signature') -and $jobs['publish'].Contains('name: installer')) 'publish downloads both artifacts'
+        # The site's build is started by a job of its own, after the release, at the tag's own ref (#189).
+        Assert-True ($jobs['dispatch-site'] -match 'needs: publish') 'the dispatch job runs after the publish job'
+        Assert-True ($jobs['dispatch-site'] -match '(?m)^      actions: write') 'the dispatch job holds actions: write'
+        Assert-True (-not ($jobs['publish'] -match '(?m)^      actions:')) 'the publish job holds no actions permission'
+        Assert-True ($jobs['dispatch-site'] -match 'gh workflow run pages\.yml --ref "\$GITHUB_REF_NAME"') 'the site is built at the tag, not at main'
         foreach ($f in 'dist/canvas-rgb-setup-*.exe', 'dist/canvas-rgb-setup-*.exe.sha256', 'dist/canvas-rgb-setup-*.exe.sig', 'dist/latest.json') {
             Assert-True ($jobs['publish'].Contains($f)) "publish uploads $f"
         }
@@ -1370,8 +1443,8 @@ try {
     Test-Case 'release workflow: every job and step uses only the keys the workflow uses today' {
         $raw = Get-Content -LiteralPath $workflowPath -Raw
         $info = Get-WorkflowJobsFromText $raw
-        Assert-Equal (($info.Jobs.Keys | Sort-Object) -join ',') 'build,publish,sign' 'the jobs are build, sign and publish'
-        foreach ($n in 'build', 'sign', 'publish') { Assert-True ((Get-WorkflowSteps $info.Jobs[$n]).Count -ge 3) "job [$n] holds its steps" }
+        Assert-Equal (($info.Jobs.Keys | Sort-Object) -join ',') 'build,dispatch-site,publish,sign' 'the jobs are build, sign, publish and the site dispatch'
+        foreach ($n in 'build', 'sign', 'publish', 'dispatch-site') { Assert-True ((Get-WorkflowSteps $info.Jobs[$n]).Count -ge 1) "job [$n] holds its steps" }
         # One rule: a key is the text before the first colon at a job or step key indent, quotes off; only the written-out sets pass.
         $violations = @(Get-WorkflowViolations $raw)
         Assert-Equal $violations.Count 0 "keys outside the allowlist, each with its job, step and line:`n$($violations -join "`n")"
@@ -1423,6 +1496,37 @@ try {
         }
         Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
     }
+    Test-Case 'release workflow: the signing key is behind the release environment, and the site dispatch is a job of its own' {
+        # #234: the key is an environment secret of `release`, whose deployment policy allows a `v*`
+        # tag alone, so GitHub refuses the sign job from any other ref and no other job can read the
+        # key whatever the file says. #189: `actions: write` is the dispatch job's alone, that job runs
+        # no third-party action, and the dispatch builds the tag's own ref rather than main.
+        $raw = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
+        $signEnv = @(Get-SignEnvironmentViolations $raw)
+        Assert-Equal $signEnv.Count 0 "the real release.yml's sign job names the release environment:`n$($signEnv -join "`n")"
+        $dispatch = @(Get-DispatchViolations $raw)
+        Assert-Equal $dispatch.Count 0 "the real release.yml starts the site from its own job:`n$($dispatch -join "`n")"
+        # The guard reads a line that is there, so a green result is not an empty read.
+        Assert-True ($raw.Contains("    environment: release`n")) 'the sign job names the environment'
+        $base = (Get-WorkflowJobsFromText $raw).Text
+        $envLine = "    environment: release`n"
+        $cases = [ordered]@{
+            'no environment on the sign job'         = { param($t) $t.Replace($envLine, '') }
+            'another environment on the sign job'    = { param($t) $t.Replace($envLine, "    environment: test-build`n") }
+            'the environment on the build job'       = { param($t) $t.Replace($envLine, '').Replace("  build:`n    runs-on: windows-latest`n", "  build:`n    runs-on: windows-latest`n    environment: release`n") }
+            'actions: write back on the publish job' = { param($t) $t.Replace("      contents: write # the only job that can write to the release`n", "      contents: write # the only job that can write to the release`n      actions: write`n") }
+            'no job of its own for the dispatch'     = { param($t) $t.Replace("  dispatch-site:`n", "  site-dispatch:`n") }
+            'the dispatch at main'                   = { param($t) $t.Replace('gh workflow run pages.yml --ref "$GITHUB_REF_NAME"', 'gh workflow run pages.yml --ref main') }
+            'an action in the dispatch job'          = { param($t) $t.Replace("      - name: Build the site`n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n`n      - name: Build the site`n") }
+        }
+        foreach ($k in $cases.Keys) {
+            $mutated = & $cases[$k] $base
+            Assert-True ($mutated -ne $base) "case [$k] changed the workflow text"
+            $v = @(Get-SignEnvironmentViolations $mutated) + @(Get-DispatchViolations $mutated) + @(Get-WorkflowViolations $mutated)
+            Assert-True ($v.Count -gt 0) "case [$k] is a violation:`n$($v -join "`n")"
+        }
+        Assert-Equal @(Get-WorkflowViolations $base).Count 0 'the unmutated workflow has none'
+    }
     Test-Case 'release workflow: the shape guard checks the top-level permissions block' {
         # The rule: a top-level permissions block applies to every job, so it is checked like a
         # job's own block and may hold only what every job may hold: the key contents, and the
@@ -1455,7 +1559,7 @@ try {
         $mutated = $raw.Replace("permissions:`n  contents: read`n", "permissions:`n  contents: admin`n")
         Assert-True ($mutated -ne $raw) 'the top-level block changed'
         Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) 'the guard reads the top-level block'
-        $mutated = $raw.Replace("    timeout-minutes: 10`n    permissions:`n      contents: read`n", "    timeout-minutes: 10`n    permissions:`n      contents: admin`n")
+        $mutated = $raw.Replace("    timeout-minutes: 10`n    environment: release`n    permissions:`n      contents: read`n", "    timeout-minutes: 10`n    environment: release`n    permissions:`n      contents: admin`n")
         Assert-True ($mutated -ne $raw) 'the sign job block changed'
         Assert-True (@(Get-WorkflowViolations $mutated).Count -gt 0) 'the guard reads the sign job block'
     }
@@ -2081,6 +2185,18 @@ try {
         }
         if (-not $info.Jobs.ContainsKey('sign')) { return ($found + 'the workflow has no sign job') }
         $sign = $info.Jobs['sign']
+        # The key is an environment secret of the `test-build` environment (#234), whose deployment
+        # policy allows the `main` branch alone: the sign job names it, and GitHub refuses the job from
+        # any other ref whatever the file says. The name is the whole rule the file can carry.
+        $envs = @()
+        foreach ($line in ($sign -split "`n")) {
+            if ($line -match '^ {4}environment:\s*(.+)$') { $envs += (Get-ScalarValue $line) }
+        }
+        if ($envs.Count -ne 1) {
+            $found += "the sign job declares $($envs.Count) environments: the signing key is an environment secret, so the job names one, test-build"
+        } elseif ($envs[0] -cne 'test-build') {
+            $found += "the sign job runs in the environment [$($envs[0])], not [test-build]"
+        }
         # The step that writes the feed: exactly one, and it runs only when the input is set.
         $writers = @()
         foreach ($step in @(Get-WorkflowSteps $sign)) {
@@ -2457,7 +2573,12 @@ try {
         Assert-True ($testBuild -match '(?m)^on:\s*$') 'the test build has an on: block'
         Assert-True ($testBuild -match '(?m)^ {2}workflow_dispatch:\s*$') 'the test build still runs by hand'
         Assert-True ($testBuild -match '(?m)^ {2}workflow_call:\s*$') 'the test build is callable'
-        Assert-True ($testBuild -match '(?ms)^ {4}secrets:\s*\r?\n {6}UPDATE_SIGNING_KEY:\s*\r?\n {8}required: true') 'the called workflow declares the key it needs'
+        # The key is an environment secret: the job names the environment, and the caller only names
+        # the secret a reusable workflow must be given (#234).
+        Assert-True ($testBuild -match '(?m)^ {4}environment: test-build\s*$') 'the sign job runs in the test-build environment'
+        $call = Get-TriggerBlock -Text $testBuild -Key 'workflow_call'
+        Assert-True ($call -match '(?m)^ {6}UPDATE_SIGNING_KEY:\s*$') 'the called workflow names the secret the caller passes'
+        Assert-True ($call -match '(?m)^ {8}required: true\s*$') 'a caller that forgets it fails the run'
         Assert-True ($testBuild -match '(?ms)^ {4}outputs:\s*\r?\n {6}version:.*?\r?\n {8}value: \$\{\{ jobs\.build\.outputs\.version \}\}') 'the called workflow gives the caller the version it signed'
         Assert-True ($testBuild -match '(?m)^ {6}version: \$\{\{ steps\.version\.outputs\.version \}\}') 'the build job outputs the version'
         # The key is read in the sign step only, in the test build as it is today.
@@ -2567,6 +2688,8 @@ try {
             'a manual dispatch can set it'            = { param($t) $t.Replace("  workflow_dispatch:`n", "  workflow_dispatch:`n    inputs:`n      experimental:`n        type: boolean`n") }
             'the feed is not in the artifact'         = { param($t) $t.Replace("            dist/latest.json`n", '') }
             'the manifest script is not checked out'  = { param($t) $t.Replace("            tools/make-update-manifest.ps1`n", '') }
+            'no environment on the sign job'          = { param($t) $t.Replace("    environment: test-build`n", '') }
+            'another environment on the sign job'     = { param($t) $t.Replace("    environment: test-build`n", "    environment: release`n") }
         }
         foreach ($k in $cases.Keys) {
             $mutated = & $cases[$k] $base

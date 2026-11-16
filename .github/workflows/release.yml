@@ -6,8 +6,13 @@ name: Release
 # The installer is NOT code-signed, so Windows SmartScreen warns on first run ("Windows protected your PC":
 # More info, then Run anyway). Compare the SHA-256 below with the one in the job log before running it.
 # Every third-party action is pinned to a full commit SHA (tag in the comment). The build job is read-only;
-# only the publish job holds contents: write (and actions: write, to start the site's build once the release
-# is out). The update signing key lives in the sign job alone.
+# only the publish job holds contents: write, and the site's build is started by a job of its own that holds
+# actions: write and does nothing else (#189).
+#
+# The update signing key is an environment secret of the `release` environment, and that environment's
+# deployment policy allows a `v*` tag alone, so the sign job is the only job that can read it and GitHub
+# refuses it from any other ref (#234). A repository secret of the same name would be readable from any
+# branch that edits this file; that is why the repository secret is gone.
 on:
   push:
     tags:
@@ -95,11 +100,15 @@ jobs:
   # was written and tested for Windows PowerShell).
   # The tray's updater trusts one minisign key. The signature carries the version (--app-version), so a
   # tampered latest.json cannot pair a new version number with an older signed installer.
-  # The private key is the UPDATE_SIGNING_KEY secret (backup: outside the repo, see docs/releasing.md).
+  # The private key is the UPDATE_SIGNING_KEY secret of the `release` environment (backup: outside the
+  # repo, see docs/releasing.md). The environment is the boundary: its deployment policy allows a `v*`
+  # tag alone, so a branch that pushes a tag-shaped ref or edits this file cannot deploy the job and
+  # cannot read the key (#234).
   sign:
     needs: build
     runs-on: windows-latest
     timeout-minutes: 10
+    environment: release
     permissions:
       contents: read
     steps:
@@ -177,7 +186,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # the only job that can write to the release
-      actions: write # it starts the site's build, so the site can show the new hash
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -212,16 +220,29 @@ jobs:
           body_path: dist/release-notes.md
           generate_release_notes: true
 
-      # The site prints the installer's SHA-256, and it reads it from the release's own .sha256
-      # asset when the site is built (#83). The site's build is started here, after the assets
-      # are attached, because a "release: published" event cannot start it: this workflow
-      # publishes with GITHUB_TOKEN, and GitHub does not start workflows from events that token
-      # creates. The build runs on main, which holds the release commit, so the page shows the
-      # version that was just released and any site fix that landed with it.
+  # The site prints the installer's SHA-256, and it reads it from the release's own .sha256 asset when
+  # the site is built (#83). The site's build is started here, after the assets are attached, because a
+  # "release: published" event cannot start it: this workflow publishes with GITHUB_TOKEN, and GitHub
+  # does not start workflows from events that token creates.
+  #
+  # It runs at the tag's own ref, not at `main`: main has moved on since the tag in general, and the site
+  # has to be built from the release commit whose version and hash it prints (#189).
+  #
+  # A job of its own (#189): `actions: write` can start a workflow run, but also cancel and re-run every
+  # run and delete artifacts and caches, so it is kept away from the third-party release action the
+  # publish job runs. This job checks out nothing and runs no third-party action.
+  dispatch-site:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write # the dispatch, and nothing else in this job can use it
+    steps:
       - name: Build the site
         env:
           GH_TOKEN: ${{ github.token }}
-          # The publish job has no checkout, so gh has no git remote to read the repository
-          # from and exits 1 with "not a git repository". GH_REPO names the repository instead.
+          # The job has no checkout, so gh has no git remote to read the repository from and exits 1
+          # with "not a git repository". GH_REPO names the repository instead.
           GH_REPO: ${{ github.repository }}
-        run: gh workflow run pages.yml --ref main
+        run: gh workflow run pages.yml --ref "$GITHUB_REF_NAME"
