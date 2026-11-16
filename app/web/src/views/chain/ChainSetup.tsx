@@ -14,7 +14,7 @@
 // commit has already ended the session.
 
 import type { ReactNode } from "react";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { CaretLeft, CaretRight, Check, CheckCircle, WarningCircle } from "@phosphor-icons/react";
 
 import { Button } from "@/components/Button";
@@ -82,6 +82,7 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
   const setup = useChainSetup(chain, intro);
   const [finishing, setFinishing] = useState(false);
   const [marking, setMarking] = useState(false);
+  const markingNow = useRef(false);
   const zone = chain.zone_name;
   const labels = setup.mirror ? MIRROR_STEPS : SERIES_STEPS;
   const lit = litLabels(setup.step, setup.mirror, labels.length);
@@ -115,11 +116,15 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
    * drops a second call as well: a second press cannot land.
    */
   const markEmpty = async () => {
-    if (marking) return;
+    // A ref, not the state: two presses inside one tick both read the state as it was rendered,
+    // and the second one's finish would let go of the key while the first call is still out.
+    if (markingNow.current) return;
+    markingNow.current = true;
     setMarking(true);
     try {
       await setup.markEmpty();
     } finally {
+      markingNow.current = false;
       setMarking(false);
     }
   };
