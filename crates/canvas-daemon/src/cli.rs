@@ -52,6 +52,9 @@ pub enum Command {
     /// List the devices OpenRGB found.
     #[command(subcommand)]
     Devices(DevicesCommand),
+    /// The lights: one per device zone, and one per part of a chain.
+    #[command(subcommand)]
+    Lights(LightsCommand),
     /// The effect library.
     #[command(subcommand)]
     Effects(EffectsCommand),
@@ -110,6 +113,13 @@ impl UpdateArgs {
 #[derive(Debug, Subcommand)]
 pub enum DevicesCommand {
     /// List the devices with their zones and LED counts.
+    List,
+}
+
+/// `canvas-rgb lights ...`
+#[derive(Debug, Subcommand)]
+pub enum LightsCommand {
+    /// List every light with its LED count and whether it is connected.
     List,
 }
 
@@ -180,11 +190,65 @@ pub enum ScenesCommand {
         /// The scene's name.
         name: String,
     },
+    /// Make a scene from a file of groups (#377).
+    Create(CreateArgs),
+    /// Replace a scene's groups from a file (#377).
+    Edit(EditArgs),
+    /// Delete a scene this run made (#377).
+    Delete(DeleteArgs),
     /// Put the scenes in a new order: name every scene once (#371).
     Order(OrderArgs),
     /// The groups of a scene.
     #[command(subcommand)]
     Group(ScenesGroupCommand),
+}
+
+/// `canvas-rgb scenes create <name> [--from <groups.json>] [--run <run>] [--dry-run]` (#377)
+#[derive(Debug, Args)]
+pub struct CreateArgs {
+    /// The new scene's name.
+    pub name: String,
+    /// A JSON file holding the groups: an array of `NewGroup`.
+    #[arg(long, value_name = "FILE")]
+    pub from: Option<String>,
+    /// The run this create belongs to: its record is `agent-runs/<run>.json`.
+    #[arg(long, value_name = "RUN")]
+    pub run: Option<String>,
+    /// Run every check and print what would happen; save nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `canvas-rgb scenes edit <scene> --from <groups.json> --run <run> [--dry-run]` (#377)
+#[derive(Debug, Args)]
+pub struct EditArgs {
+    /// The scene, by id or name.
+    pub scene: String,
+    /// A JSON file holding the groups: an array of `NewGroup`.
+    #[arg(long, value_name = "FILE")]
+    pub from: String,
+    /// The run that made the scene: its record is `agent-runs/<run>.json`.
+    #[arg(long, value_name = "RUN")]
+    pub run: String,
+    /// Run every check and print what would happen; save nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `canvas-rgb scenes delete <scene> --run <run> [--force] [--dry-run]` (#377)
+#[derive(Debug, Args)]
+pub struct DeleteArgs {
+    /// The scene, by id or name.
+    pub scene: String,
+    /// The run that made the scene: its record is `agent-runs/<run>.json`.
+    #[arg(long, value_name = "RUN")]
+    pub run: String,
+    /// Delete it even though it changed since the run made it.
+    #[arg(long)]
+    pub force: bool,
+    /// Run every check and print what would happen; save nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `canvas-rgb scenes order <scene>... [--dry-run]` (#371)
@@ -857,6 +921,19 @@ impl CliError {
     }
 }
 
+/// What `--json` prints on stdout when `scenes create`, `scenes edit` or `scenes delete` fails:
+/// one document, `{"saved": false, "run": <run or null>, "error": "<text>"}`, for every kind of
+/// failure. Any other command answers `None` and keeps its own output.
+pub fn failure_document(command: &Command, error: &CliError) -> Option<serde_json::Value> {
+    let run = match command {
+        Command::Scenes(ScenesCommand::Create(args)) => args.run.as_deref(),
+        Command::Scenes(ScenesCommand::Edit(args)) => Some(args.run.as_str()),
+        Command::Scenes(ScenesCommand::Delete(args)) => Some(args.run.as_str()),
+        _ => return None,
+    };
+    Some(serde_json::json!({ "saved": false, "run": run, "error": error.to_string() }))
+}
+
 /// What a single request ended with, before it is turned into a message.
 enum Attempt {
     /// The request never got an answer: nothing connected, or no reply inside the limit. The
@@ -1307,6 +1384,483 @@ fn group_move_text(
     }
     let tail = if details.is_empty() { String::new() } else { format!(": {}", details.join("; ")) };
     format!("{verb} {group} from {from} to {to}{tail}\n")
+}
+
+/// `canvas-rgb lights list [--json]`: every light, its LED count and whether it is connected.
+pub fn lights_list(api: &dyn Api, json: bool) -> Result<Output, CliError> {
+    let answer = api.call("GET", canvas_proto::api::routes::LIGHTS, None)?;
+    Ok(if json {
+        Output::Json(answer.clone())
+    } else {
+        Output::Text(lights_list_text(&answer))
+    })
+}
+
+/// The lights, one per line: the id, the owner's label, its LEDs and whether it is connected.
+pub fn lights_list_text(answer: &serde_json::Value) -> String {
+    let lights = answer.get("lights").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    if lights.is_empty() {
+        return "no lights\n".to_string();
+    }
+    let mut text = format!("{:<28} {:<28} {:<6} CONNECTED\n", "ID", "LABEL", "LEDS");
+    for light in &lights {
+        let id = light.get("light").and_then(|l| l.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
+        let label = str_of(light, "label");
+        let leds = light.get("led_count").and_then(|v| v.as_u64()).unwrap_or(0);
+        let connected = if light.get("connected").and_then(|v| v.as_bool()).unwrap_or(false) {
+            "yes"
+        } else {
+            "no"
+        };
+        text.push_str(&format!("{id:<28} {label:<28} {leds:<6} {connected}\n"));
+    }
+    text
+}
+
+/// `canvas-rgb scenes create <name> [--from <groups.json>] [--run <run>] [--dry-run]` (#377).
+///
+/// It reads the scenes first: a name another scene already has is refused here, because the
+/// daemon lets two scenes share one (the editor's Duplicate relies on it). With `--from` or
+/// `--dry-run` it first asks the daemon its version: an older daemon ignores `groups` and
+/// `dry_run` and would save a scene, so nothing is sent to one. With `--run` a real create
+/// saves the run's record with the create pending before the request goes out, and with the
+/// scene noted after: the list it read, the active scene, and the new scene.
+pub fn scenes_create(api: &dyn Api, args: &CreateArgs, json: bool) -> Result<Output, CliError> {
+    // A run id is checked before it is joined to a path, and before anything is sent.
+    let existing = match &args.run {
+        Some(run) => crate::agent_run::read(run)?,
+        None => None,
+    };
+    // The file is read before anything is asked of the daemon.
+    let groups = match &args.from {
+        Some(file) => Some(read_groups(file)?),
+        None => None,
+    };
+    if args.from.is_some() || args.dry_run {
+        check_daemon_version(api, env!("CARGO_PKG_VERSION"))?;
+    }
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let name = args.name.trim().to_string();
+    // A name matches without regard to case, as `scenes set` matches it.
+    let taken = scenes_of(&list)
+        .into_iter()
+        .find(|scene| str_of(scene, "name").eq_ignore_ascii_case(&name));
+    if let Some(taken) = taken {
+        return Err(CliError::Other(format!(
+            "a scene named \"{name}\" already exists (id {}); pick another name",
+            str_of(&taken, "id")
+        )));
+    }
+    // Only a real create that the run named goes into the record.
+    let mut record = None;
+    if let (Some(run), false) = (&args.run, args.dry_run) {
+        let mut started = existing.unwrap_or_else(|| crate::agent_run::RunRecord::start(run, &list));
+        started.begin("create", &name);
+        started
+            .save()
+            .map_err(|e| CliError::Other(format!("{e}; nothing was sent")))?;
+        record = Some(started);
+    }
+    let key = name.clone();
+    let body = serde_json::to_string(&canvas_proto::api::SceneCreate {
+        name,
+        copy_of: None,
+        groups,
+        dry_run: args.dry_run,
+    })
+    .map_err(|e| CliError::Other(e.to_string()))?;
+    let answer = match api.call("POST", canvas_proto::api::routes::SCENES, Some(&body)) {
+        Ok(answer) => answer,
+        Err(e) => {
+            if let Some(record) = record.as_mut() {
+                settle_pending(record, "create", &key, &e);
+            }
+            return Err(e);
+        }
+    };
+    let (saved, scene) = match scene_answer(&answer, args.dry_run) {
+        Ok(done) => done,
+        Err(e) => {
+            // A real write the daemon says it did not save left nothing behind to account for.
+            if let (Some(record), true) = (record.as_mut(), says_not_saved(&answer)) {
+                clear_pending(record, "create", &key);
+            }
+            return Err(e);
+        }
+    };
+    if let Some(mut record) = record {
+        record.note(&scene);
+        record.finish("create", &key);
+        record.save().map_err(|e| {
+            CliError::Other(format!(
+                "the scene {} was created, but its run record could not be written: {e}",
+                scene.id
+            ))
+        })?;
+    }
+    scene_output(true, saved, args.run.as_deref(), &scene, json)
+}
+
+/// `canvas-rgb scenes edit <scene> --from <groups.json> --run <run> [--dry-run]` (#377).
+///
+/// Only a scene the run made may be edited. The daemon's version is checked first (an older
+/// daemon ignores `dry_run` and saves). The scene as it is now is copied into the run's folder
+/// and the edit is saved to the record as pending before the write is sent, so there is always a
+/// way back; the `rev` it read goes with the write, so a scene another window changed is a `409`
+/// and nothing is lost.
+pub fn scenes_edit(api: &dyn Api, args: &EditArgs, json: bool) -> Result<Output, CliError> {
+    let mut record = crate::agent_run::load(&args.run)?;
+    let groups = read_groups(&args.from)?;
+    check_daemon_version(api, env!("CARGO_PKG_VERSION"))?;
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let found = resolve_scene(&list, &args.scene, json)?;
+    let id = str_of(&found, "id").to_string();
+    if record.made(&id).is_none() {
+        return Err(CliError::Other(format!(
+            "{id} was not made by run {}; nothing changed{}",
+            args.run,
+            pending_note(&record, &args.run)
+        )));
+    }
+    let current: canvas_proto::scene::Scene = serde_json::from_value(found.clone())
+        .map_err(|e| CliError::Other(format!("the daemon's answer was not a scene: {e}")))?;
+    let groups = groups_with_ids(&groups, &current.groups);
+    let scene = canvas_proto::scene::Scene { groups, ..current };
+    if !args.dry_run {
+        // The copy goes first: a failed write still leaves the scene as it was.
+        crate::agent_run::save_scene_copy(&args.run, &found)?;
+        record.begin("edit", &id);
+        record
+            .save()
+            .map_err(|e| CliError::Other(format!("{e}; nothing was sent")))?;
+    }
+    let body = serde_json::to_string(&canvas_proto::api::ScenePut {
+        scene,
+        expected_rev: found.get("rev").and_then(|v| v.as_u64()).unwrap_or_default(),
+        dry_run: args.dry_run,
+    })
+    .map_err(|e| CliError::Other(e.to_string()))?;
+    let path = canvas_proto::api::routes::SCENE.replace("{id}", &id);
+    let answer = match api.call("PUT", &path, Some(&body)) {
+        Ok(answer) => answer,
+        Err(e) => {
+            if !args.dry_run {
+                settle_pending(&mut record, "edit", &id, &e);
+            }
+            return Err(e);
+        }
+    };
+    let (saved, scene) = match scene_answer(&answer, args.dry_run) {
+        Ok(done) => done,
+        Err(e) => {
+            // A real write the daemon says it did not save left nothing behind to account for.
+            if !args.dry_run && says_not_saved(&answer) {
+                clear_pending(&mut record, "edit", &id);
+            }
+            return Err(e);
+        }
+    };
+    if !args.dry_run {
+        record.note(&scene);
+        record.finish("edit", &id);
+        record.save().map_err(|e| {
+            CliError::Other(format!("the scene {} was saved, but its run record could not be written: {e}", scene.id))
+        })?;
+    }
+    scene_output(false, saved, Some(args.run.as_str()), &scene, json)
+}
+
+/// `canvas-rgb scenes delete <scene> --run <run> [--force] [--dry-run]` (#377).
+///
+/// Three refusals, all before anything is sent: a scene the run did not make, the active scene
+/// (the daemon would not refuse it: it switches the lights to another scene instead), and a
+/// scene that changed since the run made it unless `--force` says otherwise. `--force` skips
+/// only the last one. The scene is copied into the run's folder, and the delete is saved to the
+/// record as pending, before the delete is sent.
+///
+/// A scene the record does not list is never deleted, even when the record holds a pending
+/// create of its name: that create has no known outcome, and a scene of the same name may be
+/// one someone made by hand. The refusal says so, and the scene is left for the app.
+pub fn scenes_delete(api: &dyn Api, args: &DeleteArgs, json: bool) -> Result<Output, CliError> {
+    let mut record = crate::agent_run::load(&args.run)?;
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let found = resolve_scene(&list, &args.scene, json)?;
+    let id = str_of(&found, "id").to_string();
+    let name = str_of(&found, "name").to_string();
+    let Some(made) = record.made(&id).cloned() else {
+        return Err(CliError::Other(delete_refusal(&record, &args.run, &id, &name)));
+    };
+    if list.get("active").and_then(|v| v.as_str()) == Some(id.as_str()) {
+        return Err(CliError::Other(format!(
+            "{name} is the active scene. Switch first: canvas-rgb scenes set \"{}\"",
+            record.prior_active
+        )));
+    }
+    let now = found.get("rev").and_then(|v| v.as_u64()).unwrap_or_default();
+    if now != made.rev && !args.force {
+        return Err(CliError::Other(format!(
+            "{name} changed since run {} made it (rev {now}, was {}); nothing deleted. Use --force to delete it anyway.",
+            args.run, made.rev
+        )));
+    }
+    if !args.dry_run {
+        // The copy goes first: the scene is still there if the delete fails.
+        crate::agent_run::save_scene_copy(&args.run, &found)?;
+        record.begin("delete", &id);
+        record
+            .save()
+            .map_err(|e| CliError::Other(format!("{e}; nothing was sent")))?;
+        let path = canvas_proto::api::routes::SCENE.replace("{id}", &id);
+        if let Err(e) = api.call("DELETE", &path, None) {
+            settle_pending(&mut record, "delete", &id, &e);
+            return Err(e);
+        }
+        record.forget(&id);
+        record.finish("delete", &id);
+        record.save().map_err(|e| {
+            CliError::Other(format!(
+                "the scene {id} was deleted, but its run record could not be written: {e}"
+            ))
+        })?;
+    }
+    Ok(if json {
+        Output::Json(serde_json::json!({ "saved": !args.dry_run, "run": args.run, "deleted": id }))
+    } else {
+        let said = if args.dry_run { "would delete" } else { "deleted" };
+        Output::Text(format!("{said} {id}\n"))
+    })
+}
+
+/// The refusal for a scene the run's record does not list. When the record holds a pending
+/// create of this scene's name (case aside), it says that create has no known outcome and leaves
+/// the scene to the app; otherwise it names any pending writes the run holds.
+fn delete_refusal(record: &crate::agent_run::RunRecord, run: &str, id: &str, name: &str) -> String {
+    let same_name = record
+        .pending
+        .iter()
+        .any(|p| p.op == "create" && p.scene.trim().eq_ignore_ascii_case(name.trim()));
+    if same_name {
+        return format!(
+            "{id} was not recorded as made by run {run}, and a create of \"{name}\" by this run has no known outcome, so nothing was deleted; delete it in the app if it is the run's."
+        );
+    }
+    format!("{id} was not made by run {run}; nothing changed{}", pending_note(record, run))
+}
+
+/// A sentence naming the writes a run's record holds with no known outcome, or nothing when it
+/// holds none: ` Run x holds writes with no known outcome: create Night, delete movie.`
+fn pending_note(record: &crate::agent_run::RunRecord, run: &str) -> String {
+    if record.pending.is_empty() {
+        return String::new();
+    }
+    let list: Vec<String> = record.pending.iter().map(|p| format!("{} {}", p.op, p.scene)).collect();
+    format!(". Run {run} holds writes with no known outcome: {}.", list.join(", "))
+}
+
+/// A write failed after its pending entry was saved. The entry is removed only when the write
+/// certainly did not happen: the daemon refused it (an API error under `500`), or nothing was
+/// ever connected to (`NotRunning`, `NotTrusted`). Every other failure keeps the entry, because
+/// the request may have reached the daemon first: no answer, a `5xx`, and an error the transport
+/// raised mid-request (a reset after the body went out). The record is saved again after the
+/// removal; if that fails, the entry stays, which only says more.
+fn settle_pending(record: &mut crate::agent_run::RunRecord, op: &str, scene: &str, error: &CliError) {
+    let refused = match error {
+        CliError::NotRunning(_) | CliError::NotTrusted(_) => true,
+        CliError::Api { status, .. } => *status < 500,
+        CliError::NoAnswer(_) | CliError::Other(_) => false,
+    };
+    if refused {
+        clear_pending(record, op, scene);
+    }
+}
+
+/// Removes a pending entry and saves the record; a failed save leaves the entry on disk.
+fn clear_pending(record: &mut crate::agent_run::RunRecord, op: &str, scene: &str) {
+    record.finish(op, scene);
+    let _ = record.save();
+}
+
+/// True when an answer says, in so many words, that the daemon did not save.
+fn says_not_saved(answer: &serde_json::Value) -> bool {
+    answer.get("saved").and_then(|v| v.as_bool()) == Some(false)
+}
+
+/// The parts of a version `major.minor.patch`, with a leading `v` and any `-pre` or `+build`
+/// tail dropped. Anything else cannot be compared and answers `None`.
+fn version_parts(text: &str) -> Option<(u64, u64, u64)> {
+    let core = text.trim().trim_start_matches('v');
+    let core = core.split(['-', '+']).next()?;
+    let mut parts = core.split('.');
+    let major = parts.next()?.parse().ok()?;
+    let minor = parts.next()?.parse().ok()?;
+    let patch = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some((major, minor, patch))
+}
+
+/// Asks the daemon its version (the `version` of the status the `status` command prints) and
+/// refuses when it is older than `own`, this command line's version, or cannot be read. A
+/// daemon older than the command ignores `groups` and `dry_run` and WRITES, and a check after
+/// the answer is too late, so this runs before any write is sent.
+fn check_daemon_version(api: &dyn Api, own: &str) -> Result<(), CliError> {
+    let status = api.call("GET", canvas_proto::api::routes::STATUS, None)?;
+    let reported = status.get("version").and_then(|v| v.as_str());
+    let tail = "restart canvas-rgb, then try again; nothing was changed.";
+    let Some(reported) = reported else {
+        return Err(CliError::Other(format!(
+            "the running canvas-rgb reported no version, and this command line is version {own}: {tail}"
+        )));
+    };
+    let (Some(daemon), Some(ours)) = (version_parts(reported), version_parts(own)) else {
+        return Err(CliError::Other(format!(
+            "the running canvas-rgb reported version \"{reported}\", which cannot be read, and this command line is version {own}: {tail}"
+        )));
+    };
+    if daemon < ours {
+        return Err(CliError::Other(format!(
+            "the running canvas-rgb is version {reported}, older than this command line's {own}: {tail}"
+        )));
+    }
+    Ok(())
+}
+
+/// The scenes in a scenes answer.
+fn scenes_of(list: &serde_json::Value) -> Vec<serde_json::Value> {
+    list.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default()
+}
+
+/// The most a `--from` file may hold: 1 MiB.
+const GROUPS_FILE_MAX: u64 = 1024 * 1024;
+
+/// The groups a `--from <groups.json>` file holds: an array of [`canvas_proto::api::NewGroup`].
+/// A file over [`GROUPS_FILE_MAX`] is refused without being read whole.
+fn read_groups(file: &str) -> Result<Vec<canvas_proto::api::NewGroup>, CliError> {
+    use std::io::Read as _;
+    let unreadable = |e: std::io::Error| CliError::Other(format!("could not read {file}: {e}"));
+    let mut text = String::new();
+    std::fs::File::open(file)
+        .map_err(unreadable)?
+        .take(GROUPS_FILE_MAX + 1)
+        .read_to_string(&mut text)
+        .map_err(unreadable)?;
+    if text.len() as u64 > GROUPS_FILE_MAX {
+        return Err(CliError::Other(format!("{file} is over 1 MiB, more than a groups file may hold")));
+    }
+    serde_json::from_str(&text)
+        .map_err(|e| CliError::Other(format!("{file} is not a list of groups: {e}")))
+}
+
+/// The groups a scene holds after an edit: each [`canvas_proto::api::NewGroup`] with an id.
+///
+/// A group keeps the id the scene's group of the same name had, so a group that only changed
+/// its props or its brightness keeps the id the editor knows it by; a new name gets
+/// [`slug`](crate::scenes::slug) and, when that is taken, a number.
+fn groups_with_ids(
+    groups: &[canvas_proto::api::NewGroup],
+    current: &[canvas_proto::scene::Group],
+) -> Vec<canvas_proto::scene::Group> {
+    let mut used: Vec<String> = Vec::new();
+    let mut out = Vec::with_capacity(groups.len());
+    for group in groups {
+        let kept = current
+            .iter()
+            .find(|old| old.name == group.name && !used.contains(&old.id))
+            .map(|old| old.id.clone());
+        let id = match kept {
+            Some(id) => id,
+            None => crate::scenes::fresh_id(
+                &crate::scenes::slug(&group.name),
+                used.iter().map(String::as_str),
+            ),
+        };
+        used.push(id.clone());
+        out.push(canvas_proto::scene::Group {
+            id,
+            name: group.name.clone(),
+            members: group.members.clone(),
+            plays: group.plays.clone(),
+            mode: group.mode,
+            brightness: group.brightness,
+        });
+    }
+    out
+}
+
+/// What a create, an edit or a dry run of either answers: whether it was saved, and the scene.
+///
+/// A real write answers the plain [`canvas_proto::scene::Scene`], with no `saved` field; a dry
+/// run answers a [`canvas_proto::api::SceneDryRun`], the same scene with `saved: false` beside
+/// it. A dry run whose answer lacks `saved: false` came from a daemon that ignored `dry_run`, so
+/// it may have written: that is an error, and so is a real write the daemon says it did not save.
+fn scene_answer(
+    answer: &serde_json::Value,
+    dry_run: bool,
+) -> Result<(bool, canvas_proto::scene::Scene), CliError> {
+    let saved = match (dry_run, answer.get("saved").and_then(|v| v.as_bool())) {
+        (true, Some(false)) => false,
+        (true, Some(true)) => {
+            return Err(CliError::Other(
+                "this was a dry run, but the daemon says it saved the scene".to_string(),
+            ));
+        }
+        (true, None) => {
+            return Err(CliError::Other(
+                "the daemon did not say whether it saved: this was a dry run, so it may have saved the scene; check canvas-rgb scenes list"
+                    .to_string(),
+            ));
+        }
+        (false, Some(false)) => {
+            return Err(CliError::Other("the daemon says it did not save the scene".to_string()));
+        }
+        (false, _) => true,
+    };
+    let scene = answer.get("scene").cloned().unwrap_or_else(|| answer.clone());
+    let scene = serde_json::from_value(scene)
+        .map_err(|e| CliError::Other(format!("the daemon's answer was not a scene: {e}")))?;
+    Ok((saved, scene))
+}
+
+/// What a create or an edit prints: `created desk: 2 groups` or `saved desk: 2 groups`, and a
+/// dry run's own words. With `--json` it is one document: the `saved` flag, the run (when one
+/// was named) and the scene as the daemon answered it.
+fn scene_output(
+    created: bool,
+    saved: bool,
+    run: Option<&str>,
+    scene: &canvas_proto::scene::Scene,
+    json: bool,
+) -> Result<Output, CliError> {
+    let count = scene.groups.len();
+    if json {
+        return Ok(Output::Json(serde_json::json!({
+            "saved": saved,
+            "run": run,
+            "scene": scene,
+        })));
+    }
+    let verb = match (created, saved) {
+        (true, true) => "created",
+        (true, false) => "would create",
+        (false, true) => "saved",
+        (false, false) => "would save",
+    };
+    let unsaved = if saved { "" } else { " (nothing saved)" };
+    Ok(Output::Text(format!(
+        "{verb} {}: {count} {}{unsaved}\n",
+        scene.id,
+        groups_word(count)
+    )))
+}
+
+/// `1 group` or `2 groups`.
+fn groups_word(count: usize) -> &'static str {
+    if count == 1 {
+        "group"
+    } else {
+        "groups"
+    }
 }
 
 /// Sets the scene the answer names.
@@ -2499,7 +3053,14 @@ mod tests {
     fn the_new_commands_are_at_the_spines_names() {
         use clap::CommandFactory;
         let root = Cli::command();
-        for path in [canvas_proto::cli::SCENES_ORDER, canvas_proto::cli::SCENES_GROUP_MOVE] {
+        for path in [
+            canvas_proto::cli::SCENES_ORDER,
+            canvas_proto::cli::SCENES_GROUP_MOVE,
+            canvas_proto::cli::LIGHTS_LIST,
+            canvas_proto::cli::SCENES_CREATE,
+            canvas_proto::cli::SCENES_EDIT,
+            canvas_proto::cli::SCENES_DELETE,
+        ] {
             let mut at = &root;
             for step in path {
                 at = at.find_subcommand(step).unwrap_or_else(|| panic!("no command {step} on the path {path:?}"));
@@ -2525,6 +3086,54 @@ mod tests {
             other => panic!("{other:?}"),
         }
         assert!(Cli::try_parse_from(["canvas-rgb", "scenes", "order"]).is_err(), "an order names scenes");
+
+        let cli = Cli::try_parse_from(["canvas-rgb", "lights", "list"]).unwrap();
+        assert!(matches!(cli.command, Command::Lights(LightsCommand::List)));
+        let cli = Cli::try_parse_from([
+            "canvas-rgb", "scenes", "create", "Night", "--from", "groups.json", "--run", "agent-1", "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Scenes(ScenesCommand::Create(args)) => assert_eq!(
+                (args.name.as_str(), args.from.as_deref(), args.run.as_deref(), args.dry_run),
+                ("Night", Some("groups.json"), Some("agent-1"), true)
+            ),
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "canvas-rgb", "scenes", "edit", "movie", "--from", "groups.json", "--run", "agent-1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Scenes(ScenesCommand::Edit(args)) => assert_eq!(
+                (args.scene.as_str(), args.from.as_str(), args.run.as_str(), args.dry_run),
+                ("movie", "groups.json", "agent-1", false)
+            ),
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "scenes", "delete", "movie", "--run", "agent-1", "--force"])
+            .unwrap();
+        match cli.command {
+            Command::Scenes(ScenesCommand::Delete(args)) => {
+                assert_eq!((args.scene.as_str(), args.run.as_str()), ("movie", "agent-1"));
+                assert!(args.force && !args.dry_run);
+            }
+            other => panic!("{other:?}"),
+        }
+        // --run is required on an edit and on a delete, and --from on an edit: a run's guard
+        // cannot be left off by forgetting a flag.
+        assert!(
+            Cli::try_parse_from(["canvas-rgb", "scenes", "edit", "movie", "--from", "groups.json"]).is_err(),
+            "an edit names the run"
+        );
+        assert!(
+            Cli::try_parse_from(["canvas-rgb", "scenes", "delete", "movie"]).is_err(),
+            "a delete names the run"
+        );
+        assert!(
+            Cli::try_parse_from(["canvas-rgb", "scenes", "edit", "movie", "--run", "agent-1"]).is_err(),
+            "an edit reads a groups file"
+        );
     }
 
     #[test]
@@ -2850,5 +3459,1214 @@ mod tests {
     fn an_answer_with_no_headers_says_so() {
         let text = fans_status_text(&a_fans_answer(Vec::new()));
         assert!(text.contains("no fan headers"), "{text}");
+    }
+
+    // ------------------------------------------------ the scenes CLI and the run record (#377)
+
+    /// A scratch `CANVAS_RGB_HOME` for one test, removed when the test ends. The variable is
+    /// process-wide, so the tests that read a record take one at a time, and the value it had
+    /// before is put back.
+    struct TempHome {
+        dir: PathBuf,
+        previous: Option<std::ffi::OsString>,
+        _one_at_a_time: std::sync::MutexGuard<'static, ()>,
+    }
+
+    impl TempHome {
+        fn new(tag: &str) -> Self {
+            static ONE_AT_A_TIME: std::sync::Mutex<()> = std::sync::Mutex::new(());
+            let one_at_a_time = ONE_AT_A_TIME.lock().unwrap_or_else(|e| e.into_inner());
+            let dir = std::env::temp_dir().join(format!("canvas-rgb-runs-{}-{tag}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir).expect("the scratch home is made");
+            let previous = std::env::var_os(crate::paths::HOME_ENV);
+            std::env::set_var(crate::paths::HOME_ENV, &dir);
+            Self { dir, previous, _one_at_a_time: one_at_a_time }
+        }
+
+        fn path(&self) -> &std::path::Path {
+            &self.dir
+        }
+
+        /// Writes a file under the home (making its folder) and answers its path.
+        fn write(&self, name: &str, text: &str) -> String {
+            let path = self.dir.join(name);
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).expect("the folder is made");
+            }
+            std::fs::write(&path, text).expect("the file is written");
+            path.to_string_lossy().into_owned()
+        }
+
+        /// Every file under the home, so a dry run can be shown to have written nothing.
+        fn files(&self) -> Vec<PathBuf> {
+            fn walk(dir: &std::path::Path, out: &mut Vec<PathBuf>) {
+                let Ok(entries) = std::fs::read_dir(dir) else { return };
+                for entry in entries.flatten() {
+                    let path = entry.path();
+                    if path.is_dir() {
+                        walk(&path, out);
+                    } else {
+                        out.push(path);
+                    }
+                }
+            }
+            let mut out = Vec::new();
+            walk(&self.dir, &mut out);
+            out.sort();
+            out
+        }
+    }
+
+    impl Drop for TempHome {
+        fn drop(&mut self) {
+            match &self.previous {
+                Some(value) => std::env::set_var(crate::paths::HOME_ENV, value),
+                None => std::env::remove_var(crate::paths::HOME_ENV),
+            }
+            let _ = std::fs::remove_dir_all(&self.dir);
+        }
+    }
+
+    /// An API that answers the scenes list with one fixed answer and a write with another,
+    /// recording every request. Any other read (the lights, say) answers the write's reply.
+    struct RunApi {
+        list: serde_json::Value,
+        reply: Result<serde_json::Value, (u16, serde_json::Value)>,
+        /// What `GET STATUS` answers: by default this command line's own version.
+        status: serde_json::Value,
+        /// Runs when a request other than a read arrives, before it is answered.
+        on_write: Option<Box<dyn Fn()>>,
+        /// When set, a request other than a read fails with this error, after `on_write` ran:
+        /// the daemon saw the request, and the caller learns nothing of what it did.
+        write_error: Option<Box<dyn Fn() -> CliError>>,
+        asked: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+        status_reads: std::sync::atomic::AtomicUsize,
+    }
+
+    impl RunApi {
+        fn new(list: serde_json::Value, reply: Result<serde_json::Value, (u16, serde_json::Value)>) -> Self {
+            Self {
+                list,
+                reply,
+                status: serde_json::json!({ "version": env!("CARGO_PKG_VERSION") }),
+                on_write: None,
+                write_error: None,
+                asked: std::sync::Mutex::new(Vec::new()),
+                status_reads: std::sync::atomic::AtomicUsize::new(0),
+            }
+        }
+
+        fn answering(list: serde_json::Value, reply: serde_json::Value) -> Self {
+            Self::new(list, Ok(reply))
+        }
+
+        fn failing(list: serde_json::Value, status: u16, body: serde_json::Value) -> Self {
+            Self::new(list, Err((status, body)))
+        }
+
+        /// The daemon's answer to `GET STATUS`.
+        fn with_status(mut self, status: serde_json::Value) -> Self {
+            self.status = status;
+            self
+        }
+
+        /// Something to do when a write arrives, before the daemon answers it.
+        fn on_write(mut self, hook: impl Fn() + 'static) -> Self {
+            self.on_write = Some(Box::new(hook));
+            self
+        }
+
+        /// Makes every write fail with this error once the daemon has "seen" it.
+        fn write_fails_with(mut self, make: impl Fn() -> CliError + 'static) -> Self {
+            self.write_error = Some(Box::new(make));
+            self
+        }
+
+        /// How many times the version was asked.
+        fn status_reads(&self) -> usize {
+            self.status_reads.load(std::sync::atomic::Ordering::SeqCst)
+        }
+
+        /// Every request except the version read, in order.
+        fn asked(&self) -> Vec<(String, String, Option<String>)> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        /// The one write the command sent, after the one read it made.
+        fn write(&self) -> (String, String, Option<String>) {
+            let asked = self.asked();
+            assert_eq!(asked.len(), 2, "one read, one write: {asked:?}");
+            assert_eq!(asked[0].0, "GET", "the read comes first: {asked:?}");
+            asked[1].clone()
+        }
+    }
+
+    impl Api for RunApi {
+        fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+            if method == "GET" && path == canvas_proto::api::routes::STATUS {
+                self.status_reads.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                return Ok(self.status.clone());
+            }
+            self.asked
+                .lock()
+                .unwrap()
+                .push((method.to_string(), path.to_string(), body.map(str::to_string)));
+            if method == "GET" && path == canvas_proto::api::routes::SCENES {
+                return Ok(self.list.clone());
+            }
+            if method != "GET" {
+                if let Some(hook) = &self.on_write {
+                    hook();
+                }
+                if let Some(make) = &self.write_error {
+                    return Err(make());
+                }
+            }
+            match &self.reply {
+                Ok(value) => Ok(value.clone()),
+                Err((status, body)) => Err(CliError::Api {
+                    status: *status,
+                    message: body.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+                    body: Some(body.clone()),
+                }),
+            }
+        }
+    }
+
+    /// The scenes the run tests read: Gaming is active (rev 4), Movie is at rev 7 with one group,
+    /// Sleep has no groups. Each group is a whole `Group`, because an edit reads the scene whole.
+    fn run_scenes() -> serde_json::Value {
+        serde_json::json!({
+            "active": "gaming",
+            "scenes": [
+                { "id": "gaming", "name": "Gaming", "rev": 4, "groups": [
+                    { "id": "desk", "name": "Desk", "members": ["fake:a#z0"], "plays": { "type": "off" } } ] },
+                { "id": "movie", "name": "Movie", "rev": 7, "groups": [
+                    { "id": "lamp", "name": "Lamp", "members": ["fake:b#z0"], "plays": { "type": "off" } } ] },
+                { "id": "sleep", "name": "Sleep", "rev": 2, "groups": [] },
+            ],
+            "group_states": []
+        })
+    }
+
+    /// The scene the daemon answers to a create or an edit.
+    fn a_saved_scene() -> serde_json::Value {
+        serde_json::json!({
+            "id": "night", "name": "Night", "rev": 1,
+            "groups": [
+                { "id": "fans", "name": "Fans", "members": ["fake:a#z0"], "plays": { "type": "off" } }
+            ]
+        })
+    }
+
+    /// Two lights, one connected and one not, as `GET LIGHTS` answers them.
+    fn a_lights_answer() -> serde_json::Value {
+        serde_json::json!({ "lights": [
+            { "light": { "id": "fake:a#z0" }, "led_count": 12, "connected": true, "label": "Desk strip" },
+            { "light": { "id": "fake:b#z0" }, "led_count": 3, "connected": false, "label": "Case fan" },
+        ]})
+    }
+
+    /// A groups file under the home: one group, named `Fans`, with a brightness of 70.
+    fn a_groups_file(home: &TempHome) -> String {
+        home.write(
+            "groups.json",
+            r#"[{"name":"Fans","members":["fake:a#z0"],"plays":{"type":"off"},"brightness":70}]"#,
+        )
+    }
+
+    /// The record an earlier create of run `agent-1` would have written.
+    fn a_record(scenes: serde_json::Value, prior_active: &str) -> String {
+        serde_json::json!({
+            "run": "agent-1",
+            "prior_active": prior_active,
+            "before": run_scenes(),
+            "scenes": scenes,
+        })
+        .to_string()
+    }
+
+    /// The record's file under a home.
+    fn record_at(home: &TempHome) -> PathBuf {
+        home.path().join("agent-runs").join("agent-1.json")
+    }
+
+    /// A record with a pending write list, as a crashed run would leave it.
+    fn a_record_pending(scenes: serde_json::Value, prior_active: &str, pending: serde_json::Value) -> String {
+        let mut record: serde_json::Value = serde_json::from_str(&a_record(scenes, prior_active)).unwrap();
+        record["pending"] = pending;
+        record.to_string()
+    }
+
+    /// The record on disk, parsed.
+    fn record_json(home: &TempHome) -> serde_json::Value {
+        serde_json::from_str(&std::fs::read_to_string(record_at(home)).expect("the record is there"))
+            .expect("the record is JSON")
+    }
+
+    /// A hook that copies the record's text at the moment a write arrives.
+    fn record_seen_at_write(
+        path: PathBuf,
+        seen: std::sync::Arc<std::sync::Mutex<String>>,
+    ) -> impl Fn() + 'static {
+        move || *seen.lock().unwrap() = std::fs::read_to_string(&path).unwrap_or_default()
+    }
+
+    /// A hook that makes the record's path a folder holding a file, so the next record write fails.
+    fn break_the_record_at_write(path: PathBuf) -> impl Fn() + 'static {
+        move || {
+            let _ = std::fs::remove_file(&path);
+            std::fs::create_dir_all(&path).expect("the folder is made");
+            std::fs::write(path.join("keep"), "x").expect("the file is written");
+        }
+    }
+
+    #[test]
+    fn scenes_create_sends_the_groups_and_writes_the_run_record() {
+        let home = TempHome::new("create");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let args = CreateArgs {
+            name: "Night".into(),
+            from: Some(a_groups_file(&home)),
+            run: Some("agent-1".into()),
+            dry_run: false,
+        };
+        assert_eq!(text_of(scenes_create(&api, &args, false).unwrap()), "created night: 1 group\n");
+
+        let (method, path, body) = api.write();
+        assert_eq!((method.as_str(), path.as_str()), ("POST", canvas_proto::api::routes::SCENES));
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["name"], "Night");
+        assert_eq!(body["groups"][0]["name"], "Fans");
+        assert_eq!(body["groups"][0]["members"], serde_json::json!(["fake:a#z0"]));
+        assert_eq!(body["groups"][0]["brightness"], 70);
+        assert!(body.get("dry_run").is_none(), "a real create sends no dry_run: {body}");
+
+        let record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(record_at(&home)).expect("the record is written")).unwrap();
+        assert_eq!(record["run"], "agent-1");
+        assert_eq!(record["prior_active"], "gaming", "the active scene before the run: {record}");
+        assert_eq!(record["before"], run_scenes(), "the list at the run's first write: {record}");
+        assert_eq!(
+            record["scenes"],
+            serde_json::json!([{ "id": "night", "name": "Night", "rev": 1 }]),
+            "{record}"
+        );
+        assert!(record.get("pending").is_none(), "the pending create is cleared: {record}");
+    }
+
+    #[test]
+    fn a_second_create_by_the_same_run_keeps_its_first_before() {
+        let home = TempHome::new("create-twice");
+        let first = a_record(serde_json::json!([{ "id": "night", "name": "Night", "rev": 3 }]), "movie");
+        home.write("agent-runs/agent-1.json", &first);
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let args = CreateArgs {
+            name: "Night".into(),
+            from: Some(a_groups_file(&home)),
+            run: Some("agent-1".into()),
+            dry_run: false,
+        };
+        scenes_create(&api, &args, false).unwrap();
+        let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(record_at(&home)).unwrap()).unwrap();
+        assert_eq!(record["prior_active"], "movie", "the record keeps the scene the run started from");
+        assert_eq!(
+            record["scenes"],
+            serde_json::json!([{ "id": "night", "name": "Night", "rev": 1 }]),
+            "the scene is noted once, at its latest rev: {record}"
+        );
+    }
+
+    #[test]
+    fn scenes_create_refuses_a_name_another_scene_has_whatever_its_case() {
+        let home = TempHome::new("clash");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let args =
+            CreateArgs { name: " GAMING ".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let error = scenes_create(&api, &args, false).expect_err("the name is taken");
+        assert_eq!(
+            error.to_string(),
+            "a scene named \"GAMING\" already exists (id gaming); pick another name"
+        );
+        assert_eq!(error.exit_code(), 1);
+        assert_eq!(api.asked().len(), 1, "only the list was read: {:?}", api.asked());
+        assert!(home.files().is_empty(), "nothing was written: {:?}", home.files());
+    }
+
+    #[test]
+    fn a_dry_run_writes_no_record_and_no_scene_copy() {
+        let home = TempHome::new("dry-run");
+        let api =
+            RunApi::answering(run_scenes(), serde_json::json!({ "saved": false, "scene": a_saved_scene() }));
+        let args = CreateArgs {
+            name: "Night".into(),
+            from: Some(a_groups_file(&home)),
+            run: Some("agent-1".into()),
+            dry_run: true,
+        };
+        assert_eq!(
+            text_of(scenes_create(&api, &args, false).unwrap()),
+            "would create night: 1 group (nothing saved)\n"
+        );
+        let (_, _, body) = api.write();
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["dry_run"], true, "the daemon runs the checks and saves nothing");
+        assert_eq!(
+            home.files(),
+            vec![home.path().join("groups.json")],
+            "the only file is the one the test wrote: a dry run saves nothing"
+        );
+        match scenes_create(&api, &args, true).unwrap() {
+            Output::Json(value) => {
+                assert_eq!(value["saved"], false);
+                assert_eq!(value["run"], "agent-1");
+                assert_eq!(value["scene"]["id"], "night");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenes_create_without_a_run_writes_no_record() {
+        let home = TempHome::new("no-run");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let args = CreateArgs { name: "Night".into(), from: None, run: None, dry_run: false };
+        assert_eq!(text_of(scenes_create(&api, &args, false).unwrap()), "created night: 1 group\n");
+        let (_, _, body) = api.write();
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert!(body.get("groups").is_none(), "no --from, no groups: {body}");
+        assert!(home.files().is_empty(), "no --run, no record: {:?}", home.files());
+    }
+
+    #[test]
+    fn the_json_answer_of_a_create_is_one_document_with_the_run_and_the_scene() {
+        let home = TempHome::new("create-json");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let args = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        match scenes_create(&api, &args, true).unwrap() {
+            Output::Json(value) => {
+                assert_eq!(value["saved"], true);
+                assert_eq!(value["run"], "agent-1");
+                assert_eq!(value["scene"]["id"], "night");
+                assert_eq!(value["scene"]["rev"], 1);
+                assert_eq!(value["scene"]["groups"][0]["id"], "fans");
+                assert_eq!(value["scene"]["groups"][0]["plays"], serde_json::json!({ "type": "off" }));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(record_at(&home).is_file(), "a real create writes the record");
+    }
+
+    #[test]
+    fn scenes_edit_sends_the_rev_it_read_and_updates_the_record() {
+        let home = TempHome::new("edit");
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let api = RunApi::answering(
+            run_scenes(),
+            serde_json::json!({
+                "id": "movie", "name": "Movie", "rev": 8,
+                "groups": [
+                    { "id": "lamp", "name": "Lamp", "members": ["fake:b#z0"], "plays": { "type": "off" } },
+                    { "id": "wall", "name": "Wall", "members": ["fake:c#z0"], "plays": { "type": "off" } },
+                ]
+            }),
+        );
+        let groups = home.write(
+            "groups.json",
+            r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}},{"name":"Wall","members":["fake:c#z0"],"plays":{"type":"off"},"brightness":40}]"#,
+        );
+        let args = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        assert_eq!(text_of(scenes_edit(&api, &args, false).unwrap()), "saved movie: 2 groups\n");
+
+        let (method, path, body) = api.write();
+        assert_eq!((method.as_str(), path.as_str()), ("PUT", "/api/v1/scenes/movie"));
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["expected_rev"], 7, "the rev it read goes with the write: {body}");
+        assert_eq!(body["scene"]["id"], "movie");
+        assert_eq!(body["scene"]["groups"][0]["id"], "lamp", "a group of the same name keeps its id");
+        assert_eq!(body["scene"]["groups"][1]["id"], "wall", "a new group gets its name's id");
+        assert_eq!(body["scene"]["groups"][1]["brightness"], 40);
+
+        // The scene as it was is copied first, so the edit can be undone.
+        let copy = std::fs::read_to_string(home.path().join("agent-runs/agent-1/movie.rev7.json"))
+            .expect("the copy is written before the call");
+        assert!(copy.contains("\"Lamp\""), "the copy is the whole scene: {copy}");
+
+        let record: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(record_at(&home)).unwrap()).unwrap();
+        assert_eq!(
+            record["scenes"],
+            serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 8 }]),
+            "the record follows the scene's rev: {record}"
+        );
+    }
+
+    #[test]
+    fn a_dry_run_of_an_edit_sends_no_copy_and_writes_no_record() {
+        let home = TempHome::new("edit-dry-run");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        let api = RunApi::answering(
+            run_scenes(),
+            serde_json::json!({ "saved": false, "scene": {
+                "id": "movie", "name": "Movie", "rev": 8, "groups": [] } }),
+        );
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let args = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: true };
+        assert_eq!(text_of(scenes_edit(&api, &args, false).unwrap()), "would save movie: 0 groups (nothing saved)\n");
+        let (method, path, body) = api.write();
+        assert_eq!((method.as_str(), path.as_str()), ("PUT", "/api/v1/scenes/movie"));
+        let body: serde_json::Value = serde_json::from_str(body.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["dry_run"], true, "the edit's dry run tells the daemon to save nothing: {body}");
+        assert_eq!(
+            std::fs::read_to_string(record_at(&home)).unwrap(),
+            record,
+            "a dry run leaves the record as it was"
+        );
+        assert!(
+            !home.path().join("agent-runs/agent-1").exists(),
+            "a dry run writes no copy: {:?}",
+            home.files()
+        );
+    }
+
+    #[test]
+    fn a_stale_rev_is_a_409_and_the_record_does_not_change() {
+        let home = TempHome::new("stale");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        let api = RunApi::failing(
+            run_scenes(),
+            409,
+            serde_json::json!({
+                "error": "conflict", "message": "this scene was changed in another window",
+                "scene": { "id": "movie", "name": "Movie", "rev": 9, "groups": [] }
+            }),
+        );
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let args = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let error = scenes_edit(&api, &args, false).expect_err("the rev is stale");
+        assert_eq!(error.exit_code(), 1);
+        let text = error.to_string();
+        assert!(text.contains("409"), "{text}");
+        assert!(text.contains("scene movie is at rev 9 now"), "the current rev is shown: {text}");
+        assert_eq!(
+            record_json(&home),
+            serde_json::from_str::<serde_json::Value>(&record).unwrap(),
+            "the daemon refused the write, so the record is as it was and holds no pending entry"
+        );
+        assert!(
+            home.path().join("agent-runs/agent-1/movie.rev7.json").is_file(),
+            "the copy was taken before the write, so the scene as it was is kept"
+        );
+    }
+
+    #[test]
+    fn an_edit_or_a_delete_of_a_scene_the_run_did_not_make_is_refused() {
+        let home = TempHome::new("not-made");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null);
+        let edit = EditArgs { scene: "sleep".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let error = scenes_edit(&api, &edit, false).expect_err("the run did not make sleep");
+        assert_eq!(error.to_string(), "sleep was not made by run agent-1; nothing changed");
+        assert_eq!(error.exit_code(), 1);
+        let delete = DeleteArgs { scene: "sleep".into(), run: "agent-1".into(), force: true, dry_run: false };
+        let error = scenes_delete(&api, &delete, false).expect_err("the run did not make sleep");
+        assert_eq!(error.to_string(), "sleep was not made by run agent-1; nothing changed");
+        assert!(
+            api.asked().iter().all(|(method, _, _)| method == "GET"),
+            "nothing was sent: {:?}",
+            api.asked()
+        );
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record);
+    }
+
+    #[test]
+    fn a_missing_or_unreadable_run_record_refuses_an_edit_and_a_delete() {
+        let home = TempHome::new("no-record");
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null);
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-9".into(), dry_run: false };
+        assert_eq!(
+            scenes_edit(&api, &edit, false).unwrap_err().to_string(),
+            "no record of run agent-9; nothing changed"
+        );
+        let delete = DeleteArgs { scene: "movie".into(), run: "agent-9".into(), force: false, dry_run: false };
+        assert_eq!(
+            scenes_delete(&api, &delete, false).unwrap_err().to_string(),
+            "no record of run agent-9; nothing changed"
+        );
+        assert!(api.asked().is_empty(), "nothing was read or sent: {:?}", api.asked());
+
+        // A record that is there and cannot be read refuses the same way.
+        home.write("agent-runs/agent-9.json", "{ this is not a record");
+        assert_eq!(
+            scenes_delete(&api, &delete, false).unwrap_err().to_string(),
+            "no record of run agent-9; nothing changed"
+        );
+        assert!(api.asked().is_empty(), "still nothing was read or sent: {:?}", api.asked());
+    }
+
+    #[test]
+    fn a_delete_of_the_active_scene_names_the_one_to_switch_to_first() {
+        let home = TempHome::new("active");
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "gaming", "name": "Gaming", "rev": 4 }]), "movie"),
+        );
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null);
+        // --force skips only the rev check, never this one.
+        let args = DeleteArgs { scene: "gaming".into(), run: "agent-1".into(), force: true, dry_run: false };
+        let error = scenes_delete(&api, &args, false).expect_err("the active scene is refused");
+        assert_eq!(
+            error.to_string(),
+            "Gaming is the active scene. Switch first: canvas-rgb scenes set \"movie\""
+        );
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            api.asked().iter().all(|(method, _, _)| method == "GET"),
+            "nothing was sent: {:?}",
+            api.asked()
+        );
+    }
+
+    #[test]
+    fn a_scene_that_changed_since_the_run_made_it_needs_force() {
+        let home = TempHome::new("changed");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 3 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null);
+        let args = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: false, dry_run: false };
+        let error = scenes_delete(&api, &args, false).expect_err("the rev changed");
+        assert_eq!(
+            error.to_string(),
+            "Movie changed since run agent-1 made it (rev 7, was 3); nothing deleted. Use --force to delete it anyway."
+        );
+        assert_eq!(error.exit_code(), 1);
+        assert_eq!(api.asked().len(), 1, "nothing was sent: {:?}", api.asked());
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record);
+
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null);
+        let args = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: true, dry_run: false };
+        assert_eq!(text_of(scenes_delete(&api, &args, false).unwrap()), "deleted movie\n");
+        let (method, path, body) = api.write();
+        assert_eq!((method.as_str(), path.as_str()), ("DELETE", "/api/v1/scenes/movie"));
+        assert!(body.is_none(), "a delete sends no body");
+        let copy = std::fs::read_to_string(home.path().join("agent-runs/agent-1/movie.rev7.json"))
+            .expect("the copy is written before the delete");
+        let copy: serde_json::Value = serde_json::from_str(&copy).unwrap();
+        assert_eq!(copy["rev"], 7, "the copy is the scene it is deleting: {copy}");
+        let record: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(record_at(&home)).unwrap()).unwrap();
+        assert_eq!(record["scenes"], serde_json::json!([]), "the scene is not the run's any more: {record}");
+    }
+
+    #[test]
+    fn a_delete_that_fails_still_leaves_the_copy_and_the_record() {
+        let home = TempHome::new("delete-fails");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        let api = RunApi::failing(run_scenes(), 500, serde_json::json!({ "error": "internal", "message": "the save failed" }));
+        let args = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: false, dry_run: false };
+        let error = scenes_delete(&api, &args, false).expect_err("the daemon failed");
+        assert_eq!(error.exit_code(), 1);
+        let copy = std::fs::read_to_string(home.path().join("agent-runs/agent-1/movie.rev7.json"))
+            .expect("the copy is written before the call");
+        assert!(copy.contains("\"Movie\""), "the copy is the whole scene: {copy}");
+        let after = record_json(&home);
+        assert_eq!(
+            after["scenes"],
+            serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]),
+            "the record still lists the scene: {after}"
+        );
+        assert_eq!(
+            after["pending"],
+            serde_json::json!([{ "op": "delete", "scene": "movie" }]),
+            "a 5xx leaves the outcome unknown, so the delete stays pending: {after}"
+        );
+        let _ = record;
+    }
+
+    #[test]
+    fn a_scene_copy_that_cannot_be_written_sends_nothing() {
+        let home = TempHome::new("copy-fails");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        // A file where the run's folder must be: the copy cannot be written.
+        home.write("agent-runs/agent-1", "not a folder");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let args = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let error = scenes_edit(&api, &args, false).expect_err("the copy cannot be written");
+        assert!(error.to_string().contains("could not save the scene"), "{error}");
+        assert_eq!(error.exit_code(), 1);
+        assert_eq!(api.asked().len(), 1, "only the read: the daemon was never called: {:?}", api.asked());
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record);
+    }
+
+    #[test]
+    fn a_bad_run_id_is_refused_before_anything_is_read_or_written() {
+        let home = TempHome::new("bad-id");
+        let too_long = "a".repeat(65);
+        for run in [
+            "../x", "", too_long.as_str(), ".", ".x", "x.", "con", "NUL", "com1", "lpt9.json",
+            "com0", "LPT0", "conin$", "conout$",
+        ] {
+            let api = RunApi::answering(run_scenes(), a_saved_scene());
+            let create = CreateArgs { name: "Night".into(), from: None, run: Some(run.to_string()), dry_run: false };
+            let error = scenes_create(&api, &create, false).expect_err("not a run id");
+            assert!(error.to_string().contains("is not a run id"), "{run:?}: {error}");
+            assert_eq!(error.exit_code(), 1);
+            let edit = EditArgs { scene: "movie".into(), from: "groups.json".into(), run: run.to_string(), dry_run: false };
+            assert!(
+                scenes_edit(&api, &edit, false).unwrap_err().to_string().contains("is not a run id"),
+                "{run:?} on an edit"
+            );
+            let delete = DeleteArgs { scene: "movie".into(), run: run.to_string(), force: false, dry_run: false };
+            assert!(
+                scenes_delete(&api, &delete, false).unwrap_err().to_string().contains("is not a run id"),
+                "{run:?} on a delete"
+            );
+            assert!(api.asked().is_empty(), "{run:?}: nothing was sent: {:?}", api.asked());
+        }
+        assert!(home.files().is_empty(), "nothing was written: {:?}", home.files());
+    }
+
+    #[test]
+    fn an_older_daemon_is_sent_nothing_for_a_create_from_a_file_a_dry_run_or_an_edit() {
+        let home = TempHome::new("old-daemon");
+        let own = env!("CARGO_PKG_VERSION");
+        let groups = a_groups_file(&home);
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        let files = home.files();
+        for which in 0..4 {
+            let api = RunApi::answering(run_scenes(), a_saved_scene())
+                .with_status(serde_json::json!({ "version": "0.0.1" }));
+            let create = |from: Option<String>, dry_run: bool| CreateArgs {
+                name: "Night".into(),
+                from,
+                run: Some("agent-1".into()),
+                dry_run,
+            };
+            let edit = |dry_run: bool| EditArgs {
+                scene: "movie".into(),
+                from: groups.clone(),
+                run: "agent-1".into(),
+                dry_run,
+            };
+            let (what, result) = match which {
+                0 => ("create --from", scenes_create(&api, &create(Some(groups.clone()), false), false)),
+                1 => ("create --dry-run", scenes_create(&api, &create(None, true), false)),
+                2 => ("edit", scenes_edit(&api, &edit(false), false)),
+                _ => ("edit --dry-run", scenes_edit(&api, &edit(true), false)),
+            };
+            let error = result.expect_err(what);
+            let text = error.to_string();
+            assert!(text.contains("0.0.1") && text.contains(own), "{what}: both versions are named: {text}");
+            assert!(text.contains("restart canvas-rgb"), "{what}: {text}");
+            assert_eq!(error.exit_code(), 1, "{what}");
+            assert!(api.asked().is_empty(), "{what}: no request but the version read: {:?}", api.asked());
+            assert_eq!(api.status_reads(), 1, "{what}");
+            assert_eq!(home.files(), files, "{what}: nothing was written");
+        }
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record);
+    }
+
+    #[test]
+    fn a_plain_create_never_asks_the_version_and_a_newer_daemon_passes_the_gate() {
+        let home = TempHome::new("gate-open");
+        let api = RunApi::answering(run_scenes(), a_saved_scene())
+            .with_status(serde_json::json!({ "version": "0.0.1" }));
+        let args = CreateArgs { name: "Night".into(), from: None, run: None, dry_run: false };
+        scenes_create(&api, &args, false).unwrap();
+        assert_eq!(api.status_reads(), 0, "a plain create sends nothing an old daemon misreads");
+
+        let api = RunApi::answering(run_scenes(), a_saved_scene())
+            .with_status(serde_json::json!({ "version": "99.0.0" }));
+        let args = CreateArgs { name: "Night".into(), from: Some(a_groups_file(&home)), run: None, dry_run: false };
+        scenes_create(&api, &args, false).unwrap();
+        assert_eq!(api.status_reads(), 1);
+        api.write();
+    }
+
+    #[test]
+    fn versions_compare_by_their_three_numbers_and_an_unreadable_one_is_refused() {
+        let ask = |reported: serde_json::Value, own: &str| {
+            let api = RunApi::answering(run_scenes(), a_saved_scene()).with_status(reported);
+            check_daemon_version(&api, own)
+        };
+        assert!(ask(serde_json::json!({ "version": "0.10.0" }), "0.9.0").is_ok(), "0.10.0 is newer than 0.9.0");
+        assert!(ask(serde_json::json!({ "version": "0.9.0" }), "0.10.0").is_err(), "0.9.0 is older than 0.10.0");
+        assert!(ask(serde_json::json!({ "version": "1.2.3" }), "1.2.3").is_ok());
+        assert!(ask(serde_json::json!({ "version": "v1.2.3-beta+7" }), "1.2.3").is_ok());
+        let error = ask(serde_json::json!({}), "1.2.3").unwrap_err().to_string();
+        assert!(error.contains("no version") && error.contains("1.2.3") && error.contains("restart canvas-rgb"), "{error}");
+        for bad in ["", "abc", "1.2", "1.2.3.4", "1.x.3"] {
+            let error = ask(serde_json::json!({ "version": bad }), "1.2.3").unwrap_err().to_string();
+            assert!(error.contains("cannot be read") && error.contains("1.2.3"), "{bad:?}: {error}");
+        }
+    }
+
+    #[test]
+    fn a_dry_run_answer_without_saved_false_is_an_error_and_a_real_write_needs_no_saved_field() {
+        let home = TempHome::new("saved-field");
+        let groups = a_groups_file(&home);
+        // A daemon that ignored dry_run answers the plain scene: it wrote.
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let create = CreateArgs { name: "Night".into(), from: Some(groups.clone()), run: None, dry_run: true };
+        let error = scenes_create(&api, &create, false).expect_err("a dry run needs saved: false");
+        assert!(error.to_string().contains("the daemon did not say whether it saved"), "{error}");
+        assert_eq!(error.exit_code(), 1);
+        // A dry run that says it saved is an error too.
+        let api = RunApi::answering(run_scenes(), serde_json::json!({ "saved": true, "scene": a_saved_scene() }));
+        let error = scenes_create(&api, &create, false).expect_err("saved: true on a dry run");
+        assert!(error.to_string().contains("the daemon says it saved the scene"), "{error}");
+        // The same two for an edit's dry run.
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: true };
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let error = scenes_edit(&api, &edit, false).expect_err("a dry run needs saved: false");
+        assert!(error.to_string().contains("the daemon did not say whether it saved"), "{error}");
+        let api = RunApi::answering(run_scenes(), serde_json::json!({ "saved": true, "scene": a_saved_scene() }));
+        let error = scenes_edit(&api, &edit, false).expect_err("saved: true on a dry run");
+        assert!(error.to_string().contains("the daemon says it saved the scene"), "{error}");
+        // A real write answers the plain scene, as the spine says: that is the normal answer.
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let real = CreateArgs { name: "Night".into(), from: None, run: None, dry_run: false };
+        assert_eq!(text_of(scenes_create(&api, &real, false).unwrap()), "created night: 1 group\n");
+    }
+
+    #[test]
+    fn each_write_is_pending_in_the_record_while_its_request_is_on_the_way() {
+        let home = TempHome::new("pending");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let during = |seen: &std::sync::Arc<std::sync::Mutex<String>>| -> serde_json::Value {
+            serde_json::from_str(&seen.lock().unwrap()).expect("the record is on disk when the request goes out")
+        };
+
+        // A create.
+        let api = RunApi::answering(run_scenes(), a_saved_scene())
+            .on_write(record_seen_at_write(record_at(&home), seen.clone()));
+        let args = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        scenes_create(&api, &args, false).unwrap();
+        assert_eq!(during(&seen)["pending"], serde_json::json!([{ "op": "create", "scene": "Night" }]));
+        assert!(record_json(&home).get("pending").is_none(), "cleared after the record's own update");
+
+        // An edit.
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let moved = serde_json::json!({ "id": "movie", "name": "Movie", "rev": 8, "groups": [] });
+        let api = RunApi::answering(run_scenes(), moved)
+            .on_write(record_seen_at_write(record_at(&home), seen.clone()));
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        scenes_edit(&api, &edit, false).unwrap();
+        assert_eq!(during(&seen)["pending"], serde_json::json!([{ "op": "edit", "scene": "movie" }]));
+        assert!(record_json(&home).get("pending").is_none());
+
+        // A delete.
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null)
+            .on_write(record_seen_at_write(record_at(&home), seen.clone()));
+        let delete = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: false, dry_run: false };
+        scenes_delete(&api, &delete, false).unwrap();
+        assert_eq!(during(&seen)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+        assert!(record_json(&home).get("pending").is_none());
+    }
+
+    #[test]
+    fn a_create_the_daemon_refused_leaves_no_pending_and_one_it_may_have_run_keeps_it() {
+        let home = TempHome::new("pending-refused");
+        let args = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let api = RunApi::failing(run_scenes(), 422, serde_json::json!({ "error": "validation", "message": "no" }));
+        scenes_create(&api, &args, false).expect_err("refused");
+        assert!(record_json(&home).get("pending").is_none(), "a 422 wrote nothing");
+        let api = RunApi::failing(run_scenes(), 503, serde_json::json!({ "error": "unavailable", "message": "later" }));
+        scenes_create(&api, &args, false).expect_err("unavailable");
+        assert_eq!(
+            record_json(&home)["pending"],
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            "a 5xx may have written: the record keeps the trace"
+        );
+    }
+
+    #[test]
+    fn a_create_whose_pending_entry_cannot_be_saved_sends_nothing() {
+        let home = TempHome::new("pending-fails");
+        // A folder where the record's temporary file goes: the record cannot be written.
+        home.write("agent-runs/.agent-1.json.tmp/keep", "x");
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        let args = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let error = scenes_create(&api, &args, false).expect_err("the record cannot be written");
+        assert!(error.to_string().ends_with("nothing was sent"), "{error}");
+        assert_eq!(error.exit_code(), 1);
+        assert!(
+            api.asked().iter().all(|(method, _, _)| method == "GET"),
+            "no write was sent: {:?}",
+            api.asked()
+        );
+    }
+
+    #[test]
+    fn a_record_that_cannot_be_written_after_the_daemon_wrote_says_the_scene_was_made() {
+        let home = TempHome::new("record-fails-after");
+        // The daemon's answer arrives, and the record's file has become a folder by then.
+        let api = RunApi::answering(run_scenes(), a_saved_scene())
+            .on_write(break_the_record_at_write(record_at(&home)));
+        let args = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let error = scenes_create(&api, &args, false).expect_err("the record cannot be written");
+        let text = error.to_string();
+        assert!(text.starts_with("the scene night was created, but its run record could not be written"), "{text}");
+        assert_eq!(error.exit_code(), 1);
+        api.write();
+        drop(home);
+
+        let home = TempHome::new("record-fails-after-edit");
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let moved = serde_json::json!({ "id": "movie", "name": "Movie", "rev": 8, "groups": [] });
+        let api = RunApi::answering(run_scenes(), moved).on_write(break_the_record_at_write(record_at(&home)));
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let text = scenes_edit(&api, &edit, false).expect_err("the record cannot be written").to_string();
+        assert!(text.starts_with("the scene movie was saved, but its run record could not be written"), "{text}");
+    }
+
+    #[test]
+    fn a_delete_dry_run_sends_no_delete_and_writes_no_copy() {
+        let home = TempHome::new("delete-dry-run");
+        let record = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        home.write("agent-runs/agent-1.json", &record);
+        let files = home.files();
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null);
+        let args = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: false, dry_run: true };
+        assert_eq!(text_of(scenes_delete(&api, &args, false).unwrap()), "would delete movie\n");
+        assert!(
+            api.asked().iter().all(|(method, _, _)| method == "GET"),
+            "no DELETE was sent: {:?}",
+            api.asked()
+        );
+        assert_eq!(home.files(), files, "no copy was written");
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record, "the record is as it was");
+        match scenes_delete(&api, &args, true).unwrap() {
+            Output::Json(value) => assert_eq!(value["saved"], false),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn a_groups_file_that_is_missing_bad_or_too_big_gives_one_sentence_and_sends_nothing() {
+        let home = TempHome::new("bad-from");
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let missing = home.path().join("nope.json").to_string_lossy().into_owned();
+        let not_groups = home.write("bad.json", "{ not json");
+        let big = home.write("big.json", &" ".repeat(1024 * 1024 + 1));
+        let at_the_limit = home.write("limit.json", &format!("[]{}", " ".repeat(1024 * 1024 - 2)));
+        for (file, expect) in [
+            (missing.clone(), "could not read"),
+            (not_groups.clone(), "is not a list of groups"),
+            (big.clone(), "over 1 MiB"),
+        ] {
+            let api = RunApi::answering(run_scenes(), a_saved_scene());
+            let create = CreateArgs {
+                name: "Night".into(),
+                from: Some(file.clone()),
+                run: Some("agent-1".into()),
+                dry_run: false,
+            };
+            let text = scenes_create(&api, &create, false).expect_err("a bad file").to_string();
+            assert!(text.contains(&file) && text.contains(expect), "{text}");
+            assert!(!text.contains('\n'), "one sentence: {text}");
+            assert!(api.asked().is_empty() && api.status_reads() == 0, "create sent nothing: {:?}", api.asked());
+            let edit = EditArgs { scene: "movie".into(), from: file.clone(), run: "agent-1".into(), dry_run: false };
+            let text = scenes_edit(&api, &edit, false).expect_err("a bad file").to_string();
+            assert!(text.contains(expect), "{text}");
+            assert!(api.asked().is_empty() && api.status_reads() == 0, "edit sent nothing: {:?}", api.asked());
+        }
+        // A file of exactly 1 MiB is read.
+        assert_eq!(read_groups(&at_the_limit).expect("1 MiB is allowed").len(), 0);
+    }
+
+    #[test]
+    fn a_scene_the_record_does_not_list_is_never_deleted_whatever_its_pending_create_says() {
+        let home = TempHome::new("no-adoption");
+        let mut list = run_scenes();
+        list["scenes"]
+            .as_array_mut()
+            .unwrap()
+            .push(serde_json::json!({ "id": "night", "name": "Night", "rev": 1, "groups": [] }));
+        let night = DeleteArgs { scene: "night".into(), run: "agent-1".into(), force: false, dry_run: false };
+        let refusal = "night was not recorded as made by run agent-1, and a create of \"Night\" by this run has no known outcome, so nothing was deleted; delete it in the app if it is the run's.";
+
+        // A pending create of this name, the scene at rev 1, not in the first list: still refused.
+        // `--force` does not change that, and neither does `--json`.
+        let record = a_record_pending(
+            serde_json::json!([]),
+            "gaming",
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+        );
+        home.write("agent-runs/agent-1.json", &record);
+        let files = home.files();
+        for (force, json) in [(false, false), (true, false), (false, true)] {
+            let api = RunApi::answering(list.clone(), serde_json::Value::Null);
+            let args = DeleteArgs { scene: "night".into(), run: "agent-1".into(), force, dry_run: false };
+            let error = scenes_delete(&api, &args, json).expect_err("a scene the record does not list");
+            assert_eq!(error.to_string(), refusal, "force {force}, json {json}");
+            assert!(!error.to_string().contains('\n'), "one sentence");
+            assert!(
+                api.asked().iter().all(|(method, _, _)| method == "GET"),
+                "the fake got no delete request: {:?}",
+                api.asked()
+            );
+            assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record, "the record is as it was");
+            assert_eq!(home.files(), files, "no copy was written");
+        }
+
+        // The pending name matches without regard to case, and a changed rev makes no difference.
+        let mut changed = list.clone();
+        changed["scenes"][3]["rev"] = serde_json::json!(2);
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record_pending(
+                serde_json::json!([]),
+                "gaming",
+                serde_json::json!([{ "op": "create", "scene": "NIGHT" }]),
+            ),
+        );
+        let api = RunApi::answering(changed, serde_json::Value::Null);
+        assert_eq!(scenes_delete(&api, &night, false).unwrap_err().to_string(), refusal);
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
+
+        // A pending create of another name: the plain refusal, with the pending write named.
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record_pending(
+                serde_json::json!([]),
+                "gaming",
+                serde_json::json!([{ "op": "create", "scene": "Other" }, { "op": "delete", "scene": "movie" }]),
+            ),
+        );
+        let api = RunApi::answering(list.clone(), serde_json::Value::Null);
+        assert_eq!(
+            scenes_delete(&api, &night, false).unwrap_err().to_string(),
+            "night was not made by run agent-1; nothing changed. Run agent-1 holds writes with no known outcome: create Other, delete movie."
+        );
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
+
+        // No pending write: the plain refusal, with nothing added.
+        home.write("agent-runs/agent-1.json", &a_record(serde_json::json!([]), "gaming"));
+        let api = RunApi::answering(list.clone(), serde_json::Value::Null);
+        assert_eq!(
+            scenes_delete(&api, &night, false).unwrap_err().to_string(),
+            "night was not made by run agent-1; nothing changed"
+        );
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"));
+    }
+
+    #[test]
+    fn an_edit_of_a_scene_the_run_did_not_make_names_the_writes_the_run_holds() {
+        let home = TempHome::new("edit-names-pending");
+        let groups = a_groups_file(&home);
+        let edit = EditArgs { scene: "sleep".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record_pending(
+                serde_json::json!([]),
+                "gaming",
+                serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            ),
+        );
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        assert_eq!(
+            scenes_edit(&api, &edit, false).unwrap_err().to_string(),
+            "sleep was not made by run agent-1; nothing changed. Run agent-1 holds writes with no known outcome: create Night."
+        );
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"), "{:?}", api.asked());
+        // With nothing pending, the sentence is as it was.
+        home.write("agent-runs/agent-1.json", &a_record(serde_json::json!([]), "gaming"));
+        let api = RunApi::answering(run_scenes(), a_saved_scene());
+        assert_eq!(
+            scenes_edit(&api, &edit, false).unwrap_err().to_string(),
+            "sleep was not made by run agent-1; nothing changed"
+        );
+    }
+
+    #[test]
+    fn a_failure_the_daemon_may_have_seen_keeps_the_pending_entry_and_a_certain_refusal_clears_it() {
+        let home = TempHome::new("pending-other");
+        let made = a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming");
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        let create = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let delete = DeleteArgs { scene: "movie".into(), run: "agent-1".into(), force: false, dry_run: false };
+
+        // An error the transport raised after the request went out (a reset, say) is `Other`:
+        // the write may have landed, so create, edit and delete all keep their entry.
+        let reset = || CliError::Other("connection reset by peer".to_string());
+        let api = RunApi::answering(run_scenes(), a_saved_scene()).write_fails_with(reset);
+        scenes_create(&api, &create, false).expect_err("reset");
+        assert_eq!(
+            record_json(&home)["pending"],
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            "Other after the write arrived keeps the create pending"
+        );
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::answering(run_scenes(), a_saved_scene()).write_fails_with(reset);
+        scenes_edit(&api, &edit, false).expect_err("reset");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "edit", "scene": "movie" }]));
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null).write_fails_with(reset);
+        scenes_delete(&api, &delete, false).expect_err("reset");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+
+        // No answer in time keeps it too.
+        home.write("agent-runs/agent-1.json", &made);
+        let slow = || CliError::NoAnswer("slow".to_string());
+        let api = RunApi::answering(run_scenes(), serde_json::Value::Null).write_fails_with(slow);
+        scenes_delete(&api, &delete, false).expect_err("no answer");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+
+        // A definite refusal clears it: the daemon not running, not trusted, or a 4xx.
+        for (label, make) in [
+            ("not running", (|| CliError::NotRunning("port".to_string())) as fn() -> CliError),
+            ("not trusted", || CliError::NotTrusted("someone else".to_string())),
+        ] {
+            home.write("agent-runs/agent-1.json", &made);
+            let api = RunApi::answering(run_scenes(), serde_json::Value::Null).write_fails_with(make);
+            scenes_delete(&api, &delete, false).expect_err(label);
+            assert!(record_json(&home).get("pending").is_none(), "{label} clears the pending delete");
+        }
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::failing(run_scenes(), 499, serde_json::json!({ "message": "no" }));
+        scenes_delete(&api, &delete, false).expect_err("499");
+        assert!(record_json(&home).get("pending").is_none(), "a status under 500 clears it");
+        home.write("agent-runs/agent-1.json", &made);
+        let api = RunApi::failing(run_scenes(), 500, serde_json::json!({ "message": "no" }));
+        scenes_delete(&api, &delete, false).expect_err("500");
+        assert_eq!(record_json(&home)["pending"], serde_json::json!([{ "op": "delete", "scene": "movie" }]));
+    }
+
+    #[test]
+    fn a_real_write_answered_saved_false_clears_its_pending_entry() {
+        let home = TempHome::new("saved-false");
+        let not_saved = serde_json::json!({ "saved": false, "scene": a_saved_scene() });
+        let create = CreateArgs { name: "Night".into(), from: None, run: Some("agent-1".into()), dry_run: false };
+        let api = RunApi::answering(run_scenes(), not_saved.clone());
+        let error = scenes_create(&api, &create, false).expect_err("the daemon says it did not save");
+        assert_eq!(error.to_string(), "the daemon says it did not save the scene");
+        assert!(record_json(&home).get("pending").is_none(), "create: nothing was saved, so nothing is pending");
+
+        let groups = home.write("groups.json", r#"[{"name":"Lamp","members":["fake:b#z0"],"plays":{"type":"off"}}]"#);
+        home.write(
+            "agent-runs/agent-1.json",
+            &a_record(serde_json::json!([{ "id": "movie", "name": "Movie", "rev": 7 }]), "gaming"),
+        );
+        let edit = EditArgs { scene: "movie".into(), from: groups, run: "agent-1".into(), dry_run: false };
+        let api = RunApi::answering(run_scenes(), not_saved);
+        let error = scenes_edit(&api, &edit, false).expect_err("the daemon says it did not save");
+        assert_eq!(error.to_string(), "the daemon says it did not save the scene");
+        assert!(record_json(&home).get("pending").is_none(), "edit: nothing was saved, so nothing is pending");
+
+        // An answer that is no scene says nothing about whether it saved: the entry stays.
+        let api = RunApi::answering(run_scenes(), serde_json::json!({ "unexpected": 1 }));
+        scenes_create(&api, &create, false).expect_err("not a scene");
+        assert_eq!(
+            record_json(&home)["pending"],
+            serde_json::json!([{ "op": "create", "scene": "Night" }]),
+            "only an explicit saved: false clears it"
+        );
+    }
+
+    #[test]
+    fn under_json_every_failure_of_a_scene_write_is_one_document() {
+        let create = Command::Scenes(ScenesCommand::Create(CreateArgs {
+            name: "Night".into(),
+            from: None,
+            run: Some("agent-1".into()),
+            dry_run: false,
+        }));
+        let other = CliError::Other("a scene named \"Night\" already exists (id night); pick another name".into());
+        assert_eq!(
+            failure_document(&create, &other),
+            Some(serde_json::json!({
+                "saved": false,
+                "run": "agent-1",
+                "error": "a scene named \"Night\" already exists (id night); pick another name",
+            }))
+        );
+        let api = CliError::Api {
+            status: 409,
+            message: "this scene was changed in another window".into(),
+            body: Some(serde_json::json!({ "scene": { "id": "movie", "rev": 9 } })),
+        };
+        let edit = Command::Scenes(ScenesCommand::Edit(EditArgs {
+            scene: "movie".into(),
+            from: "g.json".into(),
+            run: "agent-2".into(),
+            dry_run: false,
+        }));
+        assert_eq!(
+            failure_document(&edit, &api),
+            Some(serde_json::json!({
+                "saved": false,
+                "run": "agent-2",
+                "error": api.to_string(),
+            }))
+        );
+        assert_eq!(api.exit_code(), 1);
+        assert_eq!(other.exit_code(), 1);
+        // No run named: null. A delete names one. Other commands keep their own output.
+        let bare = Command::Scenes(ScenesCommand::Create(CreateArgs {
+            name: "x".into(),
+            from: None,
+            run: None,
+            dry_run: false,
+        }));
+        assert_eq!(failure_document(&bare, &other).unwrap()["run"], serde_json::Value::Null);
+        let delete = Command::Scenes(ScenesCommand::Delete(DeleteArgs {
+            scene: "x".into(),
+            run: "agent-3".into(),
+            force: false,
+            dry_run: false,
+        }));
+        assert_eq!(failure_document(&delete, &other).unwrap()["run"], "agent-3");
+        assert_eq!(failure_document(&Command::Lights(LightsCommand::List), &other), None);
+        assert_eq!(failure_document(&Command::Status, &other), None);
+    }
+
+    #[test]
+    fn lights_list_prints_the_id_the_label_the_leds_and_whether_it_is_connected() {
+        let api = RunApi::answering(serde_json::Value::Null, a_lights_answer());
+        let text = text_of(lights_list(&api, false).expect("the lights"));
+        let lines: Vec<Vec<&str>> = text.lines().map(|line| line.split_whitespace().collect()).collect();
+        assert_eq!(lines.len(), 3, "{text}");
+        assert_eq!(lines[0], ["ID", "LABEL", "LEDS", "CONNECTED"], "{text}");
+        assert_eq!(lines[1], ["fake:a#z0", "Desk", "strip", "12", "yes"], "{text}");
+        assert_eq!(lines[2], ["fake:b#z0", "Case", "fan", "3", "no"], "{text}");
+        match lights_list(&api, true).expect("the lights") {
+            Output::Json(value) => assert_eq!(value, a_lights_answer()),
+            other => panic!("{other:?}"),
+        }
+        assert_eq!(lights_list_text(&serde_json::json!({ "lights": [] })), "no lights\n");
     }
 }
