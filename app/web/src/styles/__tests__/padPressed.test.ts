@@ -44,9 +44,14 @@ function rules(text: string): Rule[] {
 const app = rules(read("src/styles/app.css").replace(/\/\*[\s\S]*?\*\//g, ""));
 const tokens = read("src/styles/tokens.css");
 
-/** The rule that carries a selector, if there is one. */
+/**
+ * The rule that carries a selector, if there is one.
+ *
+ * The selector has to be the whole one: `.pad-readouts` carries `.pad-readout` as its opening
+ * letters, and a substring match hands back that rule instead of the readout's own.
+ */
 function ruleFor(selector: string): Rule | undefined {
-  return app.find((rule) => rule.selectors.some((s) => s.includes(selector)));
+  return app.find((rule) => rule.selectors.includes(selector));
 }
 
 describe("the held key and the focused key", () => {
