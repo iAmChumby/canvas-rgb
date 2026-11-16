@@ -23,7 +23,6 @@ const { api, notifySpy } = vi.hoisted(() => ({
     lights: { list: vi.fn(), patch: vi.fn(), flash: vi.fn() },
     stacks: vi.fn(),
     effect: vi.fn(),
-    stacks: vi.fn(),
     createPreset: vi.fn(),
   },
   notifySpy: vi.fn(),
