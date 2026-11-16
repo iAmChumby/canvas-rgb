@@ -135,12 +135,49 @@ pub fn html_effect(id: &str, source: &str) -> Result<canvas_html::HtmlEffect, St
 /// The builder that runs real SignalRGB-format HTML effects through `canvas-html`.
 pub fn html_builder() -> Builder {
     Arc::new(|id: &str, source: &str| {
-        let effect = html_effect(id, source)?;
-        for warning in effect.warnings() {
-            tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
-        }
-        Ok(Box::new(effect) as Box<dyn Effect>)
+        boxed_html_effect(id, canvas_html::HtmlEffect::from_source(id, source, &Props::new()))
     })
+}
+
+/// The time an import's one longer load may take, in milliseconds.
+///
+/// [`canvas_html::LOAD_BUDGET_MS`] is the budget every load gets. Two seconds is a thousand
+/// times what an ordinary effect's setup costs, so it exists to stop a script that never
+/// returns, and it is also short enough that a machine busy with a game load or a build can
+/// push a perfectly good effect past it — that is why a timed-out file is retried rather than
+/// refused. An import is a person waiting for an answer, so a file the normal budget timed out
+/// on gets one load at ten seconds, five times the normal budget, before the import decides;
+/// that is still inside the editor's 60 s import deadline (`app/web/src/lib/api.ts`). Ten
+/// seconds is long enough that a script still running at the end of it did not finish loading,
+/// so saving it would only buy the same load again on every retry.
+pub const IMPORT_LOAD_BUDGET_MS: u64 = 10_000;
+
+/// The builder an import runs when the normal load ran out of time: the same load, held to
+/// [`IMPORT_LOAD_BUDGET_MS`] instead of [`canvas_html::LOAD_BUDGET_MS`].
+pub fn html_builder_with_import_load() -> Builder {
+    Arc::new(|id: &str, source: &str| {
+        boxed_html_effect(
+            id,
+            canvas_html::HtmlEffect::from_source_with_load_budget(
+                id,
+                source,
+                &Props::new(),
+                IMPORT_LOAD_BUDGET_MS,
+            ),
+        )
+    })
+}
+
+/// Logs the parts of a file that were ignored, and boxes the effect for the library.
+fn boxed_html_effect(
+    id: &str,
+    effect: Result<canvas_html::HtmlEffect, canvas_html::HtmlError>,
+) -> Result<Box<dyn Effect>, String> {
+    let effect = effect.map_err(|e| e.to_string())?;
+    for warning in effect.warnings() {
+        tracing::warn!(id, %warning, "a user effect loaded with a part of its file ignored");
+    }
+    Ok(Box::new(effect) as Box<dyn Effect>)
 }
 
 /// The builder that runs the same HTML effects for a library tile: a fixed seed, and no frame
@@ -314,6 +351,17 @@ impl ParseFailure {
     }
 }
 
+/// What an import's own load saw, before anything is written.
+pub enum ImportCheck {
+    /// The file loads: inside the normal budget, or inside the import's longer one.
+    Loads,
+    /// The normal load ran out of time and so did the import's longer one: the script did
+    /// not finish loading within [`IMPORT_LOAD_BUDGET_MS`], so nothing is saved.
+    NeverLoads(String),
+    /// The file fails the same way every time, whatever the budget.
+    Failed(String),
+}
+
 #[derive(Default)]
 struct State {
     /// Files that parsed, by path.
@@ -332,6 +380,10 @@ pub struct UserEffects {
     /// The builder a library tile is rendered with: the same file, run with a fixed seed,
     /// so a tile is the same picture every time it is rendered.
     tile_builder: Builder,
+    /// The builder an import runs when its normal load ran out of time: the same file, held
+    /// to [`IMPORT_LOAD_BUDGET_MS`], so a busy machine is told apart from a script that never
+    /// ends before anything is written.
+    import_builder: Builder,
     state: RwLock<State>,
     /// The longest a file whose load ran out of time waits before it is parsed again.
     max_retry_after: Duration,
@@ -349,8 +401,11 @@ impl UserEffects {
 
     /// Like [`UserEffects::new`], with effects that ship inside the daemon. A stock effect
     /// that does not build is logged and left out.
+    ///
+    /// The import's longer load is the same builder: a test that injects a builder models
+    /// both budgets with it.
     pub fn with_stock(builder: Builder, stock: &[(&str, &str)]) -> Self {
-        Self::build(builder.clone(), builder, stock)
+        Self::build(builder.clone(), builder.clone(), builder, stock)
     }
 
     /// Like [`UserEffects::with_stock`], with a builder of its own for library tiles: the
@@ -360,7 +415,19 @@ impl UserEffects {
         tile_builder: Builder,
         stock: &[(&str, &str)],
     ) -> Self {
-        Self::build(builder, tile_builder, stock)
+        Self::build(builder.clone(), tile_builder, builder, stock)
+    }
+
+    /// Like [`UserEffects::with_stock_and_tiles`], with a builder of its own for an import's
+    /// one longer load: the daemon gives it [`html_builder_with_import_load`]. A test that
+    /// injects its own builders can say which budget a call is under.
+    pub fn with_stock_tiles_and_import_load(
+        builder: Builder,
+        tile_builder: Builder,
+        import_builder: Builder,
+        stock: &[(&str, &str)],
+    ) -> Self {
+        Self::build(builder, tile_builder, import_builder, stock)
     }
 
     /// Like [`UserEffects::with_stock`], with the longest wait a file whose load ran out of
@@ -374,13 +441,26 @@ impl UserEffects {
         max_retry_after: Duration,
         clock: Clock,
     ) -> Self {
-        Self::build_with_limits(builder.clone(), builder, stock, max_retry_after, clock)
+        Self::build_with_limits(
+            builder.clone(),
+            builder.clone(),
+            builder,
+            stock,
+            max_retry_after,
+            clock,
+        )
     }
 
-    fn build(builder: Builder, tile_builder: Builder, stock: &[(&str, &str)]) -> Self {
+    fn build(
+        builder: Builder,
+        tile_builder: Builder,
+        import_builder: Builder,
+        stock: &[(&str, &str)],
+    ) -> Self {
         Self::build_with_limits(
             builder,
             tile_builder,
+            import_builder,
             stock,
             crate::thumbnail::TIMEOUT_RETRY_AFTER,
             monotonic_clock(),
@@ -390,6 +470,7 @@ impl UserEffects {
     fn build_with_limits(
         builder: Builder,
         tile_builder: Builder,
+        import_builder: Builder,
         stock: &[(&str, &str)],
         max_retry_after: Duration,
         clock: Clock,
@@ -422,6 +503,7 @@ impl UserEffects {
         Self {
             builder,
             tile_builder,
+            import_builder,
             state: RwLock::new(state),
             max_retry_after,
             clock,
@@ -507,9 +589,35 @@ impl UserEffects {
     }
 
     /// Runs the library's builder on a file that is about to be imported, so the import
-    /// judges it the way the loader will. Tests that inject a builder inject it here too.
-    pub fn check(&self, id: &str, html: &str) -> Result<(), String> {
-        (self.builder)(id, html).map(|_| ())
+    /// judges it the way the loader will.
+    ///
+    /// The normal budget is tried first. A load that ran out of time says either that the
+    /// machine was busy or that the script does not return; one load at
+    /// [`IMPORT_LOAD_BUDGET_MS`] tells the two apart before anything is written (#75).
+    ///
+    /// The longer load only decides whether the file is saved. Every load after the import —
+    /// the rescan, the lights, a tile (`UserEffects::create`, `crate::thumbnail`) — keeps
+    /// [`canvas_html::LOAD_BUDGET_MS`], so a file that needs longer than that is saved and
+    /// then reported as failed and retried, exactly as it was before this change. Accepting it
+    /// as loaded and installing it without that warning would leave an effect in the library
+    /// that the lights cannot run, with its group dark.
+    ///
+    /// Tests that inject a builder inject it here too.
+    pub fn check_import(&self, id: &str, html: &str) -> ImportCheck {
+        match (self.builder)(id, html) {
+            Ok(_) => ImportCheck::Loads,
+            Err(error) if crate::thumbnail::build_error_depends_on_load(&error) => {
+                match (self.import_builder)(id, html) {
+                    // The normal load only ran out of time: the machine was busy.
+                    Ok(_) => ImportCheck::Loads,
+                    Err(long) if crate::thumbnail::build_error_depends_on_load(&long) => {
+                        ImportCheck::NeverLoads(long)
+                    }
+                    Err(other) => ImportCheck::Failed(other),
+                }
+            }
+            Err(error) => ImportCheck::Failed(error),
+        }
     }
 
     /// The files that failed to parse at their last scan, with the error.

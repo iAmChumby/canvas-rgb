@@ -177,6 +177,43 @@ fn encode<T: Serialize>(body: &T) -> Result<String, ApiError> {
     serde_json::to_string(body).map_err(|e| ApiError::Decode(e.to_string()))
 }
 
+/// A port on the loopback that nothing listens on, and that no other socket can take.
+///
+/// A test that picks a port and drops the listener gives the port up: another socket (another
+/// test's fake server, an outgoing connection) can take it in the gap, and the client then talks
+/// to a stranger instead of to a closed port. The verdict would depend on what else the machine
+/// was doing (#242; the rule #328 set for the daemon's tests). The listener is bound and kept, so
+/// the port stays ours while the test runs, and the client uses `127.0.0.2`, which the holder on
+/// `127.0.0.1` does not answer: the connection is refused.
+#[cfg(test)]
+pub(crate) struct ClosedPort {
+    /// The port the holder keeps.
+    pub port: u16,
+    /// The listener that holds the port. Dropped with the struct.
+    _hold: std::net::TcpListener,
+}
+
+#[cfg(test)]
+impl ClosedPort {
+    /// The address the client uses: nothing listens on it.
+    pub fn addr(&self) -> &'static str {
+        "127.0.0.2"
+    }
+
+    /// The address with the port, for a URL.
+    pub fn host_port(&self) -> String {
+        format!("{}:{}", self.addr(), self.port)
+    }
+}
+
+/// A port nothing listens on, held so no other socket can take it. See [`ClosedPort`].
+#[cfg(test)]
+pub(crate) fn closed_port() -> ClosedPort {
+    let hold = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    let port = hold.local_addr().unwrap().port();
+    ClosedPort { port, _hold: hold }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,9 +222,8 @@ mod tests {
     /// `Unreachable` (nothing was sent), never `Lost` (maybe sent), or the tray would not fall back.
     #[test]
     fn a_closed_port_is_unreachable_and_the_updater_falls_back() {
-        let port = std::net::TcpListener::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
-        // The listener is dropped: the port is closed.
-        let client = build_client(format!("http://127.0.0.1:{port}"));
+        let closed = closed_port();
+        let client = build_client(format!("http://{}", closed.host_port()));
         let err = client
             .request::<serde_json::Value>(Method::Get, "/api/v1/status", None, false, None)
             .expect_err("nothing listens there");
@@ -195,6 +231,18 @@ mod tests {
         assert_eq!(
             crate::update::service::answer_of(Err(err)),
             crate::update::service::ServiceAnswer::Unavailable
+        );
+    }
+
+    /// The port must stay closed while the test runs. Another socket that takes it (another test's
+    /// fake server, an outgoing connection) answers for it, and the verdict would depend on what
+    /// else the machine was doing (#242).
+    #[test]
+    fn the_closed_port_the_client_uses_cannot_be_taken_by_another_socket() {
+        let closed = closed_port();
+        assert!(
+            std::net::TcpListener::bind(("127.0.0.1", closed.port)).is_err(),
+            "the port is held, so no other socket can answer for it"
         );
     }
 }

@@ -292,9 +292,10 @@ impl App {
         A: DeviceAdapter + ResumeBehavior + FrameLane + 'static,
         D: canvas_proto::traits::NumericDisplayAdapter + ResumeBehavior + 'static,
     {
-        let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
+        let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_tiles_and_import_load(
             crate::user_effects::html_builder(),
             crate::user_effects::html_builder_seeded(crate::thumbnail::TILE_SEED),
+            crate::user_effects::html_builder_with_import_load(),
             crate::user_effects::STOCK_EFFECTS,
         ));
         // The stacks are read before the API answers; the effect names they are checked against

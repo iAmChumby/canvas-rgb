@@ -813,11 +813,14 @@ pub fn saved_presets(store: &crate::storage::Store) -> BTreeMap<String, Vec<canv
 /// Adds a SignalRGB-format HTML effect to the effects folder.
 ///
 /// The file name is checked first, then the file is parsed with the builder the loader
-/// uses: a file that does not parse is a validation error and nothing is written. A file
-/// whose load ran out of time is not the file's fault — the machine was busy — so it is
-/// written anyway and the answer says it was saved, took too long to load just now, and will be tried again. The file
-/// lands in the folder atomically (a temp file in the same folder, then a rename), the
-/// folder is rescanned and the effect's summary comes back.
+/// uses: a file that does not parse is a validation error and nothing is written. A load
+/// that ran out of time is not the file's fault — the machine may have been busy — so the
+/// import gets one load at a longer budget
+/// ([`crate::user_effects::IMPORT_LOAD_BUDGET_MS`]) before anything is written. If that load
+/// succeeds the file is saved exactly as before this change; if it does not finish either,
+/// the import is refused and nothing is written. The file lands in the folder atomically (a
+/// temp file in the same folder, then a rename), the folder is rescanned at the normal budget,
+/// and the effect's summary comes back.
 pub async fn import_effect(
     State(app): State<Arc<App>>,
     body: Result<axum::body::Bytes, axum::extract::rejection::BytesRejection>,
@@ -869,20 +872,30 @@ pub async fn import_effect(
     // effects folder stays as it was. The parse runs the effect's script, so it goes
     // on a blocking thread and not on a tokio worker.
     //
-    // A load that ran out of time is not the file's fault: the machine was busy. The file
-    // is written anyway, so a save during a game load is not lost, and the rescan below
-    // (or the retry that follows it) loads it when the machine is free.
+    // A load that ran out of time is not the file's fault: the machine may have been busy,
+    // so the import runs one longer load before it decides. A script that does not finish
+    // even inside that longer load has not loaded; saving it would only buy the same load
+    // every retry, so it is refused and nothing is written (#75).
     let parse_id = id.clone();
     let parse_html = request.html.clone();
     let parse_with = app.user_effects.clone();
-    let parsed = tokio::task::spawn_blocking(move || parse_with.check(&parse_id, &parse_html))
+    let parsed = tokio::task::spawn_blocking(move || parse_with.check_import(&parse_id, &parse_html))
         .await
         .map_err(|e| ApiFailure::internal(format!("the parse task stopped: {e}")))?;
     match parsed {
-        Ok(()) => {}
-        // A load that ran out of time is not the file's fault: it is written below.
-        Err(e) if crate::thumbnail::build_error_depends_on_load(&e) => {}
-        Err(e) => {
+        crate::user_effects::ImportCheck::Loads => {}
+        crate::user_effects::ImportCheck::NeverLoads(detail) => {
+            tracing::warn!(
+                effect = %id,
+                error = %detail,
+                "an import was refused: the effect did not finish loading within the import's load budget"
+            );
+            return Err(ApiFailure::validation(format!(
+                "the effect did not finish loading within {} s, even with the longer load an import allows; nothing was saved",
+                crate::user_effects::IMPORT_LOAD_BUDGET_MS / 1_000
+            )));
+        }
+        crate::user_effects::ImportCheck::Failed(e) => {
             return Err(ApiFailure::validation(format!("the effect does not parse: {e}")));
         }
     }
@@ -905,8 +918,10 @@ pub async fn import_effect(
         })?;
     }
 
-    // The folder is rescanned, so the effect is in the library at once. The rescan
-    // parses the file, so it goes on a blocking thread too.
+    // The folder is rescanned, so the effect is in the library at once. The rescan parses the
+    // file at the normal budget, like every other load, so a file that only fits the import's
+    // longer one is reported as failed and tried again rather than installed and left
+    // unrunnable. The rescan parses files, so it goes on a blocking thread too.
     {
         let user = app.user_effects.clone();
         let dir = app.effects_dir.clone();
@@ -922,11 +937,11 @@ pub async fn import_effect(
     tracing::info!(effect = %id, replaced = existing.is_some(), "a user effect was imported");
 
     // What the answer says comes from the rescan's outcome for this file, not from the
-    // import's own parse (the two can disagree: a parse that loaded can be followed by a
-    // rescan that runs out of time, and the other way round). A file still in the failed
-    // list says it was saved, took too long to load just now, and is tried again, under the
-    // new file's name (a script that never ends also runs out of time, so it does not say
-    // the machine was busy). A file in the library gets the normal reply for what is there.
+    // import's own load (the rescan can refuse a file for a reason the load cannot see, a
+    // duplicate id, say). A file that loaded inside the normal budget is in the library, so
+    // the answer is its summary. A file that only fits the import's longer load is in the
+    // failed list, and the answer says it was saved, took too long to load just now, and will
+    // be tried again, exactly as before this change; the retry path is unchanged.
     let waiting = app
         .user_effects
         .failures()
