@@ -4,17 +4,19 @@
 //! middleware on the whole router.
 
 pub mod audio;
+pub mod chains;
 pub mod diag;
 pub mod devices;
 pub mod displays;
 pub mod editor;
 pub mod effects;
 pub mod fans;
-pub mod layouts;
+pub mod lights;
 pub mod output;
+pub mod patterns;
 pub mod peripherals;
 pub mod preview;
-pub mod render;
+pub mod scenes;
 pub mod settings;
 pub mod stack_preview;
 pub mod stacks;
@@ -33,7 +35,6 @@ pub fn router(app: Arc<App>) -> Router {
     let api = Router::new()
         .route(routes::STATUS, get(status::status))
         .route(routes::OUTPUT, get(output::get_output).patch(output::patch_output))
-        .route(routes::RENDER, get(render::get_render).patch(render::patch_render))
         .route(routes::DEVICES, get(devices::list_devices))
         .route(
             routes::DEVICE_ZONE,
@@ -63,8 +64,8 @@ pub fn router(app: Arc<App>) -> Router {
             put(effects::replace_preset).delete(effects::delete_preset),
         )
         .route(routes::EFFECT_ACTIVATE, post(effects::activate))
+        .route(routes::EFFECT_DEFAULTS, patch(effects::patch_defaults))
         .route(routes::EFFECT_THUMBNAIL, get(effects::thumbnail))
-        .route(routes::EFFECT_ACTIVE_PROPS, patch(effects::patch_active_props))
         .route(routes::EFFECT_FAVORITE, put(effects::put_favorite))
         .route(routes::EFFECT_SOURCE, get(editor::effect_source))
         .route(
@@ -79,10 +80,35 @@ pub fn router(app: Arc<App>) -> Router {
                 .delete(editor::delete_draft)
                 .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
-        .route(routes::LAYOUTS, get(layouts::list_layouts))
-        .route(routes::LAYOUT, get(layouts::get_layout).put(layouts::put_layout))
-        .route(routes::LAYOUT_ACTIVE, put(layouts::put_active_layout))
+        .route(
+            routes::SCENES,
+            get(scenes::list_scenes).post(scenes::create_scene).put(scenes::put_scenes),
+        )
+        .route(routes::SCENE_ACTIVE, put(scenes::put_active))
+        .route(routes::SCENE, put(scenes::put_scene).delete(scenes::delete_scene))
+        .route(routes::GROUP_PROPS, patch(scenes::patch_group_props))
+        .route(routes::GROUP_BRIGHTNESS, put(scenes::put_group_brightness))
+        .route(routes::GROUP_MOVE, post(scenes::move_group))
+        .route(routes::LIGHTS_FLASH, post(scenes::flash_lights))
+        .route(routes::LIGHTS, get(lights::list_lights))
+        .route(routes::LIGHT, patch(lights::patch_light))
+        .route(routes::CHAINS, get(chains::list_chains))
+        .route(
+            routes::CHAIN_SETUP,
+            post(chains::start_setup).delete(chains::cancel_setup),
+        )
+        .route(routes::CHAIN_SETUP_LIGHT, post(chains::light_setup))
+        .route(routes::CHAIN_SETUP_COMMIT, post(chains::commit_setup))
+        .route(routes::CHAIN_SETUP_EMPTY, post(chains::empty_setup))
         .route(routes::STACKS, get(stacks::list_stacks))
+        .route(routes::PATTERNS, get(patterns::list_patterns))
+        .route(
+            routes::PATTERN,
+            get(patterns::get_pattern)
+                .put(patterns::put_pattern)
+                .delete(patterns::delete_pattern)
+                .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
+        )
         .route(
             routes::STACK_PREVIEW,
             put(stack_preview::put_stack_preview)
@@ -121,14 +147,15 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::AUDIO_TEST, put(audio::put_test).get(audio::get_test).delete(audio::delete_test))
         .route(routes::DISMISS_ZONE_PANEL, post(settings::dismiss_zone_panel))
         .route(routes::ONBOARDING_COMPLETE, post(settings::complete_onboarding))
-        .route(routes::ONBOARDING_SESSION, post(devices::onboarding_session))
         .route(routes::CONFIG_EXPORT, get(settings::config_export))
         .route(routes::CONFIG_IMPORT, post(settings::config_import))
         .route(routes::QUIT, post(status::quit))
         .route(routes::UPDATE_INSTALL, post(update::install))
         .route(routes::DIAG_READBACK, get(diag::readback))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
-        .route(routes::PREVIEW, get(preview::preview));
+        .route(routes::PREVIEW, get(preview::preview))
+        .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights))
+        .route(routes::PREVIEW_GROUP, get(preview::preview_group));
 
     api.layer(axum::middleware::from_fn_with_state(
         app.clone(),

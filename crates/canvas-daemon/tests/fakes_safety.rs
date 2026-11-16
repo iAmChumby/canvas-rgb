@@ -51,3 +51,28 @@ async fn the_quit_notice_goes_through_the_apps_pipe() {
     let seen = pipe.seen.lock().unwrap().clone();
     assert_eq!(seen, vec![format!("{:?}", PipeRequest::DaemonQuitting)]);
 }
+
+/// A sink that drops every picture: the recorder only needs to know one was given.
+struct NullSink;
+
+impl canvas_proto::traits::PreviewSink for NullSink {
+    fn submit(&self, _width: u32, _height: u32, _rgb: Vec<u8>) {}
+}
+
+/// `FakeEngine` records each `set_group_preview` call (the group asked for, and whether a sink
+/// was given), so the #378 route builder can assert the selection and the handoff without
+/// editing the shared harness.
+#[test]
+fn the_fake_engine_records_group_preview_calls() {
+    use canvas_proto::traits::{Engine, PreviewSink};
+
+    let engine = FakeEngine::default();
+    assert!(engine.group_preview_calls().is_empty());
+    let sink: Arc<dyn PreviewSink> = Arc::new(NullSink);
+    engine.set_group_preview(Some("desk".into()), Some(sink));
+    engine.set_group_preview(None, None);
+    assert_eq!(
+        engine.group_preview_calls(),
+        vec![(Some("desk".to_string()), true), (None, false)]
+    );
+}

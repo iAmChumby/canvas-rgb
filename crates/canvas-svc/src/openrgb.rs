@@ -6,6 +6,7 @@
 
 use crate::daemon::DaemonBeforeStop;
 use crate::process::{ChildProcess, ProcessSpawner};
+use canvas_adapters::drive::is_driven;
 use canvas_proto::pipe::OpenRgbServerState;
 use canvas_proto::traits::DeviceAdapter;
 use canvas_proto::{DeviceId, Rgb8};
@@ -172,11 +173,17 @@ impl PaintJob {
 
     /// The watch window ended: say how many devices OpenRGB lists that never got the color. A
     /// controller announced after this is not painted, and the log must say if any were left.
+    ///
+    /// Only devices the app drives are counted: the copy of a device the app drives itself is
+    /// never painted on purpose, so it is not "still unpainted" (`canvas_adapters::drive`, #413).
     async fn report_window_end(&self, session: &mut dyn DeviceAdapter) {
         let window = WATCH_WINDOW.as_secs();
         match session.discover().await {
             Ok(devices) => {
-                let unpainted = devices.iter().filter(|d| d.led_count() > 0 && !self.painted.contains(&d.id)).count();
+                let unpainted = devices
+                    .iter()
+                    .filter(|d| is_driven(&d.id) && d.led_count() > 0 && !self.painted.contains(&d.id))
+                    .count();
                 if unpainted == 0 {
                     tracing::info!(
                         devices = self.painted.len(),
@@ -215,7 +222,13 @@ impl PaintJob {
         }
     }
 
-    /// Writes the color to each device not painted yet that has LEDs. Returns how many it wrote.
+    /// Writes the color to each device not painted yet that has LEDs and that the app drives.
+    /// Returns how many it wrote.
+    ///
+    /// OpenRGB lists its own copy of a keyboard the app drives through a native adapter, and a
+    /// frame to that copy blanks its lights and stops it typing (`canvas_adapters::drive`,
+    /// #393). The daemon never sends it a frame; neither may the boot colour or the black paint
+    /// (#413).
     async fn paint_unpainted(
         &mut self,
         session: &mut dyn DeviceAdapter,
@@ -223,7 +236,7 @@ impl PaintJob {
     ) -> Result<usize, canvas_proto::AdapterError> {
         let mut wrote = 0;
         for device in devices {
-            if device.led_count() == 0 || self.painted.contains(&device.id) {
+            if device.led_count() == 0 || !is_driven(&device.id) || self.painted.contains(&device.id) {
                 continue;
             }
             session.write_frame(&device.id, &vec![self.color; device.led_count() as usize]).await?;

@@ -85,6 +85,16 @@ pub async fn patch_zone(
         )));
     }
 
+    // A chain setup owns the header it raised until it ends (#338): a resize here would leave it
+    // at neither its earlier length nor the one the setup saves. The step lock keeps a setup from
+    // opening on this header while the resize runs.
+    let _step = app.chain_setup.lock().await;
+    if app.zone_holds.read().await.contains_key(&(id.clone(), zone)) {
+        return Err(ApiFailure::conflict(format!(
+            "{id} zone {zone} is being set up as a chain; finish or cancel the setup first"
+        )));
+    }
+
     // Resize in OpenRGB first: if the hardware refuses, the saved size must not change.
     {
         let mut adapter = app.adapter.lock().await;
@@ -106,6 +116,9 @@ pub async fn patch_zone(
         };
         crate::storage::write_json(&file, &snapshot)
             .map_err(|e| ApiFailure::internal(format!("could not save the zone sizes: {e}")))?;
+        drop(zones);
+        // The store's copy is what a chain commit and an export write back: keep it in step.
+        app.store.write().await.zones.sizes = snapshot.sizes;
     }
 
     // Re-discover so the device list carries the new LED count, then re-set the layout.
@@ -120,10 +133,8 @@ pub async fn patch_zone(
         let mut list = app.devices.write().await;
         *list = devices.clone();
     }
-    if let Some(layout) = app.active_layout().await {
-        app.set_layout(&layout, &devices);
-        app.stacks.publish_areas(&layout, &devices);
-    }
+    // The scene's plans are built from the zone sizes: the groups follow the new count.
+    crate::scenes::apply_for_devices(&app).await;
 
     tracing::info!(device = %id, zone, leds = patch.led_count, "the zone size changed");
     Ok(Json(serde_json::json!({ "ok": true, "device_id": id, "zone": zone, "led_count": patch.led_count })))
@@ -180,33 +191,6 @@ pub async fn identify(
     }
     if start {
         crate::identify::spawn_ticker(app.clone());
-    }
-    Ok(Json(serde_json::json!({ "ok": true })))
-}
-
-/// `POST /api/v1/onboarding/session`.
-///
-/// While a session is active every device is black except identify targets, even with output
-/// paused. It ends on `active: false` or 5 s after the last `active: true`.
-pub async fn onboarding_session(
-    State(app): State<Arc<App>>,
-    Json(request): Json<canvas_proto::api::OnboardingSession>,
-) -> ApiResult<Json<serde_json::Value>> {
-    if request.active {
-        let (was_new, start) = app.identify.start_session(std::time::Instant::now());
-        if was_new {
-            tracing::info!("onboarding session started: every light is black except identify targets");
-        }
-        let devices = app.devices.read().await.clone();
-        if let crate::identify::Tick::Frames(frames) = app.identify.tick(std::time::Instant::now(), &devices) {
-            app.identify.push(frames);
-        }
-        if start {
-            crate::identify::spawn_ticker(app.clone());
-        }
-    } else if app.identify.end_session() {
-        tracing::info!("onboarding session ended by the page");
-        crate::identify::restore(&app).await;
     }
     Ok(Json(serde_json::json!({ "ok": true })))
 }

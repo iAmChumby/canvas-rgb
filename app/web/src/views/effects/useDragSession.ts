@@ -35,7 +35,7 @@ import { dropArea, dropTargetAt, dropTargetWords, pointInBox, type DropBoxes, ty
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
 
@@ -59,7 +59,7 @@ interface Press {
 }
 
 export function useDragSession({
-  layout,
+  canvas,
   devices,
   draft,
   draftRef,
@@ -69,7 +69,7 @@ export function useDragSession({
   addEffect,
   applyMask,
 }: {
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   draft: Stack;
   draftRef: { current: Stack };
@@ -93,7 +93,7 @@ export function useDragSession({
   /** The release that follows a cancelled drag, still to be swallowed as a click. */
   const orphanUp = useRef<(() => void) | null>(null);
 
-  const targetNames = (): TargetNames => ({ layout, devices, layers: draftRef.current.layers });
+  const targetNames = (): TargetNames => ({ canvas, devices, layers: draftRef.current.layers });
 
   const showDrag = (next: DragState) => {
     dragRef.current = next;
@@ -187,7 +187,7 @@ export function useDragSession({
     const target = dropTargetAt({
       point,
       boxes,
-      layout,
+      canvas,
       layers: draftRef.current.layers,
       payload: current.source.kind,
       shift,
@@ -252,7 +252,7 @@ export function useDragSession({
         targets[targets.length - 1] ??
         null;
     } else if (source.kind === "effect") {
-      first = stageTargets(layout)[0] ?? null;
+      first = stageTargets(canvas)[0] ?? null;
     } else {
       first = { kind: "stackSlot", at: Math.max(0, layers.findIndex((layer) => layer.id === source.id)) };
     }
@@ -298,7 +298,7 @@ export function useDragSession({
       }
       const boxes = readDropBoxes();
       boxesRef.current = boxes;
-      const target = dropTargetAt({ point: start, boxes, layout, layers: draftRef.current.layers, payload: source.kind });
+      const target = dropTargetAt({ point: start, boxes, canvas, layers: draftRef.current.layers, payload: source.kind });
       showDrag({ source, mode: pointerType === "touch" ? "touch" : "pointer", target, point: start, hint: null });
       setAnnounce(liftAnnouncement(source));
     };
@@ -396,7 +396,7 @@ export function useDragSession({
         if (source.kind !== "effect") return;
         event.preventDefault();
         event.stopPropagation();
-        const next = cycleTarget(stageTargets(layout), current.target, event.key === "ArrowRight" ? 1 : -1);
+        const next = cycleTarget(stageTargets(canvas), current.target, event.key === "ArrowRight" ? 1 : -1);
         showDrag({ ...current, target: next });
         sayTarget(next);
         return;
@@ -418,7 +418,7 @@ export function useDragSession({
     // The names and the handlers read the draft and the desk from the render they began in; a
     // move re-renders the page, and only a new lift starts a new listener.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [drag.source, drag.mode, layout, devices]);
+  }, [drag.source, drag.mode, canvas, devices]);
 
   // The session's loose ends, for the life of the builder: a window that loses focus or a tab
   // that goes to the background ends any press or drag (the pointer's release will not come
@@ -538,7 +538,7 @@ export function useDragSession({
 
   /** What the stage calls the target a drag is over, in the live region's own words. */
   const dragWords = drag.target
-    ? dropTargetWords(drag.target, { layout, devices, layers: draft.layers })
+    ? dropTargetWords(drag.target, { canvas, devices, layers: draft.layers })
     : null;
 
   return {

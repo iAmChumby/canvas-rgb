@@ -12,7 +12,7 @@
 //! Default out_dir: .build/screens/256/real (relative to where it is run). `--tune` writes each
 //! compared Fire setting into `<out_dir>/tune-<name>/`.
 
-use canvas_daemon::stack::{stack_props, AreaMap, LeafBuilder, LiveMap, StackEffect};
+use canvas_daemon::stack::{stack_props, AreaMaps, LeafBuilder, LiveMap, StackEffect};
 use canvas_proto::props::{Props, PropValue};
 use canvas_proto::stack::{BlendMode, LayerArea, LayerMask, MaskSource, Stack, StackLayer};
 use canvas_proto::traits::{Canvas, Effect, Inputs};
@@ -101,7 +101,7 @@ fn render(stack: &Stack, tag: &str, out: &Path) {
         canvas_effects::create(id).ok_or_else(|| format!("no effect with the id {id}"))
     });
     let live = Arc::new(RwLock::new(LiveMap::from_stack(stack, 1)));
-    let areas = Arc::new(RwLock::new(AreaMap::default()));
+    let areas = Arc::new(RwLock::new(AreaMaps::default()));
     let mut effect = StackEffect::new(stack, leaf, live, areas);
     // The layer's own values, plus the reserved tile seed so the Fire is the same every run and
     // both palettes see the same heat field.

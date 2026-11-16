@@ -1,17 +1,15 @@
-// Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
+﻿// Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
 // shapes from the generated proto types; nothing here re-declares an API type.
 
-import { request, requestBinary, type RequestOptions } from "@/lib/api";
+import { apiConfig, request, requestBinary, type RequestOptions } from "@/lib/api";
+import { isDemo } from "@/lib/host";
 import { routes } from "@/proto/routes";
 import type { Status } from "@/proto/Status";
-import type { RenderState } from "@/proto/RenderState";
-import type { PatchRender } from "@/proto/PatchRender";
 import type { OutputState } from "@/proto/OutputState";
 import type { PatchOutput } from "@/proto/PatchOutput";
 import type { DevicesResponse } from "@/proto/DevicesResponse";
 import type { PatchZone } from "@/proto/PatchZone";
 import type { IdentifyRequest } from "@/proto/IdentifyRequest";
-import type { OnboardingSession } from "@/proto/OnboardingSession";
 import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { ActivateEffect } from "@/proto/ActivateEffect";
@@ -31,9 +29,25 @@ import type { PeripheralDetail } from "@/proto/PeripheralDetail";
 import type { PeripheralAccess } from "@/proto/PeripheralAccess";
 import type { ReadProgress } from "@/proto/ReadProgress";
 import type { PeripheralRow } from "@/lib/peripherals";
-import type { LayoutsResponse } from "@/proto/LayoutsResponse";
-import type { Layout } from "@/proto/Layout";
-import type { SetActiveLayout } from "@/proto/SetActiveLayout";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { Scene } from "@/proto/Scene";
+import type { SceneCreate } from "@/proto/SceneCreate";
+import type { ScenePut } from "@/proto/ScenePut";
+import type { SceneActivePut } from "@/proto/SceneActivePut";
+import type { GroupBrightnessPut } from "@/proto/GroupBrightnessPut";
+import type { GroupMove } from "@/proto/GroupMove";
+import type { GroupMoved } from "@/proto/GroupMoved";
+import type { ScenesWrite } from "@/proto/ScenesWrite";
+import type { LightsResponse } from "@/proto/LightsResponse";
+import type { LightView } from "@/proto/LightView";
+import type { LightPatch } from "@/proto/LightPatch";
+import type { FlashRequest } from "@/proto/FlashRequest";
+import type { ChainsResponse } from "@/proto/ChainsResponse";
+import type { SetupStarted } from "@/proto/SetupStarted";
+import type { SetupLight } from "@/proto/SetupLight";
+import type { SetupEmpty } from "@/proto/SetupEmpty";
+import type { SetupCommit } from "@/proto/SetupCommit";
+import type { SetupCommitted } from "@/proto/SetupCommitted";
 import type { FansStatus } from "@/proto/FansStatus";
 import type { HotLimits } from "@/proto/HotLimits";
 import type { FanMode } from "@/proto/FanMode";
@@ -53,6 +67,9 @@ import type { StacksResponse } from "@/proto/StacksResponse";
 import type { DeleteStackResponse } from "@/proto/DeleteStackResponse";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
+import type { Pattern } from "@/proto/Pattern";
+import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { DeletePatternResponse } from "@/proto/DeletePatternResponse";
 import type { AudioSource } from "@/proto/AudioSource";
 import type { AudioSources } from "@/proto/AudioSources";
 import type { ResolvedAudioSource } from "@/proto/ResolvedAudioSource";
@@ -60,8 +77,46 @@ import type { AudioTestLease } from "@/proto/AudioTestLease";
 import type { AudioTestRequest } from "@/proto/AudioTestRequest";
 import type { AudioTestState } from "@/proto/AudioTestState";
 
-/** POST /api/v1/onboarding/session (canvas-proto `ONBOARDING_SESSION`). */
-const ONBOARDING_SESSION = "/api/v1/onboarding/session";
+/**
+ * The chain routes (`routes::CHAINS`, `routes::CHAIN_SETUP*`). `proto/routes.ts` mirrors the
+ * spine by hand and does not carry them yet, so they are spelled here.
+ */
+const CHAINS = "/api/v1/chains";
+/**
+ * The pattern routes (`routes::PATTERNS`, `routes::PATTERN`, 0.16.0). `proto/routes.ts` mirrors the
+ * spine by hand and does not carry them yet, so they are spelled here, as the chains above are.
+ */
+const PATTERNS = "/api/v1/patterns";
+const patternPath = (id: string): string => `${PATTERNS}/${encodeURIComponent(id)}`;
+/** `POST` starts a session on one header, `DELETE` cancels it. `{zone}` is the zone index. */
+const chainSetup = (device: string, zone: number): string =>
+  `${CHAINS}/${encodeURIComponent(device)}/${zone}/setup`;
+
+/**
+ * Cancels a session with a request the browser finishes even when the page is already going:
+ * closing the window must put the header's length back. `keepalive` is a `fetch` option and the
+ * shared `request` carries only the caller's abort signal, so this one path takes the address and
+ * the token from the tray itself. Nothing is read from the answer, and a failure is quiet: the
+ * page is closing, and the daemon ends a session on its own timeout anyway.
+ */
+async function cancelAndLeave(path: string, body: SetupEmpty): Promise<void> {
+  if (isDemo()) {
+    await request<unknown>("DELETE", path, body).catch(() => undefined);
+    return;
+  }
+  try {
+    const config = await apiConfig();
+    await fetch(config.base_url + path, {
+      method: "DELETE",
+      headers: { Authorization: `Bearer ${config.token}`, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      cache: "no-store",
+      keepalive: true,
+    });
+  } catch {
+    // The window is going; the daemon ends the session by its own timeout.
+  }
+}
 
 export const api = {
   status: () => request<Status>("GET", routes.status),
@@ -69,8 +124,6 @@ export const api = {
   output: () => request<OutputState>("GET", routes.output),
   patchOutput: (body: PatchOutput) => request<OutputState>("PATCH", routes.output, body),
 
-  render: () => request<RenderState>("GET", routes.render),
-  patchRender: (body: PatchRender) => request<RenderState>("PATCH", routes.render, body),
 
   devices: () => request<DevicesResponse>("GET", routes.devices),
   /** The same list, asked for again on purpose (the onboarding's "Rescan"). */
@@ -95,7 +148,12 @@ export const api = {
   effectThumbnail: (id: string) => requestBinary(routes.effectThumbnail(id)),
   activateEffect: (id: string, body: ActivateEffect) =>
     request<unknown>("POST", routes.effectActivate(id), body),
-  patchActiveProps: (props: Props) => request<unknown>("PATCH", routes.effectActiveProps, props),
+  /**
+   * An effect's starting values: what the next group to play it starts from. A group that already
+   * plays the effect keeps its own values; no scene changes.
+   */
+  patchEffectDefaults: (id: string, props: Props) =>
+    request<unknown>("PATCH", routes.effectDefaults(id), props),
   setFavorite: (id: string, body: SetFavorite) =>
     request<unknown>("PUT", routes.effectFavorite(id), body),
   /** Saves the values as a user preset of the effect. */
@@ -134,7 +192,8 @@ export const api = {
   peripherals: () => request<{ peripherals: PeripheralRow[] }>("GET", routes.peripherals),
   /**
    * What one peripheral is, what it has and what it holds now. The daemon answers with the
-   * values it kept; `fresh` makes it read the device (a read stalls the pointer for seconds).
+   * values it kept; `fresh` makes it read the device (a read is a series of short report
+   * exchanges, and the device may stutter briefly while it reads).
    */
   peripheral: (id: string, opts?: { fresh?: boolean }) =>
     request<PeripheralDetail>("GET", routes.peripheral(id) + (opts?.fresh ? "?fresh=true" : "")),
@@ -166,10 +225,96 @@ export const api = {
       epoch ? `${routes.stackPreview}?epoch=${encodeURIComponent(epoch)}` : routes.stackPreview,
     ),
 
-  layouts: () => request<LayoutsResponse>("GET", routes.layouts),
-  putLayout: (id: string, body: Layout) => request<Layout>("PUT", routes.layout(id), body),
-  putActiveLayout: (body: SetActiveLayout) =>
-    request<LayoutsResponse>("PUT", routes.layoutActive, body),
+  /**
+   * Every saved pattern, whole (0.16.0). A pattern is a colour per LED of one device: the editor
+   * draws its dots from these colours, so there is no summary shape and no thumbnail.
+   */
+  patterns: () => request<PatternsResponse>("GET", PATTERNS),
+  /** One pattern, by its `pattern:` id or its bare name. */
+  pattern: (id: string) => request<Pattern>("GET", patternPath(id)),
+  /** The whole document in, the saved pattern out (409 on a taken name, 422 on a broken frame). */
+  putPattern: (id: string, body: Pattern) => request<Pattern>("PUT", patternPath(id), body),
+  /** Removes a pattern and its favourite; `force` is needed while a scene still plays it. */
+  deletePattern: (id: string, force = false) =>
+    request<DeletePatternResponse>(
+      "DELETE",
+      `${patternPath(id)}${force ? "?force=true" : ""}`,
+    ),
+  /**
+   * Puts a pattern on the lights as a draft, one stroke per PUT: the draft's own epoch and a rising
+   * `seq`, so a stroke that arrives late never replaces a newer one. A pattern draft carries no
+   * HTML and no props.
+   */
+  putPatternDraft: (body: { pattern: Pattern; epoch: string; seq: number }) =>
+    request<DraftStatus>("PUT", routes.effectsDraft, {
+      html: "",
+      props: {},
+      ...body,
+    } satisfies DraftRequest),
+
+  scenes: {
+    /** Every scene, the active one's id and how its groups are doing. */
+    list: () => request<ScenesResponse>("GET", routes.scenes),
+    /** A new scene: a copy of `copy_of`, or one group of every light set to Off. */
+    create: (body: SceneCreate) => request<Scene>("POST", routes.scenes, body),
+    /** Replaces a scene whole. 409 (the current scene in the body) when `expected_rev` is stale. */
+    put: (id: string, body: ScenePut) => request<Scene>("PUT", routes.scene(id), body),
+    /** 409 for the last scene. */
+    remove: (id: string) => request<unknown>("DELETE", routes.scene(id)),
+    /** Sets a scene, with a fade. */
+    setActive: (id: string) =>
+      request<ScenesResponse>("PUT", routes.sceneActive, { id } satisfies SceneActivePut),
+    /** New values for one group's effect, no rebuild. Saved; answers the scene with its new rev. */
+    patchGroupProps: (sceneId: string, groupId: string, props: Props) =>
+      request<Scene>("PATCH", routes.groupProps(sceneId, groupId), props),
+    /** One group's brightness. Saved; answers the scene with its new rev. */
+    putGroupBrightness: (sceneId: string, groupId: string, brightness: number) =>
+      request<Scene>("PUT", routes.groupBrightness(sceneId, groupId), {
+        brightness,
+      } satisfies GroupBrightnessPut),
+    /**
+     * Moves or copies one group to another scene (#368). One route, one save: both scenes land
+     * or neither. 409 with `which` ("from" or "to") and that scene when a rev is stale, 422 when
+     * a scene rule is broken (the HTML-group limit is the daemon's own check).
+     */
+    moveGroup: (sceneId: string, groupId: string, body: GroupMove) =>
+      request<GroupMoved>("POST", routes.groupMove(sceneId, groupId), body),
+    /**
+     * Writes several whole scenes and/or the order of the scene bar in one save (#368 undo,
+     * #371 order). 409 with the scene or the order that is stale, 422 when a shape is broken.
+     */
+    write: (body: ScenesWrite) => request<ScenesResponse>("PUT", routes.scenes, body),
+  },
+  lights: {
+    list: () => request<LightsResponse>("GET", routes.lights),
+    patch: (id: string, body: LightPatch) => request<LightView>("PATCH", routes.light(id), body),
+    /** The named lights white and every other LED black; `stop` ends it. */
+    flash: (body: FlashRequest) => request<unknown>("POST", routes.lightsFlash, body),
+  },
+  chains: {
+    /** Every resizable header and what is set up on it (a daemon without the routes answers 404). */
+    list: () => request<ChainsResponse>("GET", CHAINS),
+    /** Holds the lights, raises the header to its maximum and opens a session. */
+    start: (device: string, zone: number) =>
+      request<SetupStarted>("POST", chainSetup(device, zone)),
+    /** The coloured runs to show. Also the heartbeat: a session ends 6 s after the last one. */
+    light: (device: string, zone: number, body: SetupLight) =>
+      request<unknown>("POST", `${chainSetup(device, zone)}/light`, body),
+    /**
+     * Ends the session and puts the length back. `keepalive` finishes the request even when the
+     * page goes away with it, which is what a closed window is.
+     */
+    cancel: (device: string, zone: number, body: SetupEmpty, opts?: { keepalive?: boolean }) =>
+      opts?.keepalive
+        ? cancelAndLeave(chainSetup(device, zone), body)
+        : request<unknown>("DELETE", chainSetup(device, zone), body),
+    /** Nothing is plugged into this header: it is marked empty rather than set up. */
+    empty: (device: string, zone: number, body: SetupEmpty) =>
+      request<unknown>("POST", `${chainSetup(device, zone)}/empty`, body),
+    /** Resizes to the parts' LEDs and saves them, all or nothing; answers the new lights. */
+    commit: (device: string, zone: number, body: SetupCommit) =>
+      request<SetupCommitted>("POST", `${chainSetup(device, zone)}/commit`, body),
+  },
 
   fans: () => request<FansStatus>("GET", routes.fans),
   /** The user's "don't exceed" temperatures, one per kind of source (`null` = automatic). */
@@ -205,9 +350,6 @@ export const api = {
   dismissZonePanel: () => request<unknown>("POST", routes.dismissZonePanel),
   /** The owner reached the end of the onboarding: the window stops opening by itself. */
   completeOnboarding: () => request<unknown>("POST", routes.onboardingComplete),
-  /** While active, every light is black except what identify lights; resend every 2 s (the daemon ends it after 5 s). */
-  onboardingSession: (body: OnboardingSession) =>
-    request<unknown>("POST", ONBOARDING_SESSION, body),
 
   /** Every numeric display with its config and the value it shows now. */
   displays: () => request<DisplayStatus[]>("GET", routes.displays),

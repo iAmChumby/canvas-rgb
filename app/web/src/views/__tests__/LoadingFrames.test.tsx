@@ -62,8 +62,7 @@ const status: Status = {
   devices_connected: 11,
   devices_total: 12,
   preview_subscribers: 0,
-  active_layout: "desk",
-  active_effect: null,
+  active_effects: [],
   openrgb: "connected",
   service: "connected",
   service_down_ms: null,
@@ -274,7 +273,7 @@ describe("the devices list", () => {
     render(<DevicesView />);
     await waitFor(() => expect(frame()?.dataset.state).toBe("loading"));
     expect(screen.queryAllByTestId("device-card")).toHaveLength(0);
-    // There is nothing to draw: the list is empty and the walker has no row to open under.
+    // There is nothing to draw: the list is empty and no row opens under it.
     expect(document.querySelectorAll(".rd-dev-list .skeleton")).toHaveLength(0);
   });
 
@@ -287,27 +286,6 @@ describe("the devices list", () => {
     });
     render(<DevicesView />);
     expect(document.querySelectorAll(".rd-dev-list .skeleton").length).toBeGreaterThan(0);
-  });
-
-  it("gives a device with one resizable zone its own Size key, and the key opens the walker under its row", async () => {
-    // A device with one zone has no row of zones under it: its Size key sits in the device's row.
-    setUrl("/devices/");
-    await act(async () => {
-      await refreshDevices();
-    });
-    render(<DevicesView />);
-    const row = (await screen.findAllByTestId("device-card")).find((c) => c.getAttribute("aria-label") === "NZXT Hue 2 Strip");
-    expect(row).toBeTruthy();
-    expect(row?.querySelectorAll(".rd-zone")).toHaveLength(0);
-    const size = within(row as HTMLElement).getByRole("button", { name: "Size" });
-    expect(document.querySelector(".rd-walk")).toBeNull();
-    fireEvent.click(size);
-    // The walker opens inside that device's section, under its row.
-    await waitFor(() => expect(row?.querySelector(".rd-walk")).toBeTruthy());
-    expect(document.querySelectorAll(".rd-walk")).toHaveLength(1);
-    // The list that came is not left in the store for the tests after this one.
-    cleanup();
-    patchSnap({ devices: null, devicesTotal: null, devicesError: null });
   });
 
   it("says a device reports no zones, and offers Try again in its row", async () => {

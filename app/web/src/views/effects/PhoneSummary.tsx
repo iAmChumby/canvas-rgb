@@ -12,7 +12,7 @@ import { areaName } from "@/views/effects/stackDraft";
 import type { RefObject } from "react";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { StackLayer } from "@/proto/StackLayer";
 
@@ -20,7 +20,7 @@ export function PhoneSummary({
   layer,
   schemas,
   effects,
-  layout,
+  canvas,
   devices,
   tuneRef,
   onTune,
@@ -28,7 +28,7 @@ export function PhoneSummary({
   layer: StackLayer;
   schemas: Record<string, PropertySchema | null>;
   effects: EffectSummary[] | null;
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   tuneRef: RefObject<HTMLSpanElement | null>;
   onTune: () => void;
@@ -42,7 +42,7 @@ export function PhoneSummary({
             <h2>{layer.name}</h2>
             <span className="mute" aria-busy={layerLabel(schemas, effects, layer.effect) === null || undefined}>
               {layerLabel(schemas, effects, layer.effect) ?? <InlineSkeleton width="10ch" />} ·{" "}
-              {areaName(layer.area, layout, devices)}
+              {areaName(layer.area, canvas, devices)}
             </span>
           </div>
         </div>

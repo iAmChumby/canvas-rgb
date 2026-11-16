@@ -1,7 +1,16 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { checkPeripheralValue, demoRequest } from "@/lib/demo";
+import { stackHtmlSlots } from "@/lib/demoStacks";
+import type { DemoEffect } from "@/lib/fixtures";
 import type { DemoPeripheral } from "@/lib/peripheralFixtures";
 import { ApiFailure, messageOf } from "@/lib/errors";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
+import type { EffectsResponse } from "@/proto/EffectsResponse";
+import type { Pattern } from "@/proto/Pattern";
+import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { Stack } from "@/proto/Stack";
+import type { StacksResponse } from "@/proto/StacksResponse";
 
 // The demo backend's own words. The editor shows them behind a disclosure, and they are the
 // only words a person reads when nothing answers: they say canvas-rgb, not "the daemon".
@@ -17,6 +26,184 @@ describe("the demo backend's words", () => {
     }
     expect(message).toMatch(/canvas-rgb/);
     expect(message).not.toMatch(/daemon/i);
+  });
+});
+
+describe("the demo's HTML limit (#370)", () => {
+  /** A fresh demo backend on `?state=html,html-limit`: three groups, each playing an HTML effect. */
+  async function htmlDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=html,html-limit");
+    return import("@/lib/demo");
+  }
+
+  it("the first two HTML groups run and the third says why, as the daemon does", async () => {
+    const demo = await htmlDemo();
+    const scenes = (await demo.demoRequest("GET", "/api/v1/scenes", undefined)) as ScenesResponse;
+    const failed = scenes.group_states.map((g) => g.failed);
+    expect(failed).toHaveLength(3);
+    expect(failed.slice(0, 2)).toEqual([null, null]);
+    expect(failed[2]).toBe(htmlLimitSentence(3));
+  });
+
+  it("playing an HTML effect on every group is refused with the daemon's sentence", async () => {
+    const demo = await htmlDemo();
+    let message = "";
+    try {
+      await demo.demoRequest("POST", "/api/v1/effects/html:ink-drop/activate", {});
+    } catch (e) {
+      message = messageOf(e);
+    }
+    expect(message).toBe(htmlLimitSentence(3));
+  });
+});
+
+describe("the demo's HTML slots (#370)", () => {
+  /** One layer, its effect and its mask: what the scene's limit counts on a group playing it. */
+  function maskedStack(effect: string, mask: string): Stack {
+    return {
+      id: "stack:Test",
+      layers: [
+        {
+          id: "l1",
+          name: "One",
+          effect,
+          props: {},
+          area: { kind: "canvas" },
+          blend: "normal",
+          opacity: 100,
+          visible: true,
+          mask: { effect: mask, props: {}, source: "luma", invert: false, amount: 100 },
+        },
+      ],
+    };
+  }
+  /** The library's effects, by id: only the one that resolves is here. */
+  const effects = { "html:ink-drop": {} } as unknown as Record<string, DemoEffect>;
+
+  it("a layer's HTML effect and its HTML mask each take a slot, as the daemon counts them", () => {
+    // Two slots on one layer: the stacks route reports 2 for it, and the scene's limit counts 2.
+    expect(stackHtmlSlots(maskedStack("html:ink-drop", "html:ink-drop"), effects)).toBe(2);
+  });
+
+  it("a mask whose effect is gone takes no slot, and neither does a plain layer", () => {
+    expect(stackHtmlSlots(maskedStack("html:ink-drop", "html:gone"), effects)).toBe(1);
+    expect(stackHtmlSlots(maskedStack("solid", "html:gone"), effects)).toBe(0);
+  });
+
+  it("the stacks route reports a layer's HTML mask as a slot of its own", async () => {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=html,stack");
+    const demo = await import("@/lib/demo");
+    // One layer whose effect and its mask are both HTML: the route reports two slots, where a
+    // count of the layers alone would report one.
+    // The route saves a stack under the id its body carries.
+    await demo.demoRequest("PUT", "/api/v1/stacks/stack:Masked", {
+      ...maskedStack("html:ink-drop", "html:ink-drop"),
+      id: "stack:Masked",
+    });
+    const list = (await demo.demoRequest("GET", "/api/v1/stacks", undefined)) as StacksResponse;
+    const found = list.stacks.find((stack) => stack.id === "stack:Masked");
+    expect(found?.layers).toBe(1);
+    expect(found?.html_layers).toBe(2);
+  });
+
+  it("a mask whose effect is gone takes no slot on the route either", async () => {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=stack-gone-mask");
+    const demo = await import("@/lib/demo");
+    const list = (await demo.demoRequest("GET", "/api/v1/stacks", undefined)) as StacksResponse;
+    const gone = list.stacks.find((stack) => stack.id === "stack:Gone mask");
+    // One layer, whose effect is no HTML and whose HTML mask resolves to nothing.
+    expect(gone?.layers).toBe(1);
+    expect(gone?.html_layers).toBe(0);
+  });
+});
+
+describe("the demo's patterns (#339)", () => {
+  /**
+   * A fresh demo backend with `?state=patterns`: the demo keeps one state per page, and this file's
+   * earlier tests have already opened theirs. `vi.resetModules` gives this test the page a browser
+   * opens on that address.
+   */
+  async function patternsDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/effects/?state=patterns");
+    return import("@/lib/demo");
+  }
+
+  it("demo mode serves two patterns and a library with one", async () => {
+    const demo = await patternsDemo();
+    const list = (await demo.demoRequest("GET", "/api/v1/patterns", undefined)) as PatternsResponse;
+    expect(list.patterns).toHaveLength(2);
+    const ring = list.patterns.find((p) => p.id === "pattern:Intake");
+    const strip = list.patterns.find((p) => p.id === "pattern:Underglow");
+    expect(ring?.built_on).toEqual({ led_count: 12, arrangement: "ring" });
+    expect(strip?.built_on).toEqual({ led_count: 30, arrangement: "strip" });
+    // A ring of 12 with one marked LED, a strip of 30 with three.
+    expect(ring?.frames[0]?.colors).toHaveLength(12);
+    expect(ring?.frames[0]?.colors.filter((c) => c !== "#000000")).toHaveLength(1);
+    expect(strip?.frames[0]?.colors).toHaveLength(30);
+    expect(strip?.frames[0]?.colors.filter((c) => c !== "#000000")).toHaveLength(3);
+
+    // The library lists both as patterns, each with what it was built on, beside the canvas ones.
+    const effects = (await demo.demoRequest("GET", "/api/v1/effects", undefined)) as EffectsResponse;
+    const patterns = effects.effects.filter((e) => e.kind === "pattern");
+    expect(patterns.map((e) => e.id).sort()).toEqual(["pattern:Intake", "pattern:Underglow"]);
+    expect(patterns.find((e) => e.id === "pattern:Intake")?.built_on).toEqual({
+      led_count: 12,
+      arrangement: "ring",
+    });
+    expect(patterns.find((e) => e.id === "pattern:Intake")?.description).toBe("Pattern, ring of 12");
+    expect(patterns.find((e) => e.id === "pattern:Intake")?.needs).toEqual({ screen: false, audio: false });
+    expect(effects.effects.find((e) => e.id === "aurora")?.kind).toBe("canvas");
+
+    // One pattern by its id, and by its bare name.
+    const one = (await demo.demoRequest("GET", "/api/v1/patterns/pattern%3AIntake", undefined)) as Pattern;
+    expect(one.id).toBe("pattern:Intake");
+    const byName = (await demo.demoRequest("GET", "/api/v1/patterns/Intake", undefined)) as Pattern;
+    expect(byName.id).toBe("pattern:Intake");
+  });
+
+  it("putPattern sends the whole document and returns the saved one", async () => {
+    await patternsDemo();
+    const { api } = await import("@/lib/endpoints");
+    // A document with what this version does not know: a motion other than none, an unknown key on
+    // the pattern and one on its frame.
+    const document = {
+      id: "pattern:Intake",
+      built_on: { led_count: 3, arrangement: "ring" },
+      frames: [{ colors: ["#ff0000", "#000000", "#000000"], hold: 0, label: "the one that plays" }],
+      motion: { type: "rotate", speed: 2 },
+      tags: ["front"],
+    } as unknown as Pattern;
+
+    const saved = await api.putPattern("pattern:Intake", document);
+
+    expect(saved.id).toBe("pattern:Intake");
+    expect(saved.frames[0]?.colors).toEqual(["#ff0000", "#000000", "#000000"]);
+    expect(saved).toMatchObject({ motion: { type: "rotate", speed: 2 }, tags: ["front"] });
+    expect((saved.frames[0] as unknown as { label: string }).label).toBe("the one that plays");
+    // What was saved is what the next read answers, whole.
+    expect(await api.pattern("pattern:Intake")).toEqual(saved);
+
+    // A name another pattern has, ignoring case, is a 409, as the daemon's is.
+    const taken = await api
+      .putPattern("pattern:intake", { ...document, id: "pattern:intake" })
+      .then(() => null, (e: unknown) => e);
+    expect((taken as ApiFailure).status).toBe(409);
+
+    // A frame that is not the length the pattern was built on is a 422, with the daemon's sentence.
+    const short = await api
+      .putPattern("pattern:Short", {
+        id: "pattern:Short",
+        built_on: { led_count: 4, arrangement: "ring" },
+        frames: [{ colors: ["#ff0000"], hold: 0 }],
+        motion: { type: "none" },
+      })
+      .then(() => null, (e: unknown) => e);
+    expect((short as ApiFailure).status).toBe(422);
+    expect(messageOf(short)).toMatch(/frame 1 has 1 colours; the device it was built on has 4 LEDs/);
   });
 });
 
@@ -152,5 +339,30 @@ describe("the demo's value validator (#106)", () => {
     expect(() => checkPeripheralValue(device, "angle", { type: "number", value: NaN })).toThrow();
     expect(() => checkPeripheralValue(device, "tint", { type: "angle", value: 120 })).toThrow();
     expect(() => checkPeripheralValue(device, "tint", { type: "number", value: 120 })).toThrow();
+  });
+});
+
+describe("demo chain setup", () => {
+  it("a commit leaves the header's zone at the parts' length in the device list", async () => {
+    const { chains } = (await demoRequest("GET", "/api/v1/chains", undefined)) as {
+      chains: { device_id: string; zone_index: number; zone_name: string }[];
+    };
+    const chain = chains.find((c) => c.zone_name === "JARGB 1");
+    expect(chain).toBeDefined();
+    if (!chain) return;
+    const setup = `/api/v1/chains/${encodeURIComponent(chain.device_id)}/${chain.zone_index}/setup`;
+    const { session } = (await demoRequest("POST", setup, {})) as { session: string };
+    await demoRequest("POST", `${setup}/commit`, {
+      session,
+      parts: [
+        { name: "Fan 1", kind: "fan", leds: 24 },
+        { name: "Fan 2", kind: "fan", leds: 24 },
+      ],
+    });
+    const { devices } = (await demoRequest("GET", "/api/v1/devices", undefined)) as {
+      devices: { id: string; zones: { index: number; led_count: number }[] }[];
+    };
+    const zone = devices.find((d) => d.id === chain.device_id)?.zones.find((z) => z.index === chain.zone_index);
+    expect(zone?.led_count).toBe(48);
   });
 });

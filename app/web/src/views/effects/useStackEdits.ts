@@ -29,7 +29,8 @@ import {
   MAX_LAYERS,
 } from "@/views/effects/stackDraft";
 import type { LayerArea } from "@/proto/LayerArea";
-import type { Layout } from "@/proto/Layout";
+import type { DraftMirror } from "@/views/effects/draftMirror";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { PropertySchema } from "@/proto/PropertySchema";
 import type { PropValue } from "@/proto/PropValue";
 import type { Stack } from "@/proto/Stack";
@@ -38,7 +39,7 @@ import type { StackLayer } from "@/proto/StackLayer";
 export function useStackEdits({
   draft,
   picked,
-  layout,
+  canvas,
   draftRef,
   mounted,
   historyMoves,
@@ -49,11 +50,11 @@ export function useStackEdits({
 }: {
   draft: Stack;
   picked: string | null;
-  layout: Layout | null;
-  draftRef: { current: Stack };
+  canvas: GroupCanvas | null;
+  draftRef: DraftMirror;
   mounted: { current: boolean };
   historyMoves: { current: number };
-  setDraft: (update: Stack | ((current: Stack) => Stack), run?: string, hold?: boolean) => void;
+  setDraft: (update: Stack | ((current: Stack) => Stack), run?: string, hold?: boolean) => number;
   pick: (id: string | null) => void;
   setSheetOpen: (open: boolean) => void;
   setSchemas: (update: (current: Record<string, PropertySchema | null>) => Record<string, PropertySchema | null>) => void;
@@ -88,7 +89,7 @@ export function useStackEdits({
   const makeRect = (id: string) => {
     const layer = draftRef.current.layers.find((entry) => entry.id === id);
     if (!layer) return;
-    const rect = areaAsRect(layer.area, layout);
+    const rect = areaAsRect(layer.area, canvas);
     if (!rect) {
       refuse("That area is not on the desk, so there is no rectangle to make.");
       return;
@@ -165,14 +166,15 @@ export function useStackEdits({
       id,
       ...(place?.area ? { area: place.area } : {}),
     };
-    // The ref is updated with the draft, so a queued add sees this layer.
+    // The mirror holds the draft, so a queued add sees this layer, and its version says which
+    // change it is: a commit of an older draft cannot put the mirror back (#332).
     const next = {
       ...draftRef.current,
       layers:
         place?.at === undefined ? addLayer(layers, layer) : insertLayerAt(layers, layer, place.at),
     };
-    draftRef.current = next;
-    setDraft(next);
+    const at = setDraft(next);
+    draftRef.write(next, at);
     pick(id);
   };
 
@@ -273,8 +275,8 @@ export function useStackEdits({
         }
         if (added.length === 0) return;
         const next = { ...draftRef.current, layers: working };
-        draftRef.current = next;
-        setDraft(next);
+        const at = setDraft(next);
+        draftRef.write(next, at);
         pick(added[added.length - 1]!.id);
       } finally {
         starterQueued.current.delete(starter.id);

@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Tooltip } from "@/components/Tooltip";
 
@@ -60,8 +60,11 @@ describe("Tooltip (#271)", () => {
 
   it("wraps a bubble the window has no room for and keeps it inside", () => {
     viewport(390, 844);
-    // The Peripherals "Read again" label laid out on one line: 774.8px in a 390px window.
-    const { bubble } = show(rect(129.5, 218.2, 116, 28), 774.8, 30.3);
+    // The Peripherals "Read again" label laid out on one line, measured in the static export at
+    // 1920x1040 (headless Chromium, the label in the bubble's own 14px face): 853 px of text,
+    // 871 px with the bubble's 8 px side padding and 1 px border. In a 390 px window that is
+    // wider than the window, so the bubble has to wrap.
+    const { bubble } = show(rect(129.5, 218.2, 116, 28), 871, 30.3);
     expect(bubble.style.maxWidth).toBe("374px");
     expect(bubble.style.whiteSpace).toBe("normal");
     expect(Number.parseFloat(bubble.style.left)).toBe(8 - 129.5);
@@ -70,16 +73,17 @@ describe("Tooltip (#271)", () => {
   it("places a wrapped bubble by its wrapped height, measured after the wrap", () => {
     viewport(390, 844);
     const { container } = render(
-      <Tooltip label="asks the device for its settings again">
+      <Tooltip label="Reads the settings from the mouse again, to pick up changes made on the mouse itself. The mouse may stutter briefly while it reads.">
         <button type="button">Read again</button>
       </Tooltip>,
     );
     const tip = container.querySelector(".tip") as HTMLElement;
     const bubble = container.querySelector(".tip-bubble") as HTMLElement;
     vi.spyOn(tip, "getBoundingClientRect").mockReturnValue(rect(129.5, 218.2, 116, 28));
-    // One line until it wraps; three lines of 374px once the component lets it wrap.
+    // The same measured 871 px on one line (30.3 px tall: the 20.3 px line and the padding);
+    // three lines of 374 px once the component lets it wrap.
     vi.spyOn(bubble, "getBoundingClientRect").mockImplementation(() =>
-      bubble.style.whiteSpace === "normal" ? rect(0, 0, 374, 90) : rect(0, 0, 774.8, 30.3),
+      bubble.style.whiteSpace === "normal" ? rect(0, 0, 374, 90) : rect(0, 0, 871, 30.3),
     );
     tip.dispatchEvent(new Event("pointerenter"));
     // Above the trigger by the gap and the wrapped height: 218.2 - 6 - 90 = 122.2, so -96 inside the tip.
@@ -123,5 +127,53 @@ describe("Tooltip (#271)", () => {
     unmount();
     expect(removed()).toBe(4);
     vi.restoreAllMocks();
+  });
+});
+
+describe("the bubble and the press (#384)", () => {
+  /** The tip as the trigger, its bubble and the mark that holds the bubble back. */
+  function tipOf(props: { holdOnPress?: boolean }) {
+    const { container } = render(
+      <Tooltip label="Move Case fans" {...props}>
+        <button type="button">Move</button>
+      </Tooltip>,
+    );
+    return container.querySelector(".tip") as HTMLElement;
+  }
+
+  /** A press on the control: the mark on the tip is set in the state it holds. */
+  function press(tip: HTMLElement) {
+    act(() => {
+      tip.dispatchEvent(new Event("pointerdown"));
+    });
+  }
+
+  it("a press on a normal control does not take its bubble away", () => {
+    const tip = tipOf({});
+    press(tip);
+    // The bubble stays: a press on a button is not a drag over the page.
+    expect(tip.getAttribute("data-hold")).toBeNull();
+  });
+
+  it("a control that asks for it holds its bubble back while it is pressed", () => {
+    const tip = tipOf({ holdOnPress: true });
+    press(tip);
+    expect(tip.getAttribute("data-hold")).toBe("true");
+    // The pointer lets go and leaves the control: the bubble comes back.
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 600, clientY: 600 }));
+    });
+    expect(tip.getAttribute("data-hold")).toBeNull();
+  });
+
+  it("a press on a control that does not ask for it leaves the bubble alone, and so does a second press", () => {
+    const tip = tipOf({});
+    press(tip);
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    press(tip);
+    expect(tip.getAttribute("data-hold")).toBeNull();
   });
 });

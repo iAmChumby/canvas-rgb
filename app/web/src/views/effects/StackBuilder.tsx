@@ -3,7 +3,7 @@
 // The stack builder (D95.5): the Effects route in build mode. The picture and its layers on the
 // left, the picked layer on the right, the stack's presets below it. The preview is the daemon's
 // second engine (`?stack=1`); Try on the lights is a stack draft; Save writes the stack and
-// activates it. Nothing here writes an effect file or the layout except those two routes.
+// activates it. Nothing here writes an effect file or a stack except those two routes.
 //
 // #257 phase 4 split the former 3,300-line component: the history (useStackHistory), the read
 // (useStackLoad), the preview and the draft on the lights (usePreview, useDraftOnLights), the
@@ -11,7 +11,7 @@
 // the save and its guard (useSaveAndLeave) and the presets (usePresets) are hooks beside this
 // file; the layer list, inspector, stage, presets and overlays are their own components.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { LoadFrame, ErrorPanel } from "@/components/Loading";
 import { Skeleton } from "@/components/Skeleton";
 import { Panel } from "@/components/Panel";
@@ -26,6 +26,7 @@ import { LayerList } from "@/views/effects/LayerList";
 import { StackStage } from "@/views/effects/StackStage";
 import { StarterTiles } from "@/views/effects/StarterTiles";
 import { STARTER_STACKS } from "@/lib/demoStacks";
+import { DraftMirror } from "@/views/effects/draftMirror";
 import {
   ChooseEffectPopover,
   DragGhost,
@@ -49,6 +50,7 @@ import {
 } from "@/views/effects/stackDraft";
 import { endRun } from "@/lib/draftHistory";
 import { useSnap } from "@/lib/store";
+import { buildGroupCanvas, wholeLightsCanvas } from "@/lib/groupCanvas";
 import { useStackHistory } from "@/views/effects/useStackHistory";
 import { useStackLoad } from "@/views/effects/useStackLoad";
 import { usePresets } from "@/views/effects/usePresets";
@@ -65,12 +67,17 @@ import type { Stack } from "@/proto/Stack";
 
 export function StackBuilder({
   initialName,
+  groupHref,
+  groupName,
   onClose,
   onName,
   onWriteCode,
 }: {
   /** The `?stack=` value: a saved stack's name, or `new`. */
   initialName: string;
+  /** The way back to the Scenes page's open group, when the builder was opened from one. */
+  groupHref?: string | null;
+  groupName?: string | null;
   onClose: () => void;
   /** A newly saved stack's name: the URL becomes `?stack=<name>` without reloading. */
   onName: (name: string) => void;
@@ -79,16 +86,31 @@ export function StackBuilder({
 }) {
   const isNew = initialName === "new";
   const devices = useSnap((s) => s.devices);
-  const layouts = useSnap((s) => s.layouts);
-  const activeLayout = useSnap((s) => s.activeLayout);
+  const lightList = useSnap((s) => s.lights);
+  const scenes = useSnap((s) => s.scenes);
   const status = useSnap((s) => s.status);
   const effects = useSnap((s) => s.effects);
-  const layout = layouts?.find((entry) => entry.id === activeLayout) ?? layouts?.[0] ?? null;
+  // "Edit effect" from an open group opens the builder with `?group=<id>`: the stage then draws
+  // that group. Without one it draws every light as one flow-across group.
+  const [groupParam] = useState<string | null>(() =>
+    typeof window === "undefined" ? null : new URLSearchParams(window.location.search).get("group"),
+  );
+  const group = useMemo(
+    () =>
+      scenes?.scenes
+        .find((scene) => scene.id === scenes.active)
+        ?.groups.find((entry) => entry.id === groupParam) ?? null,
+    [scenes, groupParam],
+  );
+  const canvas = useMemo(() => {
+    if (group) return buildGroupCanvas(group, lightList ?? [], devices ?? []);
+    return wholeLightsCanvas(lightList ?? [], devices ?? []);
+  }, [group, lightList, devices]);
 
   const [nameDraft, setNameDraft] = useState("");
   const [picked, setPicked] = useState<string | null>(null);
-  // Parts (the desk's outlines) starts off; a drag shows them anyway (spec §3).
-  const [parts, setParts] = useState(false);
+  // The LEDs start on: the stage draws the group's arrangement without anyone asking for it.
+  const [parts, setParts] = useState(true);
   /** The live region's line: every lift, target and drop is said here. */
   const [announce, setAnnounce] = useState("");
   /** The phone's tab under the stage: the layer list, or the library. */
@@ -119,9 +141,9 @@ export function StackBuilder({
   const [session] = useState(() => ({ current: new StackSession(newEpoch()) }));
 
   const history = useStackHistory({ id: "stack:", layers: [] }, () => areaDraggingRef.current);
-  const { edit, setEdit, draft, setDraft, resetDraft, historyMoves, steppedRef, undoNow, redoNow, canUndo, canRedo } =
+  const { edit, setEdit, draft, setDraft, resetDraft, versionOf, historyMoves, steppedRef, undoNow, redoNow, canUndo, canRedo } =
     history;
-  const draftRef = useRef<Stack>(draft);
+  const [draftRef] = useState(() => new DraftMirror(draft, versionOf));
 
   /** Picking a layer: a mask refusal belongs to the layer it was said on, so it clears here (#256). */
   const pick = (id: string | null) => {
@@ -132,10 +154,11 @@ export function StackBuilder({
   const load = useStackLoad({ initialName, isNew, mountedRef, areaDraggingRef, resetDraft, pick });
 
   // The refs the async senders read. They are synced here, before the preview and draft hooks
-  // register their own effects, so a send always sees the draft it was rendered from.
+  // register their own effects, so a send always sees the draft it was rendered from. The mirror
+  // takes the commit's version, so a commit older than a change already written is ignored (#332).
   useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+    draftRef.commit(draft, versionOf);
+  }, [draft, versionOf]);
   useEffect(() => {
     nameRef.current = nameDraft;
   }, [nameDraft]);
@@ -159,7 +182,7 @@ export function StackBuilder({
   const edits = useStackEdits({
     draft,
     picked,
-    layout,
+    canvas,
     draftRef,
     mounted: mountedRef,
     historyMoves,
@@ -183,7 +206,7 @@ export function StackBuilder({
   });
 
   const dragSession = useDragSession({
-    layout,
+    canvas,
     devices,
     draft,
     draftRef,
@@ -226,7 +249,6 @@ export function StackBuilder({
   });
 
   const lights = useDraftOnLights({ count, session, mounted: mountedRef, stackForServer });
-
   const saver = useSaveAndLeave({
     isNew,
     name,
@@ -330,6 +352,8 @@ export function StackBuilder({
         dirty={dirty}
         saveState={saver.saveState}
         canSave={count > 0 && load.phase === "ready" && load.loadError === null}
+        groupHref={groupHref}
+        groupName={groupName}
         backRef={backRef}
         onBack={saver.askLeave}
         onRevert={saver.revert}
@@ -343,6 +367,12 @@ export function StackBuilder({
         onReplace={() => void saver.replaceOther()}
         onCancelClash={() => saver.setClash(null)}
       />
+
+      {groupParam && !group && (
+        <p className="rule rule-warn" role="status">
+          That group is not in the active scene.
+        </p>
+      )}
 
       {load.phase === "error" ? (
         <div className="rd-stack-body" data-library={libraryMode}>
@@ -391,7 +421,7 @@ export function StackBuilder({
 
               <StackStage
                 draft={draft}
-                layout={layout}
+                canvas={canvas}
                 devices={devices}
                 pickedLayer={pickedLayer}
                 parts={parts}
@@ -492,7 +522,7 @@ export function StackBuilder({
                     statuses={load.statuses}
                     schemas={load.schemas}
                     effects={effects}
-                    layout={layout}
+                    canvas={canvas}
                     devices={devices}
                     drag={dragSession.drag}
                     isLifted={dragSession.isLifted}
@@ -526,7 +556,7 @@ export function StackBuilder({
                   layer={pickedLayer}
                   schemas={load.schemas}
                   effects={effects}
-                  layout={layout}
+                  canvas={canvas}
                   devices={devices}
                   tuneRef={tuneRef}
                   onTune={() => setSheetOpen(true)}
@@ -544,7 +574,7 @@ export function StackBuilder({
               schemas={load.schemas}
               effects={effects}
               statuses={load.statuses}
-              layout={layout}
+              canvas={canvas}
               devices={devices}
               maskProblem={maskProblem}
               edits={edits}
@@ -604,7 +634,7 @@ export function StackBuilder({
       {area.pickerFor && (
         <StackAreaPicker
           layer={draft.layers.find((layer) => layer.id === area.pickerFor) ?? draft.layers[0]!}
-          layout={layout}
+          canvas={canvas}
           devices={devices}
           onUse={area.apply}
           onClose={area.close}

@@ -3,13 +3,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   CaretLeft,
-  Code,
-  DotsThreeOutline,
   FileHtml,
   MagnifyingGlass,
   MonitorPlay,
   PencilSimple,
-  Play,
   Plus,
   SquaresFour,
   Star,
@@ -18,7 +15,7 @@ import {
   Warning,
   Waveform,
 } from "@phosphor-icons/react";
-import { Button, ButtonLink, FileButton, IconButton, Swap } from "@/components/Button";
+import { Button, ButtonLink, FileButton, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { Panel } from "@/components/Panel";
@@ -36,7 +33,12 @@ import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { PresetStrip } from "@/views/PresetStrip";
 import { EffectEditor, type EffectEditorHandle, type EditorTarget, type SavedEffect } from "@/views/effects/EffectEditor";
 import { NewEffectChooser } from "@/views/effects/NewEffectChooser";
+import { NewEffectMenu } from "@/views/effects/NewEffectMenu";
+import { BuildOnStep } from "@/views/effects/BuildOnStep";
+import { PatternNew } from "@/views/effects/PatternNew";
+import { PatternTile, emptyPattern } from "@/views/effects/PatternTile";
 import { StackBuilder } from "@/views/effects/StackBuilder";
+import { PlayOn } from "@/views/effects/PlayOn";
 import { useStackParam } from "@/lib/stackRoute";
 import { BLANK_EFFECT, blankFileName, copyFileName, titleOf, withTitle } from "@/views/effects/blankEffect";
 import { api } from "@/lib/endpoints";
@@ -47,13 +49,27 @@ import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
 import { stackLayerNames } from "@/lib/stackLayers";
+import { kindWords } from "@/lib/patternFit";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
+import type { BuiltOn } from "@/proto/BuiltOn";
 import type { EffectDetail } from "@/proto/EffectDetail";
+import type { Pattern } from "@/proto/Pattern";
 import type { PropValue } from "@/proto/PropValue";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 
 /** Live edits are sent this long after the last change (ms). */
 const PATCH_DEBOUNCE_MS = 60;
+
+/** How long a deleted preset can still be put back: the notification's own life, not a timer here. */
+const UNDO_MS = 8000;
+
+/** `PATTERN_ID_PREFIX` from the spine: a pattern's id is its name. */
+const PATTERN_ID_PREFIX = "pattern:";
+
+/** A pattern being built or edited: the device step first, then the page on one document. */
+type PatternStep =
+  | { kind: "choose" }
+  | { kind: "open"; pattern: Pattern; fresh: boolean };
 
 /** The height the shell published for the status strip. */
 function currentStripHeight(): string {
@@ -66,19 +82,91 @@ export function EffectsView() {
   const effects = useSnap((s) => s.effects);
   const effectsError = useSnap((s) => s.effectsError);
   const failed = useSnap((s) => s.effectsFailed);
+  // A pattern is a library entry of its own kind: the gallery draws it from these colours, so the
+  // whole document is read, never a thumbnail (0.16.0).
+  const patterns = useSnap((s) => s.patterns);
+  // The device step lists the owner's own lights, and a light's zone is where a grid's cells are.
+  const lights = useSnap((s) => s.lights);
+  const devices = useSnap((s) => s.devices);
   const status = useSnap((s) => s.status);
-  const activeId = useSnap((s) => s.status?.active_effect ?? null);
+  // With scenes every group plays its own effect, so "running" is any group of the active scene.
+  const activeEffects = useMemo(
+    () =>
+      status?.active_effects ?? [],
+    [status],
+  );
+  // The groups "Play on …" offers: the active scene's, in its order.
+  const scenesAnswer = useSnap((s) => s.scenes);
+  const scenesError = useSnap((s) => s.scenesError);
+  const groupsKnown = scenesAnswer !== null || scenesError !== null;
+  const activeScene = useMemo(
+    () => scenesAnswer?.scenes.find((s) => s.id === scenesAnswer.active) ?? null,
+    [scenesAnswer],
+  );
+  const groups = activeScene?.groups ?? [];
+  const playedGroups = useMemo(
+    () => groups.filter((g) => g.plays.type === "effect"),
+    [groups],
+  );
+  const playingIds = useMemo(
+    () => new Set(playedGroups.flatMap((g) => (g.plays.type === "effect" ? [g.plays.effect] : []))),
+    [playedGroups],
+  );
+  const firstPlaying = playedGroups[0]?.plays.type === "effect" ? playedGroups[0].plays.effect : null;
+  const activeId = firstPlaying ?? activeEffects[0] ?? null;
   // A load that is in flight after a Try again: the frame shows its placeholder until it ends.
   const retrying = useSnap((s) => s.pending.includes("effects"));
   const [filter, setFilter] = useState<"all" | "favorites">("all");
   const [category, setCategory] = useState<EffectCategory | null>(null);
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState<string | null>(null);
+  // `?effect=<id>&group=<id>` is how an open group's "Edit effect" arrives: the effect opens,
+  // and the way back to the Scenes page names the group.
+  const [params] = useState(() =>
+    typeof window === "undefined" ? new URLSearchParams() : new URLSearchParams(window.location.search),
+  );
+  const effectParam = params.get("effect");
+  const groupParam = params.get("group");
+  const groupName = groups.find((g) => g.id === groupParam)?.name ?? null;
+  const groupHref = groupParam ? `/?group=${encodeURIComponent(groupParam)}` : null;
+  const [picked, setPicked] = useState<string | null>(() =>
+    effectParam && !effectParam.startsWith("stack:") ? effectParam : null,
+  );
   // The running effect is the default; a click on the list overrides it.
   const selectedId = picked ?? activeId ?? effects?.[0]?.id ?? null;
   const setSelectedId = setPicked;
   const [loaded, setLoaded] = useState<{ id: string; detail: EffectDetail } | null>(null);
   const [values, setValues] = useState<Values>({});
+  // A stack that holds an HTML layer or an HTML mask starts the scene's HTML runtime (the daemon
+  // counts a layer's effect and its mask): Play on then offers one group at a time. A mask whose
+  // effect is gone is counted here and not by the daemon: the careful side, one group at a time.
+  const [htmlStack, setHtmlStack] = useState<{ name: string; html: boolean } | null>(null);
+  const stackName = selectedId?.startsWith("stack:") ? selectedId.slice("stack:".length) : null;
+  const stackHtml = stackName !== null && htmlStack?.name === stackName ? htmlStack.html : false;
+  useEffect(() => {
+    if (!stackName) return;
+    let stop = false;
+    api
+      .stack(stackName)
+      .then((detail) => {
+        if (stop) return;
+        setHtmlStack({
+          name: stackName,
+          html: detail.stack.layers.some(
+            (layer) =>
+              layer.effect.startsWith("html:") ||
+              (layer.mask !== undefined && layer.mask.effect.startsWith("html:")),
+          ),
+        });
+      })
+      .catch(() => {
+        // The stack builder says why its own read failed; here the stack is played like one
+        // effect and the daemon refuses a second HTML group if it must.
+        if (!stop) setHtmlStack({ name: stackName, html: false });
+      });
+    return () => {
+      stop = true;
+    };
+  }, [stackName]);
   // The detail read's error and a write's error are separate: a successful read clears
   // only the read error, so it cannot hide a failed write's message (#156).
   const [readError, setReadError] = useState<string | null>(null);
@@ -122,22 +210,46 @@ export function EffectsView() {
   const [newOpen, setNewOpen] = useState(false);
   const [newBusy, setNewBusy] = useState<string | null>(null);
   const [newError, setNewError] = useState<string | null>(null);
-  // The page's overflow menu, where the code editor's way in sits under Advanced.
-  const [moreOpen, setMoreOpen] = useState(false);
-  const moreRef = useRef<HTMLSpanElement>(null);
+  // New effect's menu, hung under its key: a stack, a pattern or code (0.16.0).
+  const [newMenu, setNewMenu] = useState(false);
+  const newRef = useRef<HTMLSpanElement>(null);
+  // The pattern being built or edited, in the inspector's room (the gallery becomes a strip).
+  const [patternStep, setPatternStep] = useState<PatternStep | null>(null);
+  // The pattern whose delete the daemon refused, with its sentence (it names the scenes).
+  const [patternRefusal, setPatternRefusal] = useState<{ id: string; message: string } | null>(null);
+  const [patternDeleting, setPatternDeleting] = useState(false);
   // Build mode is `?stack=<name>` on this route (D95.5.1).
   const [stackParam, goStack] = useStackParam();
   const openStack = (name: string) => goStack(name);
+  // A group whose effect is a stack opens its builder, with the group it was tuned in.
+  const openedFromGroup = useRef(false);
+  useEffect(() => {
+    if (openedFromGroup.current || !effectParam?.startsWith("stack:")) return;
+    openedFromGroup.current = true;
+    goStack(effectParam.slice("stack:".length));
+    // The URL is read once at mount; `goStack` is the route's own setter.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [effectParam]);
   // The sheet's Back reaches the editor's unsaved prompt through this.
   const editorRef = useRef<EffectEditorHandle | null>(null);
   // On a phone the detail is pushed over the gallery.
   const narrow = useMediaQuery("(max-width: 720px)");
-  const [pushed, setPushed] = useState(false);
+  // A phone opens the sheet when the page was asked for one effect by name ("Edit effect" from
+  // a group): the effect must not sit behind the library. Read once, at mount.
+  const opensEffect = effectParam !== null && !effectParam.startsWith("stack:");
+  const [pushed, setPushed] = useState(
+    () =>
+      opensEffect &&
+      typeof window !== "undefined" &&
+      window.matchMedia("(max-width: 720px)").matches,
+  );
   const [closing, setClosing] = useState(false);
   // Set when the push has settled: the gallery is then out of the way and out of the tab order.
-  const [settled, setSettled] = useState(false);
+  const [settled, setSettled] = useState(pushed);
   // The height of the status strip when the sheet opened.
-  const [sheetTop, setSheetTop] = useState<string | null>(null);
+  const [sheetTop, setSheetTop] = useState<string | null>(() =>
+    pushed ? currentStripHeight() : null,
+  );
 
   const pending = useRef<Values>({});
   /** The effect the waiting values were edited on. */
@@ -171,20 +283,9 @@ export function EffectsView() {
     pendingFor.current = null;
     if (!id || Object.keys(batch).length === 0) return;
     try {
-      if (getSnap().status?.active_effect === id) {
-        await api.patchActiveProps(batch);
-      } else {
-        // The first edit to a stopped effect starts it, with the edited values on top. The
-        // Activate button is the control that starts the effect, so it shows the wait for the
-        // activation this edit asked for.
-        startActivating();
-        try {
-          await api.activateEffect(id, { props: batch, preset: null });
-          await refreshAll();
-        } finally {
-          endActivating();
-        }
-      }
+      // The Effects page's controls are the effect's starting values: what the next group to
+      // play it starts from. A group that already plays it keeps its own values.
+      await api.patchEffectDefaults(id, batch);
       if (selectedRef.current === id) saved.current = { ...saved.current, ...batch };
       clearWrite(id);
     } catch (e) {
@@ -245,13 +346,18 @@ export function EffectsView() {
   const { el: applyPulseEl, fire: pulseApply } = useSuccessPulse();
   const { el: applyPulseSheetEl, fire: pulseApplySheet } = useSuccessPulse();
 
-  const activate = async (preset: string | null) => {
+  const activate = async (onGroups: string[] | null = null, preset: string | null = null) => {
     if (!selectedId) return;
     const id = selectedId;
     clearWrite(id);
     startActivating();
     try {
-      await api.activateEffect(id, { props: {}, preset });
+      await api.activateEffect(id, {
+        props: {},
+        preset,
+        // No group named is every group: a daemon from before scenes has no groups to name.
+        ...(onGroups && onGroups.length > 0 ? { groups: onGroups } : {}),
+      });
       await refreshAll();
       // One pulse once the effect is on the lights (issue #187, rule 6): it
       // fires only here, after the daemon confirmed — never from `running`,
@@ -265,14 +371,6 @@ export function EffectsView() {
     }
   };
 
-  // The preset deleted last, while it can still be put back (8 s).
-  const [undo, setUndoState] = useState<{ name: string; run: () => Promise<void> } | null>(null);
-  const undoTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const setUndo = (next: { name: string; run: () => Promise<void> } | null) => {
-    if (undoTimer.current) clearTimeout(undoTimer.current);
-    setUndoState(next);
-    if (next) undoTimer.current = setTimeout(() => setUndoState(null), 8000);
-  };
   const detailRef = useRef<EffectDetail | null>(null);
   useEffect(() => {
     detailRef.current = loaded && loaded.id === selectedId ? loaded.detail : null;
@@ -377,12 +475,12 @@ export function EffectsView() {
     }
     // The live values stay as they are; they just no longer belong to a preset.
     if (wasApplied) setApplied(id, null);
-    // One way back, shared by the notification and the strip: it works once, then both go.
+    // One way back, in the one place a message that comes and goes belongs: the notification
+    // lane. It works once, and it is on screen for the eight seconds it always was (#366).
     let used = false;
     const putBack = async () => {
       if (used) return;
       used = true;
-      setUndo(null);
       try {
         const r = await api.createPreset(id, { name, props: preset.props });
         setUserPresets(id, r.user_presets);
@@ -393,11 +491,10 @@ export function EffectsView() {
         throw e;
       }
     };
-    setUndo({ name, run: putBack });
     notify(`Deleted ${name}`, "info", {
       label: "Undo",
       onClick: () => void putBack().catch((e: unknown) => notify(messageOf(e), "down")),
-    });
+    }, { lifeMs: UNDO_MS });
   };
 
   const toggleFavorite = async (id: string, favorite: boolean) => {
@@ -476,6 +573,10 @@ export function EffectsView() {
     setSheetTop(currentStripHeight());
     setTimeout(() => setSettled(true), 240);
   };
+
+  // "Edit effect" from a group (`?effect=<id>`) opens that effect: on a phone the sheet it
+  // lives in opens too (its initial state above), so the page does not land on the library
+  // with the effect behind it.
 
   /**
    * Switches the inspector into the code editor for one effect (D2.2). The detail is optional:
@@ -592,7 +693,8 @@ export function EffectsView() {
     }
   };
 
-  const editing = editorTarget !== null;
+  // The pane is not the inspector: a code editor, or a pattern being built or edited.
+  const editing = editorTarget !== null || patternStep !== null;
 
   const q = query.trim();
   // The search is loose: the words may come in any order, one letter may be wrong, and a word
@@ -610,10 +712,23 @@ export function EffectsView() {
   // is never blank; the Activate button waits for the real one.
   const detail = loaded ? loaded.detail : null;
   const stale = loaded !== null && loaded.id !== selectedId;
-  const running = selectedId !== null && selectedId === activeId;
+  /** The groups of the active scene that play this effect, by name. */
+  const playingHere =
+    selectedId === null
+      ? []
+      : playedGroups.flatMap((g) =>
+          g.plays.type === "effect" && g.plays.effect === selectedId ? [g.name] : [],
+        );
+  // A daemon without scenes has no groups to read: its one active effect is the running one.
+  const running =
+    selectedId !== null &&
+    (playingHere.length > 0 ||
+      (scenesAnswer === null && activeEffects.includes(selectedId)));
+  const isPlaying = (id: string) =>
+    playingIds.has(id) || (scenesAnswer === null && activeEffects.includes(id));
   const needsInput = detail ? detail.schema.needs.screen || detail.schema.needs.audio : false;
-  // Nothing can run until there is a layout.
-  const noLayout = status !== null && !status.active_layout;
+  // Nothing can run until there is a scene with a group to play on.
+  const noScene = status !== null && !status.active_scene;
 
   // Which preset the values on screen mean, and whether they have moved off it. The rail and the
   // strip read it from the same place.
@@ -662,6 +777,52 @@ export function EffectsView() {
       setClosing(false);
       setPushed(false);
     }, 240);
+  };
+
+  /** A saved pattern, whole, by its id: the gallery tile and the inspector are drawn from it. */
+  const patternDoc = (id: string | null): Pattern | null =>
+    id === null ? null : (patterns ?? []).find((p) => p.id === id) ?? null;
+
+  /** A pattern's tile opens its editor on it, as a stack's tile opens the builder. */
+  const openPattern = (id: string) => {
+    const document = patternDoc(id);
+    // The document has not arrived yet (the list is still on its way): the inspector takes the id
+    // and shows the pattern when it lands.
+    if (document === null) {
+      pick(id);
+      return;
+    }
+    pushSheet();
+    setNewOpen(false);
+    setPatternStep({ kind: "open", pattern: document, fresh: false });
+  };
+
+  /** A pattern from the device step: all off, built on the kind that was chosen. */
+  const startPattern = (builtOn: BuiltOn) => {
+    pushSheet();
+    setPatternStep({ kind: "open", pattern: emptyPattern(builtOn), fresh: true });
+  };
+
+  /**
+   * Removes a pattern. The daemon refuses while a scene plays it and its sentence names the
+   * scenes, so the refusal is shown beside a key that sends the forced delete.
+   */
+  const deletePattern = async (id: string, force = false) => {
+    setPatternDeleting(true);
+    clearWrite(null);
+    try {
+      await api.deletePattern(id, force);
+      setPatternRefusal(null);
+      setPatternStep(null);
+      // The selected pattern is gone: the inspector goes back to what the list has.
+      setPicked(null);
+      await refreshAll();
+    } catch (e) {
+      if (e instanceof ApiFailure && e.status === 409) setPatternRefusal({ id, message: messageOf(e) });
+      else failWrite(null, e);
+    } finally {
+      setPatternDeleting(false);
+    }
   };
 
   // The files that did not load: the key in the toolbar says how many, and the list is behind it.
@@ -714,6 +875,9 @@ export function EffectsView() {
         const e = row.effect;
         const html = e.id.startsWith("html:");
         const stackEffect = e.id.startsWith("stack:");
+        // A pattern is the third kind of library entry: its tile is its own dots (0.16.0).
+        const patternEffect = e.kind === "pattern" || e.id.startsWith(PATTERN_ID_PREFIX);
+        const patternBody = patternEffect ? patternDoc(e.id) : null;
         const selected = e.id === selectedId;
         return (
           <Enter key={e.id} delay={Math.min(i, 8) * 26}>
@@ -721,7 +885,13 @@ export function EffectsView() {
               <button
                 type="button"
                 className="effect-card-open"
-                aria-label={stackEffect ? `Edit the stack ${e.name}` : `Open ${e.name}`}
+                aria-label={
+                  stackEffect
+                    ? `Edit the stack ${e.name}`
+                    : patternEffect
+                      ? `Edit the pattern ${e.name}`
+                      : `Open ${e.name}`
+                }
                 aria-current={selected ? "true" : undefined}
                 aria-disabled={editing ? "true" : undefined}
                 title={
@@ -729,7 +899,9 @@ export function EffectsView() {
                     ? "Finish editing to open another effect"
                     : stackEffect
                       ? "Open the stack builder"
-                      : undefined
+                      : patternEffect
+                        ? "Open the pattern editor"
+                        : undefined
                 }
                 onClick={() => {
                   // The gallery is a strip while the editor is open: it never steals the edit.
@@ -739,11 +911,32 @@ export function EffectsView() {
                     openStack(e.id.slice("stack:".length));
                     return;
                   }
+                  // A pattern's tile opens its editor, as a stack's opens the builder.
+                  if (patternEffect) {
+                    openPattern(e.id);
+                    return;
+                  }
                   pick(e.id);
                 }}
               >
                 <span className="effect-card-preview">
-                  <Thumb id={e.id} size="md" label={e.name} live={selected} />
+                  {patternEffect ? (
+                    // The dots, in the pattern's own colours: its document, or its shape all off
+                    // while the list is on its way. Never a thumbnail request.
+                    <>
+                      <PatternTile
+                        pattern={patternBody ?? emptyPattern(e.built_on ?? { led_count: 1, arrangement: "strip" })}
+                        size="md"
+                      />
+                      {/* What it was built on, on the picture: the footer stays one line, as a
+                          canvas effect's does, so every card in a row is the same height. */}
+                      <span className="effect-card-kind">
+                        {kindWords((patternBody ?? e).built_on ?? { led_count: 1, arrangement: "strip" })}
+                      </span>
+                    </>
+                  ) : (
+                    <Thumb id={e.id} size="md" label={e.name} live={selected} />
+                  )}
                 </span>
                 <span className="effect-card-meta">
                   <span className="effect-card-text">
@@ -758,7 +951,8 @@ export function EffectsView() {
                   </span>
                   {html && <Chip html>HTML</Chip>}
                   {stackEffect && <Chip className="chip-stack">Stack</Chip>}
-                  {e.id === activeId && (
+                  {patternEffect && <Chip className="chip-pattern">Pattern</Chip>}
+                  {isPlaying(e.id) && (
                     <span className="effect-card-badge">
                       <span className="effect-card-badge-dot" aria-hidden="true" />
                       running
@@ -784,23 +978,29 @@ export function EffectsView() {
   );
 
   const isStack = selectedId?.startsWith("stack:") ?? false;
+  // A pattern is a library entry of its own kind (0.16.0): its own preview, and no property list.
+  const isPattern = selectedId?.startsWith(PATTERN_ID_PREFIX) ?? false;
+  const selectedPattern = isPattern ? patternDoc(selectedId) : null;
+  /** The pattern's shape, from its document or from its library row while the document loads. */
+  const patternShape: BuiltOn = selectedPattern?.built_on ??
+    effects?.find((e) => e.id === selectedId)?.built_on ?? { led_count: 1, arrangement: "strip" };
 
   const detailNormal = (
     <div className="stack">
-      {noLayout && (
+      {noScene && (
         <EmptyState
           icon={<SquaresFour size={24} />}
-          title="No layout to run on yet"
+          title="No scene to run on yet"
           action={
             <ButtonLink href="/" variant="primary" size="sm">
-              Open the Layout
+              Open Scenes
             </ButtonLink>
           }
         >
           The effects are still here, ready for one.
         </EmptyState>
       )}
-      {!(noLayout && !detail) && (
+      {!(noScene && !detail) && (
       <LoadFrame
         className="stack"
         state={detail ? "ready" : readError ? "error" : "loading"}
@@ -823,7 +1023,10 @@ export function EffectsView() {
           <Panel className="rd-eff-head">
             <div className="rd-eff-head-row">
               <div className="effect-live" data-stale={stale ? "true" : "false"}>
-                {needsInput ? (
+                {isPattern ? (
+                  // A pattern has no picture: its dots are the preview, drawn from its colours.
+                  <PatternTile pattern={selectedPattern ?? emptyPattern(patternShape)} size="lg" />
+                ) : needsInput ? (
                   <Thumb id={detail.schema.id} size="lg" label={detail.schema.name} live />
                 ) : (
                   <div className="effect-live-frame" key={detail.schema.id}>
@@ -839,19 +1042,21 @@ export function EffectsView() {
                     {detail.schema.needs.audio && <Chip icon={<Waveform size={14} />}>Audio input</Chip>}
                     {selectedId?.startsWith("html:") && <Chip html>HTML effect</Chip>}
                     {isStack && <Chip className="chip-stack">Stack</Chip>}
+                    {isPattern && <Chip className="chip-pattern">Pattern</Chip>}
                     <StateDot tone={running ? "ok" : "mute"}>{running ? "Running" : "Idle"}</StateDot>
                   </div>
                 </div>
-                <Button
-                  ref={applyPulseEl}
-                  variant={running ? "default" : "primary"}
+                <PlayOn
+                  effect={detail.schema.id}
+                  groups={groups}
+                  playing={playingHere}
+                  groupsKnown={groupsKnown}
+                  html={(selectedId?.startsWith("html:") ?? false) || stackHtml}
                   busy={activating}
-                  disabled={running || stale}
-                  onClick={() => void activate(null)}
-                  icon={<Play size={14} weight="fill" />}
-                >
-                  <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
-                </Button>
+                  disabled={stale}
+                  pulseRef={applyPulseEl}
+                  onPlay={(names) => void activate(names)}
+                />
               </div>
               <Chip
                 className="rd-eff-fav"
@@ -867,8 +1072,52 @@ export function EffectsView() {
               <p className="dim rd-eff-desc" title={detail.schema.description ?? undefined}>
                 {detail.schema.description}
               </p>
-              <p className="effect-live-note">{needsInput ? "Live frame" : "Preview"}</p>
+              <p className="effect-live-note">{isPattern ? "Dots" : needsInput ? "Live frame" : "Preview"}</p>
             </div>
+            {isPattern && (
+              <div className="effect-delete">
+                {patternRefusal?.id === selectedId ? (
+                  <>
+                    {/* The daemon's own sentence: it names the scenes that play it. */}
+                    <span>{patternRefusal.message}</span>
+                    <div className="row-wrap">
+                      <Button
+                        variant="danger"
+                        size="sm"
+                        busy={patternDeleting}
+                        onClick={() => void deletePattern(detail.schema.id, true)}
+                      >
+                        Delete anyway
+                      </Button>
+                      <Button variant="ghost" size="sm" onClick={() => setPatternRefusal(null)}>
+                        Keep it
+                      </Button>
+                    </div>
+                  </>
+                ) : (
+                  <div className="row-wrap effect-edit-row">
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<PencilSimple size={16} />}
+                      disabled={stale}
+                      onClick={() => openPattern(detail.schema.id)}
+                    >
+                      Edit pattern
+                    </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={<Trash size={16} />}
+                      busy={patternDeleting}
+                      onClick={() => void deletePattern(detail.schema.id)}
+                    >
+                      Delete pattern
+                    </Button>
+                  </div>
+                )}
+              </div>
+            )}
             {selectedId?.startsWith("html:") && (
                 <div className="effect-delete">
                   {deleting === selectedId ? (
@@ -925,28 +1174,49 @@ export function EffectsView() {
               )}
           </Panel>
 
-          <PresetStrip
-            builtIn={detail.schema.presets}
-            user={detail.user_presets}
-            defs={detail.schema.properties}
-            live={{ ...detail.props, ...values }}
-            running={runningPreset}
-            disabled={stale}
-            onApply={applyPreset}
-            onSave={savePreset}
-            onUpdate={updatePreset}
-            onReset={applyPreset}
-            onRename={renamePreset}
-            onDuplicate={duplicatePreset}
-            onDelete={deletePreset}
-            undo={undo && detail.schema.id === selectedId ? { name: undo.name } : null}
-            onUndo={async () => {
-              if (undo) await undo.run();
-            }}
-          />
+          {/* A pattern has no settings in 0.16.0, and so no presets: the strip is not for it. */}
+          {!isPattern && (
+            <PresetStrip
+              builtIn={detail.schema.presets}
+              user={detail.user_presets}
+              defs={detail.schema.properties}
+              live={{ ...detail.props, ...values }}
+              running={runningPreset}
+              disabled={stale}
+              onApply={applyPreset}
+              onSave={savePreset}
+              onUpdate={updatePreset}
+              onReset={applyPreset}
+              onRename={renamePreset}
+              onDuplicate={duplicatePreset}
+              onDelete={deletePreset}
+            />
+          )}
 
-          <Panel title={isStack ? "Layers" : "Properties"}>
-            {isStack ? (
+          <Panel title={isPattern ? "Pattern" : isStack ? "Layers" : "Properties"}>
+            {isPattern ? (
+              <div className="stack" style={{ gap: 10 }}>
+                <p className="dim" style={{ margin: 0 }}>
+                  A colour for every LED of one device. Every device of its kind plays it whole,
+                  and one built for another count or shape is fitted and says so.
+                </p>
+                <p className="dim rd-eff-desc">
+                  Group brightness and the master controls apply as they do to any effect; there
+                  are no settings of the pattern&apos;s own.
+                </p>
+                <div className="row-wrap">
+                  <Button
+                    variant="primary"
+                    size="sm"
+                    disabled={stale}
+                    onClick={() => openPattern(detail.schema.id)}
+                    icon={<PencilSimple size={14} />}
+                  >
+                    Edit pattern
+                  </Button>
+                </div>
+              </div>
+            ) : isStack ? (
               <div className="stack" style={{ gap: 10 }}>
                 <p className="dim" style={{ margin: 0 }}>
                   {detail.schema.description}
@@ -970,17 +1240,18 @@ export function EffectsView() {
                   >
                     Edit stack
                   </Button>
-                  <Button
-                    ref={applyPulseSheetEl}
-                    variant="default"
-                    size="sm"
+                  <PlayOn
+                    effect={detail.schema.id}
+                    groups={groups}
+                    playing={playingHere}
+                    groupsKnown={groupsKnown}
+                    html={stackHtml}
                     busy={activating}
-                    disabled={running || stale}
-                    onClick={() => void activate(null)}
-                    icon={<Play size={14} weight="fill" />}
-                  >
-                    <Swap labels={["Activate", "Running"]} at={running ? 1 : 0} />
-                  </Button>
+                    disabled={stale}
+                    size="sm"
+                    pulseRef={applyPulseSheetEl}
+                    onPlay={(names) => void activate(names)}
+                  />
                 </div>
               </div>
             ) : (
@@ -989,6 +1260,9 @@ export function EffectsView() {
                 values={values}
                 onChange={onChange}
               />
+            )}
+            {!isStack && !isPattern && (
+              <p className="mute eff-starting-values">Starting values. A group keeps its own.</p>
             )}
             {(shownWriteError ?? readError) && (
               <p className="error-line" style={{ marginTop: 8 }}>{shownWriteError ?? readError}</p>
@@ -1004,7 +1278,29 @@ export function EffectsView() {
   // Edit mode (D2.2): the inspector becomes the editor, and nothing else about the page moves.
   const editorPane = (
     <div className="eff-pane">
-      {editorTarget ? (
+      {patternStep ? (
+        patternStep.kind === "choose" ? (
+          <BuildOnStep
+            lights={lights ?? []}
+            devices={devices ?? undefined}
+            onChoose={startPattern}
+            onCancel={() => setPatternStep(null)}
+          />
+        ) : (
+          <PatternNew
+            // A saved pattern and a new one on the same shape are two pages, never one document.
+            key={`${patternStep.pattern.id}:${patternStep.fresh ? "new" : "saved"}`}
+            pattern={patternStep.pattern}
+            fresh={patternStep.fresh}
+            taken={(patterns ?? []).map((pattern) => pattern.id)}
+            onClose={() => setPatternStep(null)}
+            onSaved={(saved) => {
+              setPatternStep(null);
+              setPicked(saved.id);
+            }}
+          />
+        )
+      ) : editorTarget ? (
         <EffectEditor
           key={editorTarget.id ?? `new:${editorTarget.fileName}`}
           ref={editorRef}
@@ -1037,13 +1333,16 @@ export function EffectsView() {
       )}
     </div>
   );
-  const detailPane = editorTarget || newOpen || editBusy || editError ? editorPane : detailNormal;
+  const detailPane =
+    editorTarget || newOpen || patternStep || editBusy || editError ? editorPane : detailNormal;
 
   // Build mode: the builder takes the whole page, and the strip carries its own title and keys.
   if (stackParam !== null) {
     return (
       <StackBuilder
         initialName={stackParam}
+        groupHref={groupHref}
+        groupName={groupName}
         onClose={() => goStack(null, { replace: true })}
         onName={(name) => goStack(name, { replace: true })}
         onWriteCode={() => {
@@ -1082,22 +1381,32 @@ export function EffectsView() {
         }
       />
       <PageActions>
-        <Button
-          size="sm"
-          variant="primary"
-          icon={<Plus size={15} />}
-          disabled={editing}
-          title={editing ? "Finish editing first" : "Build an effect by stacking effects as layers"}
-          onClick={() => openStack("new")}
-        >
-          <span className="rd-btn-text">New effect</span>
-        </Button>
-        <span ref={moreRef} className="row-wrap">
-          <IconButton
-            label="More effect actions"
-            icon={<DotsThreeOutline size={16} />}
-            onClick={() => setMoreOpen((open) => !open)}
-          />
+        {groupHref && (
+          <ButtonLink
+            href={groupHref}
+            variant="ghost"
+            size="sm"
+            icon={<CaretLeft size={15} />}
+            label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+          >
+            <span className="rd-btn-text">{groupName ? `Back to ${groupName}` : "Back to the scene"}</span>
+          </ButtonLink>
+        )}
+        <span ref={newRef} className="row-wrap">
+          <Button
+            size="sm"
+            variant="primary"
+            icon={<Plus size={15} />}
+            disabled={editing}
+            aria-expanded={newMenu}
+            aria-haspopup="menu"
+            // The words hide on a phone; the name stays "New effect", not the tooltip.
+            aria-label="New effect"
+            title={editing ? "Finish editing first" : "A stack, a pattern, or an HTML effect"}
+            onClick={() => setNewMenu((open) => !open)}
+          >
+            <span className="rd-btn-text">New effect</span>
+          </Button>
         </span>
         <FileButton
           accept=".html,text/html"
@@ -1111,35 +1420,32 @@ export function EffectsView() {
         </FileButton>
       </PageActions>
 
-      {/* The overflow menu: code is the advanced way in, so it sits behind More rather than
-          beside Import (the New effect key opens the builder directly). */}
-      <Popover
-        anchor={moreRef}
-        open={moreOpen}
-        onClose={() => setMoreOpen(false)}
-        label="More effect actions"
-      >
-        <div className="stack eff-menu">
-          <p className="eff-menu-heading">Advanced</p>
-          <Button
-            size="sm"
-            icon={<Code size={15} />}
-            disabled={editing}
-            title={editing ? "Finish editing first" : undefined}
-            onClick={() => {
-              setMoreOpen(false);
-              setNewError(null);
-              pushSheet();
-              setNewOpen(true);
-            }}
-          >
-            New from code
-          </Button>
-          <p className="eff-menu-note">
-            An HTML effect you write here: copy one of the library&apos;s, or start blank.
-          </p>
-        </div>
-      </Popover>
+      {/* New effect's three ways in. The menu is a popover, so opening it takes no room in the
+          page and nothing under the pointer moves; code sits behind it rather than behind a
+          second overflow menu, which would be a second name for the same place. */}
+      <NewEffectMenu
+        anchor={newRef}
+        open={newMenu}
+        disabled={editing}
+        onClose={() => setNewMenu(false)}
+        onStack={() => {
+          setNewMenu(false);
+          openStack("new");
+        }}
+        onPattern={() => {
+          setNewMenu(false);
+          setNewError(null);
+          setNewOpen(false);
+          pushSheet();
+          setPatternStep({ kind: "choose" });
+        }}
+        onCode={() => {
+          setNewMenu(false);
+          setNewError(null);
+          pushSheet();
+          setNewOpen(true);
+        }}
+      />
 
       {dragging && (
         <div className="drop-overlay" aria-hidden="true">
@@ -1263,8 +1569,10 @@ export function EffectsView() {
                   label="Back to the effects"
                   icon={<CaretLeft size={18} />}
                   onClick={() => {
+                    // A pattern page has its own keys: Back leaves it the way its Cancel does.
+                    if (patternStep) setPatternStep(null);
                     // The editor asks before unsaved work is left (D2.2).
-                    if (editing) editorRef.current?.requestLeave();
+                    else if (editing) editorRef.current?.requestLeave();
                     else if (newOpen) setNewOpen(false);
                     else if (editError) {
                       // A source read that failed is this effect's, not the sheet's: Back drops it.
@@ -1275,6 +1583,17 @@ export function EffectsView() {
                   }}
                 />
                 <span>Effects</span>
+                {groupHref && (
+                  <ButtonLink
+                    href={groupHref}
+                    variant="ghost"
+                    size="sm"
+                    className="effect-sheet-group"
+                    label={groupName ? `Back to ${groupName}` : "Back to the scene"}
+                  >
+                    {groupName ? `Back to ${groupName}` : "Back to the scene"}
+                  </ButtonLink>
+                )}
               </div>
               {detailPane}
             </div>

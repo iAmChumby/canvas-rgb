@@ -7,14 +7,11 @@
 // To wire this in, the demo backend needs these lines (and the import):
 //
 //   import {
-//     answerDelayMs, applyDeviceScenarios, applyFanScenarios, applyLayoutScenarios,
+//     answerDelayMs, applyDeviceScenarios, applyFanScenarios,
 //     applyStatusScenarios, daemonDown, saveError,
 //   } from "@/lib/demoScenarios";
 //
 //   // in initialState():
-//   devices: applyDeviceScenarios(DEVICES),
-//   layouts: noLayout() ? [] : [{ ...LAYOUT_DESK }],
-//   activeLayout: noLayout() ? "" : LAYOUT_DESK.id,
 //
 //   // in statusNow():
 //   openrgb: openRgbDown() ? "disconnected" : "connected",
@@ -29,8 +26,13 @@
 
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { FansStatus } from "@/proto/FansStatus";
-import type { Layout } from "@/proto/Layout";
+import type { ChainView } from "@/proto/ChainView";
+import type { Group } from "@/proto/Group";
+import type { LightView } from "@/proto/LightView";
+import type { Scene } from "@/proto/Scene";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Status } from "@/proto/Status";
+import { SEEN_LIGHTS_KEY } from "@/lib/seenLights";
 
 /** Why a header was handed back: the chip's own safety, not a request. */
 export const HANDBACK_REASON = "the daemon's safety handback: the chip was too hot to trust";
@@ -38,7 +40,6 @@ export const HANDBACK_REASON = "the daemon's safety handback: the chip was too h
 /** The scenario tokens this file understands, next to the demo's own ones. */
 export const DAEMON_DOWN = "daemon-down";
 export const OPENRGB_DOWN = "openrgb-down";
-export const NO_LAYOUT = "no-layout";
 export const DEVICE_EMPTY = "device-empty";
 export const SLOW = "slow";
 export const SLOW_FPS = "slow-fps";
@@ -52,6 +53,8 @@ export const OB_NO_DEVICES = "no-devices"; // OpenRGB is up and sees nothing
 export const OB_FOUND_ON_RESCAN = "found-on-rescan"; // ...until the owner asks again
 export const OB_CONFLICT_CLEARS = "conflict-clears"; // SignalRGB quits 6 s after the page opens
 export const OB_COMPLETE = "complete"; // the onboarding was finished already
+/** `?state=chains`: one header is set up as seven fans, as a run through the flow leaves it. */
+export const CHAINS_SET_UP = "chains";
 
 /** The scenario tokens in the query string, the same way the demo reads them. */
 function tokens(): string[] {
@@ -79,11 +82,6 @@ export function openRgbDown(): boolean {
 }
 
 /** There is no layout yet: nothing can run. */
-export function noLayout(): boolean {
-  return has(NO_LAYOUT);
-}
-
-/** One device reports no zones. */
 export function deviceEmpty(): boolean {
   return has(DEVICE_EMPTY);
 }
@@ -270,6 +268,8 @@ export function applyStatusScenarios(status: Status): Status {
   if (linksConnecting()) next = { ...next, openrgb: "connecting", service: "connecting" };
   if (openRgbConnecting()) next = { ...next, openrgb: "connecting" };
   if (fanConnecting()) next = { ...next, service: "connecting" };
+  // The lights are paused (#378): the engine sends nothing, so the stage says so.
+  if (has(STAGE_PAUSED)) next = { ...next, power: "paused" };
   return next;
 }
 
@@ -280,8 +280,301 @@ export function applyDeviceScenarios(devices: DeviceInfo[]): DeviceInfo[] {
   return devices.map((d, i) => (i === 0 ? { ...d, zones: [] } : d));
 }
 
-/** Applies the layout scenarios: there is no layout yet. */
-export function applyLayoutScenarios(layouts: Layout[], active: string): { layouts: Layout[]; active: string } {
-  if (!noLayout()) return { layouts, active };
-  return { layouts: [], active: "" };
+// ---- scenes (0.14.0) ----
+//
+// The Scenes page's states, one token each. The demo's own scenes already show four groups with
+// an unassigned light (Gaming, the default), a group with a device that is not connected (its
+// Memory group) and, in Evening, a group whose effect is gone.
+//
+//   scene:<id>    the active scene is that one (`scene:focus` is one group, `scene:evening` a failed one)
+//   groups-0      the active scene has no group: every light is unassigned
+//   groups-20     a 20-group scene "Stage" is active, on twenty-four more lights
+//   long-names    the active scene and its first group carry 40-character names
+//   new-light     a light appears that no group holds, and the page has not seen it before
+//   heavy         with groups-20: every Stage light has 600 LEDs (the page's worst case for paint cost)
+
+export const GROUPS_0 = "groups-0";
+export const GROUPS_20 = "groups-20";
+export const LONG_NAMES = "long-names";
+export const NEW_LIGHT = "new-light";
+export const HEAVY = "heavy";
+/**
+ * `?state=html-groups`: the Focus scene runs two HTML effects already, so a third one cannot go
+ * into it (#368). The Evening scene's own group plays an HTML effect, and it holds lights the
+ * Focus scene does not, so the move takes nothing out and the limit is the scene's.
+ */
+export const HTML_GROUPS = "html-groups";
+/** `?state=html-limit`: three groups play HTML effects, where a scene runs two (#370). */
+export const HTML_LIMIT = "html-limit";
+
+/** The id the scene token names, if any. */
+function sceneToken(): string | null {
+  const t = tokens().find((x) => x.startsWith("scene:"));
+  return t ? t.slice("scene:".length) : null;
+}
+
+/** A light on a device of its own: a strip of `leds` LEDs, connected. */
+function demoStrip(id: string, label: string, leds: number): LightView {
+  return {
+    light: { id: `${id}#z0`, device_id: id, zone_index: 0, arrangement: "strip", reversed: false },
+    led_count: leds,
+    connected: true,
+    label,
+  };
+}
+
+/** Applies the scene scenarios to the demo's scenes and lights. */
+export function applySceneScenarios(
+  base: ScenesResponse,
+  lights: LightView[],
+): { scenes: Scene[]; active: string; lights: LightView[] } {
+  const scenes = structuredClone(base.scenes);
+  const all = structuredClone(lights);
+  let active = base.active;
+  const picked = sceneToken();
+  if (picked && scenes.some((s) => s.id === picked)) active = picked;
+
+  if (has(GROUPS_20)) {
+    const effects = ["aurora", "rainbow_wave", "breathing", "spiral", "fire", "white"];
+    const extra = Array.from({ length: 24 }, (_, i) =>
+      demoStrip(`demo:stage-${i + 1}`, `Stage light ${i + 1}`, has(HEAVY) ? 600 : 8 + ((i * 5) % 29)),
+    );
+    all.push(...extra);
+    const groups: Group[] = extra.slice(0, 20).map((l, i) => ({
+      id: `g-stage-${i + 1}`,
+      name: i === 0 ? "Key light" : `Stage group ${i + 1}`,
+      members: [l.light.id],
+      plays: { type: "effect", effect: effects[i % effects.length] ?? "aurora", props: {} },
+      mode: i % 3 === 0 ? "each_its_own" : "flow_across",
+      brightness: 100 - ((i * 7) % 60),
+    }));
+    scenes.push({ id: "stage", name: "Stage", rev: 1, groups });
+    active = "stage";
+  }
+
+  if (has(HTML_LIMIT)) {
+    // Three groups, each playing an HTML effect: the first two run and the third says why (#370).
+    const wants = ["openrgb:fan-hub-1", "openrgb:fan-hub-2", "openrgb:strip-1"];
+    const effects = ["html:ink-drop", "html:wet-smear", "html:ink-drop"];
+    const names = ["Key light", "Fill", "Edge"];
+    const groups: Group[] = wants.map((device, i) => {
+      const light = lightOfDevice(all, device);
+      return {
+        id: `g-html-${i + 1}`,
+        name: names[i] ?? `Group ${i + 1}`,
+        members: light ? [light] : [],
+        plays: { type: "effect", effect: effects[i] ?? "html:ink-drop", props: {} },
+        mode: i === 1 ? "each_its_own" : "flow_across",
+        brightness: 100 - i * 15,
+      };
+    });
+    scenes.push({ id: "html-limit", name: "Three HTML", rev: 1, groups });
+    active = "html-limit";
+  }
+
+  const current = scenes.find((s) => s.id === active);
+  if (current && has(GROUPS_0)) current.groups = [];
+
+  if (has(HTML_GROUPS)) {
+    // The Focus scene runs two HTML effects: a third one cannot go into it. The lights are the
+    // ones the Evening scene's Case group holds, so a move takes nothing out of the scene.
+    const focus = scenes.find((s) => s.id === "focus");
+    const evening = scenes.find((s) => s.id === "evening");
+    const warm = evening?.groups.find((g) => g.id === "g-warm");
+    if (focus && warm && warm.members.length >= 2) {
+      focus.groups = [
+        {
+          id: "g-html-1",
+          name: "Ink drop",
+          members: [warm.members[0]!],
+          plays: { type: "effect", effect: "html:ink-drop", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+        {
+          id: "g-html-2",
+          name: "Wet smear",
+          members: [warm.members[1]!],
+          plays: { type: "effect", effect: "html:wet-smear", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+      ];
+    }
+  }
+  // The long names are 40 characters on the dot, the most the daemon keeps.
+  if (current && has(LONG_NAMES)) {
+    current.name = [..."Evening wind-down, the whole case on, low"].slice(0, 40).join("");
+    const first = current.groups[0];
+    if (first) first.name = [..."Front intake and the radiator fans, top!"].slice(0, 40).join("");
+  }
+
+  if (has(NEW_LIGHT)) {
+    const lamp = demoStrip("demo:desk-lamp", "Desk lamp", 12);
+    // The page has seen every other light, so only this one is announced.
+    try {
+      window.localStorage.setItem(SEEN_LIGHTS_KEY, JSON.stringify(all.map((l) => l.light.id)));
+    } catch {
+      // The notice may not show: storage is not available here.
+    }
+    all.push(lamp);
+  }
+  return { scenes, active, lights: all };
+}
+
+/** The seven fans of the set-up chain: 96 LEDs, the daemon's even split of 96 into 7. */
+const SET_UP_FAN_LEDS = [14, 14, 14, 14, 14, 13, 13];
+
+/**
+ * Applies the chain scenarios: `?state=chains` sets one header up as seven fans. The whole-zone
+ * light is replaced by its parts, in the lights list and in every group that held it, as a commit
+ * does; the parts keep their place in chain order.
+ */
+export function applyChainScenarios(
+  chains: ChainView[],
+  lights: LightView[],
+  scenes: Scene[],
+): { chains: ChainView[]; lights: LightView[]; scenes: Scene[] } {
+  if (!has(CHAINS_SET_UP)) return { chains, lights, scenes };
+  const at = chains.findIndex((chain) => chain.zone_name === "JARGB 1");
+  const chain = chains[at];
+  if (!chain) return { chains, lights, scenes };
+
+  let start = 0;
+  const parts: LightView[] = SET_UP_FAN_LEDS.map((leds, i) => {
+    const id = `${chain.device_id}#z${chain.zone_index}p${i + 1}`;
+    const view: LightView = {
+      light: {
+        id,
+        device_id: chain.device_id,
+        zone_index: chain.zone_index,
+        leds: { start, count: leds },
+        name: `Fan ${i + 1}`,
+        arrangement: "ring",
+        reversed: false,
+        kind: "fan",
+      },
+      led_count: leds,
+      connected: true,
+      label: `Fan ${i + 1}`,
+    };
+    start += leds;
+    return view;
+  });
+  const ids = parts.map((part) => part.light.id);
+  const zoneLight = `${chain.device_id}#z${chain.zone_index}`;
+  const set: ChainView = { ...chain, state: "set_up", leds: start, parts };
+
+  return {
+    chains: chains.map((c, i) => (i === at ? set : c)),
+    lights: lights.flatMap((l) => (l.light.id === zoneLight ? parts : [l])),
+    scenes: scenes.map((scene) => ({
+      ...scene,
+      groups: scene.groups.map((group) => ({
+        ...group,
+        members: group.members.flatMap((id) => (id === zoneLight ? ids : [id])),
+      })),
+    })),
+  };
+}
+
+// ---- patterns (0.16.0) ----
+//
+// The picker's fit marks and a group's flags, one token each. The demo's own scenes play canvas
+// effects, so a pattern state is its own scene, "Patterns", on the demo's lights: two 40-LED
+// fans, a 16-LED fan, a 60-LED strip and a one-LED mouse.
+//
+//   pattern-fits     the two 40-LED fans play a ring of 40: every device fits ("Fits")
+//   pattern-stretch  the same fans play a ring of 12: both would be stretched
+//   pattern-flags    one group with every flag: exact, stretched, another shape and one LED
+//   pattern-gone     a group whose pattern was deleted: dark, and its row says why
+
+export const PATTERN_FITS = "pattern-fits";
+export const PATTERN_STRETCH = "pattern-stretch";
+export const PATTERN_FLAGS = "pattern-flags";
+export const PATTERN_GONE = "pattern-gone";
+
+/** The stage's own states (#378). The demo's group preview answers like the daemon, so the
+ *  stage's states can be seen and shot:
+ *
+ *   stage-connecting   the preview is open and has said nothing yet
+ *   stage-stopped      the preview was refused: another group preview took over
+ *   stage-paused       the lights are paused, so the engine sends nothing
+ */
+export const STAGE_CONNECTING = "stage-connecting";
+export const STAGE_STOPPED = "stage-stopped";
+export const STAGE_PAUSED = "stage-paused";
+
+/** What the demo's group preview does: it sends the group's picture, it opens and says nothing
+ *  yet, or it is refused the way a socket the daemon closes is. */
+export type DemoGroupPreviewMode = "live" | "connecting" | "stopped";
+
+export function demoGroupPreviewMode(): DemoGroupPreviewMode {
+  if (has(STAGE_STOPPED)) return "stopped";
+  if (has(STAGE_CONNECTING)) return "connecting";
+  return "live";
+}
+
+/** The pattern the fit states play: a ring of 40, seeded by the demo. */
+export const PATTERN_FRONT_FANS = "pattern:Front fans";
+/** The pattern the stretch state plays: a ring of 12, seeded by the demo. */
+export const PATTERN_INTAKE = "pattern:Intake";
+/** The pattern the gone state played: nothing ever seeds it. */
+export const PATTERN_REMOVED = "pattern:Removed";
+
+/** The id of a device's light in the lights list, or null when the device is not there. */
+function lightOfDevice(lights: LightView[], device: string): string | null {
+  return lights.find((l) => l.light.device_id === device)?.light.id ?? null;
+}
+
+/** A group playing one pattern, as the page reads it. */
+function patternGroup(id: string, name: string, members: (string | null)[], effect: string): Group {
+  return {
+    id,
+    name,
+    members: members.filter((m): m is string => m !== null),
+    plays: { type: "effect", effect, props: {} },
+    mode: "flow_across",
+    brightness: 100,
+  };
+}
+
+/**
+ * Applies the pattern scenarios: the active scene becomes "Patterns", whose groups play a pattern
+ * so the picker's marks and the group's flags can be seen. Nothing is added without a token, so
+ * every other state looks as it did before patterns.
+ */
+export function applyPatternScenarios(
+  base: { scenes: Scene[]; active: string },
+  lights: LightView[],
+): { scenes: Scene[]; active: string } {
+  const wanted = [PATTERN_FITS, PATTERN_STRETCH, PATTERN_FLAGS, PATTERN_GONE].filter(has);
+  if (wanted.length === 0) return base;
+  const fan1 = lightOfDevice(lights, "openrgb:fan-hub-1");
+  const fan2 = lightOfDevice(lights, "openrgb:fan-hub-2");
+  const fan3 = lightOfDevice(lights, "openrgb:fan-hub-3");
+  const strip = lightOfDevice(lights, "openrgb:strip-1");
+  const mouse = lightOfDevice(lights, "openrgb:mouse-1");
+
+  const groups: Group[] = [];
+  if (has(PATTERN_FITS)) {
+    groups.push(patternGroup("g-pat-fit", "Front fans", [fan1, fan2], PATTERN_FRONT_FANS));
+  }
+  if (has(PATTERN_STRETCH)) {
+    groups.push(patternGroup("g-pat-stretch", "Intake fans", [fan1, fan2], PATTERN_INTAKE));
+  }
+  if (has(PATTERN_FLAGS)) {
+    // One device of each landing: 40-LED ring, 16-LED ring, 60-LED strip, one LED.
+    groups.push(
+      patternGroup("g-pat-flags", "Every flag", [fan1, fan3, strip, mouse], PATTERN_FRONT_FANS),
+    );
+  }
+  if (has(PATTERN_GONE)) {
+    groups.push(patternGroup("g-pat-gone", "Removed pattern", [fan2, fan3], PATTERN_REMOVED));
+  }
+  if (groups.length === 0) return base;
+
+  const scenes = structuredClone(base.scenes);
+  scenes.push({ id: "patterns", name: "Patterns", rev: 1, groups });
+  return { scenes, active: "patterns" };
 }

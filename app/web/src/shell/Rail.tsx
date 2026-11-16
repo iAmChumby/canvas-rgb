@@ -4,7 +4,7 @@ import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useLayoutEffect, useRef, useState, type CSSProperties, type ReactNode } from "react";
 import type { Icon } from "@phosphor-icons/react";
-import { Fan, GameController, Gear, Monitor, Circuitry, SquaresFour, Sparkle } from "@phosphor-icons/react";
+import { Fan, FilmSlate, GameController, Gear, Monitor, Circuitry, Sparkle } from "@phosphor-icons/react";
 import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
 import { useRailData, type RailValues } from "@/shell/RailData";
@@ -19,7 +19,8 @@ export interface NavItem {
 
 /** The pages, in the order the rail shows them. */
 const PAGES: NavItem[] = [
-  { href: "/", label: "Layout", icon: SquaresFour },
+  // What the lights are doing, grouped the way the owner grouped them: the app opens here.
+  { href: "/", label: "Scenes", icon: FilmSlate },
   { href: "/effects/", label: "Effects", icon: Sparkle },
   // What the daemon found on this machine: the board, the sticks, the card, the keyboard.
   // #57: the upright circuitry glyph, not the diagonal Plugs: the page is the wiring, not
@@ -192,7 +193,7 @@ function RailLink({ item, current, children }: { item: NavItem; current: boolean
  */
 function PageValue({ href, values }: { href: string; values: RailValues }) {
   if (href === "/") {
-    return values.layout ? <span className="rail-value">{values.layout}</span> : null;
+    return values.scene ? <span className="rail-value">{values.scene}</span> : null;
   }
   if (href === "/effects/") {
     if (!values.effect) return null;

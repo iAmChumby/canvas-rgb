@@ -119,17 +119,23 @@ pub async fn config_export(State(app): State<Arc<App>>) -> ApiResult<Json<Export
     };
 
     let store = app.store.read().await;
+    // The scenes travel with the bundle (0.14.0), unless the migration has not run yet: then
+    // only the layouts do, and the import migrates them with its own devices.
+    let (lights, scenes) = crate::storage::scenes_for_export(&store);
     let bundle = ExportBundle {
+        patterns: app.patterns.all(),
         schema_version: canvas_proto::config::EXPORT_SCHEMA,
         exported_at: crate::storage::export_timestamp(),
         app_version: crate::version(),
         settings: store.config.settings.clone(),
-        layouts: store.layouts.clone(),
+        layouts: canvas_proto::config::LayoutsFile { schema_version: canvas_proto::config::LAYOUTS_SCHEMA, active: String::new(), layouts: Vec::new() },
         zones: store.zones.clone(),
         effects: store.effects.clone(),
         fans,
         displays: store.displays.displays.clone(),
         stacks: app.stacks.all(),
+        lights,
+        scenes,
     };
     Ok(Json(bundle))
 }
@@ -236,7 +242,11 @@ pub async fn config_import(
             .and_then(|s| s.hot.iter().find(|h| h.kind == kind).and_then(|h| h.rated_max_c))
     };
     let (rated_cpu, rated_gpu) = (rated_of(HotKind::Cpu), rated_of(HotKind::Gpu));
-    crate::storage::validate_bundle_rated(&bundle, rated_cpu, rated_gpu)
+    // The machines's current devices, so a bundle with scenes and no lights rebuilds its lights
+    // (and so a 0.13 bundle's layouts are migrated with this machine's zones: a matrix zone is a
+    // Grid here, not a Strip).
+    let devices = app.devices.read().await.clone();
+    crate::storage::validate_bundle_rated(&bundle, &devices, rated_cpu, rated_gpu)
         .map_err(|e| ApiFailure::validation(e.to_string()))?;
 
     // The stacks in the bundle go through the rules a PUT does (D95.1.2). A bundle from before
@@ -253,11 +263,40 @@ pub async fn config_import(
         stacks.push(stack);
     }
 
+    // The patterns in the bundle keep the rules a PUT does: each one is checked, and two
+    // patterns of the bundle may not share a name, ignoring case, exactly as a save refuses.
+    let mut patterns: Vec<canvas_proto::pattern::Pattern> = Vec::new();
+    for pattern in &bundle.patterns {
+        canvas_proto::pattern::validate_pattern(pattern)
+            .map_err(|error| ApiFailure::validation(format!("{}: {error}", pattern.id)))?;
+        if patterns
+            .iter()
+            .any(|saved| saved.name().eq_ignore_ascii_case(pattern.name()))
+        {
+            return Err(ApiFailure::validation(format!(
+                "{:?} is the name of two patterns in the bundle, ignoring case",
+                pattern.name()
+            )));
+        }
+        patterns.push(pattern.clone());
+    }
+
     let home = app.store.read().await.home.clone();
-    crate::storage::import_bundle_rated(&home, &bundle, rated_cpu, rated_gpu)
-        .map_err(|e| ApiFailure::internal(format!("could not import the config: {e}")))?;
+    crate::storage::import_bundle_rated(&home, &bundle, &devices, rated_cpu, rated_gpu)
+        .map_err(|e| match &e {
+            // A file this machine cannot read refuses the import (nothing was written), and a
+            // scene that cannot be made valid is the bundle's fault: both are the caller's to
+            // fix, not an internal failure.
+            crate::storage::ImportError::Blocked(_) => ApiFailure::conflict(e.to_string()),
+            crate::storage::ImportError::Scenes(_) => ApiFailure::validation(e.to_string()),
+            _ => ApiFailure::internal(format!("could not import the config: {e}")),
+        })?;
     crate::stacks::write_file(&home, &stacks)
         .map_err(|e| ApiFailure::internal(format!("could not save the stacks: {e}")))?;
+    // A bundle from before patterns has none, and importing it replaces the saved patterns with
+    // none, as it does the stacks.
+    crate::patterns::write_file(&home, &patterns)
+        .map_err(|e| ApiFailure::internal(format!("could not save the patterns: {e}")))?;
 
     // A draft on the lights holds the layout's effect from before the import as its prior,
     // and the import brings a layout of its own. The draft ends here, before the store is
@@ -301,6 +340,8 @@ pub async fn config_import(
         // The stacks are read again from the file the import wrote, so the library shows them at
         // once and the next frame resolves them against the new layout.
         app.stacks.reload_with(&known);
+        // The patterns too: the file the import wrote is what every group builds from now.
+        app.patterns.reload();
         // The import keeps this machine's audio-source pick (B1): the daemon
         // matches the kept-on-disk pick, like a restart does.
         let audio_source = app.store.read().await.config.audio_source.clone();
@@ -315,11 +356,9 @@ pub async fn config_import(
         let balances = crate::api::devices::white_balance_map(&app.store.read().await.config);
         app.engine.set_white_balance(balances);
         app.stacks.set_fps(settings.fps);
-        if let Some(layout) = app.active_layout().await {
-            let devices = app.devices.read().await.clone();
-            app.set_layout(&layout, &devices);
-            app.stacks.publish_areas(&layout, &devices);
-        }
+        // The scene goes on again (Scenes, 0.14.0): the import brought a store of its own, and
+        // the active scene is what plays now.
+        crate::scenes::apply_active_ungated(&app, false).await;
     }
 
     tracing::info!("the config was imported");

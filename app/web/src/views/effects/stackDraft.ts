@@ -5,7 +5,7 @@
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LayerArea } from "@/proto/LayerArea";
 import type { LayerMask } from "@/proto/LayerMask";
-import type { Layout } from "@/proto/Layout";
+import { areaBox, areaOnCanvas, areaWords, type GroupCanvas } from "@/lib/groupCanvas";
 import type { MaskSource } from "@/proto/MaskSource";
 import type { PropKind } from "@/proto/PropKind";
 import type { Props } from "@/proto/props";
@@ -428,64 +428,24 @@ export function layersForServer(layers: StackLayer[]): StackLayer[] {
   });
 }
 
-/** Where an area paints on the 320 × 200 canvas: a rect, or the union of its placed zones. */
-export function areaBounds(area: LayerArea, layout: Layout | null): Bounds | null {
-  if (area.kind === "canvas") return { x: 0, y: 0, width: CANVAS_W, height: CANVAS_H };
-  if (area.kind === "rect") return { x: area.x, y: area.y, width: area.width, height: area.height };
-  const zones = (layout?.zones ?? []).filter(
-    (zone) =>
-      zone.visible &&
-      zone.device_id === area.device &&
-      (area.kind === "device" || zone.zone_index === area.zone),
-  );
-  const first = zones[0];
-  if (!first) return null;
-  let x0 = first.x;
-  let y0 = first.y;
-  let x1 = first.x + first.width;
-  let y1 = first.y + first.height;
-  for (const zone of zones.slice(1)) {
-    x0 = Math.min(x0, zone.x);
-    y0 = Math.min(y0, zone.y);
-    x1 = Math.max(x1, zone.x + zone.width);
-    y1 = Math.max(y1, zone.y + zone.height);
-  }
-  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
+/** Where an area paints on the group's canvas: a rect, the canvas, or the box of its lights. */
+export function areaBounds(area: LayerArea, canvas: GroupCanvas | null): Bounds | null {
+  const box = areaBox(canvas, area);
+  return box ? { x: box.x, y: box.y, width: box.width, height: box.height } : null;
 }
 
-function deviceName(devices: DeviceInfo[] | null, id: string): string {
-  return devices?.find((device) => device.id === id)?.name ?? id.replace(/^[a-z0-9]+:/i, "");
-}
-
-/** A device or a zone on the layout, by the id and index the area names. */
-export function areaIsOnDesk(area: LayerArea, layout: Layout | null): boolean {
-  if (area.kind === "canvas" || area.kind === "rect") return true;
-  if (!layout) return false;
-  return layout.zones.some(
-    (zone) =>
-      zone.visible &&
-      zone.device_id === area.device &&
-      (area.kind === "device" || zone.zone_index === area.zone),
-  );
+/** True when the area has a place on this group's canvas. */
+export function areaIsOnCanvas(area: LayerArea, canvas: GroupCanvas | null): boolean {
+  return areaOnCanvas(canvas, area);
 }
 
 /** What an area is called in a layer row and in the picked layer's area line. */
 export function areaName(
   area: LayerArea,
-  layout: Layout | null,
+  canvas: GroupCanvas | null,
   devices: DeviceInfo[] | null,
 ): string {
-  if (area.kind === "canvas") return "Whole canvas";
-  if (area.kind === "rect") {
-    return `Rectangle ${Math.round(area.width)} × ${Math.round(area.height)}`;
-  }
-  if (!areaIsOnDesk(area, layout)) return "Not on the desk";
-  if (area.kind === "device") return deviceName(devices, area.device);
-  const zone = layout?.zones.find(
-    (placed) => placed.device_id === area.device && placed.zone_index === area.zone,
-  );
-  const name = deviceName(devices, area.device);
-  return zone?.label ? `${name} · ${zone.label}` : `${name} · Zone ${area.zone + 1}`;
+  return areaWords(canvas, area, devices);
 }
 
 /** A rectangle's position, said under its size. */
@@ -648,7 +608,7 @@ export interface AreaReadout {
 
 export function areaReadout(
   area: LayerArea,
-  layout: Layout | null,
+  canvas: GroupCanvas | null,
   devices: DeviceInfo[] | null,
 ): AreaReadout {
   if (area.kind === "rect") {
@@ -657,7 +617,7 @@ export function areaReadout(
       detail: areaPosition(area),
     };
   }
-  return { title: areaName(area, layout, devices), detail: null };
+  return { title: areaName(area, canvas, devices), detail: null };
 }
 
 // ---------------------------------------------------------------- the stage (#257)
@@ -681,11 +641,11 @@ export interface StageFrame {
  * layer, and the frame is the only place on the picture where it can be found, picked and
  * brought back. Do not skip it here.
  */
-export function stageFrames(layers: StackLayer[], layout: Layout | null): StageFrame[] {
+export function stageFrames(layers: StackLayer[], canvas: GroupCanvas | null): StageFrame[] {
   const frames: StageFrame[] = [];
   layers.forEach((layer, index) => {
     if (!layer.visible) return;
-    const bounds = areaBounds(layer.area, layout);
+    const bounds = areaBounds(layer.area, canvas);
     if (!bounds) return;
     const width = Math.max(0, bounds.width);
     const height = Math.max(0, bounds.height);
@@ -709,10 +669,10 @@ export function stageHitOrder(frames: StageFrame[]): StageFrame[] {
 /** The layer a press at `point` picks, or null when nothing is under it. */
 export function layerAtPoint(
   layers: StackLayer[],
-  layout: Layout | null,
+  canvas: GroupCanvas | null,
   point: { x: number; y: number },
 ): string | null {
-  const hit = stageHitOrder(stageFrames(layers, layout)).find(
+  const hit = stageHitOrder(stageFrames(layers, canvas)).find(
     (frame) =>
       point.x >= frame.bounds.x &&
       point.x <= frame.bounds.x + frame.bounds.width &&
@@ -729,10 +689,10 @@ export function layerAtPoint(
  */
 export function layerOnTopAtPoint(
   layers: StackLayer[],
-  layout: Layout | null,
+  canvas: GroupCanvas | null,
   point: { x: number; y: number },
 ): string | null {
-  const frames = stageFrames(layers, layout);
+  const frames = stageFrames(layers, canvas);
   for (let i = frames.length - 1; i >= 0; i--) {
     const frame = frames[i];
     if (!frame) continue;
@@ -766,9 +726,9 @@ export function cycleLayer(layers: StackLayer[], picked: string | null, step: 1 
  * less) and then held inside the 320 × 200 canvas. Null when the area is not on the desk, or lies
  * wholly off the canvas, so the chip that offers this can say so by not being there.
  */
-export function areaAsRect(area: LayerArea, layout: Layout | null): LayerArea | null {
+export function areaAsRect(area: LayerArea, canvas: GroupCanvas | null): LayerArea | null {
   if (area.kind === "rect") return area;
-  const bounds = areaBounds(area, layout);
+  const bounds = areaBounds(area, canvas);
   if (!bounds) return null;
   const x0 = Math.max(0, Math.floor(bounds.x));
   const y0 = Math.max(0, Math.floor(bounds.y));

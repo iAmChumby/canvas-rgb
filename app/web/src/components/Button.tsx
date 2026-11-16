@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useLayoutEffect, useRef, type ButtonHTMLAttributes, type ChangeEvent, type MouseEvent, type ReactNode, type Ref } from "react";
+import { useCallback, useLayoutEffect, useRef, type ButtonHTMLAttributes, type ChangeEvent, type DragEvent as ReactDragEvent, type KeyboardEvent as ReactKeyboardEvent, type MouseEvent, type PointerEvent as ReactPointerEvent, type ReactNode, type Ref } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { SpinnerGap } from "@phosphor-icons/react";
@@ -197,6 +197,7 @@ export function ButtonLink({
   children,
   className,
   prefetch = false,
+  label,
   onClick,
 }: {
   href: string;
@@ -206,6 +207,8 @@ export function ButtonLink({
   children: ReactNode;
   className?: string;
   prefetch?: boolean;
+  /** The link's accessible name, for a link whose words are hidden at some widths. */
+  label?: string;
   onClick?: () => void;
 }) {
   const router = useRouter();
@@ -214,6 +217,7 @@ export function ButtonLink({
       href={href}
       className={buttonClass(variant, size, className)}
       prefetch={prefetch}
+      aria-label={label}
       onClick={(e) => {
         onClick?.();
         // An editor with unsaved code asks before any link leaves the page, like the rail.
@@ -239,7 +243,11 @@ export function IconButton({
   className,
   tip = true,
   shortcut,
+  holdOnPress = false,
   onClick,
+  onPointerDown,
+  onKeyDown,
+  onDragStart,
 }: {
   label: string;
   /** The key that does the same, said in the tooltip beside the label ("Ctrl+Z"). */
@@ -250,10 +258,18 @@ export function IconButton({
   busy?: boolean;
   /** False when the control sits where a bubble would only be in the way (an open name field). */
   tip?: boolean;
+  /** The bubble is held back while the control is pressed: for a handle a drag lifts over the page. */
+  holdOnPress?: boolean;
   size?: "sm" | "md";
   disabled?: boolean;
   className?: string;
   onClick: () => void;
+  /** A press on the control: the grip of a thing the pointer drags. */
+  onPointerDown?: (event: ReactPointerEvent<HTMLButtonElement>) => void;
+  /** A key on the control: the arrows that move a thing the keyboard holds. */
+  onKeyDown?: (event: ReactKeyboardEvent<HTMLButtonElement>) => void;
+  /** The browser tried to drag the control away: a grip is a control, not a picture. */
+  onDragStart?: (event: ReactDragEvent<HTMLButtonElement>) => void;
 }) {
   const cls = ["ibtn", size === "sm" && "ibtn-sm", className].filter(Boolean).join(" ");
   const spinning = useLoadDelay(busy);
@@ -267,11 +283,20 @@ export function IconButton({
       aria-disabled={busy || undefined}
       disabled={disabled}
       onClick={busy ? undefined : onClick}
+      onPointerDown={busy ? undefined : onPointerDown}
+      onKeyDown={busy ? undefined : onKeyDown}
+      onDragStart={busy ? undefined : onDragStart}
     >
       <BusySlot icon={icon} spinning={spinning} size={size === "sm" ? 14 : 16} />
     </button>
   );
-  return tip ? <Tooltip label={shortcut ? `${label} (${shortcut})` : label}>{button}</Tooltip> : button;
+  return tip ? (
+    <Tooltip label={shortcut ? `${label} (${shortcut})` : label} holdOnPress={holdOnPress}>
+      {button}
+    </Tooltip>
+  ) : (
+    button
+  );
 }
 
 /** A button that opens a file picker and hands the chosen file to `onFile`. */

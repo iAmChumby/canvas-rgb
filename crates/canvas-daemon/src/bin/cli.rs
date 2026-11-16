@@ -5,8 +5,9 @@
 
 use canvas_daemon::cli::{
     Cli, CliError, Command, ConfigCommand, DevicesCommand, DiagCommand, EffectsCommand, FansCommand,
-    OutputCommand, PeripheralsCommand,
-};use clap::Parser;
+    LightsCommand, OutputCommand, PeripheralsCommand, PresetCommand, ScenesCommand, ScenesGroupCommand,
+};
+use clap::Parser;
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
@@ -14,6 +15,16 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
+            // With --json a failed scene create, edit or delete prints one document on stdout
+            // for every kind of failure; any other command prints the API's error body, whole.
+            // stderr still gets the line.
+            if cli.json {
+                if let Some(document) = canvas_daemon::cli::failure_document(&cli.command, &e) {
+                    print_json(&cli, &document);
+                } else if let Some(body) = e.json_body() {
+                    print_json(&cli, body);
+                }
+            }
             eprintln!("error: {e}");
             ExitCode::from(e.exit_code() as u8)
         }
@@ -25,10 +36,23 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     match &cli.command {
         Command::Status => status(cli),
         Command::Devices(DevicesCommand::List) => devices(cli),
+        Command::Lights(LightsCommand::List) => lights_list(cli),
         Command::Effects(EffectsCommand::List) => effects_list(cli),
         Command::Effects(EffectsCommand::Activate(args)) => effects_activate(cli, args),
         Command::Effects(EffectsCommand::Import(args)) => effects_import(cli, args),
         Command::Effects(EffectsCommand::Check(args)) => effects_check(cli, args),
+        Command::Effects(EffectsCommand::Source(args)) => effects_source(cli, args),
+        Command::Effects(EffectsCommand::Delete(args)) => effects_delete(cli, args),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::List(args))) => preset_list(cli, args),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::Save(args))) => preset_save(cli, args),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::Delete(args))) => preset_delete(cli, args),
+        Command::Scenes(ScenesCommand::List) => scenes_list(cli),
+        Command::Scenes(ScenesCommand::Set { name }) => scenes_set(cli, name),
+        Command::Scenes(ScenesCommand::Order(args)) => scenes_order(cli, args),
+        Command::Scenes(ScenesCommand::Create(args)) => scenes_create(cli, args),
+        Command::Scenes(ScenesCommand::Edit(args)) => scenes_edit(cli, args),
+        Command::Scenes(ScenesCommand::Delete(args)) => scenes_delete(cli, args),
+        Command::Scenes(ScenesCommand::Group(ScenesGroupCommand::Move(args))) => scenes_group_move(cli, args),
         Command::Output(OutputCommand::Pause) => output(cli, "paused"),
         Command::Output(OutputCommand::Resume) => output(cli, "running"),
         Command::Fans(FansCommand::Status) => fans_status(cli),
@@ -71,17 +95,25 @@ fn status(cli: &Cli) -> Result<(), CliError> {
         print_json(cli, &status);
         return Ok(());
     }
+    print!("{}", render_status(&status));
+    Ok(())
+}
 
-    println!("canvas-rgb {}", status.get("version").and_then(|v| v.as_str()).unwrap_or("?"));
-    println!(
+/// The table `canvas-rgb status` prints: the scene that is playing and the effects its groups
+/// play, straight from what the daemon answered.
+fn render_status(status: &serde_json::Value) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    let _ = writeln!(out, "canvas-rgb {}", status.get("version").and_then(|v| v.as_str()).unwrap_or("?"));
+    let _ = writeln!(out,
         "  power        {}",
         status.get("power").and_then(|v| v.as_str()).unwrap_or("?")
     );
-    println!(
+    let _ = writeln!(out,
         "  brightness   {}",
         status.get("brightness").and_then(|v| v.as_u64()).unwrap_or(0)
     );
-    println!(
+    let _ = writeln!(out,
         "  fps          {} target, {} measured",
         status.get("fps_target").and_then(|v| v.as_u64()).unwrap_or(0),
         status
@@ -90,7 +122,7 @@ fn status(cli: &Cli) -> Result<(), CliError> {
             .map(|v| format!("{v:.1}"))
             .unwrap_or_else(|| "?".into())
     );
-    println!(
+    let _ = writeln!(out,
         "  frames       {} rendered{}",
         status.get("frames_rendered").and_then(|v| v.as_u64()).unwrap_or(0),
         if status.get("parked").and_then(|v| v.as_bool()).unwrap_or(false) {
@@ -99,33 +131,52 @@ fn status(cli: &Cli) -> Result<(), CliError> {
             ""
         }
     );
-    println!(
+    let _ = writeln!(out,
         "  devices      {} connected",
         status.get("devices_connected").and_then(|v| v.as_u64()).unwrap_or(0)
     );
-    println!(
+    let _ = writeln!(out,
         "  preview      {} subscriber(s)",
         status.get("preview_subscribers").and_then(|v| v.as_u64()).unwrap_or(0)
     );
-    println!(
+    let _ = writeln!(out,
         "  openrgb      {}",
         status.get("openrgb").and_then(|v| v.as_str()).unwrap_or("?")
     );
     let service = status.get("service").and_then(|v| v.as_str()).unwrap_or("?");
-    println!("  service      {service}");
+    let _ = writeln!(out, "  service      {service}");
     if let Some(down) = status.get("service_down_ms").and_then(|v| v.as_u64()) {
-        println!("               down for {down} ms");
+        let _ = writeln!(out, "               down for {down} ms");
     }
-    println!(
-        "  layout       {}",
-        status.get("active_layout").and_then(|v| v.as_str()).unwrap_or("none")
-    );
-    println!(
-        "  effect       {}",
-        status.get("active_effect").and_then(|v| v.as_str()).unwrap_or("none")
+    // The active scene: its name, and its id beside it.
+    let scene = status.get("active_scene");
+    let scene_name = scene
+        .and_then(|s| s.get("name"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("none");
+    let scene_id = scene
+        .and_then(|s| s.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or("");
+    if scene_id.is_empty() {
+        let _ = writeln!(out, "  scene        {scene_name}");
+    } else {
+        let _ = writeln!(out, "  scene        {scene_name} ({scene_id})");
+    }
+    // The effects the scene's groups play, one entry per distinct effect, in the scene's order:
+    // the same list `Status.active_effects` carries.
+    let effects: Vec<&str> = status
+        .get("active_effects")
+        .and_then(|v| v.as_array())
+        .map(|list| list.iter().filter_map(|e| e.as_str()).collect())
+        .unwrap_or_default();
+    let _ = writeln!(
+        out,
+        "  effects      {}",
+        if effects.is_empty() { "none".to_string() } else { effects.join(", ") }
     );
     if status.get("show_zone_panel").and_then(|v| v.as_bool()).unwrap_or(false) {
-        println!("  zone panel   open (size your ARGB headers)");
+        let _ = writeln!(out, "  zone panel   open (size your ARGB headers)");
     }
 
     // The conflict banner.
@@ -142,14 +193,14 @@ fn status(cli: &Cli) -> Result<(), CliError> {
                 if service {
                     parts.push(format!("{} service", canvas_proto::consts::SIGNALRGB_SERVICE));
                 }
-                println!(
+                let _ = writeln!(out,
                     "  CONFLICT     SignalRGB is running ({}): it will fight canvas-rgb for the devices",
                     parts.join(", ")
                 );
             }
         }
     }
-    Ok(())
+    out
 }
 
 /// `canvas-rgb devices list`.
@@ -199,6 +250,16 @@ fn devices(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+/// `canvas-rgb lights list`.
+fn lights_list(cli: &Cli) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::lights_list(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
 /// `canvas-rgb effects list`.
 fn effects_list(cli: &Cli) -> Result<(), CliError> {
     let client = client(cli)?;
@@ -238,7 +299,14 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
     let schema = detail.get("schema").cloned().unwrap_or(serde_json::Value::Null);
     let properties = schema.get("properties").and_then(|v| v.as_array()).cloned().unwrap_or_default();
 
-    let raw = canvas_daemon::cli::parse_activate_props(&args.props)?;
+    // The groups the effect plays on, by name: with none, every group of the active scene
+    // plays it. The `--group` pairs are taken out of the trailing list, so the flag works
+    // before and after the properties.
+    let (from_props, prop_args) = canvas_daemon::cli::split_groups(&args.props);
+    let mut groups = args.groups.clone();
+    groups.extend(from_props);
+
+    let raw = canvas_daemon::cli::parse_activate_props(&prop_args)?;
     let mut props = serde_json::Map::new();
     for (key, value) in raw {
         let Some(property) = properties.iter().find(|p| p.get("key").and_then(|v| v.as_str()) == Some(key.as_str()))
@@ -255,7 +323,12 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
         props.insert(key, serde_json::to_value(parsed).map_err(|e| CliError::Other(e.to_string()))?);
     }
 
-    let body = serde_json::json!({ "props": props }).to_string();
+    let mut body = serde_json::Map::new();
+    body.insert("props".into(), serde_json::Value::Object(props));
+    if !groups.is_empty() {
+        body.insert("groups".into(), serde_json::json!(groups));
+    }
+    let body = serde_json::Value::Object(body).to_string();
     let answer = client.request(
         "POST",
         &format!("{}/{}/activate", canvas_proto::api::routes::EFFECTS, args.effect),
@@ -269,59 +342,160 @@ fn effects_activate(cli: &Cli, args: &canvas_daemon::cli::ActivateArgs) -> Resul
     Ok(())
 }
 
-/// `canvas-rgb effects import <file> [--replace]`.
-///
-/// The daemon writes the file into the effects folder. The token only goes to the
-/// daemon: the client checks who holds the port first.
-fn effects_import(cli: &Cli, args: &canvas_daemon::cli::ImportArgs) -> Result<(), CliError> {
-    // The file is read first: a file that is not there is a local problem, and it is
-    // reported without asking the daemon anything.
-    let path = std::path::Path::new(&args.file);
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| CliError::Other(format!("{} has no file name", args.file)))?;
-    let html = std::fs::read_to_string(path)
-        .map_err(|e| CliError::Other(format!("could not read {}: {e}", path.display())))?;
-    // A file that is over the limit is refused here, so it is never posted.
-    if html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
-        return Err(CliError::Other(format!(
-            "{} is {} bytes; the limit is {}",
-            path.display(),
-            html.len(),
-            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
-        )));
-    }
+/// `canvas-rgb scenes list`.
+fn scenes_list(cli: &Cli) -> Result<(), CliError> {
     let client = client(cli)?;
-    let body = serde_json::json!({
-        "file_name": name,
-        "html": html,
-        "replace": args.replace,
-    })
-    .to_string();
-    let answer =
-        client.request("POST", canvas_proto::api::routes::EFFECTS_IMPORT, Some(&body))?;
-    if cli.json {
-        print_json(cli, &answer);
-        return Ok(());
-    }
-    let effect = answer.get("effect");
-    let id = effect.and_then(|e| e.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
-    let name = effect.and_then(|e| e.get("name")).and_then(|v| v.as_str()).unwrap_or("?");
-    let replaced = answer.get("replaced").and_then(|v| v.as_bool()).unwrap_or(false);
-    if replaced {
-        println!("imported {id} ({name}); it replaced the file of the same name");
-    } else {
-        println!("imported {id} ({name})");
+    match canvas_daemon::cli::scenes_list(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
     }
     Ok(())
 }
 
-/// `canvas-rgb effects check <file> [--png <path>]`.
+/// `canvas-rgb scenes set <name>`.
+fn scenes_set(cli: &Cli, name: &str) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_set(&client, name, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes order <scene>... [--dry-run]`.
+fn scenes_order(cli: &Cli, args: &canvas_daemon::cli::OrderArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_order(&client, &args.scenes, args.dry_run, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes create <name> [--from <groups.json>] [--run <run>] [--dry-run]`.
+fn scenes_create(cli: &Cli, args: &canvas_daemon::cli::CreateArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_create(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes edit <scene> --from <groups.json> --run <run> [--dry-run]`.
+fn scenes_edit(cli: &Cli, args: &canvas_daemon::cli::EditArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_edit(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes delete <scene> --run <run> [--force] [--dry-run]`.
+fn scenes_delete(cli: &Cli, args: &canvas_daemon::cli::DeleteArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_delete(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]`.
+fn scenes_group_move(cli: &Cli, args: &canvas_daemon::cli::GroupMoveArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_group_move(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// A client built on its first request, so a problem with a local file, a property or a run id
+/// is reported before the daemon is looked for and before the API token is read.
+struct LazyClient<'a> {
+    base: Option<&'a str>,
+    client: std::cell::OnceCell<canvas_daemon::cli::Client>,
+}
+
+impl<'a> LazyClient<'a> {
+    fn new(cli: &'a Cli) -> Self {
+        Self { base: cli.api.as_deref(), client: std::cell::OnceCell::new() }
+    }
+}
+
+impl canvas_daemon::cli::Api for LazyClient<'_> {
+    fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+        if self.client.get().is_none() {
+            let built = canvas_daemon::cli::Client::new(self.base)?;
+            let _ = self.client.set(built);
+        }
+        match self.client.get() {
+            Some(client) => client.request(method, path, body),
+            None => Err(CliError::Other("the client could not be built".to_string())),
+        }
+    }
+}
+
+/// Prints what a command answered: the JSON document with `--json`, the text otherwise.
+fn print_output(cli: &Cli, output: canvas_daemon::cli::Output) {
+    match output {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+}
+
+/// `canvas-rgb effects import <file> [--replace] [--run <run>]`.
+///
+/// The daemon writes the file into the effects folder. The token only goes to the
+/// daemon: the client checks who holds the port first.
+fn effects_import(cli: &Cli, args: &canvas_daemon::cli::ImportArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::effects_import(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects source <effect> [--out <file>]`.
+fn effects_source(cli: &Cli, args: &canvas_daemon::cli::SourceArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::effects_source(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects delete <effect> [--keep-presets] --run <run> [--dry-run]`.
+fn effects_delete(cli: &Cli, args: &canvas_daemon::cli::EffectDeleteArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::effects_delete(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects preset list <effect>`.
+fn preset_list(cli: &Cli, args: &canvas_daemon::cli::PresetListArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::preset_list(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects preset save <effect> <name> [--prop k=v]... [--run <run>]`.
+fn preset_save(cli: &Cli, args: &canvas_daemon::cli::PresetSaveArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::preset_save(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects preset delete <effect> <name> --run <run> [--dry-run]`.
+fn preset_delete(cli: &Cli, args: &canvas_daemon::cli::PresetDeleteArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::preset_delete(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects check <file> [--png <path>] [--prop k=v]...`.
 ///
 /// No daemon is involved: the file is parsed and rendered here.
 fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), CliError> {
-    let report = canvas_daemon::cli::check_effect(&args.file, args.png.as_deref())
+    let report = canvas_daemon::cli::check_effect_with(&args.file, args.png.as_deref(), &args.props)
         .map_err(CliError::Other)?;
     // The library tile, scored against the quality bar. A script that already failed has no
     // tile worth scoring.
@@ -722,4 +896,43 @@ fn update(cli: &Cli, args: &canvas_daemon::cli::UpdateArgs) -> Result<(), CliErr
         println!("the service started the update to {version}");
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::render_status;
+
+    /// The scene's name and the effects its groups play: the two fields the daemon fills now
+    /// (`Status.active_scene`, `Status.active_effects`). The table used to print a layout and an
+    /// effect that were always "none" (review of #337).
+    #[test]
+    fn the_status_table_names_the_scene_and_the_effects_it_plays() {
+        let status = serde_json::json!({
+            "version": "0.14.0",
+            "active_scene": { "id": "main", "name": "Evening" },
+            "active_effects": ["spiral", "solid"],
+            "show_zone_panel": false,
+            "conflicts": [],
+        });
+
+        let text = render_status(&status);
+
+        assert!(text.contains("  scene        Evening (main)\n"), "{text}");
+        assert!(text.contains("  effects      spiral, solid\n"), "{text}");
+        assert!(!text.to_lowercase().contains("layout"), "the word layout is gone:\n{text}");
+    }
+
+    /// Nothing playing is said in words, not with an empty gap.
+    #[test]
+    fn the_status_table_says_none_when_the_scene_plays_nothing() {
+        let status = serde_json::json!({
+            "version": "0.14.0",
+            "active_scene": { "id": "main", "name": "Evening" },
+            "active_effects": [],
+        });
+
+        let text = render_status(&status);
+
+        assert!(text.contains("  effects      none\n"), "{text}");
+    }
 }

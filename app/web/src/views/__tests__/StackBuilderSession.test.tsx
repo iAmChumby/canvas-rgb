@@ -7,7 +7,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-libra
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
-import { refreshAll } from "@/lib/store";
+import { refreshAll, getSnap } from "@/lib/store";
+import { wholeLightsCanvas } from "@/lib/groupCanvas";
 import { EffectsView } from "@/views/EffectsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
@@ -342,7 +343,10 @@ describe("the stage while a drag runs", () => {
     const outline = stage.querySelector('.rd-drop-rect[data-target="device"]');
     expect(outline).not.toBeNull();
     const pill = stage.querySelector(".rd-drop-pill");
-    expect(pill?.textContent).toBe("Arctic Liquid Freezer III");
+    const snap = getSnap();
+    const first = wholeLightsCanvas(snap.lights ?? [], snap.devices ?? []).deviceIds[0];
+    const name = snap.devices?.find((device) => device.id === first)?.name ?? "";
+    expect(pill?.textContent).toBe(name);
     expect(stage.querySelector(".rd-drop-strip")).not.toBeNull();
     expect(stage.dataset.dropping).toBe("true");
     act(() => void fireEvent.keyDown(window, { key: "Escape" }));

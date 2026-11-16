@@ -4,16 +4,18 @@ import { NotifyHost, dismissNotifications } from "@/components/Notify";
 import { continueNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 import { getSnap, patchSnap } from "@/lib/store";
 import { fixtureState } from "@/lib/demoUpdate";
+import { firstNote } from "@/lib/releaseNotes";
 import { GlobalBanners } from "@/shell/GlobalBanners";
 import { OnboardingGate } from "@/views/editor/OnboardingGate";
 import type { Status } from "@/proto/Status";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 import { UpdatesView } from "@/views/UpdatesView";
 
-// #125 and #168: the "Updated to" notice is a toast. It speaks through the notification lane
-// (Sonner, behind components/Notify.tsx), not through a banner of its own with hand-rolled
+// #125, #168 and #366: the "Updated to" notice is a toast. It speaks through the notification
+// lane (Sonner, behind components/Notify.tsx), not through a banner of its own with hand-rolled
 // timers. It leaves on its own after the action-toast timeout, is not shown on the Updates page,
-// counts a visit to What's new as seen, and fires once per release per session.
+// counts a visit to What's new as seen, and fires once per release per session. Its second line is
+// one thing the release changed (#366), never the version the title already gave.
 //
 // The fixture form of the dismiss is CMD_UPDATE_DISMISS_UPDATED in lib/demoUpdate.ts, which is
 // the same command the close key sends through lib/host.ts; the tests read the result out of the
@@ -85,8 +87,7 @@ const baseStatus: Status = {
   devices_connected: 3,
   devices_total: 4,
   preview_subscribers: 0,
-  active_layout: "desk",
-  active_effect: null,
+  active_effects: [],
   openrgb: "connected",
   service: "connected",
   service_down_ms: null,
@@ -160,21 +161,51 @@ function mountUpdated(path = "/") {
 }
 
 describe("the updated-to toast", () => {
-  it("is a toast in the lane, with the version, the current version and the What's new key", () => {
+  it("is a toast in the lane, with the version, one line of the release notes and the What's new key", () => {
     mountUpdated();
     settle();
     const notice = laneNotice();
     expect(notice).not.toBeNull();
     expect(notice?.textContent).toContain(`Updated to ${versionOf()}`);
-    expect(notice?.textContent).toContain(`You have ${getSnap().update?.current_version}.`);
+    // #366: the second line says something the title does not. It used to repeat the version
+    // ("You have 0.16.0."), which is why the toast read as a hand-styled card.
+    const note = firstNote(getSnap().update?.updated_to?.notes ?? "");
+    expect(note).toBeTruthy();
+    expect(notice?.textContent).toContain(note as string);
+    expect(notice?.textContent).not.toContain(`You have ${getSnap().update?.current_version}.`);
     expect(within(notice as HTMLElement).getByRole("button", { name: /What.s new/ })).toBeTruthy();
     expect(within(notice as HTMLElement).getByRole("button", { name: "Dismiss" })).toBeTruthy();
     // The hand-rolled banner is gone.
     expect(bannerNotice()).toBe(false);
   });
 
-  it("is not drawn on the Updates page, even while updated_to is still set", () => {
-    mountUpdated("/updates/");
+  it("keeps one line when the release has no notes: the title and What's new only", () => {
+    // #389: `notes` is typed string, but the wire can hand over nothing at all. An empty second
+    // line would leave a gap under the title where a sentence should be.
+    for (const notes of ["", undefined]) {
+      const state = updatedState();
+      patchSnap({
+        update: { ...state, updated_to: { ...state.updated_to!, notes: notes as unknown as string } },
+      });
+      const view = render(<Shelf />);
+      settle();
+      const notice = laneNotice() as HTMLElement;
+      expect(notice, `notes: ${String(notes)}`).not.toBeNull();
+      expect(notice.textContent).toContain(`Updated to ${versionOf()}`);
+      expect(within(notice).getByRole("button", { name: /What.s new/ })).toBeTruthy();
+      expect(within(notice).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+      // The card's words are its title alone: no detail line, empty or otherwise.
+      expect(notice.querySelector(".notify-detail"), `notes: ${String(notes)}`).toBeNull();
+      expect(notice.querySelector(".notify-text")?.children.length).toBe(1);
+      view.unmount();
+      act(() => {
+        dismissNotifications();
+        vi.advanceTimersByTime(600);
+      });
+    }
+  });
+
+  it("is not drawn on the Updates page, even while updated_to is still set", () => {    mountUpdated("/updates/");
     settle();
     expect(laneNotice()).toBeNull();
     expect(bannerNotice()).toBe(false);

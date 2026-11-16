@@ -1,0 +1,858 @@
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+
+// The Scenes page: one row per group of the active scene, the scene strip, the Unassigned row and
+// the notice for a light that was just detected. `useScene` and the light feed are replaced, so
+// the tests see what the page asks of them and not the daemon.
+
+const { pathRef } = vi.hoisted(() => ({ pathRef: { current: "/" } }));
+vi.mock("next/navigation", () => ({
+  usePathname: () => pathRef.current,
+  useRouter: () => ({ push: () => {}, replace: () => {}, prefetch: () => {} }),
+}));
+vi.mock("next/link", () => ({
+  default: ({ href, children }: { href: string; children?: React.ReactNode }) => <a href={href}>{children}</a>,
+}));
+
+const { api } = vi.hoisted(() => ({
+  api: {
+    effect: vi.fn(),
+    createPreset: vi.fn(),
+    activateEffect: vi.fn(),
+    completeOnboarding: vi.fn(),
+    status: vi.fn(),
+    stacks: vi.fn(),
+    lights: { flash: vi.fn(), list: vi.fn(), patch: vi.fn() },
+  },
+}));
+vi.mock("@/lib/endpoints", () => ({ api }));
+
+const scene = vi.hoisted(() => ({ current: null as unknown }));
+vi.mock("@/views/scenes/useScene", () => ({ useScene: () => scene.current }));
+vi.mock("@/views/scenes/useLightFeed", () => ({ useLightFeed: () => () => null }));
+
+const { chainSetup } = vi.hoisted(() => ({ chainSetup: { request: vi.fn() } }));
+vi.mock("@/views/chain/request", () => ({
+  requestChainSetup: chainSetup.request,
+  useChainSetupVisit: () => 0,
+  chainSetupRequest: () => null,
+  consumeChainSetupRequest: () => {},
+}));
+
+import { patchSnap } from "@/lib/store";
+import { DEMO_LIGHTS, DEMO_SCENES } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
+import { Rail } from "@/shell/Rail";
+import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
+import { SEEN_LIGHTS_KEY } from "@/views/scenes/newLights";
+import { ScenesView } from "@/views/scenes/ScenesView";
+import type { EffectSummary } from "@/proto/EffectSummary";
+import type { ChainView } from "@/proto/ChainView";
+import type { Scene } from "@/proto/Scene";
+import type { Status } from "@/proto/Status";
+import type { LightView } from "@/proto/LightView";
+import type { GroupState } from "@/proto/GroupState";
+import type { UseScene } from "@/views/scenes/useScene";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+// jsdom has no PointerEvent and no pointer capture; a MouseEvent carries clientX just as well.
+if (!("PointerEvent" in window)) {
+  class PE extends MouseEvent {
+    pointerId: number;
+    pointerType: string;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 1;
+      this.pointerType = init.pointerType ?? "mouse";
+    }
+  }
+  (window as unknown as { PointerEvent: unknown }).PointerEvent = PE;
+}
+
+beforeAll(() => {
+  window.matchMedia = ((query: string) => ({
+    matches: false,
+    media: query,
+    addEventListener: () => {},
+    removeEventListener: () => {},
+  })) as unknown as typeof window.matchMedia;
+  globalThis.ResizeObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+  } as unknown as typeof ResizeObserver;
+  globalThis.IntersectionObserver = class {
+    observe() {}
+    unobserve() {}
+    disconnect() {}
+    takeRecords() {
+      return [];
+    }
+  } as unknown as typeof IntersectionObserver;
+});
+
+const clone = <T,>(value: T): T => structuredClone(value);
+
+const DEMO_EFFECTS = ["aurora", "rainbow_wave", "breathing", "spiral", "white", "fire"].map((id) => ({
+  id,
+  name: id.replace(/_/g, " ").replace(/^./, (c) => c.toUpperCase()),
+  description: "",
+  needs: { audio: false },
+  favorite: false,
+})) as unknown as EffectSummary[];
+
+const FRESH: LightView = {
+  light: {
+    id: "openrgb:desk-lamp#z0",
+    device_id: "openrgb:desk-lamp",
+    zone_index: 0,
+    arrangement: "single",
+    reversed: false,
+  },
+  led_count: 1,
+  connected: true,
+  label: "Desk lamp",
+};
+
+const gaming = (): Scene => clone(DEMO_SCENES.scenes[0] as Scene);
+
+/** A new light on a header: the whole-zone light of a header nobody has described yet. */
+const HEADER_DEVICE = "openrgb:MYSTIC-9";
+const HEADER_FRESH: LightView = {
+  light: {
+    id: `${HEADER_DEVICE}#z0`,
+    device_id: HEADER_DEVICE,
+    zone_index: 0,
+    arrangement: "strip",
+    reversed: false,
+  },
+  led_count: 8,
+  connected: true,
+  label: "MSI MYSTIC LIGHT · JAF",
+};
+
+/** That header as the daemon lists it: a size, and nothing set up. */
+const HEADER_CHAIN: ChainView = {
+  device_id: HEADER_DEVICE,
+  device_name: "MSI MYSTIC LIGHT",
+  zone_index: 0,
+  zone_name: "JAF",
+  state: "not_set_up",
+  leds: 8,
+  min_leds: 0,
+  max_leds: 240,
+  parts: [],
+};
+
+function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, unknown[][]> } {
+  const calls: Record<string, unknown[][]> = {};
+  const spy =
+    (name: string) =>
+    (...args: unknown[]) => {
+      (calls[name] ??= []).push(args);
+    };
+  const active = gaming();
+  const held = new Set(active.groups.flatMap((g) => g.members));
+  const base: UseScene = {
+    scene: active,
+    scenes: clone(DEMO_SCENES.scenes),
+    unassigned: DEMO_LIGHTS.filter((l) => !held.has(l.light.id)),
+    states: active.groups.map((g): GroupState => ({ id: g.id, failed: null, fits: [] })),
+    edit: (change: (draft: Scene) => void, label: string) => {
+      const draft = clone(active);
+      change(draft);
+      (calls.edit ??= []).push([draft, label]);
+    },
+    setProps: spy("setProps"),
+    setBrightness: spy("setBrightness"),
+    setActive: spy("setActive"),
+    create: spy("create"),
+    remove: spy("remove"),
+    renameScene: spy("renameScene"),
+    dryRunMove: spy("dryRunMove") as unknown as UseScene["dryRunMove"],
+    moveGroup: spy("moveGroup") as unknown as UseScene["moveGroup"],
+    reorderScenes: spy("reorderScenes"),
+    reorderGroups: spy("reorderGroups"),
+    undo: spy("undo"),
+    redo: spy("redo"),
+    canUndo: false,
+    canRedo: false,
+    undoLabel: null,
+    error: null,
+  };
+  return Object.assign({ ...base, ...over }, { calls });
+}
+
+function tree() {
+  return (
+    <StripSlotsProvider>
+      <StripSlot kind="title" />
+      <StripSlot kind="actions" />
+      <Rail pathname="/" />
+      <ScenesView />
+    </StripSlotsProvider>
+  );
+}
+
+function mount(use: UseScene) {
+  scene.current = use;
+  return render(tree());
+}
+
+beforeEach(() => {
+  window.localStorage.clear();
+  window.history.replaceState({}, "", "/");
+  api.stacks.mockReset();
+  api.stacks.mockResolvedValue({ stacks: [] });
+  chainSetup.request.mockReset();
+  api.effect.mockReset();
+  api.effect.mockResolvedValue({
+    schema: {
+      id: "fire",
+      name: "Fire",
+      description: "",
+      needs: { screen: false, audio: false },
+      properties: [],
+      presets: [],
+    },
+    favorite: false,
+    user_presets: [],
+    props: {},
+  });
+  // Every demo light has been seen, so only a light that appears later is "new".
+  window.localStorage.setItem(SEEN_LIGHTS_KEY, JSON.stringify(DEMO_LIGHTS.map((l) => l.light.id)));
+  patchSnap({
+    status: null,
+    scenes: { active: "gaming", scenes: clone(DEMO_SCENES.scenes), group_states: [] },
+    scenesError: null,
+    lights: clone(DEMO_LIGHTS),
+    lightsError: null,
+    effects: DEMO_EFFECTS,
+  });
+});
+
+afterEach(() => {
+  cleanup();
+});
+
+const rows = () => screen.getAllByTestId("group-row");
+
+/** A box, as the browser measures one. */
+const box = (top: number, height: number) =>
+  ({
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: 800,
+    width: 800,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  }) as DOMRect;
+
+/**
+ * The rows as the list lays them out: 100 px apart and 60 px tall, the list 500 px high. jsdom
+ * measures nothing, so the drag has no places to work with without this.
+ */
+function placeRows() {
+  const list = rows()[0]?.parentElement as HTMLElement;
+  list.getBoundingClientRect = () => box(0, 500);
+  rows().forEach((row, i) => {
+    row.getBoundingClientRect = () => box(i * 100, 60);
+  });
+  return list;
+}
+
+/** The handle of a row: the grip the pointer drags the row by. */
+const handle = (row: HTMLElement) =>
+  within(row).getByRole("button", { name: /^Move / }) as HTMLButtonElement;
+
+/** A press on the handle, and a drag that carries it past the threshold. */
+function dragHandle(grip: HTMLElement, to: number) {
+  fireEvent.pointerDown(grip, { pointerType: "mouse", clientX: 10, clientY: 30, button: 0 });
+  // The button is down while the pointer travels.
+  fireEvent.pointerMove(window, { pointerType: "mouse", clientX: 10, clientY: to, buttons: 1 });
+}
+
+/** The accent each group has now, by its own id. */
+function tonesByGroup(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const row of rows()) {
+    out[row.getAttribute("data-group") ?? ""] = (row as HTMLElement).style.getPropertyValue("--tone");
+  }
+  return out;
+}
+
+describe("the Scenes page", () => {
+  it("renders one row per group in scene order", () => {
+    const use = fake();
+    mount(use);
+    const names = rows().map((r) => within(r).getByTestId("group-name").textContent);
+    expect(names).toEqual((use.scene as Scene).groups.map((g) => g.name));
+  });
+
+  it("Unassigned is absent when every light is in a group", () => {
+    const one = clone(DEMO_SCENES.scenes[1] as Scene);
+    mount(fake({ scene: one, unassigned: [], states: one.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) }));
+    expect(screen.queryByTestId("unassigned-row")).toBeNull();
+  });
+
+  it("shows the Unassigned row when a light has no group", () => {
+    mount(fake());
+    expect(screen.getByTestId("unassigned-row")).toBeTruthy();
+  });
+
+  it("the Unassigned row keeps the handle's column, so its name and its preview are not squashed into it", () => {
+    mount(fake());
+    const group = rows()[0] as HTMLElement;
+    const unassigned = screen.getByTestId("unassigned-row");
+    // The row has no handle, but it keeps the room of the one the group rows have: the same
+    // number of cells, and the handle's column first.
+    expect(unassigned.children.length).toBe(group.children.length);
+    expect(unassigned.firstElementChild?.getAttribute("data-testid")).toBe("grip-space");
+    // Its name stands in the name column and its preview in the run's column, the cells a
+    // group row's stand in, so the two rows line up.
+    expect((unassigned.children[1] as HTMLElement).className).toContain("who");
+    expect((unassigned.children[2] as HTMLElement).className).toContain("runWell");
+    expect((group.children[1] as HTMLElement).className).toContain("who");
+    expect((group.children[2] as HTMLElement).className).toContain("runWell");
+  });
+
+  it("pressing a scene key calls setActive with its id", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByRole("button", { name: "Evening" }));
+    expect(use.calls.setActive).toEqual([["evening"]]);
+  });
+
+  it("the scene menu has Move earlier and Move later, and they are disabled at an end", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByTestId("scene-menu"));
+    const earlier = screen.getByRole("button", { name: /Move earlier/ });
+    const later = screen.getByRole("button", { name: /Move later/ });
+    // The scene that plays is the first one: it cannot go earlier.
+    expect((earlier as HTMLButtonElement).disabled).toBe(true);
+    expect(earlier.getAttribute("title")).toBe("It is already first.");
+    expect((later as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Move later puts the scene one place later", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByTestId("scene-menu"));
+    fireEvent.click(screen.getByRole("button", { name: /Move later/ }));
+    expect(use.calls.reorderScenes).toEqual([[["focus", "gaming", "evening"]]]);
+  });
+
+  it("the arrow keys on a scene key put the scenes in another order", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Evening" }), { key: "ArrowLeft" });
+    expect(use.calls.reorderScenes).toEqual([[["gaming", "evening", "focus"], { coalesce: true }]]);
+  });
+
+  it("a failed group shows the daemon's own words when its effect is installed", () => {
+    const base = fake();
+    const first = (base.scene as Scene).groups[0];
+    mount(fake({ states: [{ id: first?.id ?? "", failed: "the effect could not start", fits: [] }] }));
+    expect(screen.getByText("the effect could not start")).toBeTruthy();
+  });
+
+  it("a group past the scene's HTML limit shows the daemon's sentence on its row (#370)", () => {
+    const base = fake();
+    const groups = (base.scene as Scene).groups;
+    const last = groups[groups.length - 1];
+    const sentence = htmlLimitSentence(groups.length);
+    mount(
+      fake({
+        states: groups.map((g) => ({ id: g.id, failed: g.id === last?.id ? sentence : null, fits: [] })),
+      }),
+    );
+    const row = rows()[rows().length - 1] as HTMLElement;
+    // The row keeps the daemon's own words, and the whole sentence is its tooltip.
+    expect(within(row).getByRole("alert").textContent).toContain("A scene runs 2 HTML effects at a time.");
+    expect(within(row).getByRole("alert").textContent).toContain("Move one to another scene.");
+    expect(row.innerHTML).toContain(sentence);
+  });
+
+  it("a missing effect is said in words: 'Missing effect', the raw id only in a tooltip", () => {
+    const evening = clone(DEMO_SCENES.scenes[2] as Scene);
+    const lost = evening.groups[1];
+    mount(
+      fake({
+        scene: evening,
+        states: evening.groups.map((g) => ({
+          id: g.id,
+          failed: g.id === lost?.id ? "the effect html:glow-removed is not installed" : null,
+          fits: [],
+        })),
+      }),
+    );
+    const row = rows()[1] as HTMLElement;
+    expect(within(row).getByRole("button", { name: /plays Missing effect/ })).toBeTruthy();
+    expect(within(row).getByText("This effect is no longer installed.")).toBeTruthy();
+    // The id never shows as text: only a tooltip holds it.
+    expect(row.innerHTML).toContain("html:glow-removed");
+    expect(document.body.textContent).not.toContain("html:glow-removed");
+  });
+
+  const withFresh = () => {
+    const use = fake();
+    use.unassigned = [...use.unassigned, FRESH];
+    patchSnap({ lights: [...clone(DEMO_LIGHTS), FRESH] });
+    mount(use);
+    return use;
+  };
+
+  it("the notice's key for a non-first group adds the light to that group, and only that group", () => {
+    const use = withFresh();
+    const notice = screen.getByRole("region", { name: /Desk lamp/ });
+    const groups = (use.scene as Scene).groups;
+    const third = groups[2];
+    fireEvent.click(within(notice).getByRole("button", { name: `Add to ${third?.name}` }));
+    const edits = use.calls.edit ?? [];
+    expect(edits).toHaveLength(1);
+    const [draft] = edits[0] as [Scene];
+    for (const g of draft.groups) {
+      const holds = g.members.includes(FRESH.light.id);
+      expect(holds, `group ${g.name}`).toBe(g.id === third?.id);
+    }
+  });
+
+  it("shows three keys and a menu for the rest, and the menu adds to the group it names", () => {
+    const use = withFresh();
+    const notice = screen.getByRole("region", { name: /Desk lamp/ });
+    const groups = (use.scene as Scene).groups;
+    expect(groups.length).toBeGreaterThan(3);
+    const keys = within(notice).getAllByRole("button", { name: /^Add to / });
+    expect(keys).toHaveLength(3);
+    fireEvent.click(within(notice).getByRole("button", { name: `${groups.length - 3} more` }));
+    const last = groups[groups.length - 1];
+    fireEvent.click(screen.getByRole("button", { name: `Add to ${last?.name}` }));
+    const [draft] = (use.calls.edit ?? [])[0] as [Scene];
+    expect(draft.groups[groups.length - 1]?.members).toContain(FRESH.light.id);
+    expect(draft.groups[0]?.members).not.toContain(FRESH.light.id);
+  });
+
+  it("the notice sits after every row, so its arrival moves none of them", () => {
+    withFresh();
+    const notice = screen.getByRole("region", { name: /Desk lamp/ });
+    for (const row of rows()) {
+      expect(row.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    }
+    const unassigned = screen.getByTestId("unassigned-row");
+    expect(unassigned.compareDocumentPosition(notice) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    expect(within(notice).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+  });
+
+  it("the strip holds a slot for the 'N new' key whether or not a light is new; the key scrolls to the notice and focuses it", () => {
+    mount(fake());
+    expect(screen.getByTestId("new-slot")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: /new light/ })).toBeNull();
+    cleanup();
+    withFresh();
+    expect(screen.getByTestId("new-slot")).toBeTruthy();
+    const key = screen.getByRole("button", { name: /1 new light, go to the notice/ });
+    expect(key.textContent).toContain("1 new");
+    const scrolled = vi.fn();
+    Element.prototype.scrollIntoView = scrolled;
+    fireEvent.click(key);
+    expect(scrolled).toHaveBeenCalledTimes(1);
+    expect(document.activeElement).toBe(screen.getByRole("region", { name: /Desk lamp/ }));
+  });
+
+  it("the '3 more' menu closes on Escape and on a click outside, and hands focus back to its key", () => {
+    withFresh();
+    const notice = screen.getByRole("region", { name: /Desk lamp/ });
+    const more = within(notice).getByRole("button", { name: /more$/ });
+    fireEvent.click(more);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(more.getAttribute("aria-expanded")).toBe("false");
+    fireEvent.click(more);
+    expect(more.getAttribute("aria-expanded")).toBe("true");
+    fireEvent.pointerDown(document.body);
+    expect(more.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("the notice goes when it is dismissed", () => {
+    withFresh();
+    fireEvent.click(screen.getByRole("button", { name: "Dismiss" }));
+    expect(screen.queryByRole("region", { name: /Desk lamp/ })).toBeNull();
+  });
+
+  it("the notice offers the setup of a header that is not set up, and the key asks for that header", () => {
+    const use = fake();
+    use.unassigned = [...use.unassigned, HEADER_FRESH];
+    patchSnap({ lights: [...clone(DEMO_LIGHTS), HEADER_FRESH], chains: [HEADER_CHAIN] });
+    mount(use);
+
+    const notice = screen.getByRole("region", { name: /JAF/ });
+    fireEvent.click(within(notice).getByRole("button", { name: "Set up JAF" }));
+
+    expect(chainSetup.request).toHaveBeenCalledWith(`${HEADER_DEVICE}#z0`);
+  });
+
+  it("a row's open key claims no disclosure it does not have", () => {
+    mount(fake());
+    for (const key of screen.getAllByRole("button", { name: /^Open / })) {
+      expect(key.getAttribute("aria-expanded")).toBeNull();
+    }
+  });
+
+  it("never says '0 devices' while the lights are not read: it says it is reading, or that it could not", () => {
+    patchSnap({ lights: null, lightsError: null });
+    const { unmount } = mount(fake({ unassigned: [] }));
+    for (const row of rows()) {
+      expect(row.textContent).not.toMatch(/0 devices|0 LEDs/);
+      expect(row.querySelector('[aria-busy="true"]')).not.toBeNull();
+    }
+    expect(document.body.textContent).not.toMatch(/LEDs/);
+    unmount();
+    patchSnap({ lights: null, lightsError: "refused" });
+    mount(fake({ unassigned: [] }));
+    for (const row of rows()) {
+      expect(row.textContent).toContain("Devices not read");
+      expect(row.textContent).not.toMatch(/0 devices|0 LEDs/);
+    }
+  });
+
+  it("a scene with no groups says so, and does not say '0 LEDs'", () => {
+    const empty = clone(DEMO_SCENES.scenes[0] as Scene);
+    empty.groups = [];
+    mount(fake({ scene: empty, states: [] }));
+    expect(screen.getByText("This scene has no groups yet")).toBeTruthy();
+    expect(screen.getByTestId("unassigned-row")).toBeTruthy();
+    expect(document.body.textContent).not.toMatch(/ 0 LEDs/);
+    expect(document.body.textContent).toContain("no groups yet");
+  });
+
+  it("the brightness control calls setBrightness", () => {
+    const use = fake();
+    mount(use);
+    const first = rows()[0] as HTMLElement;
+    const slider = within(first).getByRole("slider");
+    fireEvent.keyDown(slider, { key: "ArrowLeft" });
+    const group = (use.scene as Scene).groups[0];
+    expect(use.calls.setBrightness).toEqual([[group?.id, (group?.brightness ?? 0) - 1]]);
+  });
+
+  it("the rail's first item is Scenes and the word Layout is not in the document", () => {
+    patchSnap({ status: null });
+    mount(fake());
+    const first = screen.getAllByRole("link")[0] as HTMLElement;
+    expect(first.textContent).toContain("Scenes");
+    expect(document.body.textContent).not.toMatch(/layout/i);
+  });
+
+  it("the last scene's Delete is disabled", () => {
+    const one = clone(DEMO_SCENES.scenes[0] as Scene);
+    mount(fake({ scene: one, scenes: [one] }));
+    fireEvent.click(screen.getByRole("button", { name: "More about this scene" }));
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect((del as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it("a scene that is not the last one can be deleted", () => {
+    mount(fake());
+    fireEvent.click(screen.getByRole("button", { name: "More about this scene" }));
+    const del = screen.getByRole("button", { name: "Delete" });
+    expect((del as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Ctrl+Z calls undo and Ctrl+Shift+Z calls redo", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true });
+    expect(use.calls.undo).toEqual([[]]);
+    fireEvent.keyDown(window, { key: "z", ctrlKey: true, shiftKey: true });
+    expect(use.calls.redo).toEqual([[]]);
+  });
+
+  it("no control is labelled Save or Revert: every change is undoable", () => {
+    mount(fake());
+    const names = [...document.querySelectorAll("button")].map((b) => (b.textContent ?? "").trim());
+    expect(names).not.toContain("Save");
+    expect(names).not.toContain("Revert");
+    const labels = [...document.querySelectorAll("[aria-label]")].map((e) => e.getAttribute("aria-label"));
+    expect(labels).not.toContain("Save");
+    expect(labels).not.toContain("Revert");
+  });
+
+  it("the row's picker puts the preview back when it closes", async () => {    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByRole("button", { name: /plays Aurora/ }));
+    await screen.findByTestId("effect-picker");
+    fireEvent.pointerEnter(screen.getByRole("button", { name: /Fire/ }));
+    await waitFor(() => expect((use.calls.edit ?? []).length).toBeGreaterThan(0));
+    const shown = (use.calls.edit ?? []).at(-1) as [Scene];
+    expect(shown[0].groups[0]?.plays).toEqual({ type: "effect", effect: "fire", props: {} });
+    // The popover closes with the Escape key: the preview goes with it.
+    fireEvent.keyDown(document, { key: "Escape" });
+    await waitFor(() => {
+      const back = (use.calls.edit ?? []).at(-1) as [Scene];
+      expect(back[0].groups[0]?.plays).toEqual({ type: "effect", effect: "aurora", props: {} });
+    });
+  });
+
+  it("the page opens the group the URL names, and nothing for an id it does not have", async () => {
+    window.history.replaceState({}, "", "/?group=g-case");
+    mount(fake());
+    await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
+    cleanup();
+    window.history.replaceState({}, "", "/?group=no-such-group");
+    mount(fake());
+    await waitFor(() => expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  // Plan Step 2 (Task 12): the first run's hello leads to Scenes, and nothing else. The hello is
+  // the whole window until "Continue" finishes the onboarding (Onboarding.finish ->
+  // api.completeOnboarding -> refreshStatus -> onDone), and the page behind it is this one.
+  it("the first run opens Scenes after the hello step", async () => {
+    const firstRun = {
+      onboarding_complete: false,
+      openrgb: "connected",
+      conflicts: [],
+    } as unknown as Status;
+    api.status.mockResolvedValue({ ...firstRun, onboarding_complete: true });
+    api.completeOnboarding.mockResolvedValue(undefined);
+    api.activateEffect.mockResolvedValue(undefined);
+    patchSnap({
+      status: firstRun,
+      // One device is enough for the greeting (not the "no lights found" ladder).
+      devices: [
+        {
+          id: "openrgb:desk-lamp",
+          name: "Desk lamp",
+          vendor: "fake",
+          kind: "led_strip",
+          adapter: "openrgb",
+          adapter_index: 0,
+          serial: "",
+          location: "",
+          connected: true,
+          zones: [],
+        },
+      ],
+      devicesTotal: 1,
+      devicesError: null,
+    });
+
+    mount(fake());
+
+    // The hello alone: the window is the greeting, not the page.
+    expect(screen.getByRole("region", { name: "Hello" })).toBeTruthy();
+    expect(screen.queryByTestId("unassigned-row")).toBeNull();
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Continue" }));
+    });
+
+    expect(api.completeOnboarding).toHaveBeenCalledTimes(1);
+    expect(api.status).toHaveBeenCalled();
+    // The greeting is gone and the page behind it is Scenes: its rows are what it leads to.
+    expect(screen.queryByRole("region", { name: "Hello" })).toBeNull();
+    expect(screen.getByTestId("unassigned-row")).toBeTruthy();
+    expect(screen.getAllByTestId("group-row").length).toBeGreaterThan(0);
+  });
+
+  // Plan Task 11: a group that plays a pattern says so on its row, and a group whose pattern was
+  // deleted is dark with the reason the daemon gives, in the words the page already uses.
+  it("a group whose pattern is gone shows why", () => {
+    const one = gaming();
+    const first = one.groups[0];
+    const second = one.groups[1];
+    if (!first || !second) throw new Error("the demo scene has too few groups");
+    one.groups = [
+      { ...first, plays: { type: "effect", effect: "pattern:Intake", props: {} } },
+      { ...second, plays: { type: "effect", effect: "pattern:Removed", props: {} } },
+    ];
+    patchSnap({
+      effects: [
+        ...DEMO_EFFECTS,
+        {
+          id: "pattern:Intake",
+          name: "Intake",
+          description: "Pattern, ring of 12",
+          needs: { screen: false, audio: false },
+          favorite: false,
+          kind: "pattern",
+          built_on: { led_count: 12, arrangement: "ring" },
+        } as EffectSummary,
+      ],
+    });
+    mount(
+      fake({
+        scene: one,
+        states: [
+          { id: first.id, failed: null, fits: [] },
+          { id: second.id, failed: "the pattern pattern:Removed is gone", fits: [] },
+        ],
+      }),
+    );
+
+    const patternRow = rows()[0] as HTMLElement;
+    expect(within(patternRow).getByText("Pattern")).toBeTruthy();
+    // The mode does not apply to a pattern: its words are hidden from the eye and from a reader,
+    // and the cell stays where it was, so the row's other controls do not move.
+    expect(patternRow.querySelector('[data-hidden="true"]')?.textContent).toContain("flow across");
+
+    const lostRow = rows()[1] as HTMLElement;
+    expect(within(lostRow).getByRole("button", { name: /plays Missing effect/ })).toBeTruthy();
+    expect(within(lostRow).getByText("This effect is no longer installed.")).toBeTruthy();
+    // The daemon's reason, with the pattern's id in it, is a tooltip and never the text.
+    expect(lostRow.innerHTML).toContain("the pattern pattern:Removed is gone");
+    expect(document.body.textContent).not.toContain("pattern:Removed");
+  });
+});
+
+describe("the order of the groups inside a scene", () => {
+  it("a group's handle can be dragged into another place, and the page is told the new order once", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    const all = rows();
+    const grip = handle(all[0] as HTMLElement);
+    // The first group is dragged down past the second one.
+    dragHandle(grip, 190);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toEqual([[["g-ram", "g-case", "g-gpu", "g-desk"]]]);
+  });
+
+  it("the rows around the dragged one never move: the list shifts nothing", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    const before = rows().map((r) => r.getBoundingClientRect().top);
+    dragHandle(handle(rows()[0] as HTMLElement), 190);
+    // The rows are where they were while the drag lasts.
+    expect(rows().map((r) => r.getBoundingClientRect().top)).toEqual(before);
+    // A marker stands in the gap the row would land in.
+    const marker = screen.getByTestId("group-marker");
+    const top = parseFloat(marker.style.top);
+    expect(top).toBeGreaterThan((rows()[1] as HTMLElement).getBoundingClientRect().bottom);
+    expect(top).toBeLessThan((rows()[2] as HTMLElement).getBoundingClientRect().top);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+  });
+
+  it("a finger does not drag a row: the group's menu is the phone's path", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    const grip = handle(rows()[0] as HTMLElement);
+    fireEvent.pointerDown(grip, { pointerType: "touch", clientX: 10, clientY: 30, button: 0 });
+    fireEvent.pointerMove(window, { pointerType: "touch", clientX: 10, clientY: 190, buttons: 1 });
+    fireEvent.pointerUp(window, { pointerType: "touch", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("the drag ends without a write when the window loses the focus", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    dragHandle(handle(rows()[0] as HTMLElement), 190);
+    fireEvent.blur(window);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("a row's handle holds its tooltip back while the row is dragged, so the bubble covers nothing", () => {
+    mount(fake());
+    placeRows();
+    const grip = handle(rows()[0] as HTMLElement);
+    const tip = grip.closest(".tip") as HTMLElement;
+    expect(tip).toBeTruthy();
+    expect(tip.getAttribute("data-hold")).toBeNull();
+    // The press begins: the bubble goes, so it cannot cover the row under the pointer.
+    dragHandle(grip, 190);
+    expect(tip.getAttribute("data-hold")).toBe("true");
+    // The row is dropped: the bubble stays away, because the row may have come to rest under
+    // the pointer. It comes back when the pointer has really left the handle.
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(tip.getAttribute("data-hold")).toBe("true");
+    fireEvent.pointerMove(window, { pointerType: "mouse", clientX: 600, clientY: 600 });
+    expect(tip.getAttribute("data-hold")).toBeNull();
+  });
+
+  it("a group deleted while it is dragged leaves the order alone: no write and no undo step", () => {
+    const use = fake();
+    const view = mount(use);
+    placeRows();
+    // The first group is dragged down past the second one.
+    dragHandle(handle(rows()[0] as HTMLElement), 190);
+    // The group is deleted while the drag lasts: it is gone from the scene.
+    const before = use.scene as Scene;
+    use.scene = { ...before, groups: before.groups.filter((g) => g.id !== "g-case") };
+    view.rerender(tree());
+    // The row is dropped. The group is not there any more, so the drop changes nothing and
+    // nothing is written: a PUT with the same order would push an undo step that does nothing.
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("the page goes away mid-drag: the handle lets the pointer go", () => {
+    const use = fake();
+    const view = mount(use);
+    placeRows();
+    // jsdom has no pointer capture: the calls are counted here.
+    const released: number[] = [];
+    const proto = Element.prototype as unknown as { releasePointerCapture?: (id: number) => void };
+    proto.releasePointerCapture = (id: number) => {
+      released.push(id);
+    };
+    try {
+      dragHandle(handle(rows()[0] as HTMLElement), 190);
+      view.unmount();
+    } finally {
+      delete proto.releasePointerCapture;
+    }
+    // The handle let the pointer go, so the browser is not left holding a capture for a node
+    // that is gone.
+    expect(released.length).toBeGreaterThan(0);
+  });
+
+  it("the arrow keys on a group's handle put it one place up or down", () => {
+    const use = fake();
+    mount(use);
+    const grip = handle(rows()[1] as HTMLElement);
+    fireEvent.keyDown(grip, { key: "ArrowUp" });
+    expect(use.calls.reorderGroups).toEqual([[["g-ram", "g-case", "g-gpu", "g-desk"]]]);
+    // The keyboard is told where the group is.
+    expect(screen.getByTestId("group-status").textContent).toBe("Memory, position 1 of 4.");
+  });
+
+  it("the arrow keys say when a group is already at an end", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.keyDown(handle(rows()[0] as HTMLElement), { key: "ArrowUp" });
+    expect(use.calls.reorderGroups).toBeUndefined();
+    expect(screen.getByTestId("group-status").textContent).toBe("Case fans is already first.");
+    fireEvent.keyDown(handle(rows()[3] as HTMLElement), { key: "ArrowDown" });
+    expect(use.calls.reorderGroups).toBeUndefined();
+    expect(screen.getByTestId("group-status").textContent).toBe("Cooler and desk is already last.");
+  });
+
+  it("a group keeps its colour when the groups are put in another order", () => {
+    mount(fake());
+    const before = tonesByGroup();
+    expect(Object.keys(before)).toEqual(["g-case", "g-ram", "g-gpu", "g-desk"]);
+    cleanup();
+
+    const turned = gaming();
+    turned.groups = [...turned.groups].reverse();
+    mount(fake({ scene: turned, states: turned.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) }));
+    // The order really changed.
+    expect(rows().map((r) => r.getAttribute("data-group"))).toEqual([
+      "g-desk",
+      "g-gpu",
+      "g-ram",
+      "g-case",
+    ]);
+    // Every group kept its own colour.
+    expect(tonesByGroup()).toEqual(before);
+  });
+});

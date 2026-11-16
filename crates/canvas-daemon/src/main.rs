@@ -100,6 +100,10 @@ fn finish(exit: Exit) -> std::process::ExitCode {
 /// The quit path's bounds (G3). The whole path ends well inside `QUIT_DEADLINE`.
 const QUIT_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2);
 const ON_QUIT_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+/// The chain setup's restore at quit: a resize, a re-read of the list and the scene back. A
+/// restore cut off by this bound leaves `chain-restore.json` on disk, and the next start replays
+/// it; the bound is what leaves the whole quit inside [`QUIT_DEADLINE`].
+const SETUP_RESTORE_LIMIT: std::time::Duration = std::time::Duration::from_millis(400);
 const BLACK_GRACE: std::time::Duration = std::time::Duration::from_millis(250);
 const SERVICE_NOTICE_LIMIT: std::time::Duration = std::time::Duration::from_millis(300);
 const ENGINE_STOP_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
@@ -127,16 +131,11 @@ async fn daemon_main(fakes: bool) -> Exit {
     let mut store = canvas_daemon::storage::Store::load();
 
     // Poison is not a built-in any more: it is a user HTML effect in
-    // `%APPDATA%\canvas-rgb\effects\`. The saved ids move to it, once, so the saved
-    // setup comes back exactly as it was. The old case forms move to a case
-    // landmark in the same pass.
-    if canvas_daemon::migration::migrate_store(&mut store) {
-        tracing::info!(
-            "the saved setup was migrated: the old effect ids and the old case forms moved to the new ones"
-        );
-        if let Err(e) = store.save_layouts() {
-            tracing::warn!(error = %e, "could not save the migrated layouts");
-        }
+    // `%APPDATA%\canvas-rgb\effects\`. The saved ids in `effects.json` move to it, once, so the
+    // saved setup comes back exactly as it was. (The saved layouts are not written: the scene
+    // migration reads them, and their own `poison` ids are renamed in memory there.)
+    if canvas_daemon::migration::migrate_effects(&mut store.effects) {
+        tracing::info!("the saved effect ids were migrated: the old effect moved to its user file");
         if let Err(e) = store.save_effects() {
             tracing::warn!(error = %e, "could not save the migrated effects");
         }
@@ -270,26 +269,11 @@ async fn daemon_main(fakes: bool) -> Exit {
     // user effect's name, and a layer may name one (D95.1.4).
     app.stacks.reload(&app.user_effects);
 
-    // The effect saved on the active layout runs again, so a restart does not leave the
-    // lights black until something activates an effect.
-    let saved_effect = app.active_layout().await.and_then(|layout| layout.effect);
-    if let Some(effect) = saved_effect {
-        // No draft survives a restart, but every apply follows the same rule: end one first,
-        // and keep a beat off while the saved effect goes on.
-        let _replace = canvas_daemon::draft::hold_for_replace(&app).await;
-        match canvas_daemon::apply_effect(&app, &effect.id, &effect.props).await {
-            Ok(()) => tracing::info!(effect = %effect.id, "the saved effect was restored"),
-            Err(e) => {
-                tracing::warn!(effect = %effect.id, error = %e, "the saved effect could not be restored");
-                if effect.id == canvas_daemon::migration::USER_POISON_ID {
-                    tracing::warn!(
-                        path = %canvas_daemon::paths::effects_dir().join(canvas_daemon::migration::USER_POISON_FILE).display(),
-                        "the user effect file is missing; install it to run this effect"
-                    );
-                }
-            }
-        }
-    }
+    // The active scene runs again, so a restart does not leave the lights black until something
+    // plays an effect. Its groups' effects are built here; a group whose effect is missing (a
+    // deleted HTML file) is dark and named in the log, and the others run. The device list that
+    // arrives next applies the scene to the real devices.
+    canvas_daemon::scenes::restore_active(&app).await;
 
     // The background tasks. Fakes mode gates off every task that touches a
     // real touchpoint (see `canvas_daemon::fakes`); the OpenRGB supervisor
@@ -384,12 +368,34 @@ async fn quit_sequence(app: &Arc<App>, fakes: bool) {
     // The service log has the moment it ended OpenRGB; this is the moment frames last went out (#81).
     app.last_frame.log("the daemon was told to stop");
 
-    // 1. `on_quit`: black, or the last frame left in place.
+    // 1. A chain setup holds a header raised: its earlier length goes back before anything is
+    //    written to the lights (#338). The same restore a cancel runs; a restore the device
+    //    refuses keeps the record, and the next start replays it.
+    // Only for an open setup: a quit with none must not spend the deadline on a scene apply.
+    let restore = async {
+        if app.identify.setup_session().is_some() {
+            canvas_daemon::api::chains::finish_setup(app).await.map(|_| ())
+        } else {
+            Ok(())
+        }
+    };
+    match tokio::time::timeout(SETUP_RESTORE_LIMIT, restore).await {
+        Ok(Ok(())) => {}
+        Ok(Err(e)) => tracing::warn!(
+            error = %e.message,
+            "the chain setup's restore failed at quit; the restore record stays for the next start"
+        ),
+        Err(_) => tracing::warn!(
+            "the chain setup's restore did not finish in time; the restore record stays for the next start"
+        ),
+    }
+
+    // 2. `on_quit`: black, or the last frame left in place.
     if tokio::time::timeout(ON_QUIT_LIMIT, write_on_quit(app)).await.is_err() {
         tracing::warn!("the on-quit write did not finish in time");
     }
 
-    // 2. Tell the service, if it is up. Fakes mode never opens the real pipe,
+    // 3. Tell the service, if it is up. Fakes mode never opens the real pipe,
     // not even to say goodbye.
     if canvas_daemon::fakes::real_pipe_enabled(fakes) {
         let notice = canvas_daemon::pipe_client::notify_quitting(app);
@@ -398,17 +404,17 @@ async fn quit_sequence(app: &Arc<App>, fakes: bool) {
         }
     }
 
-    // 3. Stop the render loop. Its thread is joined on a blocking thread, so a stuck
+    // 4. Stop the render loop. Its thread is joined on a blocking thread, so a stuck
     // join cannot hold the daemon.
     let engine = app.engine.clone();
     let stop = tokio::task::spawn_blocking(move || engine.shutdown());
     if tokio::time::timeout(ENGINE_STOP_LIMIT, stop).await.is_err() {
         tracing::warn!("the render loop did not stop in time");
     }
-    // The black frame of step 1 counts: this is the last frame the daemon sent before it ended (#81).
+    // The black frame of step 2 counts: this is the last frame the daemon sent before it ended (#81).
     app.last_frame.log("the daemon finished its quit sequence");
 
-    // 4. The OpenRGB server the daemon started.
+    // 5. The OpenRGB server the daemon started.
     kill_openrgb_server(app);
 }
 

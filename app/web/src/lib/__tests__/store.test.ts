@@ -9,10 +9,12 @@ const { api } = vi.hoisted(() => ({
     fans: vi.fn(),
     devices: vi.fn(),
     effects: vi.fn(),
-    layouts: vi.fn(),
     render: vi.fn(),
     settings: vi.fn(),
     displays: vi.fn(),
+    patterns: vi.fn(),
+    scenes: { list: vi.fn() },
+    lights: { list: vi.fn() },
   },
 }));
 
@@ -25,17 +27,41 @@ import {
   refreshDisplays,
   refreshEffects,
   refreshFans,
-  refreshLayouts,
+  refreshLights,
+  refreshPatterns,
+  refreshScenes,
   refreshSettings,
   refreshStatus,
   retryEffects,
+  retryScenes,
 } from "@/lib/store";
+import { ApiFailure } from "@/lib/errors";
 
 const STATUS = { version: "0.2.0", devices_connected: 3, devices_total: 4 };
 
+/** Two patterns, as `GET /patterns` answers them: the whole document, colours and all. */
+const PATTERNS = [
+  {
+    id: "pattern:Intake",
+    built_on: { led_count: 2, arrangement: "ring" },
+    frames: [{ colors: ["#ff0000", "#000000"], hold: 0 }],
+    motion: { type: "none" },
+  },
+  {
+    id: "pattern:Underglow",
+    built_on: { led_count: 2, arrangement: "strip" },
+    frames: [{ colors: ["#0000ff", "#00ff00"], hold: 0 }],
+    motion: { type: "none" },
+  },
+];
+
 describe("the store's answers", () => {
   beforeEach(() => {
-    for (const fn of Object.values(api)) fn.mockReset();
+    for (const fn of Object.values(api)) {
+      if (typeof fn === "function") fn.mockReset();
+    }
+    api.scenes.list.mockReset();
+    api.lights.list.mockReset();
     patchSnap({
       status: null,
       statusError: null,
@@ -46,8 +72,8 @@ describe("the store's answers", () => {
       devicesTotal: null,
       effects: null,
       effectsError: null,
-      layouts: null,
-      layoutsError: null,
+      patterns: null,
+      patternsError: null,
       settings: null,
       settingsError: null,
       displays: null,
@@ -94,6 +120,104 @@ describe("the store's answers", () => {
     await Promise.all([first, second]);
     expect(getSnap().pending).toEqual([]);
   });
+
+  it("fills the patterns snapshot and a lost answer keeps the old list", async () => {
+    api.patterns.mockResolvedValue({ patterns: PATTERNS });
+    await refreshPatterns();
+    expect(getSnap().patterns).toEqual(PATTERNS);
+    expect(getSnap().patternsError).toBeNull();
+
+    // A newer answer lands first, then the request before it fails: the list the newer answer
+    // brought stays, and the old request's failure is not shown.
+    let fail!: (e: unknown) => void;
+    api.patterns.mockImplementationOnce(
+      () =>
+        new Promise((_resolve, reject) => {
+          fail = reject;
+        }),
+    );
+    api.patterns.mockImplementationOnce(() => Promise.resolve({ patterns: [PATTERNS[0]] }));
+    const late = refreshPatterns();
+    await refreshPatterns();
+    expect(getSnap().patterns).toEqual([PATTERNS[0]]);
+    fail(new Error("the service is late and says no"));
+    await late;
+    expect(getSnap().patterns).toEqual([PATTERNS[0]]);
+    expect(getSnap().patternsError).toBeNull();
+
+    // A read that fails with nothing newer keeps the list and says why it is old.
+    api.patterns.mockRejectedValueOnce(new Error("the service is gone"));
+    await refreshPatterns();
+    expect(getSnap().patterns).toEqual([PATTERNS[0]]);
+    expect(getSnap().patternsError).toMatch(/gone/);
+  });
+
+  it("stops asking a daemon without the scene routes until its version changes", async () => {
+    // The first status read sets this daemon's version, so the test does not depend on an earlier
+    // test having set one.
+    api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    api.lights.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/lights"));
+
+    await refreshScenes();
+    await refreshLights();
+    await refreshStatus();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+    expect(api.lights.list).toHaveBeenCalledTimes(1);
+
+    // The poll asks again: a daemon that has no scene routes says the same.
+    await refreshScenes();
+    await refreshLights();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+    expect(api.lights.list).toHaveBeenCalledTimes(1);
+
+    // A Try again asks again: the user says so.
+    await retryScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+    expect(api.lights.list).toHaveBeenCalledTimes(2);
+
+    // A daemon that changed may have the routes.
+    api.status.mockResolvedValue({ ...STATUS, version: "0.14.0" });
+    await refreshStatus();
+    await refreshScenes();
+    await refreshLights();
+    expect(api.scenes.list).toHaveBeenCalledTimes(3);
+    expect(api.lights.list).toHaveBeenCalledTimes(3);
+  });
+
+  it("asks the scene routes again when the daemon comes back after a failed status read", async () => {
+    api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+
+    // The daemon is down for one read, then answers again at the same version: a rebuilt dev
+    // daemon keeps its version, and it may have the routes now.
+    api.status.mockRejectedValueOnce(new Error("connection refused"));
+    await refreshStatus();
+    await refreshStatus();
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+  });
+
+  it("asks the scene routes again when the daemon restarted without a failed read", async () => {
+    // A daemon restarted inside one poll gap answers every read, so no read fails, and a rebuilt
+    // dev daemon keeps its version: only its frame count starts again from zero. The version
+    // starts fresh here, so the test does not depend on an earlier one's gate.
+    api.status.mockResolvedValue({ ...STATUS, version: "0.14.1", frames_rendered: 1_000_000 });
+    await refreshStatus();
+    api.scenes.list.mockRejectedValue(new ApiFailure(404, "not_found", "no route GET /api/v1/scenes"));
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(1);
+
+    // The next read is answered by the daemon that replaced it: same version, frames from zero.
+    api.status.mockResolvedValue({ ...STATUS, version: "0.14.1", frames_rendered: 40 });
+    await refreshStatus();
+    await refreshScenes();
+    expect(api.scenes.list).toHaveBeenCalledTimes(2);
+  });
 });
 
 /**
@@ -112,10 +236,10 @@ const AREAS = [
     field: "effectsError",
   },
   {
-    name: "layouts",
-    call: () => refreshLayouts(),
-    answer: { layouts: [], active: "" },
-    field: "layoutsError",
+    name: "patterns",
+    call: () => refreshPatterns(),
+    answer: { patterns: [] },
+    field: "patternsError",
   },
   { name: "settings", call: () => refreshSettings(), answer: { fps: 30 }, field: "settingsError" },
   { name: "displays", call: () => refreshDisplays(), answer: [], field: "displaysError" },
@@ -123,13 +247,15 @@ const AREAS = [
 
 describe("the store's late failures", () => {
   beforeEach(() => {
-    for (const fn of Object.values(api)) fn.mockReset();
+    for (const fn of Object.values(api)) {
+      if (typeof fn === "function") fn.mockReset();
+    }
     patchSnap({
       statusError: null,
       fansError: null,
       devicesError: null,
       effectsError: null,
-      layoutsError: null,
+      patternsError: null,
       settingsError: null,
       displaysError: null,
     });

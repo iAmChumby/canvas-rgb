@@ -212,6 +212,18 @@ or acts as if a step worked without checking that it did.
   OpenRGB has found any device (`devices=0`), and the service moves on as if it had worked.
 - [#19](https://github.com/iAmChumby/canvas-rgb/issues/19): the daemon's exits leave no line, so
   the service's "crashed" is the only account and it is a guess.
+- [#419](https://github.com/iAmChumby/canvas-rgb/issues/419): a per-group save retried every group
+  a scene had dark without reading why it was dark, so a group the HTML limit left dark was rebuilt
+  and ran past the cap. Fixed: the retry reads the scene's own order
+  (`scenes::groups_over_the_html_limit`), so only a real build failure is tried again.
+- [#393](https://github.com/iAmChumby/canvas-rgb/issues/393): a keyboard the app drives itself
+  also came through OpenRGB as a second device the daemon never drives, and the scenes code made
+  a light for it without asking. Devices showed a nameless, not connected light. One question,
+  "does the daemon drive this device?", now gates every place a light is made
+  (`crates/canvas-daemon/src/scenes.rs`, `scene_migration.rs`, `composite.rs`), and the leftover
+  already stored is removed at start, after a snapshot, only when the owner never touched it.
+  The rule itself now lives in one shared place, `crates/canvas-adapters/src/drive.rs`
+  (`is_driven`), so the service's boot and black paint ask it too (#413).
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
@@ -299,7 +311,7 @@ second on the status poll, so the effect tears down and starts again before it c
   Regression test: `components/__tests__/Toast.test.tsx` (the editor's first unit test, run in CI).
 - **Class fix:** not yet (one bug). Sibling search found no second case: every other effect with a
   callback dependency only re-binds a listener, is guarded by a ref, or is a `useMemo` (`CommandPalette.tsx:96`,
-  `Popover.tsx:113`, `IdentifyWalker.tsx:144` re-bind listeners; `OnboardingGate.tsx:23`,
+  `Popover.tsx:113`, `IdentifyWalker.tsx:144` (removed in #338) re-bind listeners; `OnboardingGate.tsx:23`,
   `LayoutView.tsx:922`, `Onboarding.tsx:310` are ref-guarded one-time actions).
 
 - [#295](https://github.com/iAmChumby/canvas-rgb/issues/295): the fan header editor was keyed on the
@@ -347,6 +359,59 @@ line. Three mechanisms, and one bug the timing only exposed.
   awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
   engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
   fake bumps), never on a flag the code sets before the awaited work.
+- [#411](https://github.com/iAmChumby/canvas-rgb/issues/411): `the_timeout_restores_the_length_and_the_lights`
+  (`crates/canvas-daemon/tests/chains.rs`) waited for the header's length, then read the restore
+  record, the hold and the session at once. The daemon ends those after it restores the length, so
+  a busy runner read them in the gap. The same rule as #282: each state the assert reads is waited
+  for. Two more tests in that file made the same read (`a_failed_rollback_keeps_both_records`,
+  `start_up_rolls_back_a_leftover_intent`) and wait now. No guard: the mistake is two correct
+  lines in the wrong order, which `timing_class.rs` cannot tell from a read that is safe.
+- [#429](https://github.com/iAmChumby/canvas-rgb/issues/429):
+  `a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry` (`crates/canvas-daemon/tests/chains.rs`)
+  failed once in CI with `left: None` where the setup session should be. The wait was right; the product
+  was wrong. A refused resize is five seconds of the adapter's silence (`REPLY_TIMEOUT`,
+  `crates/canvas-adapters/src/openrgb.rs`) against the setup's six-second idle limit (`SETUP_TIMEOUT_MS`,
+  `crates/canvas-proto/src/scene.rs`), so a loaded runner pushed the commit past the limit and the
+  identify ticker ended the session under the save. Measured: the refused commit took 5.043 s of the
+  6 s; 30 of 30 passes alone and 16 of 16 with two copies at once, and with the limit set to 500 ms the
+  old code loses the session in every run. **Rule:** a session that is serving a request does not idle
+  out (`identify::SetupService`: every chain route that waits on the device holds one, and the idle
+  clock restarts when it ends); a test for that changes the limit, never the wait, so the verdict
+  stops depending on how fast the machine is.
+- [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
+  another starter while one is loading, and lands both"
+  (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
+  re-run of the same commit (PR #324, PR #386), with
+  `expected [ 'Warm white' ] to deeply equal [ 'Warm white', 'Sparkles', …(2) ]`. The wait was not the
+  fault; it was the product's draft mirror. The builder's async edits read `draftRef`, and the builder
+  assigned that mirror from a passive effect (`StackBuilder.tsx`), so a commit could land after an edit
+  had already written a newer draft. Under load the builder's own first commit (its empty draft) ran
+  late: a starter wrote its three layers, the mirror was put back to empty, and the queued starter
+  composed on an empty stack (`useStackEdits.ts` `addStack`) and landed alone, overwriting the first.
+  Measured in a loaded run of `src/views` (98 files in parallel): the test failed, log order `land
+  sunset 3` → `ref-sync 0` → `land warm 1`. The trigger is the loaded machine: the file run alone
+  failed once in 48 runs.
+- **Class fix:** done (#332) for this mirror. One object, `DraftMirror`
+  (`app/web/src/views/effects/draftMirror.ts`): `write()` is what an edit calls with the draft it
+  wrote and its version, `commit()` is what the builder's effect calls with the draft React committed
+  and its version, and either is ignored when its version is older than the mirror's, so the mirror
+  only moves forward. The version comes from `useStackHistory`, which numbers every queued change
+  (`versionOf` is the version on screen). Versions rather than arrival times, because both orders
+  happen: a commit of an older draft arrives after a write (#332), and a load or a save resets the
+  draft after a write (the reverse, which an identity-only rule broke: `StackBuilderStates.test.tsx`
+  failed 4 of 6 runs). `addOne` and `addStack` write through the mirror; every other hook still reads
+  `draftRef.current`. Test: `app/web/src/views/__tests__/DraftMirror.test.ts` (the late empty commit,
+  a reset newer than a write, the write's own commit, a write older than the mirror) and
+  `StackHistoryVersions.test.tsx`, which makes the late commit by hand on the real hook, with no
+  wait, and checks that undo, redo and a reset each get a newer version. The queue test then passed
+  60 times in two loaded runs of `src/views` (30 repetitions of it per run, 100 files in parallel).
+- **The rule this adds:** a mirror of React state that async code reads is written by the code that
+  writes the state, never assigned from every commit; a commit is followed only when it is at least as new as what
+  the mirror already holds. Siblings of the shape, found and not fixed: the same file's two sleeps that decide a
+  verdict (`StackBuilderStarters.test.tsx:111`, `:121`, 150 ms and 50 ms) and
+  `EffectDraft.test.tsx:204` (120 ms then a count of PUTs, which failed once in a loaded run of
+  `src/views` and passed on the next).
+
 - [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
   (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` failed with a
   line missing from the capture. The line was not always the same one: the "terminating the daemon" INFO
@@ -690,6 +755,70 @@ scroll, so the content was clipped and unreachable.
   that holds a 120 px panel and fails when a row does not report it. Settings has rows for the
   states that make a panel taller (`settings-mic`, `settings-listen`, `settings-update`,
   `settings-dev`, `settings-failed`).
+- A fourth mechanism, same cause: a box whose size comes from its content, and the content changes
+  with the state. **The rule: a control keeps one size when its content changes.** A panel that is
+  as wide as its content moves whenever that content changes, so the panel gets one width, and a
+  figure that changes gets a fixed slot.
+  [#367](https://github.com/iAmChumby/canvas-rgb/issues/367): the Scenes effect picker is a panel as
+  wide as its content, and the line under its list says what the lights show, so pointing at a row
+  moved the whole menu (313.45 px at rest to 373.52 px over "Screen Ambience", measured on
+  origin/main in headless Chromium: the static export served on loopback, the menu opened and each
+  row hovered in turn). Two things took the space: that line, whose words change with
+  the pointer, and the PLAYING tag, which is drawn only on the row the group plays and moves to the
+  row under the pointer while the preview runs - the row's third grid track was `auto`, so the tag
+  took the room it needed.
+  [#369](https://github.com/iAmChumby/canvas-rgb/issues/369): the colour picker. The hex code had no
+  width of its own, and the picker around it changed size while a colour was dragged: the quick
+  swatches are the other colours of the same effect, and the one that matched the colour in the
+  field was dropped, so the row of swatches lost an entry and the popover lost 34 px of height.
+  The size was one cause; the report - "the colour square looks like it shrinks and grows every
+  time the hex code changes" - was the reveal from #187. The swatch's box never moved (32 px; the
+  picker's preview 24 px, measured every frame of a two-second drag), but the mask animation ran
+  again for every value of the stream: the preview was keyed by the colour and replayed about
+  every 180 ms. A reveal belongs to a change that lands once; a stream shows the colour at once.
+- **Class fix, fourth mechanism:** done (#367, #369). The picker's PLAYING tag sits in a fixed grid
+  track (64 px) and the menu's width is set in the stylesheet
+  (`app/web/src/views/scenes/scenes.module.css`), so every row and the menu itself are one size in
+  every state. The hex code has a width of its own (7ch) with tabular digits, the swatch beside it
+  never gives up its size (`flex: 0 0 auto`), and the quick swatches keep their count - the one
+  that matches is marked, not dropped - so the picker keeps one size. One test over the editor's
+  stylesheets (`app/web/src/styles/__tests__/layoutShift.test.ts`) checks the widths the boxes are
+  given, and carries the class guard: no `:hover`, `:focus` or `:active` rule in any stylesheet of
+  the editor changes the size of a box (hover-only content must not take space), and every panel
+  whose content is live has one width. Siblings found by the search and fixed the same way: the
+  status details panel (the frame rate, the frame time and the device count are live), the audio
+  readings panel (the meter's cells, the figure in dB and the bands) and the fan bulk result panel
+  (the duty each header runs at). Left, with the reason: every other panel is as wide as its
+  content, which cannot change while the panel is open - the failed-files list, the fan profiles,
+  the New effect menu, Play on, the scene and group menus, the effect and mask choosers (already
+  `width: 320px`) and the "add to another group" menu. The layout itself is measured in headless
+  Chromium: the static export is served on loopback, the menu opened, every row hovered in turn,
+  and each box measured with `getBoundingClientRect()` before and after (the samples for #367 and
+  #369 sit beside the screenshots in `.build/screens`, in the main checkout, which is gitignored).
+- A fifth mechanism, same cause: a control's type comes from a different source than its
+  neighbours' type, so two controls of the same kind are drawn in two different faces.
+  [#373](https://github.com/iAmChumby/canvas-rgb/issues/373): the device keys on Peripherals were
+  a raw `<button>` with no font of its own, so the browser's stylesheet gave them its default face
+  (Arial 13.33 px) while the scene keys on Scenes, the same kind of control, were set in the app's
+  own face at the body size.
+- **Class fix, fourth mechanism:** the type of a tab is one shared class, `.tab-key`
+  (`app/web/src/styles/app.css`), and no page sets a tab's font for itself: the scene key's own
+  `font:` shorthand is gone (`app/web/src/views/scenes/scenes.module.css`), and the device key
+  takes the shared class (`app/web/src/views/PeripheralsView.tsx`). One rule keeps every control
+  in the app's face (`button { font-family: var(--fu) }`): a `<button>` does not inherit a font from
+  the page, so a control that says nothing about its type is drawn in the system font. The sibling
+  search found 29 such controls on the nine pages (the device key, the DPI chip, and the icon
+  buttons, switches and swatches); after the fix a headless pass over every page finds 0 (the
+  number fields stay in the app's mono face, which is the app's rule for figures).
+- **The check, fourth mechanism** (`app/web/src/views/__tests__/PeripheralTabsType.test.tsx`):
+  it renders both tab rows — the Peripherals device row and the Scenes strip — and asks *every*
+  button in each for `.tab-key`, so a new raw `<button>` tab fails it (proved by adding one to
+  each row, watching both cases fail, and taking it out again). The pinned "+" key in the Scenes
+  strip is the one button that is not a tab, and it is named as the exception. The rule that
+  `.tab-key` declares, and the `button` reset, are read from `app.css` instead of rendered:
+  jsdom has no stylesheet. The "0 controls in the system face" number above is *not* this test's
+  job — it comes from the headless scan over every page's controls, which is the check to re-run
+  after a control is added.
 
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 
@@ -823,3 +952,101 @@ retries can wait for one busy answer.
 - Left: the installed-app checks on #97 (Back/Forward and mouse back with unsaved code, the close/reload
   warning, CSS `round()` in WebView2), the phone code layer and screen readers need the installed app
   and are out of the fakes' reach. #97 carries no `cause:` label (not applied; left to the main agent).
+
+### `cause:hand-rolled-notice`: a message that comes and goes, drawn outside the notification lane
+
+The editor has one notification lane: `app/web/src/components/Notify.tsx` owns the policy (tone, life,
+hold while the pointer is on it) and sonner owns the look, the stacking, the motion and the swipe. A notice
+built anywhere else gets its own markup, its own timer and its own look, so the app says the same kind of
+thing three ways and Luke asks for one toast again (#168, #125, #12, #366). The notice itself may be a
+toast (it appears and goes), or a standing banner (it waits for a key or for its condition to end); the
+class is the handmade *clock*, not the words.
+
+- [#168](https://github.com/iAmChumby/canvas-rgb/issues/168): sonner arrived behind one wrapper, but the
+  "Updated to X.Y.Z" greeting stayed a `Banner` with its own hold, fade and removal timers
+  (`app/web/src/shell/GlobalBanners.tsx:129-197`), so it was not a toast at all.
+- [#125](https://github.com/iAmChumby/canvas-rgb/issues/125): that banner sat over the release notes it
+  linked to, and stayed until it was pressed. A `position: fixed` notice over `app.css:778-785` covers
+  whatever is under it; a toast in the lane does not, and it is not drawn on `/updates/` at all.
+- [#12](https://github.com/iAmChumby/canvas-rgb/issues/12): the first toast host restarted its own timer
+  on every status poll, so a toast never cleared. The lane's clock is module state, not an effect, so a
+  re-render cannot restart it (`app/web/src/components/Notify.tsx:118-147`).
+- [#366](https://github.com/iAmChumby/canvas-rgb/issues/366): the last two. The update toast said
+  "You have 0.16.0." under "Updated to 0.16.0", and the preset strip printed its own "Deleted X / Undo"
+  line beside the same toast on its own 8 s timer (`app/web/src/views/EffectsView.tsx:367-373`,
+  `app/web/src/views/PresetStrip.tsx:325-341`).
+- **Class fix:** done (#366). Every toast goes through `notify()` and has one anatomy: icon, title,
+  optional description, optional action, close. How long a message stays is `NOTE_MS` or `lifeMs`, never a
+  component's timer. `app/web/src/test/toastGuard.test.ts` reads every source file and fails on a second
+  `sonner` import (through `from`, `import()` or `require()`), a second toast body (`notify-*`), a
+  `<Banner>` outside the shell and the scene list, or a `setTimeout` that clears a message: a state set to
+  `null`, `false`, `undefined` or `""`, or a call named `clear*`, `dismiss*` or `hide*`, on a delay of two
+  seconds or more, a delay named by a `const` in the same file, or a delay the file does not define.
+  `Banner` is a standing notice
+  and no longer takes a leaving fade. Sibling search for the timer shape (`git grep -n "setTimeout" app/web/src`)
+  found no other message clock: the rest are debounces, animation flags, retries and the fixture's install
+  walk. Left: the fan service's "Fan control is unavailable" notice stays a banner because it reports a
+  running condition, not a moment (#168's decision); it is untouched.
+
+### `cause:wiring`: a control built but never connected to the frame
+
+An effect declares a property, the editor draws a control for it, and no code reads it: the value
+is stored and never reaches the picture. The control looks alive and the setting does nothing.
+Every effect reads its own props in `init`, so nothing notices a declared control that nothing
+uses.
+
+- [#383](https://github.com/iAmChumby/canvas-rgb/issues/383): Rain's Trail Length resized a
+  `trail` buffer in `init` and `update` never read it; every streak came from a fixed 0.88 fade
+  (`crates/canvas-effects/src/rain.rs`). The control now sets how long a drop's light lingers:
+  the per-frame fade is derived from it (`per_frame_fade`), and the default (14) on the 1/30 s
+  frame gives exactly the old 0.88 at every Speed, so a saved scene or preset keeps its picture
+  at 30 frames a second (checked against a frame fingerprint recorded from the old code,
+  `the_default_trail_length_keeps_the_old_frames`). The unused buffer is gone.
+- **Class fix:** done (#383). One test over every built-in effect
+  (`crates/canvas-effects/src/lib.rs`, `every_numeric_or_choice_control_changes_the_frame`)
+  renders each effect at the two ends of every numeric, angle and choice control with the same
+  seed, keeps one fingerprint per frame, and fails naming the effect and the control when the
+  frames are identical. The capture effects get the crate's own input, and the screen changes
+  colour and the spectrum falls partway through so Smoothing, Decay and Peak Hold have something
+  to act on. It drives 31 controls over the 12 effects and found no other dead control; on the
+  pre-#383 code it fails only on Rain's Trail Length. The exception list (`KNOWN_DEAD`) is empty,
+  and the test fails on an entry that names no control. A colour control has no two ends and no
+  built-in has a bool control, so neither is driven; a control added later is covered without
+  editing the test.
+
+### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
+
+A strip LED reads a part of the effect's picture, and one rule decided which part for every
+effect. A rule tuned for one picture (a thin moving line) reads black from another (a picture
+whose meaning is how high it reaches).
+
+- [#372](https://github.com/iAmChumby/canvas-rgb/issues/372): the full-height band averaged
+  Rain's thin streaks away, so Rain stood still on strips and fans. The fix read a small cell at
+  mid-height.
+- [#400](https://github.com/iAmChumby/canvas-rgb/issues/400): that cell read Fire and Audio
+  Spectrum dark on a strip, because their picture sits at the bottom of the canvas.
+- [#407](https://github.com/iAmChumby/canvas-rgb/issues/407): a stack answered the cell for
+  every one of its layers, so Fire or Audio Spectrum inside a stack still read dark on a strip.
+- **Class fix:** done (#400), guarded again (#407). The effect says how a strip reads it
+  (`StripRead` in `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names
+  every built-in with its read (`crates/canvas-effects/src/lib.rs`,
+  `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
+  decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
+  on a strip to a measured level. A stack answers the column when every layer that paints
+  answers it, and the cell otherwise (`crates/canvas-daemon/src/stack.rs`, `StackEffect::read`):
+  the picture is then drawn the way that read reads it, over the strip LEDs' columns or over the
+  area's own cells. The stack writes nothing into the group's canvas beyond its own layers, so
+  the picture the editor shows is the picture the lights read. The area mask is built for the
+  column as well, so a layer kept to a device or a zone is painted over the strip LEDs' whole
+  columns, and a light that is not a strip (a fan, a keyboard) keeps reading the cells it read
+  before. Tests in `crates/canvas-daemon/tests/stacks.rs` hold a stack's Fire and Audio Spectrum
+  on a strip to a measured level, hold Rain's motion over a flame to the bar of #372, hold a
+  fan and a keyboard to the colours they read before, and measure both orders of a mixed stack.
+- **The guard over the daemon's own effects** (`crates/canvas-daemon/src/strip_read_guard.rs`,
+  `every_effect_the_daemon_implements_answers_how_a_strip_reads_it`): every effect the daemon
+  implements is checked, and a scan over the daemon's own source fails with `file:line` when an
+  effect appears that the test does not cover. The stack follows the every-layer rule, the HTML
+  tile forwards the read of the effect it holds, and a pattern holds no effect. What the guard
+  does not cover: an effect in another crate that the daemon wraps without saying so, and the
+  blend of a stack whose layers answer differently (the stack answers the cell, and the top
+  layer's cell is what a strip shows).

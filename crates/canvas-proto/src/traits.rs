@@ -20,8 +20,9 @@ use crate::api::Power;
 use crate::color::Rgb8;
 use crate::device::{AdapterCapabilities, DeviceId, DeviceInfo};
 use crate::display::{DisplayInfo, DisplayValue};
-use crate::layout::{Layout, CANVAS_HEIGHT, CANVAS_WIDTH};
+use crate::layout::{CANVAS_HEIGHT, CANVAS_WIDTH};
 use crate::props::{Props, PropertySchema};
+use crate::scene::{GroupMode, Light, LightId};
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -101,6 +102,21 @@ pub trait InputSource: Send + Sync {
 
 // ---------------------------------------------------------------- effects
 
+/// How one LED of a strip (or of a ring) reads an effect's picture (#400).
+///
+/// A strip LED stands at mid-height of its part of the canvas. Most effects are read there, in a
+/// small square cell, so a thin moving line (Rain) passes through each LED and is seen. An effect
+/// whose meaning is how HIGH it reaches (a flame, a spectrum bar) is missed by a cell at
+/// mid-height: it asks for the whole column above and below the LED.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripRead {
+    /// The mean of a small square cell at the LED. The default.
+    #[default]
+    Cell,
+    /// The mean of the cell's width over the full height of the canvas.
+    Column,
+}
+
 pub trait Effect: Send {
     /// Declared once; the editor renders controls from it.
     fn schema(&self) -> PropertySchema;
@@ -108,6 +124,16 @@ pub trait Effect: Send {
     fn init(&mut self, props: &Props);
     /// Draws one frame. `dt` is seconds since the previous frame.
     fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs);
+    /// `Some` for a pattern (0.16.0): the engine reads its colours and never calls `update`.
+    fn as_pattern(&self) -> Option<&crate::pattern::Pattern> {
+        None
+    }
+    /// How a strip LED reads this effect (#400). Grids and single lights are not affected. The
+    /// engine asks once when the effect is set, not every frame, so the answer must not depend on
+    /// the props. A stack and an HTML effect keep the default.
+    fn strip_read(&self) -> StripRead {
+        StripRead::Cell
+    }
 }
 
 pub type EffectFactory = fn() -> Box<dyn Effect>;
@@ -123,6 +149,43 @@ pub trait FrameSink: Send + Sync {
 /// Receives the downscaled canvas for the editor preview (≤ 15 fps).
 pub trait PreviewSink: Send + Sync {
     fn submit(&self, width: u32, height: u32, rgb: Vec<u8>);
+}
+
+/// One group as the engine runs it (Scenes, 0.14.0): its lights in order, how they share the
+/// effect, its brightness and the effect itself. `effect: None` is dark (a group set to Off, or
+/// one whose effect could not be built).
+pub struct EngineGroup {
+    pub id: String,
+    pub members: Vec<LightId>,
+    pub mode: GroupMode,
+    /// 0..=100, multiplied with the global brightness.
+    pub brightness: u8,
+    pub effect: Option<Box<dyn Effect>>,
+    pub props: Props,
+}
+
+/// How a group of the running scene is doing. `failed` carries the text of a panic in its
+/// effect, or why its effect could not be built; the group is dark while it is set.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize, ts_rs::TS)]
+#[ts(export)]
+pub struct GroupState {
+    pub id: String,
+    pub failed: Option<String>,
+    /// How a pattern lands on each light of the group (0.16.0). Empty for a canvas effect.
+    #[serde(default)]
+    pub fits: Vec<crate::pattern::LightFit>,
+}
+
+/// Each light's colours for the editor's live LEDs, after the group's brightness and before
+/// the global stages (brightness, warmth, white balance).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct LightFrame {
+    pub lights: Vec<(LightId, Vec<Rgb8>)>,
+}
+
+/// Receives [`LightFrame`]s, at most 15 a second. Must not block.
+pub trait LightPreviewSink: Send + Sync {
+    fn submit(&self, frame: LightFrame);
 }
 
 #[derive(Debug, Clone)]
@@ -149,10 +212,6 @@ pub struct RenderStats {
 /// The render loop handle. One thread, fixed-step at `fps`. Parks with no sinks and no
 /// preview. `Paused` writes black to every sink once, then stops rendering.
 pub trait Engine: Send + Sync {
-    /// Recomputes per-LED sample regions. `devices` supplies zone topology and LED counts.
-    fn set_layout(&self, layout: Layout, devices: Vec<DeviceInfo>);
-    fn set_effect(&self, effect: Box<dyn Effect>, props: &Props);
-    fn set_props(&self, props: &Props);
     fn set_fps(&self, fps: u32);
     fn set_power(&self, power: Power);
     fn set_brightness(&self, brightness: u8);
@@ -172,6 +231,27 @@ pub trait Engine: Send + Sync {
     fn stats(&self) -> RenderStats;
     /// Stops the thread. Does not write anything; callers write black first if wanted.
     fn shutdown(&self);
+
+    // Scenes (0.14.0). After `set_scene` the loop runs one canvas per group.
+
+    /// Runs a scene: `lights` and `devices` give each group's members their LEDs. `fade`
+    /// blends the frames last sent into the new scene's over [`crate::scene::SCENE_FADE_MS`].
+    fn set_scene(&self, lights: Vec<Light>, devices: Vec<DeviceInfo>, groups: Vec<EngineGroup>, fade: bool);
+    /// Replaces one group's effect (`None` is dark) and clears its failure.
+    fn set_group_effect(&self, group: &str, effect: Option<Box<dyn Effect>>, props: &Props);
+    /// New values for one group's effect.
+    fn set_group_props(&self, group: &str, props: &Props);
+    /// One group's brightness, 0..=100.
+    fn set_group_brightness(&self, group: &str, brightness: u8);
+    fn set_light_preview(&self, sink: Option<Arc<dyn LightPreviewSink>>);
+    /// #378: sends the picture of group `group` (its own canvas times its brightness; black for
+    /// an Off or failed group) to `sink`, at most [`crate::consts::PREVIEW_MAX_FPS`] a second,
+    /// through a sink of its own so the effects editor's preview is not touched. `None` for
+    /// either stops it and copies nothing. Required, like [`Engine::set_light_preview`]: an
+    /// engine that forgot it would compile and show a blank stage.
+    fn set_group_preview(&self, group: Option<String>, sink: Option<Arc<dyn PreviewSink>>);
+    /// Every group of the running scene, in scene order. Empty outside scene mode.
+    fn group_states(&self) -> Vec<GroupState>;
 }
 
 // ---------------------------------------------------------------- adapters

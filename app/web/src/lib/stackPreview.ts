@@ -6,12 +6,10 @@
 // socket: it composites the layers here, with the compositor's own blend maths (D95.3.3), so the
 // builder shows the stack without a daemon.
 
-import { apiConfig, dropApiConfig } from "@/lib/api";
-import { isDemo } from "@/lib/host";
+import { apiConfig, dropApiConfig } from "@/lib/api";import { isDemo } from "@/lib/host";
 import { composeStack } from "@/lib/stackFrame";
-import { getSnap } from "@/lib/store";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { Frame } from "@/lib/preview";
-import type { Layout } from "@/proto/Layout";
 import type { Stack } from "@/proto/Stack";
 import { routes } from "@/proto/routes";
 import { CANVAS_H, CANVAS_W } from "@/views/effects/stackDraft";
@@ -24,14 +22,18 @@ const listeners = new Set<Listener>();
 const feedListeners = new Set<FeedListener>();
 let active = false;
 let socket: WebSocket | null = null;
+// A connect is waiting for the token: the socket is set only after that wait, so the wait
+// itself is claimed. Without the claim a second call in that window would open a second
+// socket and lose the first one.
+let connecting = false;
 let reconnect: ReturnType<typeof setTimeout> | null = null;
 let demoTimer: ReturnType<typeof setInterval> | null = null;
 let last: Frame | null = null;
 /** The feed's own last word, so a builder that subscribes late still sees it. */
 let problem: string | null = null;
-/** What the demo composites: the draft stack and the layout its device areas name. */
+/** What the demo composites: the draft stack and the group canvas its device areas name. */
 let stack: Stack | null = null;
-let layout: Layout | null = null;
+let canvas: GroupCanvas | null = null;
 let startedAt = 0;
 
 export function onStackFrame(listener: Listener): () => void {
@@ -62,9 +64,9 @@ function emit(frame: Frame): void {
 }
 
 /** The stack the demo composites. A real daemon already has it from the preview PUT. */
-export function setStackPreviewStack(next: Stack | null, nextLayout: Layout | null): void {
+export function setStackPreviewStack(next: Stack | null, nextCanvas: GroupCanvas | null): void {
   stack = next;
-  layout = nextLayout;
+  canvas = nextCanvas;
 }
 
 export function startStackPreview(): void {
@@ -77,7 +79,7 @@ export function startStackPreview(): void {
       emit({
         width: CANVAS_W,
         height: CANVAS_H,
-        rgb: composeStack(stack, layout, (performance.now() - startedAt) / 1000, CANVAS_W, CANVAS_H),
+        rgb: composeStack(stack, canvas, (performance.now() - startedAt) / 1000, CANVAS_W, CANVAS_H),
       });
     }, 1000 / 15);
     return;
@@ -105,17 +107,34 @@ export function stopStackPreview(): void {
 }
 
 async function connect(): Promise<void> {
-  if (!active || socket) return;
+  if (!active || socket || connecting) return;
+  // The claim is taken before the wait for the token and given back on every way out.
+  connecting = true;
   let url: string;
   try {
     const cfg = await apiConfig();
     const wsBase = cfg.base_url.replace(/^http/, "ws");
     url = `${wsBase}${routes.preview}?token=${encodeURIComponent(cfg.token)}&stack=1`;
   } catch {
+    connecting = false;
     scheduleReconnect();
     return;
   }
-  const ws = new WebSocket(url);
+  // The wait for the token may have outlived the feed: the socket is not opened then.
+  if (!active || socket) {
+    connecting = false;
+    return;
+  }
+  // The constructor throws on an address it cannot parse: the claim goes back and the retry
+  // runs, or the feed would never connect again.
+  let ws: WebSocket;
+  try {
+    ws = new WebSocket(url);
+  } catch {
+    connecting = false;
+    scheduleReconnect();
+    return;
+  }
   ws.binaryType = "arraybuffer";
   ws.onopen = () => setProblem(null);
   ws.onmessage = (event: MessageEvent) => {
@@ -140,6 +159,7 @@ async function connect(): Promise<void> {
     // A refused socket is retried; the builder says "preview only" either way.
   };
   socket = ws;
+  connecting = false;
 }
 
 function scheduleReconnect(delay = 1_200): void {
@@ -160,9 +180,5 @@ function parseFrame(buffer: ArrayBuffer): Frame | null {
   return { width, height, rgb: new Uint8Array(buffer, 4, expected) };
 }
 
-/** The demo layout a device or zone area names: the active layout in the snapshot. */
-export function activeDemoLayout(): Layout | null {
-  const snap = getSnap();
-  return snap.layouts?.find((entry) => entry.id === snap.activeLayout) ?? snap.layouts?.[0] ?? null;
-}
+
 

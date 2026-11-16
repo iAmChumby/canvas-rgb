@@ -12,6 +12,7 @@ const CONFIG_FILES: &[&str] = &[
     "zones.json",
     "effects.json",
     "stacks.json",
+    "patterns.json",
     "displays.json",
     "fans.last.toml",
 ];

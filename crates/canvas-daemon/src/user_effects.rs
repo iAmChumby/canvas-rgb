@@ -159,7 +159,10 @@ pub fn html_builder_seeded(seed: u32) -> Builder {
 /// An HTML effect rendering a library tile. It runs as the lights would, except that a failed
 /// frame ends the render: the tile path reads [`canvas_html::HtmlEffect::errors`] after every
 /// step and stops with a [`crate::thumbnail::TileFailure`] when one appears.
-struct TileHtml(canvas_html::HtmlEffect);
+///
+/// `pub(crate)`: the class guard ([`crate::strip_read_guard`]) reaches it, because a wrapper
+/// that holds another effect has to answer how a strip reads that effect (#407).
+pub(crate) struct TileHtml(pub(crate) canvas_html::HtmlEffect);
 
 impl TileHtml {
     fn fail_on_error(&self) {

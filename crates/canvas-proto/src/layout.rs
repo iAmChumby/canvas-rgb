@@ -1,4 +1,6 @@
 //! Layouts: zones placed in canvas space, plus per-layout sampling and render scale.
+//!
+//! Read only by the 0.14.0 migration (`scene_migration.rs` turns saved layouts into scenes).
 
 use crate::device::DeviceId;
 use crate::props::Props;

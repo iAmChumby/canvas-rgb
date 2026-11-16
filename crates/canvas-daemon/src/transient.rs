@@ -9,8 +9,7 @@
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
-use canvas_proto::Rgb8;
-
+use crate::identify::IdentifyGate;
 use crate::state::App;
 
 /// How long after the effect's own run the daemon waits for another activate or identify.
@@ -102,8 +101,8 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
             if inner.generation != generation || !inner.pending {
                 return;
             }
-            if app.identify.session_active() {
-                // An onboarding session holds the lights; check again after another grace.
+            if holds_lights(&app.identify) {
+                // A chain setup holds the lights; check again after another grace.
                 drop(inner);
                 spawn_timer(app.clone(), generation, GRACE);
                 return;
@@ -114,13 +113,22 @@ fn spawn_timer(app: Arc<App>, generation: u64, base: Duration) {
     });
 }
 
-/// Puts the layout's saved effect back on the lights (black when the layout has none).
+/// Whether the timer must wait instead of restoring: a chain setup holds the lights. A setup is
+/// transient, so the timer asks again after another grace.
+fn holds_lights(identify: &IdentifyGate) -> bool {
+    identify.holds_lights()
+}
+
+/// Puts the active scene back on the lights.
+///
+/// The scene order is not taken (see [`crate::scenes::apply_active_ungated`]): the draft gate is
+/// held across the check and the apply, and a scene write holds the scene order while it waits
+/// for that gate.
 ///
 /// A draft on the lights outranks the onboarding restore: the editor is holding them on purpose,
-/// and ending that draft puts the same saved effect back (or black when there is none), so this
-/// does nothing while a draft runs. The draft gate is held across the check and the apply, so a
-/// PUT that is already building is seen before the check and one that arrives during the apply
-/// waits for it.
+/// and ending that draft puts the same scene back, so this does nothing while a draft runs. The
+/// draft gate is held across the check and the apply, so a PUT that is already building is seen
+/// before the check and one that arrives during the apply waits for it.
 pub async fn restore(app: &Arc<App>) {
     let _gate = app.draft.gate().lock().await;
     restore_locked(app).await;
@@ -148,26 +156,34 @@ async fn restore_armed(app: &Arc<App>, generation: u64) {
     restore_locked(app).await;
 }
 
-/// [`restore`] with the draft gate already held: the draft check, the layout read and
-/// the apply, exactly as before. `restore` (tests and direct callers) takes the gate
-/// and comes here; `restore_armed` rechecks the generation under the gate and only then
-/// comes here.
+/// [`restore`] with the draft gate already held: the draft check and the apply, exactly as
+/// before. `restore` (tests and direct callers) takes the gate and comes here; `restore_armed`
+/// rechecks the generation under the gate and only then comes here.
 async fn restore_locked(app: &Arc<App>) {
     if app.draft.is_active() {
         tracing::info!("the onboarding restore is skipped: a draft holds the lights");
         return;
     }
-    let saved = app.active_layout().await.and_then(|l| l.effect);
-    let result = match saved {
-        Some(effect) => crate::apply_effect(app, &effect.id, &effect.props).await,
-        None => {
-            let mut props = canvas_proto::Props::new();
-            props.insert("color".to_string(), canvas_proto::PropValue::Color(Rgb8::BLACK));
-            crate::apply_effect(app, "solid", &props).await
-        }
-    };
-    match result {
-        Ok(()) => tracing::info!("the onboarding effect ended; the saved effect is back"),
-        Err(e) => tracing::warn!(error = %e, "could not restore the saved effect after onboarding"),
+    crate::scenes::apply_active_ungated(app, false).await;
+    tracing::info!("the onboarding effect ended; the active scene is back");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use canvas_proto::DeviceId;
+    use std::time::Instant;
+
+    /// The timer takes this checkpoint after every wait, before it restores: a chain setup in
+    /// progress is the owner still choosing, so the restore waits for it (#338).
+    #[test]
+    fn a_restore_waits_while_a_setup_holds_the_lights() {
+        let gate = crate::identify::IdentifyGate::default();
+        let now = Instant::now();
+        assert!(!holds_lights(&gate), "nothing holds the lights: the restore is due");
+        assert!(gate.start_setup(DeviceId("openrgb:board".into()), 0, "s1".into(), now).is_some());
+        assert!(holds_lights(&gate), "the setup is open: the restore waits");
+        assert!(gate.end_setup("s1"));
+        assert!(!holds_lights(&gate), "the setup ended: the restore is due again");
     }
 }

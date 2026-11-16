@@ -3,7 +3,7 @@
 // The builder's right column (#257 phase 4): the picked layer's inspector and the stack's presets,
 // or the phone's Tune sheet around them. Moved out of StackBuilder.tsx unchanged.
 
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { RefObject } from "react";
 import { CaretLeft } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { endRun, type History } from "@/lib/draftHistory";
@@ -15,7 +15,7 @@ import type { useStackEdits } from "@/views/effects/useStackEdits";
 import type { useStackLoad } from "@/views/effects/useStackLoad";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { EffectSummary } from "@/proto/EffectSummary";
-import type { Layout } from "@/proto/Layout";
+import type { GroupCanvas } from "@/lib/groupCanvas";
 import type { Stack } from "@/proto/Stack";
 import type { StackLayer } from "@/proto/StackLayer";
 
@@ -29,7 +29,7 @@ export function BuilderSide({
   schemas,
   effects,
   statuses,
-  layout,
+  canvas,
   devices,
   maskProblem,
   edits,
@@ -52,14 +52,14 @@ export function BuilderSide({
   schemas: ReturnType<typeof useStackLoad>["schemas"];
   effects: EffectSummary[] | null;
   statuses: ReturnType<typeof useStackLoad>["statuses"];
-  layout: Layout | null;
+  canvas: GroupCanvas | null;
   devices: DeviceInfo[] | null;
   maskProblem: string | null;
   edits: ReturnType<typeof useStackEdits>;
   mask: ReturnType<typeof useMaskDrop>;
   presets: ReturnType<typeof usePresets>;
   load: ReturnType<typeof useStackLoad>;
-  setEdit: Dispatch<SetStateAction<History<Stack>>>;
+  setEdit: (update: (history: History<Stack>) => History<Stack>) => number;
   setSheetOpen: (open: boolean) => void;
   /** Wraps the Choose effect key: the popover hangs under it and Escape hands focus back to it. */
   chooseRef: RefObject<HTMLSpanElement | null>;
@@ -93,7 +93,7 @@ export function BuilderSide({
           schemas={schemas}
           effects={effects}
           statuses={statuses}
-          layout={layout}
+          canvas={canvas}
           devices={devices}
           maskProblem={maskProblem}
           layerProblem={edits.layerProblem}

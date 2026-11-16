@@ -5,11 +5,11 @@
 //! `App::adapter`, so the native devices join the device list and get frames without any
 //! caller knowing which adapter serves them. A device is routed by its id prefix.
 
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use async_trait::async_trait;
 use canvas_adapters::openrgb::OpenRgbAdapter;
-use canvas_adapters::royuan::RoyuanAdapter;
+use canvas_adapters::royuan::{RetryPolicy, RoyuanAdapter};
 use canvas_proto::device::AdapterCapabilities;
 use canvas_proto::traits::{AdapterError, DeviceAdapter};
 use canvas_proto::{DeviceId, DeviceInfo, Rgb8};
@@ -17,23 +17,25 @@ use canvas_proto::{DeviceId, DeviceInfo, Rgb8};
 /// The id prefix of the ROYUAN MonsGeek keyboard's native adapter.
 const ROYUAN_PREFIX: &str = "royuan:";
 
-/// How long a missing or failed keyboard waits before the next open attempt, so an absent
-/// device is not re-enumerated on every frame.
-const RETRY: Duration = Duration::from_secs(5);
-
 pub struct CompositeAdapter {
     openrgb: OpenRgbAdapter,
     royuan: RoyuanAdapter,
     /// Whether the keyboard may be enumerated/opened over HID. False in fakes
     /// mode (#199): the keyboard adapter is never touched at all.
     keyboard_enabled: bool,
-    /// When the keyboard was last opened (or tried).
-    royuan_attempt: Option<Instant>,
+    /// When the keyboard's wait between open attempts allows the next one, and how the wait
+    /// grows when it keeps dropping (#312 review pass 3, S1c).
+    royuan_retry: RetryPolicy,
+    /// When the keyboard's current connection opened, while it is connected.
+    royuan_up_since: Option<Instant>,
 }
 
 impl CompositeAdapter {
+    /// The product's adapter: the OpenRGB controllers and the keyboard, whose still bookkeeping
+    /// lives in the daemon's user directory so a restart cannot reset its counters (#312).
     pub fn new(openrgb: OpenRgbAdapter) -> Self {
-        Self::with_keyboard(openrgb, RoyuanAdapter::new())
+        let store = canvas_adapters::royuan::FileStillStore::new(crate::paths::royuan_stills_file());
+        Self::with_keyboard(openrgb, RoyuanAdapter::with_file_store(Box::new(store)))
     }
 
     /// OpenRGB only: the keyboard adapter is held but never enumerated,
@@ -43,7 +45,8 @@ impl CompositeAdapter {
             openrgb,
             royuan: RoyuanAdapter::new(),
             keyboard_enabled: false,
-            royuan_attempt: None,
+            royuan_retry: RetryPolicy::new(),
+            royuan_up_since: None,
         }
     }
 
@@ -57,7 +60,8 @@ impl CompositeAdapter {
             openrgb,
             royuan: keyboard,
             keyboard_enabled: true,
-            royuan_attempt: None,
+            royuan_retry: RetryPolicy::new(),
+            royuan_up_since: None,
         }
     }
 
@@ -72,22 +76,42 @@ impl CompositeAdapter {
     }
 
     /// Opens the keyboard if it is closed and the retry window has passed.
+    ///
+    /// A keyboard that drops again within 30 s of connecting waits twice as long each time, up
+    /// to five minutes, and a keyboard that stayed up five minutes starts again from five
+    /// seconds (#312 review pass 3, S1c): a USB endpoint that re-enumerates every few seconds
+    /// must not send a mode report on every cycle.
     async fn ensure_royuan(&mut self) -> Result<(), AdapterError> {
         if !self.keyboard_enabled {
             return Err(AdapterError::NotConnected);
         }
+        let now = Instant::now();
         if self.royuan.is_connected() {
+            self.royuan_up_since.get_or_insert(now);
             return Ok(());
         }
-        let now = Instant::now();
-        if self
-            .royuan_attempt
-            .is_some_and(|at| now.saturating_duration_since(at) < RETRY)
-        {
+        // Closed. If it was open a moment ago, that connection dropped: charge it once.
+        if let Some(opened) = self.royuan_up_since.take() {
+            self.royuan_retry.dropped(now, opened);
+            tracing::info!(
+                wait_ms = self.royuan_retry.delay().as_millis() as u64,
+                up_ms = now.saturating_duration_since(opened).as_millis() as u64,
+                "the ROYUAN keyboard dropped; the next open waits longer"
+            );
+        }
+        if !self.royuan_retry.may_open(now) {
             return Err(AdapterError::NotConnected);
         }
-        self.royuan_attempt = Some(now);
-        self.royuan.connect().await
+        match self.royuan.connect().await {
+            Ok(()) => {
+                self.royuan_up_since = Some(now);
+                Ok(())
+            }
+            Err(e) => {
+                self.royuan_retry.failed(now);
+                Err(e)
+            }
+        }
     }
 }
 

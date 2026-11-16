@@ -154,7 +154,7 @@ export function HoldKey({
       onPointerLeave={stop}
       onPointerCancel={stop}
       onKeyDown={(e) => {
-        // Enter and Space step once; the arrow keys are the walker's own.
+        // Enter and Space step once.
         if (e.key === "Enter" || e.key === " ") {
           e.preventDefault();
           stepRef.current();

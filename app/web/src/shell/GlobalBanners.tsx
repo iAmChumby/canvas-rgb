@@ -2,7 +2,7 @@
 
 import { usePathname, useRouter } from "next/navigation";
 import { useState } from "react";
-import { ArrowCircleUp, FolderOpen, WarningCircle, Lightning, SquaresFour, Warning, WarningOctagon } from "@phosphor-icons/react";
+import { ArrowCircleUp, FolderOpen, WarningCircle, FilmSlate, Lightning, Warning, WarningOctagon } from "@phosphor-icons/react";
 import { Banner } from "@/components/Banner";
 import { Button, ButtonLink } from "@/components/Button";
 import { api } from "@/lib/endpoints";
@@ -14,32 +14,28 @@ import { fmtSeconds } from "@/lib/format";
 import { requestNavigation } from "@/lib/navigationGuard";
 import { patchSnap, useSnap } from "@/lib/store";
 import { UpdatedToast } from "@/shell/UpdatedToast";
+import { requestChainSetup } from "@/views/chain/request";
 
 /** The service banner appears after this many ms without the fan service (G4). */
 const SERVICE_BANNER_MS = 10_000;
 
 /**
- * The standing notices: the SignalRGB conflict, no layout yet, and the first-run "size your ARGB
- * headers" panel (G7). They take their own space in the page, above it. The page is not drawn
+ * The standing notices: the SignalRGB conflict, no scene yet, and the "set up your headers" panel
+ * (G7). They take their own space in the page, above it. The page is not drawn
  * until the daemon has answered once (see Shell), so these are part of the first frame of the page
  * and nothing is pushed down after it has been painted.
  */
 export function StandingNotices() {
   const pathname = usePathname();
+  const router = useRouter();
   const status = useSnap((s) => s.status);
-  const devices = useSnap((s) => s.devices);
   const [err, setErr] = useState<string | null>(null);
 
   const conflict = status?.conflicts.find((c) => c.kind === "signal_rgb");
-  // Nothing can run until the desk canvas has a zone in it. The Layout page is where the layout is
-  // made: its own frame says it, so the banner would say it twice and push the page down.
-  const onLayout = pathname === "/";
-  const noLayout = status !== null && !status.active_layout && !onLayout;
-
-  const firstResizable = devices?.find((d) => d.zones.some((z) => z.resizable));
-  const walkHref = firstResizable
-    ? `/devices/?walk=${encodeURIComponent(firstResizable.id)}`
-    : "/devices/";
+  // Nothing can run until a scene is set. The Scenes page is where scenes are: its own frame says
+  // it, so the banner would say it twice and push the page down.
+  const onScenes = pathname === "/";
+  const noScene = status !== null && !status.active_scene && !onScenes;
 
   const dismissPanel = async () => {
     setErr(null);
@@ -51,7 +47,20 @@ export function StandingNotices() {
     }
   };
 
-  if (!conflict && !noLayout && !status?.show_zone_panel) return null;
+  /**
+   * The panel's "Set up": the chain takeover on Scenes is the flow. The request opens it even
+   * after "Later", and it opens on Scenes whether this page is Scenes already or not.
+   */
+  const openSetup = () => {
+    // The request is made only when the page change happens: a change the owner cancels
+    // (Keep editing) must not leave a request behind for the next visit to Scenes.
+    requestNavigation(() => {
+      requestChainSetup();
+      router.push("/");
+    });
+  };
+
+  if (!conflict && !noScene && !status?.show_zone_panel) return null;
 
   return (
     <div className="banners-flow">
@@ -68,35 +77,35 @@ export function StandingNotices() {
           .
         </Banner>
       )}
-      {noLayout && (
+      {noScene && (
         <Banner
           tone="work"
-          icon={<SquaresFour size={20} weight="fill" />}
-          title="There is no layout yet"
+          icon={<FilmSlate size={20} weight="fill" />}
+          title="There is no scene yet"
           actions={
             <ButtonLink href="/" variant="primary" size="sm">
-              Open the Layout
+              Open Scenes
             </ButtonLink>
           }
         >
-          Nothing can run until the desk canvas has a zone in it.
+          Nothing can run until a scene is set.
         </Banner>
       )}
       {status?.show_zone_panel && (
         <Banner
           tone="work"
           icon={<Lightning size={20} weight="fill" />}
-          title="Size your ARGB headers"
+          title="Set up your ARGB headers"
           onDismiss={dismissPanel}
           dismissLabel="Dismiss this panel"
           actions={
-            <ButtonLink href={walkHref} variant="primary" size="sm">
-              Open the identify walker
-            </ButtonLink>
+            <Button variant="primary" size="sm" onClick={openSetup}>
+              Set up
+            </Button>
           }
         >
-          Walk one lit LED along each addressable header and mark where it ends, so effects fill the strip you
-          actually have. The MSI JARGB headers are set this way.
+          Tell the app what is plugged into each ARGB header, so effects fill what you actually have. A
+          header with nothing on it can be marked empty and stops asking.
           {err && <span className="error-line"> {err}</span>}
         </Banner>
       )}

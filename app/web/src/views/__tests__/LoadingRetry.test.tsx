@@ -1,14 +1,11 @@
 import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { REQUEST_TIMEOUT_MS } from "@/lib/api";
-import { INITIAL_SETTINGS, LAYOUT_DESK } from "@/lib/fixtures";
 import { patchSnap } from "@/lib/store";
 import { CMD_GET_API_CONFIG } from "@/proto/tauri";
 import { EffectsView } from "@/views/EffectsView";
 import { FansView } from "@/views/FansView";
-import { LayoutView } from "@/views/LayoutView";
 import { SettingsView } from "@/views/SettingsView";
-import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
 
 // The loads that do not end: a retry whose request never answers, and a refresh that fails
 // after the content is on screen.
@@ -161,24 +158,4 @@ describe("a refresh that fails after the content is on screen", () => {
     expect(screen.getByLabelText("Frame rate")).toBeTruthy();
   });
 
-  it("keeps the desk and says the layout may be old", async () => {
-    patchSnap({
-      layouts: [LAYOUT_DESK],
-      activeLayout: LAYOUT_DESK.id,
-      layoutsError: "could not read the layouts: the request came back with an error",
-      devices: [],
-      effects: [],
-      settings: INITIAL_SETTINGS,
-    });
-    render(
-      <StripSlotsProvider>
-        {/* The page's name lives in the status strip, so a page on its own needs a strip. */}
-        <StripSlot kind="title" />
-        <LayoutView />
-      </StripSlotsProvider>,
-    );
-    expect(screen.getByText("The layout may be out of date.")).toBeTruthy();
-    // The desk is still there, under the one name the page has in every state.
-    expect(screen.getByRole("heading", { level: 1, name: "Layout" })).toBeTruthy();
-  });
 });

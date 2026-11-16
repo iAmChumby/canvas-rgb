@@ -6,8 +6,11 @@
 
 use crate::device::DeviceInfo;
 use crate::fans::{FanMode, FanProfile, FansStatus};
-use crate::layout::{Layout, RenderScale, SamplingMode};
 use crate::props::{InputNeeds, Preset, Props, PropertySchema};
+use crate::scene::{
+    Arrangement, ChainPartKind, GroupMode, Light, LightId, Plays, Scene, GROUP_BRIGHTNESS_MAX,
+};
+use crate::traits::GroupState;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
 
@@ -15,7 +18,6 @@ pub mod routes {
     pub const PREFIX: &str = "/api/v1";
     pub const STATUS: &str = "/api/v1/status";
     pub const OUTPUT: &str = "/api/v1/output";
-    pub const RENDER: &str = "/api/v1/render";
     pub const DEVICES: &str = "/api/v1/devices";
     /// `PATCH` with [`super::PatchZone`].
     pub const DEVICE_ZONE: &str = "/api/v1/devices/{id}/zones/{zone}";
@@ -30,7 +32,6 @@ pub mod routes {
     pub const EFFECTS: &str = "/api/v1/effects";
     pub const EFFECT: &str = "/api/v1/effects/{id}";
     pub const EFFECT_ACTIVATE: &str = "/api/v1/effects/{id}/activate";
-    pub const EFFECT_ACTIVE_PROPS: &str = "/api/v1/effects/active/props";
     /// `GET`: a short looping preview of the effect at its default props, rendered headless by
     /// the daemon (no devices touched). Binary: `u16 LE width, u16 LE height, u16 LE frames`, then
     /// frames x width x height x 3 RGB bytes. 64x40, 24 frames at 12 fps. Cached per effect id
@@ -73,7 +74,7 @@ pub mod routes {
     /// stops it. The editor PUTs every [`crate::consts::DRAFT_HEARTBEAT`] while the draft runs;
     /// the slot ends after [`crate::consts::DRAFT_LEASE`] with no PUT. Nothing about a draft is
     /// saved: the previous effect comes back on Stop, on expiry, or when the daemon restarts.
-    /// An `activate` or a layout switch ends the draft without restoring anything, because the
+    /// An `activate` or a scene switch ends the draft without restoring anything, because the
     /// owner chose something else. A bad PUT (one that does not parse) leaves a running draft
     /// alone. Same body cap as [`EFFECTS_IMPORT`].
     pub const EFFECT_DRAFT: &str = "/api/v1/effects/draft";
@@ -86,15 +87,16 @@ pub mod routes {
     /// removes it and what points at it; 409 `in_use` while the stack runs, unless
     /// `?force=true`.
     pub const STACK: &str = "/api/v1/stacks/{id}";
+    /// `GET` [`super::PatternsResponse`].
+    pub const PATTERNS: &str = "/api/v1/patterns";
+    /// `GET` a [`crate::pattern::Pattern`]; `PUT` the whole document (creates or replaces);
+    /// `DELETE` with [`super::DeletePatternQuery`], answering [`super::DeletePatternResponse`].
+    pub const PATTERN: &str = "/api/v1/patterns/{id}";
     /// `PUT` with [`super::StackPreviewRequest`]: builds or updates the stack the preview
     /// engine runs and answers [`super::StackPreviewResponse`]. `DELETE` drops the preview and
     /// clears the sequence watermark. The preview engine has no device sink, so nothing here
     /// reaches a light. Same body cap as [`EFFECTS_IMPORT`].
     pub const STACK_PREVIEW: &str = "/api/v1/stacks/preview";
-    pub const LAYOUTS: &str = "/api/v1/layouts";
-    pub const LAYOUT: &str = "/api/v1/layouts/{id}";
-    /// `PUT` with [`super::SetActiveLayout`].
-    pub const LAYOUT_ACTIVE: &str = "/api/v1/layouts/active";
     pub const FANS: &str = "/api/v1/fans";
     pub const FAN_HEADER: &str = "/api/v1/fans/headers/{h}";
     pub const FAN_PROFILE: &str = "/api/v1/fans/profile";
@@ -145,10 +147,6 @@ pub mod routes {
     /// `POST`, no body: the owner reached the end of the onboarding. Sets
     /// `Status.onboarding_complete`, which stays true.
     pub const ONBOARDING_COMPLETE: &str = "/api/v1/onboarding/complete";
-    /// `POST` with [`super::OnboardingSession`]: the onboarding holds the lights. While a session
-    /// is active every LED is black except what identify lights. The page resends `active: true`
-    /// every ~2 s; the daemon ends the session after 5 s without one, or on `active: false`.
-    pub const ONBOARDING_SESSION: &str = "/api/v1/onboarding/session";
     pub const CONFIG_EXPORT: &str = "/api/v1/config/export";
     pub const CONFIG_IMPORT: &str = "/api/v1/config/import";
     /// `POST`, no body: the daemon applies `on_quit` (G3: black by default), tells the
@@ -166,6 +164,81 @@ pub mod routes {
     /// at most [`crate::consts::PREVIEW_MAX_FPS`]. Without a query it streams the running
     /// effect; `?stack=1` streams the preview engine ([`STACK_PREVIEW`]) instead.
     pub const PREVIEW: &str = "/api/v1/preview";
+
+    // Scenes (0.14.0).
+    /// `GET` [`super::ScenesResponse`]; `POST` [`super::SceneCreate`] makes a scene and answers it
+    /// (with `dry_run`, see [`super::SceneCreate`]); `PUT` [`super::ScenesWrite`] writes several scenes and/or the scene order in ONE save, all or
+    /// nothing: `409 conflict` when any `expected_rev` or the `expected_order` is stale (nothing
+    /// is written), `422 validation` for a rule broken, an unknown or repeated id, or an order
+    /// that is not a permutation of every scene id; answers [`super::ScenesResponse`]. The
+    /// handler is the daemon's (#368, #371); the collection path is reused so no scene id is
+    /// shadowed by a static segment.
+    pub const SCENES: &str = "/api/v1/scenes";
+    /// `PUT` [`super::ScenePut`] replaces a scene whole: `409 conflict` with the current scene
+    /// when `expected_rev` is stale, `422 validation` when a scene rule is broken (the HTML-group
+    /// limit is the daemon's own check, with its own sentence). With `dry_run` it runs every
+    /// check, saves nothing and answers a [`super::SceneDryRun`]. `DELETE` refuses the last
+    /// scene with `409`.
+    pub const SCENE: &str = "/api/v1/scenes/{id}";
+    /// `PUT` [`super::SceneActivePut`]: sets a scene (with a fade).
+    pub const SCENE_ACTIVE: &str = "/api/v1/scenes/active";
+    /// `PATCH` with a `Props` body: new values for one group's effect, no rebuild. Saved, and the
+    /// scene's `rev` goes up by one; answers the whole [`crate::scene::Scene`] with its new `rev`.
+    pub const GROUP_PROPS: &str = "/api/v1/scenes/{id}/groups/{group}/props";
+    /// `PUT` [`super::GroupBrightnessPut`]. As [`GROUP_PROPS`]: saved, `rev` + 1, answers the scene.
+    pub const GROUP_BRIGHTNESS: &str = "/api/v1/scenes/{id}/groups/{group}/brightness";
+    /// `POST` [`super::GroupMove`]: moves or copies one group of scene `{id}` to another scene in
+    /// ONE save (both scenes land or neither), answers a [`super::GroupMoved`]. `404` for an
+    /// unknown scene or group, `409 conflict` (with `which`: `"from"` or `"to"`, and that scene)
+    /// when a rev is stale, `422 validation` for the same scene or a broken scene rule. With
+    /// `dry_run` every check runs, nothing is saved and `saved` is `false` (#368).
+    pub const GROUP_MOVE: &str = "/api/v1/scenes/{id}/groups/{group}/move";
+    /// `GET` [`super::LightsResponse`].
+    pub const LIGHTS: &str = "/api/v1/lights";
+    /// `PATCH` [`super::LightPatch`].
+    pub const LIGHT: &str = "/api/v1/lights/{id}";
+    /// `POST` [`super::FlashRequest`]: the named lights white, every other LED black, under the
+    /// identify watchdog; `stop: true` ends it.
+    pub const LIGHTS_FLASH: &str = "/api/v1/lights/flash";
+    /// WebSocket. The first message is JSON mapping a `u16` index to a light id (re-sent when
+    /// the scene or the lights change); then binary frames: per light a `u16 LE` index, a
+    /// `u16 LE` LED count, then that many RGB triples. At most 15 a second.
+    pub const PREVIEW_LIGHTS: &str = "/api/v1/preview/lights";
+    /// WebSocket (#378). The picture ONE group draws, as it is handed to the LEDs (the group's
+    /// own 80x50 canvas times the group's brightness; black for an Off or failed group; no frame
+    /// for a pattern group). Query: `token`, and [`crate::consts::GROUP_PREVIEW_QUERY`] (the
+    /// group id). Binary messages in the [`PREVIEW`] format: `u16 LE width, u16 LE height,
+    /// width*height*3 RGB bytes`, at most [`crate::consts::PREVIEW_MAX_FPS`]. Its own sink: the
+    /// effects editor's [`PREVIEW`] socket is not touched. The newest group socket wins; the
+    /// older one is closed with `1013`. The handler is the daemon's.
+    pub const PREVIEW_GROUP: &str = "/api/v1/preview/group";
+    /// `PATCH` with a `Props` body: an effect's starting values (`EffectsFile.saved`). A group
+    /// already playing the effect keeps its own.
+    pub const EFFECT_DEFAULTS: &str = "/api/v1/effects/{id}/defaults";
+    /// `GET` [`super::ChainsResponse`]: every resizable header and what is set up on it.
+    pub const CHAINS: &str = "/api/v1/chains";
+    /// `POST` starts a setup session on one header (answers [`super::SetupStarted`]); `DELETE`
+    /// with a [`super::SetupEmpty`] body cancels it and puts the length back. `{device}` is the
+    /// device id, `{zone}` the zone index.
+    pub const CHAIN_SETUP: &str = "/api/v1/chains/{device}/{zone}/setup";
+    /// `POST` [`super::SetupLight`]: the coloured runs to show. Also the session's heartbeat.
+    pub const CHAIN_SETUP_LIGHT: &str = "/api/v1/chains/{device}/{zone}/setup/light";
+    /// `POST` [`super::SetupCommit`]: resize to the parts and save them, all or nothing.
+    pub const CHAIN_SETUP_COMMIT: &str = "/api/v1/chains/{device}/{zone}/setup/commit";
+    /// `POST` [`super::SetupEmpty`]: nothing is plugged into this header.
+    pub const CHAIN_SETUP_EMPTY: &str = "/api/v1/chains/{device}/{zone}/setup/empty";
+}
+
+#[cfg(test)]
+mod preview_group_tests {
+    use super::*;
+
+    #[test]
+    fn the_group_preview_route_and_its_query_key_are_named() {
+        assert_eq!(routes::PREVIEW_GROUP, "/api/v1/preview/group");
+        assert_eq!(crate::consts::GROUP_PREVIEW_QUERY, "group");
+        assert!(routes::PREVIEW_GROUP.starts_with(routes::PREVIEW.trim_end_matches("/preview")));
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -253,8 +326,13 @@ pub struct Status {
     #[serde(default)]
     pub devices_total: u32,
     pub preview_subscribers: u32,
-    pub active_layout: Option<String>,
-    pub active_effect: Option<String>,
+    /// The active scene (0.14.0). A daemon from before scenes sends none.
+    #[serde(default)]
+    #[ts(optional = nullable)]
+    pub active_scene: Option<SceneRef>,
+    /// The effect ids the active scene's groups play, in group order, without repeats.
+    #[serde(default)]
+    pub active_effects: Vec<String>,
     pub openrgb: LinkState,
     pub service: LinkState,
     /// Milliseconds the service pipe has been down, if it is (G4 banner after 10 s).
@@ -294,25 +372,6 @@ pub struct PatchOutput {
     pub warmth: Option<u16>,
 }
 
-/// `GET /render`: fps is global; scale and sampling are the active layout's.
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct RenderState {
-    /// 10..=60
-    pub fps: u32,
-    pub scale: RenderScale,
-    pub sampling: SamplingMode,
-}
-
-/// `PATCH /render`: fps changes live; scale and sampling apply to the active layout.
-#[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct PatchRender {
-    pub fps: Option<u32>,
-    pub scale: Option<RenderScale>,
-    pub sampling: Option<SamplingMode>,
-}
-
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct DevicesResponse {
@@ -324,12 +383,6 @@ pub struct DevicesResponse {
 #[ts(export)]
 pub struct WhiteBalances {
     pub devices: std::collections::BTreeMap<crate::device::DeviceId, crate::color::WhiteBalance>,
-}
-
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct OnboardingSession {
-    pub active: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -381,6 +434,50 @@ pub struct EffectSummary {
     pub description: String,
     pub needs: InputNeeds,
     pub favorite: bool,
+    /// A canvas effect or a pattern (0.16.0).
+    #[serde(default)]
+    pub kind: EffectKind,
+    /// The kind of device a pattern was built on. `None` for a canvas effect.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub built_on: Option<crate::pattern::BuiltOn>,
+}
+
+/// The two kinds of effect (0.16.0). The UI says "effect" for both and tags a pattern.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum EffectKind {
+    #[default]
+    Canvas,
+    Pattern,
+}
+
+/// `GET` [`routes::PATTERNS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct PatternsResponse {
+    pub patterns: Vec<crate::pattern::Pattern>,
+}
+
+/// `DELETE` [`routes::PATTERN`]: `force` deletes a pattern a scene still plays.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeletePatternQuery {
+    #[serde(default)]
+    pub force: bool,
+}
+
+/// `DELETE` [`routes::PATTERN`] answer, as [`DeleteStackResponse`] with no presets.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct DeletePatternResponse {
+    pub ok: bool,
+    pub id: String,
+    pub favorite_removed: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub note: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
@@ -507,7 +604,7 @@ pub struct StackSummary {
     pub name: String,
     /// How many layers it has.
     pub layers: u32,
-    /// How many of those are HTML effects (the slow, capped kind).
+    /// How many HTML runtimes it starts (the slow, capped kind): one for each layer whose effect is HTML and one for each HTML mask.
     pub html_layers: u32,
     /// The ids of the layers whose effect could not be found, so the library can say so.
     #[serde(default)]
@@ -709,6 +806,11 @@ pub struct DraftRequest {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub stack: Option<crate::stack::Stack>,
+    /// A pattern as the draft (0.16.0): exactly one of `html`, `stack` and `pattern` is set. A
+    /// pattern draft needs `epoch` and `seq`, as a stack draft does.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub pattern: Option<crate::pattern::Pattern>,
     /// The builder session's epoch, as for [`StackPreviewRequest`]. A stack draft needs it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
@@ -748,7 +850,7 @@ pub struct DraftStatus {
     pub lease_ms: u64,
     /// A sentence about the ending, when it needs saying: the prior effect could not be
     /// restored (its file was deleted mid-draft), so the lights are black. Absent when the
-    /// prior, or black for a layout with no effect, went on normally.
+    /// prior, or black for a group with no effect, went on normally.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub note: Option<String>,
@@ -778,25 +880,17 @@ pub struct ActivateEffect {
     /// A built-in preset (`schema.presets`) or a user preset, by name. A preset's props sit on
     /// the defaults, not on the saved values, so two presets never leak into each other.
     pub preset: Option<String>,
+    /// Scenes: the groups of the active scene to play it on, by name. `None` plays it on every
+    /// group, from the effect's starting values.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub groups: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SetFavorite {
     pub favorite: bool,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct LayoutsResponse {
-    pub active: String,
-    pub layouts: Vec<Layout>,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize, TS)]
-#[ts(export)]
-pub struct SetActiveLayout {
-    pub id: String,
 }
 
 /// `PATCH /fans/headers/{h}` body is a [`FanMode`].
@@ -854,4 +948,553 @@ pub struct DisplayStatus {
 #[ts(export)]
 pub struct SetDisplayValue {
     pub value: Option<f32>,
+}
+
+// ---------------------------------------------------------------- scenes (0.14.0)
+
+/// `GET` [`routes::SCENES`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScenesResponse {
+    pub active: String,
+    pub scenes: Vec<Scene>,
+    /// The active scene's groups, in its order.
+    pub group_states: Vec<GroupState>,
+}
+
+/// `POST` [`routes::SCENES`]. With `copy_of`, the new scene copies that scene's groups under
+/// new ids; with `groups` (#377), the new scene holds exactly those groups; without either, one
+/// group of every light, set to Off. `copy_of` and `groups` together are refused with `422`.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneCreate {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copy_of: Option<String>,
+    /// The groups the new scene holds, in order. The daemon mints each group's id and runs the
+    /// scene rules and the HTML-group limit before it saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub groups: Option<Vec<NewGroup>>,
+    /// Run every check and save nothing: the answer is a [`SceneDryRun`] with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// One group of a scene being made with [`SceneCreate::groups`]: a [`Group`] without its id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NewGroup {
+    pub name: String,
+    pub members: Vec<LightId>,
+    pub plays: Plays,
+    /// Left out: [`GroupMode::FlowAcross`], as a [`Group`] reads it.
+    #[serde(default)]
+    #[ts(optional, as = "Option<GroupMode>")]
+    pub mode: GroupMode,
+    /// 0..=100. Left out: 100, as a [`Group`] reads it.
+    #[serde(default = "default_new_group_brightness")]
+    #[ts(optional, as = "Option<u8>")]
+    pub brightness: u8,
+}
+
+fn default_new_group_brightness() -> u8 {
+    GROUP_BRIGHTNESS_MAX
+}
+
+/// `PUT` [`routes::SCENE`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScenePut {
+    pub scene: Scene,
+    /// The `rev` the change was made from.
+    #[ts(type = "number")]
+    pub expected_rev: u64,
+    /// Run every check and save nothing: the answer is a [`SceneDryRun`] with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// What a dry run of a scene write answers (#377): the scene as it would be saved (`rev`
+/// included), and `saved: false`. A move's dry run answers the real [`GroupMoved`] the same way,
+/// with `saved: false`: one shape for "what would happen".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneDryRun {
+    /// Always `false` for a dry run.
+    pub saved: bool,
+    pub scene: Scene,
+}
+
+#[cfg(test)]
+mod scene_skill_tests {
+    //! #377: groups and dry runs on create and put, and the one dry-run answer.
+    use super::*;
+
+    fn scene(id: &str, rev: u64) -> Scene {
+        Scene { id: id.into(), name: id.to_uppercase(), rev, groups: Vec::new() }
+    }
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn an_old_scene_create_body_still_loads() {
+        let old: SceneCreate = serde_json::from_str(r#"{"name":"Evening","copy_of":"main"}"#).unwrap();
+        assert_eq!((old.groups.is_none(), old.dry_run), (true, false));
+        let bare: SceneCreate = serde_json::from_str(r#"{"name":"Blank"}"#).unwrap();
+        assert_eq!((bare.copy_of, bare.groups, bare.dry_run), (None, None, false));
+        // What the old editor writes is what the new one writes when it uses none of the new fields.
+        assert_eq!(
+            serde_json::to_string(&SceneCreate { name: "x".into(), copy_of: None, groups: None, dry_run: false }).unwrap(),
+            r#"{"name":"x"}"#
+        );
+    }
+
+    #[test]
+    fn a_scene_create_with_groups_round_trips_and_a_new_group_defaults_like_a_group() {
+        let json = r#"{"name":"Night","dry_run":true,"groups":[
+            {"name":"Fans","members":["fake:a#z0"],"plays":{"type":"off"}},
+            {"name":"Desk","members":["fake:b#z0"],"plays":{"type":"effect","effect":"html:ink-drop","props":{}},"mode":"each_its_own","brightness":40}]}"#;
+        let body: SceneCreate = serde_json::from_str(json).unwrap();
+        assert!(body.dry_run);
+        let groups = body.groups.clone().unwrap();
+        assert_eq!((groups[0].mode, groups[0].brightness), (GroupMode::FlowAcross, 100), "left out: as a Group reads it");
+        assert_eq!((groups[1].mode, groups[1].brightness), (GroupMode::EachItsOwn, 40));
+        round_trip(&body);
+    }
+
+    #[test]
+    fn an_old_scene_put_body_still_loads_and_a_dry_run_is_off() {
+        let body = format!(r#"{{"scene":{},"expected_rev":1}}"#, serde_json::to_string(&scene("a", 1)).unwrap());
+        let old: ScenePut = serde_json::from_str(&body).unwrap();
+        assert!(!old.dry_run);
+        assert_eq!(serde_json::to_string(&old).unwrap(), body, "a real put writes what it always wrote");
+        let probe = ScenePut { dry_run: true, ..old };
+        assert!(round_trip(&probe).contains(r#""dry_run":true"#));
+    }
+
+    #[test]
+    fn a_scene_dry_run_round_trips_with_saved_false() {
+        assert!(round_trip(&SceneDryRun { saved: false, scene: scene("a", 2) }).contains(r#""saved":false"#));
+    }
+
+    #[test]
+    fn the_skill_cli_names_are_distinct_from_the_old_ones() {
+        use crate::cli::*;
+        let all = [
+            SCENES_LIST, SCENES_SET, LIGHTS_LIST, SCENES_CREATE, SCENES_EDIT, SCENES_DELETE,
+            EFFECTS_LIST, EFFECTS_ACTIVATE, EFFECTS_DELETE, EFFECTS_PRESET_LIST,
+            EFFECTS_PRESET_SAVE, EFFECTS_PRESET_DELETE, EFFECTS_SOURCE, SCENES_GROUP_ORDER,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for name in all {
+            assert!(seen.insert(name), "{name:?} is named twice");
+        }
+    }
+}
+
+/// `PUT` [`routes::SCENE_ACTIVE`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneActivePut {
+    pub id: String,
+}
+
+/// `PUT` [`routes::GROUP_BRIGHTNESS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupBrightnessPut {
+    /// 0..=100.
+    pub brightness: u8,
+}
+
+/// `POST` [`routes::GROUP_MOVE`] (#368).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupMove {
+    /// The id of the scene the group goes to.
+    pub to: String,
+    /// Copy instead of move: the source scene keeps the group and its `rev`; the copy always gets
+    /// a fresh group id.
+    pub copy: bool,
+    /// The `rev` of the source scene (the `{id}` of the route) the request was made from.
+    #[ts(type = "number")]
+    pub expected_rev_from: u64,
+    /// The `rev` of the target scene the request was made from.
+    #[ts(type = "number")]
+    pub expected_rev_to: u64,
+    /// Run every check and save nothing: the answer is the [`GroupMoved`] it would have been,
+    /// with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// The lights a move or copy took out of another group of the target, so the target holds each
+/// light once. A group left with no lights is removed (see [`GroupMoved::emptied`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupTaken {
+    /// The target scene's group the lights were taken from.
+    pub group_id: String,
+    pub group_name: String,
+    pub lights: Vec<LightId>,
+}
+
+/// The answer to [`GroupMove`] (#368).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupMoved {
+    /// The id the group has in the target scene: its own when the target lacks it, else a fresh
+    /// one; a copy always has a fresh one.
+    pub group_id: String,
+    /// `false` for a dry run: nothing was written and the scenes below are what would be.
+    pub saved: bool,
+    /// The scenes after, `[from, to]`; a copy leaves `from` as it was (same `rev`).
+    pub scenes: Vec<Scene>,
+    /// The scenes before, `[from, to]`: what an undo writes back.
+    pub before: Vec<Scene>,
+    /// The lights taken out of the target's other groups.
+    pub taken: Vec<GroupTaken>,
+    /// The names of the groups (of either scene) that held no light afterwards and were removed.
+    pub emptied: Vec<String>,
+}
+
+/// One scene of a [`ScenesWrite`]: the whole scene and the `rev` it was made from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneWrite {
+    pub scene: Scene,
+    #[ts(type = "number")]
+    pub expected_rev: u64,
+}
+
+/// `PUT` [`routes::SCENES`] (#368 undo/redo, #371 scene order). Every check runs before anything
+/// is written, then ONE save writes the lot. Each written scene lands at `rev` = current + 1.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScenesWrite {
+    /// Scenes to replace whole. Left out (or empty) for an order-only write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<SceneWrite>>")]
+    pub scenes: Vec<SceneWrite>,
+    /// The new order: every scene id exactly once. The same order as now is a `200` with no write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub order: Option<Vec<String>>,
+    /// The order the caller last saw; a different current order is a `409` carrying it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_order: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod scenes_ops_tests {
+    //! #368, #371: the move route, the answer types and the whole-list write.
+    use super::*;
+
+    fn scene(id: &str, rev: u64) -> Scene {
+        Scene { id: id.into(), name: id.to_uppercase(), rev, groups: Vec::new() }
+    }
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn group_move_round_trips_and_a_dry_run_is_off_when_left_out() {
+        let body = GroupMove { to: "movie".into(), copy: true, expected_rev_from: 3, expected_rev_to: 5, dry_run: false };
+        let json = round_trip(&body);
+        assert!(!json.contains("dry_run"), "a real move writes no dry_run: {json}");
+        let probe = GroupMove { dry_run: true, ..body };
+        assert!(round_trip(&probe).contains(r#""dry_run":true"#));
+        let old: GroupMove =
+            serde_json::from_str(r#"{"to":"m","copy":false,"expected_rev_from":1,"expected_rev_to":2}"#).unwrap();
+        assert!(!old.dry_run);
+    }
+
+    #[test]
+    fn group_moved_round_trips_with_saved_true_and_false() {
+        let moved = |saved| GroupMoved {
+            group_id: "desk".into(),
+            saved,
+            scenes: vec![scene("a", 2), scene("b", 4)],
+            before: vec![scene("a", 1), scene("b", 3)],
+            taken: vec![GroupTaken { group_id: "all".into(), group_name: "Everything".into(), lights: vec!["d#z0".into()] }],
+            emptied: vec!["Everything".into()],
+        };
+        round_trip(&moved(true));
+        assert!(round_trip(&moved(false)).contains(r#""saved":false"#));
+    }
+
+    #[test]
+    fn scenes_write_reads_an_order_only_body_and_a_scenes_only_body() {
+        let order_only: ScenesWrite = serde_json::from_str(r#"{"order":["b","a"],"expected_order":["a","b"]}"#).unwrap();
+        assert!(order_only.scenes.is_empty());
+        assert_eq!(order_only.order.as_deref(), Some(&["b".to_string(), "a".to_string()][..]));
+        let scenes_only: ScenesWrite =
+            serde_json::from_str(&format!(r#"{{"scenes":[{{"scene":{},"expected_rev":2}}]}}"#, serde_json::to_string(&scene("a", 2)).unwrap()))
+                .unwrap();
+        assert_eq!((scenes_only.scenes.len(), scenes_only.order, scenes_only.expected_order), (1, None, None));
+        let json = round_trip(&ScenesWrite {
+            scenes: vec![SceneWrite { scene: scene("a", 3), expected_rev: 2 }],
+            order: Some(vec!["a".into()]),
+            expected_order: Some(vec!["a".into()]),
+        });
+        assert!(json.contains("expected_rev") && json.contains("expected_order"), "{json}");
+        assert_eq!(serde_json::to_string(&ScenesWrite::default()).unwrap(), "{}");
+    }
+
+    #[test]
+    fn the_move_route_names_both_placeholders_and_the_order_write_reuses_the_collection() {
+        assert_eq!(routes::GROUP_MOVE, "/api/v1/scenes/{id}/groups/{group}/move");
+        assert!(routes::GROUP_MOVE.starts_with(routes::GROUP_PROPS.trim_end_matches("/props")));
+        // The order write reuses the collection path, so no static segment hides a scene id.
+        assert_eq!(routes::SCENES, "/api/v1/scenes");
+    }
+
+    #[test]
+    fn the_scene_ops_cli_names_are_distinct_from_the_old_ones() {
+        use crate::cli::*;
+        let all = [SCENES_LIST, SCENES_SET, SCENES_ORDER, SCENES_GROUP_MOVE, SCENES_GROUP_ORDER, EFFECTS_SOURCE];
+        let mut seen = std::collections::HashSet::new();
+        for name in all {
+            assert!(seen.insert(name), "{name:?} is named twice");
+        }
+    }
+}
+
+/// `GET` [`routes::LIGHTS`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightsResponse {
+    pub lights: Vec<LightView>,
+}
+
+/// A light with what the editor shows beside it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightView {
+    pub light: Light,
+    /// The LEDs it has now: its run clamped to the zone, or the zone's count.
+    pub led_count: u32,
+    pub connected: bool,
+    /// The owner's name, else the device and zone name.
+    pub label: String,
+}
+
+fn present<'de, D, T>(d: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(d).map(Some)
+}
+
+/// `PATCH` [`routes::LIGHT`]. A field left out is unchanged; `name: null` clears the name.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightPatch {
+    #[serde(default, deserialize_with = "present", skip_serializing_if = "Option::is_none")]
+    #[ts(optional, type = "string | null")]
+    pub name: Option<Option<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub arrangement: Option<Arrangement>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub reversed: Option<bool>,
+    /// What the part is. Setting it sets `arrangement` from it; setting `arrangement` alone
+    /// leaves `kind` as it was.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub kind: Option<ChainPartKind>,
+}
+
+/// `POST` [`routes::LIGHTS_FLASH`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct FlashRequest {
+    #[serde(default)]
+    pub lights: Vec<LightId>,
+    #[serde(default)]
+    pub stop: bool,
+}
+
+/// A header's setup state, as the editor shows it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum ChainSetupState {
+    NotSetUp,
+    Empty,
+    SetUp,
+}
+
+/// One resizable header.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChainView {
+    pub device_id: crate::device::DeviceId,
+    pub device_name: String,
+    pub zone_index: u32,
+    pub zone_name: String,
+    pub state: ChainSetupState,
+    /// The length the header has now.
+    pub leds: u32,
+    pub min_leds: u32,
+    pub max_leds: u32,
+    /// Its lights in chain order: the parts, or the whole-zone light.
+    pub parts: Vec<LightView>,
+}
+
+/// `GET` [`routes::CHAINS`]: resizable zones only.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ChainsResponse {
+    pub chains: Vec<ChainView>,
+}
+
+/// `POST` [`routes::CHAIN_SETUP`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupStarted {
+    pub session: String,
+    /// The length the header goes back to if the setup ends without a commit.
+    pub restore_to: u32,
+    /// The length it was raised to: the zone's maximum.
+    pub raised_to: u32,
+}
+
+/// One coloured run, by LED index inside the zone.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupRun {
+    pub start: u32,
+    pub count: u32,
+    pub color: crate::color::Rgb8,
+}
+
+/// `POST` [`routes::CHAIN_SETUP_LIGHT`].
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupLight {
+    pub session: String,
+    pub runs: Vec<SetupRun>,
+}
+
+/// One part as the owner described it.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupPart {
+    pub name: String,
+    pub kind: ChainPartKind,
+    pub leds: u32,
+    /// How many times the header shows this run (#381, #382): 8 fans that all show the same
+    /// 8 LEDs are ONE part of 8 LEDs with `copies: 8`. Left out (or 1): once. At most
+    /// [`crate::scene::COPIES_MAX`]; 2 or more only when this is the header's only part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copies: Option<u32>,
+}
+
+#[cfg(test)]
+mod chain_copies_tests {
+    //! #381, #382: `copies` on the setup part.
+    use super::*;
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn a_setup_part_without_copies_loads_and_with_copies_round_trips() {
+        let old: SetupPart = serde_json::from_str(r#"{"name":"Fan","kind":"fan","leds":12}"#).unwrap();
+        assert_eq!(old.copies, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("copies"), "a part without copies writes none");
+        let mirror = SetupPart { name: "Same lights, shown 8 times".into(), kind: ChainPartKind::Other, leds: 8, copies: Some(8) };
+        assert!(round_trip(&mirror).contains(r#""copies":8"#));
+    }
+
+    #[test]
+    fn the_cap_is_what_the_design_names() {
+        assert_eq!(crate::scene::COPIES_MAX, 32);
+    }
+}
+
+/// `POST` [`routes::CHAIN_SETUP_COMMIT`]: parts in chain order; their LEDs add up to the final
+/// length.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupCommit {
+    pub session: String,
+    pub parts: Vec<SetupPart>,
+}
+
+/// `POST` [`routes::CHAIN_SETUP_EMPTY`], and the body of a cancel.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupEmpty {
+    pub session: String,
+}
+
+/// What a commit made.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SetupCommitted {
+    pub lights: Vec<LightView>,
+    pub final_leds: u32,
+}
+
+/// A scene by id and name, for the status.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneRef {
+    pub id: String,
+    pub name: String,
+}
+
+#[cfg(test)]
+mod scene_payload_tests {
+    use super::*;
+
+    #[test]
+    fn light_patch_tells_a_cleared_name_from_an_absent_one() {
+        let absent: LightPatch = serde_json::from_str("{}").unwrap();
+        assert_eq!(absent.name, None);
+        let cleared: LightPatch = serde_json::from_str(r#"{"name":null}"#).unwrap();
+        assert_eq!(cleared.name, Some(None));
+        let set: LightPatch = serde_json::from_str(r#"{"name":"Top fan","reversed":true}"#).unwrap();
+        assert_eq!(set.name, Some(Some("Top fan".into())));
+        assert_eq!(set.reversed, Some(true));
+        assert_eq!(set.kind, None);
+        let kind: LightPatch = serde_json::from_str(r#"{"kind":"other"}"#).unwrap();
+        assert_eq!(kind.kind, Some(ChainPartKind::Other));
+    }
+
+    #[test]
+    fn an_old_activate_body_plays_on_every_group() {
+        let body: ActivateEffect = serde_json::from_str(r#"{"props":{},"preset":null}"#).unwrap();
+        assert_eq!(body.groups, None);
+    }
 }

@@ -36,14 +36,15 @@ into `%APPDATA%\canvas-rgb\effects\` and the daemon loads it within five seconds
 
 ## Lighting
 
-Every device sits on one layout, so an effect paints across the whole case as a single picture.
-Fourteen effects ship built in. Eleven are the classics, from solid colour to screen ambience and
-audio spectrum. The other three paint the case: Ink Drop unfurls ink through still water, Wet
-Smear drags thick pigment into streaks, and Palette Knife lays colour on in slabs.
+Every device is a light, and a scene's groups each play their own effect, so one group can flow
+across the case while another breathes on the RAM. Fourteen effects ship built in. Eleven are the
+classics, from solid colour to screen ambience and audio spectrum. The other three paint the case:
+Ink Drop unfurls ink through still water, Wet Smear drags thick pigment into streaks, and Palette
+Knife lays colour on in slabs.
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="site/public/shots/layout-dark.webp">
-  <img alt="The canvas-rgb editor: a desk layout with the devices placed on it and an effect running across them." src="site/public/shots/layout-light.webp">
+  <img alt="The canvas-rgb editor: the Scenes page, with a group's lights running an effect." src="site/public/shots/layout-light.webp">
 </picture>
 
 ## Fans
@@ -63,13 +64,17 @@ its stick and trigger ranges.
 
 - A local API on `127.0.0.1:9430`. Every route except status and the live preview needs the API
   token.
-- The `canvas-rgb` CLI talks to that same API: `status`, `devices`, `effects`, `output`, `fans`,
-  `peripherals`, `diag` and `config`. Add `--json` and a script can read any of it.
+- The `canvas-rgb` CLI talks to that same API: `status`, `devices`, `lights`, `scenes`,
+  `effects`, `output`, `fans`, `peripherals`, `diag` and `config`. Add `--json` and a script
+  can read any of it.
 - New devices are adapters, a Rust module behind the `DeviceAdapter` trait in
   `crates/canvas-proto/src/traits.rs`. [docs/adapters.md](docs/adapters.md) walks through one.
 - An effect is one HTML file. `canvas-rgb effects check my-effect.html` tells you whether it parses,
   moves and shows more than one colour before you install it. The repo ships a Claude Code skill
   for writing them in `.claude/skills/canvas-rgb-effect`.
+- An agent can build a scene for you with the skill in
+  [`.claude/skills/canvas-rgb-scene/SKILL.md`](.claude/skills/canvas-rgb-scene/SKILL.md). It saves
+  a new scene, leaves your lights on the scene they had, and can undo what it made.
 
 ## Install
 

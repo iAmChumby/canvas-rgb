@@ -13,13 +13,25 @@ import {
   Mouse,
 } from "@phosphor-icons/react";
 import { Button, Swap } from "@/components/Button";
+import { Chip } from "@/components/Chip";
 import { Panel, StateDot } from "@/components/Panel";
 import { ErrorPanel, LoadFrame, type LoadState } from "@/components/Loading";
 import { PeripheralDetailShape, PeripheralListShape } from "@/components/LoadShapes";
 import { Toggle } from "@/components/Toggle";
 import { Select } from "@/components/Select";
 import { InlineSkeleton } from "@/components/Skeleton";
-import { ControllerOutline, type PadButton } from "@/components/ControllerOutline";
+import { ControllerOutline, PAD_STICK_TRAVEL, type PadButton } from "@/components/ControllerOutline";
+import {
+  devicePadMatch,
+  litKeys,
+  PAD_STATUS_WORDS,
+  PAD_UNREADABLE_WORD,
+  STICK_SCALE,
+  TRIGGER_SCALE,
+  usePadInput,
+  type PadFrame,
+  type PadMapRow,
+} from "@/lib/padInput";
 import { PropertyControls, type Values } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
 import { UnreadValue } from "@/components/UnreadValue";
@@ -53,6 +65,14 @@ const KIND_GLYPH = {
   game_controller: GameController,
   keyboard: Keyboard,
 } as const;
+
+/**
+ * True only in a build made for the screenshot harness (#375).
+ *
+ * Next inlines the value at build time, so the badge below is not in the shipped export at
+ * all: the words "Simulated pad" are dropped with the branch that draws them.
+ */
+const PAD_STUB_BUILT = process.env.NEXT_PUBLIC_PAD_STUB === "1";
 
 /** A label without the profile it belongs to: the panel above it names the profile. */
 function plainLabel(label: string): string {
@@ -608,7 +628,9 @@ export function PeripheralsView() {
               <button
                 key={p.id}
                 type="button"
-                className="peripheral-row rd-devkey"
+                // `tab-key` is the shared type of the app's tabs (#373): the device key is set
+                // like every other tab, and this page sets only its box.
+                className="peripheral-row rd-devkey tab-key"
                 data-on={p.id === selectedId ? "true" : "false"}
                 aria-current={p.id === selectedId ? "true" : undefined}
                 onClick={() => {
@@ -695,6 +717,13 @@ function PeripheralDetail({
   const readsOff = !reads;
   const showsSettings = !unread && !readsOff;
   const noun = nounOf(info.kind);
+  // The "Read again" tooltip (#374). Only the mouse's read is known to hitch: it is five report
+  // exchanges with the pointer's own reports among them. The pad's read is 36 chunks of its
+  // profile image with no pointer in it, so the pad's tooltip promises the read and no more
+  // (#387).
+  const readAgainWords = isMouse
+    ? `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself. The ${noun} may stutter briefly while it reads.`
+    : `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself.`;
   const nowMs = useNowMs(30_000);
   const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
   const ago = readAt === null ? null : readAgo(readAt, nowMs);
@@ -803,7 +832,7 @@ function PeripheralDetail({
                 shown={reads && ago ? ago.text : undefined}
               />
             </span>
-            <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing" className="rd-peri-tip">
+            <Tooltip label={`Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Read</span>
                 <Toggle
@@ -813,7 +842,21 @@ function PeripheralDetail({
                 />
               </span>
             </Tooltip>
-            <Tooltip label={`asks the device for its settings again, for changes made on the ${noun} itself; this pauses the ${noun} for a few seconds`} className="rd-peri-tip">
+            {/* What a read does, in the words of the code (#374): the editor asks the daemon for
+                the device with `?fresh=true` (`GET /peripherals/{id}`, the daemon's
+                `crates/canvas-daemon/src/api/peripherals.rs`), the daemon opens the device and
+                reads its reports (`read_fresh_stamped`, `crates/canvas-daemon/src/peripherals.rs`),
+                and the adapter's read is a series of short report exchanges with a pause between
+                them (`crates/canvas-adapters/src/attack_shark_x6/mod.rs`: five reports, a 250 ms
+                wait for each grant and a 500 ms pause between the reports). The device is busy
+                with those exchanges while the read runs and is usable again when it ends; it is
+                never held still for the whole read. The wording says that, and says reading.
+                The stutter is the mouse's own report exchange and is claimed for the mouse only
+                (#387): the pad's read is 36 chunks of its profile image
+                (`crates/canvas-adapters/src/eightbitdo_ultimate2/mod.rs`) with no pointer in it,
+                and nothing has measured what its buttons do during one, so its tooltip promises
+                only the read. */}
+            <Tooltip label={readAgainWords} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"
@@ -826,7 +869,7 @@ function PeripheralDetail({
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip label="lets canvas-rgb change settings on the device" className="rd-peri-tip">
+            <Tooltip label={`Lets canvas-rgb change the settings on the ${noun}.`} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Change</span>
                 <Toggle
@@ -853,7 +896,7 @@ function PeripheralDetail({
               <ClockCountdown size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`Not read yet. canvas-rgb reads it while you're not using the ${noun}, or press Read again (this pauses the ${noun} for a few seconds).`}
+              {`Not read yet. The ${noun}'s settings are read while you are away. Press Read again to read them now.`}
             </p>
           </div>
         </Panel>
@@ -869,10 +912,10 @@ function PeripheralDetail({
               <EyeSlash size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`canvas-rgb reads this ${noun}'s settings only when you turn reading on; reading pauses the ${noun} for a few seconds.`}
+              {`The ${noun}'s settings are read only when you turn reading on.`}
             </p>
             <span className="rd-peri-reads-off-action">
-              <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
+              <Tooltip label={`Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`}>
                 <Button variant="primary" size="sm" onClick={() => onReadToggle(true)}>
                   Turn on reading
                 </Button>
@@ -948,7 +991,10 @@ function DpiPanel({
         optionLabel={choiceWord}
         onChange={onChange}
       />
-      <div className="dpi-stages" role="group" aria-label="DPI stages">
+      {/* The stage count is on the element so the columns are chosen from it (#387): the row is a
+          grid of equal cells, and a count that cannot fill its last row evenly (four, which would
+          be 3 + 1) takes two columns instead. */}
+      <div className="dpi-stages" role="group" aria-label="DPI stages" data-stages={stages.length}>
         {count === null && <UnreadValue label="DPI stages" />}
         {stages.map((s) => (
           <button
@@ -1011,8 +1057,14 @@ function ControllerPanel({
   const profile = plain(known(values, "active-profile"));
   const profileSection =
     profile === null ? undefined : detail.schema.sections.find((s) => s.id === `profile-${String(profile)}`);
-  const paddles = (profileSection?.properties ?? []).filter((p) => p.key.includes("-paddle-"));
-  const rows: PropertyDef[] = [...(buttons?.properties ?? []), ...paddles];
+  const paddles = useMemo(
+    () => (profileSection?.properties ?? []).filter((p) => p.key.includes("-paddle-")),
+    [profileSection],
+  );
+  const rows: PropertyDef[] = useMemo(
+    () => [...(buttons?.properties ?? []), ...paddles],
+    [buttons, paddles],
+  );
   const rowRefs = useRef(new Map<string, HTMLDivElement | null>());
 
   const planButtons: PadButton[] = rows.map((p) => ({
@@ -1029,13 +1081,123 @@ function ControllerPanel({
     row?.querySelector<HTMLButtonElement>(".select-trigger")?.click();
   };
 
+  // What the pad is doing right now (#375). The loop runs only while this panel is on the page
+  // and the editor is in front: it stops on blur, when the page is hidden, and when the panel
+  // goes away. The device on the page says which pad to read when several are connected.
+  const pad = usePadInput({ match: devicePadMatch(detail.info) });
+  const planRef = useRef<HTMLDivElement | null>(null);
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  // What each row does, in the words the schema uses. The painter needs it: a button that is
+  // mapped to another button lights when that one is held.
+  const mapRows = useMemo<PadMapRow[]>(
+    () =>
+      rows.map((p) => {
+        const held = plain(known(values, p.key));
+        return { key: p.key, target: held === null ? null : String(held) };
+      }),
+    [rows, values],
+  );
+  const mapRowsRef = useRef(mapRows);
+  // The last frame the painter was given. A held key must not go stale: when the map or the
+  // profile changes, the same frame is painted again, so the key it lights is the new one.
+  const lastFrameRef = useRef<PadFrame | null>(null);
+  useEffect(() => {
+    mapRowsRef.current = mapRows;
+  }, [mapRows]);
+
+  /**
+   * Writes the pad's state into the drawing: the keys that are held, the travel of the two
+   * triggers and where the two sticks stand. It writes into the page's own elements, so the
+   * drawing is right in the frame the press was read in.
+   */
+  const paint = useCallback((frame: PadFrame) => {
+    lastFrameRef.current = frame;
+    const plan = planRef.current;
+    const map = mapRef.current;
+    if (!plan || !map) return;
+    const lit = litKeys(frame, mapRowsRef.current);
+
+    for (const el of plan.querySelectorAll<SVGGElement>("[data-pad-key]")) {
+      const key = el.getAttribute("data-pad-key");
+      el.setAttribute("data-pressed", key !== null && lit.has(key) ? "true" : "false");
+    }
+    for (const el of map.querySelectorAll<HTMLElement>("[data-key]")) {
+      const key = el.getAttribute("data-key");
+      el.setAttribute("data-pressed", key !== null && lit.has(key) ? "true" : "false");
+    }
+
+    // The two triggers: the slot fills with the travel, and the number counts it.
+    for (const side of ["lt", "rt"] as const) {
+      const slot = plan.querySelector<SVGRectElement>(`[data-pad-slot="${side}"]`);
+      const fill = plan.querySelector<SVGRectElement>(`[data-pad-travel="${side}"]`);
+      const number = plan.querySelector<SVGTextElement>(`[data-pad-value="${side}"]`);
+      if (!slot || !fill || !number) continue;
+      const travel = (side === "lt" ? frame.lt : frame.rt) / TRIGGER_SCALE;
+      const x = Number(slot.getAttribute("x"));
+      const width = Number(slot.getAttribute("width"));
+      fill.setAttribute("width", String(width * travel));
+      fill.setAttribute("x", String(side === "rt" ? x + width * (1 - travel) : x));
+      number.textContent = String(side === "lt" ? frame.lt : frame.rt).padStart(3, "0");
+    }
+
+    // The two sticks: the dot stands where the stick stands, inside its well.
+    for (const dot of plan.querySelectorAll<SVGCircleElement>("[data-pad-dot]")) {
+      const which = dot.getAttribute("data-pad-dot");
+      const cap = dot.parentElement?.querySelector(".pad-btn");
+      if (!which || !cap) continue;
+      const cx = Number(cap.getAttribute("cx"));
+      const cy = Number(cap.getAttribute("cy"));
+      const sx = which === "l" ? frame.lx : frame.rx;
+      const sy = which === "l" ? frame.ly : frame.ry;
+      dot.setAttribute("cx", String(cx + (sx / STICK_SCALE) * PAD_STICK_TRAVEL));
+      dot.setAttribute("cy", String(cy + (sy / STICK_SCALE) * PAD_STICK_TRAVEL));
+    }
+    for (const axis of ["lx", "ly", "rx", "ry"] as const) {
+      const number = plan.querySelector<HTMLElement>(`[data-pad-stick="${axis}"]`);
+      if (!number) continue;
+      number.textContent = `${frame[axis] < 0 ? "" : "+"}${frame[axis]}`;
+    }
+
+    plan.setAttribute("data-live", frame.connected ? "true" : "false");
+  }, []);
+
+  const register = pad.register;
+  useEffect(() => register(paint), [register, paint]);
+
+  // A held key does not go stale: when the map or the profile changes, the frame that is held
+  // is painted again at once, so the light moves to the key the button now is.
+  useEffect(() => {
+    const last = lastFrameRef.current;
+    if (last) paint(last);
+  }, [mapRows, paint]);
+
+  // The strip's second line: why no key is lit, or which pad is being shown.
+  const padNote = pad.unreadable ? PAD_UNREADABLE_WORD : pad.showing;
+
   return (
     <Panel title={detail.info.name}>
+      {/* What the pad is doing: three lines held in every state, so nothing below it moves. */}
+      <div className="pad-state" data-state={pad.status} role="status">
+        <span className="pad-state-dot" aria-hidden="true" />
+        <span className="pad-state-line">
+          <span className="pad-state-head">
+            <span className="pad-state-text">{PAD_STATUS_WORDS[pad.status]}</span>
+            {PAD_STUB_BUILT && pad.simulated && (
+              <span className="pad-badge" data-on="true">
+                <Chip>Simulated pad</Chip>
+              </span>
+            )}
+          </span>
+          <span className="pad-state-note" hidden={padNote === null}>
+            {padNote ?? ""}
+          </span>
+        </span>
+      </div>
       <div className="pad-grid">
-        <div className="pad-plan-wrap">
+        <div className="pad-plan-wrap" ref={planRef}>
           <ControllerOutline buttons={planButtons} selected={picked} onPick={pick} />
         </div>
-        <div className="pad-map">
+        <div className="pad-map" ref={mapRef}>
           {rows.map((p) => {
             const options =
               p.kind.type === "choice"
@@ -1070,6 +1232,8 @@ function ControllerPanel({
                     onChange={(v) => onChange(p.key, { type: "choice", value: v })}
                   />
                 )}
+                {/* The slot the word "pressed" stands in: it is always there, so the row never moves. */}
+                <span className="pad-map-pressed">pressed</span>
               </div>
             );
           })}

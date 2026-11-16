@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, type ReactNode } from "react";
+import { useEffect, useRef, useState, type ReactNode } from "react";
 import { boundsOf, placeTooltip, TIP_MARGIN, type TipAlign, type TipRect, type TipSide } from "@/lib/tooltipPlacement";
 
 const SIDES: readonly TipSide[] = ["top", "bottom", "left", "right"];
@@ -41,10 +41,30 @@ function boundsAround(bubble: HTMLElement): TipRect {
  * while it is shown it is measured and moved to stay inside the window (#271), and it wraps
  * when the window has no room for one line of it. Reduced motion needs nothing here: the move
  * has no transition, and the stylesheet's reduced-motion block already drops the fade.
+ *
+ * The bubble is held back while its control is pressed, but only for a control that asks for it
+ * (`holdOnPress`): a drag lifts a row over the rows under it (#384), and a bubble over the drag
+ * covers what the owner is looking at. It comes back when the pointer has really left the
+ * control: the row a drag moved may come to rest under the pointer, and that is not the pointer
+ * leaving. Every other bubble behaves as it did before: a press on a normal control does not
+ * take its bubble away.
  */
-export function Tooltip({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+export function Tooltip({
+  label,
+  children,
+  className,
+  holdOnPress = false,
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+  /** The bubble is held back while the control is pressed: for a handle a drag lifts over the page. */
+  holdOnPress?: boolean;
+}) {
   const tip = useRef<HTMLSpanElement>(null);
   const bubble = useRef<HTMLSpanElement>(null);
+  /** The bubble is held back: the control is pressed. */
+  const [hold, setHold] = useState(false);
 
   useEffect(() => {
     const host = tip.current;
@@ -54,6 +74,12 @@ export function Tooltip({ label, children, className }: { label: string; childre
     let over = false;
     let focused = false;
     let bound = false;
+    /** The pointer is down on the control. */
+    let pressed = false;
+    /** The bubble is held back. */
+    let held = false;
+    /** The window's pointer move is watched only while the bubble is held back. */
+    let watching = false;
 
     const place = () => {
       const trigger = host.getBoundingClientRect();
@@ -150,21 +176,71 @@ export function Tooltip({ label, children, className }: { label: string; childre
       update();
     };
 
+    /** The bubble comes back: the pointer has left the control for good. */
+    const release = () => {
+      if (!held) return;
+      held = false;
+      setHold(false);
+      watch(false);
+    };
+
+    /**
+     * The pointer has really left the control: it is outside the control's own box, and the
+     * button is not down. The box is measured now, because a row a drag moved may have come to
+     * rest under the pointer.
+     */
+    const move = (e: PointerEvent) => {
+      if (pressed) return;
+      const r = host.getBoundingClientRect();
+      const outside =
+        e.clientX < r.left || e.clientX > r.right || e.clientY < r.top || e.clientY > r.bottom;
+      if (outside) release();
+    };
+
+    /** The window's pointer move is watched only while the bubble is held back. */
+    const watch = (on: boolean) => {
+      if (on === watching) return;
+      watching = on;
+      if (on) window.addEventListener("pointermove", move);
+      else window.removeEventListener("pointermove", move);
+    };
+
+    // The control is pressed: the bubble goes, and it waits for the pointer to leave the control
+    // for good. A bubble over a drag covers the rows under it (#384). Only a control that asks
+    // for it holds its bubble back.
+    const press = () => {
+      pressed = true;
+      if (!holdOnPress) return;
+      held = true;
+      setHold(true);
+      watch(true);
+    };
+    const up = () => {
+      pressed = false;
+    };
+
     host.addEventListener("pointerenter", enter);
     host.addEventListener("pointerleave", leave);
     host.addEventListener("focusin", focusIn);
     host.addEventListener("focusout", focusOut);
+    host.addEventListener("pointerdown", press);
+    window.addEventListener("pointerup", up);
+    window.addEventListener("pointercancel", up);
     return () => {
       host.removeEventListener("pointerenter", enter);
       host.removeEventListener("pointerleave", leave);
       host.removeEventListener("focusin", focusIn);
       host.removeEventListener("focusout", focusOut);
+      host.removeEventListener("pointerdown", press);
+      window.removeEventListener("pointerup", up);
+      window.removeEventListener("pointercancel", up);
+      watch(false);
       unbind();
     };
-  }, []);
+  }, [holdOnPress]);
 
   return (
-    <span ref={tip} className={className ? `tip ${className}` : "tip"}>
+    <span ref={tip} className={className ? `tip ${className}` : "tip"} data-hold={hold ? "true" : undefined}>
       {children}
       <span ref={bubble} className="tip-bubble" role="tooltip">
         {label}

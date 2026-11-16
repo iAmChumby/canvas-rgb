@@ -816,10 +816,12 @@ function StatusReason({ text, warn, quiet }: { text: string | null; warn: boolea
       if (e.key === "Escape") setOpen(false);
     };
     document.addEventListener("pointerdown", press, true);
-    document.addEventListener("keydown", key);
+    // Capture: the box closes on Escape anywhere, as its comment says, and a number field under it
+    // keeps its own Escape (a typed value goes back) without the key reaching this listener late.
+    document.addEventListener("keydown", key, true);
     return () => {
       document.removeEventListener("pointerdown", press, true);
-      document.removeEventListener("keydown", key);
+      document.removeEventListener("keydown", key, true);
     };
   }, [open]);
   const shown = open && text !== null;

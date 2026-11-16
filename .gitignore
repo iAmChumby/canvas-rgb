@@ -7,3 +7,6 @@ out/
 .build/
 
 dist/
+
+# Per-worktree cargo target folders (CARGO_TARGET_DIR=tgt-*): build output, never staged
+tgt-*/

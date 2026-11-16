@@ -6,9 +6,85 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-16
+
+### Added
+
+- Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
+- The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
+- Scenes: the open group shows the picture its own effect draws, so you can tune it while you watch (#378)
+- Scenes: the groups inside a scene can be put in another order: drag a group's handle, use the arrow keys on it, or pick Move up / Move down in the group's menu. A group's colour now comes from the group itself, so it keeps its colour when it moves; a scene made before this may show a different colour once. (#384)
+- Scenes: a group can be moved to another scene, or copied into it, from the group's own menu; each scene says what lands there and what leaves before you commit. (#368)
+- Scenes: the scene keys can be put in another order: drag one, use the arrow keys on it, or use the scene's own menu. (#371)
+- The command line can list your lights, create, edit and delete a scene from a file, and import, check, read and delete effects and save and delete presets, with a dry run that saves nothing; a run can only delete what it made. A new agent skill, `canvas-rgb-scene`, uses these commands to build a scene for you and leaves your lights on the scene they had. (#377)
+
+### Changed
+
+- A scene can have two groups playing HTML effects (#370)
+- What's new shows each release as sections grouped by area, with a link to each issue (#365)
+- Setting up an ARGB header starts with a short introduction, counts the orange lights you can see first, and names every step in plain words; a header you cannot see into has a way out. (#381)
+
 ### Fixed
 
+- Setting up a chain keeps the setup open while your device answers a save slowly, so a slow reply no longer loses the header's earlier length. (#429)
+- Scenes: putting the groups in a new order no longer restarts their effects, so the lights stay as they are. The order is for display only. (#384)
+- The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
+- Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
+- Peripherals: the DPI stages sit in even columns at every window size, so the mouse's settings no longer reshuffle the panels beside them. (#373)
+- Peripherals: a device with a long name keeps its row in the page, cutting the name with an ellipsis. (#373)
+- Peripherals: the "Read again" tooltip says what a read really does, and nothing claims the mouse pauses for seconds. (#374)
+- Peripherals: the tooltip promises the stutter only for the mouse, the one device whose read has been watched. (#374)
+- Every message looks the same, and the update notice no longer repeats the version (#366)
+- Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
+- Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
+- The sidebar strip shows your lights' real colours in a scene (#379)
+- Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
+- Rain: Trail Length now changes how long each streak is (#383)
+- A header whose devices all show the same lights (a splitter, a hub) is saved as one light shown several times, no longer as many one-LED fans. (#382)
+- Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
+- A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
+- Fire and Audio Spectrum fill a strip again, flame height and bar height included. (#400)
+- Fire and Audio Spectrum inside a stack fill a strip too, when every layer of the stack reads the full height (Fire, Audio Spectrum). A stack that mixes them with another effect still shows its top layer's middle cell on a strip. (#407)
+- The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)
+- A brightness or props change beside a scene with more HTML effects than the limit allows no longer starts the extra effect. (#419)
+- The text on a primary key stays readable as the lights change colour: every hue of both themes keeps 4.5:1 on the key, where yellow in the light theme dropped to 2.2:1. (#423)
+- Scenes: the scene's name reads in full in the phone header; the state mark keeps its icon, and its tooltip and details panel name the fault in words. (#422)
+
+## [0.16.0] - 2026-11-15
+
+### Added
+
+- Chains: tell the app what is on a header in three steps: drag, type a number, confirm. (#338)
+- Chains: setup comes to you on first run, and Devices can redo any header. (#338)
+- Scenes: several effects at once, one per group of devices. Switching scenes fades from what each strip shows, black included after a pause (#310)
+- Effects: Play on chooses the groups; the builder shows the group you are tuning. (#310)
+- The app opens on Scenes: your groups, their live lights and what each one plays. (#310)
+- Scenes: tune an effect inside its group, and make groups and scenes from your own devices. (#310)
+- Command line: `canvas-rgb scenes list` shows the scenes with the active one marked, `canvas-rgb scenes set <name>` sets one by name (case does not matter), and `canvas-rgb status` names the active scene (#310)
+- Command line: `canvas-rgb effects activate <effect> --group <name>` plays the effect on the groups of the active scene it names, whether the group comes before or after the effect's properties (#310)
+- Patterns: paint the colour of every LED of a device, and see each stroke on the real lights. (#339)
+- Effects: New effect offers Stack, Pattern or Code; a pattern is built on one of your devices and lives in the library. (#339)
+- Scenes: patterns appear in a group's effect picker, marked when they fit, and a stretched device says so. (#339)
+- The MonsGeek keyboard shows each key's own colour when the lights hold still for a couple of seconds, keeps that picture across a restart, and touches its flash only a few times a day at most; moving effects stay one colour. (#312)
+
+### Changed
+
+- Chains: the daemon can hold a header while the app asks what is plugged into it, and puts the length back if the window closes. (#338)
+- Chains: set up a header's parts in one commit that either lands whole or leaves everything as it was. (#338)
+- Effects: a draft previews on the groups of the active scene that play its effect, or on every light as one group when no group plays it, and leaving the editor puts the active scene back (#310)
+- Effects: a stack's areas follow the group it plays in, so a layer over a device or a zone outside that group says "not in this group" instead of painting the wrong lights (#310)
+- Effects: a stack a group of any scene plays is not deleted without `--force`, and the refusal names the scenes it is in (#310)
+- Effects: the change of the running effect's properties is refused while the editor's draft holds the lights: the draft is the editor's unsaved work, and its values are changed in the editor, not with this route (#310)
+
+### Fixed
+
+- Lights: the lights API answers its edges the way the rest of the API does. A light whose run starts past the end of its zone has no LEDs, a light of a device that has no such zone is named after the device, a change that changes nothing leaves the file on disk alone, and a patch the route cannot read (an unknown arrangement, say) is refused with the API's own error shape instead of a bare line of text (#310)
 - `canvas-rgb`: a command that cannot reach the daemon, or is never answered, now fails with a message that says which it was instead of waiting on the machine: a request gives up after 5 s to connect and 120 s in all, a connect that failed is tried three times (nothing was sent), a daemon that took the connection and went quiet says it did not answer within the limit, and an answer that cannot be read is a failure rather than an empty success (#328)
+
+### Removed
+
+- The per-LED walk and the onboarding session. Chain setup replaces them. (#338)
+- Layout, its placement canvas and the part-placing setup. Saved layouts become scenes. (#310)
 
 ## [0.13.1] - 2026-11-11
 
@@ -318,7 +394,9 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
+[0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
 [0.13.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...v0.13.0
 [0.12.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.11.1...v0.12.0

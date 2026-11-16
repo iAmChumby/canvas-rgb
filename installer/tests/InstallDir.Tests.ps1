@@ -447,6 +447,19 @@ Test-Case 'real ACLs: a folder with a real NULL DACL is refused as writable by E
         Assert-True ($why -eq "'$t' can be changed by S-1-1-0") "got: $why"
     } finally { Remove-Throwaway $t }
 }
+Test-Case 'an unparsed ACE type fails closed (injected: NTFS refuses a crafted object ACE on disk)' {
+    # The real reader turns an ACE type it cannot parse into an allow-all ACE for a fake SID. NTFS rejects a
+    # hand-built object ACE, so drive the fail-closed branch with an injected reader instead of a real folder.
+    $rd = New-InstallDirReader
+    $rd.OwnerSid = { param($p) 'S-1-5-32-544' }
+    $rd.IsReparse = { param($p) $false }
+    $rd.IsDir = { param($p) $true }
+    $rd.List = { param($p) @() }
+    $rd.Aces = { param($p) @([pscustomobject]@{ Sid = 'unparsed-ace-type-5'; Mask = 0x1f01ff; Allow = $true; InheritOnly = $false }) }
+    Assert-Equal (Find-UntrustedAceSid -Aces (& $rd.Aces 'x') -Mask $script:InstallDirEntryWriteMask) 'unparsed-ace-type-5' 'the unparsed ACE is reported as a write by an untrusted SID'
+    $why = Find-InstallDirTreeProblem -Root 'C:\fake' -Reader $rd
+    Assert-True ($why -match "can be changed by unparsed-ace-type-5") "got: $why"
+}
 Test-Case 'Copy-InstallDirCheck: a normal copy works, a junction in the way is refused, a non-admin-owned file is refused' {
     $src = New-Throwaway; $home1 = New-Throwaway; $home2 = New-Throwaway; $victim = New-Throwaway; $home3 = New-Throwaway
     try {

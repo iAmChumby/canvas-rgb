@@ -1,6 +1,8 @@
 //! The device check for #311 (`docs/adapters.md`, "Device check for Luke"). TOUCHES REAL
 //! HARDWARE: run it only in a session Luke has said yes to, with canvas-rgb's output paused
 //! (`canvas-rgb output pause`) so the daemon does not write to the keyboard at the same time.
+//! It sends its picture outside the daemon's counter (#312): a run here is not counted against
+//! the wear limits in `royuan-stills.json`.
 //!
 //! ```text
 //! cargo run -p canvas-adapters --example royuan_check -- read      # read only: id, key map, mode

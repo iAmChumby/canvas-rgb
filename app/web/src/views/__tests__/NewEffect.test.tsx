@@ -6,8 +6,9 @@ import { refreshAll } from "@/lib/store";
 import { editorSource } from "@/test/editor";
 import { EffectsView } from "@/views/EffectsView";
 
-// New from code (D2.3) against the demo backend: `?state=html,stock` puts the sample user effect
-// and the two stock HTML effects in the library, so both starting points are real files.
+// New effect: the menu's three first-level choices, and the code path behind "Code" (D2.3)
+// against the demo backend. `?state=html,stock` puts the sample user effect and the two stock
+// HTML effects in the library, so both starting points are real files.
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -52,7 +53,7 @@ async function mount() {
   render(
     <>
       <NotifyHost />
-      {/* More is a page action: it lives in the status strip, so the strip is here. */}
+      {/* New effect is a page action: it lives in the status strip, so the strip is here. */}
       <StripSlotsProvider>
         <StripSlot kind="title" />
         <StripSlot kind="actions" />
@@ -66,22 +67,45 @@ async function mount() {
 const setState = (tokens: string) =>
   window.history.replaceState({}, "", `/effects/?state=${tokens}`);
 
+/** The New effect menu, open. */
+const menu = async () => {
+  fireEvent.click(screen.getByRole("button", { name: "New effect" }));
+  return screen.findByRole("dialog", { name: "New effect" });
+};
+
+/** The code path: New effect, then Code. */
 const newEffect = async () => {
-  // The code editor's way in is advanced, behind the page's overflow menu.
-  fireEvent.click(screen.getByRole("button", { name: "More effect actions" }));
-  fireEvent.click(await screen.findByRole("button", { name: "New from code" }));
+  const open = await menu();
+  fireEvent.click(within(open).getByRole("button", { name: "Code" }));
   return screen.findByTestId("new-effect");
 };
 
 describe("a new effect", () => {
-  it("names the HTML path one way, with no second explanation of it", async () => {
+  it("New effect opens a menu with Stack, Pattern and Code", async () => {
     await mount();
-    fireEvent.click(screen.getByRole("button", { name: "More effect actions" }));
-    const key = await screen.findByRole("button", { name: "New from code" });
-    expect(document.body.textContent).not.toContain("The HTML path");
-    fireEvent.click(key);
+    const open = await menu();
+    expect(within(open).getByRole("button", { name: "Stack" })).toBeTruthy();
+    expect(within(open).getByRole("button", { name: "Pattern" })).toBeTruthy();
+    expect(within(open).getByRole("button", { name: "Code" })).toBeTruthy();
+    // Nothing else is a first-level choice.
+    expect(within(open).getAllByRole("button")).toHaveLength(3);
+
+    // Stack is the stack builder it has always been.
+    fireEvent.click(within(open).getByRole("button", { name: "Stack" }));
+    expect(await screen.findByTestId("stack-builder")).toBeTruthy();
+    setState("html,stock");
+  });
+
+  it("Code still opens the chooser with copy and blank", async () => {
+    await mount();
+    fireEvent.click(screen.getByRole("button", { name: "New effect" }));
+    const open = await screen.findByRole("dialog", { name: "New effect" });
+    fireEvent.click(within(open).getByRole("button", { name: "Code" }));
     const chooser = await screen.findByTestId("new-effect");
     expect(within(chooser).getByRole("heading", { name: "New from code" })).toBeTruthy();
+    expect(chooser.textContent).toContain("Ink Drop");
+    expect(screen.getByRole("button", { name: "Blank effect" })).toBeTruthy();
+    // The path says one thing once: no second explanation of what it is.
     expect(chooser.textContent).not.toContain("The HTML path");
     expect(chooser.textContent).not.toContain("go back and use New effect");
   });

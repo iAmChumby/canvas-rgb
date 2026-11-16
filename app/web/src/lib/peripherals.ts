@@ -125,6 +125,14 @@ export function isUnread(detail: PeripheralDetail): boolean {
 export const NOT_READ_WORDS = "not read from the device";
 
 /**
+ * The same words as a sentence, for the tooltip that explains the dash (#374): a tooltip on the
+ * page is a sentence, so it starts with a capital and ends with a full stop. `NOT_READ_WORDS`
+ * stays the fragment, because it is read inside a longer name ("LED colour: not read from the
+ * device").
+ */
+export const NOT_READ_TIP = "Not read from the device.";
+
+/**
  * The value the device reported for a key, or `undefined` when the read did not carry it. This is
  * the one way a peripheral page asks "what does the device hold?" (#276): the answer is never a
  * schema default, a `?? 0` or a `?? "1"`. A caller that gets `undefined` draws the setting as not

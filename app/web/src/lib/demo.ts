@@ -4,17 +4,23 @@
 // can be seen. `?state=conflict|service-down|first-run|html` changes what the status reports.
 //
 // The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
-// be seen in a plain browser: `?state=daemon-down|openrgb-down|no-layout|device-empty|slow|
-// save-error|handback:<header id>`.
+// be seen in a plain browser: `?state=daemon-down|openrgb-down|device-empty|slow|
+// save-error|handback:<header id>|chains|chain-error|chain-start-error`.
 
 import { ApiFailure } from "@/lib/errors";
 import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
 import {
   answerDelayMs,
+  applyChainScenarios,
   applyDeviceScenarios,
   applyFanScenarios,
-  applyLayoutScenarios,
+  applyPatternScenarios,
+  applySceneScenarios,
   applyStatusScenarios,
+  PATTERN_FRONT_FANS,
+  PATTERN_FITS,
+  PATTERN_FLAGS,
+  PATTERN_GONE,
   conflictClearsMs,
   daemonDown,
   emptyArea,
@@ -36,17 +42,38 @@ import {
   INITIAL_SETTINGS,
   ONBOARD_EFFECTS,
   isHiddenEffect,
-  LAYOUT_DESK,
+  DEMO_CHAINS,
+  DEMO_LIGHTS,
+  DEMO_SCENES,
+  demoSceneProblem,
   CHIONE_DISPLAY,
   DISPLAY_DEFAULT,
   type DemoEffect,
   type Props,
 } from "@/lib/fixtures";
 import { demoHtmlEffects, demoSource, parseUserEffect } from "@/lib/demoEffects";
+import { htmlLimitSentence, SCENE_HTML_MAX } from "@/lib/htmlLimit";
 import { scriptBody } from "@/lib/effectSource";
 import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
-import type { Layout } from "@/proto/Layout";
+import type { Scene } from "@/proto/Scene";
+import type { Group } from "@/proto/Group";
+import type { GroupMove } from "@/proto/GroupMove";
+import type { GroupMoved } from "@/proto/GroupMoved";
+import type { GroupTaken } from "@/proto/GroupTaken";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { ScenesWrite } from "@/proto/ScenesWrite";
+import type { ScenePut } from "@/proto/ScenePut";
+import type { SceneCreate } from "@/proto/SceneCreate";
+import type { LightView } from "@/proto/LightView";
+import type { LightPatch } from "@/proto/LightPatch";
+import type { ChainView } from "@/proto/ChainView";
+import type { SetupCommit } from "@/proto/SetupCommit";
+import type { SetupCommitted } from "@/proto/SetupCommitted";
+import type { SetupEmpty } from "@/proto/SetupEmpty";
+import type { SetupLight } from "@/proto/SetupLight";
+import type { SetupRun } from "@/proto/SetupRun";
+import type { SetupStarted } from "@/proto/SetupStarted";
 import type { FanMode } from "@/proto/FanMode";
 import type { FanProfile } from "@/proto/FanProfile";
 import type { FanHeaderStatus } from "@/proto/FanHeaderStatus";
@@ -82,6 +109,11 @@ import type { EffectPreviewResponse } from "@/proto/EffectPreviewResponse";
 import type { DraftRequest } from "@/proto/DraftRequest";
 import type { DraftStatus } from "@/proto/DraftStatus";
 import type { Stack } from "@/proto/Stack";
+import type { Pattern } from "@/proto/Pattern";
+import type { PatternsResponse } from "@/proto/PatternsResponse";
+import type { DeletePatternResponse } from "@/proto/DeletePatternResponse";
+import type { LightFit } from "@/proto/LightFit";
+import { fitKind, kindWords } from "@/lib/patternFit";
 import type { StackPreviewRequest } from "@/proto/StackPreviewRequest";
 import type { StackPreviewResponse } from "@/proto/StackPreviewResponse";
 import type { StackSummary } from "@/proto/StackSummary";
@@ -90,16 +122,51 @@ import {
   stackAsEffect,
   stackDetail,
   stackEffectSummary,
+  stackHtmlSlots,
   stackProps,
   stackSummary,
 } from "@/lib/demoStacks";
 import { stackThumbnailBytes } from "@/lib/stackFrame";
+import { wholeLightsCanvas } from "@/lib/groupCanvas";
 
 const BASE = "/api/v1";
-const DEMO_LAYOUTS_KEY = "canvas-rgb.demo-layouts";
 const DEMO_ONBOARDED_KEY = "canvas-rgb.demo-onboarded";
-const APP_VERSION = "0.13.1";
+const APP_VERSION = "0.17.0";
 const SCHEMA_VERSION = 1;
+/** `pattern:` + the name, as the spine writes it. */
+const PATTERN_ID_PREFIX = "pattern:";
+/** The id prefix of an HTML effect (`crates/canvas-proto/src/scene.rs`). */
+const HTML_ID_PREFIX = "html:";
+
+/**
+ * The HTML runtimes a group starts (#370): one for an `html:` effect, and one for each HTML layer
+ * or mask of a stack, by the daemon's own rule (`stackHtmlSlots`): a mask whose effect does not
+ * resolve takes no slot. The scene's limit counts these, not groups (design Q5).
+ */
+function htmlRuntimesOf(s: DemoState, effect: string | null): number {
+  if (effect === null) return 0;
+  if (effect.startsWith(HTML_ID_PREFIX)) return 1;
+  const stack = s.stacks[effect];
+  return stack ? stackHtmlSlots(stack, s.effects) : 0;
+}
+
+/**
+ * The HTML runtimes a scene starts, by the daemon's own count (`html_runtime_count` in
+ * `crates/canvas-daemon/src/scenes.rs`): one for an `html:` group, and one for each HTML layer or
+ * mask of a stack. The limit counts these, not groups.
+ */
+function sceneHtmlRuntimes(s: DemoState, scene: Scene): number {
+  return scene.groups.reduce(
+    (n, group) => n + htmlRuntimesOf(s, group.plays.type === "effect" ? group.plays.effect : null),
+    0,
+  );
+}
+/** The daemon's sentence when a pattern's kind has nothing plugged in (0.16.0). */
+const NO_DEVICE_OF_KIND = "no device of this kind is connected";
+/** The spine's limits (`canvas_proto::pattern`). */
+const PATTERN_NAME_MAX = 60;
+const PATTERN_LEDS_MAX = 4096;
+const PATTERN_FRAMES_MAX = 256;
 
 function scenario(): Set<string> {
   if (typeof window === "undefined") return new Set();
@@ -113,13 +180,22 @@ interface DemoState {
   effects: Record<string, DemoEffect>;
   /** The saved effect stacks, by `stack:` id. */
   stacks: Record<string, Stack>;
+  /** The saved patterns, by `pattern:` id (0.16.0). */
+  patterns: Record<string, Pattern>;
   favorites: Set<string>;
   saved: Record<string, Props>;
   /** The owner's presets per effect, in the order they were saved. */
   userPresets: Record<string, Preset[]>;
   activeEffect: string | null;
-  layouts: Layout[];
-  activeLayout: string;
+  /** The scenes (0.14.0), the id of the active one and the lights they group. */
+  scenes: Scene[];
+  activeScene: string;
+  lights: LightView[];
+  /** Every resizable header and what is plugged into it (0.15.0). */
+  chains: ChainView[];
+  /** The chain setup session open now: the daemon holds one at a time. */
+  setup: { session: string; restore_to: number; runs: SetupRun[] } | null;
+  setupCounter: number;
   fanModes: Record<string, FanMode>;
   fanFloor: number;
   fanHotLimits: HotLimits;
@@ -153,13 +229,15 @@ interface DemoState {
     leaseUntil: number;
     /** A stack draft carries the stack, its epoch and its sequence (D95.4.5). */
     stack?: Stack;
+    /** A pattern draft carries the pattern, its epoch and its sequence (0.16.0). */
+    pattern?: Pattern;
     epoch?: string;
     seq?: number;
   } | null;
   /** The preview requests answered, so a test can count them. */
   previews: number;
   /** The draft requests made, so a test can count them and read what they carried. */
-  draftCalls: { method: string; at: number; props?: Props; htmlBytes?: number }[];
+  draftCalls: { method: string; at: number; props?: Props; htmlBytes?: number; pattern?: string }[];
   /** The sentence the next draft ending carries (a prior that could not be restored). */
   draftNote: string | null;
   /** `?state=draft-running` has put its draft on the lights once. */
@@ -221,6 +299,56 @@ function seededStackPresets(
   };
 }
 
+/**
+ * `?state=patterns` (or any token that starts with `pattern`) turns the seeded patterns on, as
+ * `?state=stack` turns the stacks on: two patterns the library and the editor can be seen on, a
+ * ring of 12 with one LED marked and a strip of 30 with three. A page without the token has none,
+ * so every other state of the editor looks as it did before patterns.
+ */
+function patternScenarios(scenario: Set<string>): boolean {
+  for (const token of scenario) if (token.startsWith("pattern")) return true;
+  if (typeof window === "undefined") return false;
+  return new URLSearchParams(window.location.search).has("pattern");
+}
+
+/** A pattern's one frame, all off but the LEDs named: index to colour. */
+function patternFrame(leds: number, marked: Record<number, string>): Pattern["frames"][number] {
+  return {
+    colors: Array.from({ length: leds }, (_, i) => marked[i] ?? "#000000"),
+    hold: 0,
+  };
+}
+
+function seededPatterns(scenario: Set<string>): Record<string, Pattern> {
+  if (!patternScenarios(scenario)) return {};
+  const intake: Pattern = {
+    id: "pattern:Intake",
+    built_on: { led_count: 12, arrangement: "ring" },
+    // One LED marked: the first one, at the top of the ring.
+    frames: [patternFrame(12, { 0: "#ff2d55" })],
+    motion: { type: "none" },
+  };
+  const underglow: Pattern = {
+    id: "pattern:Underglow",
+    built_on: { led_count: 30, arrangement: "strip" },
+    // Three LEDs marked: the two ends and the middle, so a stretch shows as a move of the ends.
+    frames: [patternFrame(30, { 0: "#00d8ff", 15: "#0066ff", 29: "#a300ff" })],
+    motion: { type: "none" },
+  };
+  // The fans' own pattern: a ring of 40, the demo case fans' count, so it fits them exactly. Only
+  // the fan states ask it for: a plain `?state=patterns` keeps the demo's two.
+  if (scenario.has(PATTERN_FITS) || scenario.has(PATTERN_FLAGS) || scenario.has(PATTERN_GONE)) {
+    const frontFans: Pattern = {
+      id: PATTERN_FRONT_FANS,
+      built_on: { led_count: 40, arrangement: "ring" },
+      frames: [patternFrame(40, { 0: "#00ff9c", 20: "#00d8ff" })],
+      motion: { type: "none" },
+    };
+    return { [intake.id]: intake, [underglow.id]: underglow, [frontFans.id]: frontFans };
+  }
+  return { [intake.id]: intake, [underglow.id]: underglow };
+}
+
 function initialState(): DemoState {
   const s = scenario();
   const effects: Record<string, DemoEffect> = {};
@@ -244,22 +372,6 @@ function initialState(): DemoState {
   const fanModes: Record<string, FanMode> = {};
   for (const h of FAN_HEADERS) fanModes[h.id] = profile?.headers[h.id] ?? { mode: "bios" };
   const favorites = new Set(EFFECTS.filter((e) => e.summary.favorite).map((e) => e.schema.id));
-  const layouts = applyLayoutScenarios([{ ...LAYOUT_DESK, zones: LAYOUT_DESK.zones.map((z) => ({ ...z })) }], LAYOUT_DESK.id);
-  // `?state=persist`: saved layouts are kept in localStorage, so a reload sees what was saved,
-  // as it does with the daemon. Used by the onboarding's reload checks.
-  if (s.has("persist")) {
-    try {
-      const kept = window.localStorage.getItem(DEMO_LAYOUTS_KEY);
-      if (kept) layouts.layouts = JSON.parse(kept) as Layout[];
-    } catch {
-      // Starts from the fixture.
-    }
-  }
-  if (s.has("presets")) {
-    const dusk = seededPresets().aurora?.[0];
-    const layout = layouts.layouts.find((l) => l.id === layouts.active);
-    if (dusk && layout) layout.effect = { id: "aurora", props: { ...dusk.props } };
-  }
   let onboarded = onboardingDone();
   if (s.has("persist")) {
     try {
@@ -268,21 +380,65 @@ function initialState(): DemoState {
       // Not remembered.
     }
   }
+  const sceneScenarios = applySceneScenarios(DEMO_SCENES, DEMO_LIGHTS);
+  // `?state=presets`: the group that plays Aurora plays it with the first preset's values, so the
+  // strip lights that key (0.14.0: a group's own values are what run, not the layout's effect).
+  if (s.has("presets")) {
+    const dusk = seededPresets().aurora?.[0];
+    if (dusk) {
+      for (const scene of sceneScenarios.scenes) {
+        for (const group of scene.groups) {
+          if (group.plays.type === "effect" && group.plays.effect === "aurora") {
+            group.plays = { type: "effect", effect: "aurora", props: { ...dusk.props } };
+          }
+        }
+      }
+    }
+  }
   const everyDevice = DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }));
   const stacks = seededStacks(s, effects);
+  const patterns = seededPatterns(s);
+  const chainScenarios = applyChainScenarios(
+    DEMO_CHAINS.map((chain) => structuredClone(chain)),
+    sceneScenarios.lights,
+    sceneScenarios.scenes,
+  );
+  // `?state=patterns`: the case fans play `pattern:Intake`, so a pattern is in the library, on the
+  // lights and in a scene at once. The inspector opens on it, and deleting it is refused by the
+  // scene's own name.
+  if (patterns["pattern:Intake"]) {
+    for (const scene of chainScenarios.scenes) {
+      const group = scene.groups.find((g) => g.id === "g-case");
+      if (group) group.plays = { type: "effect", effect: "pattern:Intake", props: {} };
+    }
+  }
+  // `?state=pattern-fits` and its siblings: a scene whose groups play a pattern, so the picker's
+  // marks and the group's flags can be seen (demoScenarios has the four states).
+  const patternScenarios = applyPatternScenarios(
+    { scenes: chainScenarios.scenes, active: sceneScenarios.active },
+    chainScenarios.lights,
+  );
   return {
     settings: { ...INITIAL_SETTINGS },
     onboardingComplete: onboarded,
     held: foundOnRescan() ? everyDevice : [],
-    devices: applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
+    devices: chainZoneLengths(
+      applyDeviceScenarios(DEVICES.map((d) => ({ ...d, zones: d.zones.map((z) => ({ ...z })) }))),
+      chainScenarios.chains,
+    ),
     effects,
     stacks,
+    patterns,
     favorites,
     saved: {},
     userPresets: { ...(s.has("presets") ? seededPresets() : {}), ...seededStackPresets(stacks, effects) },
     activeEffect: "aurora",
-    layouts: layouts.layouts,
-    activeLayout: layouts.active,
+    scenes: patternScenarios.scenes,
+    activeScene: patternScenarios.active,
+    lights: chainScenarios.lights,
+    chains: chainScenarios.chains,
+    setup: null,
+    setupCounter: 0,
     fanModes,
     fanFloor: 20,
     fanHotLimits: { cpu_c: null, gpu_c: null, board_c: null },
@@ -442,14 +598,17 @@ function draftStatus(s: DemoState): DraftStatus {
   const slow = scenario().has("slow-draft");
   const heartbeat = fast ? 300 : slow ? 600 : 5000;
   const stack = draft?.stack;
+  // A pattern draft's slot id is `draft:` + the pattern's id, as the daemon's is.
+  const pattern = draft?.pattern;
+  const id = stack ? stack.id : pattern ? `draft:${pattern.id}` : draft ? `draft:${draft.hash}` : "";
   return {
     active: draft !== null,
-    ...(draft ? { id: stack ? stack.id : `draft:${draft.hash}`, source_hash: draft.hash } : {}),
+    ...(draft ? { id, source_hash: draft.hash } : {}),
     props: draft ? { ...draft.props } : {},
     lease_remaining_ms: draft ? Math.max(0, draft.leaseUntil - Date.now()) : 0,
     heartbeat_ms: heartbeat,
     lease_ms: fast ? 900 : 15000,
-    ...(stack ? { epoch: draft?.epoch, seq: draft?.seq } : {}),
+    ...(stack || pattern ? { epoch: draft?.epoch, seq: draft?.seq } : {}),
   };
 }
 
@@ -490,12 +649,6 @@ function checkWhiteBalance(wb: { red: number; green: number; blue: number }): vo
 /** The daemon's caps (`crates/canvas-daemon/src/api/devices.rs`). */
 const WHITE_BALANCE_MAX_DEVICES = 128;
 const WHITE_BALANCE_MAX_ID_LEN = 256;
-
-function activeLayout(): Layout {
-  const found = st().layouts.find((l) => l.id === st().activeLayout);
-  if (!found) fail(404, "not_found", "no active layout");
-  return found;
-}
 
 // ---- a slow device read (`?state=slow-read`) ----
 
@@ -731,8 +884,12 @@ function statusNow(): Status {
     devices_connected: connected,
     devices_total: total,
     preview_subscribers: 1,
-    active_layout: s.activeLayout,
-    active_effect: s.activeEffect,
+    active_scene: activeSceneOf(s) ? { id: s.activeScene, name: activeSceneOf(s)?.name ?? "" } : null,
+    active_effects: activeSceneOf(s)
+      ? sceneEffects(activeSceneOf(s) as Scene)
+      : s.activeEffect
+        ? [s.activeEffect]
+        : [],
     openrgb: waking ? "connecting" : "connected",
     service: down ? "down" : "connected",
     service_down_ms: down ? 14000 + elapsed : null,
@@ -742,12 +899,522 @@ function statusNow(): Status {
   });
 }
 
+// ---- scenes ----
+
+function activeSceneOf(s: DemoState): Scene | undefined {
+  return s.scenes.find((scene) => scene.id === s.activeScene);
+}
+
+/** The effect ids a scene's groups play, in group order, without repeats. */
+function sceneEffects(scene: Scene): string[] {
+  const out: string[] = [];
+  for (const group of scene.groups) {
+    if (group.plays.type === "effect" && !out.includes(group.plays.effect)) out.push(group.plays.effect);
+  }
+  return out;
+}
+
+/** What `GET /scenes` answers: a group whose effect is gone is dark and says why, and a group
+ *  past the scene's HTML limit is dark and says why (#370). */
+function scenesAnswer(s: DemoState): ScenesResponse {
+  const active = activeSceneOf(s);
+  const effectOf = (g: Group) => (g.plays.type === "effect" ? g.plays.effect : null);
+  const total = (active?.groups ?? []).reduce((n, g) => n + htmlRuntimesOf(s, effectOf(g)), 0);
+  // The first SCENE_HTML_MAX runtimes run, in scene order; the rest say why they do not.
+  let running = 0;
+  return {
+    active: s.activeScene,
+    scenes: s.scenes,
+    group_states: (active?.groups ?? []).map((g) => {
+      const effect = effectOf(g);
+      const pattern = effect !== null ? s.patterns[effect] : undefined;
+      let failed: string | null = null;
+      if (effect !== null && !s.effects[effect] && !s.stacks[effect] && !pattern) {
+        failed = effect.startsWith(PATTERN_ID_PREFIX)
+          ? `the pattern ${effect} is gone`
+          : `the effect ${effect} is not installed`;
+      } else {
+        const runtimes = htmlRuntimesOf(s, effect);
+        if (running + runtimes > SCENE_HTML_MAX) failed = htmlLimitSentence(total);
+        else running += runtimes;
+      }
+      return {
+        id: g.id,
+        failed,
+        // The fit flags of a group that plays a pattern (0.16.0); none for a canvas effect.
+        fits: pattern ? patternFits(s, g) : [],
+      };
+    }),
+  };
+}
+
+function sceneOrNotFound(s: DemoState, id: string): Scene {
+  const scene = s.scenes.find((x) => x.id === id);
+  if (!scene) fail(404, "not_found", `no scene ${id}`);
+  return scene;
+}
+
+/** The rules the daemon's `validate_scene` keeps, answered as a 422. */
+function checkScene(s: DemoState, scene: Scene): void {
+  if ([...scene.name].length > 40) fail(422, "validation", `the name of scene ${scene.id} is over 40 characters`);
+  const known = new Set(s.lights.map((l) => l.light.id));
+  for (const group of scene.groups) {
+    if ([...group.name].length > 40) fail(422, "validation", `the name of group ${group.id} is over 40 characters`);
+    if (group.brightness > 100) fail(422, "validation", `the brightness of group ${group.id} is over 100`);
+    for (const light of group.members) {
+      if (!known.has(light)) fail(422, "validation", `group ${group.name} holds ${light}, which is not a light`);
+    }
+  }
+  const problem = demoSceneProblem(scene);
+  if (problem) fail(422, "validation", problem);
+}
+
+let demoSceneCounter = 0;
+
+/**
+ * An id no group of `taken` holds: the base when it is free, else the base with a number on the
+ * end (`fresh_id` in the daemon).
+ */
+function freshGroupId(base: string, taken: string[]): string {
+  const held = new Set(taken);
+  if (!held.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const id = `${base}-${n}`;
+    if (!held.has(id)) return id;
+  }
+}
+
+/**
+ * The daemon's move route in the demo (#368): the same rules and the same answer. The group's
+ * lights are taken out of the target's other groups, a group left with no light goes, the group
+ * lands at the end of the target, and a copy always gets a fresh id. A dry run answers the same
+ * way and saves nothing.
+ */
+function moveGroupRoute(s: DemoState, fromId: string, groupId: string, body: GroupMove): GroupMoved {
+  const from = sceneOrNotFound(s, fromId);
+  const to = sceneOrNotFound(s, body.to);
+  if (from.id === to.id) fail(422, "validation", "A group goes to another scene.");
+  if (from.rev !== body.expected_rev_from) {
+    fail(409, "conflict", `scene ${from.name} changed in another window (it is at revision ${from.rev})`);
+  }
+  if (to.rev !== body.expected_rev_to) {
+    fail(409, "conflict", `scene ${to.name} changed in another window (it is at revision ${to.rev})`);
+  }
+  const moving = from.groups.find((g) => g.id === groupId);
+  if (!moving) fail(404, "not_found", `no group ${groupId} in scene ${from.name}`);
+
+  const taken: GroupTaken[] = [];
+  const emptied: string[] = [];
+  const kept: Group[] = [];
+  for (const other of to.groups) {
+    const gone = other.members.filter((m) => moving.members.includes(m));
+    if (gone.length === 0) {
+      kept.push(structuredClone(other));
+      continue;
+    }
+    taken.push({ group_id: other.id, group_name: other.name, lights: gone });
+    const left = other.members.filter((m) => !moving.members.includes(m));
+    if (left.length === 0) emptied.push(other.name);
+    else kept.push({ ...structuredClone(other), members: left });
+  }
+  // The id: a move keeps its own when the target is free of it; a copy always mints one that
+  // neither scene holds.
+  const held = body.copy
+    ? [...kept.map((g) => g.id), ...from.groups.map((g) => g.id)]
+    : kept.map((g) => g.id);
+  const id = freshGroupId(moving.id, held);
+  kept.push({ ...structuredClone(moving), id });
+
+  const toAfter: Scene = { ...structuredClone(to), rev: to.rev + 1, groups: kept };
+  const fromAfter: Scene = body.copy
+    ? structuredClone(from)
+    : {
+        ...structuredClone(from),
+        rev: from.rev + 1,
+        groups: from.groups.filter((g) => g.id !== groupId).map((g) => structuredClone(g)),
+      };
+  const answer: GroupMoved = {
+    group_id: id,
+    saved: !body.dry_run,
+    scenes: [fromAfter, toAfter],
+    before: [structuredClone(from), structuredClone(to)],
+    taken,
+    emptied,
+  };
+  // Every scene that would be written passes the daemon's own checks before anything is
+  // written, a dry run included: the HTML limit is the daemon's check (`check_html_limit` in
+  // `crates/canvas-daemon/src/scenes.rs`), and its sentence is what the page shows on the row it
+  // refuses. The daemon's sentence names no scene here: `check_saveable` gives it plain.
+  if (!body.copy) {
+    const count = sceneHtmlRuntimes(s, fromAfter);
+    if (count > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(count));
+  }
+  const toCount = sceneHtmlRuntimes(s, toAfter);
+  if (toCount > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(toCount));
+  if (body.dry_run) return answer;
+  // The write: both scenes land, as the daemon's one save does.
+  s.scenes[s.scenes.indexOf(from)] = fromAfter;
+  s.scenes[s.scenes.indexOf(to)] = toAfter;
+  return answer;
+}
+
+/**
+ * The daemon's whole-list write in the demo (#368 undo, #371 order): the order of the scene bar
+ * and/or whole scenes, all checked before anything is written.
+ */
+function writeScenesRoute(s: DemoState, body: ScenesWrite): ScenesResponse {
+  const ids = s.scenes.map((x) => x.id);
+  // The shape first: every scene named once, and an order that names every scene once.
+  const seen = new Set<string>();
+  for (const item of body.scenes ?? []) {
+    if (!ids.includes(item.scene.id)) {
+      fail(422, "validation", `there is no scene with the id ${item.scene.id}`);
+    }
+    if (seen.has(item.scene.id)) fail(422, "validation", `the scene ${item.scene.id} is named twice`);
+    seen.add(item.scene.id);
+  }
+  if (body.order) {
+    const named = [...body.order].sort().join("|");
+    if (named !== [...ids].sort().join("|")) {
+      fail(422, "validation", "The order must name every scene once.");
+    }
+  }
+  // Then the staleness of every revision and of the order.
+  for (const item of body.scenes ?? []) {
+    const now = s.scenes.find((x) => x.id === item.scene.id);
+    if (now && now.rev !== item.expected_rev) {
+      fail(409, "conflict", `scene ${now.name} changed in another window (it is at revision ${now.rev})`);
+    }
+  }
+  if (body.expected_order && body.expected_order.join("|") !== ids.join("|")) {
+    fail(409, "conflict", "the scenes were put in another order in another window");
+  }
+  // The write: the scenes land at the rev they are made from plus one.
+  for (const item of body.scenes ?? []) {
+    const at = s.scenes.findIndex((x) => x.id === item.scene.id);
+    const saved: Scene = { ...structuredClone(item.scene), rev: s.scenes[at]!.rev + 1 };
+    checkScene(s, saved);
+    s.scenes[at] = saved;
+  }
+  if (body.order && body.order.join("|") !== ids.join("|")) {
+    s.scenes = body.order
+      .map((id) => s.scenes.find((x) => x.id === id))
+      .filter((x): x is Scene => x !== undefined);
+  }
+  return scenesAnswer(s);
+}
+
+function createScene(s: DemoState, body: SceneCreate): Scene {
+  const name = (body.name ?? "").trim();
+  if (!name) fail(422, "validation", "a scene needs a name");
+  demoSceneCounter += 1;
+  const copy = body.copy_of ? sceneOrNotFound(s, body.copy_of) : null;
+  const scene: Scene = {
+    id: `scene-${demoSceneCounter}`,
+    name,
+    rev: 1,
+    groups: copy
+      ? copy.groups.map((g, i) => ({ ...structuredClone(g), id: `g${demoSceneCounter}-${i + 1}` }))
+      : [
+          {
+            id: `g${demoSceneCounter}-1`,
+            name: "Everything",
+            members: s.lights.map((l) => l.light.id),
+            plays: { type: "off" },
+            mode: "flow_across",
+            brightness: 100,
+          },
+        ],
+  };
+  // The daemon's rules hold for a new scene too: a name over 40 characters is refused.
+  checkScene(s, scene);
+  s.scenes.push(scene);
+  return scene;
+}
+
+function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
+  const bad = (): never => fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
+  if (seg.length === 1) {
+    if (method === "GET") return scenesAnswer(s);
+    if (method === "POST") return createScene(s, body as SceneCreate);
+    if (method === "PUT") return writeScenesRoute(s, body as ScenesWrite);
+    return bad();
+  }
+  if (seg[1] === "active") {
+    if (method !== "PUT") return bad();
+    const id = (body as { id: string }).id;
+    sceneOrNotFound(s, id);
+    s.activeScene = id;
+    return scenesAnswer(s);
+  }
+  const id = seg[1] ?? "";
+  const scene = sceneOrNotFound(s, id);
+  if (seg.length === 2) {
+    if (method === "PUT") {
+      const put = body as ScenePut;
+      if (put.scene.id !== id) fail(422, "validation", "the scene id in the body does not match the path");
+      if (put.expected_rev !== scene.rev) {
+        fail(409, "conflict", `scene ${scene.name} changed in another window (it is at revision ${scene.rev})`);
+      }
+      checkScene(s, put.scene);
+      const saved: Scene = { ...structuredClone(put.scene), rev: scene.rev + 1 };
+      s.scenes[s.scenes.indexOf(scene)] = saved;
+      return saved;
+    }
+    if (method === "DELETE") {
+      if (s.scenes.length === 1) fail(409, "conflict", "the last scene cannot be deleted");
+      s.scenes = s.scenes.filter((x) => x.id !== id);
+      if (s.activeScene === id) s.activeScene = s.scenes[0]?.id ?? "";
+      return { ok: true };
+    }
+    return bad();
+  }
+  if (seg[2] === "groups" && seg.length === 5) {
+    const group = scene.groups.find((g) => g.id === seg[3]);
+    if (!group) fail(404, "not_found", `no group ${seg[3]} in scene ${scene.name}`);
+    if (seg[4] === "move" && method === "POST") {
+      return moveGroupRoute(s, id, seg[3]!, body as GroupMove);
+    }
+    if (seg[4] === "props" && method === "PATCH") {
+      if (group.plays.type !== "effect") fail(422, "validation", `group ${group.name} plays nothing`);
+      group.plays = { ...group.plays, props: { ...group.plays.props, ...(body as Props) } };
+      // The daemon saves the write, bumps the scene's rev and answers the whole scene.
+      scene.rev += 1;
+      return structuredClone(scene);
+    }
+    if (seg[4] === "brightness" && method === "PUT") {
+      const brightness = (body as { brightness: number }).brightness;
+      if (!(brightness >= 0 && brightness <= 100)) fail(422, "validation", "brightness must be 0..=100");
+      group.brightness = Math.round(brightness);
+      // The daemon saves the write, bumps the scene's rev and answers the whole scene.
+      scene.rev += 1;
+      return structuredClone(scene);
+    }
+  }
+  return bad();
+}
+
+/**
+ * `?state=pattern-unplugged`: the DRAM sticks are out of the machine, so one kind of device has
+ * no light connected at all - the device step still offers it and says so. The state itself is
+ * untouched: this is how the lights read, not a change to them.
+ */
+function unpluggedLights(lights: LightView[]): LightView[] {
+  if (!scenario().has("pattern-unplugged")) return lights;
+  return lights.map((view) =>
+    view.led_count === 8 && view.light.arrangement === "strip" ? { ...view, connected: false } : view,
+  );
+}
+
+function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
+  if (seg.length === 1 && method === "GET") return { lights: unpluggedLights(s.lights) };
+  if (seg[1] === "flash" && method === "POST") return { ok: true };
+  if (seg.length === 2 && method === "PATCH") {
+    const view = s.lights.find((l) => l.light.id === seg[1]);
+    if (!view) fail(404, "not_found", `no light ${seg[1]}`);
+    const patch = body as LightPatch;
+    if ("name" in patch) {
+      const name = (patch.name ?? "").trim();
+      if (name) view.light.name = name;
+      else delete view.light.name;
+      const device = s.devices.find((d) => d.id === view.light.device_id);
+      const zone = device?.zones.find((z) => z.index === view.light.zone_index);
+      view.label = name || (device && zone ? `${device.name} · ${zone.name}` : view.label);
+    }
+    if (patch.arrangement) view.light.arrangement = patch.arrangement;
+    if (typeof patch.reversed === "boolean") view.light.reversed = patch.reversed;
+    return view;
+  }
+  return fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
+}
+
+// ---- chains (0.15.0) ----
+
+/** The zone's lights as the daemon lists them: the whole-zone light, or its parts. */
+function zoneLights(s: DemoState, chain: ChainView): LightView[] {
+  return s.lights.filter(
+    (l) => l.light.device_id === chain.device_id && l.light.zone_index === chain.zone_index,
+  );
+}
+
+/**
+ * Puts the zone's lights in the lights list and in every group of every scene the way a commit
+ * does: the parts in chain order stand where the zone's light stood, and each part takes the place
+ * of the part at its position. A part that no longer exists leaves its group.
+ */
+/** A commit resizes the header to its parts' LEDs, so the device list reports that length too. */
+function setZoneLeds(devices: DeviceInfo[], chain: ChainView, leds: number): void {
+  const zone = devices.find((d) => d.id === chain.device_id)?.zones.find((z) => z.index === chain.zone_index);
+  if (zone) zone.led_count = leds;
+}
+
+/** A set-up chain's zone has the parts' length (`?state=chains` seeds one as a commit leaves it). */
+function chainZoneLengths(devices: DeviceInfo[], chains: ChainView[]): DeviceInfo[] {
+  for (const chain of chains) if (chain.state === "set_up") setZoneLeds(devices, chain, chain.leds);
+  return devices;
+}
+
+function replaceZoneLights(s: DemoState, chain: ChainView, parts: LightView[]): void {
+  const before = zoneLights(s, chain);
+  const oldIds = before.map((l) => l.light.id);
+  const anchor = oldIds[0] ?? `${chain.device_id}#z${chain.zone_index}`;
+  const ids = parts.map((part) => part.light.id);
+  s.lights = s.lights.flatMap((l) => {
+    if (!oldIds.includes(l.light.id)) return [l];
+    return l.light.id === anchor ? parts : [];
+  });
+  for (const scene of s.scenes) {
+    for (const group of scene.groups) {
+      group.members = group.members.flatMap((id) => {
+        if (id === anchor) return ids;
+        const at = oldIds.indexOf(id);
+        if (at < 0) return [id];
+        const next = ids[at];
+        return next ? [next] : [];
+      });
+    }
+  }
+}
+
+/** The session a light or an ending names, or a 409: the daemon ends one that has gone stale. */
+function checkSession(s: DemoState, body: { session: string }): void {
+  if (!body || typeof body.session !== "string") fail(422, "validation", "a setup request names its session");
+  if (!s.setup || s.setup.session !== body.session) {
+    fail(409, "conflict", "the setup session has ended; open the header again");
+  }
+}
+
+function chainsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
+  const bad = (): never => fail(404, "not_found", `no route ${method} /${seg.join("/")}`);
+  if (seg.length === 1 && method === "GET") return { chains: s.chains };
+
+  const chain = s.chains.find(
+    (c) => c.device_id === seg[1] && c.zone_index === Number(seg[2] ?? NaN),
+  );
+  if (!chain) fail(404, "not_found", `no resizable header ${seg[1] ?? ""} zone ${seg[2] ?? ""}`);
+  if (seg[3] !== "setup") return bad();
+
+  if (seg.length === 4) {
+    if (method === "POST") {
+      // One session at a time, as the daemon: another header's setup must be left first.
+      if (s.setup) fail(409, "conflict", "another header is being set up; finish or leave it first");
+      // `?state=chain-start-error`: the header does not answer the start, in the device's own words.
+      if (scenario().has("chain-start-error")) {
+        fail(503, "unavailable", "the header is busy: another lighting app holds it");
+      }
+      s.setupCounter += 1;
+      const session = `demo-setup-${s.setupCounter}`;
+      s.setup = { session, restore_to: chain.leds, runs: [] };
+      const answer: SetupStarted = {
+        session,
+        restore_to: chain.leds,
+        raised_to: chain.max_leds,
+      };
+      return answer;
+    }
+    if (method === "DELETE") {
+      checkSession(s, body as SetupEmpty);
+      s.setup = null;
+      return { ok: true };
+    }
+    return bad();
+  }
+
+  const step = seg[4];
+  if (step === "light" && method === "POST") {
+    const light = body as SetupLight;
+    checkSession(s, light);
+    if (s.setup) s.setup.runs = light.runs;
+    // A test page can read the runs the flow asked for: `window.__chainLight = []` before it.
+    (globalThis as { __chainLight?: unknown[] }).__chainLight?.push({ at: Date.now(), runs: light.runs });
+    return { ok: true };
+  }
+
+  if (step === "commit" && method === "POST") {
+    const commit = body as SetupCommit;
+    checkSession(s, commit);
+    if (commit.parts.length === 0) fail(422, "validation", "a chain needs at least one part");
+    let total = 0;
+    // `copies` is a count and nothing more: 0 and above 32 are refused, 2 or more only for the
+    // header's only part, and the LEDs are counted once (the daemon's `plan_commit`).
+    commit.parts.forEach((part, i) => {
+      if (part.copies === 0) fail(422, "validation", `part ${i + 1} is shown 0 times; count at least one orange light`);
+      if (part.copies !== undefined && part.copies > 32) {
+        fail(422, "validation", `part ${i + 1} is shown ${part.copies} times, and the app counts up to 32; count again`);
+      }
+    });
+    if (commit.parts.length > 1 && commit.parts.some((part) => (part.copies ?? 1) > 1)) {
+      fail(422, "validation", "a run that the header repeats has to be the only part on that header");
+    }
+    commit.parts.forEach((part, i) => {
+      if (part.leds < 1) fail(422, "validation", `part ${i + 1} has no LEDs`);
+      if ([...part.name].length > 40) {
+        fail(422, "validation", `the name of part ${i + 1} is over 40 characters`);
+      }
+      total += part.leds;
+    });
+    if (total > chain.max_leds) {
+      fail(422, "validation", `${total} LEDs is above the ${chain.max_leds} this header drives`);
+    }
+    // `?state=chain-error`: the resize the daemon would make fails, in the device's own words.
+    if (scenario().has("chain-error")) {
+      fail(500, "internal", "the header could not be resized: OpenRGB did not answer");
+    }
+    let start = 0;
+    const parts: LightView[] = commit.parts.map((part, i) => {
+      const view: LightView = {
+        light: {
+          id: `${chain.device_id}#z${chain.zone_index}p${i + 1}`,
+          device_id: chain.device_id,
+          zone_index: chain.zone_index,
+          leds: { start, count: part.leds },
+          name: part.name,
+          arrangement: part.kind === "fan" ? "ring" : "strip",
+          reversed: false,
+          kind: part.kind,
+          ...((part.copies ?? 1) > 1 ? { copies: part.copies } : {}),
+        },
+        led_count: part.leds,
+        connected: true,
+        label: part.name,
+      };
+      start += part.leds;
+      return view;
+    });
+    replaceZoneLights(s, chain, parts);
+    setZoneLeds(s.devices, chain, total);
+    chain.state = "set_up";
+    chain.leds = total;
+    chain.parts = parts;
+    s.setup = null;
+    const answer: SetupCommitted = { lights: parts, final_leds: total };
+    return answer;
+  }
+
+  if (step === "empty" && method === "POST") {
+    const empty = body as SetupEmpty;
+    checkSession(s, empty);
+    const restore = s.setup?.restore_to ?? chain.leds;
+    // An empty header is not a light: it goes back to its length and its LEDs are removed.
+    replaceZoneLights(s, chain, []);
+    chain.state = "empty";
+    chain.leds = restore;
+    chain.parts = [];
+    s.setup = null;
+    return { ok: true };
+  }
+
+  return bad();
+}
+
 // ---- effects ----
 
 function effectOrNotFound(id: string): DemoEffect {
   const s = st();
   const stack = s.stacks[id];
   if (stack) return stackAsEffect(stack, s.effects);
+  const pattern = patternOrNone(id);
+  if (pattern) return patternAsEffect(pattern);
   const e = s.effects[id];
   if (!e) fail(404, "not_found", `no effect with id ${id}`);
   return e;
@@ -765,12 +1432,121 @@ function stackOrNotFound(id: string): Stack {
   return found;
 }
 
-function currentProps(e: DemoEffect): Props {
-  const s = st();
-  if (s.activeEffect === e.schema.id) {
-    const layout = activeLayout();
-    if (layout.effect) return { ...layout.effect.props };
+/** A pattern by its id or its name, ignoring case, as the daemon's store finds it. */
+function patternOrNotFound(id: string): Pattern {
+  const found = patternOrNone(id);
+  if (!found) fail(404, "not_found", `no pattern with the id or name ${id}`);
+  return found;
+}
+
+function patternOrNone(id: string): Pattern | null {
+  const wanted = id.trim().toLowerCase();
+  const name = (p: Pattern): string => p.id.slice(PATTERN_ID_PREFIX.length);
+  return (
+    Object.values(st().patterns).find(
+      (p) => p.id.toLowerCase() === wanted || name(p).toLowerCase() === wanted,
+    ) ?? null
+  );
+}
+
+/**
+ * The rules `validate_pattern` keeps, with the daemon's own sentences: the prefix and a name of 1
+ * to 60 characters, 1 to 4096 LEDs, 1 to 256 frames, and exactly `built_on.led_count` colours in
+ * every frame. A broken pattern is a 422 and leaves a running draft alone.
+ */
+function checkPattern(p: Pattern): void {
+  if (!p.id.startsWith(PATTERN_ID_PREFIX)) {
+    fail(422, "validation", `a pattern's id starts with "${PATTERN_ID_PREFIX}"`);
   }
+  const name = p.id.slice(PATTERN_ID_PREFIX.length);
+  if (name.trim().length === 0) fail(422, "validation", "a pattern needs a name");
+  if ([...name].length > PATTERN_NAME_MAX) {
+    fail(422, "validation", `a pattern's name is at most ${PATTERN_NAME_MAX} characters`);
+  }
+  const count = p.built_on.led_count;
+  if (count < 1 || count > PATTERN_LEDS_MAX) {
+    fail(422, "validation", `a pattern is built on 1 to ${PATTERN_LEDS_MAX} LEDs, not ${count}`);
+  }
+  if (p.frames.length === 0) fail(422, "validation", "a pattern needs a frame");
+  if (p.frames.length > PATTERN_FRAMES_MAX) {
+    fail(
+      422,
+      "validation",
+      `a pattern holds at most ${PATTERN_FRAMES_MAX} frames, not ${p.frames.length}`,
+    );
+  }
+  p.frames.forEach((frame, i) => {
+    if (frame.colors.length !== count) {
+      fail(
+        422,
+        "validation",
+        `frame ${i + 1} has ${frame.colors.length} colours; the device it was built on has ${count} LEDs`,
+      );
+    }
+  });
+}
+
+/** The library's `EffectSummary` for a pattern: a pattern has no settings, and says its kind. */
+function patternEffectSummary(pattern: Pattern) {
+  return {
+    id: pattern.id,
+    name: pattern.id.slice(PATTERN_ID_PREFIX.length),
+    description: `Pattern, ${kindWords(pattern.built_on)}`,
+    needs: { screen: false, audio: false },
+    favorite: false,
+    kind: "pattern" as const,
+    built_on: { ...pattern.built_on },
+  };
+}
+
+/**
+ * The pattern as one `DemoEffect`, so the effect routes (detail, favourite, activate) serve it.
+ * It has no properties: 0.16.0 gives a pattern no settings and no presets.
+ */
+function patternAsEffect(pattern: Pattern): DemoEffect {
+  const summary = patternEffectSummary(pattern);
+  return {
+    schema: {
+      id: pattern.id,
+      name: summary.name,
+      description: summary.description,
+      needs: summary.needs,
+      properties: [],
+      presets: [],
+    },
+    defaults: {},
+    summary,
+  };
+}
+
+/** What `GET /scenes` says of a group that plays a pattern: one fit per member light. */
+function patternFits(s: DemoState, group: Group): LightFit[] {
+  const id = group.plays.type === "effect" ? group.plays.effect : undefined;
+  const pattern = id ? s.patterns[id] : undefined;
+  if (!pattern) return [];
+  const fits: LightFit[] = [];
+  for (const member of group.members) {
+    const light = s.lights.find((l) => l.light.id === member);
+    if (!light) continue;
+    // The daemon leaves a light with no LEDs out of the fits: it plays nothing there.
+    if (!light.connected || light.led_count <= 0) continue;
+    fits.push({
+      light: member,
+      fit: fitKind(pattern.built_on, light.led_count, light.light.arrangement),
+    });
+  }
+  return fits;
+}
+
+function currentProps(e: DemoEffect): Props {
+  // The group that plays the effect has its own values (0.14.0); otherwise the saved ones sit on
+  // the schema's defaults.
+  const s = st();
+  const scene = activeSceneOf(s);
+  const group = scene?.groups.find(
+    (g) => g.plays.type === "effect" && g.plays.effect === e.schema.id,
+  );
+  if (group && group.plays.type === "effect") return { ...group.plays.props };
   return { ...e.defaults, ...(s.saved[e.schema.id] ?? {}) };
 }
 
@@ -788,9 +1564,15 @@ function setActiveProps(over: Props): void {
   const s = st();
   if (!s.activeEffect) fail(422, "validation", "no effect is active");
   const e = effectOrNotFound(s.activeEffect);
-  const layout = activeLayout();
-  const next = mergeProps(layout.effect?.props ?? currentProps(e), over);
-  layout.effect = { id: e.schema.id, props: next };
+  const next = mergeProps(currentProps(e), over);
+  // The groups that play the effect carry the new values (0.14.0): the layout's one effect is
+  // not what plays.
+  const scene = activeSceneOf(s);
+  for (const group of scene?.groups ?? []) {
+    if (group.plays.type === "effect" && group.plays.effect === e.schema.id) {
+      group.plays = { type: "effect", effect: e.schema.id, props: { ...next } };
+    }
+  }
   s.saved[e.schema.id] = next;
 }
 
@@ -1113,26 +1895,6 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
-  if (head === "render") {
-    if (method === "GET") {
-      const layout = activeLayout();
-      return { fps: s.settings.fps, scale: layout.render_scale, sampling: layout.sampling };
-    }
-    if (method === "PATCH") {
-      const b = body as { fps?: number | null; scale?: number | null; sampling?: string | null };
-      if (typeof b.fps === "number") {
-        if (b.fps < 10 || b.fps > 60) fail(422, "validation", `fps must be 10 to 60, got ${b.fps}`);
-        s.settings.fps = b.fps;
-      }
-      const layout = activeLayout();
-      if (b.scale === 25 || b.scale === 50 || b.scale === 100) layout.render_scale = b.scale;
-      if (b.sampling === "nearest" || b.sampling === "bilinear" || b.sampling === "area_average") {
-        layout.sampling = b.sampling;
-      }
-      return { fps: s.settings.fps, scale: layout.render_scale, sampling: layout.sampling };
-    }
-    return bad();
-  }
 
   if (head === "devices") {
     if (seg.length === 1 && method === "GET") {
@@ -1208,7 +1970,16 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         .map((e) => ({ ...e.summary, favorite: s.favorites.has(e.schema.id) }));
       // A saved stack is in the library after the user effects (D95.4.2).
       for (const stack of Object.values(s.stacks)) {
-        list.push({ ...stackEffectSummary(stack, s.effects), favorite: s.favorites.has(stack.id) });
+        list.push({
+          ...stackEffectSummary(stack, s.effects),
+          favorite: s.favorites.has(stack.id),
+          // A stack is drawn on the canvas: it is a canvas effect, as the daemon says.
+          kind: "canvas",
+        });
+      }
+      // A pattern is an effect too (0.16.0): it says its kind and what it was built on.
+      for (const pattern of Object.values(s.patterns)) {
+        list.push({ ...patternEffectSummary(pattern), favorite: s.favorites.has(pattern.id) });
       }
       return { effects: list, active: s.activeEffect, failed: s.failedEffects };
     }
@@ -1258,7 +2029,14 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       if (method === "PUT") {
         const req = body as DraftRequest;
-        const call = { method, at: Date.now(), props: { ...req.props }, htmlBytes: req.html.length, stack: req.stack };
+        const call = {
+          method,
+          at: Date.now(),
+          props: { ...req.props },
+          htmlBytes: req.html.length,
+          stack: req.stack,
+          pattern: req.pattern?.id,
+        };
         s.draftCalls.push(call);
         (globalThis as { __draft?: unknown[] }).__draft?.push(call);
         // A stack draft (D95.4.5): the same epoch/seq rule as the preview, and a dropped PUT
@@ -1290,6 +2068,47 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         }
         if (req.html.length > IMPORT_MAX_BYTES) {
           fail(422, "validation", `the draft is ${req.html.length} bytes; the limit is ${IMPORT_MAX_BYTES}`);
+        }
+        // A pattern draft (0.16.0): the same epoch/seq rule as a stack's, and the pattern's own
+        // colours go on the lights of its kind. Exactly one of html, stack and pattern is set.
+        if (req.pattern) {
+          if (req.html.length > 0) {
+            fail(422, "validation", "a draft carries exactly one of html, stack and pattern");
+          }
+          checkPattern(req.pattern);
+          const lease = scenario().has("fast-draft") ? 900 : 15_000;
+          const epoch = req.epoch ?? "";
+          const seq = req.seq ?? 0;
+          let applied = true;
+          if (s.draft?.pattern && s.draft.epoch === epoch && seq <= (s.draft.seq ?? 0)) applied = false;
+          if (applied) {
+            if (s.draft === null) s.draftStopFailed = false;
+            s.draft = {
+              html: "",
+              props: {},
+              hash: demoHash(
+                `${req.pattern.id}|${JSON.stringify(req.pattern.frames[0]?.colors ?? [])}`,
+              ),
+              leaseUntil: Date.now() + lease,
+              pattern: structuredClone(req.pattern),
+              epoch,
+              seq,
+            };
+          }
+          // The daemon's own note when no device of the pattern's kind is plugged in: the editor
+          // still opens on it, and says why the lights it would paint are dark.
+          const document = req.pattern;
+          const plugged = unpluggedLights(s.lights).some(
+            (view) =>
+              view.connected &&
+              view.led_count === document.built_on.led_count &&
+              view.light.arrangement === document.built_on.arrangement,
+          );
+          return {
+            ...draftStatus(s),
+            applied,
+            ...(plugged ? {} : { note: NO_DEVICE_OF_KIND }),
+          };
         }
         // `?state=draft-beat-fail`: the first beat starts the draft, the rest fail, so the
         // expiring banner and the daemon's own restore can be seen.
@@ -1389,9 +2208,18 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     }
     if (seg.length === 3 && seg[2] === "thumbnail" && method === "GET") {
       const stack = s.stacks[id];
-      if (stack) return stackThumbnailBytes(stack, activeLayout());
+      if (stack) return stackThumbnailBytes(stack, wholeLightsCanvas(s.lights, s.devices));
       effectOrNotFound(id);
       return demoThumbnail(id);
+    }
+    if (seg.length === 3 && seg[2] === "defaults" && method === "PATCH") {
+      // The effect's starting values: what the next group to play it starts from. A group that
+      // already plays it keeps its own values; no scene changes.
+      const e = effectOrNotFound(id);
+      if (id.startsWith("stack:")) fail(409, "conflict", `${id} is a stack; its values live in the stack builder`);
+      const props = body as Props;
+      s.saved[id] = { ...(s.saved[id] ?? {}), ...props };
+      return { ok: true, id, props: { ...e.defaults, ...s.saved[id] } };
     }
     if (seg.length === 3 && seg[2] === "activate" && method === "POST") {
       const e = effectOrNotFound(id);
@@ -1400,7 +2228,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (scenario().has("activate-fail")) {
         fail(503, "service_unavailable", "the effect could not start: the engine is busy");
       }
-      const req = body as { props?: Props; preset?: string | null };
+      const req = body as { props?: Props; preset?: string | null; groups?: string[] };
       const isStack = id.startsWith("stack:");
       // A stack's values are its layers' own (D95.4.3): there is no `effects.saved` entry.
       let base: Props = isStack ? { ...e.defaults } : { ...e.defaults, ...(s.saved[id] ?? {}) };
@@ -1415,9 +2243,29 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       s.draft = null;
       const next = mergeProps(base, req.props ?? {});
       s.activeEffect = id;
-      const layout = activeLayout();
-      layout.effect = { id, props: next };
-      if (!isStack) s.saved[id] = next;
+      // Scenes: the effect plays on the groups asked for (every group when none is named). The
+      // starting values are written by PATCH /effects/{id}/defaults and nothing else.
+      const scene = activeSceneOf(s);
+      if (scene) {
+        const at =
+          req.groups && req.groups.length > 0
+            ? req.groups.map((name) => {
+                const found = scene.groups.find(
+                  (g) => g.name.toLowerCase() === name.toLowerCase() || g.id === name,
+                );
+                if (!found) fail(404, "not_found", `scene ${scene.name} has no group named ${name}`);
+                return found;
+              })
+            : scene.groups;
+        for (const group of at) group.plays = { type: "effect", effect: id, props: next };
+        const html = scene.groups.reduce(
+          (n, group) => n + htmlRuntimesOf(s, group.plays.type === "effect" ? group.plays.effect : null),
+          0,
+        );
+        if (html > SCENE_HTML_MAX) {
+          fail(422, "validation", htmlLimitSentence(html));
+        }
+      }
       return { ok: true };
     }
     if (seg.length === 3 && seg[2] === "favorite" && method === "PUT") {
@@ -1528,6 +2376,68 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
+  if (head === "patterns") {
+    if (seg.length === 1 && method === "GET") {
+      const answer: PatternsResponse = {
+        patterns: Object.values(s.patterns)
+          .slice()
+          .sort((a, b) => a.id.localeCompare(b.id)),
+      };
+      return answer;
+    }
+    const id = seg[1] ?? "";
+    if (seg.length === 2 && method === "GET") {
+      return structuredClone(patternOrNotFound(id));
+    }
+    if (seg.length === 2 && method === "PUT") {
+      const next = body as Pattern;
+      // A save never renames: the path is the id, and the body has to agree with it.
+      const name = id.startsWith(PATTERN_ID_PREFIX) ? id.slice(PATTERN_ID_PREFIX.length) : id;
+      const pathId = `${PATTERN_ID_PREFIX}${name}`;
+      if (next.id !== pathId) {
+        fail(
+          422,
+          "validation",
+          `the id in the body is ${next.id}; the path is ${pathId}, and a save never renames`,
+        );
+      }
+      checkPattern(next);
+      const clash = Object.values(s.patterns).find(
+        (p) =>
+          p.id !== next.id &&
+          p.id.slice(PATTERN_ID_PREFIX.length).toLowerCase() === name.toLowerCase(),
+      );
+      if (clash) fail(409, "conflict", `${name} is already another pattern's name, ignoring case`);
+      // The whole document is kept: a second frame, a motion other than none and any later field
+      // go back out as they came in, as the daemon's file keeps them.
+      s.patterns[next.id] = structuredClone(next);
+      return structuredClone(s.patterns[next.id]);
+    }
+    if (seg.length === 2 && method === "DELETE") {
+      const pattern = patternOrNotFound(id);
+      const playing = s.scenes.filter((scene) =>
+        scene.groups.some((g) => g.plays.type === "effect" && g.plays.effect === pattern.id),
+      );
+      if (playing.length > 0 && url.searchParams.get("force") !== "true") {
+        const names = playing.map((scene) => scene.name).join(", ");
+        fail(
+          409,
+          "conflict",
+          `${pattern.id.replace(/^pattern:/, "")} plays in ${names}. Delete it anyway and the groups that play it go dark.`,
+        );
+      }
+      delete s.patterns[pattern.id];
+      const favorite_removed = s.favorites.delete(pattern.id);
+      delete s.userPresets[pattern.id];
+      if (s.activeEffect === pattern.id) s.activeEffect = null;
+      // A draft of the deleted pattern ends first, as the daemon's does.
+      if (s.draft?.pattern?.id === pattern.id) s.draft = null;
+      const answer: DeletePatternResponse = { ok: true, id: pattern.id, favorite_removed };
+      return answer;
+    }
+    return bad();
+  }
+
   if (head === "stacks") {
     // `PUT/DELETE /stacks/preview` first: it is a static route beside `{id}` (PR B).
     if (seg[1] === "preview" && seg.length === 2) {
@@ -1606,7 +2516,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       if (name.toLowerCase() === "preview") fail(422, "validation", `"${name}" is reserved for the stack preview route`);
       if (next.layers.length > 8) fail(422, "validation", `a stack holds at most 8 layers, and this one has ${next.layers.length}`);
-      const html = next.layers.filter((layer) => layer.effect.startsWith("html:")).length;
+      const html = stackHtmlSlots(next, s.effects);
       if (html > 2) fail(422, "validation", `a stack holds at most 2 HTML layers, and this one has ${html}`);
       const ids: string[] = [];
       for (const layer of next.layers) {
@@ -1647,38 +2557,10 @@ export async function demoRequest(method: string, path: string, body: unknown): 
     return bad();
   }
 
-  if (head === "layouts") {
-    if (seg.length === 1 && method === "GET") return { active: s.activeLayout, layouts: s.layouts };
-    if (seg[1] === "active" && method === "PUT") {
-      s.activeLayout = (body as { id: string }).id;
-      return { active: s.activeLayout, layouts: s.layouts };
-    }
-    const id = seg[1] ?? "";
-    const layout = s.layouts.find((l) => l.id === id);
-    if (seg.length === 2 && method === "GET") {
-      if (!layout) fail(404, "not_found", `no layout ${id}`);
-      return layout;
-    }
-    if (seg.length === 2 && method === "PUT") {
-      const next = body as Layout;
-      if (next.id !== id) fail(422, "validation", "the layout id in the body does not match the path");
-      if (![25, 50, 100].includes(next.render_scale)) {
-        fail(422, "validation", `render scale must be 25, 50 or 100, got ${next.render_scale}`);
-      }
-      const idx = s.layouts.findIndex((l) => l.id === id);
-      if (idx < 0) s.layouts.push(next);
-      else s.layouts[idx] = next;
-      if (scenario().has("persist")) {
-        try {
-          window.localStorage.setItem(DEMO_LAYOUTS_KEY, JSON.stringify(s.layouts));
-        } catch {
-          // Kept in memory only.
-        }
-      }
-      return next;
-    }
-    return bad();
-  }
+  if (head === "scenes") return scenesRoute(s, method, seg, body);
+  if (head === "lights") return lightsRoute(s, method, seg, body);
+  if (head === "chains") return chainsRoute(s, method, seg, body);
+
 
   if (head === "fans") {
     if (seg.length === 1 && method === "GET") {
@@ -1870,7 +2752,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         exported_at: new Date().toISOString(),
         app_version: APP_VERSION,
         settings: { ...s.settings },
-        layouts: { schema_version: SCHEMA_VERSION, active: s.activeLayout, layouts: s.layouts },
+        layouts: { schema_version: SCHEMA_VERSION, active: "", layouts: [] },
         zones: {
           schema_version: SCHEMA_VERSION,
           sizes: Object.fromEntries(
@@ -1893,6 +2775,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
         },
         displays: s.displayConfig ? [{ ...s.displayConfig }] : [],
         stacks: [],
+        patterns: Object.values(s.patterns).map((p) => structuredClone(p)),
       };
       return bundle;
     }
