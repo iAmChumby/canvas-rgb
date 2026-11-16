@@ -1736,15 +1736,10 @@ export function useScene(): UseScene {
             pushOrderCommand(expected, order);
             // The daemon's answer is the order now. When it is the order on the screen, the strip
             // follows the daemon again, so the order another window makes shows as soon as it
-            // lands. When the daemon has another order, this window's order is old: it goes too.
+            // lands.
             const landed = (getSnap().scenes?.scenes ?? []).map((s) => s.id);
             const local = localOrderRef.current;
-            if (
-              local &&
-              (landed.join("|") === local.join("|") || landed.join("|") !== order.join("|"))
-            ) {
-              showLocalOrder(null);
-            }
+            if (local && landed.join("|") === local.join("|")) showLocalOrder(null);
           } catch {
             showLocalOrder(null);
           }
