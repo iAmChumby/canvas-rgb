@@ -102,6 +102,21 @@ pub trait InputSource: Send + Sync {
 
 // ---------------------------------------------------------------- effects
 
+/// How one LED of a strip (or of a ring) reads an effect's picture (#400).
+///
+/// A strip LED stands at mid-height of its part of the canvas. Most effects are read there, in a
+/// small square cell, so a thin moving line (Rain) passes through each LED and is seen. An effect
+/// whose meaning is how HIGH it reaches (a flame, a spectrum bar) is missed by a cell at
+/// mid-height: it asks for the whole column above and below the LED.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripRead {
+    /// The mean of a small square cell at the LED. The default.
+    #[default]
+    Cell,
+    /// The mean of the cell's width over the full height of the canvas.
+    Column,
+}
+
 pub trait Effect: Send {
     /// Declared once; the editor renders controls from it.
     fn schema(&self) -> PropertySchema;
@@ -112,6 +127,12 @@ pub trait Effect: Send {
     /// `Some` for a pattern (0.16.0): the engine reads its colours and never calls `update`.
     fn as_pattern(&self) -> Option<&crate::pattern::Pattern> {
         None
+    }
+    /// How a strip LED reads this effect (#400). Grids and single lights are not affected. The
+    /// engine asks once when the effect is set, not every frame, so the answer must not depend on
+    /// the props. A stack and an HTML effect keep the default.
+    fn strip_read(&self) -> StripRead {
+        StripRead::Cell
     }
 }
 

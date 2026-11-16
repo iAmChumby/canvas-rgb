@@ -616,7 +616,7 @@ pub async fn put(app: &Arc<App>, html: &str, props: &Props) -> Result<bool, PutE
     // areas in the group's canvas.
     let target = crate::scenes::takeover_groups(app, &effect_id).await;
     let group = target.first().cloned().unwrap_or_default();
-    // The scene must not run more HTML groups than it may: the draft's effect is one of them.
+    // The scene must not start more HTML runtimes than it may: the draft's effect is one of them.
     crate::scenes::check_takeover_html_limit(app, &effect_id, &target, None)
         .await
         .map_err(PutError::Validation)?;
@@ -811,7 +811,7 @@ pub async fn put_stack(
     // group's canvas.
     let target = crate::scenes::takeover_groups(app, &stack.id).await;
     let group = target.first().cloned().unwrap_or_default();
-    // The scene must not run more HTML groups than it may: a stack with an HTML layer is one.
+    // The scene must not start more HTML runtimes than it may: each HTML layer of the draft is one.
     // The draft's own layers count, not the saved stack's: the draft is what runs.
     crate::scenes::check_takeover_html_limit(app, &stack.id, &target, Some(stack))
         .await

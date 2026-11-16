@@ -38,6 +38,21 @@ export const CANVAS_HEIGHT = 200;
 export const RING_INSET = 4;
 
 /**
+ * The biggest cell an LED averages over, in canvas units.
+ *
+ * An LED is a point on the picture, the way SignalRGB and OpenRGB's effect engine
+ * treat it: it reads the colour where it stands, not a band of the picture. A wide cell
+ * averages thin moving detail away, so Rain's falling lines never reached an 8-LED
+ * strip (#372). Seven units is about one and three quarter pixels of the scene canvas,
+ * and it is the smallest cell that clears the bar of 30 (of 255) that a strip LED has
+ * to move for Rain.
+ *
+ * The cap is on the cell only: a strip's LEDs still stand spread over the whole slot,
+ * and a ring's still stand on its circle.
+ */
+export const STRIP_CELL_MAX = 7;
+
+/**
  * The most LEDs one zone may plan for.
  *
  * A zone reports its own LED count, and a damaged or misbehaving device can report a
@@ -116,17 +131,7 @@ export function buildGroupPlan(
   lights: readonly Light[],
   devices: readonly DeviceInfo[],
 ): GroupPlan {
-  // The members that have LEDs, in the group's order.
-  const placed: { light: Light; count: number }[] = [];
-  for (const member of members) {
-    // A member named twice is one member: the first occurrence holds the slot.
-    if (placed.some((p) => p.light.id === member)) continue;
-    const found = lights.find((l) => l.id === member);
-    if (!found) continue;
-    const count = lightLedCount(found, devices);
-    if (count === 0) continue;
-    placed.push({ light: found, count });
-  }
+  const placed = placedMembers(members, lights, devices);
 
   // The group's LEDs: what the slots are shared out by.
   let total = 0;
@@ -143,6 +148,63 @@ export function buildGroupPlan(
     before += p.count;
   }
   return plan;
+}
+
+/**
+ * The members that have LEDs, in the group's order, with their LED counts.
+ *
+ * A member named twice is one member: the first occurrence holds the slot. A member that
+ * names no light, or a light whose device is not in `devices`, is skipped, and a light
+ * whose zone has no LEDs left gets no slot.
+ */
+function placedMembers(
+  members: readonly string[],
+  lights: readonly Light[],
+  devices: readonly DeviceInfo[],
+): { light: Light; count: number }[] {
+  const placed: { light: Light; count: number }[] = [];
+  for (const member of members) {
+    // A member named twice is one member: the first occurrence holds the slot.
+    if (placed.some((p) => p.light.id === member)) continue;
+    const found = lights.find((l) => l.id === member);
+    if (!found) continue;
+    const count = lightLedCount(found, devices);
+    if (count === 0) continue;
+    placed.push({ light: found, count });
+  }
+  return placed;
+}
+
+/**
+ * The slot a member's LEDs stand in, in the group's canvas.
+ *
+ * The planner gives every member a slot: in flow across the canvas is cut into
+ * side-by-side shares by LED count, and in each its own the slot is the whole canvas.
+ *
+ * The editor's frame for a member is that slot, not the union of the member's cells. A
+ * strip's cells are small squares at the LEDs themselves, so their union leaves the ends
+ * of the slot empty: eight LEDs in a 320-unit slot lose 33 units at the two ends, and the
+ * frame the owner draws and picks is shorter than the strip it stands for.
+ */
+export function memberSlot(
+  members: readonly string[],
+  mode: GroupMode,
+  lights: readonly Light[],
+  devices: readonly DeviceInfo[],
+  lightId: string,
+): { x: number; y: number; width: number; height: number } | null {
+  const placed = placedMembers(members, lights, devices);
+  let total = 0;
+  for (const p of placed) total += p.count;
+  let before = 0;
+  for (const p of placed) {
+    const slot = slotFor(mode, before, p.count, total);
+    before += p.count;
+    if (p.light.id === lightId) {
+      return { x: slot.x, y: slot.y, width: slot.w, height: slot.h };
+    }
+  }
+  return null;
 }
 
 /**
@@ -214,31 +276,46 @@ function buildLightLeds(
   return leds;
 }
 
-/** A strip: left to right at mid-height, each LED in the middle of its own cell. */
+/**
+ * A strip: left to right at mid-height, each LED in the middle of its own cell.
+ *
+ * The LED stands at the middle of its share of the slot, and the cell it reads is a
+ * square of at most `STRIP_CELL_MAX` units, centred on the LED at mid-height: an LED is
+ * a position on the picture, not a column through it (#372).
+ */
 function stripSamples(slot: Slot, n: number): LedSample[] {
-  const cellW = slot.w / n;
+  // Where the LED stands: its share of the slot, spread over the whole slot.
+  const share = slot.w / n;
+  // The cell it reads: a square, at most the cap, at most the slot's height.
+  const side = Math.min(share, slot.h, STRIP_CELL_MAX);
   const y = slot.y + slot.h / 2;
   const leds: LedSample[] = [];
   for (let j = 0; j < n; j++) {
-    const x = slot.x + cellW * (j + 0.5);
+    const x = slot.x + share * (j + 0.5);
     leds.push({
       center_x: x,
       center_y: y,
-      bounds: clampCell(x - cellW / 2, slot.y, x + cellW / 2, slot.y + slot.h),
+      bounds: clampCell(x - side / 2, y - side / 2, x + side / 2, y + side / 2),
       sampled: true,
     });
   }
   return leds;
 }
 
-/** A ring: the largest circle that fits the slot, from the top, clockwise. */
+/**
+ * A ring: the largest circle that fits the slot, from the top, clockwise.
+ *
+ * The cell is the square of one LED's share of the circle, at most the cap: a ring of
+ * few LEDs has a wide share of the circle, and a cell that wide averages the picture
+ * away (#372).
+ */
 function ringSamples(slot: Slot, n: number): LedSample[] {
   const cx = slot.x + slot.w / 2;
   const cy = slot.y + slot.h / 2;
   // The circle keeps a 4px inset from the slot's edges.
   const r = Math.max(0, (Math.min(slot.w, slot.h) - 2 * RING_INSET) / 2);
   // The LED's cell: a square as wide as the LEDs are apart around the circle.
-  const side = Math.min((Math.PI * 2 * r) / n, 2 * r);
+  const side = Math.min((Math.PI * 2 * r) / n, 2 * r, STRIP_CELL_MAX);
   const leds: LedSample[] = [];
   for (let j = 0; j < n; j++) {
     // -90° is the top of the circle; the angle grows clockwise (y grows downward).

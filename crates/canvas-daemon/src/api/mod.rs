@@ -154,7 +154,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::DIAG_READBACK, get(diag::readback))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
         .route(routes::PREVIEW, get(preview::preview))
-        .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights));
+        .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights))
+        .route(routes::PREVIEW_GROUP, get(preview::preview_group));
 
     api.layer(axum::middleware::from_fn_with_state(
         app.clone(),

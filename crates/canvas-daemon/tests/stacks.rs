@@ -18,7 +18,7 @@ use canvas_proto::config::EFFECTS_FILE;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props, PropertySchema};
-use canvas_proto::stack::{BlendMode, LayerArea, Stack, StackLayer, STACKS_FILE};
+use canvas_proto::stack::{BlendMode, LayerArea, LayerMask, MaskSource, Stack, StackLayer, STACKS_FILE};
 use canvas_proto::traits::{Canvas, Effect, Inputs};
 use common::{FakeAdapter, FakeEngine};
 use std::path::PathBuf;
@@ -1046,6 +1046,58 @@ async fn names_ids_caps_and_ranges_are_refused() {
     )
     .await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "a 400-wide rectangle is refused: {message}");
+}
+
+// ================================================================ the HTML slots a stack reports
+
+/// #370, review of PR #401, SHOULD-FIX 2: the stacks route reports the number the daemon counts for
+/// a group playing the stack: one slot for a layer's HTML effect and one for its HTML mask, not one
+/// per layer.
+#[tokio::test]
+async fn the_stacks_route_reports_a_layers_html_mask_as_a_slot() {
+    let harness = build("t-html-slots");
+    std::fs::write(harness.folder.join("spark.html"), VALID_HTML).unwrap();
+    harness.app.user_effects.rescan(&harness.folder);
+
+    // One layer, two HTML slots: its effect and its mask.
+    let mut masked = layer("l1", "html:spark");
+    masked.mask = Some(LayerMask {
+        effect: "html:spark".to_string(),
+        props: Props::new(),
+        source: MaskSource::Luma,
+        invert: false,
+        amount: 100,
+    });
+    assert_eq!(
+        put_stack(&harness, &stack("stack:Masked", vec![masked])).await,
+        StatusCode::OK
+    );
+    // A layer with no HTML takes no slot at all.
+    assert_eq!(put_stack(&harness, &stack("stack:Plain", vec![layer("l1", "solid")])).await, StatusCode::OK);
+
+    let listed = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    let summary = |list: &serde_json::Value, id: &str| {
+        list["stacks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|stack| stack["id"] == id)
+            .cloned()
+            .unwrap_or_else(|| panic!("{id} is listed: {list}"))
+    };
+    assert_eq!(summary(&listed, "stack:Masked")["html_layers"], 2, "{listed}");
+    assert_eq!(summary(&listed, "stack:Masked")["layers"], 1, "the layer count is unchanged");
+    assert_eq!(summary(&listed, "stack:Plain")["html_layers"], 0, "{listed}");
+
+    // A mask whose effect is gone takes no slot: the same rule as the daemon's, which cannot build
+    // a mask it cannot resolve.
+    std::fs::remove_file(harness.folder.join("spark.html")).unwrap();
+    harness.app.user_effects.rescan(&harness.folder);
+    let listed = json(harness.router.clone().oneshot(request("GET", routes::STACKS)).await.unwrap()).await;
+    assert_eq!(
+        summary(&listed, "stack:Masked")["html_layers"], 1,
+        "the unmatched mask is not a runtime: {listed}"
+    );
 }
 
 // ================================================================ a display name
