@@ -464,7 +464,7 @@ export const PATTERN_GONE = "pattern-gone";
  *  stage's states can be seen and shot:
  *
  *   stage-connecting   the preview is open and has said nothing yet
- *   stage-stopped      the preview was refused, as a socket another preview took over is
+ *   stage-stopped      the preview was refused: another group preview took over
  *   stage-paused       the lights are paused, so the engine sends nothing
  */
 export const STAGE_CONNECTING = "stage-connecting";
