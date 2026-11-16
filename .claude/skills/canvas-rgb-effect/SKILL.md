@@ -100,9 +100,23 @@ The daemon writes the file into `%APPDATA%\canvas-rgb\effects\`. A file of the s
 name is only overwritten with `--replace`. The effect's id is `html:` plus the file's
 name without the extension.
 
+When a run is in use (the `canvas-rgb-scene` skill gives you its run id), add `--run`:
+
+```
+canvas-rgb effects import my-effect.html --run <run>
+```
+
+The run records the import, so the run can delete the effect later and nothing else. With
+`--run`, `--replace` overwrites only an effect that same run imported (the old file is copied
+into the run's folder first) and refuses any other. Never pass `--replace` while a scene is
+being built.
+
 ## 5. Look at it in the app before calling it done
 
 An effect is done when you have looked at it in the editor, not when the check passes.
+When the `canvas-rgb-scene` skill called you, skip this step: the check's `--png` and the tile
+sheet from step 3 are the proof, open and describe those, and the scene skill reports that how
+the effect looks on the lights is unchecked.
 
 1. Open the editor's Effects view (the library tile and the live preview of the effect).
 2. Take a screenshot at **1440** wide and one at **390** wide (light and dark if the effect
@@ -126,3 +140,8 @@ did.
   file stays there.
 - A ported effect may use calls the runtime does not have. Take them out, or replace
   them with something the guide lists, and say what you changed.
+
+## Building a scene from effects
+
+To put effects into a scene, or to tune effects into presets and a scene, use the
+`canvas-rgb-scene` skill. It calls this skill when a new effect has to be written.
