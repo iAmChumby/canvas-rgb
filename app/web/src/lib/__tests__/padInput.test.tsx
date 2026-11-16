@@ -282,6 +282,28 @@ describe("the stub in the shipped app", () => {
     (globalThis as Record<string, unknown>).__CANVAS_RGB_PAD__ = "stub";
     expect(padSource()).toBe("stub");
   });
+
+  it("drives a name, a layout and a list of pads for the harness's shots", () => {
+    vi.stubEnv("NEXT_PUBLIC_PAD_STUB", "1");
+    (globalThis as Record<string, unknown>).__CANVAS_RGB_PAD_STUB__ = {
+      connected: true,
+      mapping: "",
+      others: 1,
+    };
+    let input: ReturnType<typeof usePadInput> | null = null;
+    function Probe() {
+      input = usePadInput({ source: "stub" });
+      return <div data-testid="status">{input.status}</div>;
+    }
+    const { getByTestId } = render(<Probe />);
+    frames.step();
+
+    expect(getByTestId("status").textContent).toBe("live");
+    // The pad the harness stamps is the one read, and the second pad makes the page say so.
+    expect(input!.showing).toBe("Showing pad 1 of 2.");
+    // Its layout cannot be read, so no key is lit.
+    expect(input!.unreadable).toBe(true);
+  });
 });
 
 describe("which pad the page reads", () => {

@@ -339,6 +339,12 @@ export function litKeys(frame: PadFrame, rows: PadMapRow[]): Set<string> {
 export interface PadStub {
   /** False when the stub says no pad is there. */
   connected?: boolean;
+  /** The pad's own name, for a shot of a page that has to choose between pads. */
+  id?: string;
+  /** "standard", or "" for a pad whose buttons the app cannot place. */
+  mapping?: string;
+  /** How many more pads the list carries after this one, each with nothing held. */
+  others?: number;
   /** The button indices that are held down, the standard numbering. */
   buttons?: number[];
   /** The triggers, 0 to 1. */
@@ -410,10 +416,18 @@ function stubPads(): PadGamepad[] | null {
   const pads: PadGamepad[] = [
     {
       connected: true,
+      id: stub.id,
+      mapping: stub.mapping,
       buttons,
       axes: [stub.lx ?? 0, stub.ly ?? 0, stub.rx ?? 0, stub.ry ?? 0],
     },
   ];
+  // The other pads a shot needs: each says it is standard, carries no ids of its own, and
+  // holds nothing, so the page has to choose and says which one it shows.
+  const up = Array.from({ length: count }, () => ({ pressed: false, value: 0 }));
+  for (let i = 0; i < (stub.others ?? 0); i++) {
+    pads.push({ connected: true, mapping: "standard", buttons: up, axes: [0, 0, 0, 0] });
+  }
   stubCache = { stub, pads };
   return pads;
 }
