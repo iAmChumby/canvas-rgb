@@ -41,11 +41,12 @@ const GROUP_PREVIEW_FPS = 15;
 /**
  * How long a socket may say nothing before the stage says the preview stopped.
  *
- * The daemon sends the first picture at once, so this is the wait for a socket that has
- * nothing to say, not the wait for a slow machine. It is the light feed's own first wait
- * (1.2 s), the same number the feed waits before it tries a closed socket again.
+ * The daemon sends the first picture on its next render tick (33 ms at the default 30 frames a
+ * second, 100 ms at the slowest), so this is the wait for a socket that has nothing to say. It
+ * is far longer than a tick on purpose: a render that stalls while an effect builds must not
+ * read as a stopped preview. Its own number, not the reconnect wait.
  */
-export const GROUP_PREVIEW_QUIET_MS = retryWait(0);
+export const GROUP_PREVIEW_QUIET_MS = 5000;
 
 export type GroupPreviewState = "connecting" | "live" | "stopped";
 
