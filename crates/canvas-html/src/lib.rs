@@ -148,6 +148,33 @@ impl HtmlEffect {
         default_overrides: &Props,
         seed: u32,
     ) -> Result<Self, HtmlError> {
+        Self::build(id, html, default_overrides, seed, LOAD_BUDGET_MS)
+    }
+
+    /// The same as [`HtmlEffect::from_source`], with the time the top-level scripts may take
+    /// given in milliseconds instead of [`LOAD_BUDGET_MS`].
+    ///
+    /// An import runs one load at a longer budget when the normal one ran out of time: a
+    /// machine that is busy with a game or a build can push an ordinary effect past two
+    /// seconds, and a script that really never returns needs the longer budget to be told
+    /// apart from it (#75). Every other load — the rescan, the lights, a tile — keeps the
+    /// normal budget.
+    pub fn from_source_with_load_budget(
+        id: &str,
+        html: &str,
+        default_overrides: &Props,
+        load_budget_ms: u64,
+    ) -> Result<Self, HtmlError> {
+        Self::build(id, html, default_overrides, entropy_seed(), load_budget_ms)
+    }
+
+    fn build(
+        id: &str,
+        html: &str,
+        default_overrides: &Props,
+        seed: u32,
+        load_budget_ms: u64,
+    ) -> Result<Self, HtmlError> {
         let parsed = parse::parse(html);
 
         if parsed.scripts.is_empty() {
@@ -271,7 +298,7 @@ impl HtmlEffect {
         // script's top-level code has run.
         let defaults = effect.schema.defaults();
         effect.install_globals(&defaults)?;
-        effect.run_scripts()?;
+        effect.run_scripts(load_budget_ms)?;
         effect.install_globals(&defaults)?;
         effect.values = defaults;
         effect.loaded = true;
@@ -374,8 +401,8 @@ impl HtmlEffect {
         })
     }
 
-    /// Runs the script bodies in order.
-    fn run_scripts(&mut self) -> Result<(), HtmlError> {
+    /// Runs the script bodies in order, each held to what is left of `load_budget_ms`.
+    fn run_scripts(&mut self, load_budget_ms: u64) -> Result<(), HtmlError> {
         let scripts = self.scripts.clone();
         // One budget for the whole load, not one per <script>.
         let load_started = std::time::Instant::now();
@@ -386,11 +413,11 @@ impl HtmlEffect {
             //
             // The script runs with a deadline, so a runaway one is stopped instead of
             // hanging the thread it runs on.
-            let remaining = match remaining_budget(LOAD_BUDGET_MS, load_started.elapsed().as_millis() as u64) {
+            let remaining = match remaining_budget(load_budget_ms, load_started.elapsed().as_millis() as u64) {
                 Some(left) => left,
                 None => {
                     return Err(HtmlError::Timeout(format!(
-                        "the effect's scripts ran longer than {LOAD_BUDGET_MS} ms together"
+                        "the effect's scripts ran longer than {load_budget_ms} ms together"
                     )))
                 }
             };
@@ -406,7 +433,7 @@ impl HtmlEffect {
             if let Err(e) = result {
                 if timed_out {
                     return Err(HtmlError::Timeout(format!(
-                        "the effect's script ran longer than {LOAD_BUDGET_MS} ms"
+                        "the effect's script ran longer than {load_budget_ms} ms"
                     )));
                 }
                 // The exception message is on the context; turn it into a message.
