@@ -10,6 +10,7 @@
 
 import { useEffect } from "react";
 import { apiConfig, dropApiConfig } from "@/lib/api";
+import { retryWait } from "@/lib/retryWait";
 import { routes } from "@/proto/routes";
 import { isDemo } from "@/lib/host";
 import { getSnap } from "@/lib/store";
@@ -20,11 +21,11 @@ export type LightColours = (lightId: string) => Uint8Array | null;
 /**
  * The wait before the socket is tried again after it closed: 1.2 s, doubling, up to 15 s.
  *
- * The group preview (#378) waits the same way, with this helper and not a copy of it.
+ * The helper lives in `lib/retryWait.ts` now, and the group preview (#378) waits the same way,
+ * with it and not a copy of it. It is still exported here for the callers that know this
+ * module.
  */
-export function retryWait(failures: number): number {
-  return Math.min(15000, 1200 * Math.pow(2, Math.min(4, failures)));
-}
+export { retryWait };
 
 /** Reads one binary frame into `into`: each light the frame names gets its own copy of the run. */
 export function decodeLightFrame(

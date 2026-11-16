@@ -27,10 +27,10 @@ import { demoGroupPreviewMode } from "@/lib/demoScenarios";
 import { GROUP_PREVIEW_H, GROUP_PREVIEW_W, GROUP_TAKEN_CODE } from "@/lib/groupPreview";
 import { isDemo } from "@/lib/host";
 import { parseFrame, type Frame } from "@/lib/preview";
+import { retryWait } from "@/lib/retryWait";
 import { getSnap } from "@/lib/store";
 import { GROUP_PREVIEW_QUERY, PREVIEW_TOKEN_QUERY } from "@/proto/consts";
 import { routes } from "@/proto/routes";
-import { retryWait } from "@/views/scenes/useLightFeed";
 
 /** How many times a refused socket is tried again before the stage gives up. */
 export const GROUP_PREVIEW_RETRIES = 3;
