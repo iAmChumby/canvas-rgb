@@ -12,7 +12,7 @@ use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::layout::LedSlice;
 use canvas_proto::props::{InputNeeds, PropKind, PropertyDef, PropertySchema, Props};
-use canvas_proto::traits::{Canvas, Effect, EngineSettings, FrameSink};
+use canvas_proto::traits::{Canvas, Effect, EngineSettings, FrameSink, StripRead};
 
 use crate::spawn;
 
@@ -121,6 +121,37 @@ impl Effect for CountingEffect {
 
     fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
         canvas.fill([0.0, 0.0, 0.0]);
+    }
+}
+
+/// An effect that counts how many times the engine asked how a strip reads it (#400).
+struct ReadCountedEffect {
+    reads: Arc<AtomicU32>,
+    read: StripRead,
+}
+
+impl Effect for ReadCountedEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "test_read_counted".into(),
+            name: "Test Read Counted".into(),
+            description: "Counts strip_read calls.".into(),
+            needs: InputNeeds::default(),
+            properties: vec![],
+            presets: vec![],
+            thumbnail: None,
+        }
+    }
+
+    fn init(&mut self, _props: &Props) {}
+
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &canvas_proto::traits::Inputs) {
+        canvas.fill([1.0, 0.0, 0.0]);
+    }
+
+    fn strip_read(&self) -> StripRead {
+        self.reads.fetch_add(1, Ordering::AcqRel);
+        self.read
     }
 }
 
@@ -724,6 +755,47 @@ mod scene {
             engine.group_states().iter().all(|s| s.failed.is_none()),
             "{:?}",
             engine.group_states()
+        );
+        engine.shutdown();
+    }
+
+    /// The engine asks how a strip reads a group's effect once, when the effect is installed,
+    /// and never per frame (#400). A replacement asks once more, for the new effect.
+    #[test]
+    fn the_engine_asks_how_a_strip_reads_an_effect_once_per_install() {
+        let engine = spawn(settings(60));
+        let devices = vec![strip_device("d1", 8)];
+        let sink = RecordingSink::new();
+        engine.add_sink(DeviceId("d1".into()), sink.clone());
+        let reads = Arc::new(AtomicU32::new(0));
+        engine.set_scene(
+            vec![light_of("d1")],
+            devices,
+            vec![group(
+                "a",
+                &["d1#z0"],
+                Some(Box::new(ReadCountedEffect { reads: reads.clone(), read: StripRead::Column })),
+            )],
+            false,
+        );
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > 5));
+        assert_eq!(
+            reads.load(Ordering::Acquire),
+            1,
+            "the read is asked once when the effect is set, never on a frame"
+        );
+
+        engine.set_group_effect(
+            "a",
+            Some(Box::new(ReadCountedEffect { reads: reads.clone(), read: StripRead::Cell })),
+            &Props::new(),
+        );
+        let frames = sink.frame_count();
+        assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() > frames + 5));
+        assert_eq!(
+            reads.load(Ordering::Acquire),
+            2,
+            "the replacement asks once more, and the frames after it ask nothing"
         );
         engine.shutdown();
     }
