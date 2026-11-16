@@ -520,24 +520,31 @@ describe("the wake state", () => {
     const list: PadGamepad[] = [];
     // Every read of the browser's list is counted: the wake poll's whole cost is these calls.
     const reads = vi.fn(() => list);
-    const { result } = renderHook(() => usePadInput({ getGamepads: reads }));
+    const drawn = vi.fn();
+    const { result } = renderHook(() => usePadInput({ getGamepads: reads }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <Drawn count={drawn}>{children}</Drawn>
+      ),
+    });
 
     expect(result.current.status).toBe("wake");
     // The mount's own read of the list found no pad.
     expect(reads.mock.calls.length).toBe(1);
 
-    // The wake state's first frame reads the list.
+    // The wake state's first frame reads the list, and draws the empty pad once.
     frames.step();
     expect(reads.mock.calls.length).toBe(2);
     expect(result.current.status).toBe("wake");
+    const settled = drawn.mock.calls.length;
 
     // The list is filled after that read, and no `gamepadconnected` is ever sent.
     list.push(pad.read());
 
-    // The frames before the next poll read nothing at all.
+    // The frames before the next poll read nothing, and set no state, so nothing is drawn.
     for (let i = 0; i < WAKE_POLL_EVERY - 1; i++) frames.step();
     expect(reads.mock.calls.length).toBe(2);
     expect(result.current.status).toBe("wake");
+    expect(drawn.mock.calls.length).toBe(settled);
 
     // The next polled frame reads the list and finds the pad, with no event at all.
     frames.step();
