@@ -5,7 +5,7 @@
 //
 // The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
 // be seen in a plain browser: `?state=daemon-down|openrgb-down|device-empty|slow|
-// save-error|handback:<header id>|chains`.
+// save-error|handback:<header id>|chains|chain-error|chain-start-error`.
 
 import { ApiFailure } from "@/lib/errors";
 import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
@@ -1120,6 +1120,10 @@ function chainsRoute(s: DemoState, method: string, seg: string[], body: unknown)
     if (method === "POST") {
       // One session at a time, as the daemon: another header's setup must be left first.
       if (s.setup) fail(409, "conflict", "another header is being set up; finish or leave it first");
+      // `?state=chain-start-error`: the header does not answer the start, in the device's own words.
+      if (scenario().has("chain-start-error")) {
+        fail(503, "unavailable", "the header is busy: another lighting app holds it");
+      }
       s.setupCounter += 1;
       const session = `demo-setup-${s.setupCounter}`;
       s.setup = { session, restore_to: chain.leds, runs: [] };
@@ -1153,6 +1157,17 @@ function chainsRoute(s: DemoState, method: string, seg: string[], body: unknown)
     checkSession(s, commit);
     if (commit.parts.length === 0) fail(422, "validation", "a chain needs at least one part");
     let total = 0;
+    // `copies` is a count and nothing more: 0 and above 32 are refused, 2 or more only for the
+    // header's only part, and the LEDs are counted once (the daemon's `plan_commit`).
+    commit.parts.forEach((part, i) => {
+      if (part.copies === 0) fail(422, "validation", `part ${i + 1} is shown 0 times; count at least one orange light`);
+      if (part.copies !== undefined && part.copies > 32) {
+        fail(422, "validation", `part ${i + 1} is shown ${part.copies} times, and the app counts up to 32; count again`);
+      }
+    });
+    if (commit.parts.length > 1 && commit.parts.some((part) => (part.copies ?? 1) > 1)) {
+      fail(422, "validation", "a run that the header repeats has to be the only part on that header");
+    }
     commit.parts.forEach((part, i) => {
       if (part.leds < 1) fail(422, "validation", `part ${i + 1} has no LEDs`);
       if ([...part.name].length > 40) {
@@ -1179,6 +1194,7 @@ function chainsRoute(s: DemoState, method: string, seg: string[], body: unknown)
           arrangement: part.kind === "fan" ? "ring" : "strip",
           reversed: false,
           kind: part.kind,
+          ...((part.copies ?? 1) > 1 ? { copies: part.copies } : {}),
         },
         led_count: part.leds,
         connected: true,

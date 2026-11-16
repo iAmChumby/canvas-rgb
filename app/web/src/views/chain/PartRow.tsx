@@ -97,7 +97,7 @@ export function PartRow({
           label={`LEDs in device ${index + 1}`}
           onCommit={onLeds}
         />
-        <span className={s.unit}>LEDs</span>
+        <span className={s.unit}>{part.leds === 1 ? "LED" : "LEDs"}</span>
       </span>
     </li>
   );
