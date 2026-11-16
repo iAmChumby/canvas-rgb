@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { Profiler } from "react";
 import { flushSync } from "react-dom";
 import { createRoot } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
@@ -226,8 +227,9 @@ describe("the move step", () => {
     await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
     expect(document.getElementById("move-outcome-evening")?.textContent).toContain("Adds 1 device.");
 
-    // The step switches to the copy. The first render of the copy is committed on its own: the
-    // effect that asks the daemon about the copy has not run yet.
+    // The step switches to the copy. The first render of the copy is committed on its own, and
+    // the row shows what that render holds: the copy's own question has no answer yet, so the
+    // row is held.
     try {
       act(() => {
         flushSync(() => {
@@ -297,6 +299,46 @@ describe("the move step", () => {
       />,
     );
     await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
+  });
+
+  it("the effect that asks the daemon writes nothing: a new question draws the step once", async () => {
+    // The daemon never answers: only the effect's own write can draw the step again.
+    const use = fakeUse({
+      dryRunMove: vi.fn(() => new Promise<MoveCheck>(() => undefined)),
+    });
+    // Every draw of the step is counted: a write of state inside it is a draw of its own.
+    let draws = 0;
+    const step = (scene: Scene, scenes: Scene[]) => (
+      <Profiler
+        id="move"
+        onRender={() => {
+          draws += 1;
+        }}
+      >
+        <MoveStep
+          groupId="g-desk"
+          copy={false}
+          use={{ ...use, scene, scenes }}
+          lights={lights()}
+          onClose={vi.fn()}
+        />
+      </Profiler>
+    );
+    const { from, to, third } = scenes();
+    const view = render(step(from, [from, to, third]));
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(2));
+    const before = draws;
+
+    // Another window saved the scene the group is in: the question is a new one, and the rows ask
+    // the daemon again.
+    const moved = { ...from, rev: from.rev + 1 };
+    view.rerender(step(moved, [moved, to, third]));
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
+    // The work the effect left is done.
+    await act(async () => {});
+
+    // The effect wrote nothing: the step drew itself once for the new question.
+    expect(draws - before).toBe(1);
   });
 
   it("a row is held until the daemon answers, and it says so in the same box", async () => {

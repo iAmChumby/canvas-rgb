@@ -29,7 +29,7 @@ const { api, notifySpy } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/endpoints", () => ({ api }));
-vi.mock("@/components/Notify", () => ({ notify: notifySpy }));
+vi.mock("@/components/Notify", () => ({ notify: notifySpy, dismissNotification: vi.fn() }));
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
   useRouter: () => ({ push: () => {}, replace: () => {}, prefetch: () => {} }),
@@ -409,7 +409,8 @@ describe("the open group", () => {
     expect(screen.getByText("Presets")).toBeTruthy();
   });
 
-  it("says no Save and no Revert: every change is undoable", async () => {    open("g-one");
+  it("says no Save and no Revert: every change is undoable", async () => {
+    open("g-one");
     await screen.findByRole("dialog");
     const names = [...document.querySelectorAll("button")].map((b) =>
       (b.textContent ?? "").trim(),

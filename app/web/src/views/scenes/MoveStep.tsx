@@ -162,10 +162,14 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
     onClose();
   }, [group, onClose, scene]);
 
-  /** Asks the daemon what a move to one scene would do. It writes nothing. */
+  /**
+   * Asks the daemon what a move to one scene would do. It writes nothing but the answer.
+   *
+   * The row waits without a write of its own: a check that is missing reads as pending, and every
+   * question has a key of its own, so the answer of an older question never lands on the row.
+   */
   const ask = useCallback(
     async (key: string, toSceneId: string, born: number) => {
-      setChecks((c) => ({ ...c, [key]: { state: "pending" } }));
       const answer = await use.dryRunMove(groupId, toSceneId, copy);
       // The step closed, or the row asked again while the answer was on its way: the answer
       // belongs to a question nobody asks any more, and it is dropped.
@@ -178,12 +182,16 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
   /**
    * Asks the daemon about one scene again, with a new question for that row: the answer of the
    * last question is dropped.
+   *
+   * This is the only write the step makes before the answers themselves: the answer on the row is
+   * older than the question, so the row waits for the daemon's own answer.
    */
   const askRow = useCallback(
     (id: string) => {
       const key = keyOf(id);
       const born = (questions.current.get(key) ?? 0) + 1;
       questions.current.set(key, born);
+      setChecks((c) => ({ ...c, [key]: { state: "pending" } }));
       void ask(key, id, born);
     },
     [ask, keyOf],
@@ -196,6 +204,9 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
 
   // The step asks the daemon about every scene when it opens, when it switches between moving and
   // copying, and when a scene's revision moves under it.
+  //
+  // It writes no state: the rows wait for the daemon's own answer, and a check that is missing
+  // reads as pending.
   useEffect(() => {
     for (const id of targetIds) {
       const key = keyOf(id);

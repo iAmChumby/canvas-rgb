@@ -27,7 +27,7 @@
 // reads a ref.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { notify } from "@/components/Notify";
+import { dismissNotification, notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { getSnap, patchSnap, refreshLights, refreshScenes, useSnap } from "@/lib/store";
@@ -180,6 +180,15 @@ function sameGroups(a: Group[], b: Group[]): boolean {
     if (!group.members.every((m, j) => m === other.members[j])) return false;
     return samePlays(group.plays, other.plays);
   });
+}
+
+/**
+ * True when two orders name the same scenes in the same order. The order the daemon answers with
+ * is compared with the order this window shows, to know whether the daemon has the order on the
+ * screen.
+ */
+function sameOrder(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
 }
 
 /**
@@ -508,14 +517,14 @@ export function useScene(): UseScene {
   /** The order writes go one after the other: the next one names the order the last one sent. */
   const orderChain = useRef<Promise<void>>(Promise.resolve());
   /**
-   * The message the last move left in the toast lane, and the undo step it belongs to. The toast
-   * is said again when the Undo it offers is no longer the one: an Undo takes the top step of
-   * the history back, so it may only be offered while the move is still on top.
+   * The message the last move left in the toast lane, and the undo step it belongs to. An Undo
+   * takes the top step of the history back, so the toast may only offer the Undo while the move is
+   * still on top: when it is not, the toast goes and the move is forgotten.
    */
-  const lastMove = useRef<{ text: string; tone: "ok" | "warn"; label: string } | null>(null);
+  const lastMove = useRef<{ text: string; tone: "ok" | "warn"; label: string; id: string } | null>(null);
   /**
-   * Whether the toast of the last move offers the Undo now. The toast is said again only when
-   * that changes, so a move is said once and a later change does not bring it back.
+   * Whether the toast of the last move offers the Undo now. The toast is taken away when that
+   * changes, so a move is said once and a later change does not bring it back.
    */
   const undoOffered = useRef(false);
   /** The timer that sends one order for a burst of key presses. */
@@ -1581,9 +1590,10 @@ export function useScene(): UseScene {
       const text = emptied ? `${first} ${emptied}` : first;
       const tone = emptied ? "warn" : "ok";
       const label = copy ? COPY_STEP_LABEL : MOVE_STEP_LABEL;
-      lastMove.current = { text, tone, label };
       undoOffered.current = true;
-      notify(
+      // The toast's own id says which message it is: it is the one taken away when the move is
+      // no longer the top step of the history.
+      const id = notify(
         text,
         tone,
         {
@@ -1599,6 +1609,7 @@ export function useScene(): UseScene {
         // again.
         { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
       );
+      lastMove.current = { text, tone, label, id };
       await refreshScenes();
       return answer;
     },
@@ -1616,13 +1627,12 @@ export function useScene(): UseScene {
   );
 
   /**
-   * The toast of the last move is said again when the Undo it offers is no longer the one: an
-   * Undo takes the top step of the history back, so it may only be offered while the move is
-   * still on top. When another change came after the move, the toast says what happened and
-   * offers nothing.
+   * The toast of the last move, and the Undo it offers.
    *
-   * The toast is said once: it is said again only when the Undo it offers changes, so a change
-   * that comes later does not bring back a toast that has gone.
+   * An Undo takes the top step of the history back, so the toast may only offer it while the move
+   * is the top step. When another change came after the move, the Undo it offers is not the one
+   * the page's Undo would take: the toast goes, and the move is forgotten, so it is never said
+   * again.
    */
   useEffect(() => {
     const move = lastMove.current;
@@ -1630,23 +1640,30 @@ export function useScene(): UseScene {
     const top = view.undoLabel === move.label;
     if (top === undoOffered.current) return;
     undoOffered.current = top;
-    notify(
-      move.text,
-      move.tone,
-      top
-        ? {
-            label: "Undo",
-            onClick: () => {
-              lastMove.current = null;
-              undoOffered.current = false;
-              undo();
-            },
-          }
-        : undefined,
-      // The reader takes the toast away: the move is forgotten, so no later change says it
-      // again.
-      { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
-    );
+    if (top) {
+      // The move is the top step of the history: the Undo it offers is the one the page's Undo
+      // takes, so the toast offers it.
+      notify(
+        move.text,
+        move.tone,
+        {
+          label: "Undo",
+          onClick: () => {
+            lastMove.current = null;
+            undoOffered.current = false;
+            undo();
+          },
+        },
+        // The reader takes the toast away: the move is forgotten, so no later change says it
+        // again.
+        { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
+      );
+      return;
+    }
+    // The move is not the top step any more: its toast goes, and the move is forgotten, so it is
+    // never said again.
+    lastMove.current = null;
+    dismissNotification(move.id);
   }, [undo, view.undoLabel]);
 
   /**
@@ -1661,21 +1678,27 @@ export function useScene(): UseScene {
   /**
    * The daemon is told the order of the scenes, with the order it last confirmed. A window that
    * put the scenes in another order in between is refused, and nothing is written.
+   *
+   * The answer is the order the daemon has now: the known order follows it, so the next write
+   * names the order the daemon has and not the one this window had. `null` when the write did
+   * not go through.
    */
   const writeOrder = useCallback(
-    async (order: string[], expected: string[]): Promise<boolean> => {
+    async (order: string[], expected: string[]): Promise<string[] | null> => {
       try {
         const answer = await api.scenes.write({ order, expected_order: expected });
         adoptScenes(answer.scenes);
-        knownOrder.current = order;
+        // The order the daemon has now: the next write names it.
+        const landed = answer.scenes.map((s) => s.id);
+        knownOrder.current = landed;
         fail(null);
         await refreshScenes();
-        return true;
+        return landed;
       } catch (e) {
         if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_MOVED);
         else fail(messageOf(e));
         await refreshScenes();
-        return false;
+        return null;
       }
     },
     [adoptScenes, fail],
@@ -1689,15 +1712,15 @@ export function useScene(): UseScene {
           label: "Put the scenes in another order",
           undo: async () => {
             showLocalOrder(from);
-            const done = await writeOrder(from, to);
+            const landed = await writeOrder(from, to);
             showLocalOrder(null);
-            return done;
+            return landed !== null;
           },
           redo: async () => {
             showLocalOrder(to);
-            const done = await writeOrder(to, from);
+            const landed = await writeOrder(to, from);
             showLocalOrder(null);
-            return done;
+            return landed !== null;
           },
         },
         false,
@@ -1728,18 +1751,19 @@ export function useScene(): UseScene {
               ? knownOrder.current
               : (getSnap().scenes?.scenes.map((s) => s.id) ?? []);
             if (expected.length === 0) return;
-            const done = await writeOrder(order, expected);
-            if (!done) {
+            const landed = await writeOrder(order, expected);
+            if (landed === null) {
               showLocalOrder(null);
               return;
             }
             pushOrderCommand(expected, order);
-            // The daemon's answer is the order now. When it is the order on the screen, the strip
-            // follows the daemon again, so the order another window makes shows as soon as it
-            // lands.
-            const landed = (getSnap().scenes?.scenes ?? []).map((s) => s.id);
+            // The daemon's answer is the order it has now. When it carries the order this window
+            // showed, the strip follows the daemon again, so the order another window made shows
+            // as soon as it lands. The answer says so, not a read of the snapshot after the wait:
+            // that read can hold another window's order, and the local order would then stay for
+            // good. A newer order of this window is on its way: that one is shown until it lands.
             const local = localOrderRef.current;
-            if (local && landed.join("|") === local.join("|")) showLocalOrder(null);
+            if (local && sameOrder(landed, local)) showLocalOrder(null);
           } catch {
             showLocalOrder(null);
           }

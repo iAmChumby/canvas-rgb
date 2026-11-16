@@ -26,7 +26,7 @@ const { api } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/endpoints", () => ({ api }));
-vi.mock("@/components/Notify", () => ({ notify: vi.fn() }));
+vi.mock("@/components/Notify", () => ({ notify: vi.fn(), dismissNotification: vi.fn() }));
 
 import { patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS } from "@/lib/fixtures";
