@@ -620,12 +620,11 @@ impl Store {
         // the owner's `lights.json` and `scenes.json` as they are, with the scene still naming
         // the light that is about to go: that copy is what makes the removal recoverable.
         //
-        // It is taken only when this path writes the cleaned file. A held migration writes both
-        // files itself and takes its own `before-scenes` snapshot, and a scenes file that could
-        // not be read is left alone with the lights file.
-        let writes_lights = !orphans.is_empty()
-            && !self.lights_blocked
-            && matches!(&scenes, Loaded::Parsed(_));
+        // It is taken whenever a leftover is about to go, whatever the scenes file is. With no
+        // scenes file the cleaned lights are written later, when the first device list arrives,
+        // and that path goes on without its own snapshot when it cannot take one: so the copy
+        // is made here, or nothing is removed.
+        let writes_lights = !orphans.is_empty() && !self.lights_blocked;
         let recoverable = if writes_lights {
             match snapshot(&self.home, "before-removing-leftover-lights") {
                 Ok(_) => true,
@@ -2625,6 +2624,54 @@ power = "running"
         assert!(
             store.lights.lights.iter().any(|l| l.id == orphan_id),
             "the lights are kept in memory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// With no `scenes.json` the cleaned lights are written later, by the first device list. The
+    /// leftover still goes only with a snapshot: when none can be taken it stays in memory, so
+    /// that later write keeps it, and the file is not touched at load (#393).
+    #[test]
+    fn with_no_scenes_file_a_leftover_goes_only_with_a_snapshot() {
+        let (dir, orphan_id, lights_before, _scenes_before, _kept) =
+            owner_files_with_a_leftover("orphan-no-scenes-no-snapshot", |_| {});
+        std::fs::remove_file(dir.join(SCENES_FILE)).unwrap();
+        std::fs::write(paths::backups_dir_in(&dir), b"not a folder").unwrap();
+
+        let store = Store::load_from(&dir);
+
+        assert_eq!(
+            std::fs::read(dir.join(LIGHTS_FILE)).unwrap(),
+            lights_before,
+            "lights.json is byte for byte what it was"
+        );
+        assert!(
+            store.lights.lights.iter().any(|l| l.id == orphan_id),
+            "with no snapshot the leftover is kept in memory"
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // With a backups folder that works, the copy exists before anything is written.
+        let (dir, orphan_id, lights_before, _scenes_before, _kept) =
+            owner_files_with_a_leftover("orphan-no-scenes-snapshot", |_| {});
+        std::fs::remove_file(dir.join(SCENES_FILE)).unwrap();
+
+        let store = Store::load_from(&dir);
+
+        assert!(
+            !store.lights.lights.iter().any(|l| l.id == orphan_id),
+            "with a snapshot the leftover is gone from memory"
+        );
+        let copies: Vec<_> = std::fs::read_dir(paths::backups_dir_in(&dir))
+            .expect("the backups folder exists")
+            .filter_map(Result::ok)
+            .filter(|e| e.file_name().to_string_lossy().contains("before-removing-leftover-lights"))
+            .collect();
+        assert_eq!(copies.len(), 1, "one snapshot was taken");
+        assert_eq!(
+            std::fs::read(copies[0].path().join(LIGHTS_FILE)).unwrap(),
+            lights_before,
+            "the snapshot holds the owner's lights.json"
         );
         let _ = std::fs::remove_dir_all(&dir);
     }
