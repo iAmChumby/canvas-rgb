@@ -5,7 +5,7 @@
 
 use canvas_daemon::cli::{
     Cli, CliError, Command, ConfigCommand, DevicesCommand, DiagCommand, EffectsCommand, FansCommand,
-    OutputCommand, PeripheralsCommand, ScenesCommand, ScenesGroupCommand,
+    LightsCommand, OutputCommand, PeripheralsCommand, ScenesCommand, ScenesGroupCommand,
 };
 use clap::Parser;
 use std::process::ExitCode;
@@ -32,6 +32,7 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     match &cli.command {
         Command::Status => status(cli),
         Command::Devices(DevicesCommand::List) => devices(cli),
+        Command::Lights(LightsCommand::List) => lights_list(cli),
         Command::Effects(EffectsCommand::List) => effects_list(cli),
         Command::Effects(EffectsCommand::Activate(args)) => effects_activate(cli, args),
         Command::Effects(EffectsCommand::Import(args)) => effects_import(cli, args),
@@ -39,6 +40,9 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Scenes(ScenesCommand::List) => scenes_list(cli),
         Command::Scenes(ScenesCommand::Set { name }) => scenes_set(cli, name),
         Command::Scenes(ScenesCommand::Order(args)) => scenes_order(cli, args),
+        Command::Scenes(ScenesCommand::Create(args)) => scenes_create(cli, args),
+        Command::Scenes(ScenesCommand::Edit(args)) => scenes_edit(cli, args),
+        Command::Scenes(ScenesCommand::Delete(args)) => scenes_delete(cli, args),
         Command::Scenes(ScenesCommand::Group(ScenesGroupCommand::Move(args))) => scenes_group_move(cli, args),
         Command::Output(OutputCommand::Pause) => output(cli, "paused"),
         Command::Output(OutputCommand::Resume) => output(cli, "running"),
@@ -237,6 +241,16 @@ fn devices(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+/// `canvas-rgb lights list`.
+fn lights_list(cli: &Cli) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::lights_list(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
 /// `canvas-rgb effects list`.
 fn effects_list(cli: &Cli) -> Result<(), CliError> {
     let client = client(cli)?;
@@ -343,6 +357,36 @@ fn scenes_set(cli: &Cli, name: &str) -> Result<(), CliError> {
 fn scenes_order(cli: &Cli, args: &canvas_daemon::cli::OrderArgs) -> Result<(), CliError> {
     let client = client(cli)?;
     match canvas_daemon::cli::scenes_order(&client, &args.scenes, args.dry_run, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes create <name> [--from <groups.json>] [--run <run>] [--dry-run]`.
+fn scenes_create(cli: &Cli, args: &canvas_daemon::cli::CreateArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_create(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes edit <scene> --from <groups.json> --run <run> [--dry-run]`.
+fn scenes_edit(cli: &Cli, args: &canvas_daemon::cli::EditArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_edit(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes delete <scene> --run <run> [--force] [--dry-run]`.
+fn scenes_delete(cli: &Cli, args: &canvas_daemon::cli::DeleteArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_delete(&client, args, cli.json)? {
         canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
         canvas_daemon::cli::Output::Text(text) => print!("{text}"),
     }

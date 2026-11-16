@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
+- The command line can list your lights and create, edit and delete a scene from a file, with a dry run that saves nothing. (#377)
 
 ### Changed
 
