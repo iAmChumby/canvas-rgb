@@ -30,6 +30,7 @@ pub mod peripherals;
 pub mod pipe_client;
 pub mod power;
 pub mod scene_migration;
+pub mod scene_move;
 pub mod scenes;
 pub mod preview;
 pub mod state;

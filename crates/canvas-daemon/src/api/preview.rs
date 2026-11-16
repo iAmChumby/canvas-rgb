@@ -8,6 +8,8 @@
 //! `?stack=1` it streams the stack preview engine instead (D95.4.4): a second engine with no
 //! device sink, so what the builder shows never reaches a light.
 //!
+//! `GET /api/v1/preview/group` streams one group's own picture (#378); see [`preview_group`].
+//!
 //! Each preview sink is registered only while at least one subscriber is connected, so the
 //! engine parks when the editor window is closed. A preview engine has one sink, so only one
 //! `?stack=1` socket streams at a time: a second one is closed with code 1013 and a reason the
@@ -290,6 +292,126 @@ async fn run_lights(mut socket: WebSocket, app: Arc<App>, mut watch: crate::scen
     }
     // `watch` gives the place back when it drops, here or if this task is cancelled or panics.
     tracing::info!("the light preview disconnected");
+}
+
+// ---------------------------------------------------------------- the group's picture (#378)
+
+/// The query the group socket carries: the token, as for [`preview`], and the group's id.
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+pub struct GroupQuery {
+    #[serde(default)]
+    pub token: Option<String>,
+    #[serde(default)]
+    pub group: Option<String>,
+}
+
+/// The close code and text a socket gets when a newer group socket takes the place.
+pub const GROUP_TAKEN_CODE: u16 = 1013;
+pub const GROUP_TAKEN_REASON: &str = "another group preview took over";
+
+/// `GET /api/v1/preview/group?group=<id>&token=<token>`.
+///
+/// Binary messages in the format of [`preview`]: `u16 LE width, u16 LE height, width*height*3 RGB
+/// bytes`, the group's own canvas times its brightness, at most `PREVIEW_MAX_FPS` a second. The
+/// token is checked as the other preview sockets check it, and before anything about the group is
+/// said, so a caller without the token learns nothing of the scene.
+///
+/// An id the active scene does not hold is refused as a plain 404 before the upgrade. There is one
+/// place for a group socket and the newest socket takes it: the one before it is closed with
+/// [`GROUP_TAKEN_CODE`], so a page that opens group B before its socket for group A has closed is
+/// not refused. Closing the last socket stops the engine's tap.
+pub async fn preview_group(
+    State(app): State<Arc<App>>,
+    Query(query): Query<GroupQuery>,
+    upgrade: WebSocketUpgrade,
+) -> Response {
+    let Some(presented) = query.token.as_deref() else {
+        return crate::api::ApiFailure::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            canvas_proto::api::error_codes::UNAUTHORIZED,
+            "the group preview needs a token",
+        )
+        .into_response();
+    };
+    if !crate::token::constant_time_eq(presented, &app.token) {
+        return crate::api::ApiFailure::new(
+            axum::http::StatusCode::UNAUTHORIZED,
+            canvas_proto::api::error_codes::UNAUTHORIZED,
+            "the API token is not valid",
+        )
+        .into_response();
+    }
+    let Some(group) = query.group.filter(|g| !g.is_empty()) else {
+        return crate::api::ApiFailure::validation(format!(
+            "the group preview needs a ?{}= group id",
+            canvas_proto::consts::GROUP_PREVIEW_QUERY
+        ))
+        .into_response();
+    };
+    let known = {
+        let store = app.store.read().await;
+        crate::scenes::active_scene(&store.scenes).groups.iter().any(|g| g.id == group)
+    };
+    if !known {
+        return crate::api::ApiFailure::not_found(format!("the active scene has no group {group:?}"))
+            .into_response();
+    }
+    upgrade.on_upgrade(move |socket| run_group(socket, app, group))
+}
+
+/// The place a group socket holds, given back when this drops however the socket's task ends.
+struct GroupSession {
+    app: Arc<App>,
+    id: u64,
+}
+
+impl Drop for GroupSession {
+    fn drop(&mut self) {
+        self.app.group_preview.release(self.app.engine.as_ref(), self.id);
+    }
+}
+
+async fn run_group(mut socket: WebSocket, app: Arc<App>, group: String) {
+    // A bounded queue of 4 pictures between the engine and this task. The engine's side never
+    // waits: a full queue drops the newest picture (`WebsocketPreview::submit`), the same policy
+    // as the effects preview.
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<(u32, u32, Vec<u8>)>(4);
+    let sink = Arc::new(WebsocketPreview::new(tx));
+    let (id, mut taken) = app.group_preview.take(app.engine.as_ref(), group.clone(), sink);
+    let _session = GroupSession { app: Arc::clone(&app), id };
+    tracing::info!(group = %group, "the group preview connected");
+
+    loop {
+        tokio::select! {
+            frame = rx.recv() => {
+                let Some((width, height, rgb)) = frame else { break };
+                let mut payload = bytes::BytesMut::with_capacity(4 + rgb.len());
+                payload.extend_from_slice(&(width as u16).to_le_bytes());
+                payload.extend_from_slice(&(height as u16).to_le_bytes());
+                payload.extend_from_slice(&rgb);
+                // A window that does not read is dropped, like the light feed's: it would
+                // otherwise hold the place with a queue that only ever drops.
+                if !send_in_time(&mut socket, &app, Message::Binary(payload.freeze())).await {
+                    break;
+                }
+            }
+            _ = &mut taken => {
+                let close = Message::Close(Some(CloseFrame {
+                    code: GROUP_TAKEN_CODE,
+                    reason: GROUP_TAKEN_REASON.into(),
+                }));
+                let _ = send_in_time(&mut socket, &app, close).await;
+                tracing::info!(group = %group, "a newer group preview took the place");
+                break;
+            }
+            incoming = socket.recv() => match incoming {
+                Some(Ok(Message::Close(_))) | None | Some(Err(_)) => break,
+                Some(Ok(_)) => {}
+            },
+        }
+    }
+    // `_session` gives the place back here, and stops the engine's tap if this socket still held it.
+    tracing::info!(group = %group, "the group preview disconnected");
 }
 
 #[cfg(test)]

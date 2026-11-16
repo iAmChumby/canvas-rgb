@@ -180,6 +180,48 @@ pub enum ScenesCommand {
         /// The scene's name.
         name: String,
     },
+    /// Put the scenes in a new order: name every scene once (#371).
+    Order(OrderArgs),
+    /// The groups of a scene.
+    #[command(subcommand)]
+    Group(ScenesGroupCommand),
+}
+
+/// `canvas-rgb scenes order <scene>... [--dry-run]` (#371)
+#[derive(Debug, Args)]
+pub struct OrderArgs {
+    /// Every scene once, in the new order. A scene is named by its id or its name.
+    #[arg(required = true, num_args = 1..)]
+    pub scenes: Vec<String>,
+    /// Check the order and print it; save nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `canvas-rgb scenes group ...`
+#[derive(Debug, Subcommand)]
+pub enum ScenesGroupCommand {
+    /// Move or copy a group to another scene (#368).
+    Move(GroupMoveArgs),
+}
+
+/// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]` (#368)
+#[derive(Debug, Args)]
+pub struct GroupMoveArgs {
+    /// The group, by name or id.
+    pub group: String,
+    /// The scene the group is in, by id or name.
+    #[arg(long)]
+    pub from: String,
+    /// The scene the group goes to, by id or name.
+    #[arg(long)]
+    pub to: String,
+    /// Copy the group: the source scene keeps it.
+    #[arg(long)]
+    pub copy: bool,
+    /// Run every check and print what would happen; save nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `canvas-rgb effects import <file> [--replace]`
@@ -753,10 +795,43 @@ pub enum CliError {
     /// request may have reached it: whether it acted is not known (#328).
     #[error("{0}")]
     NoAnswer(String),
-    #[error("the API returned {status}: {message}")]
-    Api { status: u16, message: String },
+    #[error("{}", api_error_text(*.status, .message, .body))]
+    Api {
+        status: u16,
+        message: String,
+        /// The error body the API sent, whole: a `409` carries the current scene or order.
+        body: Option<serde_json::Value>,
+    },
     #[error("{0}")]
     Other(String),
+}
+
+/// What an API error says: the status and the message, and for a `409` the current `rev` of
+/// the scene or the current order the body carries, so the owner sees what changed.
+fn api_error_text(status: u16, message: &str, body: &Option<serde_json::Value>) -> String {
+    let mut text = format!("the API returned {status}: {message}");
+    let Some(body) = body else { return text };
+    if let Some(scene) = body.get("scene") {
+        let id = scene.get("id").and_then(|v| v.as_str()).unwrap_or("?");
+        if let Some(rev) = scene.get("rev").and_then(|v| v.as_u64()) {
+            text.push_str(&format!(" (scene {id} is at rev {rev} now)"));
+        }
+    }
+    if let Some(order) = body.get("order").and_then(|v| v.as_array()) {
+        let ids: Vec<&str> = order.iter().filter_map(|v| v.as_str()).collect();
+        text.push_str(&format!(" (the order is now: {})", ids.join(", ")));
+    }
+    text
+}
+
+impl CliError {
+    /// The error body the API sent, for `--json`: it goes to stdout while stderr gets the message.
+    pub fn json_body(&self) -> Option<&serde_json::Value> {
+        match self {
+            CliError::Api { body, .. } => body.as_ref(),
+            _ => None,
+        }
+    }
 }
 
 impl From<String> for CliError {
@@ -984,12 +1059,13 @@ impl Client {
         // is not an answer (#328).
         let text = response.body_mut().read_to_string().map_err(Attempt::NoReply)?;
         if status >= 400 {
-            // The API answers with `{ "error": ..., "message": ... }`.
-            let message = serde_json::from_str::<serde_json::Value>(&text)
-                .ok()
+            // The API answers with `{ "error": ..., "message": ... }`; the body is kept whole.
+            let body = serde_json::from_str::<serde_json::Value>(&text).ok();
+            let message = body
+                .as_ref()
                 .and_then(|v| v.get("message").and_then(|m| m.as_str()).map(str::to_string))
                 .unwrap_or(text);
-            return Err(Attempt::Answer(CliError::Api { status, message }));
+            return Err(Attempt::Answer(CliError::Api { status, message, body }));
         }
         if text.trim().is_empty() {
             return Ok(serde_json::Value::Null);
@@ -1040,10 +1116,19 @@ pub fn scenes_list(api: &dyn Api, json: bool) -> Result<Output, CliError> {
 /// names one scene, so it is accepted as well.
 pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliError> {
     let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let found = resolve_scene(&list, name, json)?;
+    set_scene(api, &found, json)
+}
+
+/// The scene `name` means in a scenes answer: an exact id first, then a name without regard to
+/// case. A name that matches nothing fails and prints the list; a name that matches several
+/// scenes is refused and the matches are listed (scene names are not unique, and picking one
+/// of them is the owner's call).
+fn resolve_scene(list: &serde_json::Value, name: &str, json: bool) -> Result<serde_json::Value, CliError> {
     let scenes = list.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
     // An exact id names one scene.
     if let Some(found) = scenes.iter().find(|scene| scene.get("id").and_then(|v| v.as_str()) == Some(name)) {
-        return set_scene(api, found, json);
+        return Ok(found.clone());
     }
     let matches: Vec<&serde_json::Value> = scenes
         .iter()
@@ -1070,7 +1155,7 @@ pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliEr
         )));
     }
     let Some(found) = matches.first() else {
-        let list_text = scenes_list_text(&list);
+        let list_text = scenes_list_text(list);
         if json {
             return Err(CliError::Other(format!(
                 "no scene is named {name}; the scenes are: {}",
@@ -1079,7 +1164,149 @@ pub fn scenes_set(api: &dyn Api, name: &str, json: bool) -> Result<Output, CliEr
         }
         return Err(CliError::Other(format!("no scene is named {name}\n{list_text}")));
     };
-    set_scene(api, found, json)
+    Ok((*found).clone())
+}
+
+fn str_of<'a>(value: &'a serde_json::Value, key: &str) -> &'a str {
+    value.get(key).and_then(|v| v.as_str()).unwrap_or("?")
+}
+
+/// `canvas-rgb scenes order <scene>... [--dry-run]` (#371): names every scene once, in the new
+/// order. It reads the scenes, checks the names, and writes the order with the order it read as
+/// `expected_order`, so another window's change is a `409` and not a lost update.
+pub fn scenes_order(api: &dyn Api, names: &[String], dry_run: bool, json: bool) -> Result<Output, CliError> {
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let scenes = list.get("scenes").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let now: Vec<String> = scenes.iter().map(|s| str_of(s, "id").to_string()).collect();
+    let mut order: Vec<String> = Vec::with_capacity(names.len());
+    for name in names {
+        let found = resolve_scene(&list, name, json)?;
+        order.push(str_of(&found, "id").to_string());
+    }
+    let mut sorted = order.clone();
+    sorted.sort();
+    let mut sorted_now = now.clone();
+    sorted_now.sort();
+    if sorted != sorted_now {
+        let list_text = scenes_list_text(&list);
+        return Err(CliError::Other(if json {
+            format!("name every scene once; the scenes are: {}", list_text.trim())
+        } else {
+            format!("name every scene once, in the order you want\n{list_text}")
+        }));
+    }
+    let title = |id: &String| {
+        scenes.iter().find(|s| str_of(s, "id") == id).map(|s| str_of(s, "name").to_string()).unwrap_or_default()
+    };
+    let titles = order.iter().map(title).collect::<Vec<_>>().join(", ");
+    if dry_run {
+        return Ok(if json {
+            Output::Json(serde_json::json!({ "saved": false, "order": order }))
+        } else {
+            Output::Text(format!("would order: {titles}\n"))
+        });
+    }
+    let body = serde_json::to_string(&canvas_proto::api::ScenesWrite {
+        order: Some(order),
+        expected_order: Some(now),
+        ..Default::default()
+    })
+    .map_err(|e| CliError::Other(e.to_string()))?;
+    let answer = api.call("PUT", canvas_proto::api::routes::SCENES, Some(&body))?;
+    Ok(if json { Output::Json(answer) } else { Output::Text(format!("the scenes are in this order: {titles}\n")) })
+}
+
+/// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]`
+/// (#368). The scenes resolve like `scenes set`, the group by id and then by name. It sends the
+/// revs it read, so a scene that changed since is a `409` and nothing moves.
+pub fn scenes_group_move(api: &dyn Api, args: &GroupMoveArgs, json: bool) -> Result<Output, CliError> {
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let from = resolve_scene(&list, &args.from, json)?;
+    let to = resolve_scene(&list, &args.to, json)?;
+    let groups = from.get("groups").and_then(|v| v.as_array()).cloned().unwrap_or_default();
+    let group = match groups.iter().find(|g| str_of(g, "id") == args.group) {
+        Some(found) => found.clone(),
+        None => {
+            let named: Vec<&serde_json::Value> =
+                groups.iter().filter(|g| str_of(g, "name").eq_ignore_ascii_case(&args.group)).collect();
+            match named.as_slice() {
+                [one] => (*one).clone(),
+                [] => {
+                    let names: Vec<&str> = groups.iter().map(|g| str_of(g, "name")).collect();
+                    return Err(CliError::Other(format!(
+                        "{} has no group named {}; its groups are: {}",
+                        str_of(&from, "name"),
+                        args.group,
+                        names.join(", ")
+                    )));
+                }
+                many => {
+                    let ids: Vec<String> =
+                        many.iter().map(|g| format!("{} ({})", str_of(g, "id"), str_of(g, "name"))).collect();
+                    return Err(CliError::Other(format!(
+                        "{} names {} groups in {}: {}; name one of them by its id",
+                        args.group,
+                        many.len(),
+                        str_of(&from, "name"),
+                        ids.join(", ")
+                    )));
+                }
+            }
+        }
+    };
+    let rev = |scene: &serde_json::Value| scene.get("rev").and_then(|v| v.as_u64()).unwrap_or_default();
+    let body = serde_json::to_string(&canvas_proto::api::GroupMove {
+        to: str_of(&to, "id").to_string(),
+        copy: args.copy,
+        expected_rev_from: rev(&from),
+        expected_rev_to: rev(&to),
+        dry_run: args.dry_run,
+    })
+    .map_err(|e| CliError::Other(e.to_string()))?;
+    let path = canvas_proto::api::routes::GROUP_MOVE
+        .replace("{id}", str_of(&from, "id"))
+        .replace("{group}", str_of(&group, "id"));
+    let answer = api.call("POST", &path, Some(&body))?;
+    if json {
+        return Ok(Output::Json(answer));
+    }
+    let done: canvas_proto::api::GroupMoved = serde_json::from_value(answer)
+        .map_err(|e| CliError::Other(format!("the daemon's answer was not a group move: {e}")))?;
+    Ok(Output::Text(group_move_text(
+        args,
+        str_of(&group, "name"),
+        str_of(&from, "name"),
+        str_of(&to, "name"),
+        &done,
+    )))
+}
+
+/// One line: `moved Desk from Gaming to Movie: 2 devices taken from Everything; 1 group removed`.
+/// A dry run starts `would move` / `would copy`.
+fn group_move_text(
+    args: &GroupMoveArgs,
+    group: &str,
+    from: &str,
+    to: &str,
+    done: &canvas_proto::api::GroupMoved,
+) -> String {
+    let verb = match (args.dry_run, args.copy) {
+        (false, false) => "moved",
+        (false, true) => "copied",
+        (true, false) => "would move",
+        (true, true) => "would copy",
+    };
+    let count = |n: usize, one: &str, many: &str| format!("{n} {}", if n == 1 { one } else { many });
+    let mut details: Vec<String> = done
+        .taken
+        .iter()
+        .map(|t| format!("{} taken from {}", count(t.lights.len(), "device", "devices"), t.group_name))
+        .collect();
+    if !done.emptied.is_empty() {
+        details.push(format!("{} removed", count(done.emptied.len(), "group", "groups")));
+    }
+    let tail = if details.is_empty() { String::new() } else { format!(": {}", details.join("; ")) };
+    format!("{verb} {group} from {from} to {to}{tail}\n")
 }
 
 /// Sets the scene the answer names.
@@ -2174,6 +2401,290 @@ mod tests {
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    /// An API that answers the scenes list with groups and revs and records every request. The
+    /// reply to a write is the one given (an answer, or an error status with its body).
+    struct OpsApi {
+        reply: Result<serde_json::Value, (u16, serde_json::Value)>,
+        asked: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl OpsApi {
+        fn answering(reply: serde_json::Value) -> Self {
+            Self { reply: Ok(reply), asked: std::sync::Mutex::new(Vec::new()) }
+        }
+
+        fn failing(status: u16, body: serde_json::Value) -> Self {
+            Self { reply: Err((status, body)), asked: std::sync::Mutex::new(Vec::new()) }
+        }
+
+        fn asked(&self) -> Vec<(String, String, Option<String>)> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        /// The one write the command sent, body parsed.
+        fn write(&self) -> (String, String, serde_json::Value) {
+            let asked = self.asked();
+            assert_eq!(asked.len(), 2, "one read, one write: {asked:?}");
+            let (method, path, body) = asked[1].clone();
+            (method, path, serde_json::from_str(body.as_deref().expect("a body")).unwrap())
+        }
+    }
+
+    impl Api for OpsApi {
+        fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+            self.asked.lock().unwrap().push((method.to_string(), path.to_string(), body.map(str::to_string)));
+            if method == "GET" && path == canvas_proto::api::routes::SCENES {
+                return Ok(a_scenes_list_with_groups());
+            }
+            match &self.reply {
+                Ok(value) => Ok(value.clone()),
+                Err((status, body)) => Err(CliError::Api {
+                    status: *status,
+                    message: body.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+                    body: Some(body.clone()),
+                }),
+            }
+        }
+    }
+
+    fn a_scenes_list_with_groups() -> serde_json::Value {
+        serde_json::json!({
+            "active": "gaming",
+            "scenes": [
+                { "id": "gaming", "name": "Gaming", "rev": 4, "groups": [
+                    { "id": "desk", "name": "Desk" }, { "id": "wall", "name": "Wall" } ] },
+                { "id": "movie", "name": "Movie", "rev": 7, "groups": [ { "id": "lamp", "name": "Lamp" } ] },
+                { "id": "sleep", "name": "Sleep", "rev": 2, "groups": [] },
+            ],
+            "group_states": []
+        })
+    }
+
+    fn scene(id: &str, rev: u64) -> canvas_proto::scene::Scene {
+        canvas_proto::scene::Scene { id: id.into(), name: id.into(), rev, groups: Vec::new() }
+    }
+
+    /// What the daemon answers to a move that takes 2 devices from Everything and empties it.
+    fn a_moved_answer(saved: bool) -> serde_json::Value {
+        serde_json::to_value(canvas_proto::api::GroupMoved {
+            group_id: "desk".into(),
+            saved,
+            scenes: vec![scene("gaming", 5), scene("movie", 8)],
+            before: vec![scene("gaming", 4), scene("movie", 7)],
+            taken: vec![canvas_proto::api::GroupTaken {
+                group_id: "all".into(),
+                group_name: "Everything".into(),
+                lights: vec!["a".into(), "b".into()],
+            }],
+            emptied: vec!["Everything".into()],
+        })
+        .unwrap()
+    }
+
+    fn move_args(group: &str, from: &str, to: &str, copy: bool, dry_run: bool) -> GroupMoveArgs {
+        GroupMoveArgs { group: group.into(), from: from.into(), to: to.into(), copy, dry_run }
+    }
+
+    fn text_of(output: Output) -> String {
+        match output {
+            Output::Text(text) => text,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The command names are the spine's: the clap tree has a command at each spine path.
+    #[test]
+    fn the_new_commands_are_at_the_spines_names() {
+        use clap::CommandFactory;
+        let root = Cli::command();
+        for path in [canvas_proto::cli::SCENES_ORDER, canvas_proto::cli::SCENES_GROUP_MOVE] {
+            let mut at = &root;
+            for step in path {
+                at = at.find_subcommand(step).unwrap_or_else(|| panic!("no command {step} on the path {path:?}"));
+            }
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "scenes", "order", "Sleep", "gaming", "--dry-run"]).unwrap();
+        match cli.command {
+            Command::Scenes(ScenesCommand::Order(args)) => {
+                assert_eq!(args.scenes, ["Sleep", "gaming"]);
+                assert!(args.dry_run);
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "canvas-rgb", "scenes", "group", "move", "Desk", "--from", "gaming", "--to", "movie", "--copy",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Scenes(ScenesCommand::Group(ScenesGroupCommand::Move(args))) => {
+                assert_eq!((args.group.as_str(), args.from.as_str(), args.to.as_str()), ("Desk", "gaming", "movie"));
+                assert!(args.copy && !args.dry_run);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(Cli::try_parse_from(["canvas-rgb", "scenes", "order"]).is_err(), "an order names scenes");
+    }
+
+    #[test]
+    fn scenes_order_sends_the_order_and_the_order_it_read() {
+        let api = OpsApi::answering(a_scenes_list_with_groups());
+        let names = ["sleep".to_string(), "MOVIE".to_string(), "Gaming".to_string()];
+        let text = text_of(scenes_order(&api, &names, false, false).unwrap());
+        assert_eq!(text, "the scenes are in this order: Sleep, Movie, Gaming\n");
+        let (method, path, body) = api.write();
+        assert_eq!((method.as_str(), path.as_str()), ("PUT", canvas_proto::api::routes::SCENES));
+        assert_eq!(body["order"], serde_json::json!(["sleep", "movie", "gaming"]));
+        assert_eq!(body["expected_order"], serde_json::json!(["gaming", "movie", "sleep"]));
+        assert!(body.get("scenes").is_none(), "an order write names no scene");
+    }
+
+    #[test]
+    fn scenes_order_dry_run_prints_the_order_and_sends_nothing() {
+        let api = OpsApi::answering(serde_json::Value::Null);
+        let names = ["sleep".to_string(), "movie".to_string(), "gaming".to_string()];
+        let text = text_of(scenes_order(&api, &names, true, false).unwrap());
+        assert_eq!(text, "would order: Sleep, Movie, Gaming\n");
+        assert_eq!(api.asked().len(), 1, "only the read: {:?}", api.asked());
+        match scenes_order(&api, &names, true, true).unwrap() {
+            Output::Json(value) => assert_eq!(value, serde_json::json!({ "saved": false, "order": ["sleep", "movie", "gaming"] })),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn scenes_order_with_a_scene_left_out_or_repeated_refuses_and_prints_the_list() {
+        let api = OpsApi::answering(serde_json::Value::Null);
+        for names in [vec!["movie", "gaming"], vec!["movie", "gaming", "gaming", "sleep"]] {
+            let names: Vec<String> = names.into_iter().map(String::from).collect();
+            let error = scenes_order(&api, &names, false, false).expect_err("not every scene once");
+            let message = error.to_string();
+            assert!(message.contains("name every scene once"), "{message}");
+            assert!(message.contains("gaming") && message.contains("Movie") && message.contains("sleep"), "{message}");
+            assert_eq!(error.exit_code(), 1);
+        }
+        let unknown = scenes_order(&api, &["nope".to_string()], false, false).expect_err("no such scene");
+        assert!(unknown.to_string().contains("no scene is named nope"), "{unknown}");
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"), "nothing was written: {:?}", api.asked());
+    }
+
+    #[test]
+    fn a_stale_order_is_a_409_with_the_current_order_in_the_error() {
+        let body = serde_json::json!({ "error": "conflict", "message": "the scenes were put in another order", "order": ["movie", "gaming", "sleep"] });
+        let api = OpsApi::failing(409, body.clone());
+        let names = ["sleep".to_string(), "movie".to_string(), "gaming".to_string()];
+        let error = scenes_order(&api, &names, false, false).expect_err("stale");
+        assert_eq!(error.exit_code(), 1);
+        let text = error.to_string();
+        assert!(text.contains("409") && text.contains("the order is now: movie, gaming, sleep"), "{text}");
+        assert_eq!(error.json_body(), Some(&body), "--json prints this body to stdout");
+    }
+
+    #[test]
+    fn group_move_sends_the_revs_it_read_and_says_what_moved() {
+        let api = OpsApi::answering(a_moved_answer(true));
+        let text = text_of(scenes_group_move(&api, &move_args("Desk", "Gaming", "movie", false, false), false).unwrap());
+        assert_eq!(text, "moved Desk from Gaming to Movie: 2 devices taken from Everything; 1 group removed\n");
+        let (method, path, body) = api.write();
+        assert_eq!(method, "POST");
+        assert_eq!(path, "/api/v1/scenes/gaming/groups/desk/move");
+        assert_eq!(
+            body,
+            serde_json::json!({ "to": "movie", "copy": false, "expected_rev_from": 4, "expected_rev_to": 7 })
+        );
+    }
+
+    #[test]
+    fn group_move_copy_and_dry_run_words() {
+        let api = OpsApi::answering(a_moved_answer(true));
+        let copied = text_of(scenes_group_move(&api, &move_args("desk", "gaming", "movie", true, false), false).unwrap());
+        assert!(copied.starts_with("copied Desk from Gaming to Movie"), "{copied}");
+        assert_eq!(api.write().2["copy"], true);
+
+        let api = OpsApi::answering(a_moved_answer(false));
+        let probe = text_of(scenes_group_move(&api, &move_args("desk", "gaming", "movie", false, true), false).unwrap());
+        assert!(probe.starts_with("would move Desk from Gaming to Movie: "), "{probe}");
+        assert_eq!(api.write().2["dry_run"], true, "the daemon is asked to save nothing");
+
+        let api = OpsApi::answering(a_moved_answer(false));
+        let probe = text_of(scenes_group_move(&api, &move_args("desk", "gaming", "movie", true, true), false).unwrap());
+        assert!(probe.starts_with("would copy Desk"), "{probe}");
+    }
+
+    #[test]
+    fn group_move_with_nothing_taken_is_one_short_line() {
+        let mut answer = a_moved_answer(true);
+        answer["taken"] = serde_json::json!([]);
+        answer["emptied"] = serde_json::json!([]);
+        let api = OpsApi::answering(answer);
+        let text = text_of(scenes_group_move(&api, &move_args("Wall", "gaming", "sleep", false, false), false).unwrap());
+        assert_eq!(text, "moved Wall from Gaming to Sleep\n");
+        let one = {
+            let mut answer = a_moved_answer(true);
+            answer["taken"][0]["lights"] = serde_json::json!(["a"]);
+            OpsApi::answering(answer)
+        };
+        let text = text_of(scenes_group_move(&one, &move_args("Wall", "gaming", "sleep", false, false), false).unwrap());
+        assert!(text.contains("1 device taken from Everything"), "singular: {text}");
+    }
+
+    #[test]
+    fn group_move_json_is_the_daemons_answer() {
+        let api = OpsApi::answering(a_moved_answer(true));
+        match scenes_group_move(&api, &move_args("desk", "gaming", "movie", false, false), true).unwrap() {
+            Output::Json(value) => assert_eq!(value, a_moved_answer(true)),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn group_move_refuses_an_unknown_scene_group_or_an_ambiguous_one() {
+        let api = OpsApi::answering(serde_json::Value::Null);
+        let unknown_scene = scenes_group_move(&api, &move_args("desk", "gaming", "nowhere", false, false), false).unwrap_err();
+        assert!(unknown_scene.to_string().contains("no scene is named nowhere"), "{unknown_scene}");
+        let unknown_group = scenes_group_move(&api, &move_args("couch", "gaming", "movie", false, false), false).unwrap_err();
+        let message = unknown_group.to_string();
+        assert!(message.contains("Gaming has no group named couch") && message.contains("Desk, Wall"), "{message}");
+        assert!(api.asked().iter().all(|(method, _, _)| method == "GET"), "nothing was sent: {:?}", api.asked());
+
+        let twins = serde_json::json!({ "active": "a", "scenes": [
+            { "id": "a", "name": "A", "rev": 1, "groups": [ { "id": "x", "name": "Same" }, { "id": "y", "name": "same" } ] },
+            { "id": "b", "name": "B", "rev": 1, "groups": [] } ] });
+        struct Twins(serde_json::Value);
+        impl Api for Twins {
+            fn call(&self, _: &str, _: &str, _: Option<&str>) -> Result<serde_json::Value, CliError> {
+                Ok(self.0.clone())
+            }
+        }
+        let error = scenes_group_move(&Twins(twins), &move_args("same", "a", "b", false, false), false).unwrap_err();
+        assert!(error.to_string().contains("names 2 groups in A: x (Same), y (same)"), "{error}");
+    }
+
+    #[test]
+    fn group_move_422_exits_1_with_the_daemons_sentence() {
+        let body = serde_json::json!({ "error": "validation", "message": "A group goes to another scene." });
+        let api = OpsApi::failing(422, body);
+        let error = scenes_group_move(&api, &move_args("desk", "gaming", "gaming", false, false), false).unwrap_err();
+        assert_eq!(error.exit_code(), 1);
+        assert_eq!(error.to_string(), "the API returned 422: A group goes to another scene.");
+    }
+
+    #[test]
+    fn a_409_keeps_the_body_and_prints_the_current_rev() {
+        let body = serde_json::json!({
+            "error": "conflict", "which": "to", "message": "this scene was changed in another window",
+            "scene": { "id": "movie", "name": "Movie", "rev": 9, "groups": [] }
+        });
+        let api = OpsApi::failing(409, body.clone());
+        let error = scenes_group_move(&api, &move_args("desk", "gaming", "movie", false, false), false).unwrap_err();
+        assert_eq!(error.exit_code(), 1);
+        let text = error.to_string();
+        assert!(text.contains("409") && text.contains("scene movie is at rev 9 now"), "{text}");
+        assert_eq!(error.json_body(), Some(&body));
+        // An error without a body (the daemon is down, say) has none to print.
+        assert_eq!(CliError::Other("x".into()).json_body(), None);
+        assert_eq!(CliError::Api { status: 500, message: "boom".into(), body: None }.to_string(), "the API returned 500: boom");
     }
 
     /// A curve of four points, as the API sends a header's mode.

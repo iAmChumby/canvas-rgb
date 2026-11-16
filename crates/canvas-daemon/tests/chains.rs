@@ -125,6 +125,7 @@ fn whole_zone(device: &str, zone: u32) -> Light {
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
@@ -935,6 +936,7 @@ fn seven_parts() -> Vec<SetupPart> {
             name: format!("Fan {}", index + 1),
             kind: ChainPartKind::Fan,
             leds: *leds,
+            copies: None,
         })
         .collect()
 }
@@ -946,6 +948,7 @@ fn six_parts() -> Vec<SetupPart> {
             name: format!("Fan {index}"),
             kind: ChainPartKind::Fan,
             leds: FINAL / 6,
+            copies: None,
         })
         .collect()
 }

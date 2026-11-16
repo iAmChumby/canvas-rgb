@@ -1,4 +1,4 @@
-import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { NotifyHost, dismissNotifications, notify } from "@/components/Notify";
 
@@ -199,6 +199,37 @@ describe("the notification lane", () => {
     const status = screen.getByRole("status");
     expect(status.textContent).toContain("Lights paused");
     expect(status.getAttribute("aria-live")).toBe("polite");
+  });
+
+  it("draws one anatomy for every tone: icon, title, optional description, close (#366)", () => {
+    mount();
+    act(() => {
+      notify("Lights paused");
+      notify("The daemon did not answer", "down");
+      notify(
+        "Deleted Sunset",
+        "info",
+        { label: "Undo", onClick: vi.fn() },
+        { detail: "It can be put back for eight seconds." },
+      );
+    });
+    settle();
+
+    const bodies = lane().map((toast) => toast.querySelector(".notify-body") as HTMLElement | null);
+    expect(bodies).toHaveLength(3);
+    for (const body of bodies) {
+      expect(body).not.toBeNull();
+      // The mark for the tone, and a title, on every message.
+      expect(body?.querySelector(".notify-icon")).not.toBeNull();
+      expect(body?.querySelector(".notify-title")?.textContent).toBeTruthy();
+      // A close key on every message, the three-second note included.
+      expect(within(body as HTMLElement).getByRole("button", { name: "Dismiss" })).toBeTruthy();
+    }
+    // The second line is the optional part: two of the three have none.
+    const details = bodies.map((body) => body?.querySelector(".notify-detail") ?? null);
+    expect(details.filter((d) => d !== null)).toHaveLength(1);
+    // The answer is the other optional part: one of the three offers one.
+    expect(bodies.filter((body) => body?.querySelector(".notify-action") !== null)).toHaveLength(1);
   });
 
   it("shows three messages at a time", () => {

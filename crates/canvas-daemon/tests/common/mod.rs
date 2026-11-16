@@ -166,6 +166,12 @@ pub struct FakeEngine {
     pub panic_on_set_scene: AtomicU32,
     /// How many times `set_scene` has panicked: a test waits on this, not on the slot (#282).
     pub set_scene_panics: AtomicU32,
+    /// Every `set_group_preview` call, oldest first: the group asked for (`None` stops the
+    /// tap) and whether a sink was given. Read it with [`FakeEngine::group_preview_calls`].
+    pub group_preview: Mutex<Vec<(Option<String>, bool)>>,
+    /// The sink the last `set_group_preview` call gave (`None` after a stop): a test submits
+    /// pictures through it as the engine would.
+    pub group_preview_sink: Mutex<Option<Arc<dyn PreviewSink>>>,
 }
 
 impl Default for FakeEngine {
@@ -190,7 +196,16 @@ impl Default for FakeEngine {
             scene_members: Mutex::new(Vec::new()),
             panic_on_set_scene: AtomicU32::new(0),
             set_scene_panics: AtomicU32::new(0),
+            group_preview: Mutex::new(Vec::new()),
+            group_preview_sink: Mutex::new(None),
         }
+    }
+}
+
+impl FakeEngine {
+    /// The `(group, sink given)` pair of every `set_group_preview` call so far, oldest first.
+    pub fn group_preview_calls(&self) -> Vec<(Option<String>, bool)> {
+        self.group_preview.lock().unwrap().clone()
     }
 }
 
@@ -300,6 +315,12 @@ impl Engine for FakeEngine {
     fn set_group_brightness(&self, _group: &str, _brightness: u8) {}
 
     fn set_light_preview(&self, _sink: Option<std::sync::Arc<dyn canvas_proto::LightPreviewSink>>) {}
+
+    fn set_group_preview(&self, group: Option<String>, sink: Option<Arc<dyn PreviewSink>>) {
+        self.group_preview.lock().unwrap().push((group, sink.is_some()));
+        *self.group_preview_sink.lock().unwrap() = sink;
+    }
+
     fn group_states(&self) -> Vec<canvas_proto::GroupState> {
         Vec::new()
     }
@@ -502,6 +523,7 @@ pub fn a_scene(
         arrangement: canvas_proto::scene::Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     };
     let lights = canvas_proto::scene::LightsFile {
         chains: Vec::new(),
