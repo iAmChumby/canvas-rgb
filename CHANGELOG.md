@@ -13,6 +13,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+- Setting up an ARGB header starts with a short introduction, counts the orange lights you can see first, and names every step in plain words; a header you cannot see into has a way out. (#381)
 
 ### Fixed
 
@@ -27,6 +28,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
 - The sidebar strip shows your lights' real colours in a scene (#379)
 - Rain: Trail Length now changes how long each streak is (#383)
+- A header whose devices all show the same lights (a splitter, a hub) is saved as one light shown several times, no longer as many one-LED fans. (#382)
 
 ## [0.16.0] - 2026-11-15
 

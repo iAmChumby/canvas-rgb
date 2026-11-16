@@ -1,6 +1,6 @@
 "use client";
 
-// One part of the chain, as the owner confirms it: the colour its light shows, its name, what it
+// One device of the header, as the owner confirms it: the colour its light shows, its name, what it
 // is, and how many LEDs it holds.
 //
 // The colour chip is drawn from PART_COLOURS at the part's position, which is the same list and the
@@ -74,7 +74,7 @@ export function PartRow({
       <span className={s.rowName}>
         <NameField
           value={part.name}
-          label={`Name of part ${index + 1}`}
+          label={`Name of device ${index + 1}`}
           autoFocus={false}
           onChange={onName}
           onEnter={endEditing}
@@ -85,7 +85,7 @@ export function PartRow({
         <Segmented
           options={KINDS}
           value={part.kind}
-          label={`What part ${index + 1} is`}
+          label={`What device ${index + 1} is`}
           onChange={onKind}
         />
       </span>
@@ -94,7 +94,7 @@ export function PartRow({
           value={part.leds}
           min={1}
           max={most}
-          label={`LEDs in part ${index + 1}`}
+          label={`LEDs in device ${index + 1}`}
           onCommit={onLeds}
         />
         <span className={s.unit}>LEDs</span>

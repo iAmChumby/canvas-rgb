@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useRef } from "react";
 import { api } from "@/lib/endpoints";
+import { shownWords } from "@/views/chain/limits";
 import { moveLight } from "@/views/scenes/groupEdit";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
@@ -116,6 +117,7 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked, onEmptied 
           <span className="one-line">{light.label}</span>
           <span className={`${s.addMeta} fig`}>
             {light.led_count} {light.led_count === 1 ? "LED" : "LEDs"}
+            {shownWords(light) ? ` · ${shownWords(light)}` : ""}
             {light.connected ? "" : " · not connected"}
           </span>
         </span>

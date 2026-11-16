@@ -1,0 +1,53 @@
+/*
+ * The check for a header whose devices mirror each other: a line that says the LEDs are lit white,
+ * and the one row that will be saved, a name and a read-only LED count. Every colour is a token,
+ * except the white of the LEDs themselves, which the screen sets from the one constant the flow
+ * lights them with.
+ */
+
+.lit {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t15);
+  line-height: 1.4;
+}
+
+.litDot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border: 1px solid var(--line-2);
+  border-radius: 50%;
+  background: var(--white);
+}
+
+.row {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--s3);
+  padding: 8px var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.name {
+  min-width: 0;
+}
+
+.name :global(.name-field) {
+  width: 100%;
+}
+
+.leds {
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t15);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}

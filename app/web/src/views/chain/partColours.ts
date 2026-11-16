@@ -40,11 +40,11 @@ export function hexToRgb8(hex: string): Rgb8 {
   return full;
 }
 
-/** The word a kind is named with: "Fan 1", "Strip 2", and "Part 3" for what the owner called other. */
+/** The word a kind is named with: "Fan 1", "Strip 2", and "Device 3" for what the owner called other. */
 function nounOf(kind: ChainPartKind): string {
   if (kind === "fan") return "Fan";
   if (kind === "strip") return "Strip";
-  return "Part";
+  return "Device";
 }
 
 /** The name a part is given before the owner types one. `position` counts from 1 among all parts. */

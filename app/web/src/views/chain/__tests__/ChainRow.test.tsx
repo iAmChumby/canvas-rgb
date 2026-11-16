@@ -6,7 +6,7 @@
 // name, kind and direction go to the lights route without a session, and that a part a re-setup
 // adds reaches Scenes' own new-light notice.
 
-import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, renderHook, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 const { api } = vi.hoisted(() => ({
@@ -52,6 +52,7 @@ import { ScenesView } from "@/views/scenes/ScenesView";
 import { ChainRow } from "@/views/chain/ChainRow";
 import { chainKey, offeredChains } from "@/views/chain/offered";
 import { DevicesView } from "@/views/DevicesView";
+import { useTakeover } from "@/views/editor/takeover";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -81,7 +82,7 @@ beforeAll(() => {
 
 const DEVICE = "openrgb:A1B2C3D4E5F6";
 const SESSION = "session-1";
-const SETUP = { name: "Chain setup" };
+const SETUP = { name: "Light setup" };
 
 function zone(index: number, name: string, leds: number, resizable: boolean): ZoneInfo {
   return {
@@ -233,7 +234,7 @@ describe("a header's row on Devices", () => {
     const [jaf, jar, jarTwo] = rows as [HTMLElement, HTMLElement, HTMLElement];
     expect(jaf.textContent).toContain("Not set up");
     expect(jar.textContent).toContain("Empty");
-    expect(jarTwo.textContent).toContain("2 parts");
+    expect(jarTwo.textContent).toContain("2 devices");
     expect(within(jarTwo).getByText("Fan 1")).toBeTruthy();
     expect(within(jarTwo).getByText("Fan 2")).toBeTruthy();
     expect(within(jaf).getByRole("button", { name: /^Set up/ })).toBeTruthy();
@@ -250,9 +251,50 @@ describe("a header's row on Devices", () => {
     });
     await flush();
 
+    // A flow opened from the row skips the introduction: the session opens at once.
     expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 2);
     const setup = screen.getByRole("region", SETUP);
     expect(within(setup).getByText(/JARGB 2/)).toBeTruthy();
+    expect(screen.queryByText("Tell the app about your lights.")).toBeNull();
+    // It stands over the page (the takeover's overlay), not inside the row: the rows below stay put.
+    expect(rowOf("JARGB 2").contains(setup)).toBe(false);
+  });
+
+  it("the overlay holds the window while it is open and gives it back", async () => {
+    await showDevices([chain(1, "JARGB 1", "not_set_up", [], 0)]);
+    const held = renderHook(() => useTakeover());
+    expect(held.result.current).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(within(rowOf("JARGB 1")).getByRole("button", { name: /^Set up/ }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await flush();
+    expect(held.result.current).toBe(true);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Later" }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(held.result.current).toBe(false);
+  });
+
+  it("a header whose devices mirror each other reads as one light shown several times", async () => {
+    const mirror = part(2, 1, "Same lights, shown 8 times", 8, 0, "other");
+    mirror.light.copies = 8;
+    await showDevices([chain(2, "JARGB 2", "set_up", [mirror], 8)]);
+
+    const row = rowOf("JARGB 2");
+    expect(row.textContent).toContain("8 LEDs · shown 8 times");
+    expect(row.textContent).toContain("You cannot set one on its own.");
+    expect(row.textContent).toContain("ARGB header");
+    expect(within(row).getByRole("list", { name: "Devices on JARGB 2" })).toBeTruthy();
+    expect(row.textContent).not.toMatch(/parts?/i);
+  });
+
+  it("an empty header says nothing is plugged into this ARGB header", async () => {
+    await showDevices([chain(1, "JARGB 1", "empty")]);
+    expect(rowOf("JARGB 1").textContent).toContain("Nothing is plugged into this ARGB header.");
   });
 
   it("a set up header lists every part with its own controls", async () => {
@@ -364,10 +406,14 @@ describe("a part a re-setup adds", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     await flush();
+    // Count the orange lights (one), slide (the stored 96), then the devices (two).
     await act(async () => {
       fireEvent.click(screen.getByRole("button", { name: "Next" }));
     });
-    const count = screen.getByRole("textbox", { name: "Parts on this chain" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Next" }));
+    });
+    const count = screen.getByRole("textbox", { name: "Devices on JARGB 2" });
     await act(async () => {
       fireEvent.change(count, { target: { value: "2" } });
       fireEvent.blur(count);
@@ -376,7 +422,7 @@ describe("a part a re-setup adds", () => {
       fireEvent.click(screen.getByRole("button", { name: "Next" }));
     });
     await act(async () => {
-      fireEvent.click(screen.getByRole("button", { name: "Yes" }));
+      fireEvent.click(screen.getByRole("button", { name: "Yes, save these devices" }));
       await vi.advanceTimersByTimeAsync(0);
     });
     await flush();

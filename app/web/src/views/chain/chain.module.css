@@ -1,13 +1,14 @@
 /*
- * The chain setup flow: one instrument, three screens. A printed bar names the header and counts
- * the steps with LEDs; the reason the flow exists sits in a recess under it; one stage of fixed
- * height holds the screen so the keys in the foot never move; the foot keeps Back, Later and the
- * one key that finishes. Every colour is a token except the parts' own colours, which come from
- * PART_COLOURS because they are the colours the LEDs show.
+ * The header setup flow: one instrument. A printed bar names the header; a row of labelled steps
+ * says how far along the owner is; the reason the flow exists sits in a recess under it; one stage
+ * of fixed height holds the screen; the foot has three slots (Back, Later, the primary key) that
+ * keep their boxes on every screen, whether a key is in them or not. Every colour is a token
+ * except the devices' own colours, which come from PART_COLOURS because they are the colours the
+ * LEDs show.
  *
- * Wide (a card of 560 px or more): a part row is one line, colour, name, what it is, its LEDs.
- * Narrow: two lines, the kind under the name. The card is its own size container, so the window
- * never decides what is inside it.
+ * Wide (a card of 560 px or more): a device row is one line, colour, name, what it is, its LEDs.
+ * Narrow: two lines, the kind under the name, and the foot stacks the primary key above the other
+ * two. The card is its own size container, so the window never decides what is inside it.
  */
 
 .root {
@@ -65,15 +66,42 @@
   white-space: nowrap;
 }
 
-.progress {
+/* ---------- the steps: words, not dots; the row keeps its height for two labels or three ---------- */
+
+.steps {
   display: flex;
-  flex: none;
   align-items: center;
-  gap: 6px;
-  margin-left: auto;
+  justify-content: center;
+  gap: var(--s5);
+  height: 36px;
+  margin: 0;
+  padding: 0 var(--s5);
+  border-bottom: 1px solid var(--line);
+  list-style: none;
 }
 
-.dot {
+.stepLabel {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  letter-spacing: 0.08em;
+  line-height: 1.2;
+  text-transform: uppercase;
+  transition: color var(--dur) var(--ease);
+}
+
+.stepLabel[data-on="true"] {
+  color: var(--dim);
+}
+
+.stepLabel[data-now="true"] {
+  color: var(--ink);
+}
+
+.stepDot {
   width: 5px;
   height: 5px;
   border-radius: 50%;
@@ -81,11 +109,11 @@
   transition: background-color var(--dur) var(--ease);
 }
 
-.dot[data-on="true"] {
+.stepLabel[data-on="true"] .stepDot {
   background: color-mix(in srgb, var(--live) 45%, var(--led-off));
 }
 
-.dot[data-now="true"] {
+.stepLabel[data-now="true"] .stepDot {
   background: var(--live);
 }
 
@@ -144,6 +172,53 @@
   margin: 0;
   color: var(--mute);
   font-size: var(--t14);
+  line-height: 1.45;
+}
+
+.body {
+  margin: 0;
+  color: var(--dim);
+  font-size: var(--t15);
+  line-height: 1.5;
+}
+
+/* A line above a card: what happened to the header before it. */
+.notice {
+  margin: 0;
+  padding: var(--s2) var(--s3);
+  border: 1px solid var(--line);
+  border-left: 3px solid var(--warn);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+/* The line at the foot of a screen that must always be there: it never moves the screen. */
+.caption {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.45;
+}
+
+/* A key with a line about what it does under it. */
+.emptyKey {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--s2);
+}
+
+.checks {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  margin: 0;
+  padding-left: var(--s5);
+  color: var(--ink);
+  font-size: var(--t15);
   line-height: 1.45;
 }
 
@@ -217,6 +292,70 @@
 
 .aside {
   display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* The slide's picture: a track of LEDs, the trail white and the last one orange. */
+.track {
+  position: relative;
+  display: flex;
+  gap: 2px;
+  height: 16px;
+}
+
+.cell {
+  flex: 0 1 14px;
+  min-width: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--trail);
+}
+
+.cell[data-end="true"] {
+  border-color: var(--end);
+  background: var(--end);
+}
+
+.bar {
+  flex: 1 1 auto;
+  border: 1px solid var(--line-2);
+  border-radius: 3px;
+  background: var(--trail);
+}
+
+.tick {
+  position: absolute;
+  top: -2px;
+  right: 0;
+  bottom: -2px;
+  width: 4px;
+  border-radius: 2px;
+  background: var(--end);
+}
+
+/* The slot the slide's keys and its two panels share: whichever is open, the height is the same. */
+.slot {
+  min-height: 92px;
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  gap: var(--s2);
+  padding: var(--s3);
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--sunk);
+  box-shadow: var(--well);
+}
+
+.panelText {
+  margin: 0;
+  color: var(--ink);
+  font-size: var(--t14);
+  line-height: 1.45;
 }
 
 /* ---------- the parts: a list of lights ---------- */
@@ -428,32 +567,35 @@
   text-wrap: balance;
 }
 
-/* ---------- the foot ---------- */
+/* ---------- the foot: three slots whose boxes never change ---------- */
 
 .foot {
-  display: flex;
+  display: grid;
+  grid-template-columns: 96px minmax(0, 1fr) 96px 232px;
+  grid-template-areas: "back . later primary";
+  grid-template-rows: var(--control-h);
   align-items: center;
   gap: var(--s2);
   padding: var(--s3) var(--s5);
   border-top: 1px solid var(--line);
 }
 
-.footStart {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  min-width: 0;
+.footBack {
+  grid-area: back;
 }
 
-.footEnd {
-  display: flex;
-  align-items: center;
-  gap: var(--s2);
-  margin-left: auto;
+.footLater {
+  grid-area: later;
 }
 
-.footEnd :global(.btn-primary) {
-  min-width: 88px;
+.footPrimary {
+  grid-area: primary;
+}
+
+.footBack > :global(.btn),
+.footLater > :global(.btn),
+.footPrimary > :global(.btn) {
+  width: 100%;
 }
 
 /* ---------- narrow: a phone in the hand ---------- */
@@ -478,7 +620,17 @@
   }
 
   .foot {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-areas:
+      "primary primary"
+      "back later";
+    grid-template-rows: var(--control-h) var(--control-h);
     padding: var(--s3) var(--s4);
+  }
+
+  .steps {
+    gap: var(--s4);
+    padding: 0 var(--s4);
   }
 }
 

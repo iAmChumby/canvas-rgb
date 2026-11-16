@@ -95,7 +95,7 @@ export function StandingNotices() {
         <Banner
           tone="work"
           icon={<Lightning size={20} weight="fill" />}
-          title="Set up your headers"
+          title="Set up your ARGB headers"
           onDismiss={dismissPanel}
           dismissLabel="Dismiss this panel"
           actions={
@@ -104,8 +104,8 @@ export function StandingNotices() {
             </Button>
           }
         >
-          Tell the app what is plugged into each addressable header, so effects fill the chain you
-          actually have. A header with nothing on it is marked empty and is never asked about again.
+          Tell the app what is plugged into each ARGB header, so effects fill what you actually have. A
+          header with nothing on it can be marked empty and stops asking.
           {err && <span className="error-line"> {err}</span>}
         </Banner>
       )}
