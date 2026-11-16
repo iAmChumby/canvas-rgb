@@ -451,6 +451,14 @@ export interface PadInputOptions {
    * default is no match: the first pad in the list is read.
    */
   match?: PadMatch | null;
+  /**
+   * Called with every line the strip is given, at the hook's one write site.
+   *
+   * The loop holds the line still, so a pad held across 600 frames writes it once; a test counts
+   * those writes with this. React drops a same-value update before it draws, so a count of draws
+   * cannot show a write that repeats every frame, and this is the write itself.
+   */
+  onStatusWrite?: (status: PadStatus) => void;
 }
 
 /** What the page knows about the pad. */
@@ -666,9 +674,22 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     // How many frames the wake poll has run, so the list is read once every WAKE_POLL_EVERY.
     let idle = 0;
 
+    /**
+     * The one place the hook writes the strip's line.
+     *
+     * Every state the strip wears goes through `say`, and `say` goes through this, so a test's
+     * `onStatusWrite` counts the loop's own writes. A `setStatus` call put back into `tick` or
+     * `wakeTick` would be a second site, and the loop would write the line every frame behind
+     * that count: `padInput.test.tsx` holds the file to this one.
+     */
+    const write = (next: PadStatus) => {
+      optionsRef.current.onStatusWrite?.(next);
+      setStatus(next);
+    };
+
     /** Writes the strip's line, and asks React to draw it, only when the line changes. */
     const say = (next: PadStatus) => {
-      said = writeStatus(said, next, setStatus).said;
+      said = writeStatus(said, next, write).said;
     };
 
     /** The strip's second line: written, and drawn, only when it changes. */
@@ -790,6 +811,10 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
      */
     const resume = () => {
       if (!focused || !visible) return;
+      // The same rule as the two events below: no frame is left due to say something else over
+      // the line this event writes. Here the frame would say the same thing, so the strip never
+      // flickered; calling it off anyway keeps one rule for every path that writes.
+      stop();
       if (!pick().pad) {
         say(seen ? "gone" : "wake");
         showLine(null);
@@ -802,6 +827,10 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
       // the event announces is taken up by `start()` when the window comes back.
       if (!focused || !visible) return;
       seen = true;
+      // The wake state's own frame is due, and `start()` returns at once while a frame is due.
+      // It is called off first, or it would run after this event, find the list still empty on
+      // a frame that is not a poll frame, and write "gone" over the "live" this line writes.
+      stop();
       say("live");
       start();
     };

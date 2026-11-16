@@ -4,6 +4,8 @@
 // drive that loop by hand: the frame callback is called when the test says so, never after a
 // wait, so the verdict never depends on how fast the machine is.
 
+import { readFileSync } from "node:fs";
+import { resolve } from "node:path";
 import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { Profiler, useEffect, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -51,6 +53,12 @@ class StubPad {
 }
 
 let frames: PadFrames;
+
+/** The hook's own file, for the rule that it writes the strip's line in one place. */
+const hookSource = readFileSync(resolve(process.cwd(), "src/lib/padInput.ts"), "utf8").replace(
+  /\r\n/g,
+  "\n",
+);
 
 beforeEach(() => {
   frames = new PadFrames();
@@ -173,6 +181,42 @@ describe("the pad's input", () => {
     });
     expect(getByTestId("status").textContent).toBe("gone");
     if (hidden) Object.defineProperty(document, "visibilityState", hidden);
+  });
+
+  it("says live on focus when the pad arrived while the window was in the background", () => {
+    const pad = new StubPad();
+    const list: PadGamepad[] = [];
+    const writes: PadStatus[] = [];
+    const { result } = renderHook(() =>
+      usePadInput({
+        getGamepads: () => list,
+        onStatusWrite: (status) => writes.push(status),
+      }),
+    );
+
+    // The editor is in the background: the loop is stopped, and nothing is read.
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(result.current.status).toBe("paused");
+    expect(frames.pendingCount).toBe(0);
+
+    // The pad is plugged in, and its event arrives, while the editor is away.
+    list.push(pad.read());
+    act(() => {
+      window.dispatchEvent(new Event("gamepadconnected"));
+    });
+    expect(result.current.status).toBe("paused");
+
+    // The window comes back. The strip is live in the focus event itself: no frame ran between
+    // the focus and the read, so the frame the event starts is still due.
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(result.current.status).toBe("live");
+    expect(frames.pendingCount).toBe(1);
+    // The pad never left the list, so the strip never said it was gone.
+    expect(writes).not.toContain("gone");
   });
 
   it("draws a press in the frame it was read in, not in the next one", () => {
@@ -467,10 +511,10 @@ describe("the trigger's key", () => {
 });
 
 describe("the frame loop's cost", () => {
-  it("writes the strip's state once across 600 identical frames", () => {
-    // The count is of the hook's writes, through the step its loop calls every frame
-    // (`writeStatus` in `padInput.ts`): React drops a same-value update before it draws, so a
-    // count of commits cannot show a write that repeats every frame.
+  it("keeps the line still across 600 identical steps of the write itself", () => {
+    // This is the step on its own, as a unit: the loop's own writes are counted in the test
+    // below, which runs the hook. React drops a same-value update before it draws, so a count
+    // of commits cannot show a write that repeats every frame, and this is the write itself.
     const writes: PadStatus[] = [];
     let said: PadStatus | null = null;
     let changed = 0;
@@ -488,6 +532,43 @@ describe("the frame loop's cost", () => {
     const next = writeStatus(said, "paused", (status) => writes.push(status));
     expect(next.changed).toBe(true);
     expect(writes).toEqual(["live", "paused"]);
+  });
+
+  it("writes the strip's line once while the hook's own loop runs 600 identical frames", () => {
+    const pad = new StubPad();
+    // The hook's own writes, counted at the one place it writes the line, with the hook's real
+    // frames stepped by hand: a write put back into `tick` would show in this list.
+    const writes: PadStatus[] = [];
+    const { result } = renderHook(() =>
+      usePadInput({
+        getGamepads: () => [pad.read()],
+        onStatusWrite: (status) => writes.push(status),
+      }),
+    );
+
+    // The pad is in the list at the mount, so the first frame is a live one.
+    frames.step();
+    expect(result.current.status).toBe("live");
+    expect(writes).toEqual(["live"]);
+
+    for (let i = 0; i < 600; i++) frames.step();
+
+    // Held still: the loop ran 600 more frames and wrote the line no times.
+    expect(result.current.status).toBe("live");
+    expect(writes).toEqual(["live"]);
+
+    // A real change still reaches the page, on the event that sees it.
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(writes).toEqual(["live", "paused"]);
+  });
+
+  it("writes the strip's line in one place, so a write put back in the loop cannot skip the count", () => {
+    // `setStatus("live")` put back into `tick` (`padInput.ts`) would be a second site: it would
+    // write the line every frame behind the count above, which counts the one site's writes.
+    const sites = hookSource.split("\n").filter((line) => line.includes("setStatus("));
+    expect(sites.map((line) => line.trim())).toEqual(["setStatus(next);"]);
   });
 
   it("asks the page to draw nothing across 600 identical frames", () => {
@@ -551,5 +632,36 @@ describe("the wake state", () => {
     expect(reads.mock.calls.length).toBe(3);
     expect(result.current.status).toBe("live");
     expect(PAD_STATUS_WORDS.wake).toBe("No pad seen yet. Press any button on the pad.");
+  });
+
+  it("says live when the pad connects in the wake state, and never writes gone in between", () => {
+    const pad = new StubPad();
+    const list: PadGamepad[] = [];
+    const writes: PadStatus[] = [];
+    const { result } = renderHook(() =>
+      usePadInput({
+        getGamepads: () => list,
+        onStatusWrite: (status) => writes.push(status),
+      }),
+    );
+
+    // One frame of the wake state: it reads the list, finds nothing, and leaves the next wake
+    // frame due. That frame is the one that would write "gone" after the connect.
+    frames.step();
+    expect(result.current.status).toBe("wake");
+    expect(frames.pendingCount).toBe(1);
+
+    // The pad is in the list, and the browser announces it.
+    list.push(pad.read());
+    act(() => {
+      window.dispatchEvent(new Event("gamepadconnected"));
+    });
+
+    // The frame that was due when the pad connected does not undo it: the strip is live after
+    // it runs, and no frame in between wrote "gone".
+    frames.step();
+    expect(result.current.status).toBe("live");
+    expect(writes[writes.length - 1]).toBe("live");
+    expect(writes).not.toContain("gone");
   });
 });
