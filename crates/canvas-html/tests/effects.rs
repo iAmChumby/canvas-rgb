@@ -260,6 +260,37 @@ fn a_runaway_script_at_the_top_level_is_stopped_at_the_budget() {
     );
 }
 
+/// When the whole render's deadline (not the frame's own budget) is what ran out, the reason
+/// says so in plain words (#58).
+const SIMPLE: &str = r##"<head><title>Simple</title></head>
+<body><canvas id="c" width="16" height="16"></canvas></body>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  function draw() { ctx.fillRect(0, 0, 16, 16); window.requestAnimationFrame(draw); }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+#[test]
+fn a_render_that_runs_out_of_time_says_the_deadline_passed() {
+    let mut effect = HtmlEffect::from_source("deadline", SIMPLE, &Props::new()).expect("loads");
+    // The render's deadline is already in the past, so the first frame cannot start.
+    effect.set_give_up_at(Some(std::time::Instant::now() - std::time::Duration::from_secs(1)));
+    let mut canvas = Canvas::new(320, 200);
+    effect.update(DT * 60.0, &mut canvas, &Inputs::default());
+
+    let errors = effect.errors();
+    assert!(!errors.is_empty(), "no error was reported when the deadline had passed");
+    let message = &errors[0];
+    assert!(
+        message.contains("the render's deadline passed before this frame could finish"),
+        "the reason does not say the deadline passed plainly: {message}"
+    );
+    assert!(
+        !message.contains("frame budget was not the limit"),
+        "the awkward wording is still there: {message}"
+    );
+}
+
 #[test]
 fn a_runaway_frame_callback_is_stopped_and_the_effect_keeps_running() {
     let mut effect = HtmlEffect::from_source("loop", RUNAWAY_FRAME, &Props::new()).expect("loads");
@@ -851,16 +882,40 @@ fn page(iterations: u64, scripts: usize) -> String {
     )
 }
 
+/// Turn one probe load into a sample for the calibration loop: `None` means the scripts did
+/// not fit the load budget. Only a `Timeout` means that. Any other load error is a fault in
+/// the probe or the library, and silently reading it as a budget overrun hides the real
+/// failure (PR #69 review, follow-up #72); it must surface instead.
+fn load_outcome(result: &Result<canvas_html::HtmlEffect, canvas_html::HtmlError>, took: f64) -> Option<f64> {
+    match result {
+        Ok(_) => Some(took),
+        Err(canvas_html::HtmlError::Timeout(_)) => None,
+        Err(other) => panic!("the probe page failed to load with a reason that is not a timeout: {other}"),
+    }
+}
+
 /// How long the page takes to load, in seconds. `None` when the load ran out of time, which
 /// means the scripts did not fit in the load budget.
 fn load_seconds(iterations: u64, scripts: usize) -> Option<f64> {
     let start = std::time::Instant::now();
     let result = HtmlEffect::from_source("t", &page(iterations, scripts), &Props::new());
     let took = start.elapsed().as_secs_f64();
-    match result {
-        Ok(_) => Some(took),
-        Err(_) => None,
-    }
+    load_outcome(&result, took)
+}
+
+#[test]
+#[should_panic(expected = "reason that is not a timeout")]
+fn a_non_timeout_load_error_is_not_read_as_a_budget_overrun() {
+    // A script that throws fails to load with `HtmlError::Script`, not `Timeout`. The
+    // calibration loop reads `None` as "the scripts did not fit the budget", so mapping this
+    // error to `None` would report a load fault as a measurement. The probe must panic on it.
+    let html = r##"<head><title>T</title></head>
+<body><canvas id="c" width="4" height="4"></canvas></body>
+<script>throw new Error("a plain script fault");</script>"##;
+    let start = std::time::Instant::now();
+    let result = HtmlEffect::from_source("t", html, &Props::new());
+    let took = start.elapsed().as_secs_f64();
+    let _ = load_outcome(&result, took);
 }
 
 #[test]

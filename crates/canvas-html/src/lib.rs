@@ -437,7 +437,7 @@ impl HtmlEffect {
             budget_ms = budget_ms.min(left.as_millis() as u64);
             if budget_ms == 0 {
                 return Err(HtmlError::Timeout(
-                    "the render's time ran out before this frame (the frame budget was not the limit)".to_string(),
+                    "the render's deadline passed before this frame could finish".to_string(),
                 ));
             }
         }

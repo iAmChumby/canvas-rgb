@@ -4,7 +4,7 @@
 //! characters, readable only by the current user. The daemon compares it in constant time.
 
 use rand::rngs::OsRng;
-use rand::RngCore;
+use rand::TryRngCore;
 use std::path::Path;
 
 /// How many random bytes the token holds.
@@ -13,7 +13,9 @@ pub const TOKEN_BYTES: usize = canvas_proto::consts::TOKEN_BYTES;
 /// The token as lowercase hex.
 pub fn generate() -> String {
     let mut bytes = [0u8; TOKEN_BYTES];
-    OsRng.fill_bytes(&mut bytes);
+    OsRng
+        .try_fill_bytes(&mut bytes)
+        .expect("OS random source must fill the API token");
     let mut out = String::with_capacity(TOKEN_BYTES * 2);
     for b in bytes {
         out.push_str(&format!("{b:02x}"));
