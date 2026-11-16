@@ -347,6 +347,40 @@ line. Three mechanisms, and one bug the timing only exposed.
   awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
   engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
   fake bumps), never on a flag the code sets before the awaited work.
+- [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
+  another starter while one is loading, and lands both"
+  (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
+  re-run of the same commit (PR #324, PR #386), with
+  `expected [ 'Warm white' ] to deeply equal [ 'Warm white', 'Sparkles', …(2) ]`. The wait was not the
+  fault; it was the product's draft mirror. The builder's async edits read `draftRef`, and the builder
+  assigned that mirror from a passive effect (`StackBuilder.tsx`), so a commit could land after an edit
+  had already written a newer draft. Under load the builder's own first commit (its empty draft) ran
+  late: a starter wrote its three layers, the mirror was put back to empty, and the queued starter
+  composed on an empty stack (`useStackEdits.ts` `addStack`) and landed alone, overwriting the first.
+  Measured in a loaded run of `src/views` (98 files in parallel): the test failed, log order `land
+  sunset 3` → `ref-sync 0` → `land warm 1`. The trigger is the loaded machine: the file run alone
+  failed once in 48 runs.
+- **Class fix:** done (#332) for this mirror. One object, `DraftMirror`
+  (`app/web/src/views/effects/draftMirror.ts`): `write()` is what an edit calls with the draft it
+  wrote and its version, `commit()` is what the builder's effect calls with the draft React committed
+  and its version, and either is ignored when its version is older than the mirror's, so the mirror
+  only moves forward. The version comes from `useStackHistory`, which numbers every queued change
+  (`versionOf` is the version on screen). Versions rather than arrival times, because both orders
+  happen: a commit of an older draft arrives after a write (#332), and a load or a save resets the
+  draft after a write (the reverse, which an identity-only rule broke: `StackBuilderStates.test.tsx`
+  failed 4 of 6 runs). `addOne` and `addStack` write through the mirror; every other hook still reads
+  `draftRef.current`. Test: `app/web/src/views/__tests__/DraftMirror.test.ts` (the late empty commit,
+  a reset newer than a write, the write's own commit, a write older than the mirror) and
+  `StackHistoryVersions.test.tsx`, which makes the late commit by hand on the real hook, with no
+  wait, and checks that undo, redo and a reset each get a newer version. The queue test then passed
+  60 times in two loaded runs of `src/views` (30 repetitions of it per run, 100 files in parallel).
+- **The rule this adds:** a mirror of React state that async code reads is written by the code that
+  writes the state, never assigned from every commit; a commit is followed only when it is at least as new as what
+  the mirror already holds. Siblings of the shape, found and not fixed: the same file's two sleeps that decide a
+  verdict (`StackBuilderStarters.test.tsx:111`, `:121`, 150 ms and 50 ms) and
+  `EffectDraft.test.tsx:204` (120 ms then a count of PUTs, which failed once in a loaded run of
+  `src/views` and passed on the next).
+
 - [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
   (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` failed with a
   line missing from the capture. The line was not always the same one: the "terminating the daemon" INFO
@@ -922,3 +956,29 @@ class is the handmade *clock*, not the words.
   found no other message clock: the rest are debounces, animation flags, retries and the fixture's install
   walk. Left: the fan service's "Fan control is unavailable" notice stays a banner because it reports a
   running condition, not a moment (#168's decision); it is untouched.
+
+### `cause:wiring`: a control built but never connected to the frame
+
+An effect declares a property, the editor draws a control for it, and no code reads it: the value
+is stored and never reaches the picture. The control looks alive and the setting does nothing.
+Every effect reads its own props in `init`, so nothing notices a declared control that nothing
+uses.
+
+- [#383](https://github.com/iAmChumby/canvas-rgb/issues/383): Rain's Trail Length resized a
+  `trail` buffer in `init` and `update` never read it; every streak came from a fixed 0.88 fade
+  (`crates/canvas-effects/src/rain.rs`). The control now sets how long a drop's light lingers:
+  the per-frame fade is derived from it (`per_frame_fade`), and the default (14) on the 1/30 s
+  frame gives exactly the old 0.88 at every Speed, so a saved scene or preset keeps its picture
+  at 30 frames a second (checked against a frame fingerprint recorded from the old code,
+  `the_default_trail_length_keeps_the_old_frames`). The unused buffer is gone.
+- **Class fix:** done (#383). One test over every built-in effect
+  (`crates/canvas-effects/src/lib.rs`, `every_numeric_or_choice_control_changes_the_frame`)
+  renders each effect at the two ends of every numeric, angle and choice control with the same
+  seed, keeps one fingerprint per frame, and fails naming the effect and the control when the
+  frames are identical. The capture effects get the crate's own input, and the screen changes
+  colour and the spectrum falls partway through so Smoothing, Decay and Peak Hold have something
+  to act on. It drives 31 controls over the 12 effects and found no other dead control; on the
+  pre-#383 code it fails only on Rain's Trail Length. The exception list (`KNOWN_DEAD`) is empty,
+  and the test fails on an entry that names no control. A colour control has no two ends and no
+  built-in has a bool control, so neither is driven; a control added later is covered without
+  editing the test.

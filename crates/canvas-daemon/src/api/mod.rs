@@ -80,11 +80,15 @@ pub fn router(app: Arc<App>) -> Router {
                 .delete(editor::delete_draft)
                 .layer(axum::extract::DefaultBodyLimit::max(effects::IMPORT_BODY_LIMIT)),
         )
-        .route(routes::SCENES, get(scenes::list_scenes).post(scenes::create_scene))
+        .route(
+            routes::SCENES,
+            get(scenes::list_scenes).post(scenes::create_scene).put(scenes::put_scenes),
+        )
         .route(routes::SCENE_ACTIVE, put(scenes::put_active))
         .route(routes::SCENE, put(scenes::put_scene).delete(scenes::delete_scene))
         .route(routes::GROUP_PROPS, patch(scenes::patch_group_props))
         .route(routes::GROUP_BRIGHTNESS, put(scenes::put_group_brightness))
+        .route(routes::GROUP_MOVE, post(scenes::move_group))
         .route(routes::LIGHTS_FLASH, post(scenes::flash_lights))
         .route(routes::LIGHTS, get(lights::list_lights))
         .route(routes::LIGHT, patch(lights::patch_light))
@@ -150,7 +154,8 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::DIAG_READBACK, get(diag::readback))
         .route("/api/v1/diag/fail-sensor", post(diag::fail_sensor))
         .route(routes::PREVIEW, get(preview::preview))
-        .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights));
+        .route(routes::PREVIEW_LIGHTS, get(preview::preview_lights))
+        .route(routes::PREVIEW_GROUP, get(preview::preview_group));
 
     api.layer(axum::middleware::from_fn_with_state(
         app.clone(),

@@ -14,6 +14,7 @@ import {
   CANVAS_WIDTH,
   MAX_ZONE_LEDS,
   RING_INSET,
+  STRIP_CELL_MAX,
   buildGroupPlan,
   ledCount,
   lightLedCount,
@@ -142,22 +143,28 @@ describe("the arrangement planner (#310)", () => {
     const plan = buildGroupPlan(ids(["a", "b"]), "each_its_own", lights, devices);
     expect(plan.lights.length).toBe(2);
     for (const light of plan.lights) {
-      // The slot is the whole canvas: the first cell starts at 0 and the last ends at 320,
-      // so the light covers the whole picture and not a part of it.
+      // The slot is the whole canvas: the light's LEDs stand spread over the whole
+      // picture, the first at its share's edge and the last at the other one.
+      const share = CANVAS_WIDTH / light.leds.length;
       const firstCell = first(light.leds);
       const lastCell = light.leds[light.leds.length - 1];
-      expect(Math.abs(firstCell.bounds[0]), `${light.light} starts at ${firstCell.bounds[0]}`).toBeLessThan(
-        0.05,
-      );
       expect(
-        Math.abs(lastCell!.bounds[2] - CANVAS_WIDTH),
-        `${light.light} ends at ${lastCell!.bounds[2]}`,
+        Math.abs(firstCell.center_x - share / 2),
+        `${light.light} starts at ${firstCell.center_x}`,
       ).toBeLessThan(0.05);
-      expect(Math.abs(firstCell.bounds[1]), `${light.light} starts at ${firstCell.bounds[1]}`).toBeLessThan(
-        0.05,
-      );
       expect(
-        Math.abs(lastCell!.bounds[3] - CANVAS_HEIGHT),
+        Math.abs(lastCell!.center_x - (CANVAS_WIDTH - share / 2)),
+        `${light.light} ends at ${lastCell!.center_x}`,
+      ).toBeLessThan(0.05);
+      // Vertically the cell is a square of at most the cap, centred at mid-height (#372):
+      // the LED reads the picture where it stands, not a column of it.
+      const side = Math.min(share, CANVAS_HEIGHT, STRIP_CELL_MAX);
+      expect(
+        Math.abs(firstCell.bounds[1] - (CANVAS_HEIGHT - side) / 2),
+        `${light.light} starts at ${firstCell.bounds[1]}`,
+      ).toBeLessThan(0.05);
+      expect(
+        Math.abs(lastCell!.bounds[3] - (CANVAS_HEIGHT + side) / 2),
         `${light.light} ends at ${lastCell!.bounds[3]}`,
       ).toBeLessThan(0.05);
     }
@@ -266,13 +273,14 @@ describe("the arrangement planner (#310)", () => {
     const width = CANVAS_WIDTH;
     const height = CANVAS_HEIGHT;
 
-    // A strip alone: the slot is the whole canvas, so each of its 8 cells is a
-    // 320/8 = 40 wide column of the whole height.
+    // A strip alone: the slot is the whole canvas, so its 8 LEDs stand 320/8 = 40
+    // apart and each reads a square of at most the cap, centred at mid-height.
     {
       const devices = [device("d0", [zone(0, { type: "linear" }, 8)])];
       const plan = buildGroupPlan(ids(["a"]), "each_its_own", [strip("a", "d0")], devices);
+      const stripSide = Math.min(width / 8.0, height, STRIP_CELL_MAX);
       for (const led of first(plan.lights).leds) {
-        expectCell(led, width / 8.0, height, "a strip cell");
+        expectCell(led, stripSide, stripSide, "a strip cell");
       }
     }
 
@@ -312,7 +320,7 @@ describe("the arrangement planner (#310)", () => {
       const devices = [device("d0", [zone(0, { type: "linear" }, 8)])];
       const plan = buildGroupPlan(ids(["a"]), "each_its_own", [light("a", "d0", 0, "ring")], devices);
       const radius = (Math.min(height, width) - 2 * RING_INSET) / 2;
-      const side = (Math.PI * 2 * radius) / 8;
+      const side = Math.min((Math.PI * 2 * radius) / 8, STRIP_CELL_MAX);
       for (const led of first(plan.lights).leds) {
         const [x0, y0, x1, y1] = led.bounds;
         expect(

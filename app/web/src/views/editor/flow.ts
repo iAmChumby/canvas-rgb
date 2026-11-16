@@ -33,19 +33,36 @@ const SHOWN_KEY = "canvas-rgb.onboarding-shown";
 let memoryLaunch: string | null = null;
 let memoryLater = false;
 
-/** The id of this launch: the same across a reload, new after the app is closed and opened. */
+/** A launch id no one has used yet. */
+function newLaunchId(): string {
+  return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+/**
+ * The id of this launch: the same across a reload, new after the app is closed and opened.
+ *
+ * The session storage holds it, so a window opened from the tray (a new webview, with no session
+ * storage of its own) makes a new one. The page's own copy is only the fallback for a browser
+ * that keeps no session storage: there the id cannot change while the page lives, which is the
+ * same rule.
+ *
+ * The page keeps no copy of the id while the session storage works, so that a launch ends with
+ * the session storage and not with the page. That is what keeps the launch's own "Later" from
+ * outliving the launch it was said in (#380), and so what leaves the header's own record as the
+ * thing that keeps a header shut.
+ */
 export function launchId(): string {
-  if (memoryLaunch) return memoryLaunch;
-  let id = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
   try {
     const kept = window.sessionStorage.getItem(LAUNCH_KEY);
-    if (kept) id = kept;
-    else window.sessionStorage.setItem(LAUNCH_KEY, id);
+    if (kept) return kept;
+    const id = newLaunchId();
+    window.sessionStorage.setItem(LAUNCH_KEY, id);
+    return id;
   } catch {
     // Not remembered across a reload; still one id for this page.
+    if (!memoryLaunch) memoryLaunch = newLaunchId();
+    return memoryLaunch;
   }
-  memoryLaunch = id;
-  return id;
 }
 
 /** True when the owner said "Later" in this launch. */
@@ -86,7 +103,7 @@ export function markRedirected(): void {
   }
 }
 
-// ---- the chain setup's own "Later" (#338) ----
+// ---- the chain setup's own "Later" (#338, #380) ----
 //
 // The first run's header setup is offered by the chain takeover on Scenes. Its "Later" is
 // remembered the same way the hello's is: the launch that said it is written down, and the same
@@ -94,6 +111,10 @@ export function markRedirected(): void {
 // this launch's id, so a fresh app start (a new launch id) offers them again, and a reload keeps
 // quiet. No memory copy: the store is the one truth here, which is also what lets a test start a
 // new launch by clearing it.
+//
+// This is the launch's own shut. The header's own record is in `@/views/chain/offered`: the
+// takeover remembers every header it has offered, so a header is offered by itself at most once,
+// ever, and a window opened from the tray (a new launch) does not forget it (#380).
 
 const CHAINS_LATER_KEY = "canvas-rgb.chains-later";
 
