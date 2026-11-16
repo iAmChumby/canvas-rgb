@@ -16,6 +16,7 @@ vi.mock("@/lib/api", async (importOriginal) => {
 });
 
 import { GroupStage } from "@/views/scenes/GroupStage";
+import { GROUP_PREVIEW_QUIET_MS } from "@/views/scenes/useGroupPreview";
 import { patchSnap } from "@/lib/store";
 import type { ApiConfig } from "@/proto/ApiConfig";
 import type { Group } from "@/proto/Group";
@@ -166,6 +167,22 @@ describe("the stage", () => {
     await settle();
     act(() => {
       FakeSocket.opened[0]!.onclose?.({ code: 1013 } as CloseEvent);
+    });
+    expect(screen.getByText("The preview stopped.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
+  });
+
+  it("says the preview stopped when the socket opens and says nothing, and offers Try again", async () => {
+    render(stage());
+    await settle();
+    expect(FakeSocket.opened).toHaveLength(1);
+
+    // The socket is open and has said nothing yet: the wait for the first picture runs out.
+    act(() => {
+      FakeSocket.opened[0]!.onopen?.();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GROUP_PREVIEW_QUIET_MS + 10);
     });
     expect(screen.getByText("The preview stopped.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();

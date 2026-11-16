@@ -1,4 +1,4 @@
-import { act, cleanup, renderHook } from "@testing-library/react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
 import { StrictMode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -16,10 +16,15 @@ vi.mock("@/lib/api", async (importOriginal) => {
   return { ...actual, apiConfig: api.apiConfig, dropApiConfig: api.dropApiConfig };
 });
 
-import { useGroupPreview } from "@/views/scenes/useGroupPreview";
+import { GROUP_PREVIEW_QUIET_MS, useGroupPreview } from "@/views/scenes/useGroupPreview";
+import { patchSnap } from "@/lib/store";
 import type { ApiConfig } from "@/proto/ApiConfig";
+import type { Status } from "@/proto/Status";
 
 const CONFIG: ApiConfig = { base_url: "http://127.0.0.1:9430", token: "tok" };
+
+/** The daemon's status while the lights are paused: the engine sends nothing at all. */
+const PAUSED = { power: "paused" } as unknown as Status;
 
 class FakeSocket {
   static opened: FakeSocket[] = [];
@@ -74,6 +79,7 @@ beforeEach(() => {
   api.apiConfig.mockResolvedValue(CONFIG);
   (globalThis as { WebSocket?: unknown }).WebSocket = FakeSocket as unknown as typeof WebSocket;
   window.__TAURI__ = { core: { invoke: async () => CONFIG } } as unknown as never;
+  patchSnap({ status: null });
   vi.useFakeTimers();
 });
 
@@ -123,29 +129,6 @@ describe("the per-group preview", () => {
     feed.rerender({ saved: true });
     await settle();
     expect(FakeSocket.opened).toHaveLength(1);
-  });
-
-  it("waits for the save when the socket is refused before it opened, and never says it stopped", async () => {
-    const feed = renderHook(
-      ({ saved }: { saved: boolean }) => useGroupPreview({ groupId: "g-one", saved }),
-      { initialProps: { saved: true } },
-    );
-    await settle();
-    expect(FakeSocket.opened).toHaveLength(1);
-
-    // The daemon refuses it: the group is not in its scene yet.
-    act(() => {
-      FakeSocket.opened[0]!.onclose?.({ code: 1006 } as CloseEvent);
-    });
-    // The save has not landed: the stage waits for it.
-    feed.rerender({ saved: false });
-    expect(feed.result.current.state).toBe("connecting");
-
-    // The save lands: the socket is opened again.
-    feed.rerender({ saved: true });
-    await settle();
-    expect(FakeSocket.opened).toHaveLength(2);
-    expect(feed.result.current.state).not.toBe("stopped");
   });
 
   it("does not try again when another group preview took over", async () => {
@@ -246,17 +229,90 @@ describe("the per-group preview", () => {
     expect(FakeSocket.opened).toHaveLength(2);
   });
 
-  it("leaves exactly one socket under strict mode", async () => {
+  it("leaves exactly one live socket under strict mode", async () => {
+    // The probe is mounted: `renderHook` never renders what it is given, so a hook inside an
+    // element it only stores never runs at all.
     function Probe() {
       useGroupPreview({ groupId: "g-one", saved: true });
       return null;
     }
-    renderHook(() => (
+    render(
       <StrictMode>
         <Probe />
-      </StrictMode>
-    ));
+      </StrictMode>,
+    );
+    await settle();
+    // Every socket but one was closed: the stage keeps one socket for the group.
+    expect(FakeSocket.opened.filter((socket) => !socket.closed)).toHaveLength(1);
+  });
+
+  it("says the preview stopped when the socket opens and says nothing", async () => {
+    const feed = renderHook(() => useGroupPreview({ groupId: "g-one", saved: true }));
     await settle();
     expect(FakeSocket.opened).toHaveLength(1);
+
+    // The socket is open and has said nothing yet.
+    act(() => {
+      FakeSocket.opened[0]!.onopen?.();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GROUP_PREVIEW_QUIET_MS + 10);
+    });
+    expect(feed.result.current.state).toBe("stopped");
+  });
+
+  it("keeps the preview when the picture comes before the wait is over", async () => {
+    const feed = renderHook(() => useGroupPreview({ groupId: "g-one", saved: true }));
+    await settle();
+
+    act(() => {
+      FakeSocket.opened[0]!.onopen?.();
+      FakeSocket.opened[0]!.onmessage?.({ data: frame() } as MessageEvent);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GROUP_PREVIEW_QUIET_MS + 10);
+    });
+    expect(feed.result.current.state).toBe("live");
+  });
+
+  it("does not say the preview stopped while the lights are paused", async () => {
+    // A paused engine says nothing by design: the stage says the lights are paused, not that
+    // the preview stopped.
+    patchSnap({ status: PAUSED });
+    const feed = renderHook(() => useGroupPreview({ groupId: "g-one", saved: true }));
+    await settle();
+
+    act(() => {
+      FakeSocket.opened[0]!.onopen?.();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GROUP_PREVIEW_QUIET_MS * 3);
+    });
+    expect(feed.result.current.state).not.toBe("stopped");
+  });
+
+  it("starts a new socket when the owner tries again", async () => {
+    const feed = renderHook(() => useGroupPreview({ groupId: "g-one", saved: true }));
+    await settle();
+    expect(FakeSocket.opened).toHaveLength(1);
+
+    // The socket is open and has said nothing: the stage says the preview stopped.
+    act(() => {
+      FakeSocket.opened[0]!.onopen?.();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(GROUP_PREVIEW_QUIET_MS + 10);
+    });
+    expect(feed.result.current.state).toBe("stopped");
+
+    // The owner starts it again: the old socket goes and a new one is made.
+    act(() => {
+      feed.result.current.retry();
+    });
+    await settle();
+    expect(FakeSocket.opened).toHaveLength(2);
+    expect(FakeSocket.opened[0]!.closed).toBe(true);
+    expect(FakeSocket.opened[1]!.closed).toBe(false);
+    expect(feed.result.current.state).toBe("connecting");
   });
 });

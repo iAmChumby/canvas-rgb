@@ -13,8 +13,12 @@
 //
 // A group the daemon has not saved yet gets no socket at all: the daemon answers 404 for a
 // group it does not hold, so the stage waits for the save to land and opens the socket then.
-// A socket that fails before it opened while the save is still in flight waits for it too,
-// and never says the preview stopped.
+//
+// A socket that opens and says nothing is not waited for for ever. The daemon sends the first
+// picture at once (a new selection gets its picture on the engine's first tick), so a socket
+// that stays quiet past the wait has nothing to say: the stage says the preview stopped and
+// the owner starts it again by hand. A paused engine says nothing by design, so the wait does
+// not count while the lights are paused.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiConfig, dropApiConfig } from "@/lib/api";
@@ -23,6 +27,7 @@ import { demoGroupPreviewMode } from "@/lib/demoScenarios";
 import { GROUP_PREVIEW_H, GROUP_PREVIEW_W, GROUP_TAKEN_CODE } from "@/lib/groupPreview";
 import { isDemo } from "@/lib/host";
 import { parseFrame, type Frame } from "@/lib/preview";
+import { getSnap } from "@/lib/store";
 import { GROUP_PREVIEW_QUERY, PREVIEW_TOKEN_QUERY } from "@/proto/consts";
 import { routes } from "@/proto/routes";
 import { retryWait } from "@/views/scenes/useLightFeed";
@@ -32,6 +37,15 @@ export const GROUP_PREVIEW_RETRIES = 3;
 
 /** The pictures the daemon sends, at most this many a second (`PREVIEW_MAX_FPS`). */
 const GROUP_PREVIEW_FPS = 15;
+
+/**
+ * How long a socket may say nothing before the stage says the preview stopped.
+ *
+ * The daemon sends the first picture at once, so this is the wait for a socket that has
+ * nothing to say, not the wait for a slow machine. It is the light feed's own first wait
+ * (1.2 s), the same number the feed waits before it tries a closed socket again.
+ */
+export const GROUP_PREVIEW_QUIET_MS = retryWait(0);
 
 export type GroupPreviewState = "connecting" | "live" | "stopped";
 
@@ -74,8 +88,6 @@ function openGroupFeed(
     onState: (state: GroupPreviewState) => void;
     /** A picture arrived. */
     onFrame: (frame: Frame) => void;
-    /** True while the daemon holds this group in its saved scene. */
-    isSaved: () => boolean;
   },
 ): Feed {
   let stopped = false;
@@ -86,9 +98,14 @@ function openGroupFeed(
   let connecting = false;
   let retry: ReturnType<typeof setTimeout> | null = null;
   let timer: ReturnType<typeof setInterval> | null = null;
+  // The wait for the first picture: the socket is open and has said nothing yet.
+  let quiet: ReturnType<typeof setTimeout> | null = null;
   let failures = 0;
 
   const visible = () => typeof document === "undefined" || document.visibilityState === "visible";
+
+  /** The lights are paused: the engine sends nothing at all, and that is on purpose. */
+  const paused = () => getSnap().status?.power === "paused";
 
   const close = () => {
     if (retry) {
@@ -99,6 +116,10 @@ function openGroupFeed(
       clearInterval(timer);
       timer = null;
     }
+    if (quiet) {
+      clearTimeout(quiet);
+      quiet = null;
+    }
     if (socket) {
       socket.onclose = null;
       socket.onerror = null;
@@ -106,6 +127,27 @@ function openGroupFeed(
       socket.close();
       socket = null;
     }
+  };
+
+  /**
+   * The wait for the first picture.
+   *
+   * The socket stays open when the wait runs out: a paused engine says nothing by design and
+   * says the picture again when it runs, so the stage is told the preview stopped but the
+   * socket is not thrown away.
+   */
+  const armQuiet = () => {
+    if (quiet) clearTimeout(quiet);
+    quiet = setTimeout(() => {
+      quiet = null;
+      if (stopped || !socket) return;
+      // The lights are paused: the engine says nothing on purpose, so the wait starts again.
+      if (paused()) {
+        armQuiet();
+        return;
+      }
+      handlers.onState("stopped");
+    }, GROUP_PREVIEW_QUIET_MS);
   };
 
   const schedule = () => {
@@ -153,27 +195,32 @@ function openGroupFeed(
     ws.binaryType = "arraybuffer";
     ws.onopen = () => {
       failures = 0;
+      // The socket is open and has said nothing yet: the wait for the first picture starts.
+      armQuiet();
     };
     ws.onmessage = (event: MessageEvent) => {
       if (!(event.data instanceof ArrayBuffer)) return;
       const frame = parseFrame(event.data);
       if (!frame) return;
+      // A picture has come: the socket has something to say.
+      if (quiet) {
+        clearTimeout(quiet);
+        quiet = null;
+      }
       handlers.onState("live");
       handlers.onFrame(frame);
     };
     ws.onclose = (event: CloseEvent) => {
       socket = null;
+      if (quiet) {
+        clearTimeout(quiet);
+        quiet = null;
+      }
       if (stopped) return;
       // Another group preview took over: the stage says the preview stopped, and the owner
       // starts it again by hand. It is not tried again by itself.
       if (event.code === GROUP_TAKEN_CODE) {
         handlers.onState("stopped");
-        return;
-      }
-      // The group is not in the daemon's saved scene yet: the save has not landed. The stage
-      // waits for it instead of saying the preview stopped.
-      if (!handlers.isSaved()) {
-        handlers.onState("connecting");
         return;
       }
       // The tray may have handed out a new token: ask again.
@@ -238,6 +285,9 @@ function openGroupFeed(
       }
       failures = 0;
       handlers.onState("connecting");
+      // The old socket goes first: a socket that said nothing is still open, and a new one is
+      // made for the same group.
+      close();
       start();
     },
     stop: () => {
@@ -263,9 +313,6 @@ export function useGroupPreview({ groupId, saved }: GroupPreviewOptions): GroupP
   // The state the stage shows, as the feed's own last word. A picture that arrives does not
   // change it, so a frame never causes a render.
   const shown = useRef<GroupPreviewState>("connecting");
-  // Whether the daemon holds this group in its saved scene, read at the moment it matters.
-  const isSaved = useRef(saved);
-  isSaved.current = saved;
 
   const onState = useCallback((next: GroupPreviewState) => {
     if (shown.current === next) return;
@@ -290,7 +337,6 @@ export function useGroupPreview({ groupId, saved }: GroupPreviewOptions): GroupP
       onFrame: (frame) => {
         for (const listener of listeners.current) listener(frame);
       },
-      isSaved: () => isSaved.current,
     });
     feed.current = open;
     return () => {
