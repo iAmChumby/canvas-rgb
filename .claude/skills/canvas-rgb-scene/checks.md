@@ -18,6 +18,9 @@ pixel (red, green, blue), so it is `width * height * 3` bytes. The defaults are 
 
 All three must hold for TRUE. Any one that fails is FALSE, with its number.
 
+`dump-frames` refuses `html:` ids, so when no group in the plan plays a built-in effect, row 2 is
+UNKNOWN: name the groups and say they all play HTML effects (row 1 covers those).
+
 ## Row 8: each group lit and moving (`diag readback`, scene playing only)
 
 `canvas-rgb diag readback --json` prints `{"devices": [{"device_id": ..., "name": ..., "colors":

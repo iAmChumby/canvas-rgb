@@ -163,7 +163,7 @@ Run the checks that need no live lights. Each result is TRUE, FALSE or UNKNOWN.
 | # | Check | Command | Bar |
 |---|---|---|---|
 | 1 | each new HTML effect passes | `canvas-rgb effects check <file> --preview <dir>` | exit 0; open `<dir>/<stem>-sheet.png` |
-| 2 | a built-in effect with these props draws | `canvas-rgb diag dump-frames` (step 3) | not black, not one colour, changes between frame 0 and frame 29 |
+| 2 | a built-in effect with these props draws | `canvas-rgb diag dump-frames` (step 3) | not black, not one colour, changes between frame 0 and frame 29; UNKNOWN, naming the groups, when no group plays a built-in effect |
 | 3 | the scene is valid and under the HTML limit | the dry run, then the create | exit 0 |
 | 4 | the scene holds the plan | `canvas-rgb scenes list --json` | group count and each group's members equal the plan |
 | 5 | light coverage | `canvas-rgb lights list --json` against the scene | print both counts ("14 of 14 lights"); a percentage never stands alone |
