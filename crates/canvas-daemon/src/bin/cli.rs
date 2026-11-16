@@ -15,9 +15,13 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            // With --json the API's error body goes to stdout, whole; stderr still gets the line.
+            // With --json a failed scene create, edit or delete prints one document on stdout
+            // for every kind of failure; any other command prints the API's error body, whole.
+            // stderr still gets the line.
             if cli.json {
-                if let Some(body) = e.json_body() {
+                if let Some(document) = canvas_daemon::cli::failure_document(&cli.command, &e) {
+                    print_json(&cli, &document);
+                } else if let Some(body) = e.json_body() {
                     print_json(&cli, body);
                 }
             }
