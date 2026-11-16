@@ -29,6 +29,7 @@ import { effectNameOf } from "@/lib/status";
 import { useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
 import { EffectPicker, isPatternEffect, useEffectDetail } from "@/views/scenes/EffectPicker";
+import { GroupStage } from "@/views/scenes/GroupStage";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import { MemberList } from "@/views/scenes/MemberList";
 import { groupGoneMessage } from "@/views/scenes/groupEdit";
@@ -145,6 +146,19 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
     () => (group?.members ?? []).flatMap((id) => lights.filter((l) => l.light.id === id)),
     [group?.members, lights],
   );
+
+  // The stage's own facts (#378):
+  // - the daemon holds the group in its saved scene: a group that is still a draft is
+  //   answered with 404, so the stage waits for the save instead of opening a socket.
+  const scenes = useSnap((st) => st.scenes);
+  const savedScene = scenes?.scenes.find((s) => s.id === scenes.active);
+  const saved = savedScene?.groups.some((g) => g.id === groupId) ?? false;
+  // - the lights are paused: the engine sends nothing at all.
+  const paused = useSnap((st) => st.status?.power === "paused");
+  // - why the group is dark, from the daemon.
+  const failed = use.states.find((s) => s.id === groupId)?.failed ?? null;
+  // - the devices of the group that are not connected.
+  const away = members.filter((l) => !l.connected).length;
 
   /** The group's name: the edit is an ordinary change, so an Undo takes it back. */
   const commitName = useCallback(
@@ -315,11 +329,17 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
 
           {step === "group" && (
             <>
-              <div className={s.sheetRun}>
-                <LedRun lights={members} label={runLabel(group.name, members)} />
-              </div>
-
-              <div className={s.sheetRow}>
+              {/* The stage (#378): the picture the group itself draws, and the group's own
+                  controls beside it. The LED run stays under it, in the flow. */}
+              <GroupStage
+                group={group}
+                effectName={effectName}
+                failed={failed}
+                pattern={pattern}
+                saved={saved}
+                paused={paused}
+                away={away}
+              >
                 <Button
                   className={s.sheetEffect}
                   data-testid="sheet-effect"
@@ -342,6 +362,10 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                     }
                   />
                 )}
+              </GroupStage>
+
+              <div className={s.sheetRun}>
+                <LedRun lights={members} label={runLabel(group.name, members)} />
               </div>
 
               <div className={s.sheetFader}>

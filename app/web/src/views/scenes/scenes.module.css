@@ -750,13 +750,16 @@
 
 /* The body scrolls: the sheet is as tall as the window, whatever the group holds. It never
    scrolls sideways: a tooltip beside a key at the right edge would widen it, and the browser
-   would then scroll the content out of view when that key takes the focus. */
+   would then scroll the content out of view when that key takes the focus.
+   The scroll padding is the stage's height (#378): a control that takes the focus is never
+   hidden under the pinned stage. */
 .sheetBody {
   flex: 1 1 auto;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding: var(--s4);
+  scroll-padding-top: 170px;
 }
 
 .sheetStep {
@@ -793,14 +796,6 @@
   border-radius: var(--r-sm);
   background: var(--sunk);
   box-shadow: var(--well);
-}
-
-.sheetRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s3);
-  margin-bottom: var(--s3);
 }
 
 .sheetEffect {
@@ -866,6 +861,132 @@
 
 .sheetMenu > button {
   justify-content: flex-start;
+}
+
+/* ---------- the stage: the picture the group itself draws (#378) ---------- */
+
+/* The stage is pinned to the top of the sheet's body: the picture and the group's own
+   controls stay, and the controls below scroll under it. The negative margin takes the
+   sheet's own padding, so the band reaches the sheet's edges and no scrolled control shows
+   beside it. The box is the same size in every state, so nothing moves when the state
+   changes. */
+.stage {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  margin: calc(-1 * var(--s4)) calc(-1 * var(--s4)) var(--s4);
+  padding: var(--s3);
+  background: var(--sunk);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The picture and its caption: one column, always the same width. */
+.stageColumn {
+  display: flex;
+  flex: 0 0 160px;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+/* The picture: the group's own 80x50 canvas at 2x. */
+.stagePicture {
+  position: relative;
+  width: 160px;
+  height: 100px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--g1);
+}
+
+.stageCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+/* The picture shows while it is live: a stale picture is never read as the group's. */
+.stage[data-state="live"] .stageCanvas {
+  opacity: 1;
+}
+
+/* The mark and the words of a state that has no picture. */
+.stageMark {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.25;
+  text-align: center;
+}
+
+.stageWords {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+/* A pattern's own dots, in the colours the pattern holds. */
+.stageDots {
+  display: block;
+  width: 96px;
+  height: 44px;
+}
+
+/* The caption under the picture: it is always there, so the picture's box never moves. */
+.stageCaption {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.25;
+}
+
+/* The group's own controls, beside the picture. */
+.stageSide {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.stageControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+/* The note about a device that is away: the room is kept whether there is one or not, so the
+   stage's box is the same size in every state. */
+.stageAway {
+  display: -webkit-box;
+  min-height: 35px;
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 /* ---------- the effect picker ---------- */
@@ -1338,6 +1459,11 @@
 
   .sheetBody {
     padding: var(--s3);
+  }
+
+  /* The stage's band takes the sheet's own padding, which is smaller on a phone (#378). */
+  .stage {
+    margin: calc(-1 * var(--s3)) calc(-1 * var(--s3)) var(--s3);
   }
 
   .sheetRun {
