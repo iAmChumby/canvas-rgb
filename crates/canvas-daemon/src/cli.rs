@@ -930,7 +930,7 @@ pub fn check_tile(path: &str, preview_dir: Option<&str>) -> Result<TileCheck, St
         &canvas_proto::props::Props::new(),
         crate::thumbnail::TILE_SEED,
     )
-    .map_err(|e| e.to_string())?
+    .map_err(|e| crate::user_effects::load_error_sentence(&e.to_string()))?
     // A tile frame is never dropped for being slow, so the check scores the same picture on
     // any machine.
     .tile_mode();
@@ -3337,8 +3337,10 @@ mod tests {
     }
 
     /// SHOULD-FIX 1 of the #75 review: `effects check` reported a load that ran out of time in
-    /// the runtime's raw `timeout: ...` words; it now uses the same plain sentence the editor
-    /// and the daemon's failed list use.
+    /// the runtime's raw `timeout: ...` words; it now says it in the plain sentence
+    /// `user_effects::load_error_sentence` gives. The daemon's failed list keeps its own
+    /// wording for a file that timed out ("it took too long to load just now ..."), because
+    /// the file is tried again.
     #[test]
     fn a_timed_out_check_is_reported_in_plain_words() {
         let runaway = r##"<head><title>Loop</title></head>
@@ -3348,6 +3350,23 @@ mod tests {
 </script>"##;
         let error = check_source(runaway, None).expect_err("a runaway top-level script times out");
         assert!(!error.starts_with("timeout: "), "the runtime's prefix leaked: {error}");
+        assert!(error.contains("took too long to load"), "a plain sentence is shown: {error}");
+        assert!(error.contains("stopped"), "the sentence says the script was stopped: {error}");
+    }
+
+    /// The tile load is worded the same way (#75 review). `effects check` runs the tile check
+    /// after the source check, so a script that loads just inside the 2 s budget for one and
+    /// just outside it for the other used to print the runtime's raw `timeout: ...` text.
+    #[test]
+    fn a_timed_out_tile_check_is_reported_in_plain_words() {
+        let runaway = r##"<head><title>Loop</title></head>
+<body><canvas id="c" width="16" height="16"></canvas></body>
+<script>
+  while (true) {}
+</script>"##;
+        let file = TempFile::new("loop-tile", runaway);
+        let error = check_tile(&file.path(), None).expect_err("a runaway top-level script times out");
+        assert!(!error.contains("timeout:"), "the runtime's prefix leaked: {error}");
         assert!(error.contains("took too long to load"), "a plain sentence is shown: {error}");
         assert!(error.contains("stopped"), "the sentence says the script was stopped: {error}");
     }
