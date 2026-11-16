@@ -10,6 +10,7 @@ pub mod consts;
 pub mod device;
 pub mod display;
 pub mod fans;
+pub mod geometry;
 pub mod layout;
 pub mod pattern;
 pub mod peripheral;

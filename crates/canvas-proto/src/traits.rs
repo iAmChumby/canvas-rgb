@@ -134,6 +134,27 @@ pub trait Effect: Send {
     fn strip_read(&self) -> StripRead {
         StripRead::Cell
     }
+    /// The colours one light's LEDs show, when this effect works them out itself (#427).
+    ///
+    /// The engine asks once per light per frame, after [`update`](Self::update). `false` (the
+    /// default) means the engine samples the canvas as before; `true` means `out` holds exactly
+    /// one colour per LED of `light.leds`, in order, and the engine writes those instead of
+    /// sampling. The canvas (the picture the stage shows) is never changed by this call. A stack
+    /// whose layers read a strip differently answers it, so each layer is read its own way.
+    fn led_colours(&mut self, light: LightLeds<'_>, out: &mut Vec<Rgb8>) -> bool {
+        let _ = (light, out);
+        false
+    }
+}
+
+/// One light of a group as the engine offers it to [`Effect::led_colours`] (#427).
+#[derive(Debug, Clone, Copy)]
+pub struct LightLeds<'a> {
+    pub id: &'a crate::scene::LightId,
+    /// How the light's LEDs read the canvas: a strip reads its column, a ring or grid its cell.
+    pub arrangement: crate::scene::Arrangement,
+    /// One sample region per LED, in the light's LED order, in the group canvas's units.
+    pub leds: &'a [crate::geometry::LedSample],
 }
 
 pub type EffectFactory = fn() -> Box<dyn Effect>;
