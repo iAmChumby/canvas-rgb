@@ -5,7 +5,7 @@
 
 use canvas_daemon::cli::{
     Cli, CliError, Command, ConfigCommand, DevicesCommand, DiagCommand, EffectsCommand, FansCommand,
-    OutputCommand, PeripheralsCommand, ScenesCommand,
+    OutputCommand, PeripheralsCommand, ScenesCommand, ScenesGroupCommand,
 };
 use clap::Parser;
 use std::process::ExitCode;
@@ -15,6 +15,12 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
+            // With --json the API's error body goes to stdout, whole; stderr still gets the line.
+            if cli.json {
+                if let Some(body) = e.json_body() {
+                    print_json(&cli, body);
+                }
+            }
             eprintln!("error: {e}");
             ExitCode::from(e.exit_code() as u8)
         }
@@ -32,6 +38,8 @@ fn run(cli: &Cli) -> Result<(), CliError> {
         Command::Effects(EffectsCommand::Check(args)) => effects_check(cli, args),
         Command::Scenes(ScenesCommand::List) => scenes_list(cli),
         Command::Scenes(ScenesCommand::Set { name }) => scenes_set(cli, name),
+        Command::Scenes(ScenesCommand::Order(args)) => scenes_order(cli, args),
+        Command::Scenes(ScenesCommand::Group(ScenesGroupCommand::Move(args))) => scenes_group_move(cli, args),
         Command::Output(OutputCommand::Pause) => output(cli, "paused"),
         Command::Output(OutputCommand::Resume) => output(cli, "running"),
         Command::Fans(FansCommand::Status) => fans_status(cli),
@@ -325,6 +333,26 @@ fn scenes_list(cli: &Cli) -> Result<(), CliError> {
 fn scenes_set(cli: &Cli, name: &str) -> Result<(), CliError> {
     let client = client(cli)?;
     match canvas_daemon::cli::scenes_set(&client, name, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes order <scene>... [--dry-run]`.
+fn scenes_order(cli: &Cli, args: &canvas_daemon::cli::OrderArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_order(&client, &args.scenes, args.dry_run, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]`.
+fn scenes_group_move(cli: &Cli, args: &canvas_daemon::cli::GroupMoveArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_group_move(&client, args, cli.json)? {
         canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
         canvas_daemon::cli::Output::Text(text) => print!("{text}"),
     }

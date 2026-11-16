@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
+
 ### Changed
 
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
@@ -22,6 +26,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
 - Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
 - The sidebar strip shows your lights' real colours in a scene (#379)
+- Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
 - Rain: Trail Length now changes how long each streak is (#383)
 - Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 
