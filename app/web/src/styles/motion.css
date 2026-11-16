@@ -1683,6 +1683,7 @@
 .tick-box[data-checked="true"] {
   border-color: transparent;
   background: var(--live);
+  color: var(--on-live);
 }
 
 .tick[aria-disabled="true"] {

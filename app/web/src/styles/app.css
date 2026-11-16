@@ -1032,11 +1032,11 @@ html[data-motion="reduced"] *::after {
 .btn-primary {
   background: var(--live);
   border-color: transparent;
-  color: var(--on-accent);
+  color: var(--on-live);
 }
 
 .btn-primary:not(:disabled):hover {
-  background: color-mix(in srgb, var(--live) 86%, var(--ink));
+  background: color-mix(in srgb, var(--live) 90%, var(--on-live-away));
   border-color: transparent;
 }
 
@@ -9946,7 +9946,7 @@ button.chip:hover {
 }
 
 .rd-drop-strip[data-over="true"] {
-  color: var(--on-accent);
+  color: var(--on-live);
   background: var(--live);
   border-bottom-color: var(--live);
 }

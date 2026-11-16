@@ -40,6 +40,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
 - The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)
 - Fire and Audio Spectrum fill a strip again, flame height and bar height included. Inside a stack they still read dark on a strip. (#400)
+- The text on a primary key stays readable as the lights change colour: every hue of both themes keeps 4.5:1 on the key, where yellow in the light theme dropped to 2.2:1. (#423)
 
 ## [0.16.0] - 2026-11-15
 
