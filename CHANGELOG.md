@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- The site's hero glow no longer shows a faint line where it crosses the section edge, and a long sweep takes the same time at 30, 60 and 144 Hz. (#63)
 - Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
 
 ## [0.17.0] - 2026-11-16
