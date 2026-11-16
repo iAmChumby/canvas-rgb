@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- The "frame write failed" warning keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter still catches it. (#87)
+
 ## [0.17.0] - 2026-11-16
 
 ### Added
