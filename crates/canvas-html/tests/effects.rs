@@ -260,6 +260,37 @@ fn a_runaway_script_at_the_top_level_is_stopped_at_the_budget() {
     );
 }
 
+/// When the whole render's deadline (not the frame's own budget) is what ran out, the reason
+/// says so in plain words (#58).
+const SIMPLE: &str = r##"<head><title>Simple</title></head>
+<body><canvas id="c" width="16" height="16"></canvas></body>
+<script>
+  var ctx = document.getElementById("c").getContext("2d");
+  function draw() { ctx.fillRect(0, 0, 16, 16); window.requestAnimationFrame(draw); }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+#[test]
+fn a_render_that_runs_out_of_time_says_the_deadline_passed() {
+    let mut effect = HtmlEffect::from_source("deadline", SIMPLE, &Props::new()).expect("loads");
+    // The render's deadline is already in the past, so the first frame cannot start.
+    effect.set_give_up_at(Some(std::time::Instant::now() - std::time::Duration::from_secs(1)));
+    let mut canvas = Canvas::new(320, 200);
+    effect.update(DT * 60.0, &mut canvas, &Inputs::default());
+
+    let errors = effect.errors();
+    assert!(!errors.is_empty(), "no error was reported when the deadline had passed");
+    let message = &errors[0];
+    assert!(
+        message.contains("the render's deadline passed before this frame could finish"),
+        "the reason does not say the deadline passed plainly: {message}"
+    );
+    assert!(
+        !message.contains("frame budget was not the limit"),
+        "the awkward wording is still there: {message}"
+    );
+}
+
 #[test]
 fn a_runaway_frame_callback_is_stopped_and_the_effect_keeps_running() {
     let mut effect = HtmlEffect::from_source("loop", RUNAWAY_FRAME, &Props::new()).expect("loads");

@@ -11,4 +11,4 @@ canvas-proto.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 rquickjs = { version = "0.14", features = ["classes", "array-buffer", "parallel"] }
-tiny-skia = { version = "0.11", default-features = false, features = ["std", "simd"] }
+tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd"] }

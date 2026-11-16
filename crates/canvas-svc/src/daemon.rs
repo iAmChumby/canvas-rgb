@@ -1162,8 +1162,9 @@ mod windows_launcher {
                 std::ptr::null(),
                 std::ptr::null(),
                 FALSE,
-                // The daemon is a console program: without CREATE_NO_WINDOW the owner's desktop
-                // gets a terminal window for it, and closing that window ends the daemon.
+                // A release canvas-rgbd is a windows-subsystem program (#6), so no launcher gives it
+                // a console; CREATE_NO_WINDOW keeps a debug build from putting a terminal window on
+                // the owner's desktop, where closing that window would end the daemon.
                 CREATE_UNICODE_ENVIRONMENT | CREATE_NO_WINDOW,
                 if have_env { env } else { std::ptr::null() },
                 dir.as_ptr(),

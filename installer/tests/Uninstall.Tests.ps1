@@ -197,7 +197,7 @@ function Set-UserPathEntry { Write-Host 'STUB Set-UserPathEntry'; return $false 
     }
 
     # uninstall-elevated.ps1 runs as a temp COPY; lib.ps1 gets stubs so no service, HKLM key, process or admin check is real.
-    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails, [switch]$NoMachineHome, [switch]$LockedFile, [switch]$LockedData) {
+    function Invoke-ElevatedUninstallSandbox([string]$Name, [string]$RecordText, [switch]$Purge, [string]$SignalService = '', [switch]$JunctionHome, [switch]$ListFails, [switch]$PurgeFails, [switch]$ServiceRunning, [switch]$StopRefused, [switch]$RestoreFails, [switch]$ManualBios, [switch]$DeleteFails, [switch]$NoMachineHome, [switch]$LockedFile, [switch]$LockedData, [switch]$LockedOpenRgb, [switch]$InnoMode) {
         $root = Join-Path $dir $Name
         $scripts = Join-Path $root 'scripts'; $pd = Join-Path $root 'PD\canvas-rgb'; $inst = Join-Path $root 'install'
         New-Item -ItemType Directory -Path $scripts, $inst -Force | Out-Null
@@ -286,8 +286,21 @@ function Remove-Item {
             [System.IO.File]::WriteAllText((Join-Path $lockDir 'z-locked.txt'), 'x')
             $held = [System.IO.File]::Open((Join-Path $lockDir 'z-locked.txt'), 'Open', 'ReadWrite', 'None')
         }
+        # A partial delete of the OpenRGB tree: an OpenRGB folder with a file held open. In Inno
+        # mode the script deletes that tree itself and records OpenRgb = 'some' when the delete
+        # stops half way (#77). Without Inno mode it would come under the install-dir delete and
+        # be recorded as program files, which is a different path.
+        if ($LockedOpenRgb) {
+            $tree = Join-Path $inst 'openrgb'
+            New-Item -ItemType Directory -Path $tree -Force | Out-Null
+            [System.IO.File]::WriteAllText((Join-Path $tree 'OpenRGB.exe'), 'x')
+            [System.IO.File]::WriteAllText((Join-Path $tree 'a-first.dll'), 'x')
+            [System.IO.File]::WriteAllText((Join-Path $tree 'z-locked.dll'), 'x')
+            $held = [System.IO.File]::Open((Join-Path $tree 'z-locked.dll'), 'Open', 'ReadWrite', 'None')
+        }
         $log = Join-Path $root 'elevated.log'
         $extra = if ($Purge) { ' -PurgeConfig' } else { '' }
+        if ($InnoMode) { $extra += ' -InnoMode' }
         $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''{4}; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'uninstall-elevated.ps1'), $inst, $log, $extra
         try { $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String } finally { if ($held) { $held.Dispose() } }
         return @{ Out = $out; Code = $LASTEXITCODE; Record = $rec; Install = $inst; Pd = $pd; State = (Join-Path $pd 'uninstall-state.marker') }
@@ -537,6 +550,20 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         Assert-True (Test-Path -LiteralPath (Join-Path $r.Install 'z-locked.txt')) 'the locked file is still there'
         $words = [System.IO.File]::ReadAllText($r.State)
         Assert-True ($words -match 'some of the program files were removed') "the words say some files went: $words"
+        Assert-True ($words -notmatch 'before anything was taken away') "it must not say that nothing was taken away: $words"
+        Assert-Equal $r.Code 4 "the exit code says something was removed: $($r.Out)"
+    }
+    Test-Case 'a partial delete of the OpenRGB tree is recorded and said by the real uninstall script' {
+        # In Inno mode the script deletes the OpenRGB trees itself. A file in one of them held
+        # open makes the delete stop half way: the words must say that some of the OpenRGB folder
+        # was removed, not that nothing was taken away. The report-level test above checks the
+        # words for OpenRgb = 'some'; this one checks that the real delete path records it (#77).
+        $r = Invoke-ElevatedUninstallSandbox 'u64r' $null -LockedOpenRgb -InnoMode
+        Assert-True ($r.Code -ne 0) "the uninstall fails: $($r.Out)"
+        $tree = Join-Path $r.Install 'openrgb'
+        Assert-True (Test-Path -LiteralPath (Join-Path $tree 'z-locked.dll')) 'the locked file is still there'
+        $words = [System.IO.File]::ReadAllText($r.State)
+        Assert-True ($words -match 'some of the OpenRGB folder was removed') "the words say some of the tree went: $words"
         Assert-True ($words -notmatch 'before anything was taken away') "it must not say that nothing was taken away: $words"
         Assert-Equal $r.Code 4 "the exit code says something was removed: $($r.Out)"
     }

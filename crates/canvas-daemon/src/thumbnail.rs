@@ -106,10 +106,12 @@ impl RenderError {
     }
 
     /// The error of building an effect for a tile. The builders return the text of
-    /// [`canvas_html::HtmlError`], and its `Timeout` variant reads `timeout: ...`: an effect whose
-    /// top-level script ran past its load budget says how busy the machine was, not what the
-    /// effect is, so it is [`RenderError::OverBudget`] (retried later). Any other build error
-    /// fails the same way every time.
+    /// [`canvas_html::HtmlError`], and its `Timeout` variant reads `timeout: ...`: a top-level
+    /// script that ran past its load budget *may* have lost to a busy machine, so it is worth
+    /// another try ([`RenderError::OverBudget`]). This is only a plausible cause, not proof —
+    /// a script that is slower than `LOAD_BUDGET_MS` on every PC looks the same and is retried too
+    /// (one build per tile per [`TIMEOUT_RETRY_AFTER`]) (#58). Any other build error fails the
+    /// same way every time.
     pub fn from_build_error(why: String) -> Self {
         if build_error_depends_on_load(&why) {
             RenderError::OverBudget(why)
@@ -147,9 +149,10 @@ impl From<RenderError> for String {
 /// True when a build error says the machine was too busy, not the effect.
 ///
 /// The builders return the text of [`canvas_html::HtmlError`], and its `Timeout` variant reads
-/// `timeout: ...`: an effect whose top-level script ran past its load budget says how busy the
-/// machine was (a game running, a build), not what the effect is. Such a failure is worth
-/// another try later; any other build error fails the same way every time.
+/// `timeout: ...`: a script that ran past its load budget may have lost to a busy machine (a
+/// game running, a build), so such a failure is worth another try later. It is a plausible
+/// cause, not proof — a script slower than `LOAD_BUDGET_MS` everywhere looks the same and is
+/// retried too (#58). Any other build error fails the same way every time.
 ///
 /// The tile build path and the user-effects path ([`crate::user_effects`]) both ask this, so
 /// they tell a timeout from a real failure the same way. The tile *frame* path is a separate
@@ -218,9 +221,25 @@ pub fn render_within(
     props: &Props,
     budget: std::time::Duration,
 ) -> Result<Vec<u8>, RenderError> {
+    render_within_started(effect, props, budget, std::time::Instant::now())
+}
+
+/// [`render_within`] with the budget's clock started at `started`.
+///
+/// The daemon builds an effect before it renders it: an HTML build runs the file's top-level
+/// scripts under `LOAD_BUDGET_MS` (up to 2 s). A caller that starts the clock before the build
+/// and passes it here charges that time to the same budget, so a render slot is never held for
+/// the build *plus* the whole budget (#58). [`render_within`] starts the clock at the call, for
+/// callers that already hold a built effect.
+pub fn render_within_started(
+    effect: &mut dyn Effect,
+    props: &Props,
+    budget: std::time::Duration,
+    started: std::time::Instant,
+) -> Result<Vec<u8>, RenderError> {
     // A tile effect that cannot draw its tile unwinds with a [`TileFailure`]; anything else
     // that unwinds is a real panic and goes on.
-    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render_frames(effect, props, budget)));
+    let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| render_frames(effect, props, budget, started)));
     match attempt {
         Ok(result) => result,
         Err(payload) => match payload.downcast::<TileFailure>() {
@@ -235,8 +254,8 @@ fn render_frames(
     effect: &mut dyn Effect,
     props: &Props,
     budget: std::time::Duration,
+    started: std::time::Instant,
 ) -> Result<Vec<u8>, RenderError> {
-    let started = std::time::Instant::now();
     let _give_up_at = GiveUpAtGuard::set(started + budget);
     let over_budget = || {
         (started.elapsed() > budget).then(|| {
@@ -1232,6 +1251,20 @@ mod tests {
         assert!(error.to_string().contains("budget"), "{error}");
         // It stopped at the first update, not after the whole recipe.
         assert_eq!(updates.load(Ordering::SeqCst), 1);
+    }
+
+    /// The budget clock can be started before the build. A caller that spent part of the budget
+    /// before the render must not get the whole budget back: with a clock already 2 s old and a
+    /// 2 s budget, the render is over budget before it draws anything (#58).
+    #[test]
+    fn a_budget_started_before_the_build_is_not_given_back_to_the_render() {
+        let updates = Arc::new(AtomicU32::new(0));
+        let mut effect = Counter { updates: updates.clone(), recipe: None };
+        let started = std::time::Instant::now() - std::time::Duration::from_secs(2);
+        let error = render_within_started(&mut effect, &Props::new(), std::time::Duration::from_secs(2), started)
+            .expect_err("a budget used up before the render starts stops it");
+        assert!(error.depends_on_load(), "{error}");
+        assert!(error.to_string().contains("budget"), "{error}");
     }
 
     #[test]

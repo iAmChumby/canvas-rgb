@@ -8,8 +8,8 @@
 
 use crate::color::CssColor;
 use tiny_skia::{
-    BlendMode, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap, Point,
-    PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
+    BlendMode, ColorSpace, FillRule, GradientStop, LinearGradient, Paint, PathBuilder, Pixmap,
+    Point, PremultipliedColorU8, RadialGradient, Shader, SpreadMode, Stroke, Transform,
 };
 
 /// Default canvas size when the file declares none.
@@ -637,6 +637,7 @@ impl Context {
                 shader: Shader::SolidColor(tiny_skia::Color::TRANSPARENT),
                 blend_mode: BlendMode::Source,
                 anti_alias: false,
+                colorspace: ColorSpace::default(),
                 force_hq_pipeline: false,
             };
             let t = self.device_transform();
@@ -743,6 +744,7 @@ impl Context {
                 let stops = gradient_stops(&spec.stops, alpha);
                 match RadialGradient::new(
                     Point::from_xy(spec.x0, spec.y0),
+                    0.0,
                     Point::from_xy(spec.x1, spec.y1),
                     spec.r1,
                     stops,
@@ -758,6 +760,7 @@ impl Context {
             shader,
             blend_mode: self.state.composite.to_blend(),
             anti_alias: true,
+            colorspace: ColorSpace::default(),
             force_hq_pipeline: false,
         }
     }
