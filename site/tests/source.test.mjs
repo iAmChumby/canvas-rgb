@@ -31,3 +31,8 @@ test("the hero has no bottom border for the light to show through (#63)", () => 
   assert.ok(block, "the .site-hero rule is missing");
   assert.doesNotMatch(block[1], /border-bottom/);
 });
+
+test("the frame loop caps the glow's move with the speed-based moveCap, not a per-frame share (#63)", () => {
+  assert.match(hero, /moveCap\(rad, dt\)/, "the hero no longer calls moveCap(rad, dt) for the move cap");
+  assert.doesNotMatch(hero, /MOVE_SHARE/, "the old per-frame MOVE_SHARE cap is back");
+});
