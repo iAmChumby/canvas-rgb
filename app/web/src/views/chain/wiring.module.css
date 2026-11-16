@@ -130,14 +130,17 @@
 .partWho {
   display: flex;
   flex: 1 1 140px;
+  /* The LED count drops under the name when the name needs the room: a name is never cut short. */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
   min-width: 0;
 }
 
 .partName {
+  flex: none;
   min-width: 0;
-  max-width: 24ch;
+  max-width: min(100%, 40ch);
   justify-content: flex-start;
   text-align: left;
 }

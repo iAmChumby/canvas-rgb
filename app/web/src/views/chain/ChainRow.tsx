@@ -160,9 +160,10 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
 
 /**
  * One resizable ARGB header's row. The state words carry the meaning (never set up, empty, or its
- * devices); the dot agrees. The key is the only thing that opens a setup session.
+ * devices); the dot agrees. The key is the only thing that opens a setup session. `named` is false
+ * where the header's own strip sits right above the row and already carries its name.
  */
-export function ChainRow({ chain }: { chain: ChainView }) {
+export function ChainRow({ chain, named = true }: { chain: ChainView; named?: boolean }) {
   const [open, setOpen] = useState(false);
   /** One callback for the overlay's life: Escape's listener depends on it and must not re-subscribe. */
   const close = useCallback(() => setOpen(false), []);
@@ -192,7 +193,8 @@ export function ChainRow({ chain }: { chain: ChainView }) {
     >
       <div className={s.head}>
         <span className={s.kicker}>ARGB header</span>
-        <span className={s.zone}>{chain.zone_name}</span>
+        {/* Under a zone's own strip the name is already on the page: it is said once. */}
+        {named && <span className={s.zone}>{chain.zone_name}</span>}
         <StateDot tone={tone}>{words}</StateDot>
         <span className={s.key}>
           <Button
