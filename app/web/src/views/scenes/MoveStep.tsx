@@ -12,10 +12,11 @@
 // The rows are quiet flat keys, the key the scene bar uses: a face, a 1 px edge and a skirt.
 // The accent is for hover, focus and press. The LED lights on the row whose move is on its way.
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { ArrowRight, CopySimple } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { Chip } from "@/components/Chip";
+import { InlineSkeleton } from "@/components/Skeleton";
 import { moveOutcomeLine } from "@/views/scenes/groupEdit";
 import type { MoveCheck, UseScene } from "@/views/scenes/useScene";
 import type { GroupMoved } from "@/proto/GroupMoved";
@@ -36,8 +37,6 @@ export interface MoveStepProps {
   onClose: () => void;
 }
 
-/** What the row says while the daemon has not answered yet. */
-const PENDING_LINE = "Checking…";
 /** What the row says when the daemon could not be asked. */
 const FAILED_LINE = "Could not check this move.";
 
@@ -170,12 +169,14 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
           const refused = refusalOf(check);
           const answer = answerOf(check);
           const failed = state === "failed";
-          const line = refused
+          // While the daemon has not answered, the line is the loading kit's own placeholder in
+          // the same box (#258: a wait is never drawn as a sentence).
+          const line: ReactNode = refused
             ?? (answer
               ? moveOutcomeLine(answer, { away })
               : failed
                 ? FAILED_LINE
-                : PENDING_LINE);
+                : <InlineSkeleton width="26ch" />);
           return (
             <div className={s.row} key={target.id}>
               <Chip

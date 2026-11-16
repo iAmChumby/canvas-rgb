@@ -218,8 +218,11 @@ describe("the move step", () => {
     render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
     const row = await screen.findByTestId("move-to-evening");
     expect((row as HTMLButtonElement).disabled).toBe(true);
-    // The line is there, in the same box, and it says the check is on its way.
-    expect(document.getElementById("move-outcome-evening")?.textContent).toBe("Checking…");
+    // The line is there, in the same box, and it is marked as waiting: the loading kit draws
+    // the wait, so the line holds no sentence yet.
+    const waiting = document.getElementById("move-outcome-evening");
+    expect(waiting?.getAttribute("data-state")).toBe("pending");
+    expect(waiting?.textContent).not.toContain("Could not check");
     await act(async () => {
       releases["evening"]?.({ state: "answered", answer: dryAnswer("g-desk") });
     });
@@ -286,9 +289,11 @@ describe("the move step", () => {
     await waitFor(() => expect(screen.getByTestId("move-retry-evening")).toBeTruthy());
     expect(document.getElementById("move-outcome-evening")?.textContent).toBe("Could not check this move.");
     expect((screen.getByTestId("move-to-evening") as HTMLButtonElement).disabled).toBe(true);
-    // The retry asks the daemon again.
+    // The retry asks the daemon again, once, about that scene (the step had asked once for
+    // every scene it lists).
+    const asked = dryRunMove.mock.calls.length;
     fireEvent.click(screen.getByTestId("move-retry-evening"));
-    await waitFor(() => expect(dryRunMove).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(dryRunMove).toHaveBeenCalledTimes(asked + 1));
   });
 
   it("an answer that comes back after the step closed changes nothing", async () => {
