@@ -152,6 +152,9 @@ pub async fn put_stack(
     )?;
     // The scene must not start more HTML runtimes than a scene may: a save is refused only when
     // it puts a scene that plays this stack over the limit (crate::scenes::check_stack_html_limit).
+    // The scene lock is held from the check to the end of the save, as every scene write holds
+    // it, so a scene save cannot land between the two and leave a scene over the limit on file.
+    let _scene_lock = app.scene.lock().await;
     crate::scenes::check_stack_html_limit(&app, &stack)
         .await
         .map_err(ApiFailure::validation)?;

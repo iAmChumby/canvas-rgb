@@ -1740,7 +1740,8 @@ pub async fn check_takeover_html_limit(
 /// allowed: a stack no scene plays (its count is the same before and after), and a save that keeps
 /// or lowers the count (nothing got worse). The second is what lets the owner fix an over-limit
 /// scene by editing the stack, so a pair already over the limit on file is not locked. A save is
-/// refused when it raises a scene's count to more than [`SCENE_HTML_MAX`].
+/// refused when it raises a scene's count to more than [`SCENE_HTML_MAX`]. The refusal starts
+/// with the scene's name: the stack builder shows it, and there "this one" would name nothing.
 pub async fn check_stack_html_limit(
     app: &App,
     stack: &canvas_proto::stack::Stack,
@@ -1767,7 +1768,7 @@ pub async fn check_stack_html_limit(
             }
         });
         if new > old && new > SCENE_HTML_MAX {
-            return Err(html_limit_sentence(new));
+            return Err(format!("{}: {}", scene.name, html_limit_sentence(new)));
         }
     }
     Ok(())

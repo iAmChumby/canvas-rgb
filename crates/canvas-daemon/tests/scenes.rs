@@ -2651,7 +2651,9 @@ async fn a_stack_a_scene_over_the_limit_plays_saves_when_it_takes_html_away() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     // Four runtimes: the two-layer stack and the scene's two HTML groups.
     let four = canvas_daemon::scenes::html_limit_sentence(4);
-    assert_eq!(answer["message"].as_str(), Some(four.as_str()), "{answer}");
+    let message = answer["message"].as_str().unwrap_or_default();
+    // The refusal names the scene first: the stack builder shows it, away from any scene.
+    assert!(message.ends_with(four.as_str()) && message.len() > four.len() + 2, "{answer}");
     let kept = rig.app.stacks.get("stack:Html").expect("the stack is still there");
     assert_eq!(kept.layers.len(), 1, "refused: the saved stack is the one-lower one");
     assert_eq!(kept.layers[0].effect, "html:mine", "refused: nothing was written");

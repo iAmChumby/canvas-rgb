@@ -137,7 +137,8 @@ export function EffectsView() {
   const [loaded, setLoaded] = useState<{ id: string; detail: EffectDetail } | null>(null);
   const [values, setValues] = useState<Values>({});
   // A stack that holds an HTML layer or an HTML mask starts the scene's HTML runtime (the daemon
-  // counts a layer's effect and its mask): Play on then offers one group at a time.
+  // counts a layer's effect and its mask): Play on then offers one group at a time. A mask whose
+  // effect is gone is counted here and not by the daemon: the careful side, one group at a time.
   const [htmlStack, setHtmlStack] = useState<{ name: string; html: boolean } | null>(null);
   const stackName = selectedId?.startsWith("stack:") ? selectedId.slice("stack:".length) : null;
   const stackHtml = stackName !== null && htmlStack?.name === stackName ? htmlStack.html : false;
