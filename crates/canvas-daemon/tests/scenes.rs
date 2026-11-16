@@ -2924,7 +2924,7 @@ async fn start_up_applies_the_active_scene() {
 /// The two routes of #368 and #371, driven in-process on the fakes (no port 9430).
 mod scene_ops {
     use super::*;
-    use canvas_proto::api::{GroupMove, GroupMoved, SceneWrite, ScenesWrite};
+    use canvas_proto::api::{GroupMove, GroupMoved, NewGroup, SceneCreate, SceneDryRun, SceneWrite, ScenesWrite};
 
     /// `main` (active, rev 1): left = A red, right = B blue. `other` (rev 1): all = A and B green.
     /// `spare` (rev 1): no group at all.
@@ -3496,5 +3496,273 @@ mod scene_ops {
         assert_eq!(status, StatusCode::OK);
         let (status, _) = send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["other", "main", "spare"]), None))).await;
         assert_eq!(status, StatusCode::OK);
+    }
+
+    // ---- POST /api/v1/scenes with groups, and dry runs (#377)
+
+    fn new_group(name: &str, members: &[&str], effect: &str) -> NewGroup {
+        NewGroup {
+            name: name.into(),
+            members: members.iter().map(|m| m.to_string()).collect(),
+            plays: Plays::Effect { effect: effect.into(), props: Props::new() },
+            mode: GroupMode::FlowAcross,
+            brightness: 100,
+        }
+    }
+
+    /// A group that plays nothing: no effect has to exist for the group rules to be checked.
+    fn off_group(name: &str, members: &[&str]) -> NewGroup {
+        NewGroup { plays: Plays::Off, ..new_group(name, members, "solid") }
+    }
+
+    fn create_body(
+        name: &str,
+        groups: Option<Vec<NewGroup>>,
+        copy_of: Option<&str>,
+        dry_run: bool,
+    ) -> serde_json::Value {
+        serde_json::to_value(SceneCreate { name: name.into(), copy_of: copy_of.map(str::to_string), groups, dry_run })
+            .unwrap()
+    }
+
+    async fn create(rig: &Rig, body: serde_json::Value) -> (StatusCode, serde_json::Value) {
+        send(rig, "POST", routes::SCENES, Some(body)).await
+    }
+
+    /// The scene the route would save, from a dry run's answer.
+    fn dry_run_of(json: serde_json::Value) -> SceneDryRun {
+        serde_json::from_value(json).expect("a SceneDryRun")
+    }
+
+    /// The whole scenes file as the store holds it, so a test can compare it with the disk.
+    async fn stored_file(rig: &Rig) -> ScenesFile {
+        rig.app.store.read().await.scenes.clone()
+    }
+
+    #[tokio::test]
+    async fn create_with_groups_saves_one_scene() {
+        let rig = ops_rig().await;
+        let bytes = file_bytes(&rig);
+        let active = rig.app.store.read().await.scenes.active.clone();
+        let built = rig.app.scene.builds();
+        // `other` already holds `all` and `main` holds `left`: each id is minted against every
+        // group of every scene, as a copy's are.
+        let groups = vec![
+            new_group("All", &["fake:a#z0"], "solid"),
+            new_group("Left", &["fake:b#z0"], "solid"),
+        ];
+        let (status, answer) = create(&rig, create_body("Night", Some(groups), None, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let scene = scene_of(answer);
+        assert_eq!((scene.id.as_str(), scene.name.as_str(), scene.rev), ("night", "Night", 1));
+        assert_eq!(
+            scene.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["all-2", "left-2"],
+            "the ids are minted from the names, against every scene"
+        );
+        assert_eq!(scene.groups[0].members, ["fake:a#z0"]);
+        assert_eq!(scene.groups[1].members, ["fake:b#z0"]);
+        let now = all_scenes(&rig).await;
+        assert_eq!(now.last(), Some(&scene), "one scene, at the end, as the answer says");
+        let on_disk: ScenesFile = serde_json::from_slice(&file_bytes(&rig).unwrap()).unwrap();
+        assert_eq!(on_disk, stored_file(&rig).await, "ONE save wrote the whole file");
+        assert_ne!(file_bytes(&rig), bytes, "the one save changed the file");
+        assert_eq!(rig.app.store.read().await.scenes.active, active, "the new scene is not active");
+        assert_eq!(rig.app.scene.builds(), built, "the engine was not told");
+    }
+
+    #[tokio::test]
+    async fn create_with_groups_runs_the_scene_rules() {
+        let rig = ops_rig().await;
+        add_third_light(&rig).await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+
+        // The spine's rules, through the door a PUT goes through.
+        let twice = vec![
+            new_group("Fans", &["fake:a#z0"], "solid"),
+            new_group("Desk", &["fake:a#z0"], "solid"),
+        ];
+        let (status, answer) = create(&rig, create_body("Night", Some(twice), None, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "light fake:a#z0 is in more than one group");
+
+        let ghost = vec![off_group("Fans", &["fake:ghost#z0"])];
+        let (status, answer) = create(&rig, create_body("Night", Some(ghost), None, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "there is no light fake:ghost#z0");
+
+        // The HTML limit is the daemon's own (two runtimes), with its own sentence.
+        let count = canvas_proto::scene::SCENE_HTML_MAX + 1;
+        let lights = ["fake:a#z0", "fake:b#z0", "fake:c#z0"];
+        let html: Vec<NewGroup> = lights
+            .iter()
+            .enumerate()
+            .map(|(at, light)| new_group(&format!("H{}", at + 1), &[*light], &format!("html:{}", at + 1)))
+            .collect();
+        assert_eq!(html.len(), count);
+        let (status, answer) = create(&rig, create_body("Night", Some(html), None, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], canvas_daemon::scenes::html_limit_sentence(count), "the daemon's sentence");
+
+        // A name past the limit, for the scene and for a group.
+        let long = "x".repeat(canvas_proto::scene::SCENE_NAME_MAX + 1);
+        let (status, answer) = create(&rig, create_body(&long, Some(vec![off_group("Fans", &["fake:a#z0"])]), None, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(
+            answer["message"],
+            format!("a scene's name is at most {} characters", canvas_proto::scene::SCENE_NAME_MAX)
+        );
+        let long_group = "y".repeat(canvas_proto::scene::GROUP_NAME_MAX + 1);
+        let (status, answer) = create(&rig, create_body("Night", Some(vec![off_group(&long_group, &["fake:a#z0"])]), None, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        let message = answer["message"].as_str().unwrap_or_default();
+        assert!(message.contains("is too long"), "the spine's name sentence: {message}");
+
+        assert_eq!(all_scenes(&rig).await, before, "no refused create left a scene");
+        assert_eq!(file_bytes(&rig), bytes, "no refused create wrote the file");
+    }
+
+    #[tokio::test]
+    async fn create_dry_run_saves_nothing() {
+        let rig = ops_rig().await;
+        let bytes = file_bytes(&rig);
+        let before = all_scenes(&rig).await;
+        let groups = vec![
+            new_group("Fans", &["fake:a#z0"], "solid"),
+            new_group("Desk", &["fake:b#z0"], "solid"),
+        ];
+        let (status, answer) = create(&rig, create_body("Night", Some(groups.clone()), None, true)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let probe = dry_run_of(answer);
+        assert!(!probe.saved, "a dry run says it saved nothing");
+        assert_eq!((probe.scene.id.as_str(), probe.scene.rev), ("night", 1));
+        assert_eq!(
+            probe.scene.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["fans", "desk"],
+            "the answer carries the minted ids"
+        );
+        assert_eq!(all_scenes(&rig).await, before, "the store is the same, every rev included");
+        assert_eq!(file_bytes(&rig), bytes, "the file's bytes are the same");
+        // The real create answers that very scene.
+        let (status, answer) = create(&rig, create_body("Night", Some(groups), None, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert_eq!(scene_of(answer), probe.scene, "the dry run carried what would be saved");
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_leaves_no_scene() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        // The scenes file refuses a write: the pushed scene must come back out.
+        rig.app.store.write().await.scenes_blocked = true;
+        let groups = vec![new_group("Fans", &["fake:a#z0"], "solid")];
+        let (status, answer) = create(&rig, create_body("Night", Some(groups), None, false)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert_eq!(all_scenes(&rig).await, before, "no scene was left in the store");
+        assert_eq!(file_bytes(&rig), bytes, "the file on disk is the old file");
+    }
+
+    #[tokio::test]
+    async fn put_dry_run_saves_nothing() {
+        let rig = ops_rig().await;
+        let bytes = file_bytes(&rig);
+        let before = all_scenes(&rig).await;
+        let built = rig.app.scene.builds();
+        let mut scene = stored(&rig, "main").await;
+        scene.groups[1].brightness = 40;
+        let path = route(routes::SCENE, &[("id", "main")]);
+        let body = serde_json::to_value(ScenePut { scene: scene.clone(), expected_rev: 1, dry_run: true }).unwrap();
+        let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let probe = dry_run_of(answer);
+        assert!(!probe.saved);
+        assert_eq!(probe.scene.rev, 2, "the rev it would be saved at");
+        assert_eq!(probe.scene.groups[1].brightness, 40, "the answer carries the change");
+        assert_eq!(stored(&rig, "main").await.rev, 1, "the rev was not bumped");
+        assert_eq!(all_scenes(&rig).await, before, "the store is as it was");
+        assert_eq!(file_bytes(&rig), bytes, "the file's bytes are the same");
+        assert_eq!(rig.app.scene.builds(), built, "the engine was not told, though the scene plays");
+
+        // A stale expected_rev is still a 409 in a dry run, and writes nothing.
+        let stale = serde_json::to_value(ScenePut { scene, expected_rev: 99, dry_run: true }).unwrap();
+        let (status, answer) = send(&rig, "PUT", &path, Some(stale)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["error"], "conflict");
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    #[tokio::test]
+    async fn create_without_groups_is_unchanged() {
+        let rig = ops_rig().await;
+        // One group of every light, Off, as the route always made it.
+        let (status, answer) = create(&rig, create_body("Night", None, None, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let scene = scene_of(answer.clone());
+        assert_eq!((scene.id.as_str(), scene.rev), ("night", 1));
+        assert_eq!(scene.groups.len(), 1);
+        assert_eq!(scene.groups[0].members, ["fake:a#z0", "fake:b#z0"]);
+        assert_eq!(scene.groups[0].plays, Plays::Off);
+        assert!(answer.get("saved").is_none(), "a real create answers a Scene, as it always did");
+        // A copy still copies under fresh ids.
+        let (status, answer) = create(&rig, create_body("Copy", None, Some("other"), false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let copied = scene_of(answer);
+        assert_eq!(
+            copied.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+            ["all-2"],
+            "a copy mints its ids as it did"
+        );
+        assert_eq!(copied.groups[0].members, ["fake:a#z0", "fake:b#z0"]);
+    }
+
+    #[tokio::test]
+    async fn groups_and_copy_of_together_is_refused() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let body = create_body("Night", Some(vec![off_group("Fans", &["fake:a#z0"])]), Some("other"), false);
+        let (status, answer) = create(&rig, body).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["error"], "validation");
+        assert_eq!(
+            answer["message"],
+            "A scene takes either a copy of another scene or its own groups, not both."
+        );
+        assert_eq!(all_scenes(&rig).await, before);
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    /// A create with groups refuses a request without the token, with the wrong token, from a
+    /// browser origin and from a foreign host exactly as `PUT /api/v1/scenes/{id}` does.
+    #[tokio::test]
+    async fn create_with_groups_refuses_what_put_scene_refuses() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bearer = format!("Bearer {TOKEN}");
+        let cases: [(&str, Vec<(&str, &str)>); 4] = [
+            ("no token", vec![("host", "127.0.0.1:9430")]),
+            ("wrong token", vec![("host", "127.0.0.1:9430"), ("authorization", "Bearer not-the-token")]),
+            ("browser origin", vec![("host", "127.0.0.1:9430"), ("origin", "https://evil.example"), ("authorization", &bearer)]),
+            ("foreign host", vec![("host", "evil.example"), ("authorization", &bearer)]),
+        ];
+        let scene_path = route(routes::SCENE, &[("id", "main")]);
+        let put_body = serde_json::to_value(ScenePut { scene: before[0].clone(), expected_rev: 1, dry_run: false }).unwrap();
+        let body = create_body("Night", Some(vec![off_group("Fans", &["fake:a#z0"])]), None, false);
+        for (what, headers) in &cases {
+            let reference = raw(&rig, "PUT", &scene_path, headers, put_body.clone()).await;
+            assert!(
+                reference.0 == StatusCode::UNAUTHORIZED || reference.0 == StatusCode::FORBIDDEN,
+                "{what}: the reference route refuses ({reference:?})"
+            );
+            let made = raw(&rig, "POST", routes::SCENES, headers, body.clone()).await;
+            assert_eq!(made, reference, "{what}: the create with groups answers as PUT /scenes/{{id}} does");
+        }
+        assert_eq!(all_scenes(&rig).await, before, "a refused request changed nothing");
+        // The control: with the token the create answers, so the refusals above are the guard's
+        // and not a missing route's.
+        let (status, answer) = create(&rig, body).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
     }
 }
