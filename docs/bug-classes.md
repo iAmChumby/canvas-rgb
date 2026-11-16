@@ -1007,10 +1007,16 @@ whose meaning is how high it reaches).
   mid-height.
 - [#400](https://github.com/iAmChumby/canvas-rgb/issues/400): that cell read Fire and Audio
   Spectrum dark on a strip, because their picture sits at the bottom of the canvas.
+- [#407](https://github.com/iAmChumby/canvas-rgb/issues/407): a stack answered the cell for
+  every one of its layers, so Fire or Audio Spectrum inside a stack still read dark on a strip.
 - **Class fix:** done (#400). The effect says how a strip reads it (`StripRead` in
   `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names every built-in
   with its read (`crates/canvas-effects/src/lib.rs`,
   `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
   decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
-  on a strip to a measured level. Open: a stack answers the cell, so Fire inside a stack still
-  reads dark on a strip.
+  on a strip to a measured level. A stack that wraps effects answers the column when any of its
+  layers answers it (`crates/canvas-daemon/src/stack.rs`, `StackEffect::strip_read`), and its
+  area mask is built for the column as well, so a layer kept to a device or a zone is painted
+  over the strip LEDs' whole columns and not cut to the cell at mid-height. Tests in
+  `crates/canvas-daemon/tests/stacks.rs` hold a stack's Fire and Audio Spectrum on a strip to a
+  measured level.

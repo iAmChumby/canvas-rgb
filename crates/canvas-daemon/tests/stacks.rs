@@ -19,7 +19,7 @@ use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind}
 use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props, PropertySchema};
 use canvas_proto::stack::{BlendMode, LayerArea, LayerMask, MaskSource, Stack, StackLayer, STACKS_FILE};
-use canvas_proto::traits::{Canvas, Effect, Inputs};
+use canvas_proto::traits::{Canvas, Effect, Inputs, StripRead};
 use common::{FakeAdapter, FakeEngine};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -4949,4 +4949,223 @@ async fn a_joining_page_keeps_the_draft_out_of_the_sweepers_hands() {
     gated.release("html:Other");
     let answer = answered("the joined build did not finish", rebuild).await;
     assert_eq!(json(answer).await["applied"], true);
+}
+
+// ================================================================ #407: a stack reads the strip
+
+/// A leaf builder that hands every layer a real built-in effect, by id.
+///
+/// The stack compositor is what #407 is about, so the layers here are the real effects: Fire
+/// and Audio Spectrum answer the column, Rain answers the cell.
+fn real_leaves() -> LeafBuilder {
+    Arc::new(|id: &str| match id {
+        "fire" => Ok(Box::new(canvas_effects::fire::Fire::with_seed(372)) as Box<dyn Effect>),
+        "rain" => Ok(Box::new(canvas_effects::rain::Rain::with_seed(372)) as Box<dyn Effect>),
+        "audio_spectrum" => Ok(Box::new(canvas_effects::audio_spectrum::AudioSpectrum::new())
+            as Box<dyn Effect>),
+        other => Err(format!("no effect with the id {other}")),
+    })
+}
+
+/// The colours every LED shows on a painted group canvas, with the read the group answers
+/// (#407).
+///
+/// This is the engine's own rule (`canvas-core`'s scene engine): a strip LED reads its whole
+/// column when the group's effect asks for it, and its cell at mid-height otherwise.
+fn strip_colours(
+    devices: &[DeviceInfo],
+    canvas: &Canvas,
+    read: StripRead,
+) -> Vec<canvas_proto::Rgb8> {
+    let (_lights, plan) = stack::zone_group(devices);
+    let scale = canvas_core::SCENE_RENDER_SCALE;
+    let mut out = Vec::new();
+    for samples in &plan.lights {
+        let scaled: Vec<canvas_core::geometry::LedSample> = samples
+            .leds
+            .iter()
+            .map(|sample| canvas_core::geometry::LedSample {
+                center_x: sample.center_x * scale,
+                center_y: sample.center_y * scale,
+                bounds: sample.bounds.map(|v| v * scale),
+                sampled: sample.sampled,
+            })
+            .collect();
+        let mut colours = Vec::new();
+        if read == StripRead::Column {
+            canvas_core::sampling::sample_led_columns(
+                &canvas.pixels,
+                canvas.width,
+                canvas.height,
+                &scaled,
+                &mut colours,
+            );
+        } else {
+            canvas_core::sampling::sample_leds(
+                &canvas.pixels,
+                canvas.width,
+                canvas.height,
+                &scaled,
+                canvas_core::SCENE_SAMPLING,
+                &mut colours,
+            );
+        }
+        out.extend(colours);
+    }
+    out
+}
+
+/// The level a strip shows: the mean of every LED's colour, 0..255.
+fn strip_level(devices: &[DeviceInfo], canvas: &Canvas, read: StripRead) -> f64 {
+    let colours = strip_colours(devices, canvas, read);
+    if colours.is_empty() {
+        return 0.0;
+    }
+    let sum: f64 = colours
+        .iter()
+        .map(|c| (f64::from(c.r) + f64::from(c.g) + f64::from(c.b)) / 3.0)
+        .sum();
+    sum / colours.len() as f64
+}
+
+/// The brightest LED the strip shows: the mean of its colour, 0..255.
+fn strip_peak(devices: &[DeviceInfo], canvas: &Canvas, read: StripRead) -> f64 {
+    strip_colours(devices, canvas, read)
+        .iter()
+        .map(|c| (f64::from(c.r) + f64::from(c.g) + f64::from(c.b)) / 3.0)
+        .fold(0.0, f64::max)
+}
+
+/// The group's canvas, at the size the engine renders a group in.
+fn group_canvas() -> Canvas {
+    Canvas::with_scale(canvas_core::SCENE_RENDER_SCALE)
+}
+
+/// The props of the layer `l1`: a fire at full intensity, so the flame is bright. It still
+/// cools inside the bottom half of the canvas, so the cell at mid-height reads the cold gap
+/// above it and the column reads the flame.
+fn fire_props() -> Props {
+    let mut props = Props::new();
+    props.insert("l1.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    props
+}
+
+/// #407: a stack whose layer is Fire answers the column, and the strip reads the flame
+/// instead of the cold gap above it.
+#[test]
+fn a_stack_whose_layer_is_fire_reads_a_lit_strip() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let stack = stack("stack:Fire", vec![layer("l1", "fire")]);
+    let mut effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas_for(&devices));
+    effect.init(&fire_props());
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let read = effect.strip_read();
+    let cell = strip_level(&devices, &canvas, StripRead::Cell);
+    let column = strip_level(&devices, &canvas, StripRead::Column);
+    let cell_peak = strip_peak(&devices, &canvas, StripRead::Cell);
+    let column_peak = strip_peak(&devices, &canvas, StripRead::Column);
+    println!(
+        "#407 the fire stack answers {read:?}: the cell shows {cell:.1} (peak {cell_peak:.1}), \
+         the column {column:.1} (peak {column_peak:.1})"
+    );
+    assert_eq!(read, StripRead::Column, "a stack with a Fire layer answers the column");
+    assert!(column_peak > 15.0, "the column shows the flame: peak {column_peak:.1}");
+    assert!(
+        cell_peak < column_peak / 4.0,
+        "the cell at mid-height shows the cold gap above the flame: {cell_peak:.1} against {column_peak:.1}"
+    );
+}
+
+/// #407: the same for Audio Spectrum, with a fake spectrum: the bars reach a quarter of the
+/// canvas, so the cell at mid-height is above them and reads black.
+#[test]
+fn a_stack_whose_layer_is_audio_spectrum_reads_a_lit_strip() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let stack = stack("stack:Audio", vec![layer("l1", "audio_spectrum")]);
+    let mut effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas_for(&devices));
+    effect.init(&Props::new());
+    let mut canvas = group_canvas();
+    let spectrum = Arc::new(canvas_proto::traits::AudioSpectrum {
+        centers_hz: (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect(),
+        magnitudes: vec![0.25; 32],
+    });
+    let inputs = Inputs { time: 0.0, screen: None, audio: Some(spectrum) };
+    for _ in 0..30 {
+        effect.update(1.0 / 30.0, &mut canvas, &inputs);
+    }
+    let read = effect.strip_read();
+    let cell = strip_level(&devices, &canvas, StripRead::Cell);
+    let column = strip_level(&devices, &canvas, StripRead::Column);
+    let cell_peak = strip_peak(&devices, &canvas, StripRead::Cell);
+    let column_peak = strip_peak(&devices, &canvas, StripRead::Column);
+    println!(
+        "#407 the audio stack answers {read:?}: the cell shows {cell:.1} (peak {cell_peak:.1}), \
+         the column {column:.1} (peak {column_peak:.1})"
+    );
+    assert_eq!(read, StripRead::Column, "a stack with an Audio Spectrum layer answers the column");
+    assert!(column_peak > 15.0, "the column shows the bars: peak {column_peak:.1}");
+    assert!(
+        cell_peak < column_peak / 4.0,
+        "the cell at mid-height is above the bars: {cell_peak:.1} against {column_peak:.1}"
+    );
+}
+
+/// #407: a layer kept to a zone is masked to that zone, and the mask is built for the column,
+/// so the strip reads the flame and not only the cell at mid-height.
+#[test]
+fn a_stack_whose_fire_layer_is_kept_to_a_zone_reads_a_lit_strip() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let stack = stack(
+        "stack:Fire",
+        vec![with_area(
+            layer("l1", "fire"),
+            LayerArea::Zone { device: DeviceId("d".into()), zone: 0 },
+        )],
+    );
+    let mut effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas_for(&devices));
+    effect.init(&fire_props());
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let read = effect.strip_read();
+    let cell = strip_level(&devices, &canvas, StripRead::Cell);
+    let column = strip_level(&devices, &canvas, StripRead::Column);
+    let cell_peak = strip_peak(&devices, &canvas, StripRead::Cell);
+    let column_peak = strip_peak(&devices, &canvas, StripRead::Column);
+    println!(
+        "#407 the masked fire stack answers {read:?}: the cell shows {cell:.1} (peak {cell_peak:.1}), \
+         the column {column:.1} (peak {column_peak:.1})"
+    );
+    assert_eq!(read, StripRead::Column, "a stack with a Fire layer answers the column");
+    assert!(
+        column_peak > 15.0,
+        "the column shows the flame through the zone's mask: peak {column_peak:.1}"
+    );
+    assert!(
+        cell_peak < column_peak / 4.0,
+        "the cell at mid-height shows the cold gap above the flame: {cell_peak:.1} against {column_peak:.1}"
+    );
+}
+
+/// #407: the ruling — a stack answers the column when any of its layers answers it.
+#[test]
+fn a_stack_of_rain_over_fire_answers_the_column() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    // Bottom first: the Fire at the bottom, the Rain over it.
+    let stack = stack("stack:Two", vec![layer("l1", "fire"), layer("l2", "rain")]);
+    let effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas_for(&devices));
+    assert_eq!(effect.strip_read(), StripRead::Column);
+}
+
+/// #407: a stack of cell layers keeps the cell, so a thin moving line is still seen.
+#[test]
+fn a_stack_of_cell_layers_answers_the_cell() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let stack = stack("stack:Two", vec![layer("l1", "rain"), layer("l2", "rain")]);
+    let effect = stack_effect!(&stack, real_leaves(), live_for(&stack), areas_for(&devices));
+    assert_eq!(effect.strip_read(), StripRead::Cell);
 }
