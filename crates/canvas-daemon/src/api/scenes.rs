@@ -89,14 +89,19 @@ fn save_failure(store: &crate::storage::Store, error: std::io::Error) -> ApiFail
 
 /// The whole answer of the list, the set and the delete routes.
 async fn response(app: &App) -> ScenesResponse {
-    let store = app.store.read().await;
-    let active = scenes::active_scene(&store.scenes);
-    let lights = store.lights.lights.clone();
-    ScenesResponse {
-        active: active.id.clone(),
-        scenes: store.scenes.scenes.clone(),
-        group_states: scenes::group_states(app, active, &lights).await,
-    }
+    let (active, scenes, lights) = {
+        let store = app.store.read().await;
+        (
+            scenes::active_scene(&store.scenes).clone(),
+            store.scenes.scenes.clone(),
+            store.lights.lights.clone(),
+        )
+    };
+    // The store's lock is given back before the groups are asked for: a reader that
+    // holds it across that wait blocks every writer, and through them every other
+    // reader (#241).
+    let group_states = scenes::group_states(app, &active, &lights).await;
+    ScenesResponse { active: active.id.clone(), scenes, group_states }
 }
 
 /// Replaces the scene with `new`'s id and saves. On a failed save the old scene is back and the

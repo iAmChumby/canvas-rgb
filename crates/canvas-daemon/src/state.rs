@@ -9,7 +9,7 @@ use canvas_adapters::resume::ResumeBehavior;
 use canvas_proto::api::{LinkState, Status};
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::fans::FansStatus;
-use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, PreviewSink};
+use canvas_proto::traits::{DeviceAdapter, Engine, FrameSink, GroupState, PreviewSink, RenderStats};
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
@@ -98,6 +98,100 @@ impl GroupPreviewSlot {
 /// (issue #225). A healthy service answers in milliseconds; past this the route answers 503.
 pub const FANS_LOCK_PIPE_LIMIT: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// How long a route waits for the render engine before it answers without it (#241).
+///
+/// The engine's handle is a `std::sync::Mutex` the render thread takes as well, so a
+/// route that asks the engine on a runtime worker waits for the render thread there.
+/// The daemon's runtime has **two** workers (`crates/canvas-daemon/src/main.rs`), so two
+/// such waits take the whole API down while the port keeps listening: the editor says
+/// "the daemon did not answer" and the capture's poll of `/api/v1/settings` times out.
+pub const ENGINE_CALL_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// Asks the render engine something without holding a runtime worker while it waits.
+///
+/// The call runs on the blocking pool and is bounded by [`ENGINE_CALL_LIMIT`]. `None`
+/// when the engine did not answer in time: the caller answers with what it already
+/// knew, and the API keeps serving (#241).
+pub async fn engine_call<T, F>(engine: Arc<dyn Engine>, call: F) -> Option<T>
+where
+    T: Send + 'static,
+    F: FnOnce(&dyn Engine) -> T + Send + 'static,
+{
+    match tokio::time::timeout(
+        ENGINE_CALL_LIMIT,
+        tokio::task::spawn_blocking(move || call(engine.as_ref())),
+    )
+    .await
+    {
+        Ok(Ok(value)) => Some(value),
+        // The call panicked, or the engine did not answer in time.
+        Ok(Err(_)) | Err(_) => None,
+    }
+}
+
+/// A value the daemon keeps from the render engine, and whether it has asked for it.
+#[derive(Debug, Clone, Default)]
+struct Cached<T> {
+    /// Whether the daemon has asked the engine at all. Once it has, a route never asks
+    /// again: the render thread may never hand the lock over, and every ask would cost
+    /// a thread of the blocking pool.
+    asked: bool,
+    /// The last value the engine gave.
+    value: T,
+}
+
+/// Keeps the engine's numbers fresh, so a route never waits for the render thread.
+///
+/// One thread per value asks the engine once a second and keeps the last answer. The
+/// engine's lock is the render thread's: a route that asked for the numbers on a
+/// runtime worker would wait for the render thread there, and the daemon's runtime has
+/// two workers (#241). The watchers are ordinary OS threads, not tasks on the blocking
+/// pool, so a render thread that never hands the lock over costs one thread and not one
+/// per request.
+pub fn watch_engine(app: Arc<App>) {
+    let for_stats = Arc::clone(&app);
+    std::thread::Builder::new()
+        .name("canvas-rgb-engine-stats".into())
+        .spawn(move || {
+            loop {
+                if for_stats.shutting_down.load(Ordering::SeqCst) != 0 {
+                    return;
+                }
+                // The flag goes up before the ask: a render thread that never hands the
+                // lock over must not make every route ask for itself.
+                for_stats.engine_stats.lock().unwrap_or_else(|e| e.into_inner()).asked = true;
+                let stats = for_stats.engine.stats();
+                let mut cache = for_stats.engine_stats.lock().unwrap_or_else(|e| e.into_inner());
+                cache.value = stats;
+                drop(cache);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .ok();
+    let for_groups = Arc::clone(&app);
+    std::thread::Builder::new()
+        .name("canvas-rgb-engine-groups".into())
+        .spawn(move || {
+            loop {
+                if for_groups.shutting_down.load(Ordering::SeqCst) != 0 {
+                    return;
+                }
+                for_groups
+                    .engine_groups
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .asked = true;
+                let groups = for_groups.engine.group_states();
+                let mut cache =
+                    for_groups.engine_groups.lock().unwrap_or_else(|e| e.into_inner());
+                cache.value = groups;
+                drop(cache);
+                std::thread::sleep(std::time::Duration::from_secs(1));
+            }
+        })
+        .ok();
+}
+
 /// The state every handler sees.
 pub struct App {
     /// The on-disk state. Written rarely (a settings change) and read often.
@@ -107,6 +201,11 @@ pub struct App {
     pub store: tokio::sync::RwLock<Store>,
     /// The render engine handle.
     pub engine: Arc<dyn Engine>,
+    /// The engine's last numbers, kept by [`watch_engine`] so a route never waits for the
+    /// render thread (#241).
+    engine_stats: Mutex<Cached<RenderStats>>,
+    /// The engine's last group states, kept the same way (#241).
+    engine_groups: Mutex<Cached<Vec<GroupState>>>,
     /// The OpenRGB adapter. Behind an async mutex: the SDK client is not `Sync` on its
     /// own, and the API handlers await it.
     pub adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
@@ -322,6 +421,8 @@ impl App {
             rescan_requests,
             rescan_inbox: Mutex::new(Some(rescan_inbox)),
             rescan_budget: crate::openrgb_supervisor::RESCAN_BUDGET,
+            engine_stats: Mutex::new(Cached::default()),
+            engine_groups: Mutex::new(Cached::default()),
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::with_home(Vec::new(), home.clone()),
             home,
@@ -462,9 +563,54 @@ impl App {
         self.devices.read().await.len() as u32
     }
 
+    /// The engine's numbers, without waiting for the render thread.
+    ///
+    /// The numbers come from the daemon's watcher thread ([`watch_engine`]), which asks the
+    /// engine once a second. A route asks the engine itself only when the watcher has not
+    /// answered yet, and that ask is bounded: the engine's lock is the render thread's,
+    /// and the daemon's runtime has two workers (#241).
+    pub async fn engine_stats(&self) -> RenderStats {
+        {
+            let cache = self.engine_stats.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.asked {
+                return cache.value.clone();
+            }
+        }
+        match engine_call(Arc::clone(&self.engine), |engine| engine.stats()).await {
+            Some(stats) => {
+                let mut cache = self.engine_stats.lock().unwrap_or_else(|e| e.into_inner());
+                cache.asked = true;
+                cache.value = stats.clone();
+                stats
+            }
+            // The engine did not answer in time: the route answers with the numbers it
+            // has, and the API keeps serving.
+            None => RenderStats::default(),
+        }
+    }
+
+    /// The engine's group states, kept the same way ([`App::engine_stats`]).
+    pub async fn engine_group_states(&self) -> Vec<GroupState> {
+        {
+            let cache = self.engine_groups.lock().unwrap_or_else(|e| e.into_inner());
+            if cache.asked {
+                return cache.value.clone();
+            }
+        }
+        match engine_call(Arc::clone(&self.engine), |engine| engine.group_states()).await {
+            Some(groups) => {
+                let mut cache = self.engine_groups.lock().unwrap_or_else(|e| e.into_inner());
+                cache.asked = true;
+                cache.value = groups.clone();
+                groups
+            }
+            None => Vec::new(),
+        }
+    }
+
     /// The status snapshot the API and the CLI read.
     pub async fn status(&self) -> Status {
-        let stats = self.engine.stats();
+        let stats = self.engine_stats().await;
         let store = self.store.read().await;
         let power = store.config.settings.power;
         let brightness = store.config.settings.brightness;

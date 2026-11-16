@@ -1753,7 +1753,9 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
 /// `lights` and the devices as they are now: nothing is cached, so a resize shows at the next read.
 pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> Vec<GroupState> {
     let built = app.scene.failures();
-    let running = app.engine.group_states();
+    // The engine's own states come from the daemon's watcher thread, so this never waits
+    // for the render thread while the caller holds the store's lock (#241).
+    let running = app.engine_group_states().await;
     let devices = app.devices.read().await.clone();
     scene
         .groups
