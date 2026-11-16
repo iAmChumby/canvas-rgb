@@ -948,9 +948,42 @@ function freshGroupId(base: string, taken: string[]): string {
 }
 
 /**
+ * How many groups of one scene may play an HTML effect (`SCENE_HTML_MAX` in
+ * `crates/canvas-proto/src/scene.rs`).
+ */
+const SCENE_HTML_MAX = 2;
+/** The id prefix of an HTML effect (`HTML_EFFECT_PREFIX` in the spine). */
+const HTML_EFFECT_PREFIX = "html:";
+
+/**
+ * How many groups of a scene play an HTML effect, counting a stack with an HTML layer or mask as
+ * one (`html_group_count` in `crates/canvas-daemon/src/scenes.rs`).
+ */
+function htmlGroupCount(s: DemoState, scene: Scene): number {
+  return scene.groups.filter((g) => {
+    if (g.plays.type !== "effect") return false;
+    const id = g.plays.effect;
+    if (id.startsWith(HTML_EFFECT_PREFIX)) return true;
+    const stack = s.stacks[id];
+    if (!stack) return false;
+    return stack.layers.some(
+      (layer) =>
+        layer.effect.startsWith(HTML_EFFECT_PREFIX) ||
+        (layer.mask?.effect ?? "").startsWith(HTML_EFFECT_PREFIX),
+    );
+  }).length;
+}
+
+/** The daemon's own sentence when a scene would run too many HTML effects. */
+function htmlLimitSentence(count: number): string {
+  return `at most ${SCENE_HTML_MAX} groups of a scene may play an HTML effect (a stack with an HTML layer counts); ${count} do`;
+}
+
+/**
  * The daemon's move route in the demo (#368): the same rules and the same answer. The group's
  * lights are taken out of the target's other groups, a group left with no light goes, the group
- * lands at the end of the target, and a copy always gets a fresh id.
+ * lands at the end of the target, and a copy always gets a fresh id. A dry run answers the same
+ * way and saves nothing.
  */
 function moveGroupRoute(s: DemoState, fromId: string, groupId: string, body: GroupMove): GroupMoved {
   const from = sceneOrNotFound(s, fromId);
@@ -1003,6 +1036,15 @@ function moveGroupRoute(s: DemoState, fromId: string, groupId: string, body: Gro
     taken,
     emptied,
   };
+  // Every scene that would be written passes the daemon's own checks before anything is
+  // written, a dry run included: the HTML limit is the daemon's check, and its sentence is what
+  // the page shows on the row it refuses.
+  if (!body.copy) {
+    const count = htmlGroupCount(s, fromAfter);
+    if (count > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(count));
+  }
+  const toCount = htmlGroupCount(s, toAfter);
+  if (toCount > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(toCount));
   if (body.dry_run) return answer;
   // The write: both scenes land, as the daemon's one save does.
   s.scenes[s.scenes.indexOf(from)] = fromAfter;
