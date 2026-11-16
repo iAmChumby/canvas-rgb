@@ -24,8 +24,8 @@ this file says `canvas-rgb`.
 3. **A new scene is saved and NOT playing.** Never run `canvas-rgb scenes set` and never run
    `canvas-rgb effects activate`, unless the person asks you to in this conversation. Their lights
    stay on the scene they had.
-4. **A scene runs two HTML effects at a time.** The daemon says so in its own sentence (see
-   step 6). Do not count HTML effects yourself and do not copy the number from this file: the
+4. **A scene runs a limited number of HTML effects at a time.** The daemon says so in its own
+   sentence (see step 6). Do not count HTML effects yourself and do not copy the number from this file: the
    daemon's sentence holds the current limit.
 5. **A delete touches only what the run made.** Every `delete` carries `--run`. The command line
    refuses anything the run did not make, and a scene that is playing.
@@ -91,9 +91,13 @@ these into presets": ask nothing.
   ```
   canvas-rgb diag dump-frames --effect <id> --prop speed=7 --frames 30 --out frames-dir
   ```
-  The frames are raw bytes (`.rgb`), not pictures. Read them and compute the check in step 7,
-  row 2. `dump-frames` knows the built-in effect ids only (`crates/canvas-effects/src/lib.rs:82`)
-  and draws `screen_ambience` and `audio_spectrum` with default inputs, so call those UNKNOWN.
+  `dump-frames` writes one file per frame into the `--out` folder: `frame_00000.rgb`,
+  `frame_00001.rgb` and so on. Each file is raw bytes, not a picture: the pixels in row order,
+  three bytes each (red, green, blue), so a frame is `width * height * 3` bytes. The defaults
+  are 320 by 200 (`--width` and `--height` change them). Read the frames and compute the check
+  in step 7, row 2 (`checks.md` says how). `dump-frames` knows the built-in effect ids only
+  (`crates/canvas-effects/src/lib.rs:77-85`; an `html:` id is refused) and draws
+  `screen_ambience` and `audio_spectrum` with default inputs, so call those UNKNOWN.
 - Save a winning look as a preset with a NEW name each time (at most 40 characters). Props are
   `--prop key=value`, once per key.
   ```
@@ -128,9 +132,12 @@ canvas-rgb scenes create "Harbour" --from groups.json --run <run> --dry-run --js
 canvas-rgb scenes create "Harbour" --from groups.json --run <run> --json
 ```
 
-The dry run prints `would create {id}: {n} groups (nothing saved)`. Fix what the daemon refuses
-(step 6) and dry-run again. Only then run the second command, which prints
-`created {id}: {n} groups`. The scene has `rev` 1 and is not playing.
+With `--json` the dry run prints one document: `{"saved": false, "run": "<run>", "scene": {...}}`.
+Read `scene.groups` for the count and fix what the daemon refuses (step 6), then dry-run again.
+Only then run the second command, which prints `{"saved": true, ...}`. The scene has `rev` 1 and
+is not playing. Without `--json` the same two commands print
+`would create {id}: {n} group (nothing saved)` and `created {id}: {n} group`; the word is `group`
+for one group and `groups` otherwise.
 
 ## 6. When a command is refused
 
@@ -151,25 +158,28 @@ Run the checks that need no live lights. Each result is TRUE, FALSE or UNKNOWN.
 
 | # | Check | Command | Bar |
 |---|---|---|---|
-| 1 | each new HTML effect passes | `canvas-rgb effects check <file> --preview <dir>` | exit 0; open the sheet PNG |
-| 2 | a built-in effect with these props draws | `canvas-rgb diag dump-frames` (step 3) | not all black, not one colour, changes across 30 frames |
+| 1 | each new HTML effect passes | `canvas-rgb effects check <file> --preview <dir>` | exit 0; open `<dir>/<stem>-sheet.png` |
+| 2 | a built-in effect with these props draws | `canvas-rgb diag dump-frames` (step 3) | not black, not one colour, changes between frame 0 and frame 29 |
 | 3 | the scene is valid and under the HTML limit | the dry run, then the create | exit 0 |
 | 4 | the scene holds the plan | `canvas-rgb scenes list --json` | group count and each group's members equal the plan |
 | 5 | light coverage | `canvas-rgb lights list --json` against the scene | print both counts ("14 of 14 lights"); a percentage never stands alone |
 | 6 | each member's device is connected | `lights list --json`, `connected` | true; FALSE names the device |
 | 7 | every group built (scene playing only) | `scenes list --json`, `group_states[].failed` | all null; UNKNOWN when the scene is not playing |
-| 8 | each group lit and moving (scene playing only) | `canvas-rgb diag readback --json` three times, one second apart | not black, at least two colours, a change across samples; a device the readback skips is UNKNOWN and named |
+| 8 | each group lit and moving (scene playing only) | `canvas-rgb diag readback --json` three times, one second apart | not black, two or more colours, a change across samples (`checks.md`); a device the readback skips is UNKNOWN and named |
 | 9 | frame time (scene playing only) | `canvas-rgb status --json`, `frame_time_ms`, ten seconds | at most 16.6 ms |
 | 10 | taste | none | the person, on their lights |
 
 Rows 7 to 9 are UNKNOWN unless the person said yes to the live measurement below. Rows 2, 4, 5 and
-8 need arithmetic that you do yourself on the output; say what you computed.
+8 need arithmetic that you do yourself on the output; `checks.md` defines each term, and you
+write the numbers you computed in the report.
 
 ## 8. Live measurement (optional, default no)
 
 Ask once: "Try it on your lights for about 15 seconds so I can measure the colours? I will switch
 back to "{prior}" afterwards." Only on a yes: `canvas-rgb scenes set "{new}"`, run rows 7 to 9,
-then `canvas-rgb scenes set "{prior}"`. The wording "switch to it" or "turn it on" is a yes.
+then `canvas-rgb scenes set "{prior}"`. The wording "switch to it" or "turn it on" is a yes. If
+the switch back fails, stop, say so in the report, and quote the sentence. The lights stay on
+"{new}" until the person switches.
 
 ## 9. Report
 
@@ -193,7 +203,8 @@ changed elsewhere meanwhile is refused (`refusals.md`).
 
 When the person says undo, undo in reverse creation order. If the new scene is playing, the
 person asking for undo is the request to switch back: run `canvas-rgb scenes set "{prior}"` first.
-Then:
+Then use the names and ids the run made, from the run record `agent-runs/<run>.json` (below).
+Run only the lines for what the run made; the examples are a shape, not a list.
 
 ```
 canvas-rgb scenes delete "Harbour" --run <run> --dry-run
