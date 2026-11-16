@@ -113,12 +113,16 @@ impl Default for Inner {
 ///
 /// Dropping it ends the request and restarts the setup's idle clock, which covers every early
 /// return between the request's checks and its answer.
-pub struct SetupService<'a> {
-    gate: &'a IdentifyGate,
+///
+/// The guard owns the gate instead of borrowing it: a step that runs on a task of its own (#457)
+/// holds the guard there, and the client that asked for the step may be gone long before the
+/// step ends. A borrowed guard could not move into that task.
+pub struct SetupService {
+    gate: Arc<IdentifyGate>,
     session: String,
 }
 
-impl Drop for SetupService<'_> {
+impl Drop for SetupService {
     fn drop(&mut self) {
         self.gate.end_request(&self.session, Instant::now());
     }
@@ -262,12 +266,16 @@ impl IdentifyGate {
     ///
     /// `None` when `session` is not the open setup's: a stale window serves nothing and changes
     /// no clock.
-    pub fn serve_setup(&self, session: &str) -> Option<SetupService<'_>> {
+    ///
+    /// The guard owns the gate, so it can be held by a task of its own (#457): a chain step that
+    /// writes to OpenRGB runs there, and the client that asked for it may be gone by the time it
+    /// ends.
+    pub fn serve_setup(self: &Arc<Self>, session: &str) -> Option<SetupService> {
         let mut inner = self.lock();
         match inner.setup.as_mut() {
             Some(setup) if setup.session == session => {
                 setup.serving += 1;
-                Some(SetupService { gate: self, session: session.to_string() })
+                Some(SetupService { gate: Arc::clone(self), session: session.to_string() })
             }
             _ => None,
         }
@@ -612,12 +620,12 @@ mod tests {
         frame.iter().enumerate().filter(|(_, c)| **c != Rgb8::BLACK).map(|(i, _)| i).collect()
     }
 
-    fn setup() -> (IdentifyGate, Vec<DeviceInfo>, Instant) {
+    fn setup() -> (Arc<IdentifyGate>, Vec<DeviceInfo>, Instant) {
         let devices = vec![
             device("openrgb:board", vec![zone(0, 10), zone(1, 20)]),
             device("openrgb:ram", vec![zone(0, 8)]),
         ];
-        (IdentifyGate::default(), devices, Instant::now())
+        (Arc::new(IdentifyGate::default()), devices, Instant::now())
     }
 
     fn frames_of(tick: Tick) -> Vec<(DeviceId, Vec<Rgb8>)> {
