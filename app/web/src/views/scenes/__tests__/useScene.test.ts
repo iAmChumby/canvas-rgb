@@ -2322,3 +2322,68 @@ describe("the move of a group and the order of the scenes", () => {
     expect(notifySpy).toHaveBeenCalledTimes(1);
   });
 });
+
+describe("the order of the groups inside a scene", () => {
+  /** The demo's own order: the four groups of the scene that plays. */
+  const ORDER = ["g-case", "g-ram", "g-gpu", "g-desk"];
+  /** The same groups, with the first two swapped. */
+  const MOVED = ["g-ram", "g-case", "g-gpu", "g-desk"];
+
+  it("a reorder is one save, with the new order and the revision the page read", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.reorderGroups(MOVED);
+    });
+
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+    const [id, body] = api.scenes.put.mock.calls[0] as [
+      string,
+      { scene: Scene; expected_rev: number },
+    ];
+    expect(id).toBe("gaming");
+    // The whole scene goes, with the order the owner made and the revision it was read at.
+    expect(body.expected_rev).toBe(7);
+    expect(body.scene.groups.map((g) => g.id)).toEqual(MOVED);
+    // The order shows at once.
+    expect(result.current.scene?.groups.map((g) => g.id)).toEqual(MOVED);
+  });
+
+  it("a revision another window moved on is refused: nothing moved, and the page says so", async () => {
+    api.scenes.put.mockRejectedValueOnce(new ApiFailure(409, "conflict", "the scene changed"));
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.reorderGroups(MOVED);
+    });
+
+    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    // The order on the screen is the order the daemon has.
+    expect(result.current.scene?.groups.map((g) => g.id)).toEqual(ORDER);
+  });
+
+  it("an undo puts the groups back in the old order", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.reorderGroups(MOVED);
+    });
+    await waitFor(() => expect(result.current.canUndo).toBe(true));
+
+    act(() => {
+      result.current.undo();
+    });
+
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(2));
+    const [, body] = api.scenes.put.mock.calls.at(-1) as [
+      string,
+      { scene: Scene; expected_rev: number },
+    ];
+    // The whole scene goes back, the groups in the order they were in.
+    expect(body.scene.groups.map((g) => g.id)).toEqual(ORDER);
+    await waitFor(() => expect(result.current.scene?.groups.map((g) => g.id)).toEqual(ORDER));
+  });
+});

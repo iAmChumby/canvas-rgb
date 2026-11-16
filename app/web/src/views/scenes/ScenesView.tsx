@@ -1,6 +1,7 @@
 "use client";
 
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type CSSProperties, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import { createPortal } from "react-dom";
 import { ArrowClockwise, ArrowCounterClockwise, ArrowLeft, ArrowRight, CopySimple, DotsThree, PencilSimple, Plus, SquaresFour, Trash } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
@@ -18,9 +19,10 @@ import { GroupSheet, Sheet } from "@/views/scenes/GroupSheet";
 import { LightFeedContext } from "@/views/scenes/LedRun";
 import { NewLightNotice } from "@/views/scenes/NewLightNotice";
 import { SceneStrip } from "@/views/scenes/SceneStrip";
-import { groupGoneMessage, moveLight } from "@/views/scenes/groupEdit";
+import { groupGoneMessage, groupOrderMoved, moveLight } from "@/views/scenes/groupEdit";
 import { useNewLights } from "@/views/scenes/newLights";
 import { useLightFeed } from "@/views/scenes/useLightFeed";
+import { useGroupReorder } from "@/views/scenes/useGroupReorder";
 import { useScene } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
 import { Onboarding } from "@/views/editor/Onboarding";
@@ -30,6 +32,7 @@ import { requestChainSetup } from "@/views/chain/request";
 import { shouldOpen } from "@/views/editor/flow";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
+import r from "@/views/scenes/groupReorder.module.css";
 
 /** The room the list holds while the scenes are read: the strip's rows, drawn as placeholders. */
 const SKEL_NAMES = ["52%", "38%", "46%"] as const;
@@ -39,6 +42,8 @@ function ScenesShape({ rows }: { rows: number }) {
     <div className={s.list}>
       {Array.from({ length: rows }, (_, i) => (
         <div className={s.row} key={i} aria-hidden="true">
+          {/* The handle's own column: the placeholder keeps the place of the real row. */}
+          <span className={s.gripSpace} />
           <div className={s.who}>
             <Skeleton width={SKEL_NAMES[i % SKEL_NAMES.length]} height={16} />
             <Skeleton width="68%" height={14} />
@@ -84,6 +89,12 @@ export function ScenesView() {
   /** The active scene before this render: a new scene is the one that changed it. */
   const lastActive = useRef<string | null>(null);
   const { scene, unassigned, error, undo, redo } = use;
+  /** The groups of the scene that plays, in the order they are in. */
+  const groups = scene?.groups ?? [];
+  /** The list the group rows are in: the drag's marker stands in the gaps of it. */
+  const listRef = useRef<HTMLDivElement>(null);
+  /** What the keyboard is told: where a group went, or that it is already at an end. */
+  const [groupStatus, setGroupStatus] = useState("");
 
   const byId = useMemo(() => new Map((lights ?? []).map((l) => [l.light.id, l])), [lights]);
   const rowLights = useMemo(() => {
@@ -232,6 +243,44 @@ export function ScenesView() {
   /** Where the scene that plays is in the order of the keys. */
   const sceneAt = use.scenes.findIndex((s) => s.id === scene?.id);
 
+  /**
+   * The groups of the scene, in another order (#384).
+   *
+   * The rows are dragged by their handle, and the arrow keys on the handle move a group one
+   * place. The order shows at once and the whole scene goes to the daemon in one write.
+   */
+  const reorder = useGroupReorder(groups, listRef, (order) => use.reorderGroups(order));
+
+  /**
+   * A group one place up or down. The keyboard is told where it went, or that it is already at
+   * that end.
+   */
+  const moveGroup = useCallback(
+    (group: Group, delta: number) => {
+      const ids = groups.map((g) => g.id);
+      const at = ids.indexOf(group.id);
+      const order = groupOrderMoved(ids, group.id, delta);
+      if (!order) {
+        setGroupStatus(delta < 0 ? `${group.name} is already first.` : `${group.name} is already last.`);
+        return;
+      }
+      setGroupStatus(`${group.name}, position ${at + delta + 1} of ${ids.length}.`);
+      use.reorderGroups(order);
+    },
+    [groups, use],
+  );
+
+  /** The arrow keys on a row's handle. No modifier: the handle has no other meaning for them. */
+  const onGripKey = useCallback(
+    (group: Group, event: ReactKeyboardEvent<HTMLButtonElement>) => {
+      if (event.key !== "ArrowUp" && event.key !== "ArrowDown") return;
+      if (event.altKey || event.ctrlKey || event.metaKey || event.shiftKey) return;
+      event.preventDefault();
+      moveGroup(group, event.key === "ArrowUp" ? -1 : 1);
+    },
+    [moveGroup],
+  );
+
   /** A device was picked for the group being made: the group exists and plays from now on. */
   const onPicked = (lightId: string) => {    const id = freshGroupId();
     const name = `Group ${(scene?.groups.length ?? 0) + 1}`;
@@ -278,11 +327,10 @@ export function ScenesView() {
       ? "error"
       : "loading";
 
-  const totalLeds = (scene?.groups ?? []).reduce(
+  const totalLeds = groups.reduce(
     (n, g) => n + (rowLights.get(g.id) ?? []).reduce((m, l) => m + l.led_count, 0),
     0,
   );
-  const groups = scene?.groups ?? [];
 
   // The first run's hello takes the whole window (#310): the page behind it is this one.
   if (hello) {
@@ -477,13 +525,13 @@ export function ScenesView() {
             />
           }
         >
-          <div className={s.list}>
+          <div className={s.list} ref={listRef}>
             {groups.length === 0 && (
               <EmptyState icon={<SquaresFour size={22} />} title="This scene has no groups yet">
                 Make a group from the devices below and they light up.
               </EmptyState>
             )}
-            {groups.map((g, i) => {
+            {groups.map((g) => {
               const effect = effectFor(g);
               return (
                 <GroupRow
@@ -495,7 +543,6 @@ export function ScenesView() {
                   effectId={effect.id}
                   missing={effect.missing}
                   failed={use.states.find((x) => x.id === g.id)?.failed ?? null}
-                  index={i}
                   open={openId === g.id}
                   use={use}
                   onOpen={(id) => {
@@ -503,6 +550,8 @@ export function ScenesView() {
                     setOpenId((cur) => (cur === id ? null : id));
                   }}
                   onBrightness={use.setBrightness}
+                  onGripDown={reorder.begin}
+                  onGripKey={onGripKey}
                 />
               );
             })}
@@ -528,8 +577,43 @@ export function ScenesView() {
                 New group
               </Button>
             </div>
+            {/* The gap the lifted row would land in. It stands in the list's own box, so it stays
+                in the gap when the page scrolls. */}
+            {reorder.marker !== null && (
+              <span
+                className={r.marker}
+                style={{ top: reorder.marker }}
+                data-testid="group-marker"
+                aria-hidden="true"
+              />
+            )}
           </div>
         </LoadFrame>
+
+        {/* What the keyboard is told: where a group went. */}
+        <span role="status" className="sr-only" data-testid="group-status">
+          {groupStatus}
+        </span>
+
+        {/* The copy of the lifted row, drawn over the page: the list scrolls with the page and
+            would clip it. */}
+        {reorder.drag &&
+          createPortal(
+            <span
+              className={r.copy}
+              style={{
+                left: reorder.drag.x - reorder.drag.grabX,
+                top: reorder.drag.y - reorder.drag.grabY,
+                minWidth: reorder.drag.width,
+                "--tone": `var(${reorder.drag.tone})`,
+              } as CSSProperties}
+              data-testid="group-copy"
+              aria-hidden="true"
+            >
+              <span className="one-line">{reorder.drag.label}</span>
+            </span>,
+            document.body,
+          )}
 
         {openId && (
           <GroupSheet

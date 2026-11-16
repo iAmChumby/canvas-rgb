@@ -1,8 +1,8 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
 import { useRef, useState } from "react";
-import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowsHorizontal, CopySimple, DotsSixVertical, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -12,12 +12,11 @@ import { Slider } from "@/components/Slider";
 import { shownWords } from "@/views/chain/limits";
 import { EffectPicker, isPatternEffect } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
+import { groupAccent } from "@/views/scenes/groupAccent";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
-
-const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 
 /** The mode in the owner's words (spec "Language"). */
 export const MODE_WORDS = { flow_across: "flow across", each_its_own: "each its own" } as const;
@@ -88,13 +87,15 @@ export interface GroupRowProps {
   lightsState?: LightsState;
   /** Why the group is dark, from the daemon; null while it runs. */
   failed: string | null;
-  /** Its place in the scene, for its accent. */
-  index: number;
   open?: boolean;
   /** The scene's data: the row's own changes go through it. */
   use: UseScene;
   onOpen: (groupId: string) => void;
   onBrightness: (groupId: string, n: number) => void;
+  /** A press on the row's handle: the pointer drags the row. */
+  onGripDown: (group: Group, event: PointerEvent<HTMLButtonElement>) => void;
+  /** A key on the row's handle: the arrows that move the group one place. */
+  onGripKey: (group: Group, event: KeyboardEvent<HTMLButtonElement>) => void;
 }
 
 /**
@@ -112,11 +113,12 @@ export function GroupRow({
   missing = false,
   lightsState = "ready",
   failed,
-  index,
   open,
   use,
   onOpen,
   onBrightness,
+  onGripDown,
+  onGripKey,
 }: GroupRowProps) {
   const off = group.plays.type === "off";
   // A pattern plays the whole pattern on every device of the group, so the mode means nothing
@@ -129,12 +131,24 @@ export function GroupRow({
     <article
       className={s.row}
       data-testid="group-row"
+      data-group={group.id}
       data-failed={failed ? "true" : undefined}
       data-off={off ? "true" : undefined}
       data-open={open ? "true" : undefined}
-      style={{ "--tone": `var(${ACCENTS[index % ACCENTS.length]})` } as CSSProperties}
+      style={{ "--tone": `var(${groupAccent(group.id)})` } as CSSProperties}
       aria-label={group.name}
     >
+      {/* The handle: the pointer drags the row by it, and the arrow keys move the group one place
+          while it has the focus. */}
+      <IconButton
+        label={`Move ${group.name}`}
+        className={s.grip}
+        size="sm"
+        icon={<DotsSixVertical size={16} />}
+        onClick={() => undefined}
+        onPointerDown={(event) => onGripDown(group, event)}
+        onKeyDown={(event) => onGripKey(group, event)}
+      />
       <Button
         variant="ghost"
         className={s.who}

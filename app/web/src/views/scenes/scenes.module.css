@@ -182,6 +182,7 @@
 }
 
 .list {
+  position: relative;
   display: flex;
   flex-direction: column;
   gap: var(--s2);
@@ -190,10 +191,12 @@
 
 /* ---------- one row ---------- */
 
+/* The handle's own column: the row that is dragged by it keeps its place in the grid, so the
+   name and the controls do not move when the handle appears. */
 .row {
   position: relative;
   display: grid;
-  grid-template-columns: minmax(150px, 220px) minmax(0, 1fr) 168px 140px 176px;
+  grid-template-columns: 28px minmax(150px, 220px) minmax(0, 1fr) 168px 140px 176px;
   align-items: center;
   column-gap: var(--s4);
   padding: var(--s3) var(--s4) var(--s3) calc(var(--s4) + 6px);
@@ -494,7 +497,7 @@
 
 @container page (max-width: 1099px) {
   .row {
-    grid-template-columns: minmax(120px, 200px) minmax(0, 1fr);
+    grid-template-columns: 28px minmax(120px, 200px) minmax(0, 1fr);
     row-gap: var(--s3);
   }
 
@@ -518,7 +521,7 @@
 @container page (max-width: 520px) {
   .row {
     padding: var(--s3) var(--s3) var(--s3) calc(var(--s3) + 6px);
-    grid-template-columns: minmax(96px, 128px) minmax(0, 1fr);
+    grid-template-columns: 28px minmax(96px, 128px) minmax(0, 1fr);
     column-gap: var(--s3);
   }
 
@@ -1299,9 +1302,20 @@
   background: var(--live-soft);
 }
 
+/* The handle a thing is dragged by: the group's row (#384) and the devices in a group. It never
+   starts a native drag, and the text around it is never selected. */
 .grip {
   cursor: grab;
   touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+}
+
+/* The handle's column in a placeholder row: the room the handle takes, so the name and the
+   controls of the real row stand where the placeholder's do. */
+.gripSpace {
+  width: 28px;
+  height: 28px;
 }
 
 .memberName {

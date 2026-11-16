@@ -14,7 +14,7 @@
 // Revert.
 
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, ArrowRight, CopySimple, DotsThree, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
+import { ArrowDown, ArrowLeft, ArrowRight, ArrowUp, CopySimple, DotsThree, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { useMediaQuery } from "@/components/MediaQuery";
@@ -33,7 +33,7 @@ import { GroupStage } from "@/views/scenes/GroupStage";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import { MemberList } from "@/views/scenes/MemberList";
 import { MoveStep } from "@/views/scenes/MoveStep";
-import { groupGoneMessage } from "@/views/scenes/groupEdit";
+import { groupGoneMessage, groupOrderMoved } from "@/views/scenes/groupEdit";
 import { PropertyControls } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
 import type { GroupMode } from "@/proto/GroupMode";
@@ -188,6 +188,23 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
     onClose();
   }, [edit, groupId, onClose]);
 
+  /** The groups of the scene, in their order, and where this one is in it. */
+  const groupIds = (scene?.groups ?? []).map((g) => g.id);
+  const groupAt = groupIds.indexOf(groupId);
+
+  /**
+   * The group one place up or down in the scene (#384). This is the phone's path: the strip
+   * scrolls sideways there, and the rows are dragged by a handle that a finger does not drag.
+   */
+  const moveGroup = useCallback(
+    (delta: number) => {
+      const order = groupOrderMoved(groupIds, groupId, delta);
+      if (!order) return;
+      use.reorderGroups(order);
+    },
+    [groupIds, groupId, use],
+  );
+
   /** A group that was left with no devices: the page says so and offers the Undo. */
   const emptied = useCallback(
     (names: string[]) => {
@@ -303,6 +320,32 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
               }}
             >
               Copy to scene
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<ArrowUp size={16} />}
+              disabled={groupAt <= 0}
+              title={groupAt <= 0 ? "It is already first." : undefined}
+              onClick={() => {
+                setMenu(false);
+                moveGroup(-1);
+              }}
+            >
+              Move up
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<ArrowDown size={16} />}
+              disabled={groupAt < 0 || groupAt >= groupIds.length - 1}
+              title={groupAt >= 0 && groupAt >= groupIds.length - 1 ? "It is already last." : undefined}
+              onClick={() => {
+                setMenu(false);
+                moveGroup(1);
+              }}
+            >
+              Move down
             </Button>
             <Button
               variant="ghost"

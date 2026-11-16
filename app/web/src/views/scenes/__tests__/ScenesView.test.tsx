@@ -56,6 +56,20 @@ import type { UseScene } from "@/views/scenes/useScene";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
+// jsdom has no PointerEvent and no pointer capture; a MouseEvent carries clientX just as well.
+if (!("PointerEvent" in window)) {
+  class PE extends MouseEvent {
+    pointerId: number;
+    pointerType: string;
+    constructor(type: string, init: PointerEventInit = {}) {
+      super(type, init);
+      this.pointerId = init.pointerId ?? 1;
+      this.pointerType = init.pointerType ?? "mouse";
+    }
+  }
+  (window as unknown as { PointerEvent: unknown }).PointerEvent = PE;
+}
+
 beforeAll(() => {
   window.matchMedia = ((query: string) => ({
     matches: false,
@@ -159,6 +173,7 @@ function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, 
     dryRunMove: spy("dryRunMove") as unknown as UseScene["dryRunMove"],
     moveGroup: spy("moveGroup") as unknown as UseScene["moveGroup"],
     reorderScenes: spy("reorderScenes"),
+    reorderGroups: spy("reorderGroups"),
     undo: spy("undo"),
     redo: spy("redo"),
     canUndo: false,
@@ -218,6 +233,53 @@ afterEach(() => {
 });
 
 const rows = () => screen.getAllByTestId("group-row");
+
+/** A box, as the browser measures one. */
+const box = (top: number, height: number) =>
+  ({
+    top,
+    bottom: top + height,
+    height,
+    left: 0,
+    right: 800,
+    width: 800,
+    x: 0,
+    y: top,
+    toJSON: () => ({}),
+  }) as DOMRect;
+
+/**
+ * The rows as the list lays them out: 100 px apart and 60 px tall, the list 500 px high. jsdom
+ * measures nothing, so the drag has no places to work with without this.
+ */
+function placeRows() {
+  const list = rows()[0]?.parentElement as HTMLElement;
+  list.getBoundingClientRect = () => box(0, 500);
+  rows().forEach((row, i) => {
+    row.getBoundingClientRect = () => box(i * 100, 60);
+  });
+  return list;
+}
+
+/** The handle of a row: the grip the pointer drags the row by. */
+const handle = (row: HTMLElement) =>
+  within(row).getByRole("button", { name: /^Move / }) as HTMLButtonElement;
+
+/** A press on the handle, and a drag that carries it past the threshold. */
+function dragHandle(grip: HTMLElement, to: number) {
+  fireEvent.pointerDown(grip, { pointerType: "mouse", clientX: 10, clientY: 30, button: 0 });
+  // The button is down while the pointer travels.
+  fireEvent.pointerMove(window, { pointerType: "mouse", clientX: 10, clientY: to, buttons: 1 });
+}
+
+/** The accent each group has now, by its own id. */
+function tonesByGroup(): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const row of rows()) {
+    out[row.getAttribute("data-group") ?? ""] = (row as HTMLElement).style.getPropertyValue("--tone");
+  }
+  return out;
+}
 
 describe("the Scenes page", () => {
   it("renders one row per group in scene order", () => {
@@ -625,5 +687,97 @@ describe("the Scenes page", () => {
     // The daemon's reason, with the pattern's id in it, is a tooltip and never the text.
     expect(lostRow.innerHTML).toContain("the pattern pattern:Removed is gone");
     expect(document.body.textContent).not.toContain("pattern:Removed");
+  });
+});
+
+describe("the order of the groups inside a scene", () => {
+  it("a group's handle can be dragged into another place, and the page is told the new order once", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    const all = rows();
+    const grip = handle(all[0] as HTMLElement);
+    // The first group is dragged down past the second one.
+    dragHandle(grip, 190);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toEqual([[["g-ram", "g-case", "g-gpu", "g-desk"]]]);
+  });
+
+  it("the rows around the dragged one never move: the list shifts nothing", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    const before = rows().map((r) => r.getBoundingClientRect().top);
+    dragHandle(handle(rows()[0] as HTMLElement), 190);
+    // The rows are where they were while the drag lasts.
+    expect(rows().map((r) => r.getBoundingClientRect().top)).toEqual(before);
+    // A marker stands in the gap the row would land in.
+    const marker = screen.getByTestId("group-marker");
+    const top = parseFloat(marker.style.top);
+    expect(top).toBeGreaterThan((rows()[1] as HTMLElement).getBoundingClientRect().bottom);
+    expect(top).toBeLessThan((rows()[2] as HTMLElement).getBoundingClientRect().top);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+  });
+
+  it("a finger does not drag a row: the group's menu is the phone's path", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    const grip = handle(rows()[0] as HTMLElement);
+    fireEvent.pointerDown(grip, { pointerType: "touch", clientX: 10, clientY: 30, button: 0 });
+    fireEvent.pointerMove(window, { pointerType: "touch", clientX: 10, clientY: 190, buttons: 1 });
+    fireEvent.pointerUp(window, { pointerType: "touch", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("the drag ends without a write when the window loses the focus", () => {
+    const use = fake();
+    mount(use);
+    placeRows();
+    dragHandle(handle(rows()[0] as HTMLElement), 190);
+    fireEvent.blur(window);
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("the arrow keys on a group's handle put it one place up or down", () => {
+    const use = fake();
+    mount(use);
+    const grip = handle(rows()[1] as HTMLElement);
+    fireEvent.keyDown(grip, { key: "ArrowUp" });
+    expect(use.calls.reorderGroups).toEqual([[["g-ram", "g-case", "g-gpu", "g-desk"]]]);
+    // The keyboard is told where the group is.
+    expect(screen.getByTestId("group-status").textContent).toBe("Memory, position 1 of 4.");
+  });
+
+  it("the arrow keys say when a group is already at an end", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.keyDown(handle(rows()[0] as HTMLElement), { key: "ArrowUp" });
+    expect(use.calls.reorderGroups).toBeUndefined();
+    expect(screen.getByTestId("group-status").textContent).toBe("Case fans is already first.");
+    fireEvent.keyDown(handle(rows()[3] as HTMLElement), { key: "ArrowDown" });
+    expect(use.calls.reorderGroups).toBeUndefined();
+    expect(screen.getByTestId("group-status").textContent).toBe("Cooler and desk is already last.");
+  });
+
+  it("a group keeps its colour when the groups are put in another order", () => {
+    mount(fake());
+    const before = tonesByGroup();
+    expect(Object.keys(before)).toEqual(["g-case", "g-ram", "g-gpu", "g-desk"]);
+    cleanup();
+
+    const turned = gaming();
+    turned.groups = [...turned.groups].reverse();
+    mount(fake({ scene: turned, states: turned.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) }));
+    // The order really changed.
+    expect(rows().map((r) => r.getAttribute("data-group"))).toEqual([
+      "g-desk",
+      "g-gpu",
+      "g-ram",
+      "g-case",
+    ]);
+    // Every group kept its own colour.
+    expect(tonesByGroup()).toEqual(before);
   });
 });
