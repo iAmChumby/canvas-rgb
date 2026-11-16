@@ -48,8 +48,9 @@ canvas-rgb effects list
 
 - `status --json`: the daemon is up. Note `active_scene` (its id and name): that is the PRIOR
   scene. Note `version`.
-- `lights list --json`: each light's `light.id` (a device id, then `#z` and the zone number), its
-  `led_count` and `connected`. These ids are the `members` of a group.
+- `lights list --json`: each light's `light.id` (a device id, then `#z` and the zone number, and
+  `p{n}` for a part of a chain), its `led_count` and `connected`. These ids are the `members` of
+  a group.
 - `devices list --json`: each device's kind (`motherboard`, `dram`, `keyboard`, `mouse`,
   `microphone`, `headset`, `led_strip`, `gpu`, `other`) and zones. There is no fan or ring kind:
   read the zone names.
