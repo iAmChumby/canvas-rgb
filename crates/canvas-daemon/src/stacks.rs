@@ -294,11 +294,6 @@ pub fn html_slots(layer: &StackLayer, known: &KnownEffects) -> usize {
     usize::from(is_html_effect(&layer.effect)) + usize::from(mask)
 }
 
-/// True for a layer that takes at least one HTML slot: the capped, slow kind.
-pub fn layer_counts_as_html(layer: &StackLayer, known: &KnownEffects) -> bool {
-    html_slots(layer, known) > 0
-}
-
 /// Checks one stack before it is saved (the D95.1.1 table).
 ///
 /// `known` is what `find_schema` can resolve and `others` the stacks that are not this one:

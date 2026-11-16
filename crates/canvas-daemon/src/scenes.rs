@@ -568,6 +568,9 @@ fn build_and_set(app: &App, lights: &[Light], devices: &[DeviceInfo], scene: &Sc
             Plays::Off => (None, Props::new()),
             Plays::Effect { effect: id, props } => {
                 let slots = group_html_runtimes(group, &slots_of);
+                // A group takes its runtime before it is built, so a group whose build fails keeps
+                // its place: the first SCENE_HTML_MAX runtimes in scene order are the ones that
+                // run, built or not, and a later group does not move up into a freed slot.
                 if runtimes + slots > SCENE_HTML_MAX {
                     // Over the limit: the group keeps what the owner saved, and does not run.
                     tracing::warn!(
@@ -1675,12 +1678,9 @@ fn stack_slots(stack: &canvas_proto::stack::Stack, known: &crate::stacks::KnownE
     stack.layers.iter().map(|layer| crate::stacks::html_slots(layer, known)).sum()
 }
 
-/// True when the stack has an HTML layer or mask.
-pub fn stack_has_html_layers(stack: &canvas_proto::stack::Stack) -> bool {
-    stack.layers.iter().any(|layer| {
-        layer.effect.starts_with(HTML_EFFECT_PREFIX)
-            || layer.mask.as_ref().is_some_and(|m| m.effect.starts_with(HTML_EFFECT_PREFIX))
-    })
+/// True when `group` plays the stack `stack`.
+fn plays_stack(group: &Group, stack: &str) -> bool {
+    matches!(&group.plays, Plays::Effect { effect, .. } if effect == stack)
 }
 
 /// The sentence for a scene that starts more HTML runtimes than it may (#370, design Q3), with the
@@ -1737,28 +1737,37 @@ pub async fn check_takeover_html_limit(
     Ok(())
 }
 
-/// Checks the HTML limit for a stack that a group of a scene plays: every scene must not start more
-/// HTML runtimes than it may.
+/// Checks the HTML limit for a stack save: a save is refused only when it puts a scene that
+/// plays this stack over the limit.
 ///
-/// Every scene is checked, not only the active one: a scene the owner sets later must be able
-/// to run.
-///
-/// The stack is the one being saved, not the saved one: a new HTML layer is what makes the
-/// scene start one runtime too many.
+/// Two things make a save harmless, and both are allowed: a stack no scene plays (the file cannot
+/// change any scene's count with it), and a save that keeps or lowers the count of every scene
+/// that plays it. The second is what lets the owner fix an over-limit scene by editing the stack:
+/// a pair already over the limit on file is not made worse by a save that takes HTML away, so it
+/// is not refused. A save is refused when it adds an HTML runtime to a scene whose count with it
+/// would be over [`SCENE_HTML_MAX`].
 pub async fn check_stack_html_limit(
     app: &App,
     stack: &canvas_proto::stack::Stack,
 ) -> Result<(), String> {
-    if !stack_has_html_layers(stack) {
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    let draft = stack_slots(stack, &known);
+    // The stack as saved: a stack that is not on file counts nothing, so its first save is
+    // measured against zero.
+    let saved = saved_stack_slots(app, &stack.id, &known);
+    if draft <= saved {
         return Ok(());
     }
     let scenes = {
         let store = app.store.read().await;
         store.scenes.scenes.clone()
     };
-    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
-    let draft = stack_slots(stack, &known);
     for scene in &scenes {
+        // A scene that does not play the stack is untouched by the save: its count stays what it
+        // is, over the limit or not.
+        if !scene.groups.iter().any(|group| plays_stack(group, &stack.id)) {
+            continue;
+        }
         let count = html_runtime_count(scene, &|id| {
             if id == stack.id {
                 draft

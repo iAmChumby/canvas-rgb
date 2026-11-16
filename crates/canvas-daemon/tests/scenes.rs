@@ -2583,9 +2583,102 @@ async fn an_imported_bundle_over_the_html_limit_keeps_its_groups_and_marks_the_t
     assert_eq!(failures.get("three").map(String::as_str), Some(HTML_LIMIT_SENTENCE), "{failures:?}");
 }
 
-/// #370: a scene over the limit stays a valid file, and each door that would put it on the lights
-/// refuses with the daemon's sentence and writes nothing: setting it, activating an effect on its
-/// groups, and a takeover of one of its effects.
+/// #370, review of PR #401, BLOCKER 1: a stack save beside a scene that is already over the limit
+/// is allowed when the stack is plain and no scene plays it. The file's over-limit scene is not a
+/// reason to refuse a save that cannot change it.
+#[tokio::test]
+async fn a_plain_stack_saves_beside_a_scene_that_is_already_over_the_limit() {
+    let plain = serde_json::json!({
+        "id": "stack:Plain",
+        "layers": [{ "id": "l1", "name": "One", "effect": "solid" }],
+    });
+    // The control: the same save on a file whose scene is within the limit.
+    let mut within = three_html_scenes();
+    within.scenes[0].groups[2].plays = plays("solid");
+    let control = rig_loaded(&within, &[]).await;
+    let (status, answer) =
+        send(&control, "PUT", "/api/v1/stacks/stack:Plain", Some(plain.clone())).await;
+    assert_eq!(status, StatusCode::OK, "control, two HTML groups: {answer}");
+
+    // The file the review describes: three HTML groups saved by an older version.
+    let rig = rig_loaded(&three_html_scenes(), &[]).await;
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Plain", Some(plain)).await;
+    assert_eq!(status, StatusCode::OK, "the plain stack touches no scene: {answer}");
+    assert!(rig.app.stacks.get("stack:Plain").is_some(), "the stack was written");
+}
+
+/// #370, review of PR #401, BLOCKER 1: the stack a scene over the limit plays can still be saved
+/// when the save takes HTML away from it, which is how the owner fixes the scene; a save that adds
+/// an HTML layer is refused with the sentence and writes nothing.
+#[tokio::test]
+async fn a_stack_a_scene_over_the_limit_plays_saves_when_it_takes_html_away() {
+    // The scene on file plays the stack beside two HTML effects: three runtimes, over the limit.
+    let mut scenes = three_html_scenes();
+    scenes.scenes[0].groups[0].plays = plays("stack:Html");
+    let rig = rig_loaded(&scenes, &[]).await;
+    // The stack as saved, written past the route as an older version would have left it.
+    let legacy: canvas_proto::stack::Stack = serde_json::from_value(serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "One", "effect": "html:mine" }],
+    }))
+    .expect("a stack");
+    let known = canvas_daemon::stacks::KnownEffects::from_user(&rig.app.user_effects);
+    rig.app.stacks.put(legacy, &known).expect("the legacy stack is written");
+
+    // Fewer HTML layers: the scene's count drops to two, and the save is allowed.
+    let fewer = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "One", "effect": "solid" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(fewer)).await;
+    assert_eq!(status, StatusCode::OK, "the save lowers the count: {answer}");
+    let file = std::fs::read(rig.home.path.join("stacks.json")).unwrap();
+
+    // More HTML layers: the scene would run four, and nothing is written.
+    let more = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "html:mine" },
+            { "id": "l2", "name": "Two", "effect": "html:audio" },
+        ],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(more)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+    let kept = rig.app.stacks.get("stack:Html").expect("the stack is still there");
+    assert_eq!(kept.layers.len(), 1, "refused: the saved stack is the one-lower one");
+    assert_eq!(kept.layers[0].effect, "solid", "refused: nothing was written");
+    assert_eq!(
+        std::fs::read(rig.home.path.join("stacks.json")).unwrap(),
+        file,
+        "refused: the file is as it was"
+    );
+}
+
+/// #370, review of PR #401, NIT 8: a group whose effect cannot be built still takes its place in
+/// the scene's order, so the first two HTML runtimes are the first two groups, built or not, and a
+/// later group does not move up into the slot a failed build left free.
+#[tokio::test]
+async fn a_group_whose_build_fails_still_takes_its_html_runtime() {
+    let mut scenes = three_html_scenes();
+    scenes.scenes[0].groups[0].plays = plays("html:gone");
+    let rig = rig_loaded(&scenes, &[]).await;
+
+    // The first group took the first runtime and built nothing; the second took the second.
+    assert_eq!(rig.app.scene.builds(), 1, "only the second group built");
+    let failures = rig.app.scene.failures();
+    assert!(
+        failures.get("one").is_some_and(|why| why.as_str() != HTML_LIMIT_SENTENCE),
+        "the first group says why it could not build: {failures:?}"
+    );
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the third waits for the slot the failed group kept: {failures:?}"
+    );
+}
+
+
 #[tokio::test]
 async fn set_scene_activate_and_takeover_refuse_an_over_limit_scene() {
     let rig = rig_loaded(&three_html_scenes(), &[]).await;
