@@ -6,6 +6,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-16
+
 ### Added
 
 - Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
@@ -25,8 +27,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Setting up a chain keeps the setup open while your device answers a save slowly, so a slow reply no longer loses the header's earlier length. (#429)
-- Scenes: the lights no group holds keep their row at the bottom of the list, the group's menu lines every item up, and a row's tooltip stays out of the way while the row is dragged. (#384)
-- Scenes: a group's handle does not take the page's scrolling away on a phone, only that handle's bubble waits for the press to end, and a group deleted while it is dragged leaves the order as it was. (#384)
 - Scenes: putting the groups in a new order no longer restarts their effects, so the lights stay as they are. The order is for display only. (#384)
 - The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
 - Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
@@ -394,7 +394,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
 [0.13.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...v0.13.0
