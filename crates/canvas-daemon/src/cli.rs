@@ -375,7 +375,10 @@ pub struct GroupMoveArgs {
 pub struct ImportArgs {
     /// The HTML file to import.
     pub file: String,
-    /// Overwrite an effect of the same name. With `--run`, only an effect that run imported.
+    /// Overwrite an effect of the same name. With `--run`, a run may replace only an effect that
+    /// same run imported: any other is refused, and the effect's whole content is copied into the
+    /// run's folder before the import is sent. Without `--run` this is the plain overwrite a
+    /// person at the keyboard uses, with no record and no copy.
     #[arg(long)]
     pub replace: bool,
     /// The run this import belongs to: its record is `agent-runs/<run>.json` (#377).
@@ -600,14 +603,15 @@ pub fn parse_prop_args(args: &[String]) -> Result<Vec<(String, String)>, String>
 
 /// Turns parsed `--prop` pairs into typed properties, each checked against the kind `kind_of`
 /// finds for its key. A key the effect does not have, and a value of the wrong kind or outside
-/// its range, are refused.
+/// its range, are refused; a schema `kind_of` cannot read is its own sentence, not "not a
+/// property of this effect".
 fn typed_props(
     pairs: &[(String, String)],
-    kind_of: impl Fn(&str) -> Option<canvas_proto::props::PropKind>,
+    kind_of: impl Fn(&str) -> Result<Option<canvas_proto::props::PropKind>, String>,
 ) -> Result<canvas_proto::props::Props, String> {
     let mut props = canvas_proto::props::Props::new();
     for (key, raw) in pairs {
-        let Some(kind) = kind_of(key) else {
+        let Some(kind) = kind_of(key)? else {
             return Err(format!("{key} is not a property of this effect"));
         };
         let value = parse_prop_value(&kind, raw).map_err(|e| format!("--prop {key}: {e}"))?;
@@ -616,12 +620,25 @@ fn typed_props(
     Ok(props)
 }
 
-/// The kind of the property `key` in an effect's schema as the daemon's JSON carries it.
-fn json_prop_kind(properties: &[serde_json::Value], key: &str) -> Option<canvas_proto::props::PropKind> {
-    let found = properties
+/// The kind of the property `key` in an effect's schema as the daemon's JSON carries it:
+/// `Ok(None)` when the effect has no such key, and an error when the key's kind cannot be read,
+/// so a schema this CLI does not understand is never reported as a missing property.
+fn json_prop_kind(
+    properties: &[serde_json::Value],
+    key: &str,
+) -> Result<Option<canvas_proto::props::PropKind>, String> {
+    let Some(found) = properties
         .iter()
-        .find(|property| property.get("key").and_then(|v| v.as_str()) == Some(key))?;
-    serde_json::from_value(found.get("kind")?.clone()).ok()
+        .find(|property| property.get("key").and_then(|v| v.as_str()) == Some(key))
+    else {
+        return Ok(None);
+    };
+    let Some(kind) = found.get("kind") else {
+        return Err(format!("the daemon's schema for {key} carries no kind, so --prop {key} cannot be checked"));
+    };
+    serde_json::from_value(kind.clone()).map(Some).map_err(|e| {
+        format!("the daemon's schema for {key} carries a kind this command cannot read: {e}")
+    })
 }
 
 /// Parses the `--<prop> <value>` pairs the CLI takes after `effects activate`.
@@ -695,10 +712,18 @@ pub fn check_effect(path: &str, png: Option<&str>) -> Result<CheckReport, String
 
 /// [`check_effect`] with `--prop key=value` arguments: the frames and the PNG are drawn with
 /// those properties laid over the defaults. The arguments are parsed before the file is read.
+/// The file is read through [`read_capped`], at [`canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES`],
+/// so a check never loads more than an import would take.
 pub fn check_effect_with(path: &str, png: Option<&str>, props: &[String]) -> Result<CheckReport, String> {
     parse_prop_args(props)?;
-    let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let source = check_source_file(path)?;
     check_source_with(&source, png, props)
+}
+
+/// An effect file's text, read capped: no more than an import may hold.
+fn check_source_file(path: &str) -> Result<String, String> {
+    read_capped(path, canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES, "an effect file")
+        .map_err(|e| e.to_string())
 }
 
 /// Checks a SignalRGB-format HTML effect's source, with no daemon involved.
@@ -719,7 +744,7 @@ pub fn check_source_with(source: &str, png: Option<&str>, prop_args: &[String]) 
     let schema = effect.schema();
     let mut props = schema.defaults();
     props.extend(typed_props(&pairs, |key| {
-        schema.properties.iter().find(|p| p.key == key).map(|p| p.kind.clone())
+        Ok(schema.properties.iter().find(|p| p.key == key).map(|p| p.kind.clone()))
     })?);
     effect.init(&props);
 
@@ -896,7 +921,7 @@ const PREVIEW_SHEET_GAP: usize = 4;
 /// quality bar, and (given a folder) writes the tile as a GIF and a contact sheet of its
 /// frames, so the picture can be looked at and not only measured.
 pub fn check_tile(path: &str, preview_dir: Option<&str>) -> Result<TileCheck, String> {
-    let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
+    let source = check_source_file(path)?;
     // The tile is rendered with the fixed tile seed, so the check scores the same picture
     // every time it is run.
     let mut effect = canvas_html::HtmlEffect::from_source_seeded(
@@ -2179,10 +2204,53 @@ fn scene_plays_effect(scene: &serde_json::Value, effect: &str) -> bool {
     })
 }
 
+/// True when a JSON string field names the effect (the ids match without regard to case).
+fn names_effect(field: Option<&serde_json::Value>, effect: &str) -> bool {
+    field.and_then(|v| v.as_str()).is_some_and(|id| id.eq_ignore_ascii_case(effect))
+}
+
+/// True when a layer of a stack names the effect, as the layer's own effect or as its mask's (the
+/// ids match without regard to case).
+fn stack_names_effect(stack: &serde_json::Value, effect: &str) -> bool {
+    stack.get("layers").and_then(|v| v.as_array()).is_some_and(|layers| {
+        layers.iter().any(|layer| {
+            names_effect(layer.get("effect"), effect)
+                || names_effect(layer.get("mask").and_then(|mask| mask.get("effect")), effect)
+        })
+    })
+}
+
+/// The names of the saved stacks that name the effect as a layer or as a layer's mask, quoted, in
+/// the order the daemon lists them. The list route carries no layer ids, so each stack is read
+/// whole through the same client; a stack that cannot be read refuses the delete rather than
+/// letting it go blind.
+fn stacks_naming_effect(api: &dyn Api, effect: &str) -> Result<Vec<String>, CliError> {
+    let listed = api.call("GET", canvas_proto::api::routes::STACKS, None)?;
+    let mut names = Vec::new();
+    for summary in listed.get("stacks").and_then(|v| v.as_array()).into_iter().flatten() {
+        let id = str_of(summary, "id");
+        let detail = api.call("GET", &effect_route(canvas_proto::api::routes::STACK, id), None)?;
+        if detail.get("stack").is_some_and(|stack| stack_names_effect(stack, effect)) {
+            names.push(format!("\"{}\"", str_of(summary, "name")));
+        }
+    }
+    Ok(names)
+}
+
+/// The effect's own presets, from a `GET /effects/{id}` answer. A missing `user_presets`, or one
+/// that is not an array, is an error and never "no presets": a copy has to be the effect's whole
+/// content, so a delete must not drop presets it failed to copy. `after` says what did not happen.
+fn user_presets_of<'a>(detail: &'a serde_json::Value, after: &str) -> Result<&'a Vec<serde_json::Value>, CliError> {
+    detail
+        .get("user_presets")
+        .and_then(|v| v.as_array())
+        .ok_or_else(|| CliError::Other(format!("could not read the effect's presets; {after}")))
+}
+
 /// The whole of an effect, copied into the run's folder before it is deleted or written over: its
 /// id, file name and source, and with `presets` also its user presets (a delete takes them too).
-/// The effect's source is read from the daemon; an answer with no source is an error, and nothing
-/// is copied or sent.
+/// The effect's source is read from the daemon; an answer with no source, or with no readable list
+/// of presets, is an error, and nothing is copied or sent.
 fn copy_effect(api: &dyn Api, run: &str, effect: &str, presets: bool) -> Result<(), CliError> {
     let answer = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT_SOURCE, effect), None)?;
     let Some(source) = answer.get("source").and_then(|v| v.as_str()) else {
@@ -2195,10 +2263,8 @@ fn copy_effect(api: &dyn Api, run: &str, effect: &str, presets: bool) -> Result<
     });
     if presets {
         let detail = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT, effect), None)?;
-        doc["user_presets"] = detail
-            .get("user_presets")
-            .cloned()
-            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+        doc["user_presets"] =
+            serde_json::Value::Array(user_presets_of(&detail, "nothing deleted")?.clone());
     }
     crate::agent_run::save_effect_copy(run, &doc)?;
     Ok(())
@@ -2320,11 +2386,17 @@ pub fn effects_source(api: &dyn Api, args: &SourceArgs, json: bool) -> Result<Ou
 
 /// `canvas-rgb effects delete <effect> [--keep-presets] --run <run> [--dry-run]`.
 ///
-/// Refused, before anything is sent, for an effect the run did not import, and for an effect any
-/// scene still plays (the scenes are named; there is no flag to force it, because the groups
-/// would go dark). The effect's whole content is copied into the run's folder, and the delete is
-/// saved to the record as pending, before the delete is sent. A dry run runs the checks and
-/// sends, copies and writes nothing.
+/// Refused, before anything is sent, for an effect the run did not import, for an effect any
+/// scene still plays, and for an effect a saved stack uses as a layer or as a layer's mask (the
+/// scenes and the stacks are named; there is no flag to force it, because those groups and
+/// layers would go dark). The effect's whole content is copied into the run's folder, and the
+/// delete is saved to the record as pending, before the delete is sent. A dry run runs the checks
+/// and sends, copies and writes nothing.
+///
+/// The scenes and the stacks are read before the delete and the daemon does not refuse: a scene
+/// or a stack edited into the effect between that read and the DELETE is not seen. The gap is
+/// named in `.build/reports/fixpass-412.md` (item 3, which lives in the main checkout), and a
+/// daemon-side refusal is the follow-up.
 pub fn effects_delete(api: &dyn Api, args: &EffectDeleteArgs, json: bool) -> Result<Output, CliError> {
     let mut record = crate::agent_run::load(&args.run)?;
     let Some(made) = record.made_effect(&args.effect).map(|m| m.id.clone()) else {
@@ -2341,6 +2413,14 @@ pub fn effects_delete(api: &dyn Api, args: &EffectDeleteArgs, json: bool) -> Res
             "{made} is played by {} {}; nothing deleted. Move those groups to another effect first.",
             if players.len() == 1 { "the scene" } else { "the scenes" },
             players.join(", ")
+        )));
+    }
+    let stackers = stacks_naming_effect(api, &made)?;
+    if !stackers.is_empty() {
+        return Err(CliError::Other(format!(
+            "{made} is a layer or a mask of {} {}; nothing deleted. Change those layers to another effect first.",
+            if stackers.len() == 1 { "the stack" } else { "the stacks" },
+            stackers.join(", ")
         )));
     }
     if args.dry_run {
@@ -2398,6 +2478,9 @@ fn effect_deleted_output(
 }
 
 /// `canvas-rgb effects preset list <effect>`: the built-in presets and the user's own.
+///
+/// The answer must carry the effect's own list: "none of yours" is a list, and a missing or
+/// unreadable one is an error rather than an effect that looks presetless.
 pub fn preset_list(api: &dyn Api, args: &PresetListArgs, json: bool) -> Result<Output, CliError> {
     let detail = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT, &args.effect), None)?;
     let built_in = detail
@@ -2405,10 +2488,7 @@ pub fn preset_list(api: &dyn Api, args: &PresetListArgs, json: bool) -> Result<O
         .and_then(|schema| schema.get("presets"))
         .cloned()
         .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
-    let user = detail
-        .get("user_presets")
-        .cloned()
-        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let user = serde_json::Value::Array(user_presets_of(&detail, "nothing changed")?.clone());
     if json {
         return Ok(Output::Json(serde_json::json!({
             "effect": effect_id_of(&detail, &args.effect),
@@ -3254,6 +3334,39 @@ mod tests {
         let file = TempFile::new("broken", "<head><title>No script</title></head>");
         let error = check_effect(&file.path(), None).expect_err("the file must not load");
         assert!(error.contains("parse:"), "the parser's message is kept: {error}");
+    }
+
+    /// SHOULD-FIX 4 of the #412 review: `effects check` reads a file given by path like an import
+    /// does, capped and with the same sentence, so a check never loads more than an import takes.
+    #[test]
+    fn a_check_file_over_the_cap_is_refused_with_the_one_cap_sentence() {
+        let big = TempFile::new(
+            "check-big",
+            &"x".repeat(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1),
+        );
+        let said = format!(
+            "is over {} bytes, more than an effect file may hold",
+            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
+        );
+        let error = check_effect(&big.path(), None).expect_err("a file over the cap is refused");
+        assert!(error.contains(&said), "read_capped's sentence is kept: {error}");
+        let error = check_effect_with(&big.path(), None, &["speed=1".to_string()])
+            .expect_err("a file over the cap is refused with --prop too");
+        assert!(error.contains(&said), "{error}");
+        let error = check_tile(&big.path(), None).expect_err("the tile is not drawn from it");
+        assert!(error.contains(&said), "{error}");
+        // One byte less is read: the cap itself is allowed. Whatever the check makes of the file,
+        // it is not the cap's refusal.
+        let fits = TempFile::new(
+            "check-fits",
+            &format!(
+                "<head><title>Fits</title></head><body></body><script>void 0;</script>{}",
+                " ".repeat(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES - 100)
+            ),
+        );
+        if let Err(error) = check_effect(&fits.path(), None) {
+            assert!(!error.contains("is over"), "a file at the cap is read: {error}");
+        }
     }
 
     #[test]
@@ -5457,6 +5570,11 @@ mod tests {
                     };
                 }
             }
+            // No stacks unless a test routes some: the effects commands read the list to see
+            // whether a saved stack layers or masks an effect.
+            if method == "GET" && path == canvas_proto::api::routes::STACKS {
+                return Ok(serde_json::json!({ "stacks": [] }));
+            }
             Err(CliError::Api {
                 status: 404,
                 message: format!("the fake daemon has no route for {method} {path}"),
@@ -5738,6 +5856,24 @@ mod tests {
         assert!(home.files().is_empty(), "no record was started: {:?}", home.files());
     }
 
+    /// NIT 9 of the #412 review: a schema kind this CLI cannot read is its own sentence, not "is
+    /// not a property of this effect".
+    #[test]
+    fn a_schema_kind_this_cli_cannot_read_is_not_reported_as_a_missing_property() {
+        let home = TempHome::new("fx-badkind");
+        let mut detail = ink_detail();
+        detail["schema"]["properties"][0]["kind"] = serde_json::json!({ "type": "sparkle" });
+        let api = FxApi::new(run_scenes()).route("GET", &ink_route(), detail);
+        let error = preset_save(&api, &save_args(&["speed=2"], Some("agent-1")), false).unwrap_err();
+        assert!(
+            error.to_string().contains("carries a kind this command cannot read"),
+            "the message names the schema, not the key: {error}"
+        );
+        assert!(!error.to_string().contains("is not a property"), "{error}");
+        assert!(api.writes().is_empty(), "{:?}", api.asked());
+        assert!(home.files().is_empty(), "nothing was written: {:?}", home.files());
+    }
+
     #[test]
     fn preset_save_posts_the_typed_props_and_the_record_holds_it_pending_while_the_request_is_on_the_way() {
         let home = TempHome::new("fx-save");
@@ -5912,8 +6048,11 @@ mod tests {
         assert_eq!(text, "would delete html:ink\n");
         assert_eq!(
             api.asked(),
-            vec![("GET".to_string(), canvas_proto::api::routes::SCENES.to_string(), None)],
-            "a dry run only reads the scenes: no source, no copy, no delete"
+            vec![
+                ("GET".to_string(), canvas_proto::api::routes::SCENES.to_string(), None),
+                ("GET".to_string(), canvas_proto::api::routes::STACKS.to_string(), None),
+            ],
+            "a dry run only reads the scenes and the stacks: no source, no copy, no delete"
         );
         assert_eq!(home.files(), before, "no record rewrite, no copy: the whole home is as it was");
         assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record_before);
@@ -5961,6 +6100,87 @@ mod tests {
         let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
         assert!(error.to_string().contains("is played by the scene \"Solo\";"), "{error}");
         assert_eq!(home.files(), before, "no copy was taken");
+    }
+
+    /// SHOULD-FIX 2 of the #412 review: a saved stack that uses the effect as a layer, or only as
+    /// a layer's mask, blocks the delete too, and the stacks are named the way the scenes are.
+    #[test]
+    fn an_effect_a_stack_layers_or_masks_is_never_deleted_and_the_stacks_are_named() {
+        let home = TempHome::new("fx-edel-stacked");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let before = home.files();
+        let listed = || {
+            serde_json::json!({ "stacks": [
+                { "id": "stack:Sunset", "name": "Sunset", "layers": 1, "html_layers": 1, "missing": [] } ] })
+        };
+        let sunset = effect_route(canvas_proto::api::routes::STACK, "stack:Sunset");
+        // One layer names the effect outright; one names it only as its mask, in another case.
+        for detail in [
+            serde_json::json!({ "stack": { "id": "stack:Sunset", "layers": [
+                { "id": "l1", "name": "Ink", "effect": INK } ] }, "layers": [] }),
+            serde_json::json!({ "stack": { "id": "stack:Sunset", "layers": [
+                { "id": "l1", "name": "Heat", "effect": "fire",
+                  "mask": { "effect": "HTML:INK", "amount": 100 } } ] }, "layers": [] }),
+        ] {
+            let api = FxApi::new(run_scenes())
+                .route("GET", canvas_proto::api::routes::STACKS, listed())
+                .route("GET", &sunset, detail);
+            let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "html:ink is a layer or a mask of the stack \"Sunset\"; nothing deleted. Change those layers to another effect first.",
+                "a stack that uses the effect is named, and no flag forces it"
+            );
+            assert!(api.writes().is_empty(), "no DELETE is sent: {:?}", api.asked());
+            assert_eq!(api.reads(&ink_source_route()), 0, "the effect is not even copied");
+            assert_eq!(home.files(), before, "no copy was taken");
+        }
+        // Two stacks, both naming it: the plural, and both names.
+        let listed = || {
+            serde_json::json!({ "stacks": [
+                { "id": "stack:Sunset", "name": "Sunset", "layers": 1, "html_layers": 0, "missing": [] },
+                { "id": "stack:Dusk", "name": "Dusk", "layers": 2, "html_layers": 1, "missing": [] } ] })
+        };
+        let api = FxApi::new(run_scenes())
+            .route("GET", canvas_proto::api::routes::STACKS, listed())
+            .route(
+                "GET",
+                &sunset,
+                serde_json::json!({ "stack": { "id": "stack:Sunset", "layers": [
+                    { "id": "l1", "effect": INK } ] }, "layers": [] }),
+            )
+            .route(
+                "GET",
+                &effect_route(canvas_proto::api::routes::STACK, "stack:Dusk"),
+                serde_json::json!({ "stack": { "id": "stack:Dusk", "layers": [
+                    { "id": "l2", "effect": "fire" },
+                    { "id": "l1", "effect": INK } ] }, "layers": [] }),
+            );
+        let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "html:ink is a layer or a mask of the stacks \"Sunset\", \"Dusk\"; nothing deleted. Change those layers to another effect first."
+        );
+        assert!(api.writes().is_empty(), "{:?}", api.asked());
+        // A stack that names another effect leaves the delete alone: it goes through to the copy.
+        let api = FxApi::new(run_scenes())
+            .route(
+                "GET",
+                canvas_proto::api::routes::STACKS,
+                serde_json::json!({ "stacks": [
+                    { "id": "stack:Sunset", "name": "Sunset", "layers": 1, "html_layers": 0, "missing": [] } ] }),
+            )
+            .route(
+                "GET",
+                &sunset,
+                serde_json::json!({ "stack": { "id": "stack:Sunset", "layers": [
+                    { "id": "l1", "effect": "fire" } ] }, "layers": [] }),
+            )
+            .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>ink</html>", "file_name": "ink.html" }))
+            .route("GET", &ink_route(), ink_detail())
+            .route("DELETE", &ink_route(), serde_json::json!({ "ok": true, "id": "html:ink", "presets_removed": 1 }));
+        let text = text_of(effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap());
+        assert_eq!(text, "deleted html:ink (1 preset removed)\n", "another effect's stack is not in the way");
     }
 
     #[test]
@@ -6044,6 +6264,43 @@ mod tests {
         let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
         assert!(error.to_string().contains("the daemon sent no source for html:ink"), "{error}");
         assert!(api.writes().is_empty(), "{:?}", api.asked());
+    }
+
+    /// SHOULD-FIX 5 of the #412 review: a missing or non-array `user_presets` is a copy that is not
+    /// the effect's whole content, so it is an error and the delete never goes out.
+    #[test]
+    fn an_effect_answer_without_a_readable_preset_list_is_refused_and_nothing_is_deleted() {
+        let home = TempHome::new("fx-edel-nopresets");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let record_before = std::fs::read_to_string(record_at(&home)).unwrap();
+        let mut missing = ink_detail();
+        missing.as_object_mut().expect("an object").remove("user_presets");
+        for answer in [
+            missing,
+            serde_json::json!({ "user_presets": null }),
+            serde_json::json!({ "user_presets": { "Night": 1 } }),
+        ] {
+            let api = FxApi::new(run_scenes())
+                .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>ink</html>", "file_name": "ink.html" }))
+                .route("GET", &ink_route(), answer.clone());
+            let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "could not read the effect's presets; nothing deleted",
+                "a delete never drops presets it could not copy: {answer}"
+            );
+            assert!(api.writes().is_empty(), "the DELETE is never sent: {:?}", api.asked());
+            assert_eq!(
+                std::fs::read_to_string(record_at(&home)).unwrap(),
+                record_before,
+                "the record is untouched: no pending entry"
+            );
+            assert!(!run_folder(&home, "effects").exists(), "no half copy is left behind");
+        }
+        // The list command refuses the same answer instead of showing an effect with no presets.
+        let api = FxApi::new(run_scenes()).route("GET", &ink_route(), serde_json::json!({ "schema": { "id": INK } }));
+        let error = preset_list(&api, &PresetListArgs { effect: INK.into() }, false).unwrap_err();
+        assert_eq!(error.to_string(), "could not read the effect's presets; nothing changed");
     }
 
     #[test]
