@@ -43,7 +43,6 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Fire and Audio Spectrum inside a stack fill a strip too: every layer of a stack reads the way it reads on its own, so a flame shows its height and Rain still moves. (#407)
 - The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)
 - A brightness or props change beside a scene with more HTML effects than the limit allows no longer starts the extra effect. (#419)
-- Fire and Audio Spectrum fill a strip again, flame height and bar height included. Inside a stack they still read dark on a strip. (#400)
 - The text on a primary key stays readable as the lights change colour: every hue of both themes keeps 4.5:1 on the key, where yellow in the light theme dropped to 2.2:1. (#423)
 - Scenes: the scene's name reads in full in the phone header; the state mark keeps its icon, and its tooltip and details panel name the fault in words. (#422)
 
