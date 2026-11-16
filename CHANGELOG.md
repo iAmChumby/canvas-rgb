@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Devices and Peripherals no longer cut off rows and switches in narrow desktop windows: the device list scrolls in its pane and the mouse's controls wrap. (#89)
+
 ## [0.17.0] - 2026-11-16
 
 ### Added

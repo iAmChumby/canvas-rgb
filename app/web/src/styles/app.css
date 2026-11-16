@@ -3954,18 +3954,12 @@ button.chip:hover {
   }
 }
 
-/* phone: the row wraps to two lines, the name and its state on the first, the id, the drawing
-   and the count on the second. */
+/* A narrow page: the row wraps to two lines, the name and its state on the first, the id, the
+   drawing and the count on the second. The list keeps its own scroller: this container query also
+   fires on a desktop shell (a 721-752 px window), where `.content` is clipped, so handing the
+   scroll back to the document here left the rows cut off (#89). The phone hand-back is below,
+   keyed on the window. */
 @container page (max-width: 640px) {
-  .rd-devices .rd-dev-list {
-    overflow: visible;
-    flex: 0 0 auto;
-  }
-
-  .rd-devices .load-frame[data-state="ready"] {
-    flex: 0 0 auto;
-  }
-
   .rd-devices .rd-dev-row {
     display: flex;
     flex-wrap: wrap;
@@ -5323,6 +5317,15 @@ button.chip:hover {
     padding: 0;
   }
 
+  /* The Devices list is the last pane to hand scrolling back to the document, and only on a
+     phone. On a desktop shell its page can be just as narrow, but `.content` is clipped there, so
+     it must keep its own scroller (#89). */
+  .rd-devices .rd-dev-list,
+  .rd-devices .load-frame[data-state="ready"] {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
   .rd-fans .rd-fans-right > .panel {
     overflow: visible;
   }
@@ -6279,6 +6282,24 @@ button.chip:hover {
   .rd-peri-readat {
     flex: 1 1 100%;
     justify-items: end;
+  }
+}
+
+/* A desktop shell whose page is only 640 px wide (a 721-752 px window) is the one band where the
+   window is not a phone but the page is at the phone edge: the 639 px block above and the 720 px
+   window rules below both miss it, and the Access switches sat 21 px past the page (#89). Wrap the
+   head here too; the sections keep their columns. */
+@container page (max-width: 640px) {
+  .rd-peripherals .peripheral-head {
+    flex-wrap: wrap;
+  }
+
+  .rd-peripherals .rd-peri-access {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
   }
 }
 
