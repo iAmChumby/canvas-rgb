@@ -26,9 +26,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
 - Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
 - The sidebar strip shows your lights' real colours in a scene (#379)
-- A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
 - Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
 - Rain: Trail Length now changes how long each streak is (#383)
+- Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
+- A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
 
 ## [0.16.0] - 2026-11-15
 
