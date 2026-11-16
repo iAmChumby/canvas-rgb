@@ -1,4 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { flushSync } from "react-dom";
+import { createRoot } from "react-dom/client";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
 // The move step: one row per other scene, the key that does it, and the line that says what it
@@ -207,6 +209,40 @@ describe("the move step", () => {
     view.rerender(<MoveStep groupId="g-desk" copy use={use} lights={lights()} onClose={vi.fn()} />);
     await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
     expect(use.dryRunMove).toHaveBeenLastCalledWith("g-desk", "focus", true);
+  });
+
+  it("a row is not enabled with the other mode's answer in the first render of the other mode", async () => {
+    // The answer of the move lands.
+    const use = fakeUse();
+    const container = document.createElement("div");
+    document.body.appendChild(container);
+    const root = createRoot(container);
+    await act(async () => {
+      root.render(
+        <MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />,
+      );
+    });
+    const row = await screen.findByTestId("move-to-evening");
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+    expect(document.getElementById("move-outcome-evening")?.textContent).toContain("Adds 1 device.");
+
+    // The step switches to the copy. The first render of the copy is committed on its own: the
+    // effect that asks the daemon about the copy has not run yet.
+    act(() => {
+      flushSync(() => {
+        root.render(
+          <MoveStep groupId="g-desk" copy use={use} lights={lights()} onClose={vi.fn()} />,
+        );
+      });
+      // The row is not the move's answer: it is held until the daemon answers the copy.
+      expect((row as HTMLButtonElement).disabled).toBe(true);
+      expect(document.getElementById("move-outcome-evening")?.textContent).not.toContain("Adds 1 device.");
+    });
+
+    await act(async () => {
+      root.unmount();
+    });
+    container.remove();
   });
 
   it("a row is not enabled with the other mode's answer when the step switches", async () => {
