@@ -3,6 +3,7 @@
 
 pub mod attack_shark_x6;
 pub mod chione;
+pub mod drive;
 pub mod eightbitdo_ultimate2;
 pub mod fake;
 pub mod frame_lane;

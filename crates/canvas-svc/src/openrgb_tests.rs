@@ -161,6 +161,74 @@ async fn an_absent_boot_color_means_black() {
     assert_eq!(wait_for_colors(&fake, 0, &[Rgb8::BLACK; 3]).await, vec![Rgb8::BLACK; 3]);
 }
 
+/// OpenRGB's copy of the ROYUAN MonsGeek keyboard, whose id carries the HID path
+/// `VID_3151&PID_4015`: the daemon never drives it (#393), and neither may the service (#413).
+fn keyboard_copy(index: u32, leds: u32) -> DeviceInfo {
+    let mut info = device(index, leds);
+    info.serial = "HID: hid#VID_3151&PID_4015&MI_02#7&abc".into();
+    info.id = DeviceId(format!("openrgb:{}", info.serial));
+    info.kind = DeviceKind::Keyboard;
+    info.name = "ROYUAN MonsGeek keyboard (OpenRGB copy)".into();
+    info
+}
+
+/// The boot colour and the black paint go to the ordinary device and never to the keyboard's
+/// OpenRGB copy, and the end of the watch window does not count the copy as unpainted (#413).
+#[tokio::test]
+async fn neither_the_boot_color_nor_the_black_paint_writes_to_the_keyboards_openrgb_copy() {
+    let (_, text) = crate::test_logs::captured_async(async {
+        let fake = FakeOpenRgbServer::start(vec![device(0, 4), keyboard_copy(1, 6)]).await.unwrap();
+        let processes = FakeProcesses::new();
+        let (root, exe) = install();
+        let mut sup = supervisor(&processes, &root, &exe, fake.port(), None);
+        let boot = Rgb8::new(10, 20, 30);
+        let start = Instant::now();
+        // The first tick connects and reads the count; the second sees it hold still and paints.
+        sup.tick(start, false, Some(boot)).await;
+        sup.tick(start + Duration::from_secs(1), false, Some(boot)).await;
+
+        assert_eq!(
+            wait_for_colors(&fake, 0, &[boot; 4]).await,
+            vec![boot; 4],
+            "the ordinary device got the boot colour"
+        );
+        assert_eq!(fake.update_leds_writes(1), 0, "the boot colour was written to the keyboard's OpenRGB copy");
+        assert_eq!(fake.custom_mode_writes(1), 0, "the copy was switched to custom mode by the boot colour");
+        assert_eq!(fake.colors(1), vec![Rgb8::BLACK; 6], "the copy's lights were written");
+        assert!(sup.boot_pending(), "the watch window runs after the first write");
+
+        // The watch window ends: the copy is skipped, so it is not "still unpainted".
+        sup.tick(start + Duration::from_secs(1) + crate::openrgb::WATCH_WINDOW, false, Some(boot)).await;
+        assert!(!sup.boot_pending(), "the watch window ended");
+
+        // The black paint after the daemon's restart limit follows the same rule.
+        sup.request_black(Instant::now());
+        let black = Instant::now();
+        sup.tick(black, false, None).await;
+        sup.tick(black + Duration::from_secs(1), false, None).await;
+
+        assert_eq!(
+            wait_for_colors(&fake, 0, &[Rgb8::BLACK; 4]).await,
+            vec![Rgb8::BLACK; 4],
+            "the ordinary device got the black paint"
+        );
+        assert_eq!(fake.update_leds_writes(1), 0, "the black paint was written to the keyboard's OpenRGB copy");
+        assert_eq!(fake.custom_mode_writes(1), 0, "the copy was switched to custom mode by the black paint");
+        assert_eq!(fake.colors(1), vec![Rgb8::BLACK; 6], "the copy's lights were written black");
+    })
+    .await;
+
+    assert!(text.contains("boot color written to 1 devices"), "the boot colour reached one device: {text}");
+    assert!(
+        text.contains("all 1 devices were painted"),
+        "the copy is not counted as unpainted at the end of the watch window: {text}"
+    );
+    assert!(
+        text.contains("black after the daemon restart limit written to 1 devices"),
+        "the black paint reached one device: {text}"
+    );
+}
+
 #[tokio::test]
 async fn the_boot_color_is_not_written_while_a_daemon_is_connected() {
     let fake = FakeOpenRgbServer::start(vec![device(0, 3)]).await.unwrap();
