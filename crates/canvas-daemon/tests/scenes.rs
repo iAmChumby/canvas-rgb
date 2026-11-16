@@ -2766,7 +2766,9 @@ async fn a_stack_with_two_html_layers_plus_a_group_is_refused_by_every_save() {
     });
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Twice", Some(two_layers)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+    // A stack save's refusal names the scene it would put over the limit.
+    let named = format!("Main: {HTML_LIMIT_SENTENCE}");
+    assert_eq!(answer["message"].as_str(), Some(named.as_str()), "{answer}");
     assert_eq!(stored(&rig, "main").await, saved, "refused: nothing was written");
 }
 
