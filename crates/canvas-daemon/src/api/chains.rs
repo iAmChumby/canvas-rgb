@@ -134,8 +134,14 @@ pub async fn start_setup(
         ));
     };
     // From here the gate holds the lights: every path below either completes the start or ends
-    // the session before it answers.
-    //
+    // the session before it answers. The request is served while the raise below waits on the
+    // device (a refused one is five seconds of silence), so the ticker cannot end the setup and
+    // put the header back under the raise (#429).
+    let Some(_served) = app.identify.serve_setup(&session) else {
+        return Err(ApiFailure::conflict(
+            "a chain setup is already open; finish or cancel it first",
+        ));
+    };
     // The gate counts a ticker as running from here, so one is spawned at once: a failure below
     // ends the setup and the ticker then finds nothing and stops, instead of the gate believing in
     // a ticker that never started (which would leave every later identify and flash dark).
@@ -228,6 +234,13 @@ pub async fn cancel_setup(
     // closed it, and its parts must stay.
     let _step = app.chain_setup.lock().await;
     check_session(&app, &id, zone, &request.session).await?;
+    // The resize back waits on the device, so this request is served: the ticker must not end
+    // the session and restore under it (#429).
+    let Some(_served) = app.identify.serve_setup(&request.session) else {
+        return Err(ApiFailure::conflict(
+            "this chain setup session is not open any more; start it again",
+        ));
+    };
     let leds = finish_setup_locked(&app).await?;
     Ok(Json(serde_json::json!({ "ok": true, "leds": leds })))
 }
@@ -255,6 +268,14 @@ pub async fn commit_setup(
     let device_id = DeviceId(id.clone());
     let _step = app.chain_setup.lock().await;
     check_session(&app, &id, zone, &request.session).await?;
+    // A commit waits on the device for a resize, and a refused one is five seconds of silence:
+    // while this request is served the setup cannot time out, so the ticker never puts the
+    // header back under the save, and the session is still open for a retry (#429).
+    let Some(_served) = app.identify.serve_setup(&request.session) else {
+        return Err(ApiFailure::conflict(
+            "this chain setup session is not open any more; start it again",
+        ));
+    };
     let max_leds = app
         .device(&device_id)
         .await
@@ -293,10 +314,9 @@ pub async fn commit_setup(
         .map_err(|e| ApiFailure::validation(e.to_string()))?
     };
 
-    // A commit takes longer than the setup's quiet timeout allows between light requests. Renew
-    // it before the work, with no runs (the commit's own frames are the last ones): otherwise a
-    // slow resize would let the ticker end the session mid-commit and put the header back under
-    // it. A stale session is caught here even when it went away since the check above.
+    // A commit takes longer than the setup's quiet timeout allows between light requests. The
+    // request is served (`serve_setup` above), so the ticker cannot end the session under it; the
+    // runs are cleared here because the commit's own frames are the last ones.
     if !app
         .identify
         .set_runs(&request.session, Vec::new(), std::time::Instant::now())
@@ -460,6 +480,13 @@ pub async fn empty_setup(
 ) -> ApiResult<Json<serde_json::Value>> {
     let _step = app.chain_setup.lock().await;
     check_session(&app, &id, zone, &request.session).await?;
+    // The setup ends with a resize back that waits on the device: served, so the ticker cannot
+    // end it and restore under this request (#429).
+    let Some(_served) = app.identify.serve_setup(&request.session) else {
+        return Err(ApiFailure::conflict(
+            "this chain setup session is not open any more; start it again",
+        ));
+    };
     let leds = finish_setup_locked(&app).await?;
     let device_id = DeviceId(id.clone());
     let plan = {
