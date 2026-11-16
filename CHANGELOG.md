@@ -28,6 +28,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - The sidebar strip shows your lights' real colours in a scene (#379)
 - Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
 - Rain: Trail Length now changes how long each streak is (#383)
+- Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 
 ## [0.16.0] - 2026-11-15
 
