@@ -3929,3 +3929,113 @@ async fn a_scene_saved_before_this_change_loads_with_the_same_groups_on() {
         "the saved order is the order the editor is handed, as before"
     );
 }
+
+/// One save that reorders the groups and changes one group's effect does both: the groups are
+/// paired by id, so only the group whose effect changed is built, and the row that moved keeps
+/// what it plays (#384). A pairing by place would have handed the untouched group the other's
+/// values, or built both.
+#[tokio::test]
+async fn a_reorder_and_one_group_s_effect_change_in_one_save_builds_that_group_only() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two groups once");
+
+    // `right` goes above `left`, and `left` takes another effect: one PUT does both.
+    let mut scene = stored(&rig, "main").await;
+    scene.groups.reverse();
+    scene.groups[1].plays = Plays::Effect { effect: "white".into(), props: Props::new() };
+    let path = route(routes::SCENE, &[("id", "main")]);
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.builds(),
+        built + 1,
+        "exactly the group whose effect changed was built, though both rows moved"
+    );
+
+    // The changed group plays the new effect (a flat white, no colour of its own), and the one
+    // that only moved keeps its own (blue): a pairing by place would have swapped the two.
+    let start = Instant::now();
+    let mut white = None;
+    while start.elapsed() < Duration::from_secs(20) {
+        if let Some(frame) = rig.a.last() {
+            let flat = frame.len() == LEDS as usize && frame.iter().all(|c| *c == frame[0]);
+            if flat && frame[0] != rgb(RED) && frame[0] != rgb(BLUE) {
+                white = frame.first().copied();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        white.is_some(),
+        "the left group took its new effect; last frame {:?}",
+        rig.a.last().map(|f| f[0])
+    );
+    shows(&rig.b, rgb(BLUE), "the group that only moved kept its own effect").await;
+    let now = stored(&rig, "main").await;
+    assert_eq!(
+        now.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["right", "left"],
+        "the saved order is the new one, and the change is in the same scene"
+    );
+}
+
+/// Removing one group and adding another with a new id is a change of the scene's shape: the
+/// engine takes the whole scene again, so every effect is built, and the new group plays (#384).
+#[tokio::test]
+async fn a_group_removed_and_another_added_in_one_save_takes_the_whole_scene_again() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two groups once");
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups.retain(|g| g.id != "right");
+    scene.groups.push(group("new", &["fake:b#z0"], "solid", color(GREEN)));
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.builds(),
+        built + 2,
+        "a group added and one removed is a change of shape: the whole scene is built again"
+    );
+    shows(&rig.a, rgb(RED), "the group that stayed still plays its own effect").await;
+    shows(&rig.b, rgb(GREEN), "the new group plays").await;
+    let now = stored(&rig, "main").await;
+    assert_eq!(
+        now.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["left", "new"],
+        "the scene holds the group that stayed and the one that was added"
+    );
+}
+
+/// A deleted scene leaves no record of the HTML runtimes it kept: `html_kept` is keyed by scene id,
+/// and nothing else names a deleted scene (#418 review, NIT 2).
+#[tokio::test]
+async fn deleting_a_scene_over_the_html_limit_forgets_the_groups_it_kept() {
+    let mut written = three_html_scenes();
+    written.scenes.push(Scene {
+        id: "other".into(),
+        name: "Other".into(),
+        rev: 1,
+        groups: vec![group("all", &["fake:a#z0"], "html:mine", Props::new())],
+    });
+    let rig = rig_loaded(&written, &[]).await;
+    assert_eq!(rig.app.scene.html_kept("main").len(), 2, "the first build kept two groups on");
+    assert!(rig.app.scene.html_kept("other").is_empty(), "a scene under the limit keeps nothing");
+
+    // `other` plays, so `main` can be deleted; what `main` kept is still remembered until then.
+    let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(rig.app.scene.html_kept("main").len(), 2, "another scene's apply left it alone");
+
+    let (status, answer) = send(&rig, "DELETE", &route(routes::SCENE, &[("id", "main")]), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.scene.html_kept("main").is_empty(),
+        "a deleted scene keeps no record: {:?}",
+        rig.app.scene.html_kept("main")
+    );
+}
