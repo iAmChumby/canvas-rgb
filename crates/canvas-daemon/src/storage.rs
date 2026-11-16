@@ -2630,7 +2630,8 @@ power = "running"
     /// arrangement and a copy count. A light that carries any of them is the owner's.
     #[test]
     fn a_light_the_owner_touched_is_kept_and_no_file_is_rewritten() {
-        let cases: Vec<(&str, Box<dyn Fn(&mut Light)>)> = vec![
+        type Touch = Box<dyn Fn(&mut Light)>;
+        let cases: Vec<(&str, Touch)> = vec![
             ("name", Box::new(|l: &mut Light| l.name = Some("My keyboard".into()))),
             (
                 "leds",
