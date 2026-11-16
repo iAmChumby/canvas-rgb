@@ -1,7 +1,8 @@
 // Regression guard for #57: the phone dock's sizes are tokens, not literals in the media query.
 // Before the fix app.css hard-coded 56px, 18px, 16px, 2px and calc(56px ...) inside the
 // max-width:720px block. This reads the two stylesheets as text, extracts that block and fails
-// on a raw pixel measurement, so a new magic number cannot land there again.
+// on a raw height, grid-row or gap measurement in the dock link rules. It does not cover the
+// rest of that block (padding, margin, font-size, line-height and borders still hold literals).
 
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";

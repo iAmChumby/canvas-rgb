@@ -146,8 +146,8 @@
   --rail-w-icon: 64px;
   --control-h: 32px;
   /* The phone dock's link (#57): the icon row, the name row and their gap, plus the link's
-     height. They live here with the rest of the sizes so the max-width:720px block in app.css
-     has no raw pixel measurements of its own. The name and the gap come from the type and
+     height. They live here with the rest of the sizes so the phone dock link in app.css's
+     max-width:720px block reads its sizes from tokens. The name and the gap come from the type and
      space scales; only the icon and the link height are dock-specific. */
   --nav-link-h: 56px;
   --nav-row-icon: 18px;
