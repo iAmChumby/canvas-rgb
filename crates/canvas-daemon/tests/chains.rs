@@ -1143,7 +1143,8 @@ async fn commit_ends_the_hold_and_the_scene_plays_again() {
 }
 
 /// Review Focus 3: a resize the device refuses leaves everything as it was, and the session open
-/// so the same commit can be tried again.
+/// so the same commit can be tried again. The refusal outlasts the setup's idle limit (#429):
+/// a commit that waits on a slow device keeps its session until it answers.
 #[tokio::test]
 async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     let rig = rig("commit-resize-fails", fake(EARLIER).await, true).await;
@@ -1155,10 +1156,23 @@ async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     let setup = started(&rig, 0).await;
     assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
     rig.server.fail_resizes(true);
+    // #429: a refused resize is five seconds of silence, most of the setup's six-second idle
+    // limit between light requests. A loaded runner pushed the rest past it, and the session
+    // ended under the commit. The limit is shortened here so the commit outlasts it by ten
+    // times on any machine: the test stops reading a verdict off how fast the machine is.
+    rig.app.identify.set_setup_timeout(Duration::from_millis(500));
 
+    let measured = std::time::Instant::now();
     let (status, body) = commit(&rig, 0, &setup.session, &seven_parts()).await;
 
     assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR, "{body}");
+    // The commit outlasted the limit the rig gave the setup: that is what used to end the
+    // session under it, so a fast refusal must not quietly make this test prove nothing.
+    assert!(
+        measured.elapsed() > Duration::from_millis(500),
+        "the refused commit took {:?}, under the setup's shortened limit",
+        measured.elapsed()
+    );
     let message = body["message"].as_str().unwrap_or_default();
     assert!(message.contains("no reply"), "the answer carries the device's own error: {body}");
     assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent is deleted: nothing was written");
@@ -1176,6 +1190,9 @@ async fn a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry() {
     assert_eq!(chain_state(&rig, 0).await, None, "no chain record was written");
     assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 1, "the whole-zone light is still it");
 
+    // The daemon's own limit again: the checks above are not requests, and the retry is one
+    // request that ends the setup.
+    rig.app.identify.set_setup_timeout(canvas_daemon::identify::SETUP_TIMEOUT);
     // The retry the open session allows: the same commit lands.
     rig.server.fail_resizes(false);
     let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;

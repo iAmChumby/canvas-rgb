@@ -15,7 +15,9 @@
 //! hand, so one zone of one device is lit in several colours at once ([`crate::identify::Run`]
 //! carries no colour, and widening it would change every identify caller). Every other LED is
 //! black, and the setup's frames outrank a flash. It ends when its session ends, or
-//! [`SETUP_TIMEOUT`] after the last light request, and the ticker restores on that end.
+//! [`SETUP_TIMEOUT`] after the last light request, and the ticker restores on that end. A request
+//! that is still being served holds that timeout off (#429), so a slow device never ends a setup
+//! it is in the middle of answering.
 
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -34,7 +36,9 @@ pub const WATCHDOG: Duration = Duration::from_secs(4);
 pub const TICK: Duration = Duration::from_millis(100);
 /// The colour of the target run.
 pub const TARGET: Rgb8 = Rgb8::WHITE;
-/// How long after the last light request a chain setup ends by itself (the spine's number).
+/// How long after the last light request a chain setup ends by itself (the spine's number). A
+/// request that is still being served holds it open ([`SetupService`]), so a device that answers
+/// a commit slowly never costs the owner the session mid-save (#429).
 pub const SETUP_TIMEOUT: Duration = Duration::from_millis(SETUP_TIMEOUT_MS);
 
 /// The id prefix of devices whose adapter lights the whole device (the ROYUAN keyboard).
@@ -73,9 +77,13 @@ struct Setup {
     session: String,
     /// When the last `start_setup`/`set_runs` arrived; [`SETUP_TIMEOUT`] runs from here.
     last_request: Instant,
+    /// The setup's requests being served right now (#429). A resize the device refuses is five
+    /// seconds of silence, most of this setup's six: a commit that long must not lose its
+    /// session under it. While one is served the setup cannot time out, and its idle clock
+    /// starts again when the request ends.
+    serving: u32,
 }
 
-#[derive(Default)]
 struct Inner {
     target: Option<Target>,
     /// The chain setup while one is open; one at a time.
@@ -83,6 +91,37 @@ struct Inner {
     /// The writer channel of every device the daemon drives.
     sinks: HashMap<DeviceId, tokio::sync::mpsc::Sender<Vec<Rgb8>>>,
     ticker_running: bool,
+    /// How long after its last request the setup ends: [`SETUP_TIMEOUT`] unless a test sets
+    /// another, so a test can make a request outlast the limit without waiting it out.
+    setup_timeout: Duration,
+}
+
+impl Default for Inner {
+    fn default() -> Self {
+        Self {
+            target: None,
+            setup: None,
+            sinks: HashMap::new(),
+            ticker_running: false,
+            setup_timeout: SETUP_TIMEOUT,
+        }
+    }
+}
+
+/// One of a setup's requests being served (#429): while it lives the setup does not time out,
+/// so the ticker never puts the header back under a request that still holds it.
+///
+/// Dropping it ends the request and restarts the setup's idle clock, which covers every early
+/// return between the request's checks and its answer.
+pub struct SetupService<'a> {
+    gate: &'a IdentifyGate,
+    session: String,
+}
+
+impl Drop for SetupService<'_> {
+    fn drop(&mut self) {
+        self.gate.end_request(&self.session, Instant::now());
+    }
 }
 
 /// What one tick of the ticker found.
@@ -184,7 +223,7 @@ impl IdentifyGate {
             return None;
         }
         inner.target = None;
-        inner.setup = Some(Setup { device, zone, runs: Vec::new(), session, last_request: now });
+        inner.setup = Some(Setup { device, zone, runs: Vec::new(), session, last_request: now, serving: 0 });
         let start = !inner.ticker_running;
         inner.ticker_running = true;
         Some(start)
@@ -213,6 +252,40 @@ impl IdentifyGate {
             return true;
         }
         false
+    }
+
+    /// How long a setup may go without a request before the ticker ends it. [`SETUP_TIMEOUT`]
+    /// unless a test sets another; the daemon never does.
+    pub fn set_setup_timeout(&self, timeout: Duration) {
+        self.lock().setup_timeout = timeout;
+    }
+
+    /// Marks one of `session`'s requests as being served (#429). While the guard lives the setup
+    /// cannot time out; dropping it restarts the idle clock.
+    ///
+    /// `None` when `session` is not the open setup's: a stale window serves nothing and changes
+    /// no clock.
+    pub fn serve_setup(&self, session: &str) -> Option<SetupService<'_>> {
+        let mut inner = self.lock();
+        match inner.setup.as_mut() {
+            Some(setup) if setup.session == session => {
+                setup.serving += 1;
+                Some(SetupService { gate: self, session: session.to_string() })
+            }
+            _ => None,
+        }
+    }
+
+    /// Ends one served request and starts the setup's idle clock again from `now`. A request for
+    /// a setup that ended meanwhile changes nothing.
+    fn end_request(&self, session: &str, now: Instant) {
+        let mut inner = self.lock();
+        let Some(setup) = inner.setup.as_mut() else { return };
+        if setup.session != session {
+            return;
+        }
+        setup.serving = setup.serving.saturating_sub(1);
+        setup.last_request = now;
     }
 
     /// The open setup's session id, if any.
@@ -261,11 +334,12 @@ impl IdentifyGate {
             return Tick::Idle;
         }
         // The setup's own timeout. Its end is its own answer: the ticker restores on it, and
-        // the setup is cleared so the tick after it is idle.
-        let setup_ended = inner
-            .setup
-            .as_ref()
-            .is_some_and(|setup| now.saturating_duration_since(setup.last_request) >= SETUP_TIMEOUT);
+        // the setup is cleared so the tick after it is idle. A request that is still being
+        // served holds it open (#429): the setup must not be put back under a commit that is
+        // waiting on the device, and its clock starts again when that request ends.
+        let setup_ended = inner.setup.as_ref().is_some_and(|setup| {
+            setup.serving == 0 && now.saturating_duration_since(setup.last_request) >= inner.setup_timeout
+        });
         if setup_ended {
             inner.setup = None;
         }
@@ -806,6 +880,39 @@ mod tests {
         assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::SetupExpired);
         assert!(!gate.is_active(), "engine frames flow again");
         assert_eq!(gate.tick(t0 + Duration::from_millis(SETUP_TIMEOUT_MS), &devices), Tick::Idle);
+    }
+
+    /// #429: a request that outlives the setup's timeout holds the session open, and the idle
+    /// clock starts again when it ends. A device that answers a commit slowly must not cost the
+    /// owner the session mid-save.
+    #[test]
+    fn a_served_request_holds_the_setup_open_past_the_timeout() {
+        let (gate, devices, t0) = setup();
+        gate.start_setup(DeviceId("openrgb:board".into()), 0, "s".into(), t0);
+        let served = gate.serve_setup("s").expect("the open session can be served");
+        // Four timeouts' worth: an unserved setup would have ended at the first.
+        for step in 1..=4 {
+            assert!(
+                matches!(gate.tick(t0 + SETUP_TIMEOUT * step, &devices), Tick::Frames(_)),
+                "a served request keeps the setup open at {step} timeouts"
+            );
+            assert_eq!(gate.setup_session().as_deref(), Some("s"), "still open at {step} timeouts");
+        }
+        drop(served);
+        // The clock starts again from the end of the request, not from its start.
+        let ended = Instant::now();
+        assert!(
+            matches!(gate.tick(ended + SETUP_TIMEOUT - Duration::from_millis(1), &devices), Tick::Frames(_)),
+            "the request's own end renews the setup"
+        );
+        assert_eq!(gate.tick(ended + SETUP_TIMEOUT + Duration::from_secs(1), &devices), Tick::SetupExpired);
+
+        // Nothing is served for a session that is not open: a stale window changes no clock.
+        let (closed, _, t1) = setup();
+        assert!(closed.serve_setup("s").is_none(), "a setup that never opened serves nothing");
+        closed.start_setup(DeviceId("openrgb:board".into()), 0, "current".into(), t1);
+        assert!(closed.serve_setup("stale").is_none(), "another session's id serves nothing");
+        assert_eq!(closed.tick(t1 + SETUP_TIMEOUT, &devices), Tick::SetupExpired);
     }
 
     /// Every request renews the timeout, so a window that keeps asking keeps the setup open.

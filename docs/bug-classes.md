@@ -366,6 +366,18 @@ line. Three mechanisms, and one bug the timing only exposed.
   for. Two more tests in that file made the same read (`a_failed_rollback_keeps_both_records`,
   `start_up_rolls_back_a_leftover_intent`) and wait now. No guard: the mistake is two correct
   lines in the wrong order, which `timing_class.rs` cannot tell from a read that is safe.
+- [#429](https://github.com/iAmChumby/canvas-rgb/issues/429):
+  `a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry` (`crates/canvas-daemon/tests/chains.rs`)
+  failed once in CI with `left: None` where the setup session should be. The wait was right; the product
+  was wrong. A refused resize is five seconds of the adapter's silence (`REPLY_TIMEOUT`,
+  `crates/canvas-adapters/src/openrgb.rs`) against the setup's six-second idle limit (`SETUP_TIMEOUT_MS`,
+  `crates/canvas-proto/src/scene.rs`), so a loaded runner pushed the commit past the limit and the
+  identify ticker ended the session under the save. Measured: the refused commit took 5.043 s of the
+  6 s; 30 of 30 passes alone and 16 of 16 with two copies at once, and with the limit set to 500 ms the
+  old code loses the session in every run. **Rule:** a session that is serving a request does not idle
+  out (`identify::SetupService`: every chain route that waits on the device holds one, and the idle
+  clock restarts when it ends); a test for that changes the limit, never the wait, so the verdict
+  stops depending on how fast the machine is.
 - [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
   another starter while one is loading, and lands both"
   (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
