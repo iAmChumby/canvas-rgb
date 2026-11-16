@@ -30,27 +30,27 @@ fn build() -> Arc<App> {
 }
 
 #[tokio::test]
-async fn a_frame_sink_drops_the_old_frame_when_the_device_is_slow() {
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+async fn a_frame_sink_keeps_the_newest_frame_when_the_device_is_slow() {
+    let (tx, mut rx) = tokio::sync::watch::channel(Vec::new());
     let sink = DeviceSink::new(DeviceId("fake:one".into()), tx);
     sink.submit(vec![canvas_proto::Rgb8::WHITE]);
     sink.submit(vec![canvas_proto::Rgb8::BLACK]);
 
-    // The first frame is there; the second was dropped rather than queued.
-    let first = rx.try_recv().expect("the first frame is queued");
-    assert_eq!(first, vec![canvas_proto::Rgb8::WHITE]);
-    assert!(rx.try_recv().is_err(), "the channel holds one frame at most");
+    // The writer takes the newest frame: the one that is there when it is ready (#308).
+    let newest = rx.borrow_and_update().clone();
+    assert_eq!(newest, vec![canvas_proto::Rgb8::BLACK]);
 }
 
 #[tokio::test]
 async fn the_frame_sink_never_blocks_the_engine() {
-    let (tx, _rx) = tokio::sync::mpsc::channel(1);
+    let (tx, _rx) = tokio::sync::watch::channel(Vec::new());
     let sink = DeviceSink::new(DeviceId("fake:one".into()), tx);
-    // Fill the channel, then keep submitting: this must not block.
+    // Keep submitting: this must not block.
     for _ in 0..100 {
         sink.submit(vec![canvas_proto::Rgb8::WHITE]);
     }
 }
+
 
 #[tokio::test]
 async fn the_zone_sizes_are_re_applied_on_every_connect() {
