@@ -18,10 +18,10 @@ Test-Case 'Skip-Case at top level (no Test-Case around it) is counted once as SK
     Assert-True ($out -match 'COUNTS=0,0,1') "got: $out"
 }
 
-Test-Case 'a skip followed by a throw is still not counted as FAIL' {
+Test-Case 'a skip followed by a throw counts as SKIP and FAIL, never PASS' {
     $cmd = ". '$assert'; Test-Case 'inner' { Skip-Case 'the skip' 'reason'; throw 'after skip' }; Write-Output ('COUNTS={0},{1},{2}' -f `$script:Pass, `$script:Fail, `$script:Skipped)"
     $out = (& powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String)
-    Assert-True ($out -match 'COUNTS=0,0,1') "got: $out"
+    Assert-True ($out -match 'COUNTS=0,1,1') "got: $out"
 }
 
 Complete-Tests 'AssertHarness'
