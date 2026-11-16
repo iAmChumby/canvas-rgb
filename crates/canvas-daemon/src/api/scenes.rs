@@ -214,7 +214,7 @@ pub async fn create_scene(
     State(app): State<Arc<App>>,
     Json(request): Json<SceneCreate>,
 ) -> ApiResult<SceneAnswer> {
-    let SceneCreate { name, copy_of, groups: asked, dry_run } = request.0;
+    let SceneCreate { name, copy_of, groups: asked, dry_run } = request;
     let name = name.trim().to_string();
     if name.is_empty() {
         return Err(ApiFailure::validation("a scene needs a name"));
@@ -283,7 +283,7 @@ pub async fn put_scene(
     Path(id): Path<String>,
     Json(put): Json<ScenePut>,
 ) -> Result<SceneAnswer, SceneFailure> {
-    let ScenePut { scene, expected_rev, dry_run } = put.0;
+    let ScenePut { scene, expected_rev, dry_run } = put;
     let lock = app.scene.lock().await;
     let old = find_scene(&app, &id).await?;
     if scene.id != id {
