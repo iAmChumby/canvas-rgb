@@ -33,7 +33,7 @@ use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props};
 use canvas_proto::scene::{Arrangement, GroupMode, Light, LightId, SCENE_FADE_MS};
 use canvas_proto::traits::{
-    AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, ScreenFrame,
+    AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, ScreenFrame, StripRead,
 };
 use tracing::warn;
 
@@ -78,6 +78,9 @@ pub(crate) struct GroupSlot {
     pub effect: Option<Box<dyn Effect>>,
     /// What the effect asked for, read once when it was installed.
     pub needs: InputNeeds,
+    /// How a strip or ring light reads this effect's picture, read once when the effect was
+    /// installed (#400): the engine never asks per frame.
+    pub strip_read: StripRead,
     /// Unique for the engine's whole life. The render thread puts an effect back only when the
     /// slot still has the generation it took it at: a replaced effect is dropped instead.
     pub effect_generation: u64,
@@ -88,6 +91,32 @@ pub(crate) struct GroupSlot {
     /// Why the group is dark: the text of a panic. The effect is not called again until it is
     /// replaced.
     pub failed: Option<String>,
+}
+
+impl GroupSlot {
+    /// Installs a freshly built effect in this slot: its needs and how a strip reads it
+    /// (`strip_read`, #400) come from that build, read once by the caller, never per frame.
+    /// The effect's clock restarts and its pending props are dropped.
+    ///
+    /// Returns the effect it replaced, for the caller to drop outside the state lock.
+    pub(crate) fn install(
+        &mut self,
+        effect: Option<Box<dyn Effect>>,
+        needs: InputNeeds,
+        strip_read: StripRead,
+        failed: Option<String>,
+        generation: u64,
+    ) -> Option<Box<dyn Effect>> {
+        let old = self.effect.take();
+        self.effect = effect;
+        self.needs = needs;
+        self.strip_read = strip_read;
+        self.effect_generation = generation;
+        self.started = Instant::now();
+        self.pending_props = None;
+        self.failed = failed;
+        old
+    }
 }
 
 /// The running scene, in the engine's state.
@@ -108,6 +137,8 @@ pub(crate) struct GroupWork {
     pub effect: Option<Box<dyn Effect>>,
     pub effect_generation: u64,
     pub needs: InputNeeds,
+    /// How a strip or ring light reads the effect's picture (#400), read when it was installed.
+    pub strip_read: StripRead,
     pub started: Instant,
     pub brightness: u8,
     pub pending_props: Option<Props>,
@@ -156,6 +187,7 @@ impl SceneState {
                 effect: if g.failed.is_some() { None } else { g.effect.take() },
                 effect_generation: g.effect_generation,
                 needs: g.needs,
+                strip_read: g.strip_read,
                 started: g.started,
                 brightness: g.brightness,
                 pending_props: g.pending_props.take(),
@@ -809,14 +841,32 @@ fn run_group(
                 scale_light(out, factor);
             }
             _ if live => {
-                sampling::sample_leds(
-                    &group.canvas.pixels,
-                    group.canvas.width,
-                    group.canvas.height,
-                    &light.leds,
-                    SCENE_SAMPLING,
-                    out,
-                );
+                // #400: an effect whose meaning is how high its picture reaches asks for the
+                // column, and then a strip or ring light reads the mean of its cell's x-range
+                // over the canvas's full height. Every other effect, and every grid and single
+                // light in any group, reads the cell at the LED as before.
+                let column = work.strip_read == StripRead::Column
+                    && group.shapes.get(index).is_some_and(|(_, arrangement)| {
+                        matches!(arrangement, Arrangement::Strip | Arrangement::Ring)
+                    });
+                if column {
+                    sampling::sample_led_columns(
+                        &group.canvas.pixels,
+                        group.canvas.width,
+                        group.canvas.height,
+                        &light.leds,
+                        out,
+                    );
+                } else {
+                    sampling::sample_leds(
+                        &group.canvas.pixels,
+                        group.canvas.width,
+                        group.canvas.height,
+                        &light.leds,
+                        SCENE_SAMPLING,
+                        out,
+                    );
+                }
                 scale_light(out, factor);
             }
             _ => {
@@ -918,6 +968,7 @@ mod tests {
                 brightness: 100,
                 effect: None,
                 needs: InputNeeds::default(),
+                strip_read: StripRead::Cell,
                 effect_generation: 1,
                 started: Instant::now(),
                 pending_props: None,
@@ -1034,6 +1085,9 @@ mod tests {
     }
 
     /// One group of `members`, playing `effect` at `brightness`.
+    ///
+    /// The strip read comes from the effect, read once here as the engine reads it when the
+    /// effect is installed (#400).
     fn state_playing(
         members: &[&str],
         lights: Vec<Light>,
@@ -1041,6 +1095,7 @@ mod tests {
         brightness: u8,
     ) -> SceneState {
         let mut scene = state(members, lights);
+        scene.groups[0].strip_read = effect.as_deref().map(|e| e.strip_read()).unwrap_or_default();
         scene.groups[0].effect = effect;
         scene.groups[0].brightness = brightness;
         scene
@@ -1327,6 +1382,176 @@ mod tests {
             .collect()
     }
 
+    /// The mean of a list of per-LED figures, 0.0 for an empty one.
+    fn mean(values: &[f64]) -> f64 {
+        if values.is_empty() {
+            0.0
+        } else {
+            values.iter().sum::<f64>() / values.len() as f64
+        }
+    }
+
+    /// Installs `effect` in the scene's one group the way the engine does when a group's effect
+    /// changes (#400): initialised with `props`, its strip read asked once here, and the
+    /// generation moved so the runner starts the new picture on a clear canvas.
+    fn install_effect(scene: &mut SceneState, mut effect: Box<dyn Effect>, props: &Props) {
+        effect.init(props);
+        let read = effect.strip_read();
+        let generation = scene.groups[0].effect_generation + 1;
+        let replaced =
+            scene.groups[0].install(Some(effect), InputNeeds::default(), read, None, generation);
+        assert!(replaced.is_none(), "one frame at a time in this test: no effect was in flight");
+    }
+
+    /// Replacing a group's effect changes how the strip reads it each time (#400): Rain asks
+    /// for the cell, Fire for the column, and back to Rain.
+    ///
+    /// Rain's picture is blue on blue, so every LED reads blue however it is sampled. Fire's
+    /// flame burns at the bottom of the canvas: a column read sees it, and the cell at
+    /// mid-height reads black, so the orange is the proof that the new reading reached the
+    /// strip. Rain again puts the blue back.
+    #[test]
+    fn replacing_a_groups_effect_changes_how_the_strip_reads_it() {
+        let mut scene = rain_scene(&["d1"], GroupMode::EachItsOwn);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+
+        for _ in 0..4 {
+            frame(&mut scene, &mut runner, &devices);
+        }
+        let rain = take(&mut runner, "d1", 8);
+        assert_eq!(scene.groups[0].strip_read, StripRead::Cell, "Rain reads the cell");
+        assert!(rain.iter().all(|c| c.b > c.r), "Rain reads blue on every LED: {rain:?}");
+
+        install_effect(
+            &mut scene,
+            Box::new(canvas_effects::fire::Fire::with_seed(372)),
+            &Props::new(),
+        );
+        assert_eq!(scene.groups[0].strip_read, StripRead::Column, "Fire reads the column");
+        for _ in 0..30 {
+            frame(&mut scene, &mut runner, &devices);
+        }
+        let fire = take(&mut runner, "d1", 8);
+        assert!(
+            fire.iter().any(|c| c.r > c.b && c.r > 0),
+            "the column reaches Fire's flame, which burns below mid-height: {fire:?}"
+        );
+        assert_ne!(fire, rain, "the reading changed when the effect did");
+
+        install_effect(
+            &mut scene,
+            Box::new(canvas_effects::rain::Rain::with_seed(373)),
+            &purple_rain_props(),
+        );
+        assert_eq!(scene.groups[0].strip_read, StripRead::Cell, "Rain reads the cell again");
+        for _ in 0..4 {
+            frame(&mut scene, &mut runner, &devices);
+        }
+        let rain_again = take(&mut runner, "d1", 8);
+        assert!(
+            rain_again.iter().all(|c| c.b > c.r),
+            "the flame's orange is gone and Rain is back: {rain_again:?}"
+        );
+        assert_ne!(rain_again, fire, "the reading changed when the effect did");
+    }
+
+    /// R2 (#400): Fire's mean level on an 8-LED strip with its own column read is at least the
+    /// old full-height band's, both read from the same canvas on the same frames.
+    #[test]
+    fn fire_reads_a_strip_at_least_as_bright_as_the_old_band() {
+        let mut scene = state_playing(
+            &["d1#z0"],
+            vec![light("d1")],
+            Some(Box::new(canvas_effects::fire::Fire::with_seed(372))),
+            100,
+        );
+        scene.groups[0].mode = GroupMode::EachItsOwn;
+        assert_eq!(scene.groups[0].strip_read, StripRead::Column, "Fire reads the column");
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("d1", 8)];
+        let band = old_band_cells(8);
+        let mut engine = Stats::new(8);
+        let mut old = Stats::new(8);
+        for index in 0..RAIN_WARMUP_FRAMES + 120 {
+            frame(&mut scene, &mut runner, &devices);
+            let now = take(&mut runner, "d1", 8);
+            let group = &runner.groups[0];
+            // The old band is read from the canvas this frame drew, not from another run.
+            let before = sample_cells(
+                &group.canvas.pixels,
+                group.canvas.width,
+                group.canvas.height,
+                &band,
+                Rule::Mean,
+            );
+            if index >= RAIN_WARMUP_FRAMES {
+                engine.add(&now);
+                old.add(&before);
+            }
+        }
+        let engine_level = mean(&engine.levels());
+        let old_level = mean(&old.levels());
+        eprintln!(
+            "#400 Fire on a strip: column read mean level {engine_level:.2}, old band {old_level:.2}"
+        );
+        assert!(
+            engine_level >= old_level,
+            "Fire reads {engine_level:.2} of 255 on the strip, below the old band's {old_level:.2}"
+        );
+    }
+
+    /// R3 (#400): Audio Spectrum's level under the loud bands rises with the magnitude, and a
+    /// quiet band is lit rather than black. The bars grow upward from the bottom, so only the
+    /// column read sees a short bar at all.
+    #[test]
+    fn audio_spectrum_rises_across_its_bands_on_a_strip() {
+        let mut levels = [0.0f64; 3];
+        for (index, magnitude) in [0.2f32, 0.5, 1.0].into_iter().enumerate() {
+            let mut scene = state_playing(
+                &["d1#z0"],
+                vec![light("d1")],
+                Some(Box::new(canvas_effects::audio_spectrum::AudioSpectrum::new())),
+                100,
+            );
+            scene.groups[0].mode = GroupMode::EachItsOwn;
+            scene.groups[0].needs = InputNeeds { screen: false, audio: true };
+            assert_eq!(scene.groups[0].strip_read, StripRead::Column, "the bars read the column");
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8)];
+            let mut frame_params = params();
+            frame_params.input_source = Some(Arc::new(LoudBands { magnitude }));
+            let mut stats = Stats::new(8);
+            for index in 0..RAIN_WARMUP_FRAMES + 120 {
+                frame_with(&mut scene, &mut runner, &devices, &frame_params);
+                let now = take(&mut runner, "d1", 8);
+                if index >= RAIN_WARMUP_FRAMES {
+                    stats.add(&now);
+                }
+            }
+            // The LEDs standing under the loud bands, read off the plan the runner samples.
+            let under: Vec<f64> = runner.groups[0]
+                .plan
+                .lights
+                .iter()
+                .flat_map(|l| l.leds.iter().zip(stats.levels()))
+                .filter(|(led, _)| led.center_x >= LOUD_X0 && led.center_x < LOUD_X1)
+                .map(|(_, level)| level)
+                .collect();
+            assert!(!under.is_empty(), "no LED stands under the loud bands");
+            levels[index] = under.iter().sum::<f64>() / under.len() as f64;
+        }
+        eprintln!(
+            "#400 Audio Spectrum on a strip at 0.2 / 0.5 / 1.0: {:.2} / {:.2} / {:.2}",
+            levels[0], levels[1], levels[2]
+        );
+        assert!(levels[0] > 0.0, "a band at 0.2 reads {:.2} of 255, not lit", levels[0]);
+        assert!(
+            levels[0] < levels[1] && levels[1] < levels[2],
+            "the level must rise with the magnitude: {levels:?}"
+        );
+    }
+
     /// Every LED of an 8-LED strip in "each its own" must move with Rain's thin lines. Before
     /// the fix a strip LED averaged a full-height column holding about 19 streaks and its
     /// range was about 6 of 255.
@@ -1503,6 +1728,81 @@ mod tests {
             let want = Rgb8::from_f32([0.2, 0.4, 0.6]);
             for (led, colour) in now.iter().enumerate() {
                 assert_eq!(*colour, want, "{mode:?} LED {led}: {now:?}");
+            }
+        }
+    }
+
+    /// A test effect with another effect's picture and a chosen strip read (#400): how a
+    /// reading behaves is the sampling step's question, whatever effect asked for it.
+    struct ReadAs<E: Effect> {
+        inner: E,
+        read: StripRead,
+    }
+
+    impl<E: Effect> Effect for ReadAs<E> {
+        fn schema(&self) -> PropertySchema {
+            self.inner.schema()
+        }
+
+        fn init(&mut self, props: &Props) {
+            self.inner.init(props);
+        }
+
+        fn update(&mut self, dt: f32, canvas: &mut Canvas, inputs: &Inputs) {
+            self.inner.update(dt, canvas, inputs);
+        }
+
+        fn strip_read(&self) -> StripRead {
+            self.read
+        }
+    }
+
+    /// R4 (#400): both readings keep the picture where it is. A flat colour reads exactly, and
+    /// a horizontal gradient gives each LED the gradient's value at its own centre within
+    /// 3 of 255, in "each its own".
+    #[test]
+    fn both_readings_keep_a_flat_colour_and_a_horizontal_gradient() {
+        let want = Rgb8::from_f32([0.2, 0.4, 0.6]);
+        for read in [StripRead::Cell, StripRead::Column] {
+            let mut scene = state_playing(
+                &["d1#z0"],
+                vec![light("d1")],
+                Some(Box::new(ReadAs { inner: FlatColour, read })),
+                100,
+            );
+            scene.groups[0].mode = GroupMode::EachItsOwn;
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8)];
+            frame(&mut scene, &mut runner, &devices);
+            let flat = take(&mut runner, "d1", 8);
+            for (led, colour) in flat.iter().enumerate() {
+                assert_eq!(*colour, want, "{read:?} flat LED {led}: {flat:?}");
+            }
+
+            let mut scene = state_playing(
+                &["d1#z0"],
+                vec![light("d1")],
+                Some(Box::new(ReadAs { inner: HorizontalRamp, read })),
+                100,
+            );
+            scene.groups[0].mode = GroupMode::EachItsOwn;
+            let mut runner = SceneRunner::new();
+            frame(&mut scene, &mut runner, &devices);
+            let (centres, width) = {
+                let group = &runner.groups[0];
+                let centres =
+                    group.plan.lights[0].leds.iter().map(|led| led.center_x).collect::<Vec<f32>>();
+                (centres, group.canvas.width as f32)
+            };
+            let now = take(&mut runner, "d1", 8);
+            for (led, (centre, colour)) in centres.iter().zip(&now).enumerate() {
+                let expect = ramp_value_at((centre - 0.5) / (width - 1.0));
+                for (got, expect) in [colour.r, colour.g, colour.b].into_iter().zip(expect) {
+                    assert!(
+                        i32::from(got).abs_diff(expect) <= 3,
+                        "{read:?} gradient LED {led}: {colour:?} against {expect} at x {centre}: {now:?}"
+                    );
+                }
             }
         }
     }
@@ -2341,7 +2641,9 @@ mod tests {
 
     /// Measures every built-in effect on an 8-LED strip in "each its own" and prints the
     /// table: the widest channel range every LED shows over 120 frames after the warm-up,
-    /// and the mean frame-to-frame change, for the capped cell and for the old band.
+    /// and the mean frame-to-frame change, for the effect's own strip read (#400: the
+    /// column for Fire and Audio Spectrum, the cell for everything else) and for the old
+    /// full-height band.
     ///
     /// This is a measurement, not a verdict, so it is ignored by the suite. Run it with:
     /// `cargo test -p canvas-core -- --ignored --nocapture --test-threads=1 measure_every_effect`
@@ -2426,17 +2728,17 @@ mod tests {
                 break;
             }
         }
-        let (rule, shape) = match winner {
+        match winner {
             Some((rule, shape)) => {
                 println!("#372 the rule that ships: {} {}", rule.name(), shape.name());
-                (rule, shape)
             }
             None => {
-                println!("#372 no candidate passes all four: the rule does not change");
-                println!("#372 the cost of the rule that ships, against the old full-height band");
-                (Rule::Mean, Shape::Today)
+                println!("#372 no single rule passes all four. #400 answers this per effect:");
+                println!(
+                    "#400 Fire and Audio Spectrum read the column; every other built-in reads the cell."
+                );
             }
-        };
+        }
 
         let effects: Vec<Measured> = vec![
             Measured {
@@ -2509,11 +2811,27 @@ mod tests {
                 audio: true,
             },
         ];
-        let cells = shape.cells(0.0, 320.0, 8);
-        println!("#372 effect | new rule range | old range | new rule change | old change | new rule level | old level");
+        // #400: the rule is per effect, so each row is measured with the read its own
+        // `strip_read` asks for: the full-height column for Fire and Audio Spectrum, today's
+        // cell for every other effect.
+        println!(
+            "#400 effect | read | range | old range | change | old change | level | old level"
+        );
         for measured in effects {
-            let (candidate, old) =
-                measure_effect(measured.effect, measured.props, measured.audio, std::slice::from_ref(&cells), rule);
+            let read = measured.effect.strip_read();
+            let cells = match read {
+                StripRead::Column => {
+                    column_cells(crate::arrangement::STRIP_CELL_MAX, 0.0, 320.0, 8)
+                }
+                StripRead::Cell => Shape::Today.cells(0.0, 320.0, 8),
+            };
+            let (candidate, old) = measure_effect(
+                measured.effect,
+                measured.props,
+                measured.audio,
+                std::slice::from_ref(&cells),
+                Rule::Mean,
+            );
             let candidate_range = candidate[0].widest();
             let old_range = old.widest();
             let candidate_change = candidate[0].flicker();
@@ -2521,7 +2839,7 @@ mod tests {
             let candidate_level = candidate[0].levels();
             let old_level = old.levels();
             println!(
-                "#372 {} | {}..{} | {}..{} | {candidate_change:.3} | {old_change:.3} | {}..{} | {}..{}",
+                "#400 {} | {read:?} | {}..{} | {}..{} | {candidate_change:.3} | {old_change:.3} | {}..{} | {}..{}",
                 measured.name,
                 candidate_range.iter().min().unwrap_or(&0),
                 candidate_range.iter().max().unwrap_or(&0),
@@ -2533,7 +2851,7 @@ mod tests {
                 old_level.iter().cloned().fold(f64::MIN, f64::max).round() as i64,
             );
             println!(
-                "#372 {} per LED: new rule {candidate_range:?} change {:?} level {:?} | old {old_range:?} change {:?} level {:?}",
+                "#400 {} per LED: read {read:?} {candidate_range:?} change {:?} level {:?} | old {old_range:?} change {:?} level {:?}",
                 measured.name,
                 candidate[0].mean_change(),
                 candidate_level.iter().map(|l| l.round()).collect::<Vec<f64>>(),
@@ -2626,7 +2944,11 @@ mod group_preview_tests {
     }
 
     /// A scene of one group `id` over device `d1` (4 LEDs), playing `effect` at `brightness`.
+    ///
+    /// The strip read is the effect's own, read once here the way the engine reads it when the
+    /// effect is installed (#400).
     fn scene_of(id: &str, effect: Option<Box<dyn Effect>>, brightness: u8) -> SceneState {
+        let strip_read = effect.as_deref().map(|e| e.strip_read()).unwrap_or_default();
         SceneState {
             generation: 1,
             lights: vec![light("d1")],
@@ -2637,6 +2959,7 @@ mod group_preview_tests {
                 brightness,
                 effect,
                 needs: InputNeeds::default(),
+                strip_read,
                 effect_generation: 1,
                 started: Instant::now(),
                 pending_props: None,

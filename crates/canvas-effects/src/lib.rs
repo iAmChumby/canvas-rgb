@@ -143,6 +143,30 @@ mod tests {
         assert!(registry().iter().all(|f| f().schema().id != "poison"));
     }
 
+    /// The strip read is a decision per effect, not a default that happens to be right (#400).
+    ///
+    /// Only the two effects whose meaning is how high the picture reaches ask for the full
+    /// column: Fire's flame and Audio Spectrum's bars. Every other built-in keeps the small
+    /// cell, which is what makes Rain move on a strip. A new effect that needs the column has
+    /// to say so here, so this test is where that decision is recorded.
+    #[test]
+    fn only_fire_and_audio_spectrum_read_a_strip_as_a_column() {
+        let mut column: Vec<String> = Vec::new();
+        let mut cell: Vec<String> = Vec::new();
+        for make in registry() {
+            let effect = make();
+            let id = effect.schema().id;
+            match effect.strip_read() {
+                canvas_proto::StripRead::Column => column.push(id),
+                canvas_proto::StripRead::Cell => cell.push(id),
+            }
+        }
+        assert_eq!(column, ["fire".to_string(), "audio_spectrum".to_string()]);
+        // The two lists are the whole registry, so every other built-in answered the cell.
+        assert_eq!(column.len() + cell.len(), registry().len(), "every built-in is counted once");
+        assert!(cell.iter().all(|id| id != "fire" && id != "audio_spectrum"), "{cell:?}");
+    }
+
     #[test]
     fn the_schema_names_are_the_display_names() {
         for (id, name) in native_ids().iter().zip(NAMES.iter()) {
