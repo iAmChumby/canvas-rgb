@@ -81,8 +81,10 @@ export function GroupStage({
   children,
 }: GroupStageProps) {
   const off = group.plays.type === "off";
-  // A pattern has no picture and a group set to Off draws nothing: neither opens a socket.
-  const preview = useGroupPreview({ groupId: off || pattern ? null : group.id, saved });
+  // A pattern has no picture, so it opens no socket at all. A group set to Off does open one:
+  // the daemon sends it black frames, and the stage says "Off" from the group's own state
+  // rather than reading it out of the frames.
+  const preview = useGroupPreview({ groupId: pattern ? null : group.id, saved });
 
   const state: GroupStageState = failed
     ? "failed"

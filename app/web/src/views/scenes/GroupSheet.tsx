@@ -151,7 +151,8 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   // - the daemon holds the group in its saved scene: a group that is still a draft is
   //   answered with 404, so the stage waits for the save instead of opening a socket.
   const scenes = useSnap((st) => st.scenes);
-  const savedScene = scenes?.scenes.find((s) => s.id === scenes.active);
+  const activeId = scenes?.active ?? "";
+  const savedScene = scenes?.scenes.find((s) => s.id === activeId);
   const saved = savedScene?.groups.some((g) => g.id === groupId) ?? false;
   // - the lights are paused: the engine sends nothing at all.
   const paused = useSnap((st) => st.status?.power === "paused");

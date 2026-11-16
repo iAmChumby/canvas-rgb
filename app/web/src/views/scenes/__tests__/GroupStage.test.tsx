@@ -145,10 +145,12 @@ describe("the stage", () => {
     expect(screen.getByText("A pattern is drawn on the lights only. The LEDs show it.")).toBeTruthy();
   });
 
-  it("says a group set to Off draws nothing, and opens no socket for it", async () => {
+  it("says a group set to Off draws nothing, and takes the black frames the daemon sends", async () => {
     render(stage({ group: OFF, effectName: "Off" }));
     await settle();
-    expect(FakeSocket.opened).toHaveLength(0);
+    // The daemon sends black frames for a group set to Off, so the socket is open: the stage
+    // says "Off" from the group's own state, not from the frames.
+    expect(FakeSocket.opened).toHaveLength(1);
     expect(screen.getByText("Off. Nothing is drawn.")).toBeTruthy();
   });
 

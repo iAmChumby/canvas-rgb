@@ -19,7 +19,8 @@ const PATTERN_ID_PREFIX = "pattern:";
  */
 export function demoGroupFrame(groupId: string, seconds: number): Uint8Array | null {
   const scenes = getSnap().scenes;
-  const active = scenes?.scenes.find((s) => s.id === scenes.active);
+  const activeId = scenes?.active ?? "";
+  const active = scenes?.scenes.find((s) => s.id === activeId);
   const group = active?.groups.find((g) => g.id === groupId);
   if (!group) return null;
   const rgb = new Uint8Array(GROUP_PREVIEW_W * GROUP_PREVIEW_H * 3);
