@@ -161,10 +161,24 @@ mod tests {
                 canvas_proto::StripRead::Cell => cell.push(id),
             }
         }
-        assert_eq!(column, ["fire".to_string(), "audio_spectrum".to_string()]);
-        // The two lists are the whole registry, so every other built-in answered the cell.
-        assert_eq!(column.len() + cell.len(), registry().len(), "every built-in is counted once");
-        assert!(cell.iter().all(|id| id != "fire" && id != "audio_spectrum"), "{cell:?}");
+        assert_eq!(column, ["fire", "audio_spectrum"]);
+        // Every built-in is named in one list or the other, so a new effect fails here until
+        // someone decides how a strip reads it.
+        assert_eq!(
+            cell,
+            [
+                "solid",
+                "white",
+                "gradient",
+                "rainbow_wave",
+                "spiral",
+                "breathing",
+                "color_cycle",
+                "aurora",
+                "rain",
+                "screen_ambience",
+            ]
+        );
     }
 
     #[test]

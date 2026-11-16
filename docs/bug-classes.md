@@ -982,3 +982,22 @@ uses.
   and the test fails on an entry that names no control. A colour control has no two ends and no
   built-in has a bool control, so neither is driven; a control added later is covered without
   editing the test.
+
+### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
+
+A strip LED reads a part of the effect's picture, and one rule decided which part for every
+effect. A rule tuned for one picture (a thin moving line) reads black from another (a picture
+whose meaning is how high it reaches).
+
+- [#372](https://github.com/iAmChumby/canvas-rgb/issues/372): the full-height band averaged
+  Rain's thin streaks away, so Rain stood still on strips and fans. The fix read a small cell at
+  mid-height.
+- [#400](https://github.com/iAmChumby/canvas-rgb/issues/400): that cell read Fire and Audio
+  Spectrum dark on a strip, because their picture sits at the bottom of the canvas.
+- **Class fix:** done (#400). The effect says how a strip reads it (`StripRead` in
+  `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names every built-in
+  with its read (`crates/canvas-effects/src/lib.rs`,
+  `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
+  decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
+  on a strip to a measured level. Open: a stack answers the cell, so Fire inside a stack still
+  reads dark on a strip.

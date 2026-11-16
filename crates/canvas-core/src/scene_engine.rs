@@ -78,7 +78,7 @@ pub(crate) struct GroupSlot {
     pub effect: Option<Box<dyn Effect>>,
     /// What the effect asked for, read once when it was installed.
     pub needs: InputNeeds,
-    /// How a strip or ring light reads this effect's picture, read once when the effect was
+    /// How a strip light reads this effect's picture, read once when the effect was
     /// installed (#400): the engine never asks per frame.
     pub strip_read: StripRead,
     /// Unique for the engine's whole life. The render thread puts an effect back only when the
@@ -137,7 +137,7 @@ pub(crate) struct GroupWork {
     pub effect: Option<Box<dyn Effect>>,
     pub effect_generation: u64,
     pub needs: InputNeeds,
-    /// How a strip or ring light reads the effect's picture (#400), read when it was installed.
+    /// How a strip light reads the effect's picture (#400), read when it was installed.
     pub strip_read: StripRead,
     pub started: Instant,
     pub brightness: u8,
@@ -842,12 +842,13 @@ fn run_group(
             }
             _ if live => {
                 // #400: an effect whose meaning is how high its picture reaches asks for the
-                // column, and then a strip or ring light reads the mean of its cell's x-range
-                // over the canvas's full height. Every other effect, and every grid and single
-                // light in any group, reads the cell at the LED as before.
+                // column, and then a strip light reads the mean of its cell's x-range over the
+                // canvas's full height. A ring keeps the cell: its LEDs sit on a circle, so a
+                // column would give the top and the bottom LED one colour. Every other effect,
+                // and every grid and single light in any group, reads the cell as before.
                 let column = work.strip_read == StripRead::Column
                     && group.shapes.get(index).is_some_and(|(_, arrangement)| {
-                        matches!(*arrangement, Arrangement::Strip | Arrangement::Ring)
+                        matches!(*arrangement, Arrangement::Strip)
                     });
                 if column {
                     sampling::sample_led_columns(
