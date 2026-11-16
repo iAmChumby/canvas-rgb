@@ -26,14 +26,11 @@ export function revealActiveKey(strip: HTMLElement): void {
   if (!key) return;
   revealKey(strip, key);
 }
-
 /**
  * Scrolls the strip so one key is in view: the key that moved must not go behind an edge, and the
  * pinned "+" key keeps its reach.
  */
 export function revealKey(strip: HTMLElement, key: HTMLElement): void {
-  const box = strip.getBoundingClientRect();
-  const k = key.getBoundingClientRect();
   const pin = strip.querySelector<HTMLElement>("[data-pin]");
   // The pin's own position is the reach: it sits where its content ends, or pinned to the right edge
   // once the keys overflow. Moving the strip can move it from the one to the other, so measure again

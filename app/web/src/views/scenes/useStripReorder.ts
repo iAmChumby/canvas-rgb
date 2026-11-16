@@ -23,6 +23,16 @@ const SCROLL_STEP = 12;
 /** Half the gap between two keys: the marker stands in the middle of it. */
 const GAP = 4;
 
+/**
+ * Scrolls the strip toward the pointer when the pointer is near one of its edges: a drag at the
+ * end of the strip reaches the scenes that are further along.
+ */
+export function scrollStripNear(el: HTMLElement, x: number): void {
+  const box = el.getBoundingClientRect();
+  if (x < box.left + EDGE) el.scrollLeft -= SCROLL_STEP;
+  else if (x > box.right - EDGE) el.scrollLeft += SCROLL_STEP;
+}
+
 /** The press that may become a drag. */
 interface Press {
   /** The scene that is pressed. */
@@ -145,9 +155,7 @@ export function useStripReorder(
     (x: number) => {
       const el = strip.current;
       if (!el) return;
-      const box = el.getBoundingClientRect();
-      if (x < box.left + EDGE) el.scrollLeft -= SCROLL_STEP;
-      else if (x > box.right - EDGE) el.scrollLeft += SCROLL_STEP;
+      scrollStripNear(el, x);
     },
     [strip],
   );
@@ -256,7 +264,7 @@ export function useStripReorder(
       window.removeEventListener("pointercancel", cancel);
       window.removeEventListener("keydown", key);
     };
-  }, [gapAt, onReorder, orderWith, scenes]);
+  }, [gapAt, onReorder, orderWith, scenes, scrollNear]);
 
   return { drag, marker, begin, refuse, swallowClick };
 }

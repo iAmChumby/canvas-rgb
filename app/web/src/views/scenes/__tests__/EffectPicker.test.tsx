@@ -29,7 +29,7 @@ vi.mock("@/components/Notify", () => ({ notify: vi.fn() }));
 
 import { patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS } from "@/lib/fixtures";
-import { EffectPicker, HTML_ONE_AT_A_TIME } from "@/views/scenes/EffectPicker";
+import { EffectPicker, HTML_LIMIT_NOTE } from "@/views/scenes/EffectPicker";
 import { useScene } from "@/views/scenes/useScene";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
@@ -66,7 +66,7 @@ const clone = <T,>(value: T): T => structuredClone(value);
 const FIRST = DEMO_LIGHTS[0];
 
 /** The scene the fake daemon holds. `html` says the other group plays an HTML effect. */
-function scene(html: boolean): Scene {
+function scene(html: boolean, second = false): Scene {
   return {
     id: "gaming",
     name: "Gaming",
@@ -88,12 +88,24 @@ function scene(html: boolean): Scene {
         mode: "flow_across",
         brightness: 100,
       },
+      ...(second
+        ? [
+            {
+              id: "g-three",
+              name: "Third",
+              members: [],
+              plays: { type: "effect", effect: "html:other", props: {} } as const,
+              mode: "flow_across" as const,
+              brightness: 100,
+            },
+          ]
+        : []),
     ],
   };
 }
 
-function answer(html = false): ScenesResponse {
-  const s = scene(html);
+function answer(html = false, second = false): ScenesResponse {
+  const s = scene(html, second);
   return {
     active: s.id,
     scenes: [s],
@@ -288,18 +300,28 @@ describe("the effect picker", () => {
     expect(api.scenes.put).not.toHaveBeenCalled();
   });
 
-  it("an HTML effect another group plays cannot be chosen, and says why", async () => {
-    patchSnap({ scenes: answer(true) });
-    api.scenes.list.mockResolvedValue(answer(true));
+  it("an HTML effect a scene already runs two of cannot be chosen, and says why", async () => {
+    // The scene runs two HTML effects already: a third is refused (the daemon's own limit).
+    patchSnap({ scenes: answer(true, true) });
+    api.scenes.list.mockResolvedValue(answer(true, true));
     render(<Harness />);
     const html = await screen.findByRole("button", { name: /Sample/ });
     expect(html.getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByText(new RegExp(HTML_ONE_AT_A_TIME))).toBeTruthy();
+    expect(screen.getByText(new RegExp(HTML_LIMIT_NOTE))).toBeTruthy();
     // Clicking it does nothing at all: no preview and no choice.
     fireEvent.click(html);
     fireEvent.pointerEnter(html);
     await new Promise((r) => setTimeout(r, 30));
     expect(api.scenes.put).not.toHaveBeenCalled();
+  });
+
+  it("a scene under the limit still offers an HTML effect", async () => {
+    // One HTML effect in the scene: the second one is allowed (the daemon runs two).
+    patchSnap({ scenes: answer(true) });
+    api.scenes.list.mockResolvedValue(answer(true));
+    render(<Harness />);
+    const html = await screen.findByRole("button", { name: /Sample/ });
+    expect(html.getAttribute("aria-disabled")).toBeNull();
   });
 
   // Plan Task 11: patterns are in the picker with the effects, under a heading of their own, and

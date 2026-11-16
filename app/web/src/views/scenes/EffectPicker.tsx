@@ -27,8 +27,12 @@ import type { Scene } from "@/proto/Scene";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
 
-/** How many groups of one scene may play an HTML effect (`crates/canvas-proto/src/scene.rs`). */
-export const SCENE_HTML_MAX = 1;
+/**
+ * How many groups of one scene may play an HTML effect (`SCENE_HTML_MAX` in
+ * `crates/canvas-proto/src/scene.rs`). The daemon is the one that counts them; a stack with an
+ * HTML layer counts as one there, and this count does not see the stacks.
+ */
+export const SCENE_HTML_MAX = 2;
 /** The id prefix of an HTML effect (`crates/canvas-proto/src/scene.rs`). */
 export const HTML_EFFECT_PREFIX = "html:";
 /** The id prefix of a stack: a stack is in the library after the user's own effects. */
@@ -36,7 +40,7 @@ export const STACK_EFFECT_PREFIX = "stack:";
 /** The id prefix of a pattern: `pattern:` + its name (`crates/canvas-proto/src/pattern.rs`). */
 export const PATTERN_EFFECT_PREFIX = "pattern:";
 /** Why an HTML effect cannot be chosen: the scene's limit, in words. */
-export const HTML_ONE_AT_A_TIME = "One HTML effect at a time";
+export const HTML_LIMIT_NOTE = `This scene already runs ${SCENE_HTML_MAX} HTML effects`;
 /** The mark a pattern carries when it lands exactly on every device of the group. */
 const FITS_MARK = "Fits";
 /** The entry that plays nothing. */
@@ -178,18 +182,19 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   /** The restore, kept where the way out of the picker can reach it. */
   const restoreRef = useRef<() => void>(() => undefined);
 
-  /** The other groups that play an HTML effect: the scene's one is taken. */
-  const htmlOwner = useMemo(() => {
-    if (!scene) return null;
-    const other = scene.groups.find(
-      (g) =>
-        g.id !== groupId && g.plays.type === "effect" && isHtmlEffect(g.plays.effect),
-    );
-    return other ?? null;
+  /**
+   * The other groups of the scene that play an HTML effect: the scene may run
+   * `SCENE_HTML_MAX` of them, and one more is refused (the daemon's own check).
+   */
+  const htmlOthers = useMemo(() => {
+    if (!scene) return 0;
+    return scene.groups.filter(
+      (g) => g.id !== groupId && g.plays.type === "effect" && isHtmlEffect(g.plays.effect),
+    ).length;
   }, [scene, groupId]);
-  /** This group plays an HTML effect itself: the scene's one is already its own. */
+  /** This group plays an HTML effect itself: the scene's count is its own. */
   const groupIsHtml = group?.plays.type === "effect" && isHtmlEffect(group.plays.effect);
-  const htmlBlocked = htmlOwner !== null && !groupIsHtml;
+  const htmlBlocked = !groupIsHtml && htmlOthers >= SCENE_HTML_MAX;
 
   const preview = useCallback(
     (target: string, mine: number) => {
@@ -371,7 +376,7 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     </span>
                     <span className={s.pickText}>
                       <span className={s.pickName}>{effect.name}</span>
-                      {blocked && <span className={s.pickNote}>{HTML_ONE_AT_A_TIME}</span>}
+                      {blocked && <span className={s.pickNote}>{HTML_LIMIT_NOTE}</span>}
                       {!blocked && isHtmlEffect(effect.id) && <Chip html>HTML</Chip>}
                       {builtOn && fit && (
                         <span className={s.pickMeta}>

@@ -1389,7 +1389,7 @@ export function useScene(): UseScene {
       await refreshScenes();
       return answer;
     },
-    [adoptScenes, fail, knownRev, pushCommand, refreshScenes, restoreScenes, waitQuiet],
+    [adoptScenes, fail, knownRev, pushCommand, restoreScenes, waitQuiet],
   );
 
   /**

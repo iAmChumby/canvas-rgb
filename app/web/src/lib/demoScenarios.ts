@@ -296,6 +296,12 @@ export const GROUPS_20 = "groups-20";
 export const LONG_NAMES = "long-names";
 export const NEW_LIGHT = "new-light";
 export const HEAVY = "heavy";
+/**
+ * `?state=html-groups`: the Focus scene runs two HTML effects already, so a third one cannot go
+ * into it (#368). The Evening scene's own group plays an HTML effect, and it holds lights the
+ * Focus scene does not, so the move takes nothing out and the limit is the scene's.
+ */
+export const HTML_GROUPS = "html-groups";
 
 /** The id the scene token names, if any. */
 function sceneToken(): string | null {
@@ -344,6 +350,34 @@ export function applySceneScenarios(
 
   const current = scenes.find((s) => s.id === active);
   if (current && has(GROUPS_0)) current.groups = [];
+
+  if (has(HTML_GROUPS)) {
+    // The Focus scene runs two HTML effects: a third one cannot go into it. The lights are the
+    // ones the Evening scene's Case group holds, so a move takes nothing out of the scene.
+    const focus = scenes.find((s) => s.id === "focus");
+    const evening = scenes.find((s) => s.id === "evening");
+    const warm = evening?.groups.find((g) => g.id === "g-warm");
+    if (focus && warm && warm.members.length >= 2) {
+      focus.groups = [
+        {
+          id: "g-html-1",
+          name: "Ink drop",
+          members: [warm.members[0]!],
+          plays: { type: "effect", effect: "html:ink-drop", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+        {
+          id: "g-html-2",
+          name: "Wet smear",
+          members: [warm.members[1]!],
+          plays: { type: "effect", effect: "html:wet-smear", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+      ];
+    }
+  }
   // The long names are 40 characters on the dot, the most the daemon keeps.
   if (current && has(LONG_NAMES)) {
     current.name = [..."Evening wind-down, the whole case on, low"].slice(0, 40).join("");

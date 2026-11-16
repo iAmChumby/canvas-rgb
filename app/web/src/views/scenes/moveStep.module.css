@@ -46,7 +46,7 @@
   margin: 0;
   max-width: 100%;
   color: var(--mute);
-  font-size: 13px;
+  font-size: var(--t14);
   line-height: 1.35;
   overflow-wrap: anywhere;
 }
