@@ -519,21 +519,26 @@ async fn one_thin_bar_is_read_by_the_led_that_stands_in_it() {
     let effect = canvas_effects::create("audio_spectrum").expect("the built-in effect exists");
     run_on_d0(&engine, effect, &Props::new());
 
+    // The LEDs the newest frame lights. The effect needs a few frames to raise the bar, so the
+    // verdict waits for the frame it is about and is never read after a fixed pause.
+    let lit_now = || -> Vec<usize> {
+        let frames = sink.frames.lock().unwrap_or_else(|e| e.into_inner());
+        frames
+            .last()
+            .map(|last| {
+                last.iter()
+                    .enumerate()
+                    .filter(|(_, colour)| **colour != Rgb8::BLACK)
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
     assert!(
-        wait_until(Duration::from_secs(10), || sink.lit()),
-        "the one bar was drawn"
+        wait_until(Duration::from_secs(10), || lit_now() == under),
+        "only the LED that stands in the bar reads it: lit {:?}, under the bar {under:?}",
+        lit_now()
     );
-    // Let the effect settle on the bar before the last frame is read.
-    std::thread::sleep(Duration::from_millis(300));
-    let frames = sink.frames.lock().unwrap_or_else(|e| e.into_inner()).clone();
-    let last = frames.last().expect("a frame was submitted").clone();
-    let lit: Vec<usize> = last
-        .iter()
-        .enumerate()
-        .filter(|(_, colour)| **colour != Rgb8::BLACK)
-        .map(|(index, _)| index)
-        .collect();
-    assert_eq!(lit, under, "only the LED that stands in the bar reads it");
     eprintln!(
         "#372 one thin bar: the bar covers the pixels {}..{} and the LED(s) {under:?} read it",
         band.0, band.1
