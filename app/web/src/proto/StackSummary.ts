@@ -17,7 +17,7 @@ name: string,
  */
 layers: number, 
 /**
- * How many of those are HTML effects (the slow, capped kind).
+ * How many HTML runtimes it starts (the slow, capped kind): one for each layer whose effect is HTML and one for each HTML mask.
  */
 html_layers: number, 
 /**

@@ -119,6 +119,23 @@ describe("the Scenes effect picker keeps one width (#367)", () => {
     }
   });
 
+  it("the line that says why a row cannot be chosen stays on one line (#370)", () => {
+    // A second line is taller than the strip beside it, so the row would grow: the row says a few
+    // words on one line, with no reserved height of its own, and the daemon's whole sentence is on
+    // the line's title and on the line under the list, whose two lines are already reserved.
+    const note = forSelector(scenesCss, ".pickNote");
+    expect(note.length).toBeGreaterThan(0);
+    for (const r of note) {
+      expect(decl(r, "white-space"), ".pickNote wraps, so a longer sentence makes its row taller").toBe("nowrap");
+      expect(decl(r, "text-overflow")).toBe("ellipsis");
+      expect(decl(r, "overflow")).toBe("hidden");
+      expect(decl(r, "height")).toBeUndefined();
+    }
+    const picker = read("src/views/scenes/EffectPicker.tsx");
+    expect(picker).toContain("<span className={s.pickNote} title={blockedWords}>");
+    expect(picker).toContain("<p className={s.pickerHint} data-why={asksWhy || undefined}>");
+  });
+
   it("the menu is as wide as the design says, not as wide as its content", () => {
     // The panel is as wide as its content, so the line under the list - which says what the
     // lights show - moved the whole menu. The width is set in the stylesheet instead, and it is
