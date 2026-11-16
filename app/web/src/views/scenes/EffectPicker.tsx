@@ -8,15 +8,17 @@
 // makes, not a change the owner made, so it is not on the undo stack and every way out of the
 // picker puts the old effect back.
 //
-// An HTML effect is the engine's own runtime, and a scene may hold one at a time
-// (`SCENE_HTML_MAX` in `crates/canvas-proto/src/scene.rs`). When another group already plays
-// one, the HTML effects are shown and say why they cannot be chosen; they are not offered.
+// An HTML effect is the engine's own runtime, and a scene may hold `SCENE_HTML_MAX` of them at a
+// time (two, #370). A stack counts one for each of its HTML layers and masks. When the scene's
+// runtimes are already spoken for by other groups, the HTML effects are shown and say why they
+// cannot be chosen; they are not offered.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DotsNine, Moon } from "@phosphor-icons/react";
 import { Chip } from "@/components/Chip";
 import { Thumb } from "@/components/Thumb";
 import { api } from "@/lib/endpoints";
+import { htmlLimitSentence, SCENE_HTML_MAX } from "@/lib/htmlLimit";
 import { groupFit, kindWords } from "@/lib/patternFit";
 import { PatternTile } from "@/views/effects/PatternTile";
 import { useSnap } from "@/lib/store";
@@ -27,16 +29,12 @@ import type { Scene } from "@/proto/Scene";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
 
-/** How many groups of one scene may play an HTML effect (`crates/canvas-proto/src/scene.rs`). */
-export const SCENE_HTML_MAX = 1;
 /** The id prefix of an HTML effect (`crates/canvas-proto/src/scene.rs`). */
 export const HTML_EFFECT_PREFIX = "html:";
 /** The id prefix of a stack: a stack is in the library after the user's own effects. */
 export const STACK_EFFECT_PREFIX = "stack:";
 /** The id prefix of a pattern: `pattern:` + its name (`crates/canvas-proto/src/pattern.rs`). */
 export const PATTERN_EFFECT_PREFIX = "pattern:";
-/** Why an HTML effect cannot be chosen: the scene's limit, in words. */
-export const HTML_ONE_AT_A_TIME = "One HTML effect at a time";
 /** The mark a pattern carries when it lands exactly on every device of the group. */
 const FITS_MARK = "Fits";
 /** The entry that plays nothing. */
@@ -178,18 +176,61 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   /** The restore, kept where the way out of the picker can reach it. */
   const restoreRef = useRef<() => void>(() => undefined);
 
-  /** The other groups that play an HTML effect: the scene's one is taken. */
-  const htmlOwner = useMemo(() => {
-    if (!scene) return null;
-    const other = scene.groups.find(
-      (g) =>
-        g.id !== groupId && g.plays.type === "effect" && isHtmlEffect(g.plays.effect),
+  /**
+   * The scene's saved stacks and the HTML slots each takes: what a group playing one starts
+   * (design Q5: runtimes, not groups). A layer's HTML effect and its HTML mask each count, which
+   * is the number the daemon counts and the stacks route reports. The pane has no other way to
+   * know: the scene names the stack by id only.
+   */
+  const [knownStacks, setKnownStacks] = useState<Map<string, number>>(() => new Map());
+  useEffect(() => {
+    let alive = true;
+    void api
+      .stacks()
+      .then((answer) => {
+        if (alive) setKnownStacks(new Map(answer.stacks.map((saved) => [saved.id, saved.html_layers])));
+      })
+      .catch(() => undefined);
+    return () => {
+      alive = false;
+    };
+  }, []);
+  /** The HTML runtimes one effect starts: 1 for an `html:` effect, a stack's HTML slots. */
+  const runtimesOf = useCallback(
+    (id: string | null) => {
+      if (id === null) return 0;
+      if (isHtmlEffect(id)) return 1;
+      return knownStacks.get(id) ?? 0;
+    },
+    [knownStacks],
+  );
+  /** The HTML runtimes the scene's OTHER groups start: this group's own slot is the one asked for. */
+  const otherHtml = useMemo(() => {
+    if (!scene) return 0;
+    return scene.groups.reduce(
+      (total, other) =>
+        other.id === groupId || other.plays.type !== "effect"
+          ? total
+          : total + runtimesOf(other.plays.effect),
+      0,
     );
-    return other ?? null;
-  }, [scene, groupId]);
-  /** This group plays an HTML effect itself: the scene's one is already its own. */
-  const groupIsHtml = group?.plays.type === "effect" && isHtmlEffect(group.plays.effect);
-  const htmlBlocked = htmlOwner !== null && !groupIsHtml;
+  }, [scene, groupId, runtimesOf]);
+  /** This group already starts an HTML runtime: choosing another HTML effect replaces its own. */
+  const groupIsHtml = group?.plays.type === "effect" && runtimesOf(group.plays.effect) > 0;
+  /**
+   * The rule itself: the scene's count with this choice, which is this group's own runtime added
+   * to the other groups' runtimes, against the limit. A group that already plays HTML keeps its
+   * slot when it swaps one HTML effect for another, so its count does not change: in a scene that
+   * is already over the limit its rows stay open in the picker, and the daemon's refusal on save
+   * is what the owner sees.
+   */
+  const htmlBlocked = !groupIsHtml && otherHtml + 1 > SCENE_HTML_MAX;
+  /** Why a blocked row is blocked: the daemon's sentence, with this group's own runtime counted. */
+  const blockedWords = htmlLimitSentence(otherHtml + 1);
+  /** What a blocked row itself says: short enough to be read whole beside the picture. */
+  const blockedNote = `${otherHtml} HTML already`;
+  /** A blocked row is pointed at or focused: the line under the list says why, in full. */
+  const [asksWhy, setAsksWhy] = useState(false);
 
   const preview = useCallback(
     (target: string, mine: number) => {
@@ -316,8 +357,14 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                   type="button"
                   className={s.pickRow}
                   aria-pressed={current === OFF}
-                  onPointerEnter={() => onHighlight(OFF)}
-                  onFocus={() => onHighlight(OFF)}
+                  onPointerEnter={() => {
+                    setAsksWhy(false);
+                    onHighlight(OFF);
+                  }}
+                  onFocus={() => {
+                    setAsksWhy(false);
+                    onHighlight(OFF);
+                  }}
                   onClick={() => choose(OFF)}
                 >
                   <span className={s.pickStrip} aria-hidden="true">
@@ -353,8 +400,16 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     data-blocked={blocked ? "true" : undefined}
                     aria-pressed={held}
                     aria-disabled={blocked || undefined}
-                    onPointerEnter={() => !blocked && onHighlight(effect.id)}
-                    onFocus={() => !blocked && onHighlight(effect.id)}
+                    onPointerEnter={() => {
+                      setAsksWhy(blocked);
+                      if (!blocked) onHighlight(effect.id);
+                    }}
+                    onPointerLeave={() => blocked && setAsksWhy(false)}
+                    onFocus={() => {
+                      setAsksWhy(blocked);
+                      if (!blocked) onHighlight(effect.id);
+                    }}
+                    onBlur={() => blocked && setAsksWhy(false)}
                     onClick={() => !blocked && choose(effect.id)}
                   >
                     <span className={s.pickStrip} aria-hidden="true">
@@ -371,7 +426,14 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
                     </span>
                     <span className={s.pickText}>
                       <span className={s.pickName}>{effect.name}</span>
-                      {blocked && <span className={s.pickNote}>{HTML_ONE_AT_A_TIME}</span>}
+                      {blocked && (
+                        // A few words that fit the row whole, so it keeps its height (#367). The
+                        // daemon's sentence is the note's tooltip, and the line under the list
+                        // says it in full while this row is pointed at or focused.
+                        <span className={s.pickNote} title={blockedWords}>
+                          {blockedNote}
+                        </span>
+                      )}
                       {!blocked && isHtmlEffect(effect.id) && <Chip html>HTML</Chip>}
                       {builtOn && fit && (
                         <span className={s.pickMeta}>
@@ -391,8 +453,10 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
           </section>
         );
       })}
-      <p className={s.pickerHint}>
-        {shown
+      <p className={s.pickerHint} data-why={asksWhy || undefined}>
+        {asksWhy
+          ? blockedWords
+          : shown
           ? `The lights show ${shown.name}.`
           : highlight === OFF
             ? "The lights show nothing."
