@@ -3,7 +3,7 @@
 // The builder's right column (#257 phase 4): the picked layer's inspector and the stack's presets,
 // or the phone's Tune sheet around them. Moved out of StackBuilder.tsx unchanged.
 
-import type { Dispatch, RefObject, SetStateAction } from "react";
+import type { RefObject } from "react";
 import { CaretLeft } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { endRun, type History } from "@/lib/draftHistory";
@@ -59,7 +59,7 @@ export function BuilderSide({
   mask: ReturnType<typeof useMaskDrop>;
   presets: ReturnType<typeof usePresets>;
   load: ReturnType<typeof useStackLoad>;
-  setEdit: Dispatch<SetStateAction<History<Stack>>>;
+  setEdit: (update: (history: History<Stack>) => History<Stack>) => number;
   setSheetOpen: (open: boolean) => void;
   /** Wraps the Choose effect key: the popover hangs under it and Escape hands focus back to it. */
   chooseRef: RefObject<HTMLSpanElement | null>;
