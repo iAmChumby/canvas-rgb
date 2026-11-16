@@ -6,6 +6,11 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)
+- `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)
+
 ## [0.17.0] - 2026-11-16
 
 ### Added
