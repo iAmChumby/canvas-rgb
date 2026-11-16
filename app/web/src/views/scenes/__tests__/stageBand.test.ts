@@ -21,16 +21,16 @@ function blockOf(source: string, selector: string): string {
 
 /** A custom property's value in px, out of a rule block. */
 function px(block: string, name: string): number {
-  const found = new RegExp(`${name}:\\s*(\\d+)px`).exec(block);
-  if (!found) throw new Error(`${name} is not in the block`);
-  return Number(found[1]);
+  const found = new RegExp(`${name}:\\s*(\\d+)px`).exec(block)?.[1];
+  if (found === undefined) throw new Error(`${name} is not in the block`);
+  return Number(found);
 }
 
 /** A token's value in px, out of tokens.css. */
 function tokenPx(name: string): number {
-  const found = new RegExp(`${name}:\\s*(\\d+)px`).exec(tokens);
-  if (!found) throw new Error(`${name} is not in tokens.css`);
-  return Number(found[1]);
+  const found = new RegExp(`${name}:\\s*(\\d+)px`).exec(tokens)?.[1];
+  if (found === undefined) throw new Error(`${name} is not in tokens.css`);
+  return Number(found);
 }
 
 /**
@@ -41,9 +41,9 @@ function tokenPx(name: string): number {
  * taller of the two.
  */
 function bandHeight(modeRow: number): number {
-  const caption = /line-height:\s*([\d.]+)/.exec(blockOf(css, ".stageCaption"));
-  if (!caption) throw new Error("the caption has no line-height");
-  const column = px(blockOf(css, ".stagePicture"), "height") + tokenPx("--s1") + tokenPx("--t14") * Number(caption[1]);
+  const caption = /line-height:\s*([\d.]+)/.exec(blockOf(css, ".stageCaption"))?.[1];
+  if (caption === undefined) throw new Error("the caption has no line-height");
+  const column = px(blockOf(css, ".stagePicture"), "height") + tokenPx("--s1") + tokenPx("--t14") * Number(caption);
   const side =
     tokenPx("--control-h") +
     tokenPx("--s3") +

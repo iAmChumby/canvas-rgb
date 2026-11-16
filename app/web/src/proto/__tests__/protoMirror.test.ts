@@ -28,16 +28,16 @@ const CONSTS = read("crates/canvas-proto/src/consts.rs");
 
 /** The route as the spine sets it: `pub const PREVIEW_GROUP: &str = "...";`. */
 function spineRoute(): string {
-  const found = /pub const PREVIEW_GROUP: &str = "([^"]+)";/.exec(API);
-  if (!found) throw new Error("PREVIEW_GROUP is not in crates/canvas-proto/src/api.rs");
-  return found[1];
+  const found = /pub const PREVIEW_GROUP: &str = "([^"]+)";/.exec(API)?.[1];
+  if (found === undefined) throw new Error("PREVIEW_GROUP is not in crates/canvas-proto/src/api.rs");
+  return found;
 }
 
 /** A query key as the spine sets it: `pub const NAME: &str = "...";`. */
 function spineQueryKey(name: string): string {
-  const found = new RegExp(`pub const ${name}: &str = "([^"]+)";`).exec(CONSTS);
-  if (!found) throw new Error(`${name} is not in crates/canvas-proto/src/consts.rs`);
-  return found[1];
+  const found = new RegExp(`pub const ${name}: &str = "([^"]+)";`).exec(CONSTS)?.[1];
+  if (found === undefined) throw new Error(`${name} is not in crates/canvas-proto/src/consts.rs`);
+  return found;
 }
 
 describe("the spine's names, as the editor keeps them (#378)", () => {
