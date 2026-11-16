@@ -325,7 +325,7 @@ describe("the controller drawing", () => {
     expect(row("profile-1-paddle-1").getAttribute("data-pressed")).toBe("false");
   });
 
-  it("does not draw a focused key as pressed", async () => {
+  it("marks only the held key, and leaves a key that has the focus alone", async () => {
     await open();
     const key = target("button-a");
     key.dispatchEvent(new FocusEvent("focus"));
@@ -333,7 +333,7 @@ describe("the controller drawing", () => {
     frames.step();
     expect(key.getAttribute("data-pressed")).toBe("false");
 
-    // A key that is held elsewhere does not make the focused key look pressed.
+    // A key that is held elsewhere does not make the focused key look pressed either.
     pad.buttons.add(1);
     frames.step();
     expect(key.getAttribute("data-pressed")).toBe("false");
