@@ -1,4 +1,4 @@
-﻿// Mirrors crates/canvas-proto/src/api.rs `routes`. Spine file: edit only through the spine owner.
+// Mirrors crates/canvas-proto/src/api.rs `routes`. Spine file: edit only through the spine owner.
 // Every request needs `Authorization: Bearer <token>` except GET STATUS (G9).
 export const routes = {
   status: "/api/v1/status",
