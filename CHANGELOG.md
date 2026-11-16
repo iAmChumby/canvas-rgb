@@ -13,6 +13,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
+- A scene can have two groups playing HTML effects (#370)
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
 
 ### Fixed

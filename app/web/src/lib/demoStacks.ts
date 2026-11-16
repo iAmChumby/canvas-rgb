@@ -227,13 +227,37 @@ export function seededStacks(scenario: Set<string>, effects: Record<string, Demo
   return stacks;
 }
 
+/** The id prefix of an HTML effect (`crates/canvas-proto/src/scene.rs`). */
+const HTML_ID_PREFIX = "html:";
+
+/**
+ * The HTML slots a stack takes (#370): one for a layer whose effect is HTML, and one more for a
+ * layer whose HTML mask resolves to an effect. This is the daemon's own rule
+ * (`html_slots` in `crates/canvas-daemon/src/stacks.rs`): a mask whose effect is gone cannot
+ * build, so it takes no slot and the layer draws unmasked. The stacks route reports this number
+ * as `html_layers`, and the scene's limit counts it for a group playing the stack.
+ */
+export function stackHtmlSlots(stack: Stack, effects: Record<string, DemoEffect>): number {
+  return stack.layers.reduce(
+    (total, layer) =>
+      total +
+      (layer.effect.startsWith(HTML_ID_PREFIX) ? 1 : 0) +
+      (layer.mask !== undefined &&
+      layer.mask.effect.startsWith(HTML_ID_PREFIX) &&
+      effects[layer.mask.effect] !== undefined
+        ? 1
+        : 0),
+    0,
+  );
+}
+
 /** The library's row for a stack (D95.4.2). */
 export function stackSummary(stack: Stack, effects: Record<string, DemoEffect>): StackSummary {
   return {
     id: stack.id,
     name: stack.id.slice("stack:".length),
     layers: stack.layers.length,
-    html_layers: stack.layers.filter((layer) => layer.effect.startsWith("html:")).length,
+    html_layers: stackHtmlSlots(stack, effects),
     missing: stack.layers
       .filter(
         (layer) =>

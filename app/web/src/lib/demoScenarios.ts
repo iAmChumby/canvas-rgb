@@ -296,6 +296,8 @@ export const GROUPS_20 = "groups-20";
 export const LONG_NAMES = "long-names";
 export const NEW_LIGHT = "new-light";
 export const HEAVY = "heavy";
+/** `?state=html-limit`: three groups play HTML effects, where a scene runs two (#370). */
+export const HTML_LIMIT = "html-limit";
 
 /** The id the scene token names, if any. */
 function sceneToken(): string | null {
@@ -340,6 +342,26 @@ export function applySceneScenarios(
     }));
     scenes.push({ id: "stage", name: "Stage", rev: 1, groups });
     active = "stage";
+  }
+
+  if (has(HTML_LIMIT)) {
+    // Three groups, each playing an HTML effect: the first two run and the third says why (#370).
+    const wants = ["openrgb:fan-hub-1", "openrgb:fan-hub-2", "openrgb:strip-1"];
+    const effects = ["html:ink-drop", "html:wet-smear", "html:ink-drop"];
+    const names = ["Key light", "Fill", "Edge"];
+    const groups: Group[] = wants.map((device, i) => {
+      const light = lightOfDevice(all, device);
+      return {
+        id: `g-html-${i + 1}`,
+        name: names[i] ?? `Group ${i + 1}`,
+        members: light ? [light] : [],
+        plays: { type: "effect", effect: effects[i] ?? "html:ink-drop", props: {} },
+        mode: i === 1 ? "each_its_own" : "flow_across",
+        brightness: 100 - i * 15,
+      };
+    });
+    scenes.push({ id: "html-limit", name: "Three HTML", rev: 1, groups });
+    active = "html-limit";
   }
 
   const current = scenes.find((s) => s.id === active);

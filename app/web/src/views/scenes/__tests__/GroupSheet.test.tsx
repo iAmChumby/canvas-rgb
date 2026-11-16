@@ -20,6 +20,7 @@ const { api, notifySpy } = vi.hoisted(() => ({
     },
     lights: { list: vi.fn(), patch: vi.fn(), flash: vi.fn() },
     effect: vi.fn(),
+    stacks: vi.fn(),
     createPreset: vi.fn(),
   },
   notifySpy: vi.fn(),
@@ -182,6 +183,8 @@ beforeEach(() => {
   for (const group of Object.values(api.scenes)) group.mockReset();
   for (const fn of Object.values(api.lights)) fn.mockReset();
   api.effect.mockReset();
+  api.stacks.mockReset();
+  api.stacks.mockResolvedValue({ stacks: [] });
   notifySpy.mockReset();
   serverRev = scene().rev;
   api.scenes.list.mockResolvedValue(answer());

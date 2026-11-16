@@ -604,7 +604,7 @@ pub struct StackSummary {
     pub name: String,
     /// How many layers it has.
     pub layers: u32,
-    /// How many of those are HTML effects (the slow, capped kind).
+    /// How many HTML runtimes it starts (the slow, capped kind): one for each layer whose effect is HTML and one for each HTML mask.
     pub html_layers: u32,
     /// The ids of the layers whose effect could not be found, so the library can say so.
     #[serde(default)]
