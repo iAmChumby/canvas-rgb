@@ -81,8 +81,12 @@ export interface ChainSetupProps {
 export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = null, more = false }: ChainSetupProps) {
   const setup = useChainSetup(chain, intro);
   const [finishing, setFinishing] = useState(false);
+  /** A ref as well as the state: two presses in one tick both read the state as it was rendered. */
+  const finishingNow = useRef(false);
   const [marking, setMarking] = useState(false);
   const markingNow = useRef(false);
+  const [retrying, setRetrying] = useState(false);
+  const retryingNow = useRef(false);
   const zone = chain.zone_name;
   const labels = setup.mirror ? MIRROR_STEPS : SERIES_STEPS;
   const lit = litLabels(setup.step, setup.mirror, labels.length);
@@ -102,12 +106,30 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
 
   /** Save ends the flow; the key is held while the commit is out, so a second press cannot land. */
   const finish = async () => {
-    if (finishing) return;
+    if (finishingNow.current) return;
+    finishingNow.current = true;
     setFinishing(true);
     try {
       await setup.confirm();
     } finally {
+      finishingNow.current = false;
       setFinishing(false);
+    }
+  };
+
+  /**
+   * Retry sends again what failed: a commit, the empty call, or a whole new session. The key is
+   * held while its call is out, and the hook drops a second one as well.
+   */
+  const retry = async () => {
+    if (retryingNow.current) return;
+    retryingNow.current = true;
+    setRetrying(true);
+    try {
+      await setup.retry();
+    } finally {
+      retryingNow.current = false;
+      setRetrying(false);
     }
   };
 
@@ -317,7 +339,7 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
           back: null,
           later: laterKey,
           primary: (
-            <Button variant="primary" onClick={setup.retry}>
+            <Button variant="primary" busy={retrying} onClick={() => void retry()}>
               Retry
             </Button>
           ),
@@ -358,7 +380,7 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
             <div className={s.error} role="alert">
               <WarningCircle className={s.errorIcon} size={16} weight="fill" aria-hidden="true" />
               <p className={s.errorText}>{setup.error}</p>
-              <Button size="sm" onClick={setup.retry}>
+              <Button size="sm" busy={retrying} onClick={() => void retry()}>
                 Retry
               </Button>
             </div>

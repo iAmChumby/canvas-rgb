@@ -850,6 +850,85 @@ describe("the header setup screens", () => {
     expect(screen.getByText(/^Marked empty\./)).toBeTruthy();
   });
 
+  it("a stale session under the introduction ends the flow, and Retry starts a new one", async () => {
+    // The introduction lights nothing, so the daemon's 6 s timeout can end its session while the
+    // owner sits on it. The next empty call then answers 409 (review finding 2).
+    api.chains.empty.mockRejectedValueOnce(new ApiFailure(500, "internal", "the daemon could not write"));
+    await show(notSetUp(), { intro: "full" });
+
+    await press("Nothing is plugged in here");
+    expect(screen.getByText("Tell the app about your lights.")).toBeTruthy();
+    expect(screen.getByText("the daemon could not write")).toBeTruthy();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    expect(api.chains.empty).toHaveBeenCalledTimes(1);
+
+    // Seven seconds of the introduction: nothing is sent, so the daemon has let the session go.
+    await flush(7000);
+    api.chains.empty.mockRejectedValueOnce(
+      new ApiFailure(409, "conflict", "this chain setup session is not open any more; start it again."),
+    );
+
+    await press("Nothing is plugged in here");
+
+    // Not the daemon's words under the introduction again: the flow ends, as a stale commit does.
+    expect(screen.getByText("JARGB 1 did not answer.")).toBeTruthy();
+    expect(
+      screen.getByText("this chain setup session is not open any more; start it again."),
+    ).toBeTruthy();
+    expect(screen.queryByText("Tell the app about your lights.")).toBeNull();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    // The empty call went to the session the daemon had let go, twice, and never a third time.
+    expect(api.chains.empty.mock.calls.map((call) => call[2])).toEqual([
+      { session: SESSION },
+      { session: SESSION },
+    ]);
+    await flush(7000);
+    expect(api.chains.empty).toHaveBeenCalledTimes(2);
+
+    // Retry opens a new session and lands on the first question: a dead session's empty write is
+    // not repeated by itself, so nothing more is sent until the owner asks for it.
+    await press("Retry");
+    expect(api.chains.start).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(ASK)).toBeTruthy();
+    expect(api.chains.empty).toHaveBeenCalledTimes(2);
+  });
+
+  it("the banner's Retry sends one commit when it is pressed twice", async () => {
+    api.chains.commit.mockRejectedValueOnce(new ApiFailure(500, "internal", "the daemon could not write"));
+    await show();
+    await toCheck(36, 3);
+
+    await press("Yes, save these devices");
+    expect(api.chains.commit).toHaveBeenCalledTimes(1);
+    expect(screen.getByText("the daemon could not write")).toBeTruthy();
+
+    // The retry's own answer is still out when the second press arrives.
+    let answer: (v: { lights: unknown[]; final_leds: number }) => void = () => {};
+    api.chains.commit.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+
+    const retry = screen.getByRole("button", { name: "Retry" });
+    await act(async () => {
+      // Two presses in one tick: only the hook's in-flight ref can tell them apart.
+      fireEvent.click(retry);
+      fireEvent.click(retry);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    // One failed save, one retry: the second press sent nothing, and the key says it is busy.
+    expect(api.chains.commit).toHaveBeenCalledTimes(2);
+    expect(retry.getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => {
+      answer({ lights: [], final_leds: 36 });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText("Saved. 3 devices, 36 LEDs on JARGB 1.")).toBeTruthy();
+  });
+
   it("a failed mark-empty keeps the checklist open with the daemon's words and Retry", async () => {
     api.chains.empty.mockRejectedValueOnce(new ApiFailure(500, "internal", "the daemon could not write"));
     const { onClose } = await show();
