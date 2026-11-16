@@ -17,9 +17,12 @@ import {
   padReadable,
   TRIGGER_PRESS_AT,
   usePadInput,
+  WAKE_POLL_EVERY,
+  writeStatus,
   type PadFrame,
   type PadGamepad,
   type PadMapRow,
+  type PadStatus,
 } from "@/lib/padInput";
 import { PadFrames } from "@/test/padFrames";
 
@@ -117,6 +120,59 @@ describe("the pad's input", () => {
     });
     expect(getByTestId("status").textContent).toBe("paused");
     expect(PAD_STATUS_WORDS.paused).toBe("Input paused: the editor is in the background.");
+  });
+
+  it("keeps the strip on paused while the window is in the background", () => {
+    const pad = new StubPad();
+    const seen: PadFrame[] = [];
+    const { getByTestId } = render(<Harness pad={pad} seen={seen} />);
+
+    frames.step();
+    expect(getByTestId("status").textContent).toBe("live");
+
+    act(() => {
+      window.dispatchEvent(new Event("blur"));
+    });
+    expect(getByTestId("status").textContent).toBe("paused");
+
+    // The browser's own events arrive while the editor is away. The strip still says "paused":
+    // it must not claim a pad is live in a window the person is not looking at.
+    act(() => {
+      window.dispatchEvent(new Event("gamepadconnected"));
+    });
+    expect(getByTestId("status").textContent).toBe("paused");
+
+    pad.connected = false;
+    act(() => {
+      window.dispatchEvent(new Event("gamepaddisconnected"));
+    });
+    expect(getByTestId("status").textContent).toBe("paused");
+
+    // The window comes back: the strip says what the list holds now, at once.
+    act(() => {
+      window.dispatchEvent(new Event("focus"));
+    });
+    expect(getByTestId("status").textContent).toBe("gone");
+
+    // The page hidden is the same rule, with the window still focused.
+    const hidden = Object.getOwnPropertyDescriptor(Document.prototype, "visibilityState");
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "hidden" });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(getByTestId("status").textContent).toBe("paused");
+
+    act(() => {
+      window.dispatchEvent(new Event("gamepadconnected"));
+    });
+    expect(getByTestId("status").textContent).toBe("paused");
+
+    Object.defineProperty(document, "visibilityState", { configurable: true, get: () => "visible" });
+    act(() => {
+      document.dispatchEvent(new Event("visibilitychange"));
+    });
+    expect(getByTestId("status").textContent).toBe("gone");
+    if (hidden) Object.defineProperty(document, "visibilityState", hidden);
   });
 
   it("draws a press in the frame it was read in, not in the next one", () => {
@@ -411,6 +467,29 @@ describe("the trigger's key", () => {
 });
 
 describe("the frame loop's cost", () => {
+  it("writes the strip's state once across 600 identical frames", () => {
+    // The count is of the hook's writes, through the step its loop calls every frame
+    // (`writeStatus` in `padInput.ts`): React drops a same-value update before it draws, so a
+    // count of commits cannot show a write that repeats every frame.
+    const writes: PadStatus[] = [];
+    let said: PadStatus | null = null;
+    let changed = 0;
+    for (let i = 0; i < 600; i++) {
+      const step = writeStatus(said, "live", (status) => writes.push(status));
+      said = step.said;
+      if (step.changed) changed += 1;
+    }
+
+    // One write for the first frame, and none for the 599 identical ones after it.
+    expect(writes).toEqual(["live"]);
+    expect(changed).toBe(1);
+
+    // A real change still reaches the page at once.
+    const next = writeStatus(said, "paused", (status) => writes.push(status));
+    expect(next.changed).toBe(true);
+    expect(writes).toEqual(["live", "paused"]);
+  });
+
   it("asks the page to draw nothing across 600 identical frames", () => {
     const pad = new StubPad();
     // The profiler's callback is the page's own draw count: one call is one commit.
@@ -430,34 +509,39 @@ describe("the frame loop's cost", () => {
 
     for (let i = 0; i < 600; i++) frames.step();
 
-    // Held still: the status was not written again, and no frame was drawn again.
+    // Held still: no frame was drawn again.
     expect(drawn.mock.calls.length).toBe(commits);
   });
 });
 
 describe("the wake state", () => {
-  it("starts the read on its own when no gamepadconnected ever arrives", () => {
+  it("starts the read on its own, and reads the list once every fifteenth frame", () => {
     const pad = new StubPad();
     const list: PadGamepad[] = [];
-    const drawn = vi.fn();
-    const { result } = renderHook(() => usePadInput({ getGamepads: () => list }), {
-      wrapper: ({ children }: { children: ReactNode }) => (
-        <Drawn count={drawn}>{children}</Drawn>
-      ),
-    });
-    expect(result.current.status).toBe("wake");
+    // Every read of the browser's list is counted: the wake poll's whole cost is these calls.
+    const reads = vi.fn(() => list);
+    const { result } = renderHook(() => usePadInput({ getGamepads: reads }));
 
-    // The first frame draws the empty pad once and asks for another.
+    expect(result.current.status).toBe("wake");
+    // The mount's own read of the list found no pad.
+    expect(reads.mock.calls.length).toBe(1);
+
+    // The wake state's first frame reads the list.
     frames.step();
-    const settled = drawn.mock.calls.length;
-    // The next frames get the same answer, so nothing is drawn again.
-    for (let i = 0; i < 3; i++) frames.step();
+    expect(reads.mock.calls.length).toBe(2);
     expect(result.current.status).toBe("wake");
-    expect(drawn.mock.calls.length).toBe(settled);
 
-    // The fifth frame: the list is filled, and no `gamepadconnected` was ever sent.
+    // The list is filled after that read, and no `gamepadconnected` is ever sent.
     list.push(pad.read());
+
+    // The frames before the next poll read nothing at all.
+    for (let i = 0; i < WAKE_POLL_EVERY - 1; i++) frames.step();
+    expect(reads.mock.calls.length).toBe(2);
+    expect(result.current.status).toBe("wake");
+
+    // The next polled frame reads the list and finds the pad, with no event at all.
     frames.step();
+    expect(reads.mock.calls.length).toBe(3);
     expect(result.current.status).toBe("live");
     expect(PAD_STATUS_WORDS.wake).toBe("No pad seen yet. Press any button on the pad.");
   });

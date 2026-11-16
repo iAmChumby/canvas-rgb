@@ -26,8 +26,8 @@
 // which one it is showing. A pad in a layout the browser cannot place lights no key at all.
 //
 // The read starts before the first pad is seen: while the editor is in front and the list is
-// empty, the loop asks the list once a frame, so a pad whose `gamepadconnected` never arrives
-// (a WebView may not send it) is picked up all the same.
+// empty, the loop asks the list once every fifteenth frame, so a pad whose
+// `gamepadconnected` never arrives (a WebView may not send it) is picked up all the same.
 //
 // The stub (`?pad=stub`, or the global the harness sets) exists only in a build made for the
 // screenshot harness: `NEXT_PUBLIC_PAD_STUB=1`. In the shipped export the flag is unset, the
@@ -578,6 +578,43 @@ function pageVisible(): boolean {
 }
 
 /**
+ * How many frames pass between reads of the pad list while no pad is connected.
+ *
+ * A browser reports a pad only after its first button press: `gamepadconnected` follows that
+ * press, not the plug, and a WebView may not send the event at all. So the list has to be read
+ * while it still looks empty. Reading it every frame would call `getGamepads()` at 60 Hz for
+ * nothing, so the wake state reads it once every fifteenth frame (about four times a second at
+ * 60 Hz); the event still moves the page to the live loop at once when it arrives.
+ */
+export const WAKE_POLL_EVERY = 15;
+
+/** What the strip says, and whether the page has to be drawn for it. */
+export interface StatusWrite {
+  /** The line the strip says now. */
+  said: PadStatus;
+  /** True when the line changed, so the setter was called. */
+  changed: boolean;
+}
+
+/**
+ * Writes the strip's line, and only when it changed.
+ *
+ * The loop goes through this one step every frame, so the page is asked for a draw only on a
+ * real change. It is exported so a test can hand it a counting setter: React drops a same-value
+ * update before it draws anything, so a count of commits cannot show a write that repeats every
+ * frame, and this is the write itself.
+ */
+export function writeStatus(
+  said: PadStatus | null,
+  next: PadStatus,
+  write: (status: PadStatus) => void,
+): StatusWrite {
+  if (said === next) return { said: next, changed: false };
+  write(next);
+  return { said: next, changed: true };
+}
+
+/**
  * Reads the pad, in the editor's own window.
  *
  * The loop runs while the editor is in front and the controller panel is on the page. It stops
@@ -626,12 +663,12 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     let said: PadStatus | null = null;
     let shown: string | null = null;
     let cleared = false;
+    // How many frames the wake poll has run, so the list is read once every WAKE_POLL_EVERY.
+    let idle = 0;
 
     /** Writes the strip's line, and asks React to draw it, only when the line changes. */
     const say = (next: PadStatus) => {
-      if (said === next) return;
-      said = next;
-      setStatus(next);
+      said = writeStatus(said, next, setStatus).said;
     };
 
     /** The strip's second line: written, and drawn, only when it changes. */
@@ -675,9 +712,11 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     };
 
     /**
-     * The wake state's own frame: one read of the list, and nothing else. It runs while the
-     * editor is in front and no pad is in the list, and it moves to the live loop as soon as
-     * one appears. The answer the same as last frame sets no state.
+     * The wake state's own frame: at most one read of the list, and nothing else. It runs while
+     * the editor is in front and no pad is in the list, and it moves to the live loop as soon
+     * as one appears. The list is read on every WAKE_POLL_EVERYth frame, not on every frame:
+     * the other frames cost no read at all, and their answer is the same as the last one, so
+     * they set no state.
      */
     const wake = () => {
       if (raf !== null || !focused || !visible) return;
@@ -687,12 +726,16 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     const wakeTick = () => {
       raf = null;
       if (!focused || !visible) return;
-      const picked = pick();
-      if (picked.pad) {
-        seen = true;
-        say("live");
-        raf = window.requestAnimationFrame(tick);
-        return;
+      const poll = idle % WAKE_POLL_EVERY === 0;
+      idle += 1;
+      if (poll) {
+        const picked = pick();
+        if (picked.pad) {
+          seen = true;
+          say("live");
+          raf = window.requestAnimationFrame(tick);
+          return;
+        }
       }
       say(seen ? "gone" : "wake");
       showLine(null);
@@ -708,8 +751,9 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
         say(seen ? "gone" : "wake");
         showLine(null);
         clear();
-        // No pad in the list yet: keep asking once a frame, so a pad whose event never comes
-        // (the WebView may not send `gamepadconnected`) is picked up all the same.
+        // No pad in the list yet: go back to the wake poll, which reads the list every
+        // WAKE_POLL_EVERYth frame, so a pad whose event never comes (the WebView may not send
+        // `gamepadconnected`) is picked up all the same.
         wake();
         return;
       }
@@ -740,12 +784,29 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
       }
     };
 
+    /**
+     * The editor is in front again. The strip stops saying "paused" at once: with no pad in
+     * the list it says what the list holds, rather than waiting for the next polled frame.
+     */
+    const resume = () => {
+      if (!focused || !visible) return;
+      if (!pick().pad) {
+        say(seen ? "gone" : "wake");
+        showLine(null);
+      }
+      start();
+    };
+
     const onConnected = () => {
+      // The strip says "paused" while the editor is away, and nothing is read then: the change
+      // the event announces is taken up by `start()` when the window comes back.
+      if (!focused || !visible) return;
       seen = true;
       say("live");
       start();
     };
     const onDisconnected = () => {
+      if (!focused || !visible) return;
       seen = true;
       stop();
       say("gone");
@@ -761,8 +822,7 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     };
     const onFocus = () => {
       focused = true;
-      if (!visible) return;
-      start();
+      resume();
     };
     const onVisibility = () => {
       visible = document.visibilityState !== "hidden";
@@ -772,8 +832,7 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
         clear();
         return;
       }
-      if (!focused) return;
-      start();
+      resume();
     };
 
     window.addEventListener("blur", onBlur);
