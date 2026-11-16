@@ -14,7 +14,7 @@
 // Revert.
 
 import { useCallback, useMemo, useRef, useState, type ReactNode } from "react";
-import { ArrowLeft, DotsThree, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
+import { ArrowLeft, ArrowRight, CopySimple, DotsThree, Moon, PencilSimple, Plus, Sparkle, Trash, X } from "@phosphor-icons/react";
 import { Button, ButtonLink, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
 import { useMediaQuery } from "@/components/MediaQuery";
@@ -29,8 +29,10 @@ import { effectNameOf } from "@/lib/status";
 import { useSnap } from "@/lib/store";
 import { AddDevices } from "@/views/scenes/AddDevices";
 import { EffectPicker, isPatternEffect, useEffectDetail } from "@/views/scenes/EffectPicker";
+import { GroupStage } from "@/views/scenes/GroupStage";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import { MemberList } from "@/views/scenes/MemberList";
+import { MoveStep } from "@/views/scenes/MoveStep";
 import { groupGoneMessage } from "@/views/scenes/groupEdit";
 import { PropertyControls } from "@/views/PropertyControls";
 import { notify } from "@/components/Notify";
@@ -99,8 +101,8 @@ export function Sheet({
   );
 }
 
-/** The sheet's own step: the group, its name, the effect or the devices. */
-type Step = "group" | "name" | "effect" | "devices";
+/** The sheet's own step: the group, its name, the effect, the devices or the move. */
+type Step = "group" | "name" | "effect" | "devices" | "move";
 
 export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupSheetProps) {
   const { edit, setProps, setBrightness, undo } = use;
@@ -112,8 +114,12 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   const [renaming, setRenaming] = useState(false);
   const [name, setName] = useState(group?.name ?? "");
   const [menu, setMenu] = useState(false);
+  /** The move step: the group is moved, or copied into the other scene. */
+  const [moveKind, setMoveKind] = useState<"move" | "copy">("move");
   const menuAnchor = useRef<HTMLButtonElement>(null);
   const panel = useRef<HTMLElement>(null);
+  /** A group can only go to another scene, and there must be one. */
+  const canMove = use.scenes.length > 1;
 
   // Escape closes the sheet, one step at a time: a step of its own first, then the sheet.
   useFocusTrap({
@@ -145,6 +151,20 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
     () => (group?.members ?? []).flatMap((id) => lights.filter((l) => l.light.id === id)),
     [group?.members, lights],
   );
+
+  // The stage's own facts (#378):
+  // - the daemon holds the group in its saved scene: a group that is still a draft is
+  //   answered with 404, so the stage waits for the save instead of opening a socket.
+  const scenes = useSnap((st) => st.scenes);
+  const activeId = scenes?.active ?? "";
+  const savedScene = scenes?.scenes.find((s) => s.id === activeId);
+  const saved = savedScene?.groups.some((g) => g.id === groupId) ?? false;
+  // - the lights are paused: the engine sends nothing at all.
+  const paused = useSnap((st) => st.status?.power === "paused");
+  // - why the group is dark, from the daemon.
+  const failed = use.states.find((s) => s.id === groupId)?.failed ?? null;
+  // - the devices of the group that are not connected.
+  const away = members.filter((l) => !l.connected).length;
 
   /** The group's name: the edit is an ordinary change, so an Undo takes it back. */
   const commitName = useCallback(
@@ -179,7 +199,14 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
   if (!group) return null;
 
   const effectName = effectId ? effectNameOf(effects, effectId) : "Off";
-  const title = step === "effect" ? "What it plays" : step === "devices" ? "Add devices" : group.name;
+  const title =
+    step === "effect"
+      ? "What it plays"
+      : step === "devices"
+        ? "Add devices"
+        : step === "move"
+          ? `${moveKind === "copy" ? "Copy" : "Move"} ${group.name}`
+          : group.name;
 
   return (
     <div className={s.sheetRoot}>
@@ -252,6 +279,34 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
             <Button
               variant="ghost"
               size="sm"
+              icon={<ArrowRight size={16} />}
+              disabled={!canMove}
+              title={canMove ? undefined : "There is no other scene."}
+              onClick={() => {
+                setMenu(false);
+                setMoveKind("move");
+                setStep("move");
+              }}
+            >
+              Move to scene
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              icon={<CopySimple size={16} />}
+              disabled={!canMove}
+              title={canMove ? undefined : "There is no other scene."}
+              onClick={() => {
+                setMenu(false);
+                setMoveKind("copy");
+                setStep("move");
+              }}
+            >
+              Copy to scene
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
               icon={<Trash size={16} />}
               onClick={() => {
                 setMenu(false);
@@ -313,13 +368,31 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
             </div>
           )}
 
+          {step === "move" && (
+            <div className={s.sheetStep}>
+              <MoveStep
+                groupId={groupId}
+                copy={moveKind === "copy"}
+                use={use}
+                lights={lights}
+                onClose={onClose}
+              />
+            </div>
+          )}
+
           {step === "group" && (
             <>
-              <div className={s.sheetRun}>
-                <LedRun lights={members} label={runLabel(group.name, members)} />
-              </div>
-
-              <div className={s.sheetRow}>
+              {/* The stage (#378): the picture the group itself draws, and the group's own
+                  controls beside it. The LED run stays under it, in the flow. */}
+              <GroupStage
+                group={group}
+                effectName={effectName}
+                failed={failed}
+                pattern={pattern}
+                saved={saved}
+                paused={paused}
+                away={away}
+              >
                 <Button
                   className={s.sheetEffect}
                   data-testid="sheet-effect"
@@ -342,6 +415,10 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
                     }
                   />
                 )}
+              </GroupStage>
+
+              <div className={s.sheetRun}>
+                <LedRun lights={members} label={runLabel(group.name, members)} />
               </div>
 
               <div className={s.sheetFader}>

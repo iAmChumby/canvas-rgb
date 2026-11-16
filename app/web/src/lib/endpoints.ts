@@ -1,4 +1,4 @@
-// Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
+﻿// Typed calls for every route the editor uses. Paths come from the spine's routes.ts and the
 // shapes from the generated proto types; nothing here re-declares an API type.
 
 import { apiConfig, request, requestBinary, type RequestOptions } from "@/lib/api";
@@ -35,6 +35,9 @@ import type { SceneCreate } from "@/proto/SceneCreate";
 import type { ScenePut } from "@/proto/ScenePut";
 import type { SceneActivePut } from "@/proto/SceneActivePut";
 import type { GroupBrightnessPut } from "@/proto/GroupBrightnessPut";
+import type { GroupMove } from "@/proto/GroupMove";
+import type { GroupMoved } from "@/proto/GroupMoved";
+import type { ScenesWrite } from "@/proto/ScenesWrite";
 import type { LightsResponse } from "@/proto/LightsResponse";
 import type { LightView } from "@/proto/LightView";
 import type { LightPatch } from "@/proto/LightPatch";
@@ -269,6 +272,18 @@ export const api = {
       request<Scene>("PUT", routes.groupBrightness(sceneId, groupId), {
         brightness,
       } satisfies GroupBrightnessPut),
+    /**
+     * Moves or copies one group to another scene (#368). One route, one save: both scenes land
+     * or neither. 409 with `which` ("from" or "to") and that scene when a rev is stale, 422 when
+     * a scene rule is broken (the HTML-group limit is the daemon's own check).
+     */
+    moveGroup: (sceneId: string, groupId: string, body: GroupMove) =>
+      request<GroupMoved>("POST", routes.groupMove(sceneId, groupId), body),
+    /**
+     * Writes several whole scenes and/or the order of the scene bar in one save (#368 undo,
+     * #371 order). 409 with the scene or the order that is stale, 422 when a shape is broken.
+     */
+    write: (body: ScenesWrite) => request<ScenesResponse>("PUT", routes.scenes, body),
   },
   lights: {
     list: () => request<LightsResponse>("GET", routes.lights),

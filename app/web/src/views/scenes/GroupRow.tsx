@@ -9,6 +9,7 @@ import { Chip } from "@/components/Chip";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Popover } from "@/components/Popover";
 import { Slider } from "@/components/Slider";
+import { shownWords } from "@/views/chain/limits";
 import { EffectPicker, isPatternEffect } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
 import type { Group } from "@/proto/Group";
@@ -28,12 +29,16 @@ export type LightsState = "ready" | "loading" | "failed";
 export const FAILURE_GONE = "This effect is no longer installed.";
 
 /** "3 devices" or the one device's own name; the LED total goes beside it. */
-export function memberSummary(lights: LightView[]): { who: string; leds: number; away: number } {
+export function memberSummary(
+  lights: LightView[],
+): { who: string; leds: number; away: number; shown: string } {
   const leds = lights.reduce((n, l) => n + l.led_count, 0);
   const away = lights.filter((l) => !l.connected).length;
   const who =
     lights.length === 1 ? (lights[0]?.label ?? "1 device") : `${lights.length} devices`;
-  return { who, leds, away };
+  // A header whose devices mirror each other is one light shown several times (#382).
+  const shown = lights.length === 1 && lights[0] ? shownWords(lights[0]) : "";
+  return { who, leds, away, shown };
 }
 
 /**
@@ -56,12 +61,13 @@ function Summary({ lights, state }: { lights: LightView[]; state: LightsState })
       </span>
     );
   }
-  const { who, leds, away } = memberSummary(lights);
+  const { who, leds, away, shown } = memberSummary(lights);
   return (
     <span className={`${s.summary} fig`}>
       <span className="one-line" title={who}>{who}</span>
       <span className={s.leds}>
         <AnimatedNumber value={leds} /> {leds === 1 ? "LED" : "LEDs"}
+        {shown ? ` · ${shown}` : ""}
       </span>
       {away > 0 && <span className={s.away}>{away} not connected</span>}
     </span>

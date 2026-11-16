@@ -8,7 +8,9 @@ import { useLoadDelay } from "@/lib/loadDelay";
 
 /**
  * A mono number entry. The value is clamped to [min, max] when it is committed (Enter or blur),
- * so a value below a floor cannot be entered. Arrow keys step it.
+ * so a value below a floor cannot be entered. Arrow keys step it. Escape puts the value back and
+ * the key stops at the field, as FigureField's and NameField's do: a number typed into a flow's
+ * overlay is never the thing that closes the overlay (#408 review, finding 1).
  */
 export function NumberField({
   value,
@@ -64,6 +66,14 @@ export function NumberField({
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
     if (e.key === "Enter") {
       e.currentTarget.blur();
+      return;
+    }
+    if (e.key === "Escape") {
+      // The field's own key: the draft goes back to the value and the key stops here. Focus stays,
+      // so the owner can type again; the field is always open, so there is nothing to close.
+      e.preventDefault();
+      e.stopPropagation();
+      setDraft(null);
       return;
     }
     if (e.key === "ArrowUp" || e.key === "ArrowDown") {

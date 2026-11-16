@@ -9,7 +9,8 @@
   real OpenRGB (6742), any HID device, the screen/audio capture, NVML, or any
   folder outside its test home.
 
-  The test home lives under the worktree's .build\fake-home (gitignored).
+  The test home lives under the worktree's .build\fake-home (gitignored) unless -HomeDir names
+  another folder; a suite that owns its folder passes one under .build\ and removes it after.
   The test API port is 19430 (CANVAS_RGB_TEST_API_PORT).
 
   It never touches the real daemon on 9430, the real fans, the real OpenRGB,
@@ -22,18 +23,29 @@
 .EXAMPLE
   powershell -NoProfile -File tools/run-fake-daemon.ps1 -Stop
   # stops the test daemon and the fake OpenRGB server started by this script.
+
+.EXAMPLE
+  powershell -NoProfile -File tools/run-fake-daemon.ps1 -HomeDir .build\fake-home-e2e
+  # a suite's own test home, which it removes afterwards; stop it with the same -HomeDir.
 #>
 param(
     [switch]$Stop,
     [switch]$Rebuild,
     # Ports for this run. Two checkouts can each run a fake daemon at once on different ports.
     [int]$ApiPort = 19430,
-    [int]$OpenRgbPort = 16742
+    [int]$OpenRgbPort = 16742,
+    # This run's test home. A suite that owns the whole folder (and deletes it afterwards) passes
+    # its own, so it never shares `.build\fake-home` with a daemon a person is poking at.
+    [string]$HomeDir
 )
 
 $ErrorActionPreference = 'Stop'
 $root = Split-Path -Parent $PSScriptRoot
-$homeDir = Join-Path $root '.build\fake-home'
+$homeDir = if ($HomeDir) {
+    if ([IO.Path]::IsPathRooted($HomeDir)) { [IO.Path]::GetFullPath($HomeDir) } else { [IO.Path]::GetFullPath((Join-Path $root $HomeDir)) }
+} else {
+    Join-Path $root '.build\fake-home'
+}
 $fakeOpenRgbPort = $OpenRgbPort
 $testApiPort = $ApiPort
 if ($testApiPort -lt 1 -or $testApiPort -gt 65535 -or $fakeOpenRgbPort -lt 1 -or $fakeOpenRgbPort -gt 65535 -or $testApiPort -in 9430, 6742 -or $fakeOpenRgbPort -in 9430, 6742 -or $testApiPort -eq $fakeOpenRgbPort) {

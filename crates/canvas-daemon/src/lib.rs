@@ -209,20 +209,11 @@ pub fn takeover_builder(app: &Arc<App>, id: &str) -> crate::scenes::EffectBuilde
     })
 }
 
-/// Devices the daemon never sends frames to, matched on the HID path inside the device id.
-/// OpenRGB's driver for each of these breaks the device when it is streamed to:
+/// Devices the app never writes to, and the question every writer asks (#393).
 ///
-/// - `VID_3151&PID_4015`, the ROYUAN MonsGeek keyboard: frames through OpenRGB blank its
-///   lights and stop it typing (lighting session 2, 2026-10-26). OpenRGB's detector for it
-///   cannot be turned off in its config, so the daemon drops OpenRGB's copy and drives the
-///   keyboard through the native `royuan` adapter instead (see `composite`).
-pub const NOT_DRIVEN: &[&str] = &["VID_3151&PID_4015"];
-
-/// True when the daemon may send frames to this device.
-pub fn is_driven(id: &canvas_proto::DeviceId) -> bool {
-    let id = id.0.to_ascii_uppercase();
-    !NOT_DRIVEN.iter().any(|path| id.contains(path))
-}
+/// The rule lives in `canvas_adapters::drive`, so the service's boot paint and black paint read
+/// the same one the daemon does (#413). The daemon's own places keep calling it by this name.
+pub use canvas_adapters::drive::{is_driven, NOT_DRIVEN};
 
 /// How many of `devices` the engine's `write_solid` reaches: connected, driven, and with LEDs.
 /// The engine skips a sink with no LEDs, so counting every sink would report a write to a device
@@ -239,18 +230,6 @@ pub fn version() -> String {
 #[cfg(test)]
 mod tests {
     use canvas_proto::DeviceId;
-
-    #[test]
-    fn the_monsgeek_keyboard_is_never_driven_and_the_rest_are() {
-        let keyboard = DeviceId(
-            r"openrgb:HID: \\?\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2}".into(),
-        );
-        let mic = DeviceId(r"openrgb:HID: \\?\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c".into());
-        assert!(!super::is_driven(&keyboard));
-        assert!(!super::is_driven(&DeviceId(keyboard.0.to_lowercase())));
-        assert!(super::is_driven(&mic));
-        assert!(super::is_driven(&DeviceId("openrgb:A1B2C3D4E5F6".into())));
-    }
 
     fn device(id: &str, leds: u32, connected: bool) -> canvas_proto::DeviceInfo {
         use canvas_proto::device::{DeviceKind, ZoneInfo, ZoneKind};

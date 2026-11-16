@@ -657,18 +657,10 @@
   }
 }
 
-/* A phone's strip drops the mark's words to one tick or icon. On this page a fault keeps its words
-   ("1 group dark", "Scenes not read") beside the icon: the row has the room, and a bare warning
-   mark names nothing. The strip's own rule keeps the all-clear to a tick. */
-@media (max-width: 720px) {
-  :global(.strip-inner):has(:global(.rd-scenes-context)) :global(.strip-mark):not([data-tone="ok"]) :global(.strip-mark-text) {
-    display: inline;
-    max-width: 9ch;
-    overflow: hidden;
-    text-overflow: ellipsis;
-    white-space: nowrap;
-  }
-}
+/* A phone's strip keeps the mark to its icon on this page too (#422). The scene's name beside it
+   is the thing to read, and the mark's words took the room the name needed: "Evening" came out
+   "Eveni...". The mark's tooltip and accessible name still say the fault ("1 group dark"), and
+   tapping it opens the details panel, whose problem list says it in words. */
 
 /* ---------- an icon key in the page's own actions ---------- */
 
@@ -750,13 +742,25 @@
 
 /* The body scrolls: the sheet is as tall as the window, whatever the group holds. It never
    scrolls sideways: a tooltip beside a key at the right edge would widen it, and the browser
-   would then scroll the content out of view when that key takes the focus. */
+   would then scroll the content out of view when that key takes the focus.
+   The scroll padding is the stage's height (#378): a control that takes the focus is never
+   hidden under the pinned stage. Both rules read one number, so the padding cannot drift away
+   from the band it covers.
+   The band's height is the taller of the picture column (the picture 100 + the gap 4 + the
+   caption 17.5 = 121.5) and the side (the effect row 32 + the gap 12 + the mode row + the gap
+   8 + the note 35), plus the band's own padding (2 x 12 = 24): 145.5 on a wide window, and
+   171 on a phone, where the mode control's segments take two rows (60 instead of 32). */
 .sheetBody {
+  /* The stage's height: the band is the same height for an effect group and a pattern group. */
+  --stage-h: 146px;
+  /* The mode control's row: it is kept whether or not the group has a mode. */
+  --stage-mode-h: 32px;
   flex: 1 1 auto;
   min-height: 0;
   overflow-x: hidden;
   overflow-y: auto;
   padding: var(--s4);
+  scroll-padding-top: var(--stage-h);
 }
 
 .sheetStep {
@@ -793,14 +797,6 @@
   border-radius: var(--r-sm);
   background: var(--sunk);
   box-shadow: var(--well);
-}
-
-.sheetRow {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: center;
-  gap: var(--s3);
-  margin-bottom: var(--s3);
 }
 
 .sheetEffect {
@@ -866,6 +862,155 @@
 
 .sheetMenu > button {
   justify-content: flex-start;
+}
+
+/* ---------- the stage: the picture the group itself draws (#378) ---------- */
+
+/* The stage is pinned to the top of the sheet's body: the picture and the group's own
+   controls stay, and the controls below scroll under it. The negative margin takes the
+   sheet's own padding, so the band reaches the sheet's edges and no scrolled control shows
+   beside it. The box is the same size in every state, so nothing moves when the state
+   changes, and the same size for an effect group and a pattern group: the band's height is
+   the number the scroll padding reads. */
+.stage {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  display: flex;
+  align-items: flex-start;
+  gap: var(--s3);
+  margin: calc(-1 * var(--s4)) calc(-1 * var(--s4)) var(--s4);
+  padding: var(--s3);
+  min-height: var(--stage-h);
+  background: var(--sunk);
+  border-bottom: 1px solid var(--line);
+}
+
+/* The picture and its caption: one column, always the same width. */
+.stageColumn {
+  display: flex;
+  flex: 0 0 160px;
+  flex-direction: column;
+  gap: var(--s1);
+  min-width: 0;
+}
+
+/* The picture: the group's own 80x50 canvas at 2x. */
+.stagePicture {
+  position: relative;
+  width: 160px;
+  height: 100px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--g1);
+}
+
+.stageCanvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+  image-rendering: pixelated;
+  opacity: 0;
+  transition: opacity var(--dur) var(--ease);
+}
+
+/* The picture shows while it is live: a stale picture is never read as the group's. */
+.stage[data-state="live"] .stageCanvas {
+  opacity: 1;
+}
+
+/* The mark and the words of a state that has no picture. */
+.stageMark {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: var(--s2);
+  padding: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.25;
+  text-align: center;
+}
+
+.stageWords {
+  display: -webkit-box;
+  max-width: 100%;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 3;
+}
+
+/* A pattern's own dots, in the colours the pattern holds. */
+.stageDots {
+  display: block;
+  width: 96px;
+  height: 44px;
+}
+
+/* A pattern's tile holds its dots and a three-line sentence, in the same 100 px: the dots are
+   shorter and the tile's padding and gap are tighter, so the sentence reads in full and the
+   tile (and the band with it) keeps its size. */
+.stage[data-state="pattern"] .stageMark {
+  gap: var(--s1);
+  padding: var(--s1);
+}
+
+.stage[data-state="pattern"] .stageDots {
+  height: 28px;
+}
+
+/* The caption under the picture: it is always there, so the picture's box never moves. */
+.stageCaption {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  line-height: 1.25;
+}
+
+/* The group's own controls, beside the picture. */
+.stageSide {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.stageControls {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--s3);
+  min-width: 0;
+}
+
+/* The mode control's row, kept when the group has no mode (a pattern): the band is the same
+   height for an effect group and a pattern group, so nothing moves when the sheet is opened on
+   another group. The row is empty, so it is out of the way for the keyboard too. */
+.stageModeRow {
+  flex: 0 0 auto;
+  width: 100%;
+  height: var(--stage-mode-h);
+}
+
+/* The note about a device that is away: the room is kept whether there is one or not, so the
+   stage's box is the same size in every state. */
+.stageAway {
+  display: -webkit-box;
+  min-height: 35px;
+  margin: 0;
+  overflow: hidden;
+  overflow-wrap: anywhere;
+  color: var(--dim);
+  font-size: var(--t14);
+  line-height: 1.25;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
 }
 
 /* ---------- the effect picker ---------- */
@@ -1338,6 +1483,15 @@
 
   .sheetBody {
     padding: var(--s3);
+    /* On a phone the mode control's segments take two rows (26 x 2 + the gap 2 + the padding 4
+       + the border 2 = 60), so the mode row is taller and the band with it. */
+    --stage-h: 171px;
+    --stage-mode-h: 60px;
+  }
+
+  /* The stage's band takes the sheet's own padding, which is smaller on a phone (#378). */
+  .stage {
+    margin: calc(-1 * var(--s3)) calc(-1 * var(--s3)) var(--s3);
   }
 
   .sheetRun {

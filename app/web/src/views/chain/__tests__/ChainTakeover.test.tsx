@@ -70,7 +70,7 @@ beforeAll(() => {
 
 const DEVICE = "openrgb:A1B2C3D4E5F6";
 const SESSION = "session-1";
-const SETUP = { name: "Chain setup" };
+const SETUP = { name: "Light setup" };
 
 const STATUS = {
   onboarding_complete: true,
@@ -142,11 +142,16 @@ async function press(name: string): Promise<void> {
   });
 }
 
-/** Walks the flow on screen from the length step to Yes. */
+/**
+ * Walks the flow on screen from the intro to the save: Start, the three Nexts (count, slide,
+ * devices) and the save key.
+ */
 async function finish(): Promise<void> {
+  await press("Start");
   await press("Next");
   await press("Next");
-  await press("Yes");
+  await press("Next");
+  await press("Yes, save these devices");
 }
 
 describe("the chain takeover", () => {
@@ -176,8 +181,12 @@ describe("the chain takeover", () => {
 
     expect(api.chains.list).toHaveBeenCalled();
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
-    expect(screen.getByText(/JARGB 1/)).toBeTruthy();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 1/)).toBeTruthy();
+    // The introduction comes first: nothing on the hardware changes until Start.
+    expect(screen.getByText("Tell the app about your lights.")).toBeTruthy();
     await flush();
+    expect(api.chains.start).not.toHaveBeenCalled();
+    await press("Start");
     expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 1);
   });
 
@@ -194,6 +203,7 @@ describe("the chain takeover", () => {
   it("Later closes it and the header is not offered again, in this launch or the next", async () => {
     const first = await show([chain(1, "JARGB 1", "not_set_up")]);
 
+    await press("Start");
     await press("Later");
     expect(api.chains.cancel).toHaveBeenCalledWith(DEVICE, 1, { session: SESSION });
     expect(screen.queryByRole("region", SETUP)).toBeNull();
@@ -215,19 +225,55 @@ describe("the chain takeover", () => {
   it("headers are offered one after another", async () => {
     const second = chain(2, "JARGB 2", "not_set_up");
     await show([chain(1, "JARGB 1", "not_set_up"), second]);
-    expect(screen.getByText(/JARGB 1/)).toBeTruthy();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 1/)).toBeTruthy();
 
     // The first header is answered: the list says it is set up, and the takeover moves on.
     api.chains.list.mockResolvedValue({
       chains: [chain(1, "JARGB 1", "set_up", [part(1, "Fan 1", 120, 0, "fan")], 120), second],
     });
     await finish();
-    await press("Close");
+    await press("Done");
     await flush();
 
-    expect(screen.getByText(/JARGB 2/)).toBeTruthy();
-    await flush();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 2/)).toBeTruthy();
+    await press("Start");
     expect(api.chains.start).toHaveBeenLastCalledWith(DEVICE, 2);
+  });
+
+  it("the introduction is drawn once per visit and the next header gets the short card", async () => {
+    const second = chain(2, "JARGB 2", "not_set_up");
+    await show([chain(1, "JARGB 1", "not_set_up"), second]);
+    expect(screen.getByText("Tell the app about your lights.")).toBeTruthy();
+
+    api.chains.list.mockResolvedValue({
+      chains: [chain(1, "JARGB 1", "set_up", [part(1, "Fan 1", 120, 0, "fan")], 120), second],
+    });
+    await finish();
+    await press("Done");
+    await flush();
+
+    expect(screen.getByText("Next: JARGB 2.")).toBeTruthy();
+    expect(screen.getByText("Is anything plugged into it?")).toBeTruthy();
+    expect(screen.queryByText("Tell the app about your lights.")).toBeNull();
+    // The card has the same three keys, and no session is open until Start.
+    expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Nothing is plugged in here" })).toBeTruthy();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("a header marked empty on the introduction opens the next card with the notice above it", async () => {
+    const second = chain(2, "JARGB 2", "not_set_up");
+    await show([chain(1, "JARGB 1", "not_set_up"), second]);
+
+    api.chains.list.mockResolvedValue({ chains: [chain(1, "JARGB 1", "empty"), second] });
+    await press("Nothing is plugged in here");
+    await flush();
+
+    expect(api.chains.empty).toHaveBeenCalledWith(DEVICE, 1, { session: SESSION });
+    expect(screen.getByText("Next: JARGB 2.")).toBeTruthy();
+    expect(
+      screen.getByText("JARGB 1 is marked empty. Set it up again from Devices, then add its lights to your scenes."),
+    ).toBeTruthy();
   });
 
   it("an empty header is not offered again", async () => {
@@ -236,13 +282,13 @@ describe("the chain takeover", () => {
 
     // Only the header with something to ask about is offered.
     expect(screen.queryByText(/JARGB 1/)).toBeNull();
-    expect(screen.getByText(/JARGB 2/)).toBeTruthy();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 2/)).toBeTruthy();
 
     api.chains.list.mockResolvedValue({
       chains: [chain(1, "JARGB 1", "empty"), chain(2, "JARGB 2", "set_up", [part(1, "Fan 1", 120, 0, "fan")], 120)],
     });
     await finish();
-    await press("Close");
+    await press("Done");
     await flush();
 
     expect(screen.queryByRole("region", SETUP)).toBeNull();
@@ -252,7 +298,7 @@ describe("the chain takeover", () => {
 
   it("leaving the takeover by Escape cancels the session", async () => {
     await show([chain(1, "JARGB 1", "not_set_up")]);
-    await flush();
+    await press("Start");
     expect(api.chains.start).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -273,7 +319,7 @@ describe("the chain takeover", () => {
     nav.path = "/devices/";
     patchSnap({ status: { ...STATUS, show_zone_panel: true } as Status, devices: [] });
     render(<StandingNotices />);
-    const title = screen.getByText("Set up your headers");
+    const title = screen.getByText("Set up your ARGB headers");
     const panel = title.closest(".banner") as HTMLElement;
     expect(panel.textContent).not.toMatch(/walker|identify walker|Size your ARGB/i);
     expect(panel.querySelector("a")).toBeNull();
@@ -281,8 +327,8 @@ describe("the chain takeover", () => {
     await press("Set up");
 
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
-    await flush();
-    expect(api.chains.start).toHaveBeenCalledTimes(2);
+    await press("Start");
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
   });
 
   it("a page change the owner cancels leaves no request behind", async () => {

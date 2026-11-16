@@ -1,7 +1,10 @@
 import { describe, expect, it } from "vitest";
 import { demoRequest } from "@/lib/demo";
 import { ApiFailure } from "@/lib/errors";
+import { DEMO_LIGHTS } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
 import type { Scene } from "@/proto/Scene";
+import type { GroupMoved } from "@/proto/GroupMoved";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
 
 // The demo backend answers the scene routes the way the daemon will (the spine's routes), so
@@ -78,5 +81,167 @@ describe("the demo's scene routes", () => {
     );
     expect(refused).toBeInstanceOf(ApiFailure);
     expect((refused as ApiFailure).status).toBe(422);
+  });
+
+  it("moves a group to another scene and answers the way the daemon does", async () => {
+    const { answer, scene } = await active();
+    const target = answer.scenes.find((s) => s.id !== scene.id);
+    if (!target) throw new Error("the demo has no other scene");
+    const group = scene.groups[0];
+    if (!group) throw new Error("the demo scene has no groups");
+    const moved = (await demoRequest(
+      "POST",
+      `/api/v1/scenes/${scene.id}/groups/${group.id}/move`,
+      {
+        to: target.id,
+        copy: false,
+        expected_rev_from: scene.rev,
+        expected_rev_to: target.rev,
+      },
+    )) as GroupMoved;
+    expect(moved.saved).toBe(true);
+    expect(moved.group_id).toBe(group.id);
+    expect(moved.scenes[0]?.groups.some((g) => g.id === group.id)).toBe(false);
+    expect(moved.scenes[1]?.groups.at(-1)?.id).toBe(group.id);
+    // The scene the group left is the way it was.
+    expect(moved.before[0]?.groups.some((g) => g.id === group.id)).toBe(true);
+  });
+
+  it("refuses a move to the same scene, and a stale rev with 409", async () => {
+    const { scene } = await active();
+    const group = scene.groups[0];
+    if (!group) throw new Error("the demo scene has no groups");
+    await expect(
+      demoRequest("POST", `/api/v1/scenes/${scene.id}/groups/${group.id}/move`, {
+        to: scene.id,
+        copy: false,
+        expected_rev_from: scene.rev,
+        expected_rev_to: scene.rev,
+      }),
+    ).rejects.toMatchObject({ status: 422 });
+    await expect(
+      demoRequest("POST", `/api/v1/scenes/${scene.id}/groups/${group.id}/move`, {
+        to: "focus",
+        copy: false,
+        expected_rev_from: scene.rev - 1,
+        expected_rev_to: 1,
+      }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("answers a dry run the way the daemon does, and saves nothing", async () => {
+    const { answer, scene } = await active();
+    const target = answer.scenes.find((s) => s.id !== scene.id);
+    if (!target) throw new Error("the demo has no other scene");
+    const group = scene.groups[0];
+    if (!group) throw new Error("the demo scene has no groups");
+    const dry = (await demoRequest(
+      "POST",
+      `/api/v1/scenes/${scene.id}/groups/${group.id}/move`,
+      {
+        to: target.id,
+        copy: false,
+        expected_rev_from: scene.rev,
+        expected_rev_to: target.rev,
+        dry_run: true,
+      },
+    )) as GroupMoved;
+    // The answer is the one the move would give, and it says that nothing was saved.
+    expect(dry.saved).toBe(false);
+    expect(dry.group_id).toBe(group.id);
+    expect(dry.scenes[0]?.groups.some((g) => g.id === group.id)).toBe(false);
+    expect(dry.scenes[1]?.groups.at(-1)?.id).toBe(group.id);
+    // Nothing was written: the scene the group left is the way it was.
+    const after = (await demoRequest("GET", "/api/v1/scenes", null)) as ScenesResponse;
+    const now = after.scenes.find((s) => s.id === scene.id);
+    expect(now?.rev).toBe(scene.rev);
+    expect(now?.groups.some((g) => g.id === group.id)).toBe(true);
+  });
+
+  it("puts the scenes in another order, and refuses a stale one", async () => {
+    const { answer } = await active();
+    const ids = answer.scenes.map((s) => s.id);
+    const order = [ids[2]!, ids[0]!, ids[1]!];
+    const written = (await demoRequest("PUT", "/api/v1/scenes", {
+      order,
+      expected_order: ids,
+    })) as ScenesResponse;
+    expect(written.scenes.map((s) => s.id)).toEqual(order);
+    // The order that is not a permutation is refused.
+    await expect(
+      demoRequest("PUT", "/api/v1/scenes", { order: [ids[0]!], expected_order: order }),
+    ).rejects.toMatchObject({ status: 422 });
+    // An order another window changed is refused too.
+    await expect(
+      demoRequest("PUT", "/api/v1/scenes", { order: ids, expected_order: ids }),
+    ).rejects.toMatchObject({ status: 409 });
+  });
+
+  it("refuses a move that would run too many HTML effects, in the daemon's own words", async () => {
+    const { answer, scene } = await active();
+    const target = answer.scenes.find((s) => s.id !== scene.id);
+    if (!target) throw new Error("the demo has no other scene");
+    const moving = scene.groups.find((g) => g.members.length > 0);
+    if (!moving) throw new Error("the demo scene has no groups");
+    // Two lights the group that goes does not hold: the take takes nothing out of the target.
+    const free = DEMO_LIGHTS.map((l) => l.light.id).filter((id) => !moving.members.includes(id));
+    const [first, second] = free;
+    if (!first || !second) throw new Error("the demo has not enough lights");
+    // The target runs two HTML effects already.
+    const html: Scene = {
+      ...target,
+      groups: [
+        {
+          id: "g-html-1",
+          name: "Ink drop",
+          members: [first],
+          plays: { type: "effect", effect: "html:ink-drop", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+        {
+          id: "g-html-2",
+          name: "Wet smear",
+          members: [second],
+          plays: { type: "effect", effect: "html:wet-smear", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+      ],
+    };
+    const saved = (await demoRequest("PUT", `/api/v1/scenes/${target.id}`, {
+      scene: html,
+      expected_rev: target.rev,
+    })) as Scene;
+    // The group that goes plays an HTML effect too: the scene would run three.
+    const htmlMoving: Scene = {
+      ...scene,
+      groups: [
+        { ...moving, plays: { type: "effect", effect: "html:third", props: {} } },
+        ...scene.groups.filter((g) => g.id !== moving.id),
+      ],
+    };
+    const withHtml = (await demoRequest("PUT", `/api/v1/scenes/${scene.id}`, {
+      scene: htmlMoving,
+      expected_rev: scene.rev,
+    })) as Scene;
+    const group = withHtml.groups.find((g) => g.id === moving.id);
+    if (!group) throw new Error("the demo scene has no groups");
+    const refused = await demoRequest(
+      "POST",
+      `/api/v1/scenes/${withHtml.id}/groups/${group.id}/move`,
+      {
+        to: saved.id,
+        copy: false,
+        expected_rev_from: withHtml.rev,
+        expected_rev_to: saved.rev,
+        dry_run: true,
+      },
+    ).catch((e: unknown) => e);
+    expect(refused).toBeInstanceOf(ApiFailure);
+    expect((refused as ApiFailure).status).toBe(422);
+    // The daemon's own sentence (`html_limit_sentence` in the daemon), plain: a move names no
+    // scene in it.
+    expect((refused as ApiFailure).message).toBe(htmlLimitSentence(3));
   });
 });
