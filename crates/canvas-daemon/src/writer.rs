@@ -60,7 +60,7 @@ pub async fn writer_loop_with_lane(
                 // `canvas_daemon::writer`, which a `RUST_LOG=canvas_rgbd=...` filter drops.
                 if failures == 1 || failures.is_multiple_of(300) {
                     tracing::warn!(
-                        target: "canvas_rgbd",
+                        target: crate::logging::LOG_TARGET,
                         device = %device,
                         error = %e,
                         failures,
@@ -246,56 +246,15 @@ mod tests {
         );
     }
 
-    /// A subscriber that records the target of the frame-write warning (#87).
-    #[derive(Default)]
-    struct Targets(Arc<Mutex<Vec<String>>>);
-
-    impl tracing::Subscriber for Targets {
-        fn register_callsite(
-            &self,
-            _: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::sometimes()
-        }
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct Message(String);
-            impl tracing::field::Visit for Message {
-                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                    if field.name() == "message" {
-                        self.0 = format!("{value:?}");
-                    }
-                }
-                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                    if field.name() == "message" {
-                        self.0 = value.to_string();
-                    }
-                }
-            }
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            if message.0.contains("frame write failed") {
-                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event.metadata().target().to_string());
-            }
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     /// The frame-write warning keeps the daemon's own target after the writer moved out of the
     /// binary into the library (#87): a `RUST_LOG=canvas_rgbd=...` filter still catches it. On the
     /// old target (`canvas_daemon::writer`) that filter drops every line from this module.
+    ///
+    /// `captured` prints the target, so the line reads `WARN canvas_rgbd: frame write failed`
+    /// (class `cause:timing-test`: a capture reads lines through `test_logs::captured`, never
+    /// through a subscriber a test installs itself, #45).
     #[test]
-    fn the_frame_write_warning_keeps_the_canvas_rgbd_target() {
-        let targets = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Targets(Arc::clone(&targets));
+    fn the_frame_write_warning_keeps_the_daemon_target() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -304,17 +263,18 @@ mod tests {
         let adapter = Arc::new(tokio::sync::Mutex::new(failing));
         let last_frame = Arc::new(LastFrame::default());
         let (tx, rx) = tokio::sync::mpsc::channel(1);
-        tracing::subscriber::with_default(subscriber, || {
+        // The writer runs on this thread, so its warning goes into this capture.
+        let (_, text) = crate::test_logs::captured(|| {
             runtime.block_on(async {
                 tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
                 drop(tx);
                 writer_loop(adapter, DeviceId("fake:ram".into()), rx, last_frame).await;
             });
         });
-        let targets = targets.lock().unwrap_or_else(|e| e.into_inner());
+        let target = crate::logging::LOG_TARGET;
         assert!(
-            targets.iter().any(|target| target == "canvas_rgbd"),
-            "the frame-write warning must use the canvas_rgbd target, got {targets:?}"
+            text.lines().any(|line| line.contains(&format!("WARN {target}:"))),
+            "the frame-write warning must use the {target} target: {text}"
         );
     }
 }
