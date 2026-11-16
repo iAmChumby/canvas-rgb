@@ -30,6 +30,7 @@ vi.mock("@/lib/endpoints", () => ({ api }));
 vi.mock("@/components/Notify", () => ({ notify: notifySpy }));
 
 import { DEMO_LIGHTS } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
 import { MoveStep } from "@/views/scenes/MoveStep";
 import { type MoveCheck } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
@@ -93,8 +94,11 @@ function scenes(): { from: Scene; to: Scene; third: Scene } {
 /**
  * The daemon's own answer to a dry run of the move of `groupId` into Evening: the scenes after,
  * the scenes before, the lights it took and the groups it emptied.
+ *
+ * `revs` are the revisions the daemon answered with: the answer carries the scenes before the
+ * move, at the revisions the daemon had.
  */
-function dryAnswer(groupId: string): GroupMoved {
+function dryAnswer(groupId: string, revs = { from: 7, to: 2 }): GroupMoved {
   const { from, to } = scenes();
   const moving = from.groups.find((g) => g.id === groupId);
   if (!moving) throw new Error(`the scene holds no group ${groupId}`);
@@ -120,7 +124,7 @@ function dryAnswer(groupId: string): GroupMoved {
       { ...from, rev: from.rev + 1, groups: from.groups.filter((g) => g.id !== groupId) },
       { ...to, rev: to.rev + 1, groups: kept },
     ],
-    before: [from, to],
+    before: [{ ...from, rev: revs.from }, { ...to, rev: revs.to }],
     taken,
     emptied,
   };
@@ -205,6 +209,56 @@ describe("the move step", () => {
     expect(use.dryRunMove).toHaveBeenLastCalledWith("g-desk", "focus", true);
   });
 
+  it("a row is not enabled with the other mode's answer when the step switches", async () => {
+    // The first answers land; the ones for the copy are still on their way.
+    let round = 0;
+    const use = fakeUse({
+      dryRunMove: vi.fn((): Promise<MoveCheck> => {
+        round += 1;
+        if (round <= 2) return Promise.resolve({ state: "answered", answer: dryAnswer("g-desk") });
+        return new Promise<MoveCheck>(() => undefined);
+      }),
+    });
+    const view = render(
+      <MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />,
+    );
+    const row = await screen.findByTestId("move-to-evening");
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+    // The move's answer is on the row.
+    expect(document.getElementById("move-outcome-evening")?.textContent).toContain("Adds 1 device.");
+
+    // The step switches to the copy: the row is held, and it does not keep the move's answer.
+    view.rerender(<MoveStep groupId="g-desk" copy use={use} lights={lights()} onClose={vi.fn()} />);
+    expect((row as HTMLButtonElement).disabled).toBe(true);
+    expect(document.getElementById("move-outcome-evening")?.textContent).not.toContain("Adds 1 device.");
+    // The daemon is asked again, about the copy.
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
+    expect(use.dryRunMove).toHaveBeenLastCalledWith("g-desk", "focus", true);
+  });
+
+  it("the rows ask again when a scene's revision changes", async () => {
+    const use = fakeUse();
+    const view = render(
+      <MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />,
+    );
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(2));
+
+    // Another window saved the scene the group is in: it is one rev on, so the answers on the
+    // rows are older than the daemon now is.
+    const { from, to, third } = scenes();
+    const moved = { ...from, rev: from.rev + 1 };
+    view.rerender(
+      <MoveStep
+        groupId="g-desk"
+        copy={false}
+        use={{ ...use, scene: moved, scenes: [moved, to, third] }}
+        lights={lights()}
+        onClose={vi.fn()}
+      />,
+    );
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
+  });
+
   it("a row is held until the daemon answers, and it says so in the same box", async () => {
     const releases: Record<string, (answer: MoveCheck) => void> = {};
     const use = fakeUse({
@@ -271,8 +325,7 @@ describe("the move step", () => {
   });
 
   it("a move the daemon refuses is disabled, with the daemon's own sentence", async () => {
-    const sentence =
-      "at most 2 groups of a scene may play an HTML effect (a stack with an HTML layer counts); 3 do";
+    const sentence = htmlLimitSentence(3);
     const use = fakeUse({
       dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "refused", message: sentence })),
     });
@@ -372,6 +425,40 @@ describe("the move step", () => {
     fireEvent.click(row);
     await waitFor(() => expect(use.moveGroup).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("a confirm the daemon refuses asks every row again, and the next confirm carries the new revisions", async () => {
+    let round = 0;
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => {
+        round += 1;
+        // The first answer is the old one; the answers after the refusal carry the revisions the
+        // daemon has now.
+        return {
+          state: "answered",
+          answer: round <= 2 ? dryAnswer("g-desk") : dryAnswer("g-desk", { from: 8, to: 3 }),
+        };
+      }),
+      // The daemon refused the confirm (a 409): nothing moved.
+      moveGroup: vi.fn(async () => null),
+    });
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
+    const row = await screen.findByTestId("move-to-evening");
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+    expect(use.dryRunMove).toHaveBeenCalledTimes(2);
+
+    // The confirm is refused.
+    fireEvent.click(row);
+    await waitFor(() => expect(use.moveGroup).toHaveBeenCalledTimes(1));
+
+    // Every row asks again: the answers on the rows are older than the daemon now is.
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+
+    // The next confirm carries the revisions the new answer was made with.
+    fireEvent.click(row);
+    await waitFor(() => expect(use.moveGroup).toHaveBeenCalledTimes(2));
+    expect(use.moveGroup).toHaveBeenLastCalledWith("g-desk", "evening", false, { from: 8, to: 3 });
   });
 
   it("the step closes when its group is gone", async () => {
