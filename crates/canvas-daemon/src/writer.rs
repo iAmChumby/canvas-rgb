@@ -274,11 +274,11 @@ mod tests {
         let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
         let adapter = Arc::new(tokio::sync::Mutex::new(failing));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         // The writer runs on this thread, so its warning goes into this capture.
         let (_, text) = crate::test_logs::captured(|| {
             runtime.block_on(async {
-                tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
+                tx.send_replace(vec![Rgb8::WHITE; 8]);
                 drop(tx);
                 writer_loop(adapter, DeviceId("fake:ram".into()), rx, last_frame).await;
             });

@@ -96,8 +96,11 @@ pub async fn patch_zone(
     let for_the_work = Arc::clone(&app);
     let work_id = id.clone();
     tokio::spawn(async move {
-        let result = resize_the_zone(&for_the_work, work_id, zone, patch.led_count).await;
-        let _ = reply.send(result);
+        let result = resize_the_zone(&for_the_work, work_id.clone(), zone, patch.led_count).await;
+        // A client that went away gets no answer; a failed resize must still be on record.
+        if let Err(Err(failure)) = reply.send(result) {
+            tracing::warn!(device = %work_id, zone, ?failure, "a zone resize failed after the client went away");
+        }
     });
     // The task answers, or it is gone.
     answer
