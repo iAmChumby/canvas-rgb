@@ -19,6 +19,7 @@
 
 use canvas_core::geometry;
 use canvas_proto::api::{StackLayerState, StackLayerStatus};
+use canvas_proto::color::Rgb8;
 use canvas_proto::device::DeviceId;
 use canvas_proto::layout::{SamplingMode, CANVAS_HEIGHT, CANVAS_WIDTH};
 use canvas_proto::props::{InputNeeds, Props, PropertyDef, PropertySchema};
@@ -354,6 +355,39 @@ impl Mask {
     }
 }
 
+/// Which pixels of an area a layer paints, read with the layer's own reading (#407).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    /// The cells the area's LEDs read.
+    Cell,
+    /// The columns the area's strip LEDs read: their own x-range over the full height.
+    Column,
+    /// The cells the column read does not cover: the lights that are not a strip.
+    CellOnly,
+}
+
+impl Coverage {
+    /// True when the area's mask covers the pixel, read this way.
+    fn covers(self, mask: &Mask, x: u32, y: u32) -> bool {
+        match self {
+            Coverage::Cell => mask.contains(x, y),
+            Coverage::Column => mask.contains_column(x, y),
+            Coverage::CellOnly => mask.contains(x, y) && !mask.contains_column(x, y),
+        }
+    }
+}
+
+/// Where one layer's picture is mapped, and which pixels it may paint (#407).
+#[derive(Debug, Clone, Copy)]
+struct PaintBox {
+    /// The box the picture is mapped over.
+    dest: [f32; 4],
+    /// The box it may paint: the pixels the area's mask covers.
+    paint: [f32; 4],
+    /// Which of the area's pixels it may paint, read with the layer's own reading.
+    coverage: Coverage,
+}
+
 /// Every device's and zone's mask, at one group, render scale and sampling mode.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AreaMap {
@@ -368,6 +402,12 @@ pub struct AreaMap {
     /// The render size the masks are built for.
     pub width: u32,
     pub height: u32,
+    /// The group's strip LEDs, in render pixels (#407): the cells the engine reads a strip
+    /// light from, and the columns a layer whose meaning is how high it reaches is read over.
+    ///
+    /// They are the group's own samples, so the compositor reads a layer at the very LED the
+    /// engine will read, with that layer's own reading.
+    pub strips: Vec<geometry::LedSample>,
 }
 
 impl AreaMap {
@@ -397,6 +437,7 @@ impl AreaMap {
             sampling,
             width,
             height,
+            strips: Vec::new(),
         };
         for samples in plan.lights.iter() {
             let Some(light) = lights.iter().find(|l| l.id == samples.light) else { continue };
@@ -412,6 +453,10 @@ impl AreaMap {
                 let scaled = scale_sample(led, scale);
                 device_mask.add_led(&scaled, sampling, column);
                 zone_mask.add_led(&scaled, sampling, column);
+                // The strip's own LEDs, for the compositor's per-LED read (#407).
+                if column && led.sampled {
+                    map.strips.push(scaled);
+                }
             }
         }
         // A device or zone with no LED of its own paints nothing, and has no box.
@@ -480,6 +525,65 @@ fn scale_sample(sample: &geometry::LedSample, scale: f32) -> geometry::LedSample
         bounds: sample.bounds.map(|v| v * scale),
         sampled: sample.sampled,
     }
+}
+
+/// The pixels a read averages over `bounds`: the ones whose centres fall inside it, the rule
+/// `sampling::sample_area` uses, clamped to the canvas.
+///
+/// The bounds are the ones the engine's sampler gets, so the compositor paints and reads the
+/// very pixels the engine will (#407). An axis that holds no pixel centre still gives its
+/// first pixel, the rule the sampler uses, so a cell thinner than a pixel is never empty.
+fn read_box(bounds: [f32; 4], width: u32, height: u32) -> (u32, u32, u32, u32) {
+    if width == 0 || height == 0 {
+        return (0, 0, 0, 0);
+    }
+    let max_x = i64::from(width - 1);
+    let max_y = i64::from(height - 1);
+    let x0 = ((bounds[0] - 0.5).ceil() as i64).clamp(0, max_x);
+    let y0 = ((bounds[1] - 0.5).ceil() as i64).clamp(0, max_y);
+    let x1 = ((bounds[2] - 0.5).floor() as i64).clamp(0, max_x).max(x0);
+    let y1 = ((bounds[3] - 0.5).floor() as i64).clamp(0, max_y).max(y0);
+    (x0 as u32, y0 as u32, x1 as u32, y1 as u32)
+}
+
+/// The colour one LED reads out of a painted canvas: the mean over the read's pixels, the
+/// rule `sampling::sample_area` uses.
+///
+/// `column` reads the LED's own x-range over the whole height of the canvas, the read of
+/// #400; otherwise the LED reads its cell.
+fn canvas_read(canvas: &Canvas, bounds: [f32; 4], column: bool) -> [f32; 3] {
+    if canvas.width == 0 || canvas.height == 0 {
+        return [0.0; 3];
+    }
+    let (x0, y0, x1, y1) = read_box(bounds, canvas.width, canvas.height);
+    let (x0, y0, x1, y1) = if column {
+        (x0, 0, x1, canvas.height - 1)
+    } else {
+        (x0, y0, x1, y1)
+    };
+    if x1 < x0 || y1 < y0 {
+        return [0.0; 3];
+    }
+    let mut sum = [0.0f64; 3];
+    let mut count = 0u64;
+    for y in y0..=y1 {
+        for x in x0..=x1 {
+            let pixel = canvas.get(x, y);
+            for channel in 0..3 {
+                sum[channel] += f64::from(pixel[channel]);
+            }
+            count += 1;
+        }
+    }
+    if count == 0 {
+        return [0.0; 3];
+    }
+    let n = count as f64;
+    [
+        (sum[0] / n) as f32,
+        (sum[1] / n) as f32,
+        (sum[2] / n) as f32,
+    ]
 }
 
 /// The masks of every group, at one version.
@@ -912,9 +1016,23 @@ pub struct StackEffect {
     frame_panicked: bool,
     /// True once the compositor's own start panicked: it logs once and keeps going.
     init_panicked: bool,
-    /// How a strip LED reads this stack (#407): the column when any of its layers answers the
-    /// column, the cell otherwise.
+    /// How each layer is read on a strip (#407): the column for a layer whose meaning is how
+    /// high it reaches (Fire, Audio Spectrum), the cell for every other layer.
+    layer_reads: Vec<StripRead>,
+    /// How the stack itself is read on a strip (#407): the column when every layer answers
+    /// the column, the cell otherwise.
+    ///
+    /// The answer is read once, when the effect is set, so it cannot follow a layer that
+    /// comes and goes. It is the column only when the layers agree on it: then the picture's
+    /// own read is the blend of the layers' reads, and nothing has to be painted. When the
+    /// layers disagree the stack answers the cell and paints every strip LED its own blend.
     read: StripRead,
+    /// The group's strip LEDs, in the area book's render pixels (#407): where the compositor
+    /// paints each strip LED's own colour, which is what the engine then reads.
+    strip_leds: Vec<geometry::LedSample>,
+    /// The width the strip LEDs were measured at: the frame they are painted into can be
+    /// another size, and the LEDs scale with it.
+    strip_width: u32,
 }
 
 impl StackEffect {
@@ -1012,13 +1130,36 @@ impl StackEffect {
                 }
             })
             .collect();
-        // A stack answers the column when any of its layers answers it (#407): the stack's
-        // picture is one picture, and the column is the read that shows a layer whose meaning is
-        // how high it reaches (a flame, a spectrum bar). A stack of cell layers keeps the cell,
-        // so a thin moving line (Rain) is still seen.
-        let read = if layers
+        // Each layer is read on its own (#407): a layer whose meaning is how high its picture
+        // reaches (Fire, Audio Spectrum) is read over the LED's column, every other layer over
+        // the LED's cell. The stack reads each layer that way and blends the reads, so a thin
+        // moving line (Rain) keeps its cell and a flame keeps its column.
+        let layer_reads: Vec<StripRead> = layers
             .iter()
-            .any(|layer| layer.built.as_ref().is_some_and(|effect| effect.strip_read() == StripRead::Column))
+            .map(|layer| match layer.built.as_ref() {
+                Some(effect) => match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    effect.strip_read()
+                })) {
+                    Ok(read) => read,
+                    Err(_) => {
+                        tracing::error!(
+                            stack = %stack.id,
+                            layer = %layer.id,
+                            effect = %layer.effect,
+                            "a layer's effect panicked while it was asked how a strip reads it; the layer is read as a cell"
+                        );
+                        StripRead::Cell
+                    }
+                },
+                None => StripRead::Cell,
+            })
+            .collect();
+        // The stack answers the column when every layer answers it (#407): the picture's own
+        // read is then the blend of the layers' reads, and no LED has to be painted. When the
+        // layers disagree the stack answers the cell and paints every strip LED the blend of
+        // the layers' own reads.
+        let read = if !layer_reads.is_empty()
+            && layer_reads.iter().all(|read| *read == StripRead::Column)
         {
             StripRead::Column
         } else {
@@ -1040,7 +1181,10 @@ impl StackEffect {
             frame_size: (0, 0),
             frame_panicked: false,
             init_panicked: false,
+            layer_reads,
             read,
+            strip_leds: Vec::new(),
+            strip_width: 0,
         }
     }
 
@@ -1173,6 +1317,13 @@ impl StackEffect {
         drop(live);
         drop(areas);
         self.resolved = resolved;
+        // The group's strip LEDs, copied out with the areas (#407): the frame reads every
+        // layer at each of them and paints the result where the engine reads it.
+        let areas = read_recovering(&self.areas);
+        let group_map = self.group.as_deref().and_then(|id| areas.groups.get(id));
+        self.strip_leds = group_map.map(|map| map.strips.clone()).unwrap_or_default();
+        self.strip_width = group_map.map(|map| map.width).unwrap_or(0);
+        drop(areas);
         // A mask's own values are live too (#256): a slider drag or a mask property change
         // re-initialises the mask effect and rebuilds nothing. The lock is dropped first.
         for (index, mask) in masks.into_iter().enumerate() {
@@ -1288,6 +1439,14 @@ impl StackEffect {
     }
 
     /// The pixels of one layer's canvas, composited into `target`.
+    ///
+    /// A layer is read on its own (#407): a layer whose meaning is how high its picture reaches
+    /// (Fire, Audio Spectrum) is read over the strip LEDs' whole columns, so its picture is
+    /// mapped over the area's columns; every other layer is read over the cell at mid-height.
+    ///
+    /// A column-reading layer paints the cells the column does not cover as well: a light that
+    /// is not a strip (a fan, a keyboard) reads its cell, and it must read the layer exactly as
+    /// it did before.
     fn composite_layer(
         &self,
         index: usize,
@@ -1295,14 +1454,12 @@ impl StackEffect {
         values: &LiveLayer,
         target: &mut Canvas,
     ) {
-        let layer = &self.layers[index];
         let a = f32::from(values.opacity.min(100)) / 100.0;
         if a <= 0.0 || !values.visible {
             return;
         }
-        // A stack that answers the column paints over the strip LEDs' whole columns (#407): the
-        // LED reads its own x-range over the full height, so the picture has to be there.
-        let column = self.read == StripRead::Column;
+        let column =
+            self.layer_reads.get(index).copied().unwrap_or(StripRead::Cell) == StripRead::Column;
         let dest = if area.whole_canvas {
             [0.0, 0.0, target.width as f32, target.height as f32]
         } else if column {
@@ -1310,14 +1467,6 @@ impl StackEffect {
         } else {
             area.dest
         };
-        if !dest.iter().all(|v| v.is_finite()) {
-            return;
-        }
-        let [dx0, dy0, dx1, dy1] = dest;
-        let (dw, dh) = (dx1 - dx0, dy1 - dy0);
-        if dw <= 0.0 || dh <= 0.0 {
-            return;
-        }
         // A masked area paints every pixel its LEDs read, which for a ring can reach just past
         // the rectangle the picture is mapped over (D95.2.3).
         let paint = match &area.mask {
@@ -1330,6 +1479,47 @@ impl StackEffect {
             }
             None => dest,
         };
+        let coverage = if column { Coverage::Column } else { Coverage::Cell };
+        self.paint_area(index, area, values, target, PaintBox { dest, paint, coverage });
+        if column {
+            if let Some(mask) = &area.mask {
+                // The lights that are not a strip read their cells, and the columns do not
+                // cover them: the layer paints them over its own box, as it always did.
+                let dest = area.dest;
+                let paint = mask.extent().unwrap_or(dest);
+                self.paint_area(
+                    index,
+                    area,
+                    values,
+                    target,
+                    PaintBox { dest, paint, coverage: Coverage::CellOnly },
+                );
+            }
+        }
+    }
+
+    /// Paints one layer's picture over the box, where the area's mask allows it.
+    fn paint_area(
+        &self,
+        index: usize,
+        area: &OwnedArea,
+        values: &LiveLayer,
+        target: &mut Canvas,
+        box_: PaintBox,
+    ) {
+        let layer = &self.layers[index];
+        let a = f32::from(values.opacity.min(100)) / 100.0;
+        let dest = box_.dest;
+        let paint = box_.paint;
+        let coverage = box_.coverage;
+        if !dest.iter().all(|v| v.is_finite()) {
+            return;
+        }
+        let [dx0, dy0, dx1, dy1] = dest;
+        let (dw, dh) = (dx1 - dx0, dy1 - dy0);
+        if dw <= 0.0 || dh <= 0.0 {
+            return;
+        }
         let x0 = (paint[0].floor().max(0.0) as u32).min(target.width);
         let y0 = (paint[1].floor().max(0.0) as u32).min(target.height);
         let x1 = (paint[2].ceil().max(0.0) as u32).min(target.width);
@@ -1346,12 +1536,7 @@ impl StackEffect {
         for y in y0..y1 {
             for x in x0..x1 {
                 if let Some(area_mask) = &area.mask {
-                    let covered = if column {
-                        area_mask.contains_column(x, y)
-                    } else {
-                        area_mask.contains(x, y)
-                    };
-                    if !covered {
+                    if !coverage.covers(area_mask, x, y) {
                         continue;
                     }
                 }
@@ -1378,6 +1563,181 @@ impl StackEffect {
                 }
                 let i = (y as usize) * (target.width as usize) + x as usize;
                 target.pixels[i] = blend_pixel(values.blend, target.pixels[i], source, alpha);
+            }
+        }
+    }
+
+    /// One layer's own read at one strip LED (#407): the mean over the read's pixels of what
+    /// the layer paints there.
+    ///
+    /// The read is the layer's: a layer whose meaning is how high its picture reaches (Fire,
+    /// Audio Spectrum) is read over the LED's column, every other layer over the LED's cell at
+    /// mid-height. The area's mask is applied with the same reading, so a layer kept to a
+    /// device contributes only where that device reads.
+    ///
+    /// The mean is over the whole read, so a pixel the layer does not reach counts as black:
+    /// this is what the layer would read on its own.
+    fn layer_read(
+        &self,
+        index: usize,
+        area: &OwnedArea,
+        led: &geometry::LedSample,
+        column: bool,
+    ) -> [f32; 3] {
+        let layer = &self.layers[index];
+        let src = &layer.canvas;
+        if src.width == 0 || src.height == 0 {
+            return [0.0; 3];
+        }
+        let (x0, y0, x1, y1) = read_box(led.bounds, src.width, src.height);
+        // The column read averages the LED's own x-range over the whole height of the canvas.
+        let (x0, y0, x1, y1) = if column { (x0, 0, x1, src.height - 1) } else { (x0, y0, x1, y1) };
+        // The picture is mapped over the area's box, the same box the composite paints it over.
+        let dest = if area.whole_canvas {
+            [0.0, 0.0, src.width as f32, src.height as f32]
+        } else if column {
+            area.column_dest
+        } else {
+            area.dest
+        };
+        let (dw, dh) = (dest[2] - dest[0], dest[3] - dest[1]);
+        if dw <= 0.0 || dh <= 0.0 || !dest.iter().all(|v| v.is_finite()) {
+            return [0.0; 3];
+        }
+        // A mask that applies shapes this layer only (#256): its coverage scales the layer's
+        // picture per pixel, the same way the composite scales its alpha.
+        let mask = layer
+            .mask
+            .as_ref()
+            .filter(|mask| mask.applies())
+            .filter(|mask| mask.canvas.width == src.width && mask.canvas.height == src.height);
+        let mut sum = [0.0f64; 3];
+        let mut count = 0u64;
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                count += 1;
+                if let Some(area_mask) = &area.mask {
+                    let covered = if column {
+                        area_mask.contains_column(x, y)
+                    } else {
+                        area_mask.contains(x, y)
+                    };
+                    if !covered {
+                        continue;
+                    }
+                }
+                // The pixel's centre, and where it lands in the layer's own picture.
+                let fx = x as f32 + 0.5;
+                let fy = y as f32 + 0.5;
+                if fx < dest[0] || fx >= dest[2] || fy < dest[1] || fy >= dest[3] {
+                    // Outside the area's box: the layer paints nothing there.
+                    continue;
+                }
+                let sx = (((fx - dest[0]) / dw) * src.width as f32).floor();
+                let sy = (((fy - dest[1]) / dh) * src.height as f32).floor();
+                let sx = (sx.max(0.0) as u32).min(src.width - 1);
+                let sy = (sy.max(0.0) as u32).min(src.height - 1);
+                let mut source = src.get(sx, sy);
+                if let Some(mask) = mask {
+                    let pixel = mask.canvas.get(sx, sy);
+                    let coverage = masked_coverage(
+                        mask.values.source,
+                        pixel,
+                        mask.values.invert,
+                        mask.values.amount,
+                    );
+                    for value in source.iter_mut() {
+                        *value *= coverage;
+                    }
+                }
+                for channel in 0..3 {
+                    sum[channel] += f64::from(source[channel]);
+                }
+            }
+        }
+        if count == 0 {
+            return [0.0; 3];
+        }
+        let n = count as f64;
+        [
+            (sum[0] / n) as f32,
+            (sum[1] / n) as f32,
+            (sum[2] / n) as f32,
+        ]
+    }
+
+    /// The colour one strip LED shows (#407): every layer's own read, blended with the
+    /// stack's blend and opacity.
+    ///
+    /// The blend is the stack's own, over the reads and not over the pictures: the layer on
+    /// top wins what it covers, at its opacity, exactly as the composite does per pixel.
+    fn strip_led_colour(&self, led: &geometry::LedSample) -> [f32; 3] {
+        let mut out = [0.0f32; 3];
+        for index in 0..self.layers.len() {
+            let Some(entry) = self.resolved.get(index) else { continue };
+            let values = &entry.values;
+            if !values.visible || values.opacity == 0 {
+                continue;
+            }
+            let Some(area) = entry.area.as_ref() else { continue };
+            if self.layers[index].built.is_none() {
+                continue;
+            }
+            let column =
+                self.layer_reads.get(index).copied().unwrap_or(StripRead::Cell) == StripRead::Column;
+            let source = self.layer_read(index, area, led, column);
+            let alpha = f32::from(values.opacity.min(100)) / 100.0;
+            out = blend_pixel(values.blend, out, source, alpha);
+        }
+        out
+    }
+
+    /// Paints every strip LED's own colour where the engine reads it (#407).
+    ///
+    /// The stack answers one read for the whole picture, and that read has to serve every
+    /// layer: a cell at mid-height misses a flame (Fire, Audio Spectrum answer the column),
+    /// and a column over the full height averages a thin moving line (Rain) away by about
+    /// thirty times. The compositor therefore reads every layer with the layer's own reading,
+    /// blends the reads per LED, and paints the result where the engine reads the LED.
+    ///
+    /// A LED whose own read already gives that colour is left alone, so a stack that reads
+    /// right keeps its picture to the bit.
+    fn paint_strip_leds(&mut self, canvas: &mut Canvas) {
+        if self.strip_leds.is_empty() {
+            return;
+        }
+        // The strip LEDs are measured at the area book's size; the frame can be another one.
+        let scale = if self.strip_width == 0 {
+            1.0
+        } else {
+            canvas.width as f32 / self.strip_width as f32
+        };
+        let column = self.read == StripRead::Column;
+        for led in &self.strip_leds {
+            let led = geometry::LedSample {
+                center_x: led.center_x * scale,
+                center_y: led.center_y * scale,
+                bounds: led.bounds.map(|v| v * scale),
+                sampled: led.sampled,
+            };
+            let colour = self.strip_led_colour(&led);
+            // What the picture gives this LED now, the read the engine will use.
+            let painted = canvas_read(canvas, led.bounds, column);
+            if Rgb8::from_f32(painted) == Rgb8::from_f32(colour) {
+                continue;
+            }
+            // The engine reads these pixels, so they hold the colour the LED has to show.
+            let (x0, y0, x1, y1) = read_box(led.bounds, canvas.width, canvas.height);
+            let (x0, y0, x1, y1) = if column {
+                (x0, 0, x1, canvas.height - 1)
+            } else {
+                (x0, y0, x1, y1)
+            };
+            for y in y0..=y1 {
+                for x in x0..=x1 {
+                    let i = (y as usize) * (canvas.width as usize) + x as usize;
+                    canvas.pixels[i] = colour;
+                }
             }
         }
     }
@@ -1472,13 +1832,16 @@ impl Effect for StackEffect {
         }
     }
 
-    /// A stack answers the full-height column when any of its layers answers it (#407), and the
-    /// cell otherwise.
+    /// A stack answers the column when every one of its layers answers it, and the cell
+    /// otherwise (#407).
     ///
-    /// The stack draws one picture, so the strip reads that picture as a whole: a layer whose
-    /// meaning is how high it reaches (Fire, Audio Spectrum) is missed by the cell at mid-height,
-    /// and a stack of cell layers (Rain over Gradient) keeps the cell, so the thin moving line is
-    /// seen. The answer is read once, when the effect is set, and it does not depend on the props.
+    /// The stack draws one picture, so one read cannot serve every layer: a cell at mid-height
+    /// misses a flame (Fire, Audio Spectrum answer the column), and a column over the whole
+    /// height averages a thin moving line (Rain) away by about thirty times. The compositor
+    /// therefore reads every layer with the layer's own reading, blends the reads per LED, and
+    /// paints the result where the engine reads it — in the cell when the layers disagree.
+    ///
+    /// The answer is read once, when the effect is set, and it does not depend on the props.
     fn strip_read(&self) -> StripRead {
         self.read
     }
@@ -1745,6 +2108,9 @@ impl StackEffect {
             self.composite_layer(index, area, values, canvas);
         }
         self.resolved = resolved;
+        // Every strip LED's own colour, painted where the engine reads it (#407): the stack
+        // answers the cell, and the cell holds the blend of the layers' own reads.
+        self.paint_strip_leds(canvas);
         if changed {
             self.report_statuses();
         }

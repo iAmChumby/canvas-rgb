@@ -1014,9 +1014,12 @@ whose meaning is how high it reaches).
   with its read (`crates/canvas-effects/src/lib.rs`,
   `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
   decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
-  on a strip to a measured level. A stack that wraps effects answers the column when any of its
-  layers answers it (`crates/canvas-daemon/src/stack.rs`, `StackEffect::strip_read`), and its
-  area mask is built for the column as well, so a layer kept to a device or a zone is painted
-  over the strip LEDs' whole columns and not cut to the cell at mid-height. Tests in
+  on a strip to a measured level. A stack reads each of its layers with that layer's own read
+  (`crates/canvas-daemon/src/stack.rs`, `StackEffect::layer_reads` and `strip_led_colour`): the
+  layers' reads are blended per LED, and the compositor paints that colour where the engine
+  reads the LED. The area mask is built for the column as well, so a layer kept to a device or
+  a zone is painted over the strip LEDs' whole columns and not cut to the cell at mid-height,
+  and a light that is not a strip keeps reading the cells it read before. Tests in
   `crates/canvas-daemon/tests/stacks.rs` hold a stack's Fire and Audio Spectrum on a strip to a
-  measured level.
+  measured level, hold Rain's motion over a flame to the bar of #372, and hold a fan and a
+  keyboard to the colours they read before.

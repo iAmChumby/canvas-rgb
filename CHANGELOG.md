@@ -32,8 +32,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Rain: Trail Length now changes how long each streak is (#383)
 - Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 - A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
-- Fire and Audio Spectrum fill a strip again, flame height and bar height included. Inside a stack they still read dark on a strip. (#400)
-- Fire and Audio Spectrum inside a stack fill a strip too: a stack reads the whole column when one of its layers does. (#407)
+- Fire and Audio Spectrum fill a strip again, flame height and bar height included. (#400)
+- Fire and Audio Spectrum inside a stack fill a strip too: every layer of a stack reads the way it reads on its own, so a flame shows its height and Rain still moves. (#407)
 
 ## [0.16.0] - 2026-11-15
 
