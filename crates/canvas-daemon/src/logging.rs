@@ -130,6 +130,20 @@ const WRITE_PENDING: u8 = 0;
 const WRITE_STARTED: u8 = 1;
 const WRITE_TAKEN_BACK: u8 = 2;
 
+/// Puts the state back to PENDING if the helper unwinds. A `write` that panics after taking
+/// the line must not leave it STARTED: the caller would then read "the helper owns the line",
+/// skip the fallback, and lose the line entirely (follow-up #72). On a normal return the state
+/// stays STARTED, so a caller that timed out still knows the helper owns the line.
+struct ResetOnPanic(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl Drop for ResetOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(WRITE_PENDING, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// Runs `write` on a helper thread and waits at most `limit`, so that the line is written AT MOST
 /// ONCE. Returns `true` when the line is in the file, or the helper has begun writing it and may
 /// still finish after the limit (the caller must not write it again: a late append plus a second
@@ -149,13 +163,15 @@ pub fn write_once_within(
         if helper_state.compare_exchange(WRITE_PENDING, WRITE_STARTED, SeqCst, SeqCst).is_err() {
             return;
         }
+        let _reset = ResetOnPanic(std::sync::Arc::clone(&helper_state));
         helper_wrote.store(write().is_ok(), SeqCst);
     });
     if finished {
         wrote.load(SeqCst)
     } else {
         // Past the limit: if the helper has not begun, take the write back (it will skip it);
-        // if it has begun, it owns the line.
+        // if it has begun (or it panicked and put it back), the caller owns the line when the
+        // take-back succeeds.
         state.compare_exchange(WRITE_PENDING, WRITE_TAKEN_BACK, SeqCst, SeqCst).is_err()
     }
 }
@@ -486,6 +502,20 @@ mod tests {
     fn a_failed_write_is_reported_so_the_caller_can_fall_back() {
         assert!(!write_once_within(std::time::Duration::from_millis(250), || Err(std::io::Error::other("disk full"))));
         assert!(write_once_within(std::time::Duration::from_millis(250), || Ok(())));
+    }
+
+    /// #36 follow-up (#72): a helper that panics must not leave the state STARTED. If it does,
+    /// `write_once_within` reports "the helper owns the line" and the caller skips the fallback,
+    /// so the line is lost. The panic guard puts the state back so the caller takes the write back.
+    #[test]
+    fn a_panicking_helper_lets_the_caller_write_the_fallback() {
+        let caller_owns_line = write_once_within(std::time::Duration::from_millis(50), || {
+            panic!("the direct write panicked");
+        });
+        assert!(
+            !caller_owns_line,
+            "a panicked helper wrote nothing: the caller must be told to write the fallback"
+        );
     }
 
     #[test]
