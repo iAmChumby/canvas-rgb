@@ -2,9 +2,12 @@
 
 Each row is a sentence the commands in `SKILL.md` print, what caused it and what to do next.
 `{x}` marks a part that changes. Exit code 0 is done; 1 is a refusal or a 4xx answer; 2 is no
-daemon, an untrusted listener, or no answer. Under `--json` a failed scene, effect or preset
-command prints one document, `{"saved": false, "run": ..., "error": "<the sentence>"}`; read
-`error` and repeat it.
+daemon, an untrusted listener, or no answer. Under `--json` a failed `scenes create`,
+`scenes edit`, `scenes delete`, `effects import`, `effects delete`, `effects preset save` or
+`effects preset delete` prints one document,
+`{"saved": false, "run": ..., "error": "<the sentence>"}`; read `error` and repeat it. Every
+failure also prints `error: <the sentence>` on stderr, and other commands under `--json` print
+the API's error body, whole.
 
 Repeat the sentence to the person word for word. Then do the next step.
 
@@ -26,7 +29,7 @@ Repeat the sentence to the person word for word. Then do the next step.
 | `the API returned 422: light {id} is in more than one group` | A light is in two groups. | Remove it from one group and dry-run again. |
 | `the API returned 422: there is no light {id}` | A member id is not in `lights list`. | Copy ids from `canvas-rgb lights list --json` and dry-run again. |
 | `the API returned 422: a scene's name is at most 40 characters` | The scene name is too long. | Shorten it. |
-| `the API returned 409: this scene was changed in another window; its current state is in `scene` (scene {id} is at rev {n} now)` | The scene changed after the edit read it. Nothing was saved. | Run `canvas-rgb scenes list --json`, rebuild the groups from the current scene, dry-run, and retry once. Say "Changed in another window. Nothing changed." |
+| ``the API returned 409: this scene was changed in another window; its current state is in `scene` (scene {id} is at rev {n} now)`` | The scene changed after the edit read it. Nothing was saved. | Run `canvas-rgb scenes list --json`, rebuild the groups from the current scene, dry-run, and retry once. Say "Changed in another window. Nothing changed." |
 | `{file} is over 1 MiB, more than a groups file may hold` | The groups file is too big. | Shrink it. |
 | `no scene is named {name}` followed by the list of scenes | The name matches no scene. | Use an id or name from the list. |
 | `this was a dry run, but the daemon says it saved the scene` | The daemon contradicted a dry run. | Run `canvas-rgb scenes list --json`. Report UNKNOWN until it shows what is saved. |
@@ -61,3 +64,4 @@ Repeat the sentence to the person word for word. Then do the next step.
 | `--prop {key}: {rule}` | The value breaks the property's range or kind. | Follow the rule it states. |
 | `{file} is over 1048576 bytes, more than an effect file may hold`, `{file} is not text (UTF-8)` | The effect file is too big or not text. | Fix the file. |
 | `{file} already exists; pick another file name` | `effects source --out` never writes over a file. | Use a new file name. |
+| `the API returned 409: {file_name} is already installed; ask for a replace to overwrite it` | `effects import` of a file whose effect already exists, without `--replace`. Nothing was saved. | Pick a new file name and import again. Never pass `--replace`, and do not ask the person for a replace; the run's rule is in `SKILL.md` step 3. |
