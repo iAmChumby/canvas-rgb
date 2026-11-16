@@ -11,6 +11,8 @@
 //!    elevated relaunched the tray elevated).
 //! 3. Every place that starts a process says which token it runs with: a comment (not code: a
 //!    `let token: u32` does not count) containing `token:` on the same line or in the 8 lines above it.
+//!    A line that runs PowerShell itself is such a place: `powershell -File ...` as a `.cmd`
+//!    wrapper's line, and `& powershell` or `& (Join-Path ... 'powershell.exe')` in a script (#82).
 //! 4. A file outside `canvas-svc` that names the daemon (`canvas-rgbd`, `DaemonExe`, `daemon_path`,
 //!    in code, or in the `[Code]` section of the Inno script) may not start any process at all unless a
 //!    line-level allow-list entry says why. This catches `Command::new(&daemon_path)`, where rule 1's
@@ -82,6 +84,40 @@ const PROCESS_STARTS: &[&str] = &[
     "ShellExecuteW(",
 ];
 
+/// True when the line runs PowerShell itself. `Start-Process` was always a launch; a wrapper that
+/// calls `powershell -File <script>` starts a process just the same, and so does a script's
+/// `& powershell` or `& (Join-Path $env:SystemRoot '...\powershell.exe')` (the build-lock calls).
+/// The shapes this knows: a `.cmd`/`.bat` line whose first word is `powershell` or `pwsh`, and a
+/// script line that starts with the call operator and then the program, as long as the line passes
+/// it arguments (`-File`, `-Command`, ...). A usage line in a script's help block and a line that
+/// only prints the command (`Write-Host '  powershell ...'`) name no call operator and are not
+/// launches. Residual gap, accepted: a launch built on a variable (`$exe = 'powershell.exe'; & $exe
+/// -File x`), a call operator that comes after other code on the line, and PowerShell started by
+/// `cmd /c` are invisible to a text scan; rule 3 still forces the author of a new line it does see
+/// to write which token it runs with, and review of that line is where the rest would be caught.
+fn runs_powershell(line: &str, ext: &str) -> bool {
+    let lower = line.to_lowercase();
+    let t = lower.trim_start();
+    let passes_arguments = ["-file", "-command", "-encodedcommand", "-noprofile"]
+        .iter()
+        .any(|a| t.contains(a));
+    if !passes_arguments {
+        return false;
+    }
+    if matches!(ext, "cmd" | "bat") {
+        return ["powershell", "pwsh"].iter().any(|p| {
+            t == *p || t.starts_with(&format!("{p} ")) || t.starts_with(&format!("{p}.exe "))
+        });
+    }
+    t.starts_with("& powershell")
+        || t.starts_with("& pwsh")
+        || t.starts_with("& 'powershell")
+        || t.starts_with("& \"powershell")
+        || t.starts_with("& 'pwsh")
+        || t.starts_with("& \"pwsh")
+        || (t.starts_with("& (join-path") && (t.contains("powershell") || t.contains("pwsh")))
+}
+
 /// True when the line names the elevating verb in any spelling: `"runas"`, `-Verb RunAs`,
 /// `-Verb:RunAs`, `-verb runas`, `Verb = 'RunAs'`, `Verb='runas'`, `w!("RunAs")`. Case-insensitive,
 /// and `runas` must be a whole word, so the Inno flag `runasoriginaluser` is not a hit.
@@ -129,6 +165,16 @@ const DAEMON_FILE_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "elevates the machine-wide child script, not the daemon",
 ),
 (
+    "installer/setup.ps1",
+    "& (Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe') -NoProfile -File $lockTool @Command",
+    "runs the build-lock script as the person; the one UAC prompt is the allow-listed line above it",
+),
+(
+    "tools/build-installer.ps1",
+    "& powershell.exe -NoProfile -File $lockTool @Command",
+    "runs the build-lock script as the developer; the installer build, not a daemon start",
+),
+(
     "crates/canvas-daemon/src/logging.rs",
     "let made = std::process::Command::new(\"cmd\")",
     "a unit test makes a junction with `cmd /C mklink /J` to check the log writer refuses a reparse point; not the daemon",
@@ -152,6 +198,12 @@ const DAEMON_STARTS_ALLOWED: &[(&str, &str, &str)] = &[(
     "`\"$daemonExe`\" --fakes > `\"$daemonLog`\" 2>&1",
     "developer tool (#199): this checkout's own debug build in fakes mode, on a test port and a test home; \
      the daemon refuses --fakes in release, without a test port, or with a real data folder",
+),
+(
+    "tools/run-fake-daemon.ps1",
+    "& powershell -NoProfile -File (Join-Path $root 'tools\\with-build-lock.ps1') cargo build -p canvas-daemon --bin canvas-rgbd",
+    "developer tool (#199): builds the debug daemon through the build lock; it starts nothing, and the \
+     allow-listed line above is what launches it",
 )];
 
 /// Rule 3 lines that look like a launch but are text, not a call: the installer's printed plan
@@ -253,12 +305,13 @@ fn scan_text_used(rel: &str, text: &str, used: &mut Used) -> Vec<Finding> {
         let section = sections[i].as_str();
         let names_daemon = names_daemon_in(raw);
         let is_text = TEXT_LINES.iter().any(|t| raw.contains(t));
-        let starts_process = PROCESS_STARTS.iter().any(|p| raw.contains(p));
+        let runs_powershell = runs_powershell(raw, ext);
+        let starts_process = PROCESS_STARTS.iter().any(|p| raw.contains(p)) || runs_powershell;
 
         // Rule 1: only the service starts the daemon.
         let mut rule1 = false;
         if !in_service && names_daemon {
-            let launches = LAUNCHES.iter().any(|l| raw.contains(l));
+            let launches = LAUNCHES.iter().any(|l| raw.contains(l)) || runs_powershell;
             let run_entry = ext == "iss" && section == "[Run]";
             if launches || run_entry {
                 if !allowed(DAEMON_STARTS_ALLOWED, 3, rel, raw, used) {
@@ -563,6 +616,29 @@ fn the_other_process_start_spellings_need_a_token_line() {
         let file = if call.contains('(') { "crates/a/src/x.rs" } else { "tools/x.ps1" };
         assert_eq!(rules(file, call), vec![3], "{call}");
     }
+}
+
+#[test]
+fn rule_3_covers_a_bare_powershell_line_and_the_shapes_a_script_runs_it_with() {
+    // The .cmd wrappers (#79) run the script through a bare powershell line: that starts a process.
+    let wrapper = "powershell -NoProfile -ExecutionPolicy Bypass -File \"%~dp0setup.ps1\" %*";
+    assert_eq!(rules("installer/setup.cmd", wrapper), vec![3]);
+    assert!(rules(
+        "installer/setup.cmd",
+        "rem token: this person's own, unelevated\r\npowershell -NoProfile -File \"x.ps1\" %*"
+    )
+    .is_empty());
+    // The same line in pwsh spelling.
+    assert_eq!(rules("installer/x.cmd", "pwsh -NoProfile -File \"%~dp0x.ps1\" %*"), vec![3]);
+    // A script runs it with the call operator, by name or through a Join-Path to the full path.
+    let named = "    & powershell -NoProfile -File (Join-Path $PSScriptRoot 'with-build-lock.ps1') `";
+    assert_eq!(rules("tools/x.ps1", named), vec![3]);
+    let joined = "& (Join-Path $env:SystemRoot 'System32\\WindowsPowerShell\\v1.0\\powershell.exe') -NoProfile -File $lockTool @Command";
+    assert_eq!(rules("installer/setup.ps1", joined), vec![3]);
+    // Not launches: the help line that prints the command, and the filter that compares a name.
+    assert!(rules("tools/x.ps1", "Write-Host '  powershell -NoProfile -File tools/run-fake-daemon.ps1 -Stop'").is_empty());
+    assert!(rules("tools/x.ps1", "$kids = Get-CimInstance Win32_Process | Where-Object { $_.Name -eq 'powershell.exe' }").is_empty());
+    assert!(rules("tools/x.ps1", "  powershell -NoProfile -File tools/x.ps1").is_empty());
 }
 
 #[test]

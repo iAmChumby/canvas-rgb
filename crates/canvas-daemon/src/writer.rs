@@ -67,8 +67,17 @@ pub async fn writer_loop_with_lane(
             Err(e) => {
                 failures += 1;
                 // Log the first failure and then every 300th, not every frame.
+                // Keep the daemon's own target (#87): this loop moved out of the binary into the
+                // library, and without an explicit target the line's target became
+                // `canvas_daemon::writer`, which a `RUST_LOG=canvas_rgbd=...` filter drops.
                 if failures == 1 || failures.is_multiple_of(300) {
-                    tracing::warn!(device = %device, error = %e, failures, "frame write failed");
+                    tracing::warn!(
+                        target: crate::logging::LOG_TARGET,
+                        device = %device,
+                        error = %e,
+                        failures,
+                        "frame write failed"
+                    );
                 }
             }
         }
@@ -246,6 +255,38 @@ mod tests {
         assert!(
             text.contains("no frame was sent to any device"),
             "the failed frame is not the last frame: {text}"
+        );
+    }
+
+    /// The frame-write warning keeps the daemon's own target after the writer moved out of the
+    /// binary into the library (#87): a `RUST_LOG=canvas_rgbd=...` filter still catches it. On the
+    /// old target (`canvas_daemon::writer`) that filter drops every line from this module.
+    ///
+    /// `captured` prints the target, so the line reads `WARN canvas_rgbd: frame write failed`
+    /// (class `cause:timing-test`: a capture reads lines through `test_logs::captured`, never
+    /// through a subscriber a test installs itself, #45).
+    #[test]
+    fn the_frame_write_warning_keeps_the_daemon_target() {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("a runtime");
+        let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
+        let adapter = Arc::new(tokio::sync::Mutex::new(failing));
+        let last_frame = Arc::new(LastFrame::default());
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        // The writer runs on this thread, so its warning goes into this capture.
+        let (_, text) = crate::test_logs::captured(|| {
+            runtime.block_on(async {
+                tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
+                drop(tx);
+                writer_loop(adapter, DeviceId("fake:ram".into()), rx, last_frame).await;
+            });
+        });
+        let target = crate::logging::LOG_TARGET;
+        assert!(
+            text.lines().any(|line| line.contains(&format!("WARN {target}:"))),
+            "the frame-write warning must use the {target} target: {text}"
         );
     }
 }

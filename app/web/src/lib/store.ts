@@ -82,7 +82,7 @@ export interface Snap {
   devicesTotal: number | null;
   effects: EffectSummary[] | null;
   effectsError: string | null;
-  /** The user effect files that did not parse. */
+  /** The user effect files that did not load (a parse error or a load timeout). */
   effectsFailed: FailedEffect[];
   /** Every saved pattern, whole: the editor draws one from its colours (0.16.0). */
   patterns: Pattern[] | null;

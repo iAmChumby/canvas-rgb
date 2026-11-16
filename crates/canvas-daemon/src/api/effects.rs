@@ -76,7 +76,7 @@ fn layer_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
     find_among(&all, id)
 }
 
-/// The user effect files that did not parse, with the parser's message.
+/// The user effect files that did not load, with why: a parse error or a load timeout.
 fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
     user.failures()
         .into_iter()
@@ -701,11 +701,16 @@ pub async fn thumbnail(
         // like any other answer and before the slot is handed back. Caught after the task
         // instead (from the join), the permit has already dropped during the unwind and a
         // request that waited for the slot would find nothing cached and render the tile again.
+        // The clock starts before the build: an HTML build runs the file's top-level scripts
+        // under LOAD_BUDGET_MS (up to 2 s), and that time is charged to the same budget so the
+        // render slot is not held for the build plus the whole budget (#58).
         let render_started = std::time::Instant::now();
         let attempt = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
             crate::create_effect_for_tile(&user, &stacks, &effect_id)
                 .map_err(crate::thumbnail::RenderError::from_build_error)
-                .and_then(|mut effect| crate::thumbnail::render_within(effect.as_mut(), &props, budget))
+                .and_then(|mut effect| {
+                    crate::thumbnail::render_within_started(effect.as_mut(), &props, budget, render_started)
+                })
         }));
         let render_ms = render_started.elapsed().as_millis() as u64;
         match &attempt {

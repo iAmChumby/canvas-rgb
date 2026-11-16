@@ -932,6 +932,18 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
     function Test-RestartGuarded([string]$Body) {
         return ((Get-GuardedStatement $Body $script:RestartGuard) -match 'RestartCanvasRgb')
     }
+    # The note for a restart that did not work is for codes 1 (could not start) and 2 (left
+    # stopped on purpose) only. Code 3 means "nothing to start" and gets no note. The old check
+    # only looked for the absence of two strings, so a `RestartCode > 0` rewrite passed it while
+    # writing a note for 3 too (#77). Read the comparisons instead: exactly `= 1` and `= 2`,
+    # no range or inequality operator that could take in 3.
+    function Test-IssNoteOnlyForCodes12([string]$Body) {
+        $comparisons = @([regex]::Matches($Body, 'RestartCode\s*(<>|>=|<=|=|>|<)\s*(\d+)') | ForEach-Object { $_.Value })
+        if ($comparisons.Count -ne 2) { return $false }
+        if (@($comparisons | Where-Object { $_ -match 'RestartCode\s*=\s*1' }).Count -ne 1) { return $false }
+        if (@($comparisons | Where-Object { $_ -match 'RestartCode\s*=\s*2' }).Count -ne 1) { return $false }
+        return $true
+    }
     Test-Case 'a restart in the else branch of the guard is not inside the guard' {
         # Two mutants of the real DeinitializeSetup: the restart moved into the else branch, as a
         # block and as a single statement. Both used to pass because the guarded statement ran on
@@ -997,8 +1009,7 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         $beforeExit = $restart.Substring(0, $iNotStopped)
         Assert-True ($beforeExit -match 'Result := 3;\s*$') "the result at the exit is 3: [$beforeExit]"
         $deinit = Get-IssFunction 'procedure DeinitializeSetup'
-        Assert-True ($deinit -match 'RestartCode = 2' -and $deinit -match 'RestartCode = 1') 'a note for 1 and 2'
-        Assert-True ($deinit -notmatch 'RestartCode = 3' -and $deinit -notmatch 'RestartCode <> 0') 'no note for 3'
+        Assert-True (Test-IssNoteOnlyForCodes12 $deinit) 'a note for exactly 1 and 2, never for 3'
         # The decision for "not stopped" is the same whatever else is true, and the script gives it
         # the exit code that carries no note.
         Assert-Equal (Get-InstallRestartDecision -StoppedRunningService $false -ElevatedStepRan $true -CopyStarted $true) 'not-stopped'
@@ -1027,13 +1038,26 @@ function Start-Service { param($Name) Write-Host 'CALL Start-Service' }
         $restart = Get-IssFunction 'function RestartCanvasRgb'
         Assert-True ($restart.IndexOf('if not FStoppedRunningService then Exit') -gt 0) 'the helper leaves early'
         $deinit = Get-IssFunction 'procedure DeinitializeSetup'
-        Assert-True ($deinit -notmatch 'RestartCode <> 0' -and $deinit -notmatch 'RestartCode = 3') 'no note for code 3'
+        Assert-True (Test-IssNoteOnlyForCodes12 $deinit) 'a note for exactly 1 and 2, never for code 3'
         # 4. the decision and the script, for the facts of that cancel (nothing stopped).
         Assert-Equal (Get-InstallRestartDecision) 'not-stopped'
         $r = Invoke-RestartCanvasSandbox 'restart-g'
         Assert-Equal $r.Code 3 "there was nothing to start: $($r.Out)"
         Assert-Equal (@([regex]::Matches($r.Out, 'CALL Start-Service')).Count) 0 "the service is not started: $($r.Out)"
         Assert-True ($r.Log -match 'did not stop canvas-rgb') "it says why: $($r.Log)"
+    }
+    Test-Case 'a note for any positive restart code, code 3 included, fails the note guard' {
+        # The old check only asserted the absence of the strings 'RestartCode = 3' and
+        # 'RestartCode <> 0'. A single comparand-agnostic branch - `if RestartCode > 0 then
+        # Note := ...` - contains neither string, so it passed that check while writing a note
+        # for code 3, which is supposed to be silent (#77). The new check reads the comparisons
+        # and must refuse this shape.
+        $deinit = Get-IssFunction 'procedure DeinitializeSetup'
+        Assert-True (Test-IssNoteOnlyForCodes12 $deinit) 'the real notes are for exactly 1 and 2'
+        $mutant = $deinit -replace 'RestartCode = 2', 'RestartCode > 0' -replace 'RestartCode = 1', 'RestartCode > 0'
+        Assert-True ($mutant -match 'RestartCode > 0') 'the mutant was built'
+        Assert-True ($mutant -notmatch 'RestartCode = 3' -and $mutant -notmatch 'RestartCode <> 0') 'the old string-absence check would have passed it'
+        Assert-True (-not (Test-IssNoteOnlyForCodes12 $mutant)) 'the note guard rejects a note for code 3'
     }
     Test-Case 'an elevated step that could not be launched is not counted as run, so the restart still decides' {
         # The flag says the step started. Set before the launch it would also say so when the

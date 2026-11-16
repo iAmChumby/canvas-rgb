@@ -30,8 +30,9 @@ jobs:
     if: github.ref == 'refs/heads/main'
     permissions:
       contents: read
-    # The signing key goes to the called workflow, which reads it in its sign step only. The build
-    # job of that workflow runs the project's own code and never sees the key.
+    # A reusable workflow gets a secret only when its caller names it, so the name is passed here. The
+    # value the sign job reads is the `test-build` environment secret of the called workflow, which
+    # takes precedence over a repository secret of the same name (#234); this job never holds the key.
     # experimental: the called workflow writes the feed (latest.json) and the release body into the
     # signed artifact. A manual test build of that workflow never sets it, so it writes neither.
     uses: ./.github/workflows/test-build.yml

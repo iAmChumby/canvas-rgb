@@ -9,6 +9,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
+- Devices rows and Peripherals switches stay inside desktop windows from 721px up: the device list scrolls in its pane and the mouse's Access switches wrap to their own line when they stop fitting. (#89)
+- Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)
+- `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)
+- The "frame write failed" warning keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter still catches it. (#87)
+- Every daemon log line that moved out of the daemon's own program keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter catches all of them. (#446)
+- The site's hero glow no longer shows a faint line where it crosses the section edge, and a long sweep takes the same time at 30, 60 and 144 Hz. (#63)
+- Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
 
 ## [0.17.0] - 2026-11-16
 
