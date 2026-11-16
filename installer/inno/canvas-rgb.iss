@@ -129,6 +129,7 @@ var
   FPrepError: String;       // why PrepareToInstall stopped Setup, for the /UPDATE result file
   FPurge: String;           // ' -PurgeConfig' or empty
   FStoppedRunningService: Boolean;  // the first step stopped a running service (#60)
+  FStopStepRan: Boolean;            // this run ran stop-canvas.ps1, so a restart-failed marker is its own (#77)
   FElevatedStepRan: Boolean;       // the elevated step was launched: it starts the service itself when it fails (#65)
   FCopyStarted: Boolean;           // Inno's copy of the files started: the folder holds a mix of old and new (#65)
   FInstallDirOk: Boolean;           // the uninstall check passed: the folder only administrators can change (#46)
@@ -609,6 +610,7 @@ begin
   // A marker from an earlier run says nothing about this one.
   DeleteFile(StoppedServiceMarkerPath);
   DeleteFile(RestartFailedNotePath);
+  FStopStepRan := True;
   if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '" -InstallDir "' + ExpandConstant('{app}') + '"', False, Code) or (Code <> 0) then
   begin
     // Nothing was copied: the checks above all ran before a single file was touched. What was
@@ -766,7 +768,9 @@ begin
       // A restart stop-canvas.ps1 tried and failed is the most specific account of why canvas-rgb
       // is down: show its plain words instead of only the log tail (#77). The generic restart-code
       // note below is for the other failed restarts; it must not overwrite this one.
-      Note := RestartFailedNote;
+      // Only a marker this run wrote: a cancel or an earlier failure never reached the stop step, and
+      // a marker left by an older run says nothing about this one.
+      if FStopStepRan then Note := RestartFailedNote else Note := '';
       if Note = '' then
       begin
         RestartCode := RestartCanvasRgb;
@@ -917,7 +921,7 @@ begin
         if Code = 1 then
           Msg := 'canvas-rgb was not removed: the uninstall stopped before anything was taken away. Nothing was removed. The log below says what happened.'
         else
-          Msg := 'canvas-rgb was not removed cleanly, and the uninstall could not record what it had already done. The log below says what happened.';
+          Msg := 'canvas-rgb was not removed cleanly, and Setup cannot tell what the uninstall had already done. The log below says what happened.';
       end;
       MsgBox(Msg + #13#10 + #13#10 + LogTail(Log), mbError, MB_OK);
     end;

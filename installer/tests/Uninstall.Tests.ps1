@@ -623,7 +623,7 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         # Exit 5 means the state could not be recorded: the words must say that, not more.
         $iElse = $un.IndexOf('was not removed cleanly')
         Assert-True ($iElse -gt $iCode1) 'the state-unknown branch follows'
-        Assert-True ($un.Substring($iElse) -match 'could not record') 'the state-unknown branch says the state could not be recorded'
+        Assert-True ($un.Substring($iElse) -match 'cannot tell what the uninstall had already done') 'the state-unknown branch says Setup cannot tell what was done'
     }
     Test-Case 'an uninstall that fails and cannot record its state does not let the wrapper say nothing was removed' {
         # The state file cannot be written, and the service was touched, so what happened is not

@@ -1116,7 +1116,7 @@ function Clear-StoppedServiceMarker {
 # only from the log. This marker carries the plain sentence Inno shows in Setup's final note; it is
 # written only when the restart really failed, so a later success cannot show a false note. Like the
 # stopped-service marker it lives in the protected machine home, which is never created here.
-$script:RestartFailedWords = 'canvas-rgb could not be started again after setup failed; start it from the Start menu to get your lights working, and the fans stay on your motherboard''s own settings until you run setup again.'
+$script:RestartFailedWords = 'canvas-rgb could not be started again after setup failed. Run setup again; until then your fans are on your motherboard''s own settings.'
 
 function Get-RestartFailedMarkerPath {
     $c = Get-CanvasConst

@@ -808,12 +808,16 @@ try {
         Assert-True (Test-Path -LiteralPath $r.RestartNote) "the note the installer reads is written: $($r.Out)"
         $words = [System.IO.File]::ReadAllText($r.RestartNote)
         Assert-True ($words -match 'could not be started again after setup failed') "it says what failed: $words"
-        Assert-True ($words -match 'Start menu') "it says what to do: $words"
+        Assert-True ($words -match 'Run setup again') "it says what to do: $words"
         # The installer must actually read that marker into the note, not just leave it on disk.
         $iss = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
         Assert-True ($iss -match [regex]::Escape("{commonappdata}\canvas-rgb\restart-failed.marker")) 'the installer reads the marker the stop step wrote'
         $deinit = Get-IssFunction 'procedure DeinitializeSetup'
         Assert-True ($deinit -match 'RestartFailedNote') "the installer puts its words in the final note: $deinit"
+        # Only a marker this run wrote: a cancel or an early failure never reached the stop step (#77 review).
+        Assert-True ($deinit -match 'if FStopStepRan then Note := RestartFailedNote') "a stale marker is never shown: $deinit"
+        $prep = Get-IssFunction 'function PrepareToInstall'
+        Assert-True ($prep.IndexOf('FStopStepRan := True') -gt $prep.IndexOf('DeleteFile(RestartFailedNotePath)')) 'the flag is set after the stale marker is deleted'
         # A restart that worked must leave no note, or a later failure would show a false one.
         $ok = Invoke-StopCanvasSandbox 'stop77-ok' -ServiceStatus 'Running' -NoOpenRgb
         Assert-Equal $ok.Code 0 "the stop succeeds: $($ok.Out)"
