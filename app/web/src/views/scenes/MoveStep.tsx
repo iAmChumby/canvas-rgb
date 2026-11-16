@@ -164,30 +164,53 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
 
   /** Asks the daemon what a move to one scene would do. It writes nothing. */
   const ask = useCallback(
-    async (toSceneId: string) => {
-      const key = keyOf(toSceneId);
-      const born = (questions.current.get(key) ?? 0) + 1;
-      questions.current.set(key, born);
+    async (key: string, toSceneId: string, born: number) => {
       setChecks((c) => ({ ...c, [key]: { state: "pending" } }));
       const answer = await use.dryRunMove(groupId, toSceneId, copy);
       // The step closed, or the row asked again while the answer was on its way: the answer
       // belongs to a question nobody asks any more, and it is dropped.
-      if (!mounted.current || questions.current.get(key) !== born) return;
+      if (!mounted.current || born !== questions.current.get(key)) return;
       setChecks((c) => ({ ...c, [key]: answer }));
     },
-    [copy, groupId, keyOf, use.dryRunMove],
+    [copy, groupId, use.dryRunMove],
+  );
+
+  /**
+   * Asks the daemon about one scene again, with a new question for that row: the answer of the
+   * last question is dropped.
+   */
+  const askRow = useCallback(
+    (id: string) => {
+      const key = keyOf(id);
+      const born = (questions.current.get(key) ?? 0) + 1;
+      questions.current.set(key, born);
+      void ask(key, id, born);
+    },
+    [ask, keyOf],
   );
 
   /** Asks the daemon about every scene again: the answers on the rows are older than the daemon's. */
   const askAll = useCallback(() => {
-    for (const id of targetIds) void ask(id);
-  }, [ask, targetIds]);
+    for (const id of targetIds) askRow(id);
+  }, [askRow, targetIds]);
 
   // The step asks the daemon about every scene when it opens, when it switches between moving and
   // copying, and when a scene's revision moves under it.
   useEffect(() => {
-    for (const id of targetIds) void ask(id);
-  }, [ask, targetIds]);
+    for (const id of targetIds) {
+      const key = keyOf(id);
+      const born = (questions.current.get(key) ?? 0) + 1;
+      questions.current.set(key, born);
+      void ask(key, id, born);
+    }
+    return () => {
+      // The step closed, or the question changed: every answer still on its way is stale.
+      for (const id of targetIds) {
+        const key = keyOf(id);
+        questions.current.set(key, (questions.current.get(key) ?? 0) + 1);
+      }
+    };
+  }, [ask, keyOf, targetIds]);
 
   /** How many of the group's devices are away: they move with the group, but they are not lit. */
   const away = useMemo(() => {
@@ -269,7 +292,7 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
                     size="sm"
                     className={s.retry}
                     data-testid={`move-retry-${target.id}`}
-                    onClick={() => void ask(target.id)}
+                    onClick={() => askRow(target.id)}
                   >
                     Try again
                   </Button>
