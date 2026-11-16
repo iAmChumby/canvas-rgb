@@ -10,7 +10,8 @@
 // The two exits are for the headers where the rule does not hold. "Some went dark" is for devices
 // of different lengths on a header that mirrors (the shortest one runs out first); "It never goes
 // out" is for a hub that wraps or pads past the last LED, so the orange never leaves: the owner
-// says how many LEDs one device has. Both open in the slot the keys are in, so nothing moves.
+// says how many LEDs one device has. Both are a mirror's exits: on a series a device at the last
+// LED ends the run, so neither is offered. Both open in the slot the keys are in, so nothing moves.
 
 import { useState } from "react";
 
@@ -62,9 +63,9 @@ export function LengthStep({
         ) : null}
       </p>
       <div className={s.slot}>
-        {panel === null ? (
+        {panel === null && copies > 1 ? (
           <div className={`${s.aside} ${s.escapes}`}>
-            {copies > 1 && value >= 2 ? (
+            {value >= 2 ? (
               <Button variant="ghost" size="sm" onClick={() => setPanel("dark")}>
                 Some went dark
               </Button>
@@ -93,7 +94,7 @@ export function LengthStep({
                   close();
                 }}
               >
-                Use {value - 1} LEDs
+                Use {value - 1} {value - 1 === 1 ? "LED" : "LEDs"}
               </Button>
               <Button size="sm" variant="ghost" onClick={close}>
                 Keep sliding

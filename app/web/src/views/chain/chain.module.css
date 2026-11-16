@@ -310,6 +310,8 @@
   height: 16px;
 }
 
+/* The LED drawing: cells, the track bar past 48 cells and the tick. These radii are the drawing's
+   own, not chrome: the 6-to-10px rule is for panels and controls, and an LED cell is a 14px dot. */
 .cell {
   flex: 0 1 14px;
   min-width: 0;
@@ -424,6 +426,12 @@
   color: var(--mute);
   font-family: var(--fm);
   font-size: var(--t14);
+}
+
+/* The dot between what a row is and how long it is: "Device 1 · 12 LEDs". */
+.sep {
+  margin-right: var(--s2);
+  color: var(--mute);
 }
 
 /* A row on the confirm step: the colour, the name, what it is, its LEDs. */

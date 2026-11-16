@@ -81,6 +81,7 @@ export interface ChainSetupProps {
 export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = null, more = false }: ChainSetupProps) {
   const setup = useChainSetup(chain, intro);
   const [finishing, setFinishing] = useState(false);
+  const [marking, setMarking] = useState(false);
   const zone = chain.zone_name;
   const labels = setup.mirror ? MIRROR_STEPS : SERIES_STEPS;
   const lit = litLabels(setup.step, setup.mirror, labels.length);
@@ -106,6 +107,20 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
       await setup.confirm();
     } finally {
       setFinishing(false);
+    }
+  };
+
+  /**
+   * Mark empty writes the header's record once. The key is held while the call is out, and the hook
+   * drops a second call as well: a second press cannot land.
+   */
+  const markEmpty = async () => {
+    if (marking) return;
+    setMarking(true);
+    try {
+      await setup.markEmpty();
+    } finally {
+      setMarking(false);
     }
   };
 
@@ -188,7 +203,14 @@ export function ChainSetup({ chain, onClose, intro = "full", previousEmpty = nul
           />
         );
       case "nothing":
-        return <NothingLitPanel zone={zone} onBlind={setup.cantSee} onEmpty={() => void setup.markEmpty()} />;
+        return (
+          <NothingLitPanel
+            zone={zone}
+            busy={marking}
+            onBlind={setup.cantSee}
+            onEmpty={() => void markEmpty()}
+          />
+        );
       case "blind":
         return <BlindStep />;
       case "done":

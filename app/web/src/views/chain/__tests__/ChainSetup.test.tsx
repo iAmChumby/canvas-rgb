@@ -6,6 +6,7 @@
 // to light, the writes that end the flow, and the words on the glass. The copy strings are the
 // design's, written out here so a changed word fails a test.
 
+import { StrictMode } from "react";
 import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
@@ -131,6 +132,27 @@ async function flush(ms = 0): Promise<void> {
   await act(async () => {
     await vi.advanceTimersByTimeAsync(ms);
   });
+}
+
+/**
+ * Mounts the screen the way the dev server does: React's strict mode runs every effect twice, so
+ * the mount that opens the session is replayed. `next.config.ts` turns strict mode on.
+ */
+async function showStrict(chain: ChainView = notSetUp(), props: ShowProps = {}) {
+  const onClose = vi.fn();
+  const view = render(
+    <StrictMode>
+      <ChainSetup
+        chain={chain}
+        onClose={onClose}
+        intro={props.intro ?? "none"}
+        previousEmpty={props.previousEmpty ?? null}
+        more={props.more ?? false}
+      />
+    </StrictMode>,
+  );
+  await flush();
+  return { ...view, onClose };
 }
 
 const slider = () => screen.getByRole("slider", { name: "LEDs on this header" });
@@ -334,6 +356,20 @@ describe("the header setup screens", () => {
     expect(screen.getByRole("button", { name: BLIND })).toBeTruthy();
   });
 
+  it("draws the first question under React's strict mode, with exactly one live session", async () => {
+    // The dev server runs effects twice. The cleanup of the first run marks the flow finished, so a
+    // second `begin` cancelled both sessions and the screen stayed on "Getting ... ready.".
+    await showStrict();
+
+    expect(screen.getByText(ASK)).toBeTruthy();
+    expect(screen.queryByText("Getting JARGB 1 ready.")).toBeNull();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    // One session was opened and none was thrown away: exactly one is live.
+    expect(api.chains.cancel).not.toHaveBeenCalled();
+    await flush(60);
+    expect(lastRuns()).toEqual([{ start: 0, count: 1, color: ORANGE }]);
+  });
+
   it("a count above 32 is refused with the reason and a way out, and nothing is taken", async () => {
     await show();
 
@@ -447,11 +483,33 @@ describe("the header setup screens", () => {
     ]);
   });
 
-  it("Some went dark is not offered for a single orange light", async () => {
+  it("Some went dark says Use 1 LED, not 1 LEDs", async () => {
+    await show();
+    await toSlide(8, 2);
+
+    await press("Some went dark");
+    expect(screen.getByRole("button", { name: "Use 1 LED" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Use 1 LEDs" })).toBeNull();
+  });
+
+  it("a series has no exit of its own on the slide, and I can't see inside is still there", async () => {
     await show();
     await toSlide(1, 5);
 
+    // "Some went dark" is a mirror's (devices of different lengths); "It never goes out" is a
+    // mirror's too (a hub that wraps or pads). A series on such a hub has no exit of its own.
     expect(screen.queryByRole("button", { name: "Some went dark" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "It never goes out" })).toBeNull();
+    // The way out of the flow stays where it was: on the counting screen.
+    await press("Back");
+    expect(screen.getByRole("button", { name: BLIND })).toBeTruthy();
+  });
+
+  it("a mirrored header is offered both slide exits", async () => {
+    await show();
+    await toSlide(8, 5);
+
+    expect(screen.getByRole("button", { name: "Some went dark" })).toBeTruthy();
     expect(screen.getByRole("button", { name: "It never goes out" })).toBeTruthy();
   });
 
@@ -484,7 +542,11 @@ describe("the header setup screens", () => {
     expect(screen.getByText("Count each device, not each LED: 7 fans and 1 strip is 8.")).toBeTruthy();
     expect(screen.getByText("3 devices, 36 LEDs: 12 each.")).toBeTruthy();
     const rows = within(devicesList()).getAllByRole("listitem");
-    expect(rows.map((r) => r.textContent)).toEqual(["Device 112LEDs", "Device 212LEDs", "Device 312LEDs"]);
+    expect(rows.map((r) => r.textContent)).toEqual([
+      "Device 1·12LEDs",
+      "Device 2·12LEDs",
+      "Device 3·12LEDs",
+    ]);
     expect(chipColours()).toEqual(PART_COLOURS.slice(0, 3));
   });
 
@@ -564,7 +626,11 @@ describe("the header setup screens", () => {
       ],
     });
     expect(screen.getByText("Saved. 3 devices, 36 LEDs on JARGB 1.")).toBeTruthy();
-    expect(screen.getByText(/A device hidden behind a radiator can end the orange early/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        "A device hidden behind a radiator can end the orange early. If one looks short, set up again from Devices, then add its lights to your scenes.",
+      ),
+    ).toBeTruthy();
   });
 
   it("changing a row's LED count moves the boundary and calls light", async () => {
@@ -653,6 +719,31 @@ describe("the header setup screens", () => {
     expect(screen.queryByText("the header could not be resized: no reply from OpenRGB")).toBeNull();
   });
 
+  it("a stale session on commit ends the flow, and Retry opens a new one", async () => {
+    api.chains.commit.mockRejectedValueOnce(
+      new ApiFailure(409, "conflict", "the header setup ended before the save"),
+    );
+    await show();
+    await toCheck(36, 3);
+
+    await press("Yes, save these devices");
+
+    // The daemon let the session go: the save cannot be retried on it, so the flow ends.
+    expect(screen.getByText("JARGB 1 did not answer.")).toBeTruthy();
+    expect(screen.getByText("the header setup ended before the save")).toBeTruthy();
+    expect(screen.queryByText(CHECK_Q)).toBeNull();
+    expect(api.chains.commit).toHaveBeenCalledTimes(1);
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    expect(api.chains.cancel).not.toHaveBeenCalled();
+
+    await press("Retry");
+
+    // A new session, as a stale light call's Retry opens one.
+    expect(api.chains.start).toHaveBeenCalledTimes(2);
+    expect(screen.getByText(ASK)).toBeTruthy();
+    expect(api.chains.commit).toHaveBeenCalledTimes(1);
+  });
+
   it("Done closes", async () => {
     const { onClose } = await show();
     await toCheck(36, 3);
@@ -708,6 +799,55 @@ describe("the header setup screens", () => {
 
     expect(screen.getByText(/^Marked empty\./)).toBeTruthy();
     expect(onClose).not.toHaveBeenCalled();
+  });
+
+  it("Mark this header empty is sent once when it is pressed twice", async () => {
+    let answer: (v: { ok: boolean }) => void = () => {};
+    api.chains.empty.mockReturnValue(
+      new Promise((resolve) => {
+        answer = resolve;
+      }),
+    );
+    await show();
+    await press("Nothing lit up");
+
+    const key = screen.getByRole("button", { name: "Mark this header empty" });
+    await act(async () => {
+      // Two presses inside one tick: the key's own guard has not seen a render, so the hook's
+      // in-flight guard is what stops the second one.
+      fireEvent.click(key);
+      fireEvent.click(key);
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(api.chains.empty).toHaveBeenCalledTimes(1);
+    expect(key.getAttribute("aria-busy")).toBe("true");
+
+    await act(async () => {
+      answer({ ok: true });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(screen.getByText(/^Marked empty\./)).toBeTruthy();
+  });
+
+  it("a failed Nothing is plugged in here goes back to the introduction with the error", async () => {
+    api.chains.empty.mockRejectedValueOnce(new ApiFailure(500, "internal", "the daemon could not write"));
+    await show(notSetUp(), { intro: "full" });
+
+    await press("Nothing is plugged in here");
+
+    // The owner was never shown a light, so the checklist's advice would be about nothing.
+    expect(screen.getByText("Tell the app about your lights.")).toBeTruthy();
+    expect(screen.getByText("the daemon could not write")).toBeTruthy();
+    expect(screen.queryByText("No light came on.")).toBeNull();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+
+    // Retry sends the empty call again on the session the start opened; it opens no second one.
+    api.chains.empty.mockResolvedValueOnce({ ok: true });
+    await press("Retry");
+    expect(api.chains.empty).toHaveBeenCalledTimes(2);
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    expect(screen.getByText(/^Marked empty\./)).toBeTruthy();
   });
 
   it("a failed mark-empty keeps the checklist open with the daemon's words and Retry", async () => {

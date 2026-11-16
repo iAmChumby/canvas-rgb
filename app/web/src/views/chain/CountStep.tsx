@@ -117,6 +117,9 @@ export function CountStep({
             <PartChip index={i} />
             <span className={s.lineName}>Device {i + 1}</span>
             <span className={s.lineLeds}>
+              <span className={s.sep} aria-hidden="true">
+                ·
+              </span>
               <AnimatedNumber value={part.leds} />
               <span className={s.unit}>{part.leds === 1 ? "LED" : "LEDs"}</span>
             </span>

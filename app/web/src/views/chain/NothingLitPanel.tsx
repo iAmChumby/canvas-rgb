@@ -12,10 +12,13 @@ import s from "@/views/chain/chain.module.css";
 
 export function NothingLitPanel({
   zone,
+  busy,
   onBlind,
   onEmpty,
 }: {
   zone: string;
+  /** The empty call is out: the key is held, so a second press cannot land. */
+  busy: boolean;
   onBlind: () => void;
   onEmpty: () => void;
 }) {
@@ -33,7 +36,7 @@ export function NothingLitPanel({
           <Button variant="ghost" size="sm" onClick={onBlind}>
             I can&rsquo;t see inside
           </Button>
-          <Button variant="default" size="sm" onClick={onEmpty}>
+          <Button variant="default" size="sm" busy={busy} onClick={onEmpty}>
             Mark this header empty
           </Button>
         </div>

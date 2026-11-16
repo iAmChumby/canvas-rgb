@@ -5,7 +5,9 @@
 // are full-saturation hues, which stay apart on an LED (a dimmed or whitened colour washes out
 // next to its neighbour), and every one is a long way from white: white is the colour step 1
 // draws the chain in, so a part never reads as that. The first colour avoids the editor's blue,
-// because it is the one that marks the last LED of the chain.
+// because it is the one that marks the last LED of the chain. These hex values and the white and
+// orange the flow sends are the LEDs' own colours, not the editor's tokens: they are pixels on
+// hardware, and the same value must reach the daemon and the screen.
 //
 // Which colour is which on real fans is checked in the hardware session (Task 12): the owner looks
 // at seven fans and answers whether two neighbours look the same.

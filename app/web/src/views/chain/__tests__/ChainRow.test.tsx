@@ -53,6 +53,7 @@ import { ChainRow } from "@/views/chain/ChainRow";
 import { chainKey, offeredChains } from "@/views/chain/offered";
 import { DevicesView } from "@/views/DevicesView";
 import { useTakeover } from "@/views/editor/takeover";
+import { chainLaterThisLaunch } from "@/views/editor/flow";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -277,6 +278,36 @@ describe("a header's row on Devices", () => {
       await vi.advanceTimersByTimeAsync(0);
     });
     expect(held.result.current).toBe(false);
+  });
+
+  it("Escape on the overlay is Later: it closes, ends the session and writes no Later flag", async () => {
+    await showDevices([chain(1, "JARGB 1", "not_set_up", [], 0)]);
+
+    await act(async () => {
+      fireEvent.click(within(rowOf("JARGB 1")).getByRole("button", { name: /^Set up/ }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await flush();
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+
+    await act(async () => {
+      fireEvent.keyDown(window, { key: "Escape" });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.queryByRole("region", SETUP)).toBeNull();
+    // Later: the session ends, so the header goes back to the length it had.
+    expect(api.chains.cancel).toHaveBeenCalledWith(DEVICE, 1, { session: SESSION });
+    // The row writes no "Later" for the launch: a row's close is not the takeover's.
+    expect(chainLaterThisLaunch()).toBe(false);
+
+    // And the row's key opens the header again whenever the owner asks.
+    await act(async () => {
+      fireEvent.click(within(rowOf("JARGB 1")).getByRole("button", { name: /^Set up/ }));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await flush();
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
   });
 
   it("a header whose devices mirror each other reads as one light shown several times", async () => {

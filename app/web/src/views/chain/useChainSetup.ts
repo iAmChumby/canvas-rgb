@@ -243,13 +243,18 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
   /** The session the daemon opened, and whether it has ended. */
   const session = useRef<string | null>(null);
   const finished = useRef(false);
+  /** True once a flow without an introduction has opened its session at mount. React's strict
+   * mode runs that mount effect twice, and the replay must not open a second session. */
+  const opened = useRef(false);
+  /** True while the empty call is out: a second press sends nothing. */
+  const emptying = useRef(false);
   /** What a Start is for, as `begin` reads it after the daemon has answered. */
   const intentRef = useRef<ChainIntent>("setup");
   /** When the last light call went, and the trailing call waiting for its window. */
   const sentAt = useRef(0);
   const trailing = useRef<ReturnType<typeof setTimeout> | null>(null);
   /** What the last failure was, so Retry knows what to send again. */
-  const failure = useRef<"start" | "commit" | "empty" | "light" | null>(null);
+  const failure = useRef<"start" | "commit" | "empty" | "light" | "stale" | null>(null);
 
   const stopTrailing = useCallback(() => {
     if (trailing.current !== null) {
@@ -360,10 +365,13 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
     [device, zone, stopTrailing],
   );
 
-  /** Marks the header empty. True when the daemon took it. */
+  /** Marks the header empty. True when the daemon took it. One call at a time. */
   const markEmpty = useCallback(async (): Promise<boolean> => {
     const id = session.current;
-    if (id === null || finished.current) return false;
+    if (id === null || finished.current || emptying.current) return false;
+    emptying.current = true;
+    /** Where the owner pressed from: the checklist, or the introduction's own empty key. */
+    const from = live.current.step;
     failure.current = null;
     setError(null);
     try {
@@ -375,18 +383,32 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       apply({ step: "done" }, { send: false });
       return true;
     } catch (e) {
-      // The header stays as it was: the screen with the checklist shows the daemon's words and
-      // Retry, and the session stays open.
+      // The header stays as it was: the screen the key was pressed on shows the daemon's words and
+      // Retry, and the session stays open. "Nothing is plugged in here" was never shown a light, so
+      // it goes back to the introduction; the checklist would advise about a light nobody saw.
       failure.current = "empty";
       setError(messageOf(e));
-      apply({ step: "nothing" });
+      apply({ step: from === "starting" ? "intro" : "nothing" });
       return false;
+    } finally {
+      emptying.current = false;
     }
   }, [apply, device, stopTrailing, zone]);
 
   /** Opens the session. What comes next is the intent: count the lights, or mark the header empty. */
   const begin = useCallback(async () => {
     failure.current = null;
+    if (session.current !== null) {
+      // A session is already open for this flow: the empty call failed and the screen went back to
+      // the introduction, so the header is still raised. Starting a second one would leave the
+      // first open until the daemon's own timeout.
+      if (intentRef.current === "empty") {
+        await markEmpty();
+        return;
+      }
+      apply({ step: "lit" });
+      return;
+    }
     try {
       const started = await api.chains.start(device, zone);
       if (finished.current) {
@@ -608,6 +630,18 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       setDoneKind("saved");
       apply({ step: "done" }, { send: false });
     } catch (e) {
+      if (e instanceof ApiFailure && e.status === 409) {
+        // The daemon let the session go (its timeout, or another window): the save cannot be
+        // retried on it. The flow ends on the error screen, and Retry opens a new session, as a
+        // stale light call does.
+        finished.current = true;
+        session.current = null;
+        stopTrailing();
+        failure.current = "stale";
+        setError(messageOf(e));
+        apply({ step: "error" }, { send: false });
+        return;
+      }
       // The step stays, and so does the session: the daemon keeps it open for a retry.
       failure.current = "commit";
       setError(messageOf(e));
@@ -640,7 +674,20 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
     // A flow without an intro opens its session one microtask after this effect: `begin` answers
     // with state, and a setState in the effect's own body is the cascading render the lint rule
     // forbids. A flow with an intro waits for Start.
-    if (autoStart) queueMicrotask(() => void begin());
+    //
+    // React's strict mode runs this effect twice (mount, cleanup, mount). The cleanup above has
+    // just set `finished`, and no session exists yet, so the second run only takes that flag back:
+    // one mount opens the session, and its answer lands rather than cancelling itself.
+    if (autoStart) {
+      if (opened.current) {
+        // The replay: nothing has been started yet and the screen has not moved on, so the start
+        // answer still in flight is this flow's and must land.
+        if (session.current === null && live.current.step === "starting") finished.current = false;
+      } else {
+        opened.current = true;
+        queueMicrotask(() => void begin());
+      }
+    }
     return () => {
       clearInterval(beat);
       window.removeEventListener("pagehide", onHide);
@@ -665,7 +712,7 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
     } else {
       doneText = `Saved. ${noun(rows.length, "device", "devices")}, ${noun(total, "LED", "LEDs")} on ${zoneName}.`;
       doneNote =
-        "A device hidden behind a radiator can end the orange early. If one looks short, set up again from Devices and raise its LEDs.";
+        "A device hidden behind a radiator can end the orange early. If one looks short, set up again from Devices, then add its lights to your scenes.";
     }
   }
 

@@ -224,12 +224,25 @@ export function ChainRow({ chain }: { chain: ChainView }) {
 /**
  * The setup over the page, as the takeover has it: a plain dim with the flow standing in it, so the
  * rows of the Devices list do not move. The window is the flow's while it is open.
+ *
+ * Escape is Later here, as it is on the takeover: the flow closes and its session ends as it
+ * unmounts, and the header's own record is not touched. A flow opened from a row writes no "Later"
+ * flag, and the row's own key opens the header again whenever the owner asks.
  */
 function Overlay({ chain, onClose }: { chain: ChainView; onClose: () => void }) {
   useEffect(() => {
     setTakeover(true);
     return () => setTakeover(false);
   }, []);
+  useEffect(() => {
+    const onKey = (event: KeyboardEvent) => {
+      if (event.key !== "Escape") return;
+      event.preventDefault();
+      onClose();
+    };
+    window.addEventListener("keydown", onKey);
+    return () => window.removeEventListener("keydown", onKey);
+  }, [onClose]);
   // Drawn on the body: a row inside a transformed or clipped ancestor would trap a fixed overlay.
   return createPortal(
     <div className={s.takeover}>
