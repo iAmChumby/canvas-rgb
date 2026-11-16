@@ -4,15 +4,16 @@
 // an effect can play. One group plays there directly; more offers the groups, with every group as
 // one choice. A group that already plays the effect is marked and left as it is: playing the
 // effect on a second group never changes the first. An HTML effect (or a stack with an HTML
-// layer) may play in one group only (`SCENE_HTML_MAX` is 1), so with two or more groups it offers
-// single groups and says why. A daemon without scenes has no groups: Play falls back to its
-// legacy activation, which plays on everything.
+// layer) plays on one group per press here, and the scene allows `SCENE_HTML_MAX` of them at a
+// time (#370). A daemon without scenes has no groups: Play falls back to its legacy activation,
+// which plays on everything.
 
 import { useRef, useState, type Ref } from "react";
 import { CaretDown, Play } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { Checkbox } from "@/components/Checkbox";
 import { Popover } from "@/components/Popover";
+import { SCENE_HTML_MAX } from "@/lib/htmlLimit";
 import type { Group } from "@/proto/Group";
 
 /** The key's words. `playing` is how many groups of the scene play the effect now. */
@@ -159,7 +160,7 @@ export function PlayOn({
           <p className="play-on-head">Play on</p>
           {html && (
             <p className="play-on-note" role="note">
-              One HTML effect at a time
+              A scene runs {SCENE_HTML_MAX} HTML effects at a time
             </p>
           )}
           {playing.length > 0 && (

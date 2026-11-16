@@ -33,6 +33,7 @@ vi.mock("@/components/Notify", () => ({ notify: notifySpy }));
 import { ApiFailure } from "@/lib/errors";
 import { getSnap, patchSnap } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES, demoSceneProblem } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
 import { NOTHING_MOVED, NOTHING_UNDONE, useScene } from "@/views/scenes/useScene";
 import type { Group } from "@/proto/Group";
 import type { GroupMove } from "@/proto/GroupMove";
@@ -1892,11 +1893,7 @@ describe("the move of a group and the order of the scenes", () => {
     const rig = moveRig();
     api.scenes.list.mockImplementation(async () => listOf([rig.beforeMain, rig.beforeOther]));
     api.scenes.moveGroup.mockRejectedValue(
-      new ApiFailure(
-        422,
-        "validation",
-        "at most 2 groups of a scene may play an HTML effect (a stack with an HTML layer counts); 3 do",
-      ),
+      new ApiFailure(422, "validation", htmlLimitSentence(3)),
     );
 
     const { result } = renderHook(() => useScene());
@@ -1904,11 +1901,7 @@ describe("the move of a group and the order of the scenes", () => {
 
     await act(async () => {
       const check = await result.current.dryRunMove("left", "other", false);
-      expect(check).toEqual({
-        state: "refused",
-        message:
-          "at most 2 groups of a scene may play an HTML effect (a stack with an HTML layer counts); 3 do",
-      });
+      expect(check).toEqual({ state: "refused", message: htmlLimitSentence(3) });
     });
   });
 

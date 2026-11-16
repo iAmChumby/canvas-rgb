@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import { demoRequest } from "@/lib/demo";
 import { ApiFailure } from "@/lib/errors";
 import { DEMO_LIGHTS } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
 import type { Scene } from "@/proto/Scene";
 import type { GroupMoved } from "@/proto/GroupMoved";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
@@ -239,8 +240,8 @@ describe("the demo's scene routes", () => {
     ).catch((e: unknown) => e);
     expect(refused).toBeInstanceOf(ApiFailure);
     expect((refused as ApiFailure).status).toBe(422);
-    expect((refused as ApiFailure).message).toBe(
-      "at most 2 groups of a scene may play an HTML effect (a stack with an HTML layer counts); 3 do",
-    );
+    // The daemon's own sentence (`html_limit_sentence` in the daemon), plain: a move names no
+    // scene in it.
+    expect((refused as ApiFailure).message).toBe(htmlLimitSentence(3));
   });
 });

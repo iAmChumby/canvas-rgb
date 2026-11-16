@@ -43,11 +43,14 @@ fn summary(known: &KnownEffects, stack: &Stack) -> StackSummary {
         id: stack.id.clone(),
         name: stack.name().to_string(),
         layers: stack.layers.len() as u32,
+        // The number the scene's HTML limit counts for a group playing this stack: one slot for a
+        // layer's HTML effect and one for an HTML mask that resolves, not one per layer
+        // ([`crate::stacks::html_slots`]). The field keeps the spine's name.
         html_layers: stack
             .layers
             .iter()
-            .filter(|layer| crate::stacks::layer_counts_as_html(layer, known))
-            .count() as u32,
+            .map(|layer| crate::stacks::html_slots(layer, known) as u32)
+            .sum(),
         missing,
     }
 }
@@ -147,8 +150,11 @@ pub async fn put_stack(
             crate::stacks::StackRefusal::Invalid(message) => ApiFailure::validation(message),
         },
     )?;
-    // The scene must not run more HTML groups than it may: a stack with an HTML layer is one,
-    // and a group of the active scene plays this stack.
+    // The scene must not start more HTML runtimes than a scene may: a save is refused only when
+    // it puts a scene that plays this stack over the limit (crate::scenes::check_stack_html_limit).
+    // The scene lock is held from the check to the end of the save, as every scene write holds
+    // it, so a scene save cannot land between the two and leave a scene over the limit on file.
+    let _scene_lock = app.scene.lock().await;
     crate::scenes::check_stack_html_limit(&app, &stack)
         .await
         .map_err(ApiFailure::validation)?;

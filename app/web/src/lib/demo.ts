@@ -52,6 +52,7 @@ import {
   type Props,
 } from "@/lib/fixtures";
 import { demoHtmlEffects, demoSource, parseUserEffect } from "@/lib/demoEffects";
+import { htmlLimitSentence, SCENE_HTML_MAX } from "@/lib/htmlLimit";
 import { scriptBody } from "@/lib/effectSource";
 import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
@@ -121,6 +122,7 @@ import {
   stackAsEffect,
   stackDetail,
   stackEffectSummary,
+  stackHtmlSlots,
   stackProps,
   stackSummary,
 } from "@/lib/demoStacks";
@@ -133,6 +135,32 @@ const APP_VERSION = "0.16.0";
 const SCHEMA_VERSION = 1;
 /** `pattern:` + the name, as the spine writes it. */
 const PATTERN_ID_PREFIX = "pattern:";
+/** The id prefix of an HTML effect (`crates/canvas-proto/src/scene.rs`). */
+const HTML_ID_PREFIX = "html:";
+
+/**
+ * The HTML runtimes a group starts (#370): one for an `html:` effect, and one for each HTML layer
+ * or mask of a stack, by the daemon's own rule (`stackHtmlSlots`): a mask whose effect does not
+ * resolve takes no slot. The scene's limit counts these, not groups (design Q5).
+ */
+function htmlRuntimesOf(s: DemoState, effect: string | null): number {
+  if (effect === null) return 0;
+  if (effect.startsWith(HTML_ID_PREFIX)) return 1;
+  const stack = s.stacks[effect];
+  return stack ? stackHtmlSlots(stack, s.effects) : 0;
+}
+
+/**
+ * The HTML runtimes a scene starts, by the daemon's own count (`html_runtime_count` in
+ * `crates/canvas-daemon/src/scenes.rs`): one for an `html:` group, and one for each HTML layer or
+ * mask of a stack. The limit counts these, not groups.
+ */
+function sceneHtmlRuntimes(s: DemoState, scene: Scene): number {
+  return scene.groups.reduce(
+    (n, group) => n + htmlRuntimesOf(s, group.plays.type === "effect" ? group.plays.effect : null),
+    0,
+  );
+}
 /** The daemon's sentence when a pattern's kind has nothing plugged in (0.16.0). */
 const NO_DEVICE_OF_KIND = "no device of this kind is connected";
 /** The spine's limits (`canvas_proto::pattern`). */
@@ -886,20 +914,29 @@ function sceneEffects(scene: Scene): string[] {
   return out;
 }
 
-/** What `GET /scenes` answers: a group whose effect is gone is dark and says why. */
+/** What `GET /scenes` answers: a group whose effect is gone is dark and says why, and a group
+ *  past the scene's HTML limit is dark and says why (#370). */
 function scenesAnswer(s: DemoState): ScenesResponse {
   const active = activeSceneOf(s);
+  const effectOf = (g: Group) => (g.plays.type === "effect" ? g.plays.effect : null);
+  const total = (active?.groups ?? []).reduce((n, g) => n + htmlRuntimesOf(s, effectOf(g)), 0);
+  // The first SCENE_HTML_MAX runtimes run, in scene order; the rest say why they do not.
+  let running = 0;
   return {
     active: s.activeScene,
     scenes: s.scenes,
     group_states: (active?.groups ?? []).map((g) => {
-      const effect = g.plays.type === "effect" ? g.plays.effect : null;
+      const effect = effectOf(g);
       const pattern = effect !== null ? s.patterns[effect] : undefined;
       let failed: string | null = null;
       if (effect !== null && !s.effects[effect] && !s.stacks[effect] && !pattern) {
         failed = effect.startsWith(PATTERN_ID_PREFIX)
           ? `the pattern ${effect} is gone`
           : `the effect ${effect} is not installed`;
+      } else {
+        const runtimes = htmlRuntimesOf(s, effect);
+        if (running + runtimes > SCENE_HTML_MAX) failed = htmlLimitSentence(total);
+        else running += runtimes;
       }
       return {
         id: g.id,
@@ -945,38 +982,6 @@ function freshGroupId(base: string, taken: string[]): string {
     const id = `${base}-${n}`;
     if (!held.has(id)) return id;
   }
-}
-
-/**
- * How many groups of one scene may play an HTML effect (`SCENE_HTML_MAX` in
- * `crates/canvas-proto/src/scene.rs`).
- */
-const SCENE_HTML_MAX = 2;
-/** The id prefix of an HTML effect (`HTML_EFFECT_PREFIX` in the spine). */
-const HTML_EFFECT_PREFIX = "html:";
-
-/**
- * How many groups of a scene play an HTML effect, counting a stack with an HTML layer or mask as
- * one (`html_group_count` in `crates/canvas-daemon/src/scenes.rs`).
- */
-function htmlGroupCount(s: DemoState, scene: Scene): number {
-  return scene.groups.filter((g) => {
-    if (g.plays.type !== "effect") return false;
-    const id = g.plays.effect;
-    if (id.startsWith(HTML_EFFECT_PREFIX)) return true;
-    const stack = s.stacks[id];
-    if (!stack) return false;
-    return stack.layers.some(
-      (layer) =>
-        layer.effect.startsWith(HTML_EFFECT_PREFIX) ||
-        (layer.mask?.effect ?? "").startsWith(HTML_EFFECT_PREFIX),
-    );
-  }).length;
-}
-
-/** The daemon's own sentence when a scene would run too many HTML effects. */
-function htmlLimitSentence(count: number): string {
-  return `at most ${SCENE_HTML_MAX} groups of a scene may play an HTML effect (a stack with an HTML layer counts); ${count} do`;
 }
 
 /**
@@ -1037,13 +1042,14 @@ function moveGroupRoute(s: DemoState, fromId: string, groupId: string, body: Gro
     emptied,
   };
   // Every scene that would be written passes the daemon's own checks before anything is
-  // written, a dry run included: the HTML limit is the daemon's check, and its sentence is what
-  // the page shows on the row it refuses.
+  // written, a dry run included: the HTML limit is the daemon's check (`check_html_limit` in
+  // `crates/canvas-daemon/src/scenes.rs`), and its sentence is what the page shows on the row it
+  // refuses. The daemon's sentence names no scene here: `check_saveable` gives it plain.
   if (!body.copy) {
-    const count = htmlGroupCount(s, fromAfter);
+    const count = sceneHtmlRuntimes(s, fromAfter);
     if (count > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(count));
   }
-  const toCount = htmlGroupCount(s, toAfter);
+  const toCount = sceneHtmlRuntimes(s, toAfter);
   if (toCount > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(toCount));
   if (body.dry_run) return answer;
   // The write: both scenes land, as the daemon's one save does.
@@ -2236,14 +2242,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
               })
             : scene.groups;
         for (const group of at) group.plays = { type: "effect", effect: id, props: next };
-        const html = scene.groups.filter((g) => {
-          if (g.plays.type !== "effect") return false;
-          if (g.plays.effect.startsWith("html:")) return true;
-          const stack = s.stacks[g.plays.effect];
-          return stack ? stack.layers.some((layer) => layer.effect.startsWith("html:")) : false;
-        }).length;
-        if (html > 1) {
-          fail(422, "validation", "at most 1 group of a scene may play an HTML effect (a stack with an HTML layer counts); " + html + " do");
+        const html = scene.groups.reduce(
+          (n, group) => n + htmlRuntimesOf(s, group.plays.type === "effect" ? group.plays.effect : null),
+          0,
+        );
+        if (html > SCENE_HTML_MAX) {
+          fail(422, "validation", htmlLimitSentence(html));
         }
       }
       return { ok: true };
@@ -2496,7 +2500,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       if (name.toLowerCase() === "preview") fail(422, "validation", `"${name}" is reserved for the stack preview route`);
       if (next.layers.length > 8) fail(422, "validation", `a stack holds at most 8 layers, and this one has ${next.layers.length}`);
-      const html = next.layers.filter((layer) => layer.effect.startsWith("html:")).length;
+      const html = stackHtmlSlots(next, s.effects);
       if (html > 2) fail(422, "validation", `a stack holds at most 2 HTML layers, and this one has ${html}`);
       const ids: string[] = [];
       for (const layer of next.layers) {
