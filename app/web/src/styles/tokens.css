@@ -91,6 +91,10 @@
   --live-h: 215;
   --live: hsl(var(--live-h) 78% 72%);
   --live-soft: hsl(var(--live-h) 55% 55% / 0.16);
+  /* The fill of a key that is held (#375). It is the live hue at the lightness that lets the
+     legend on it hold its contrast: --on-accent on this is near-black, and the fill against
+     the well it stands on is 6:1 or better at every hue. */
+  --live-press: hsl(var(--live-h) 78% 72%);
 
   /* the colour field: the washes over the hue in the picker, and the hue ramp itself.
      These are the colour model, not the theme, so they are the same in both. */
@@ -211,6 +215,10 @@
   --down: #c8283a;
   --live: hsl(var(--live-h) 70% 42%);
   --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
+  /* The fill of a key that is held (#375). The light theme's live hue is too light for white
+     on it (2.2:1 at yellow), so the held key takes the deeper fill: white on it is 5.2:1 or
+     better at every hue, and the fill against the well it stands on is 3.8:1 or better. */
+  --live-press: hsl(var(--live-h) 70% 26%);
 }
 
 @media (prefers-color-scheme: light) {
@@ -263,5 +271,7 @@
     --down: #c8283a;
     --live: hsl(var(--live-h) 70% 42%);
     --live-soft: hsl(var(--live-h) 60% 50% / 0.14);
+    /* The fill of a key that is held (#375): the deeper fill, so white on it holds 5.2:1. */
+    --live-press: hsl(var(--live-h) 70% 26%);
   }
 }

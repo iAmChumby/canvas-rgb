@@ -6627,10 +6627,34 @@ button.chip:hover {
   stroke: var(--mute);
 }
 
-.pad-target[data-pressed="true"] .pad-btn,
+/* The key that has the keyboard's focus. It is a ring of the live hue, never the held look:
+   a focused key must not read as a pressed one. */
 .pad-target:focus-visible .pad-btn {
   fill: var(--live-soft);
   stroke: var(--live);
+}
+
+/*
+ * The key that is held down (#375). It takes a solid fill of the live hue, and its legend is
+ * printed in the ink that goes with that fill: --on-accent, which is near-black on the bright
+ * fill of the dark theme and white on the deeper fill of the light one. The fill holds its
+ * contrast at every hue the live preview can take (5.8:1 or better in the dark theme, 5.2:1 or
+ * better in the light one), so the legend never disappears into the fill.
+ */
+.pad-target[data-pressed="true"] .pad-btn {
+  fill: var(--live-press);
+  stroke: var(--live);
+  transition: none;
+}
+
+.pad-target[data-pressed="true"] .pad-print {
+  fill: var(--on-accent);
+  /* The legend drops 1 px, the way a key's legend does while it is held. */
+  transform: translateY(1px);
+}
+
+.pad-target[data-pressed="true"] .pad-glyph {
+  stroke: var(--on-accent);
 }
 
 .pad-target[data-on="true"] .pad-btn {
@@ -6639,10 +6663,225 @@ button.chip:hover {
   stroke-width: 2;
 }
 
+/*
+ * The four paddles are ghosts: XInput cannot see them, so they are drawn as dashed outlines
+ * and they never light. They come after the hover and the focus rules, so a ghost stays a
+ * ghost under the pointer and under the keyboard.
+ */
+.pad-target[data-ghost="true"] .pad-btn {
+  fill: none;
+  stroke: var(--line-2);
+  stroke-dasharray: 3 3;
+}
+
+.pad-target[data-ghost="true"] .pad-print {
+  fill: var(--mute);
+}
+
+.pad-target[data-ghost="true"]:focus-visible .pad-btn {
+  fill: none;
+  stroke: var(--live);
+}
+
+/* The stick's dot: where the stick stands inside its well. */
+.pad-stick-dot {
+  fill: var(--live);
+  stroke: var(--on-accent);
+  stroke-width: 1.5;
+  opacity: 0;
+  pointer-events: none;
+}
+
+/* While the pad is live the cap is the stick: the dot stands where the stick stands, and the
+   cap's legend gives way to it. */
+.pad-plan-wrap[data-live="true"] .pad-stick-dot {
+  opacity: 1;
+}
+
+.pad-plan-wrap[data-live="true"] [data-pad-dot] ~ .pad-print {
+  opacity: 0;
+}
+
+/* The two triggers: a slot that fills with the travel, and the number that counts it. */
+.pad-travel-slot {
+  fill: var(--sunk);
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.pad-travel-fill {
+  fill: var(--live);
+  transition: none;
+}
+
+.pad-travel-label {
+  fill: var(--mute);
+  font-family: var(--fm);
+  font-size: 14px;
+}
+
+.pad-travel-value {
+  fill: var(--dim);
+  font-family: var(--fm);
+  font-size: 14px;
+}
+
+/* The two sticks, in numbers: where each one stands. */
+.pad-readouts {
+  display: flex;
+  justify-content: center;
+  gap: var(--s5);
+  width: 100%;
+}
+
+.pad-readout {
+  display: inline-flex;
+  align-items: baseline;
+  gap: var(--s2);
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}
+
+.pad-readout-pair {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 2px;
+}
+
+.pad-readout-name {
+  color: var(--dim);
+}
+
+.pad-readout-axis {
+  color: var(--mute);
+}
+
+.pad-readout-value {
+  /* The slot is the width of the longest number, so the row never moves. */
+  min-width: 4ch;
+  color: var(--ink);
+  text-align: right;
+}
+
+/* What the plan cannot show, said once. */
+.pad-note {
+  margin: 0;
+  color: var(--mute);
+  font-size: var(--t14);
+  text-align: center;
+}
+
+/*
+ * The strip that says what the pad is doing (#375). It is the same height in every state and at
+ * every width, so the panels below it never move: three lines are held, plus the 2 px between
+ * the status word and its note, because the longest note wraps to two lines on a phone.
+ */
+.pad-state {
+  display: flex;
+  /* The status word stands on the strip's first line in every state; the dot and the note follow it. */
+  align-items: flex-start;
+  gap: var(--s2);
+  min-height: calc(var(--t14) * 3 * 1.45 + 2px);
+  margin-bottom: var(--s3);
+}
+
+/* The status line and its note, in one column, so the note sits under the state's own words. */
+.pad-state-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.pad-state-dot {
+  width: 8px;
+  height: 8px;
+  flex: none;
+  /* Centred on the first text line. */
+  margin-top: calc((var(--t14) * 1.45 - 8px) / 2);
+  border-radius: 50%;
+  background: var(--mute);
+}
+
+.pad-state[data-state="live"] .pad-state-dot {
+  background: var(--ok);
+}
+
+.pad-state[data-state="gone"] .pad-state-dot {
+  background: var(--down);
+}
+
+.pad-state[data-state="paused"] .pad-state-dot {
+  background: var(--work);
+}
+
+/* The status word's own line: the badge of the harness build stands at its end, inside the line,
+   so it can never take width from the note or add a line to the strip. */
+.pad-state-head {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  min-width: 0;
+}
+
+.pad-state-text {
+  flex: 1;
+  min-width: 0;
+  color: var(--dim);
+  font-size: var(--t14);
+}
+
+/* The strip's second line: why no key is lit, or which of the pads is being shown. */
+.pad-state-note {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
+}
+
+/* The slot the badge stands in. It is only in a build made for the harness (#375), so the
+   shipped strip gives its width to the words. */
+.pad-badge {
+  /* One text line tall whatever the chip is, so the line keeps its height. */
+  display: flex;
+  flex: none;
+  align-items: center;
+  height: calc(var(--t14) * 1.45);
+}
+
+/* The row of the button that is held: it takes the live colour and says so at its edge. */
+.pad-map-row[data-pressed="true"] {
+  border-bottom-color: var(--live);
+  background: var(--live-soft);
+}
+
+.pad-map-row[data-pressed="true"] .pad-map-label {
+  color: var(--live);
+}
+
+.pad-map-pressed {
+  /* The slot the word stands in: it is always there, so the row never moves. */
+  flex: none;
+  width: 8ch;
+  color: var(--live);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  text-align: right;
+  visibility: hidden;
+}
+
+.pad-map-row[data-pressed="true"] .pad-map-pressed {
+  visibility: visible;
+}
+
 .pad-print {
   fill: var(--dim);
   font-family: var(--fm);
-  font-size: 11px;
+  font-size: 14px;
+  /* The weight is here, not in a rule of its own further down: a second rule would take the
+     size with it, and the plan's legends would fall back under the floor again. */
+  font-weight: 600;
   pointer-events: none;
 }
 
@@ -6654,9 +6893,31 @@ button.chip:hover {
   text-transform: uppercase;
 }
 
+/*
+ * The plan is drawn in its own units and scaled to the room it has (#375). On a phone the
+ * drawing is smaller than those units, so the text inside it is written larger: the travel
+ * numbers, their labels and the button legends come out at 14 px or more on the screen. Only
+ * font sizes change, never a coordinate, so the drawing's box and every panel below it stay
+ * where they were.
+ */
+@media (max-width: 560px) {
+  .pad-travel-value {
+    font-size: 18px;
+  }
+
+  .pad-travel-label {
+    font-size: 17px;
+  }
+
+  .pad-print {
+    font-size: 16px;
+  }
+}
+
 .pad-map {
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(230px, 1fr));
+  /* Wide enough for the longest label ("Paddle 1 (P1)"), the 128px select and the "pressed" slot. */
+  grid-template-columns: repeat(auto-fill, minmax(min(320px, 100%), 1fr));
   gap: var(--s2) var(--s4);
 }
 
@@ -7020,11 +7281,6 @@ button.chip:hover {
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.pad-print {
-  font-size: 12px;
-  font-weight: 600;
 }
 
 /* The canvas of the reworked editor: the parts, their two fills, the rulers and the stage the
