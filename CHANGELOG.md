@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
 - Devices rows and Peripherals switches stay inside desktop windows from 721px up: the device list scrolls in its pane and the mouse's Access switches wrap to their own line when they stop fitting. (#89)
 - Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)
 - Importing an effect whose script never finishes is refused and nothing is saved, instead of saving it and retrying the same load every few minutes; a save the machine was too busy to load now gets one longer load first (#75)

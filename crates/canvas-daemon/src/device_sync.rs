@@ -138,7 +138,10 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
         if sinks.contains_key(&id) {
             continue;
         }
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
+        // The newest frame, and the writer that takes it. A watch channel and not a queue:
+        // the device is often slower than the render loop, and the frame that matters is
+        // the newest one (#308).
+        let (tx, rx) = tokio::sync::watch::channel::<Vec<canvas_proto::Rgb8>>(Vec::new());
         // The writer task records the time of every frame that went out (#81). It lives in the
         // library, so a test can run it and prove that it records.
         let writer = tokio::spawn(crate::writer::writer_loop_with_lane(

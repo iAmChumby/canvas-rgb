@@ -158,9 +158,9 @@ async fn a_resume_from_sleep_puts_the_scene_back_and_re_enters_custom_mode() {
         quit_tx,
     ));
 
-    // The engine's sink: a bounded channel into the writer task that writes to the
+    // The engine's sink: the newest frame, on its way to the writer task that writes to the
     // adapter, the same path the daemon builds in `main.rs`.
-    let (tx, rx) = tokio::sync::mpsc::channel::<Vec<Rgb8>>(1);
+    let (tx, rx) = tokio::sync::watch::channel::<Vec<Rgb8>>(Vec::new());
     let writer = tokio::spawn(canvas_daemon::writer::writer_loop(
         app.adapter.clone(),
         device.id.clone(),
