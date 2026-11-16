@@ -180,7 +180,11 @@ struct SpectrumSource {
 impl SpectrumSource {
     fn new() -> Self {
         let centers: Vec<f32> = (0..32).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect();
-        let magnitudes: Vec<f32> = (0..32).map(|i| if i == 16 { 1.0 } else { 0.0 }).collect();
+        // A run of loud bands, not one narrow bar: a strip's LED reads a small cell of
+        // the picture (#372), so the fake has to publish something the strip's LEDs can
+        // read. One band is a two-pixel bar, and it fell between two of the LEDs.
+        let magnitudes: Vec<f32> =
+            (0..32).map(|i| if (8..24).contains(&i) { 1.0 } else { 0.0 }).collect();
         Self {
             audio: Arc::new(AudioSpectrum {
                 centers_hz: centers,
@@ -191,6 +195,36 @@ impl SpectrumSource {
 }
 
 impl InputSource for SpectrumSource {
+    fn screen(&self) -> Option<Arc<ScreenFrame>> {
+        None
+    }
+
+    fn audio(&self) -> Option<Arc<AudioSpectrum>> {
+        Some(Arc::clone(&self.audio))
+    }
+}
+
+/// A source that publishes a known spectrum: one loud band.
+struct OneBandSource {
+    audio: Arc<AudioSpectrum>,
+}
+
+impl OneBandSource {
+    /// One band at `index` of `bands`, at `magnitude`. The rest are silent.
+    fn new(bands: usize, index: usize, magnitude: f32) -> Self {
+        let centers: Vec<f32> = (0..bands).map(|i| 60.0 * 2f32.powf(i as f32 / 4.0)).collect();
+        let magnitudes: Vec<f32> =
+            (0..bands).map(|i| if i == index { magnitude } else { 0.0 }).collect();
+        Self {
+            audio: Arc::new(AudioSpectrum {
+                centers_hz: centers,
+                magnitudes,
+            }),
+        }
+    }
+}
+
+impl InputSource for OneBandSource {
     fn screen(&self) -> Option<Arc<ScreenFrame>> {
         None
     }
@@ -392,6 +426,122 @@ async fn an_audio_effect_reads_the_source_and_lights_the_sink() {
     assert!(
         wait_until(Duration::from_secs(10), || sink.lit()),
         "the effect drew from the spectrum the source published"
+    );
+    engine.shutdown();
+}
+
+/// The strip's LEDs, as the pixels each one reads, and the pixels a band of the spectrum
+/// draws on.
+///
+/// A strip's LED reads a small square cell at mid-height (#372), and an Audio Spectrum
+/// bar is two render pixels wide and grows up from the bottom of the canvas. The engine
+/// draws on the scene's render canvas, 80x50.
+fn strip_cells_and_band(bands: usize, index: usize) -> (Vec<(u32, u32)>, (u32, u32)) {
+    use canvas_proto::scene::{zone_light_id, Arrangement, GroupMode, Light};
+    let dev = device("d0", 12);
+    let light = Light {
+        id: zone_light_id(&dev.id, 0),
+        device_id: dev.id.clone(),
+        zone_index: 0,
+        leds: None,
+        name: None,
+        arrangement: Arrangement::Strip,
+        reversed: false,
+        kind: None,
+        copies: None,
+    };
+    let plan = canvas_core::arrangement::build_group_plan(
+        std::slice::from_ref(&light.id),
+        GroupMode::FlowAcross,
+        std::slice::from_ref(&light),
+        std::slice::from_ref(&dev),
+    );
+    let scale = canvas_core::SCENE_RENDER_SCALE;
+    let cells = plan.lights[0]
+        .leds
+        .iter()
+        .map(|led| {
+            let [bx0, _by0, bx1, _by1] = led.bounds;
+            let x0 = (((bx0 * scale) - 0.5).ceil() as i64).clamp(0, 79) as u32;
+            let x1 = ((((bx1 * scale) - 0.5).floor() as i64).clamp(0, 79) as u32).max(x0);
+            (x0, x1)
+        })
+        .collect();
+    // The band: the effect draws one bar per band, two pixels wide on an 80 pixel canvas.
+    let bar_w = (80u32 / bands as u32).max(1);
+    let band = (index as u32 * bar_w, ((index as u32 + 1) * bar_w).min(80));
+    (cells, band)
+}
+
+/// One thin bar, on a strip (#372).
+///
+/// A bar at full scale is the whole height of the canvas, so the LED whose cell stands in
+/// it reads the bar's colour: one thin bar is read by that LED and by no other. A bar
+/// that falls between two cells is read by neither, because the cell is a point on the
+/// picture and not a column through it.
+#[tokio::test]
+async fn one_thin_bar_is_read_by_the_led_that_stands_in_it() {
+    const BANDS: usize = 32;
+    let (cells, band) = strip_cells_and_band(BANDS, 11);
+    // The LED whose cell the bar stands in.
+    let under: Vec<usize> = cells
+        .iter()
+        .enumerate()
+        .filter(|(_, (x0, x1))| *x0 < band.1 && *x1 >= band.0)
+        .map(|(index, _)| index)
+        .collect();
+    assert!(!under.is_empty(), "the band falls between every LED's cell: {cells:?}");
+
+    let home =
+        std::env::temp_dir().join(format!("canvas-rgb-capture-one-band-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&home);
+    std::fs::create_dir_all(&home).expect("the temp home is created");
+    let store = canvas_daemon::storage::Store::at(&home);
+    let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
+        fps: 30,
+        power: canvas_proto::api::Power::Running,
+        brightness: 100,
+        warmth: canvas_proto::consts::WARMTH_OFF,
+    });
+    let (tx, _rx) = tokio::sync::mpsc::unbounded_channel();
+    let app = Arc::new(App::new(
+        store,
+        engine.clone(),
+        Box::new(FakeAdapter::default()),
+        TOKEN.to_string(),
+        "0.1.0-test".to_string(),
+        tx,
+    ));
+    app.set_input_source(Some(Arc::new(OneBandSource::new(BANDS, 11, 1.0))));
+
+    let sink = RecordingSink::new();
+    engine.add_sink(DeviceId("d0".into()), sink.clone());
+    let effect = canvas_effects::create("audio_spectrum").expect("the built-in effect exists");
+    run_on_d0(&engine, effect, &Props::new());
+
+    // The LEDs the newest frame lights. The effect needs a few frames to raise the bar, so the
+    // verdict waits for the frame it is about and is never read after a fixed pause.
+    let lit_now = || -> Vec<usize> {
+        let frames = sink.frames.lock().unwrap_or_else(|e| e.into_inner());
+        frames
+            .last()
+            .map(|last| {
+                last.iter()
+                    .enumerate()
+                    .filter(|(_, colour)| **colour != Rgb8::BLACK)
+                    .map(|(index, _)| index)
+                    .collect()
+            })
+            .unwrap_or_default()
+    };
+    assert!(
+        wait_until(Duration::from_secs(10), || lit_now() == under),
+        "only the LED that stands in the bar reads it: lit {:?}, under the bar {under:?}",
+        lit_now()
+    );
+    eprintln!(
+        "#372 one thin bar: the bar covers the pixels {}..{} and the LED(s) {under:?} read it",
+        band.0, band.1
     );
     engine.shutdown();
 }

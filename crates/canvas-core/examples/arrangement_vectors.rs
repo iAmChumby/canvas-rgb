@@ -471,7 +471,10 @@ fn json_plan(plan: &GroupPlan) -> String {
 }
 
 /// The whole file: the inputs and the plan each of them makes.
-fn print_json() -> String {
+///
+/// Public so the parity test (`crates/canvas-core/tests/arrangement_vectors.rs`) can ask
+/// the printer what it makes today and compare it with the checked-in file.
+pub fn print_json() -> String {
     let mut out = String::new();
     out.push_str("{\n");
     out.push_str(

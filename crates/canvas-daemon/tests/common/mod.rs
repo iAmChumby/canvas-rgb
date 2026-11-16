@@ -169,6 +169,9 @@ pub struct FakeEngine {
     /// Every `set_group_preview` call, oldest first: the group asked for (`None` stops the
     /// tap) and whether a sink was given. Read it with [`FakeEngine::group_preview_calls`].
     pub group_preview: Mutex<Vec<(Option<String>, bool)>>,
+    /// The sink the last `set_group_preview` call gave (`None` after a stop): a test submits
+    /// pictures through it as the engine would.
+    pub group_preview_sink: Mutex<Option<Arc<dyn PreviewSink>>>,
 }
 
 impl Default for FakeEngine {
@@ -194,6 +197,7 @@ impl Default for FakeEngine {
             panic_on_set_scene: AtomicU32::new(0),
             set_scene_panics: AtomicU32::new(0),
             group_preview: Mutex::new(Vec::new()),
+            group_preview_sink: Mutex::new(None),
         }
     }
 }
@@ -314,6 +318,7 @@ impl Engine for FakeEngine {
 
     fn set_group_preview(&self, group: Option<String>, sink: Option<Arc<dyn PreviewSink>>) {
         self.group_preview.lock().unwrap().push((group, sink.is_some()));
+        *self.group_preview_sink.lock().unwrap() = sink;
     }
 
     fn group_states(&self) -> Vec<canvas_proto::GroupState> {
