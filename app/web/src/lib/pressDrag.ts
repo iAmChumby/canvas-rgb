@@ -33,6 +33,15 @@ export function focusForKeys(el: { focus(options?: FocusOptions): void }): void 
   } as FocusOptions & { focusVisible: boolean });
 }
 
+/**
+ * How far the pointer must travel before the thing under it is lifted: a press is not a drag.
+ *
+ * The one rule for every surface the pointer drags (#105, the class fix for
+ * `cause:ui-interaction`): the scene strip's keys (#371) and the group rows' handles (#384) both
+ * use it, so a press that does not travel is a click in both.
+ */
+export const DRAG_THRESHOLD = 6;
+
 /** Cancels a press on a drag surface, so no native drag or text selection can start from it. */
 export function cancelPress<T extends HTMLElement | SVGElement>(
   e: PointerEvent<T>,

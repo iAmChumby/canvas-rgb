@@ -192,6 +192,16 @@ function sameOrder(a: string[], b: string[]): boolean {
 }
 
 /**
+ * What the page says when another window saved first: the last change's own sentence when it has
+ * one (a change that moves something says that nothing moved), and the page's own sentence
+ * otherwise.
+ */
+function conflictOf(changes: Change[]): string {
+  const last = changes[changes.length - 1];
+  return last?.conflict ?? CONFLICT_MESSAGE;
+}
+
+/**
  * True when `group` holds exactly the values a live write sent. A key that is there with another
  * value is not this write's: another window may have saved, or the daemon fitted the patch to the
  * effect's schema. Either way the answer is ambiguous, and it is taken as a conflict.
@@ -226,6 +236,11 @@ interface Change {
   apply: (draft: Scene) => void;
   /** What the change is called, for the page. */
   label: string;
+  /**
+   * What the page says when another window saved first. A change that moves something says that
+   * nothing moved; every other change says that the window changed.
+   */
+  conflict?: string;
 }
 
 /** One write that has not gone out yet: the scene to save and the changes it carries. */
@@ -341,6 +356,11 @@ const BLANK_VIEW: View = {
 export interface EditOptions {
   /** The change is a preview: it goes to the daemon and on the screen, but not on the undo stack. */
   transient?: boolean;
+  /**
+   * What the page says when another window saved first. The default is the page's own sentence;
+   * a change that moves something says that nothing moved.
+   */
+  conflictMessage?: string;
 }
 
 export interface UseScene {
@@ -382,6 +402,12 @@ export interface UseScene {
    * write. A burst of key presses is one order and one write (`coalesce`).
    */
   reorderScenes(order: string[], options?: { coalesce?: boolean }): void;
+  /**
+   * Puts the groups of the active scene in another order (#384). The order shows at once; the
+   * whole scene goes to the daemon with the revision it was read at, so a stale revision is
+   * refused and nothing moves. An Undo puts the old order back.
+   */
+  reorderGroups(order: string[]): void;
   undo(): void;
   redo(): void;
   canUndo: boolean;
@@ -802,13 +828,13 @@ export function useScene(): UseScene {
             // the edits made while the answer was read pushed are dropped: they start from the old
             // scene, and undoing one would take back the other window's change.
             history.current = { ...history.current, past: undoStepsFor(serverScene, later), future: [] };
-            error.current = CONFLICT_MESSAGE;
+            error.current = conflictOf(later);
             publish();
             continue;
           }
           outgoing.current.delete(sceneId);
           settleQuiet(sceneId);
-          error.current = CONFLICT_MESSAGE;
+          error.current = conflictOf(sentChanges);
           publish();
           return;
         }
@@ -843,7 +869,7 @@ export function useScene(): UseScene {
       const next = clone(current);
       change(next);
       const id = ++changeSeq.current;
-      const entry: Change = { id, apply: change, label };
+      const entry: Change = { id, apply: change, label, conflict: options?.conflictMessage };
       outgoing.current.set(active, { scene: next, changes: [...(pending?.changes ?? []), entry] });
       // A preview is not the owner's decision: it goes to the lights, but the Undo stack keeps
       // the step before it, so an Undo never lands on a picture that was only a preview.
@@ -1783,6 +1809,36 @@ export function useScene(): UseScene {
     [pushOrderCommand, showLocalOrder, writeOrder],
   );
 
+  /**
+   * Puts the groups of the active scene in another order (#384).
+   *
+   * The order shows at once, and the whole scene goes to the daemon with the revision it was read
+   * at: a revision another window moved on is refused, and nothing moves. The change is on the
+   * undo stack: an Undo puts the old order back, and a Redo puts the new one back.
+   */
+  const reorderGroups = useCallback(
+    (order: string[]) => {
+      edit(
+        (draft) => {
+          const byId = new Map(draft.groups.map((g) => [g.id, g]));
+          const next: Group[] = [];
+          for (const id of order) {
+            const group = byId.get(id);
+            if (!group) continue;
+            next.push(group);
+            byId.delete(id);
+          }
+          // A group this window has not seen keeps its place at the end.
+          for (const group of byId.values()) next.push(group);
+          draft.groups = next;
+        },
+        "Put the groups in another order",
+        { conflictMessage: NOTHING_MOVED },
+      );
+    },
+    [edit],
+  );
+
   // The order the daemon last confirmed. While a reorder of this window is on its way the
   // daemon's answer is still the old order: a write names the order it was made from, not the
   // one on the screen.
@@ -1834,6 +1890,7 @@ export function useScene(): UseScene {
     dryRunMove,
     moveGroup,
     reorderScenes,
+    reorderGroups,
     undo,
     redo,
     canUndo: ownsHistory && view.canUndo,

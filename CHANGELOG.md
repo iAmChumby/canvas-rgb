@@ -11,6 +11,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
 - The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
 - Scenes: the open group shows the picture its own effect draws, so you can tune it while you watch (#378)
+- Scenes: the groups inside a scene can be put in another order: drag a group's handle, use the arrow keys on it, or pick Move up / Move down in the group's menu. A group's colour now comes from the group itself, so it keeps its colour when it moves; a scene made before this may show a different colour once. (#384)
 - Scenes: a group can be moved to another scene, or copied into it, from the group's own menu; each scene says what lands there and what leaves before you commit. (#368)
 - Scenes: the scene keys can be put in another order: drag one, use the arrow keys on it, or use the scene's own menu. (#371)
 - The command line can list your lights, create, edit and delete a scene from a file, and import, check, read and delete effects and save and delete presets, with a dry run that saves nothing; a run can only delete what it made. A new agent skill, `canvas-rgb-scene`, uses these commands to build a scene for you and leaves your lights on the scene they had. (#377)
@@ -23,6 +24,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Scenes: the lights no group holds keep their row at the bottom of the list, the group's menu lines every item up, and a row's tooltip stays out of the way while the row is dragged. (#384)
+- Scenes: a group's handle does not take the page's scrolling away on a phone, only that handle's bubble waits for the press to end, and a group deleted while it is dragged leaves the order as it was. (#384)
 - Scenes: putting the groups in a new order no longer restarts their effects, so the lights stay as they are. The order is for display only. (#384)
 - The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
 - Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)

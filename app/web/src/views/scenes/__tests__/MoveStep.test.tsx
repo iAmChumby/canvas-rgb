@@ -150,6 +150,7 @@ function fakeUse(over: Partial<UseScene> = {}): UseScene {
     dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "answered", answer: dryAnswer("g-desk") })),
     moveGroup: vi.fn(async () => null),
     reorderScenes: vi.fn(),
+    reorderGroups: vi.fn(),
     undo: vi.fn(),
     redo: vi.fn(),
     canUndo: false,

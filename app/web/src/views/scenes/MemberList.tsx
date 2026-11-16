@@ -148,6 +148,7 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
               <IconButton
                 label={`Move ${name}`}
                 className={s.grip}
+                size="sm"
                 icon={<DotsSixVertical size={16} />}
                 onClick={() => undefined}
                 onPointerDown={(event) => onGripDown(id, event)}

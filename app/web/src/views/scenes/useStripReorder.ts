@@ -15,11 +15,9 @@
 // there.
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
+import { DRAG_THRESHOLD, cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import type { Scene } from "@/proto/Scene";
 
-/** How far the pointer must travel before the key is lifted: a press is not a drag. */
-export const DRAG_THRESHOLD = 6;
 /** How close to the strip's edge the pointer must be for the strip to scroll. */
 const EDGE = 48;
 /** How far the strip scrolls near its edge, in pixels. */

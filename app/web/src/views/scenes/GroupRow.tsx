@@ -1,8 +1,8 @@
 "use client";
 
-import type { CSSProperties } from "react";
+import type { CSSProperties, DragEvent, KeyboardEvent, PointerEvent } from "react";
 import { useRef, useState } from "react";
-import { ArrowsHorizontal, CopySimple, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
+import { ArrowsHorizontal, CopySimple, DotsSixVertical, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
 import { Button, IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
@@ -12,12 +12,11 @@ import { Slider } from "@/components/Slider";
 import { shownWords } from "@/views/chain/limits";
 import { EffectPicker, isPatternEffect } from "@/views/scenes/EffectPicker";
 import { LedRun, runLabel } from "@/views/scenes/LedRun";
+import { groupAccent } from "@/views/scenes/groupAccent";
 import type { Group } from "@/proto/Group";
 import type { LightView } from "@/proto/LightView";
 import type { UseScene } from "@/views/scenes/useScene";
 import s from "@/views/scenes/scenes.module.css";
-
-const ACCENTS = ["--a1", "--a2", "--a3", "--a4", "--a5"] as const;
 
 /** The mode in the owner's words (spec "Language"). */
 export const MODE_WORDS = { flow_across: "flow across", each_its_own: "each its own" } as const;
@@ -88,13 +87,17 @@ export interface GroupRowProps {
   lightsState?: LightsState;
   /** Why the group is dark, from the daemon; null while it runs. */
   failed: string | null;
-  /** Its place in the scene, for its accent. */
-  index: number;
   open?: boolean;
   /** The scene's data: the row's own changes go through it. */
   use: UseScene;
   onOpen: (groupId: string) => void;
   onBrightness: (groupId: string, n: number) => void;
+  /** A press on the row's handle: the pointer drags the row. */
+  onGripDown: (group: Group, event: PointerEvent<HTMLButtonElement>) => void;
+  /** The browser tried to drag the row away: the handle is a control, not a picture. */
+  onGripDrag: (event: DragEvent<HTMLButtonElement>) => void;
+  /** A key on the row's handle: the arrows that move the group one place. */
+  onGripKey: (group: Group, event: KeyboardEvent<HTMLButtonElement>) => void;
 }
 
 /**
@@ -112,11 +115,13 @@ export function GroupRow({
   missing = false,
   lightsState = "ready",
   failed,
-  index,
   open,
   use,
   onOpen,
   onBrightness,
+  onGripDown,
+  onGripDrag,
+  onGripKey,
 }: GroupRowProps) {
   const off = group.plays.type === "off";
   // A pattern plays the whole pattern on every device of the group, so the mode means nothing
@@ -129,12 +134,27 @@ export function GroupRow({
     <article
       className={s.row}
       data-testid="group-row"
+      data-group={group.id}
       data-failed={failed ? "true" : undefined}
       data-off={off ? "true" : undefined}
       data-open={open ? "true" : undefined}
-      style={{ "--tone": `var(${ACCENTS[index % ACCENTS.length]})` } as CSSProperties}
+      style={{ "--tone": `var(${groupAccent(group.id)})` } as CSSProperties}
       aria-label={group.name}
     >
+      {/* The handle: the pointer drags the row by it, and the arrow keys move the group one place
+          while it has the focus. Its bubble is held back while it is pressed: the dragged row
+          passes over the rows under the pointer, and a bubble there covers them. */}
+      <IconButton
+        label={`Move ${group.name}`}
+        className={s.grip}
+        size="sm"
+        holdOnPress
+        icon={<DotsSixVertical size={16} />}
+        onClick={() => undefined}
+        onPointerDown={(event) => onGripDown(group, event)}
+        onDragStart={onGripDrag}
+        onKeyDown={(event) => onGripKey(group, event)}
+      />
       <Button
         variant="ghost"
         className={s.who}
@@ -222,6 +242,9 @@ export function GroupRow({
 export function UnassignedRow({ lights, lightsState = "ready" }: { lights: LightView[]; lightsState?: LightsState }) {
   return (
     <article className={s.row} data-testid="unassigned-row" data-unassigned="true" aria-label="Unassigned">
+      {/* The handle's own column: this row has no handle, but it keeps the room of the one the
+          group rows have, so its name and its preview stand where they stand there. */}
+      <span className={s.gripSpace} data-testid="grip-space" />
       <div className={`${s.who} ${s.whoStatic}`}>
         <span className={s.name}>Unassigned</span>
         <Summary lights={lights} state={lightsState} />

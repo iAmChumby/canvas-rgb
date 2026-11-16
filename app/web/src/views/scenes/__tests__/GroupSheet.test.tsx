@@ -382,6 +382,43 @@ describe("the open group", () => {
     expect(copy.getAttribute("title")).toBe("There is no other scene.");
   });
 
+  it("the menu has Move up and Move down, and they are disabled at an end", async () => {
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const up = await screen.findByRole("button", { name: "Move up" });
+    const down = await screen.findByRole("button", { name: "Move down" });
+    // The group is the first one: it cannot go up.
+    expect((up as HTMLButtonElement).disabled).toBe(true);
+    expect(up.getAttribute("title")).toBe("It is already first.");
+    expect((down as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("the last group cannot go down, and the first one cannot go up", async () => {
+    open("g-two");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const up = await screen.findByRole("button", { name: "Move up" });
+    const down = await screen.findByRole("button", { name: "Move down" });
+    // The group is the last one: it cannot go down, but it can go up.
+    expect((down as HTMLButtonElement).disabled).toBe(true);
+    expect(down.getAttribute("title")).toBe("It is already last.");
+    expect((up as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Move down puts the group one place down, in one save with the revision the page read", async () => {
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    fireEvent.click(await screen.findByRole("button", { name: "Move down" }));
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+    const [id, body] = api.scenes.put.mock.calls[0] as [
+      string,
+      { scene: Scene; expected_rev: number },
+    ];
+    expect(id).toBe("gaming");
+    // One save: the whole scene, with the new order and the revision the page read.
+    expect(body.expected_rev).toBe(7);
+    expect(body.scene.groups.map((g) => g.id)).toEqual(["g-two", "g-one"]);
+  });
+
   it("choosing Move to scene opens the step, and it lists the other scene", async () => {
     api.scenes.list.mockResolvedValue(twoScenes());
     patchSnap({ scenes: twoScenes(), scenesError: null });

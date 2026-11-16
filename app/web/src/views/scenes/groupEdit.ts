@@ -56,6 +56,23 @@ export function groupGoneMessage(names: string[]): string {
   return `${names.length} groups had no devices left and were removed`;
 }
 
+/**
+ * The order of the groups when one of them moves one place (#384).
+ *
+ * `delta` is -1 for up and 1 for down. `null` when the group is already at that end: the page
+ * says so instead of writing an order that is the same one.
+ */
+export function groupOrderMoved(ids: string[], groupId: string, delta: number): string[] | null {
+  const at = ids.indexOf(groupId);
+  if (at < 0) return null;
+  const to = at + delta;
+  if (to < 0 || to >= ids.length) return null;
+  const order = [...ids];
+  const [moved] = order.splice(at, 1);
+  order.splice(to, 0, moved!);
+  return order;
+}
+
 /** What the toast says when a move emptied groups of the scene it went to. */
 export function moveEmptiedMessage(names: string[]): string {
   if (names.length === 0) return "";
