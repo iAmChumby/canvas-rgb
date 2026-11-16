@@ -347,6 +347,13 @@ line. Three mechanisms, and one bug the timing only exposed.
   awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
   engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
   fake bumps), never on a flag the code sets before the awaited work.
+- [#411](https://github.com/iAmChumby/canvas-rgb/issues/411): `the_timeout_restores_the_length_and_the_lights`
+  (`crates/canvas-daemon/tests/chains.rs`) waited for the header's length, then read the restore
+  record, the hold and the session at once. The daemon ends those after it restores the length, so
+  a busy runner read them in the gap. The same rule as #282: each state the assert reads is waited
+  for. Two more tests in that file made the same read (`a_failed_rollback_keeps_both_records`,
+  `start_up_rolls_back_a_leftover_intent`) and wait now. No guard: the mistake is two correct
+  lines in the wrong order, which `timing_class.rs` cannot tell from a read that is safe.
 - [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
   another starter while one is loading, and lands both"
   (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the

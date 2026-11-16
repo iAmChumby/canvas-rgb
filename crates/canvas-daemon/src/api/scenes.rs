@@ -10,8 +10,8 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
-    FlashRequest, GroupBrightnessPut, GroupMove, GroupMoved, SceneActivePut, SceneCreate, ScenePut,
-    ScenesResponse, ScenesWrite,
+    FlashRequest, GroupBrightnessPut, GroupMove, GroupMoved, NewGroup, SceneActivePut, SceneCreate,
+    SceneDryRun, ScenePut, ScenesResponse, ScenesWrite,
 };
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
@@ -162,30 +162,83 @@ pub async fn list_scenes(State(app): State<Arc<App>>) -> Json<ScenesResponse> {
     Json(response(&app).await)
 }
 
+/// What `POST /api/v1/scenes` and `PUT /api/v1/scenes/{id}` answer: the scene a write saved, or,
+/// for a dry run, the scene it would save with `saved: false` (#377). A real write answers the
+/// `Scene` it always answered, so the editor's call is unchanged.
+pub enum SceneAnswer {
+    Saved(Scene),
+    DryRun(SceneDryRun),
+}
+
+impl IntoResponse for SceneAnswer {
+    fn into_response(self) -> axum::response::Response {
+        match self {
+            Self::Saved(scene) => Json(scene).into_response(),
+            Self::DryRun(probe) => Json(probe).into_response(),
+        }
+    }
+}
+
+/// The groups a create asked for, in its order. Each id is minted from the group's name with
+/// [`fresh_id`], against every group id of every scene, exactly as the copy path mints them; a
+/// name a group of the same request already took mints `-2`, `-3` and so on.
+fn asked_groups(scenes: &[Scene], asked: &[NewGroup]) -> Vec<Group> {
+    let mut used: Vec<String> =
+        scenes.iter().flat_map(|s| s.groups.iter().map(|g| g.id.clone())).collect();
+    let mut groups = Vec::with_capacity(asked.len());
+    for group in asked {
+        let id = fresh_id(&slug(&group.name), used.iter().map(String::as_str));
+        used.push(id.clone());
+        groups.push(Group {
+            id,
+            name: group.name.clone(),
+            members: group.members.clone(),
+            plays: group.plays.clone(),
+            mode: group.mode,
+            brightness: group.brightness,
+        });
+    }
+    groups
+}
+
 /// `POST /api/v1/scenes`.
+///
+/// With `groups` (#377) the new scene holds exactly those groups, each id minted from its name,
+/// and it then passes every check [`put_scene`] runs, in its order — [`scenes::check_saveable`]
+/// (the spine's `validate_scene`, the names, the HTML limit) and then [`fit_group_props`] — before
+/// ONE save; a failed save pops the scene, so the store is as it was. With `dry_run` the checks
+/// run (those of `groups`, when it has them) and nothing is written: the answer is the scene it would save. A scene made this way is
+/// never made active and the engine is not told, as before. Without `groups` the route is what it
+/// was, byte for byte, except that a dry run saves nothing.
 pub async fn create_scene(
     State(app): State<Arc<App>>,
     Json(request): Json<SceneCreate>,
-) -> ApiResult<Json<Scene>> {
-    let name = request.name.trim().to_string();
+) -> ApiResult<SceneAnswer> {
+    let SceneCreate { name, copy_of, groups: asked, dry_run } = request;
+    let name = name.trim().to_string();
     if name.is_empty() {
         return Err(ApiFailure::validation("a scene needs a name"));
     }
     if name.chars().count() > SCENE_NAME_MAX {
         return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
     }
+    if asked.is_some() && copy_of.is_some() {
+        return Err(ApiFailure::validation(
+            "A scene takes either a copy of another scene or its own groups, not both.",
+        ));
+    }
     let _lock = app.scene.lock().await;
     let mut store = app.store.write().await;
     let mut taken: Vec<&str> = store.scenes.scenes.iter().map(|s| s.id.as_str()).collect();
     taken.push(RESERVED_SCENE_ID);
     let id = fresh_id(&slug(&name), taken);
-    let groups = match &request.copy_of {
-        Some(source) => {
+    let groups = match (copy_of.as_deref(), asked.as_deref()) {
+        (Some(source), _) => {
             let source = store
                 .scenes
                 .scenes
                 .iter()
-                .find(|s| &s.id == source)
+                .find(|s| s.id == source)
                 .ok_or_else(|| ApiFailure::not_found(format!("no scene with the id {source}")))?;
             // Fresh group ids: none of them is a group id any scene has.
             let mut used: Vec<String> =
@@ -198,41 +251,66 @@ pub async fn create_scene(
             }
             copied
         }
-        None => scenes::everything_group(&store.lights.lights)
+        (None, Some(asked)) => asked_groups(&store.scenes.scenes, asked),
+        (None, None) => scenes::everything_group(&store.lights.lights)
             .map(|g| Group { plays: Plays::Off, ..g })
             .into_iter()
             .collect(),
     };
-    let scene = Scene { id, name, rev: 1, groups };
+    let mut scene = Scene { id, name, rev: 1, groups };
+    if asked.is_some() {
+        scenes::check_saveable(&app, &scene, &store.lights.lights)?;
+        fit_group_props(&app, &mut scene)?;
+    }
+    if dry_run {
+        // A dry run refuses what the save would refuse: a scenes file that waits or is blocked.
+        if let Err(e) = store.scenes_writable() {
+            return Err(save_failure(&store, e));
+        }
+        return Ok(SceneAnswer::DryRun(SceneDryRun { saved: false, scene }));
+    }
     store.scenes.scenes.push(scene.clone());
     if let Err(e) = store.save_scenes() {
         store.scenes.scenes.pop();
         return Err(save_failure(&store, e));
     }
-    Ok(Json(scene))
+    Ok(SceneAnswer::Saved(scene))
 }
 
 /// `PUT /api/v1/scenes/{id}`.
+///
+/// With `dry_run` every check runs, the rev is the one it would be saved at, and nothing is
+/// written and no engine told: the answer is the scene it would save, with `saved: false`. A
+/// stale `expected_rev` is still a `409` in a dry run (#377).
 pub async fn put_scene(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
     Json(put): Json<ScenePut>,
-) -> Result<Json<Scene>, SceneFailure> {
+) -> Result<SceneAnswer, SceneFailure> {
+    let ScenePut { scene, expected_rev, dry_run } = put;
     let lock = app.scene.lock().await;
     let old = find_scene(&app, &id).await?;
-    if put.scene.id != id {
+    if scene.id != id {
         return Err(ApiFailure::validation("the scene's id must be the id in the path").into());
     }
-    if old.rev != put.expected_rev {
+    if old.rev != expected_rev {
         return Err(SceneFailure::Conflict { which: None, scene: Box::new(old) });
     }
-    let mut new = put.scene;
+    let mut new = scene;
     new.rev = old.rev + 1;
     {
         let store = app.store.read().await;
         scenes::check_saveable(&app, &new, &store.lights.lights)?;
     }
     fit_group_props(&app, &mut new)?;
+    if dry_run {
+        // A dry run refuses what the save would refuse: a scenes file that waits or is blocked.
+        let store = app.store.read().await;
+        if let Err(e) = store.scenes_writable() {
+            return Err(save_failure(&store, e).into());
+        }
+        return Ok(SceneAnswer::DryRun(SceneDryRun { saved: false, scene: new }));
+    }
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
         let replace = crate::draft::hold_for_replace(&app).await;
@@ -244,7 +322,7 @@ pub async fn put_scene(
             scenes::apply_group_change(&app, &lock, &old, &new).await;
         }
     }
-    Ok(Json(new))
+    Ok(SceneAnswer::Saved(new))
 }
 
 /// What the engine is told after the active scene changed from `old` to `new`: the same tail as
