@@ -1,10 +1,16 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { NumberField } from "@/components/NumberField";
 
 // A number entry's keys. Escape is the field's own, as it is FigureField's and NameField's
 // (#408 review, finding 1): the draft goes back to the value, nothing is committed, and the key
 // stops at the field so an overlay or a panel around it does not take Escape as its own.
+
+beforeAll(() => {
+  // The field's stepper reads the reduced-motion query, which jsdom does not have.
+  window.matchMedia ??= ((query: string) =>
+    ({ matches: false, media: query, addEventListener() {}, removeEventListener() {} }) as unknown as MediaQueryList);
+});
 
 afterEach(cleanup);
 
