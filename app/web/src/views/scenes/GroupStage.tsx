@@ -128,7 +128,7 @@ export function GroupStage({
         : STAGE_WORDS[state];
 
   return (
-    <div className={s.stage} data-state={state}>
+    <div className={s.stage} data-state={state} data-testid="group-stage">
       <div className={s.stageColumn}>
         <div className={s.stagePicture}>
           <canvas

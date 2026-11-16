@@ -19,6 +19,7 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { apiConfig, dropApiConfig } from "@/lib/api";
 import { demoGroupFrame } from "@/lib/demoGroupPreview";
+import { demoGroupPreviewMode } from "@/lib/demoScenarios";
 import { GROUP_PREVIEW_H, GROUP_PREVIEW_W, GROUP_TAKEN_CODE } from "@/lib/groupPreview";
 import { isDemo } from "@/lib/host";
 import { parseFrame, type Frame } from "@/lib/preview";
@@ -185,6 +186,17 @@ function openGroupFeed(
 
   /** The demo has no socket: it draws the group's own picture, as the daemon sends it. */
   const startDemo = () => {
+    const mode = demoGroupPreviewMode();
+    if (mode === "stopped") {
+      // The daemon refused the socket: the stage says the preview stopped.
+      handlers.onState("stopped");
+      return;
+    }
+    if (mode === "connecting") {
+      // The socket is open and has said nothing yet.
+      handlers.onState("connecting");
+      return;
+    }
     const t0 = performance.now();
     const tick = () => {
       const rgb = demoGroupFrame(groupId, (performance.now() - t0) / 1000);

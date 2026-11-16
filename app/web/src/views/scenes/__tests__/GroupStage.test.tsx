@@ -98,7 +98,7 @@ beforeEach(() => {
   vi.spyOn(HTMLCanvasElement.prototype, "getContext").mockReturnValue(
     ctx as unknown as CanvasRenderingContext2D,
   );
-  patchSnap({ status: null, patterns: null });
+  patchSnap({ status: null, patterns: null, scenes: null });
   vi.useFakeTimers();
 });
 
@@ -107,6 +107,7 @@ afterEach(() => {
   vi.useRealTimers();
   vi.restoreAllMocks();
   delete window.__TAURI__;
+  window.history.replaceState({}, "", "/");
 });
 
 function stage(props: Partial<ComponentProps<typeof GroupStage>> = {}) {
@@ -202,5 +203,26 @@ describe("the stage", () => {
     // Every picture went into the canvas, and nothing was rendered.
     expect(paints).toBe(601);
     expect(commits).toBe(after);
+  });
+});
+
+describe("the stage in the demo", () => {
+  it("says the preview is connecting when the demo's socket has said nothing yet", async () => {
+    // No Tauri host: the demo backend answers in the browser.
+    delete window.__TAURI__;
+    window.history.replaceState({}, "", "/?state=stage-connecting");
+    render(stage());
+    await settle();
+    expect(FakeSocket.opened).toHaveLength(0);
+    expect(screen.getByText("Connecting to the preview.")).toBeTruthy();
+  });
+
+  it("says the preview stopped when the demo refuses it", async () => {
+    delete window.__TAURI__;
+    window.history.replaceState({}, "", "/?state=stage-stopped");
+    render(stage());
+    await settle();
+    expect(screen.getByText("The preview stopped.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Try again" })).toBeTruthy();
   });
 });
