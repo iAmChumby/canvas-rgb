@@ -2299,11 +2299,17 @@ mod tests {
                 break;
             }
         }
-        let Some((rule, shape)) = winner else {
-            println!("#372 no candidate passes all four: the rule does not change");
-            return;
+        let (rule, shape) = match winner {
+            Some((rule, shape)) => {
+                println!("#372 the rule that ships: {} {}", rule.name(), shape.name());
+                (rule, shape)
+            }
+            None => {
+                println!("#372 no candidate passes all four: the rule does not change");
+                println!("#372 the cost of the rule that ships, against the old full-height band");
+                (Rule::Mean, Shape::Today)
+            }
         };
-        println!("#372 the rule that ships: {} {}", rule.name(), shape.name());
 
         let effects: Vec<Measured> = vec![
             Measured {
