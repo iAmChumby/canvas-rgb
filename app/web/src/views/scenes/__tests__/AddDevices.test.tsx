@@ -87,10 +87,15 @@ function fake(): UseScene & { calls: Record<string, unknown[][]> } {
     create: spy("create"),
     remove: spy("remove"),
     renameScene: spy("renameScene"),
+    dryRunMove: spy("dryRunMove") as unknown as UseScene["dryRunMove"],
+    moveGroup: spy("moveGroup") as unknown as UseScene["moveGroup"],
+    reorderScenes: spy("reorderScenes"),
+    reorderGroups: spy("reorderGroups"),
     undo: spy("undo"),
     redo: spy("redo"),
     canUndo: false,
     canRedo: false,
+    undoLabel: null,
     error: null,
   };
   return Object.assign({ ...base }, { calls });

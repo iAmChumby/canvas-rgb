@@ -5,7 +5,7 @@
 
 use canvas_daemon::cli::{
     Cli, CliError, Command, ConfigCommand, DevicesCommand, DiagCommand, EffectsCommand, FansCommand,
-    OutputCommand, PeripheralsCommand, ScenesCommand, ScenesGroupCommand,
+    LightsCommand, OutputCommand, PeripheralsCommand, PresetCommand, ScenesCommand, ScenesGroupCommand,
 };
 use clap::Parser;
 use std::process::ExitCode;
@@ -15,9 +15,13 @@ fn main() -> ExitCode {
     match run(&cli) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
-            // With --json the API's error body goes to stdout, whole; stderr still gets the line.
+            // With --json a failed scene create, edit or delete prints one document on stdout
+            // for every kind of failure; any other command prints the API's error body, whole.
+            // stderr still gets the line.
             if cli.json {
-                if let Some(body) = e.json_body() {
+                if let Some(document) = canvas_daemon::cli::failure_document(&cli.command, &e) {
+                    print_json(&cli, &document);
+                } else if let Some(body) = e.json_body() {
                     print_json(&cli, body);
                 }
             }
@@ -32,13 +36,22 @@ fn run(cli: &Cli) -> Result<(), CliError> {
     match &cli.command {
         Command::Status => status(cli),
         Command::Devices(DevicesCommand::List) => devices(cli),
+        Command::Lights(LightsCommand::List) => lights_list(cli),
         Command::Effects(EffectsCommand::List) => effects_list(cli),
         Command::Effects(EffectsCommand::Activate(args)) => effects_activate(cli, args),
         Command::Effects(EffectsCommand::Import(args)) => effects_import(cli, args),
         Command::Effects(EffectsCommand::Check(args)) => effects_check(cli, args),
+        Command::Effects(EffectsCommand::Source(args)) => effects_source(cli, args),
+        Command::Effects(EffectsCommand::Delete(args)) => effects_delete(cli, args),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::List(args))) => preset_list(cli, args),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::Save(args))) => preset_save(cli, args),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::Delete(args))) => preset_delete(cli, args),
         Command::Scenes(ScenesCommand::List) => scenes_list(cli),
         Command::Scenes(ScenesCommand::Set { name }) => scenes_set(cli, name),
         Command::Scenes(ScenesCommand::Order(args)) => scenes_order(cli, args),
+        Command::Scenes(ScenesCommand::Create(args)) => scenes_create(cli, args),
+        Command::Scenes(ScenesCommand::Edit(args)) => scenes_edit(cli, args),
+        Command::Scenes(ScenesCommand::Delete(args)) => scenes_delete(cli, args),
         Command::Scenes(ScenesCommand::Group(ScenesGroupCommand::Move(args))) => scenes_group_move(cli, args),
         Command::Output(OutputCommand::Pause) => output(cli, "paused"),
         Command::Output(OutputCommand::Resume) => output(cli, "running"),
@@ -237,6 +250,16 @@ fn devices(cli: &Cli) -> Result<(), CliError> {
     Ok(())
 }
 
+/// `canvas-rgb lights list`.
+fn lights_list(cli: &Cli) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::lights_list(&client, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
 /// `canvas-rgb effects list`.
 fn effects_list(cli: &Cli) -> Result<(), CliError> {
     let client = client(cli)?;
@@ -349,6 +372,36 @@ fn scenes_order(cli: &Cli, args: &canvas_daemon::cli::OrderArgs) -> Result<(), C
     Ok(())
 }
 
+/// `canvas-rgb scenes create <name> [--from <groups.json>] [--run <run>] [--dry-run]`.
+fn scenes_create(cli: &Cli, args: &canvas_daemon::cli::CreateArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_create(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes edit <scene> --from <groups.json> --run <run> [--dry-run]`.
+fn scenes_edit(cli: &Cli, args: &canvas_daemon::cli::EditArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_edit(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
+/// `canvas-rgb scenes delete <scene> --run <run> [--force] [--dry-run]`.
+fn scenes_delete(cli: &Cli, args: &canvas_daemon::cli::DeleteArgs) -> Result<(), CliError> {
+    let client = client(cli)?;
+    match canvas_daemon::cli::scenes_delete(&client, args, cli.json)? {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+    Ok(())
+}
+
 /// `canvas-rgb scenes group move <group> --from <scene> --to <scene> [--copy] [--dry-run]`.
 fn scenes_group_move(cli: &Cli, args: &canvas_daemon::cli::GroupMoveArgs) -> Result<(), CliError> {
     let client = client(cli)?;
@@ -359,59 +412,90 @@ fn scenes_group_move(cli: &Cli, args: &canvas_daemon::cli::GroupMoveArgs) -> Res
     Ok(())
 }
 
-/// `canvas-rgb effects import <file> [--replace]`.
+/// A client built on its first request, so a problem with a local file, a property or a run id
+/// is reported before the daemon is looked for and before the API token is read.
+struct LazyClient<'a> {
+    base: Option<&'a str>,
+    client: std::cell::OnceCell<canvas_daemon::cli::Client>,
+}
+
+impl<'a> LazyClient<'a> {
+    fn new(cli: &'a Cli) -> Self {
+        Self { base: cli.api.as_deref(), client: std::cell::OnceCell::new() }
+    }
+}
+
+impl canvas_daemon::cli::Api for LazyClient<'_> {
+    fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+        if self.client.get().is_none() {
+            let built = canvas_daemon::cli::Client::new(self.base)?;
+            let _ = self.client.set(built);
+        }
+        match self.client.get() {
+            Some(client) => client.request(method, path, body),
+            None => Err(CliError::Other("the client could not be built".to_string())),
+        }
+    }
+}
+
+/// Prints what a command answered: the JSON document with `--json`, the text otherwise.
+fn print_output(cli: &Cli, output: canvas_daemon::cli::Output) {
+    match output {
+        canvas_daemon::cli::Output::Json(value) => print_json(cli, &value),
+        canvas_daemon::cli::Output::Text(text) => print!("{text}"),
+    }
+}
+
+/// `canvas-rgb effects import <file> [--replace] [--run <run>]`.
 ///
 /// The daemon writes the file into the effects folder. The token only goes to the
 /// daemon: the client checks who holds the port first.
 fn effects_import(cli: &Cli, args: &canvas_daemon::cli::ImportArgs) -> Result<(), CliError> {
-    // The file is read first: a file that is not there is a local problem, and it is
-    // reported without asking the daemon anything.
-    let path = std::path::Path::new(&args.file);
-    let name = path
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .ok_or_else(|| CliError::Other(format!("{} has no file name", args.file)))?;
-    let html = std::fs::read_to_string(path)
-        .map_err(|e| CliError::Other(format!("could not read {}: {e}", path.display())))?;
-    // A file that is over the limit is refused here, so it is never posted.
-    if html.len() > canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES {
-        return Err(CliError::Other(format!(
-            "{} is {} bytes; the limit is {}",
-            path.display(),
-            html.len(),
-            canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES
-        )));
-    }
-    let client = client(cli)?;
-    let body = serde_json::json!({
-        "file_name": name,
-        "html": html,
-        "replace": args.replace,
-    })
-    .to_string();
-    let answer =
-        client.request("POST", canvas_proto::api::routes::EFFECTS_IMPORT, Some(&body))?;
-    if cli.json {
-        print_json(cli, &answer);
-        return Ok(());
-    }
-    let effect = answer.get("effect");
-    let id = effect.and_then(|e| e.get("id")).and_then(|v| v.as_str()).unwrap_or("?");
-    let name = effect.and_then(|e| e.get("name")).and_then(|v| v.as_str()).unwrap_or("?");
-    let replaced = answer.get("replaced").and_then(|v| v.as_bool()).unwrap_or(false);
-    if replaced {
-        println!("imported {id} ({name}); it replaced the file of the same name");
-    } else {
-        println!("imported {id} ({name})");
-    }
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::effects_import(&api, args, cli.json)?);
     Ok(())
 }
 
-/// `canvas-rgb effects check <file> [--png <path>]`.
+/// `canvas-rgb effects source <effect> [--out <file>]`.
+fn effects_source(cli: &Cli, args: &canvas_daemon::cli::SourceArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::effects_source(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects delete <effect> [--keep-presets] --run <run> [--dry-run]`.
+fn effects_delete(cli: &Cli, args: &canvas_daemon::cli::EffectDeleteArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::effects_delete(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects preset list <effect>`.
+fn preset_list(cli: &Cli, args: &canvas_daemon::cli::PresetListArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::preset_list(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects preset save <effect> <name> [--prop k=v]... [--run <run>]`.
+fn preset_save(cli: &Cli, args: &canvas_daemon::cli::PresetSaveArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::preset_save(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects preset delete <effect> <name> --run <run> [--dry-run]`.
+fn preset_delete(cli: &Cli, args: &canvas_daemon::cli::PresetDeleteArgs) -> Result<(), CliError> {
+    let api = LazyClient::new(cli);
+    print_output(cli, canvas_daemon::cli::preset_delete(&api, args, cli.json)?);
+    Ok(())
+}
+
+/// `canvas-rgb effects check <file> [--png <path>] [--prop k=v]...`.
 ///
 /// No daemon is involved: the file is parsed and rendered here.
 fn effects_check(cli: &Cli, args: &canvas_daemon::cli::CheckArgs) -> Result<(), CliError> {
-    let report = canvas_daemon::cli::check_effect(&args.file, args.png.as_deref())
+    let report = canvas_daemon::cli::check_effect_with(&args.file, args.png.as_deref(), &args.props)
         .map_err(CliError::Other)?;
     // The library tile, scored against the quality bar. A script that already failed has no
     // tile worth scoring.

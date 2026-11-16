@@ -86,6 +86,10 @@ export const routes = {
   // PUT GroupBrightnessPut. As groupProps: saved, rev + 1, answers the scene.
   groupBrightness: (scene: string, group: string) =>
     `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/brightness`,
+  // POST GroupMove: moves or copies one group to another scene (#368). 409 with `which`
+  // ("from" or "to") and that scene when a rev is stale, 422 when a scene rule is broken.
+  groupMove: (scene: string, group: string) =>
+    `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/move`,
   // GET LightsResponse.
   lights: "/api/v1/lights",
   // PATCH LightPatch.
@@ -94,6 +98,11 @@ export const routes = {
   lightsFlash: "/api/v1/lights/flash",
   // WebSocket: a JSON index message, then binary frames (per light u16 LE index, u16 LE count, RGB).
   previewLights: "/api/v1/preview/lights",
+  // WebSocket (#378): the picture ONE group draws, as the LEDs get it. The group id rides in the
+  // query beside the token, like every preview socket: a browser cannot set headers on one.
+  // Binary frames in the same format as `preview`: u16 LE width, u16 LE height, then
+  // width*height*3 RGB bytes (always 80x50 here).
+  previewGroup: "/api/v1/preview/group",
   // PATCH Props: an effect's starting values.
   effectDefaults: (id: string) => `/api/v1/effects/${encodeURIComponent(id)}/defaults`,
 } as const;

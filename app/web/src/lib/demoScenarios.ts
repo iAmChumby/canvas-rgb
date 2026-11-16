@@ -268,6 +268,8 @@ export function applyStatusScenarios(status: Status): Status {
   if (linksConnecting()) next = { ...next, openrgb: "connecting", service: "connecting" };
   if (openRgbConnecting()) next = { ...next, openrgb: "connecting" };
   if (fanConnecting()) next = { ...next, service: "connecting" };
+  // The lights are paused (#378): the engine sends nothing, so the stage says so.
+  if (has(STAGE_PAUSED)) next = { ...next, power: "paused" };
   return next;
 }
 
@@ -296,6 +298,12 @@ export const GROUPS_20 = "groups-20";
 export const LONG_NAMES = "long-names";
 export const NEW_LIGHT = "new-light";
 export const HEAVY = "heavy";
+/**
+ * `?state=html-groups`: the Focus scene runs two HTML effects already, so a third one cannot go
+ * into it (#368). The Evening scene's own group plays an HTML effect, and it holds lights the
+ * Focus scene does not, so the move takes nothing out and the limit is the scene's.
+ */
+export const HTML_GROUPS = "html-groups";
 /** `?state=html-limit`: three groups play HTML effects, where a scene runs two (#370). */
 export const HTML_LIMIT = "html-limit";
 
@@ -366,6 +374,34 @@ export function applySceneScenarios(
 
   const current = scenes.find((s) => s.id === active);
   if (current && has(GROUPS_0)) current.groups = [];
+
+  if (has(HTML_GROUPS)) {
+    // The Focus scene runs two HTML effects: a third one cannot go into it. The lights are the
+    // ones the Evening scene's Case group holds, so a move takes nothing out of the scene.
+    const focus = scenes.find((s) => s.id === "focus");
+    const evening = scenes.find((s) => s.id === "evening");
+    const warm = evening?.groups.find((g) => g.id === "g-warm");
+    if (focus && warm && warm.members.length >= 2) {
+      focus.groups = [
+        {
+          id: "g-html-1",
+          name: "Ink drop",
+          members: [warm.members[0]!],
+          plays: { type: "effect", effect: "html:ink-drop", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+        {
+          id: "g-html-2",
+          name: "Wet smear",
+          members: [warm.members[1]!],
+          plays: { type: "effect", effect: "html:wet-smear", props: {} },
+          mode: "flow_across",
+          brightness: 100,
+        },
+      ];
+    }
+  }
   // The long names are 40 characters on the dot, the most the daemon keeps.
   if (current && has(LONG_NAMES)) {
     current.name = [..."Evening wind-down, the whole case on, low"].slice(0, 40).join("");
@@ -457,6 +493,27 @@ export const PATTERN_FITS = "pattern-fits";
 export const PATTERN_STRETCH = "pattern-stretch";
 export const PATTERN_FLAGS = "pattern-flags";
 export const PATTERN_GONE = "pattern-gone";
+
+/** The stage's own states (#378). The demo's group preview answers like the daemon, so the
+ *  stage's states can be seen and shot:
+ *
+ *   stage-connecting   the preview is open and has said nothing yet
+ *   stage-stopped      the preview was refused: another group preview took over
+ *   stage-paused       the lights are paused, so the engine sends nothing
+ */
+export const STAGE_CONNECTING = "stage-connecting";
+export const STAGE_STOPPED = "stage-stopped";
+export const STAGE_PAUSED = "stage-paused";
+
+/** What the demo's group preview does: it sends the group's picture, it opens and says nothing
+ *  yet, or it is refused the way a socket the daemon closes is. */
+export type DemoGroupPreviewMode = "live" | "connecting" | "stopped";
+
+export function demoGroupPreviewMode(): DemoGroupPreviewMode {
+  if (has(STAGE_STOPPED)) return "stopped";
+  if (has(STAGE_CONNECTING)) return "connecting";
+  return "live";
+}
 
 /** The pattern the fit states play: a ring of 40, seeded by the demo. */
 export const PATTERN_FRONT_FANS = "pattern:Front fans";

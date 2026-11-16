@@ -31,7 +31,7 @@
 .btn.btn-primary[aria-busy="true"]:hover,
 .btn.btn-primary[aria-busy="true"]:active {
   border-color: transparent;
-  color: var(--on-accent);
+  color: var(--on-live);
   background-color: var(--live);
   box-shadow: 0 var(--skirt-h) 0 color-mix(in oklab, var(--live) 55%, black);
 }

@@ -6,17 +6,28 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+## [0.17.0] - 2026-11-16
+
 ### Added
 
+- Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
 - The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
+- Scenes: the open group shows the picture its own effect draws, so you can tune it while you watch (#378)
+- Scenes: the groups inside a scene can be put in another order: drag a group's handle, use the arrow keys on it, or pick Move up / Move down in the group's menu. A group's colour now comes from the group itself, so it keeps its colour when it moves; a scene made before this may show a different colour once. (#384)
+- Scenes: a group can be moved to another scene, or copied into it, from the group's own menu; each scene says what lands there and what leaves before you commit. (#368)
+- Scenes: the scene keys can be put in another order: drag one, use the arrow keys on it, or use the scene's own menu. (#371)
+- The command line can list your lights, create, edit and delete a scene from a file, and import, check, read and delete effects and save and delete presets, with a dry run that saves nothing; a run can only delete what it made. A new agent skill, `canvas-rgb-scene`, uses these commands to build a scene for you and leaves your lights on the scene they had. (#377)
 
 ### Changed
 
 - A scene can have two groups playing HTML effects (#370)
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+- Setting up an ARGB header starts with a short introduction, counts the orange lights you can see first, and names every step in plain words; a header you cannot see into has a way out. (#381)
 
 ### Fixed
 
+- Setting up a chain keeps the setup open while your device answers a save slowly, so a slow reply no longer loses the header's earlier length. (#429)
+- Scenes: putting the groups in a new order no longer restarts their effects, so the lights stay as they are. The order is for display only. (#384)
 - The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
 - Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
 - Peripherals: the DPI stages sit in even columns at every window size, so the mouse's settings no longer reshuffle the panels beside them. (#373)
@@ -29,7 +40,15 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - The sidebar strip shows your lights' real colours in a scene (#379)
 - Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
 - Rain: Trail Length now changes how long each streak is (#383)
+- A header whose devices all show the same lights (a splitter, a hub) is saved as one light shown several times, no longer as many one-LED fans. (#382)
 - Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
+- A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
+- Fire and Audio Spectrum fill a strip again, flame height and bar height included. (#400)
+- Fire and Audio Spectrum inside a stack fill a strip too, when every layer of the stack reads the full height (Fire, Audio Spectrum). A stack that mixes them with another effect still shows its top layer's middle cell on a strip. (#407)
+- The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)
+- A brightness or props change beside a scene with more HTML effects than the limit allows no longer starts the extra effect. (#419)
+- The text on a primary key stays readable as the lights change colour: every hue of both themes keeps 4.5:1 on the key, where yellow in the light theme dropped to 2.2:1. (#423)
+- Scenes: the scene's name reads in full in the phone header; the state mark keeps its icon, and its tooltip and details panel name the fault in words. (#422)
 
 ## [0.16.0] - 2026-11-15
 
@@ -375,7 +394,8 @@ The first release.
 - Settings for the Attack Shark X6 mouse and the 8BitDo Ultimate 2 controller.
 - The editor, the tray app, the `canvas-rgb` CLI and the Windows installer.
 
-[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...HEAD
+[Unreleased]: https://github.com/iAmChumby/canvas-rgb/compare/v0.17.0...HEAD
+[0.17.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.16.0...v0.17.0
 [0.16.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.1...v0.16.0
 [0.13.1]: https://github.com/iAmChumby/canvas-rgb/compare/v0.13.0...v0.13.1
 [0.13.0]: https://github.com/iAmChumby/canvas-rgb/compare/v0.12.0...v0.13.0

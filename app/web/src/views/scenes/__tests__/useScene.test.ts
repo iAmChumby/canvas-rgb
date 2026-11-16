@@ -5,7 +5,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 // (`crates/canvas-proto/src/api.rs`); the daemon that serves them does not exist yet, so the
 // tests answer `api` themselves and check what the hook sends.
 
-const { api } = vi.hoisted(() => ({
+const { api, notifySpy, dismissSpy } = vi.hoisted(() => ({
   api: {
     scenes: {
       list: vi.fn(),
@@ -15,6 +15,8 @@ const { api } = vi.hoisted(() => ({
       setActive: vi.fn(),
       patchGroupProps: vi.fn(),
       putGroupBrightness: vi.fn(),
+      moveGroup: vi.fn(),
+      write: vi.fn(),
     },
     lights: {
       list: vi.fn(),
@@ -22,19 +24,90 @@ const { api } = vi.hoisted(() => ({
       flash: vi.fn(),
     },
   },
+  // The lane gives every message its own id, the tone and the words: `ok:Moved LEFT to Other.`
+  notifySpy: vi.fn(),
+  dismissSpy: vi.fn(),
 }));
 
 vi.mock("@/lib/endpoints", () => ({ api }));
+vi.mock("@/components/Notify", () => ({ notify: notifySpy, dismissNotification: dismissSpy }));
 
 import { ApiFailure } from "@/lib/errors";
-import { getSnap, patchSnap } from "@/lib/store";
+import { getSnap, patchSnap, refreshScenes } from "@/lib/store";
 import { DEMO_LIGHTS, DEMO_SCENES, demoSceneProblem } from "@/lib/fixtures";
+import { htmlLimitSentence } from "@/lib/htmlLimit";
+import { MOVE_STEP_LABEL, NOTHING_MOVED, NOTHING_UNDONE, useScene } from "@/views/scenes/useScene";
+import type { Group } from "@/proto/Group";
+import type { GroupMove } from "@/proto/GroupMove";
+import type { GroupMoved } from "@/proto/GroupMoved";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { ScenesWrite } from "@/proto/ScenesWrite";
 import type { Props } from "@/proto/props";
-import { useScene } from "@/views/scenes/useScene";
 
 const clone = <T,>(value: T): T => structuredClone(value);
+
+/** One group of a made-up scene. */
+function group(id: string, members: string[]): Group {
+  return {
+    id,
+    name: id.toUpperCase(),
+    members,
+    plays: { type: "effect", effect: "solid", props: {} },
+    mode: "flow_across",
+    brightness: 100,
+  };
+}
+
+/** The answer `GET /scenes` gives for a list of scenes. */
+function listOf(scenes: Scene[]): ScenesResponse {
+  return {
+    active: scenes[0]?.id ?? "",
+    scenes: clone(scenes),
+    group_states: scenes[0]?.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) ?? [],
+  };
+}
+
+/**
+ * The two scenes a move runs between: `main` holds LEFT and RIGHT, `other` holds ALL with both
+ * lights. The answer is the daemon's own: the scenes after, the scenes before, what was taken.
+ */
+function moveRig() {
+  const beforeMain: Scene = {
+    id: "main",
+    name: "Main",
+    rev: 3,
+    groups: [group("left", ["a"]), group("right", ["b"])],
+  };
+  const beforeOther: Scene = {
+    id: "other",
+    name: "Other",
+    rev: 4,
+    groups: [group("all", ["a", "b"])],
+  };
+  const afterMain: Scene = {
+    ...clone(beforeMain),
+    rev: 4,
+    groups: [clone(beforeMain.groups[1]!)],
+  };
+  const afterOther: Scene = {
+    ...clone(beforeOther),
+    rev: 5,
+    groups: [
+      { ...clone(beforeOther.groups[0]!), members: ["b"] },
+      clone(beforeMain.groups[0]!),
+    ],
+  };
+  const answer: GroupMoved = {
+    group_id: "left",
+    saved: true,
+    scenes: [clone(afterMain), clone(afterOther)],
+    before: [clone(beforeMain), clone(beforeOther)],
+    taken: [{ group_id: "all", group_name: "ALL", lights: ["a"] }],
+    emptied: [],
+  };
+  return { beforeMain, beforeOther, afterMain, afterOther, answer };
+}
 
 function gaming(): Scene {
   const scene = DEMO_SCENES.scenes.find((s) => s.id === DEMO_SCENES.active);
@@ -155,6 +228,10 @@ function answerLive(groupId: string, props?: Props, brightness?: number): Scene 
 beforeEach(() => {
   for (const group of Object.values(api.scenes)) group.mockReset();
   for (const fn of Object.values(api.lights)) fn.mockReset();
+  notifySpy.mockReset();
+  // The lane gives every message its own id: the tone and the words.
+  notifySpy.mockImplementation((text: string, tone = "ok") => `${tone}:${text}`);
+  dismissSpy.mockReset();
   serverRev = gaming().rev;
   api.scenes.list.mockResolvedValue(answer());
   // Every write answers the scene the daemon saved: the rev it was sent plus one.
@@ -1516,5 +1593,797 @@ describe("the demo's scenes", () => {
         }
       }
     }
+  });
+});
+
+describe("the move of a group and the order of the scenes", () => {
+  it("a move goes through the daemon's route, with the revs the page holds", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+
+    await act(async () => {
+      const answer = await result.current.moveGroup("left", "other", false);
+      expect(answer?.group_id).toBe("left");
+    });
+
+    expect(api.scenes.moveGroup).toHaveBeenCalledTimes(1);
+    const [sceneId, groupId, body] = api.scenes.moveGroup.mock.calls[0] as [string, string, GroupMove];
+    expect(sceneId).toBe("main");
+    expect(groupId).toBe("left");
+    expect(body).toEqual({ to: "other", copy: false, expected_rev_from: 3, expected_rev_to: 4 });
+  });
+
+  it("an undo puts both scenes back, with the revs it just read", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    await waitFor(() => expect(result.current.canUndo).toBe(true));
+
+    await act(async () => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+
+    const [body] = api.scenes.write.mock.calls[0] as [ScenesWrite];
+    expect(body.scenes?.map((s) => s.scene.id)).toEqual(["main", "other"]);
+    // The revs are the ones the undo just read, not the ones the move left.
+    expect(body.scenes?.map((s) => s.expected_rev)).toEqual([4, 5]);
+    expect(body.scenes?.[0]?.scene.groups.map((g) => g.id)).toEqual(["left", "right"]);
+    expect(body.scenes?.[1]?.scene.groups.map((g) => g.id)).toEqual(["all"]);
+  });
+
+  it("an undo that finds the scene changed writes nothing and says so", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+
+    // Another window changed the source while the move was on the screen.
+    held = [
+      { ...rig.afterMain, groups: [{ ...rig.afterMain.groups[0]!, name: "Renamed" }] },
+      rig.afterOther,
+    ];
+    await act(async () => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(result.current.error).toBe(NOTHING_UNDONE));
+    expect(api.scenes.write).not.toHaveBeenCalled();
+  });
+
+  it("an undo of a copy writes the target only", async () => {
+    const rig = moveRig();
+    const copyAnswer: GroupMoved = {
+      ...clone(rig.answer),
+      group_id: "left-2",
+      // A copy leaves the source as it was.
+      scenes: [clone(rig.beforeMain), clone(rig.afterOther)],
+    };
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [copyAnswer.scenes[0]!, copyAnswer.scenes[1]!];
+      return clone(copyAnswer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", true);
+    });
+    const call = api.scenes.moveGroup.mock.calls[0] as [string, string, GroupMove];
+    expect(call[2].copy).toBe(true);
+
+    await act(async () => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+    const [body] = api.scenes.write.mock.calls[0] as [ScenesWrite];
+    // The source was not changed by the copy, so it is not written back.
+    expect(body.scenes?.map((s) => s.scene.id)).toEqual(["other"]);
+  });
+
+  it("a save the daemon refuses shows its message and drops the undo", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockRejectedValue(
+      new ApiFailure(503, "unavailable", "the scenes cannot be saved yet: the file is blocked"),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    await act(async () => {
+      result.current.undo();
+    });
+    await waitFor(() =>
+      expect(result.current.error).toBe("the scenes cannot be saved yet: the file is blocked"),
+    );
+    // The step is dropped: it is neither undone nor redoable.
+    expect(result.current.canUndo).toBe(false);
+    expect(result.current.canRedo).toBe(false);
+  });
+
+  it("a move another window made first says that nothing moved", async () => {
+    const rig = moveRig();
+    api.scenes.list.mockImplementation(async () => listOf([rig.beforeMain, rig.beforeOther]));
+    api.scenes.moveGroup.mockRejectedValue(
+      new ApiFailure(409, "conflict", "this scene was changed in another window"),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    expect(api.scenes.write).not.toHaveBeenCalled();
+  });
+
+  it("an edit that lands first is carried by the rev the move sends", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Mine";
+      }, "Rename the scene");
+    });
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    const body = api.scenes.moveGroup.mock.calls.at(-1)?.[2] as GroupMove;
+    // The edit's own answer (rev 4), not the rev the move was planned on.
+    expect(body.expected_rev_from).toBe(4);
+  });
+
+  it("the order goes to the daemon with the order it last confirmed", async () => {
+    api.scenes.list.mockImplementation(async () => clone(answer()));
+    api.scenes.write.mockImplementation(async () => clone(answer()));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+
+    act(() => {
+      result.current.reorderScenes(["focus", "gaming", "evening"]);
+    });
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+    const [body] = api.scenes.write.mock.calls[0] as [ScenesWrite];
+    expect(body.order).toEqual(["focus", "gaming", "evening"]);
+    expect(body.expected_order).toEqual(["gaming", "focus", "evening"]);
+    // The order shows at once, before the daemon has answered.
+    expect(result.current.scenes.map((s) => s.id)).toEqual(["focus", "gaming", "evening"]);
+  });
+
+  it("a burst of key presses is one order and one write", async () => {
+    api.scenes.list.mockImplementation(async () => clone(answer()));
+    api.scenes.write.mockImplementation(async () => clone(answer()));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+
+    vi.useFakeTimers();
+    act(() => {
+      result.current.reorderScenes(["focus", "gaming", "evening"], { coalesce: true });
+    });
+    act(() => {
+      result.current.reorderScenes(["gaming", "focus", "evening"], { coalesce: true });
+    });
+    expect(api.scenes.write).not.toHaveBeenCalled();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(400);
+    });
+    expect(api.scenes.write).toHaveBeenCalledTimes(1);
+    const [body] = api.scenes.write.mock.calls[0] as [ScenesWrite];
+    expect(body.order).toEqual(["gaming", "focus", "evening"]);
+  });
+
+  it("an order another window made first says that nothing moved", async () => {
+    api.scenes.list.mockImplementation(async () => clone(answer()));
+    api.scenes.write.mockRejectedValue(
+      new ApiFailure(409, "conflict", "the scenes were put in another order in another window"),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+
+    act(() => {
+      result.current.reorderScenes(["focus", "gaming", "evening"]);
+    });
+    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    // The daemon's order is the one that counts: the page goes back to it.
+    expect(result.current.scenes.map((s) => s.id)).toEqual(["gaming", "focus", "evening"]);
+  });
+
+  it("two orders that come one after the other are written one after the other", async () => {
+    // The daemon's order: the list and the write answer with it.
+    let held = clone(DEMO_SCENES.scenes);
+    const list = (): ScenesResponse => {
+      const scene = held.find((s) => s.id === DEMO_SCENES.active) ?? held[0];
+      return {
+        active: DEMO_SCENES.active,
+        scenes: clone(held),
+        group_states: scene?.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) ?? [],
+      };
+    };
+    const put = (order: string[]): void => {
+      const byId = new Map(held.map((s) => [s.id, s]));
+      held = order.map((id) => byId.get(id)).filter((s): s is Scene => s !== undefined);
+    };
+    api.scenes.list.mockImplementation(async () => list());
+    const writes: ScenesWrite[] = [];
+    api.scenes.write.mockImplementation(async (body: ScenesWrite) => {
+      writes.push(clone(body));
+      // The daemon puts the scenes in the order it is given, and answers with that order.
+      if (body.order) put(body.order);
+      return list();
+    });
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+
+    act(() => {
+      result.current.reorderScenes(["focus", "gaming", "evening"]);
+    });
+    act(() => {
+      result.current.reorderScenes(["gaming", "focus", "evening"]);
+    });
+
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(2));
+    // The second write names the order the first one sent: the daemon has that one.
+    expect(writes[0]?.order).toEqual(["focus", "gaming", "evening"]);
+    expect(writes[0]?.expected_order).toEqual(["gaming", "focus", "evening"]);
+    expect(writes[1]?.order).toEqual(["gaming", "focus", "evening"]);
+    expect(writes[1]?.expected_order).toEqual(["focus", "gaming", "evening"]);
+    // Nothing was refused.
+    expect(result.current.error).toBeNull();
+  });
+
+  it("the strip follows the daemon's order again after the reorder", async () => {
+    // The daemon's order: the list and the write answer with it.
+    let held = clone(DEMO_SCENES.scenes);
+    const list = (): ScenesResponse => {
+      const scene = held.find((s) => s.id === DEMO_SCENES.active) ?? held[0];
+      return {
+        active: DEMO_SCENES.active,
+        scenes: clone(held),
+        group_states: scene?.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) ?? [],
+      };
+    };
+    const put = (order: string[]): void => {
+      const byId = new Map(held.map((s) => [s.id, s]));
+      held = order.map((id) => byId.get(id)).filter((s): s is Scene => s !== undefined);
+    };
+    api.scenes.list.mockImplementation(async () => list());
+    api.scenes.write.mockImplementation(async (body: ScenesWrite) => {
+      if (body.order) put(body.order);
+      return list();
+    });
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+    const before = result.current.scenes.map((s) => s.id);
+
+    // The scenes are put in another order.
+    const after = [before[1]!, before[0]!, before[2]!];
+    act(() => {
+      result.current.reorderScenes(after);
+    });
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+    // The daemon's answer is the order now, and the strip follows it.
+    await waitFor(() => expect(result.current.scenes.map((s) => s.id)).toEqual(after));
+
+    // Another window put the scenes in another order: the strip shows that one too.
+    const other = [before[2]!, before[0]!, before[1]!];
+    put(other);
+    await act(async () => {
+      await refreshScenes();
+    });
+    await waitFor(() => expect(result.current.scenes.map((s) => s.id)).toEqual(other));
+  });
+
+  it("the strip shows the order another window made while this window's write was on its way", async () => {
+    // The daemon's order: the list and the write answer with it.
+    const held = clone(DEMO_SCENES.scenes);
+    const list = (order: string[]): ScenesResponse => {
+      const byId = new Map(held.map((s) => [s.id, s]));
+      const scenes = order.map((id) => byId.get(id)).filter((s): s is Scene => s !== undefined);
+      const scene = scenes.find((s) => s.id === DEMO_SCENES.active) ?? scenes[0];
+      return {
+        active: DEMO_SCENES.active,
+        scenes: clone(scenes),
+        group_states: scene?.groups.map((g) => ({ id: g.id, failed: null, fits: [] })) ?? [],
+      };
+    };
+    const now = (): string[] => held.map((s) => s.id);
+    // Another window put the scenes in another order while this window's write was on its way.
+    let other: string[] | null = null;
+    api.scenes.list.mockImplementation(async () => list(other ?? now()));
+    api.scenes.write.mockImplementation(async (body: ScenesWrite) => {
+      // The answer carries the order this window asked for.
+      const answer = list(body.order ?? now());
+      other = [...now()].reverse();
+      return answer;
+    });
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scenes.length).toBe(3));
+    const before = result.current.scenes.map((s) => s.id);
+
+    // The scenes are put in another order.
+    const after = [before[1]!, before[0]!, before[2]!];
+    act(() => {
+      result.current.reorderScenes(after);
+    });
+    // The order shows at once, before the daemon has answered.
+    expect(result.current.scenes.map((s) => s.id)).toEqual(after);
+
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+    // The daemon's answer carried this window's order, and the order another window made landed
+    // after it: the strip shows that one, not the order this window sent.
+    await waitFor(() => expect(result.current.scenes.map((s) => s.id)).toEqual(other));
+  });
+
+  it("the dry run asks the daemon with its own dry run, and writes nothing", async () => {
+    const rig = moveRig();
+    api.scenes.list.mockImplementation(async () => listOf([rig.beforeMain, rig.beforeOther]));
+    api.scenes.moveGroup.mockImplementation(async () => ({ ...clone(rig.answer), saved: false }));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+
+    await act(async () => {
+      const check = await result.current.dryRunMove("left", "other", false);
+      expect(check.state).toBe("answered");
+    });
+
+    const [sceneId, groupId, body] = api.scenes.moveGroup.mock.calls[0] as [string, string, GroupMove];
+    expect(sceneId).toBe("main");
+    expect(groupId).toBe("left");
+    expect(body.dry_run).toBe(true);
+    expect(body.expected_rev_from).toBe(3);
+    expect(body.expected_rev_to).toBe(4);
+    expect(api.scenes.write).not.toHaveBeenCalled();
+    expect(api.scenes.put).not.toHaveBeenCalled();
+  });
+
+  it("a dry run the daemon refuses says the daemon's own words", async () => {
+    const rig = moveRig();
+    api.scenes.list.mockImplementation(async () => listOf([rig.beforeMain, rig.beforeOther]));
+    api.scenes.moveGroup.mockRejectedValue(
+      new ApiFailure(422, "validation", htmlLimitSentence(3)),
+    );
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+
+    await act(async () => {
+      const check = await result.current.dryRunMove("left", "other", false);
+      expect(check).toEqual({ state: "refused", message: htmlLimitSentence(3) });
+    });
+  });
+
+  it("a move sends the live edits of the scene's groups first, and carries the revision they left", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    // The brightness write answers with the scene one rev on, the way the daemon answers.
+    api.scenes.putGroupBrightness.mockImplementation(async () => ({
+      ...clone(rig.beforeMain),
+      rev: rig.beforeMain.rev + 1,
+    }));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+
+    await act(async () => {
+      // The brightness is moved while the throttle window is still open: the write waits.
+      result.current.setBrightness("left", 40);
+      await result.current.moveGroup("left", "other", false);
+    });
+
+    expect(api.scenes.putGroupBrightness).toHaveBeenCalledTimes(1);
+    // The edit went out before the move.
+    const edit = api.scenes.putGroupBrightness.mock.invocationCallOrder[0]!;
+    const move = api.scenes.moveGroup.mock.invocationCallOrder[0]!;
+    expect(edit).toBeLessThan(move);
+    // The move carries the revision the edit left.
+    const body = api.scenes.moveGroup.mock.calls[0]?.[2] as GroupMove;
+    expect(body.expected_rev_from).toBe(rig.beforeMain.rev + 1);
+  });
+
+  it("the move waits for the target scene's own write before it reads its revision", async () => {
+    // The scene that plays changes while the old scene's write is still on its way: the move
+    // goes to that old scene, and it may not carry a revision the write has not left yet.
+    let active = "gaming";
+    const list = () => ({
+      active,
+      scenes: clone(DEMO_SCENES.scenes),
+      group_states: [] as ScenesResponse["group_states"],
+    });
+    api.scenes.list.mockImplementation(async () => list());
+    api.scenes.setActive.mockImplementation(async (id: string) => {
+      active = id;
+      return list();
+    });
+    let release: (scene: Scene) => void = () => {};
+    api.scenes.put.mockImplementation(
+      async () =>
+        new Promise<Scene>((resolve) => {
+          release = resolve;
+        }),
+    );
+    api.scenes.moveGroup.mockImplementation(async () => ({
+      group_id: "g-case",
+      saved: true,
+      scenes: [],
+      before: [],
+      taken: [],
+      emptied: [],
+    }));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("gaming"));
+
+    // An edit of the scene that plays goes out and stays on its way.
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Mine";
+      }, "Rename the scene");
+    });
+    expect(api.scenes.put).toHaveBeenCalledTimes(1);
+
+    // Another scene plays now, and the move goes to the one whose write is still on its way.
+    await act(async () => {
+      result.current.setActive("focus");
+    });
+    await waitFor(() => expect(result.current.scene?.id).toBe("focus"));
+
+    let done = false;
+    await act(async () => {
+      const moved = result.current
+        .moveGroup("g-case", "gaming", false)
+        .then(() => {
+          done = true;
+        });
+      // The move waits for the write of the scene it goes to.
+      await Promise.resolve();
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(api.scenes.moveGroup).not.toHaveBeenCalled();
+      const pending = api.scenes.put.mock.calls[0] as [string, { expected_rev: number }];
+      // The write lands.
+      release({ ...clone(DEMO_SCENES.scenes[0]!), rev: pending[1].expected_rev + 1 });
+      await moved;
+    });
+
+    expect(done).toBe(true);
+    const pending = api.scenes.put.mock.calls[0] as [string, { expected_rev: number }];
+    const body = api.scenes.moveGroup.mock.calls[0]?.[2] as GroupMove;
+    // The revision the write left, not the one before it.
+    expect(body.expected_rev_to).toBe(pending[1].expected_rev + 1);
+  });
+
+  it("an undo that finds the scene renamed writes nothing and says so", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+
+    // Another window renamed the scene after the move: the undo would take the name back.
+    held = [{ ...rig.afterMain, name: "Renamed" }, rig.afterOther];
+    await act(async () => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(result.current.error).toBe(NOTHING_UNDONE));
+    expect(api.scenes.write).not.toHaveBeenCalled();
+  });
+
+  it("the move says what happened, and offers the Undo while it is the top step", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+
+    await waitFor(() => expect(notifySpy).toHaveBeenCalled());
+    const [text, tone, action] = notifySpy.mock.calls.at(-1)! as [
+      string,
+      string,
+      { label: string; onClick: () => void },
+    ];
+    expect(text).toBe("Moved LEFT to Other.");
+    expect(tone).toBe("ok");
+    expect(action.label).toBe("Undo");
+    // The Undo takes the move back.
+    action.onClick();
+    await waitFor(() => expect(api.scenes.write).toHaveBeenCalledTimes(1));
+  });
+
+  it("the toast goes when another change came after the move", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    await waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1));
+    expect((notifySpy.mock.calls.at(-1) as unknown[])[2]).toBeDefined();
+
+    // Another change came after the move: the Undo would take that change back instead, so the
+    // toast goes, and the move is forgotten.
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Mine";
+      }, "Rename the scene");
+    });
+    await waitFor(() => expect(dismissSpy).toHaveBeenCalledWith("ok:Moved LEFT to Other."));
+    // The toast of a move that is not the top step of the history is not said again.
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the move's toast is said once, and a later change takes it away", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+
+    // The toast is said once, with the Undo of the move.
+    await waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1));
+    const [text, tone, action] = notifySpy.mock.calls.at(0)! as [
+      string,
+      string,
+      { label: string; onClick: () => void },
+    ];
+    expect(text).toBe("Moved LEFT to Other.");
+    expect(tone).toBe("ok");
+    expect(action.label).toBe("Undo");
+
+    // Another change came after the move: the toast goes, and the move is forgotten.
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Mine";
+      }, "Rename the scene");
+    });
+    await waitFor(() => expect(dismissSpy).toHaveBeenCalledWith("ok:Moved LEFT to Other."));
+
+    // A later change does not say the move again: the toast is gone, and it stays gone.
+    await act(async () => {
+      result.current.edit((draft) => {
+        const group = draft.groups[0];
+        if (group) group.brightness = 40;
+      }, "Change the brightness");
+    });
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("the move's toast goes when the page's Undo takes the move back, and it does not come back", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    // The daemon writes the scenes it is given, and answers with what it has.
+    api.scenes.write.mockImplementation(async (body: ScenesWrite) => {
+      if (body.scenes?.length) held = body.scenes.map((w) => clone(w.scene));
+      return listOf(held);
+    });
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    await waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1));
+
+    // The page's Undo takes the move back: the toast goes with it, and nothing is said.
+    await act(async () => {
+      result.current.undo();
+    });
+    await waitFor(() => expect(dismissSpy).toHaveBeenCalledWith("ok:Moved LEFT to Other."));
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+
+    // The page's Redo makes the move again: the move is forgotten, so it is not said again.
+    await act(async () => {
+      result.current.redo();
+    });
+    await waitFor(() => expect(result.current.undoLabel).toBe(MOVE_STEP_LABEL));
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+  });
+
+  it("a later change, and the undo of it, do not say the move's toast again", async () => {
+    const rig = moveRig();
+    let held = [rig.beforeMain, rig.beforeOther];
+    api.scenes.list.mockImplementation(async () => listOf(held));
+    api.scenes.moveGroup.mockImplementation(async () => {
+      held = [rig.afterMain, rig.afterOther];
+      return clone(rig.answer);
+    });
+    api.scenes.write.mockImplementation(async () => listOf(held));
+
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene?.id).toBe("main"));
+    await act(async () => {
+      await result.current.moveGroup("left", "other", false);
+    });
+    await waitFor(() => expect(notifySpy).toHaveBeenCalledTimes(1));
+
+    // Another change came after the move: the toast goes, and the move is forgotten.
+    await act(async () => {
+      result.current.edit((draft) => {
+        draft.name = "Mine";
+      }, "Rename the scene");
+    });
+    await waitFor(() => expect(dismissSpy).toHaveBeenCalledWith("ok:Moved LEFT to Other."));
+
+    // The note's three seconds pass.
+    vi.useFakeTimers();
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3100);
+    });
+    vi.useRealTimers();
+
+    // The undo of that change does not say the move again: the move is forgotten.
+    await act(async () => {
+      result.current.undo();
+    });
+    expect(notifySpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("the order of the groups inside a scene", () => {
+  /** The demo's own order: the four groups of the scene that plays. */
+  const ORDER = ["g-case", "g-ram", "g-gpu", "g-desk"];
+  /** The same groups, with the first two swapped. */
+  const MOVED = ["g-ram", "g-case", "g-gpu", "g-desk"];
+
+  it("a reorder is one save, with the new order and the revision the page read", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.reorderGroups(MOVED);
+    });
+
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+    const [id, body] = api.scenes.put.mock.calls[0] as [
+      string,
+      { scene: Scene; expected_rev: number },
+    ];
+    expect(id).toBe("gaming");
+    // The whole scene goes, with the order the owner made and the revision it was read at.
+    expect(body.expected_rev).toBe(7);
+    expect(body.scene.groups.map((g) => g.id)).toEqual(MOVED);
+    // The order shows at once.
+    expect(result.current.scene?.groups.map((g) => g.id)).toEqual(MOVED);
+  });
+
+  it("a revision another window moved on is refused: nothing moved, and the page says so", async () => {
+    api.scenes.put.mockRejectedValueOnce(new ApiFailure(409, "conflict", "the scene changed"));
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.reorderGroups(MOVED);
+    });
+
+    await waitFor(() => expect(result.current.error).toBe(NOTHING_MOVED));
+    // The order on the screen is the order the daemon has.
+    expect(result.current.scene?.groups.map((g) => g.id)).toEqual(ORDER);
+  });
+
+  it("an undo puts the groups back in the old order", async () => {
+    const { result } = renderHook(() => useScene());
+    await waitFor(() => expect(result.current.scene).not.toBeNull());
+
+    act(() => {
+      result.current.reorderGroups(MOVED);
+    });
+    await waitFor(() => expect(result.current.canUndo).toBe(true));
+
+    act(() => {
+      result.current.undo();
+    });
+
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(2));
+    const [, body] = api.scenes.put.mock.calls.at(-1) as [
+      string,
+      { scene: Scene; expected_rev: number },
+    ];
+    // The whole scene goes back, the groups in the order they were in.
+    expect(body.scene.groups.map((g) => g.id)).toEqual(ORDER);
+    await waitFor(() => expect(result.current.scene?.groups.map((g) => g.id)).toEqual(ORDER));
   });
 });

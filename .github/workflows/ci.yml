@@ -80,6 +80,11 @@ jobs:
               - '.cargo/**'
               - 'deny.toml'
               - 'tools/poison-compare/**'
+              # The agent skills quote the command line (#377). This job builds the CLI and runs
+              # the doc-lint, so a change to the text or to the lint has to reach it.
+              - '.claude/skills/**'
+              - 'AGENTS.md'
+              - 'tools/tests/SkillDoc.Tests.ps1'
             rust-release:
               # What the release-mode tests build: canvas-daemon (the tile quality test) depends on
               # every crate except canvas-svc, so any crate change can move a frame time. The
@@ -255,6 +260,16 @@ jobs:
       # as part of the workspace build.
       - name: Tests
         run: cargo test --locked --workspace --exclude canvas-daemon
+
+      # The agent skills quote the command line: build it, then check every quoted command
+      # and flag against its own --help (#377). The lint skips itself where the binary cannot
+      # exist (the dependency gate runs on Linux); here the build above makes it real.
+      - name: Build the CLI for the skill doc-lint
+        run: cargo build --locked -p canvas-daemon --bin canvas-rgb-cli
+
+      - name: Skill doc-lint
+        shell: pwsh
+        run: pwsh -NoProfile -File tools/tests/SkillDoc.Tests.ps1
 
   rust-daemon:
     # The daemon's tests: the longest suite of the workspace, so it runs beside the others and

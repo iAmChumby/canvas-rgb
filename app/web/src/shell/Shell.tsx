@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react
 import { usePathname, useRouter } from "next/navigation";
 import { startSync, useSnap, getSnap, patchSnap, refreshAll, refreshStatus, statusRetry } from "@/lib/store";
 import { startHueTint, startPreview, stopPreview } from "@/lib/preview";
+import { startLiveInk } from "@/lib/liveInk";
 import { onNavigate } from "@/lib/host";
 import { requestNavigation } from "@/lib/navigationGuard";
 import { api } from "@/lib/endpoints";
@@ -61,6 +62,7 @@ function Frame({ children }: { children: ReactNode }) {
 
   useEffect(() => {
     const stopTint = startHueTint();
+    const stopInk = startLiveInk();
     const sync = () => {
       if (document.visibilityState === "visible") startPreview();
       else stopPreview();
@@ -69,6 +71,7 @@ function Frame({ children }: { children: ReactNode }) {
     document.addEventListener("visibilitychange", sync);
     return () => {
       document.removeEventListener("visibilitychange", sync);
+      stopInk();
       stopTint();
       stopPreview();
     };

@@ -31,28 +31,60 @@ pub fn sample_leds(
     out.clear();
     out.reserve(leds.len());
     for led in leds {
-        let color = if !led.sampled {
-            // A LED with no owner is black: it is never sampled.
-            Rgb8::BLACK
-        } else {
-            match mode {
-                SamplingMode::Nearest => {
-                    sample_nearest(canvas, width, height, led.center_x, led.center_y)
-                }
-                SamplingMode::Bilinear => {
-                    sample_bilinear(canvas, width, height, led.center_x, led.center_y)
-                }
-                SamplingMode::AreaAverage => sample_area(
-                    canvas,
-                    width,
-                    height,
-                    led.center_x,
-                    led.center_y,
-                    led.bounds,
-                ),
-            }
-        };
-        out.push(color);
+        out.push(read_led(canvas, width, height, led, mode, false));
+    }
+}
+
+/// Samples each LED's cell width over the **full height** of `canvas`: the read an effect asks
+/// for with `StripRead::Column` (#400).
+///
+/// The x-range is the LED's own cell, the range [`sample_leds`] would average over; the y-range
+/// is the whole canvas. An effect whose picture grows upward from the bottom (a flame, a
+/// spectrum bar) says its meaning is how high it reaches, and a cell at mid-height would read
+/// the empty picture above it. The mean stays the mean: a flat picture reads exactly what the
+/// cell read gives it, and a column of one colour, or of none, is that colour at full height.
+pub fn sample_led_columns(
+    canvas: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    leds: &[LedSample],
+    out: &mut Vec<Rgb8>,
+) {
+    out.clear();
+    out.reserve(leds.len());
+    for led in leds {
+        out.push(read_led(canvas, width, height, led, SamplingMode::AreaAverage, true));
+    }
+}
+
+/// One LED's colour: nearest, bilinear or the area mean of its region.
+///
+/// `full_height` replaces the region's y-range with the whole canvas and keeps its x-range: the
+/// column read of #400. Only the area mean can read a column; the other two modes are a pixel
+/// at the LED's centre, which no column can change.
+fn read_led(
+    canvas: &[[f32; 3]],
+    width: u32,
+    height: u32,
+    led: &LedSample,
+    mode: SamplingMode,
+    full_height: bool,
+) -> Rgb8 {
+    if !led.sampled {
+        // A LED with no owner is black: it is never sampled.
+        return Rgb8::BLACK;
+    }
+    match mode {
+        SamplingMode::Nearest => sample_nearest(canvas, width, height, led.center_x, led.center_y),
+        SamplingMode::Bilinear => sample_bilinear(canvas, width, height, led.center_x, led.center_y),
+        SamplingMode::AreaAverage => {
+            let bounds = if full_height {
+                [led.bounds[0], 0.0, led.bounds[2], height as f32]
+            } else {
+                led.bounds
+            };
+            sample_area(canvas, width, height, led.center_x, led.center_y, bounds)
+        }
     }
 }
 
@@ -276,6 +308,49 @@ mod tests {
         let mut out = Vec::new();
         sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::AreaAverage, &mut out);
         assert_eq!(out, vec![Rgb8::new(128, 128, 0)]);
+    }
+
+    /// The column read (#400) averages the LED's x-range over the whole height, not over the
+    /// cell's height: the left pixel column of the 2x2 canvas is red over blue.
+    #[test]
+    fn a_column_read_averages_its_x_range_over_the_whole_height() {
+        let (c, w, h) = canvas_2x2();
+        let led = region(0.0, 0.0, [0.0, 0.0, 1.0, 1.0]);
+        let mut out = Vec::new();
+        sample_led_columns(&c, w, h, std::slice::from_ref(&led), &mut out);
+        assert_eq!(out, vec![Rgb8::new(128, 0, 128)]);
+        // The cell read of the same LED sees its own row only: red, and never the blue under it.
+        let mut cell = Vec::new();
+        sample_leds(&c, w, h, std::slice::from_ref(&led), SamplingMode::AreaAverage, &mut cell);
+        assert_eq!(cell, vec![Rgb8::new(255, 0, 0)]);
+    }
+
+    /// The x-range the column reads is the LED's own cell: a cell over the right pixel column
+    /// takes that column, green over white.
+    #[test]
+    fn a_column_read_keeps_the_leds_own_x_range() {
+        let (c, w, h) = canvas_2x2();
+        let led = region(1.5, 0.0, [1.0, 0.0, 2.0, 1.0]);
+        let mut out = Vec::new();
+        sample_led_columns(&c, w, h, std::slice::from_ref(&led), &mut out);
+        assert_eq!(out, vec![Rgb8::new(128, 255, 128)]);
+    }
+
+    /// A flat canvas reads exactly what the cell read reads on every LED.
+    #[test]
+    fn a_column_read_of_a_flat_canvas_reads_that_colour_exactly() {
+        let flat = vec![[0.2f32, 0.4, 0.6]; 4];
+        let mut out = Vec::new();
+        sample_led_columns(&flat, 2, 2, &[region(1.0, 1.0, [0.5, 0.0, 1.5, 2.0])], &mut out);
+        assert_eq!(out, vec![Rgb8::from_f32([0.2, 0.4, 0.6])]);
+    }
+
+    #[test]
+    fn a_led_with_no_owner_is_black_in_the_column_read_too() {
+        let (c, w, h) = canvas_2x2();
+        let mut out = Vec::new();
+        sample_led_columns(&c, w, h, &[LedSample::default()], &mut out);
+        assert_eq!(out, vec![Rgb8::BLACK]);
     }
 
     #[test]

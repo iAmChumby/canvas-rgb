@@ -11,6 +11,7 @@ import { useCallback, useMemo, useRef, useState, type PointerEvent as ReactPoint
 import { DotsSixVertical, X } from "@phosphor-icons/react";
 import { IconButton } from "@/components/Button";
 import { notify } from "@/components/Notify";
+import { shownWords } from "@/views/chain/limits";
 import { groupGoneMessage, takeLightOut } from "@/views/scenes/groupEdit";
 import type { FitKind } from "@/proto/FitKind";
 import type { LightView } from "@/proto/LightView";
@@ -147,6 +148,7 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
               <IconButton
                 label={`Move ${name}`}
                 className={s.grip}
+                size="sm"
                 icon={<DotsSixVertical size={16} />}
                 onClick={() => undefined}
                 onPointerDown={(event) => onGripDown(id, event)}
@@ -160,7 +162,9 @@ export function MemberList({ groupId, lights, use }: MemberListProps) {
               <span className={s.memberName}>
                 <span className="one-line">{name}</span>
                 <span className={`${s.memberLeds} fig`}>
-                  {light ? `${light.led_count} ${light.led_count === 1 ? "LED" : "LEDs"}` : "not read"}
+                  {light
+                    ? `${light.led_count} ${light.led_count === 1 ? "LED" : "LEDs"}${shownWords(light) ? ` · ${shownWords(light)}` : ""}`
+                    : "not read"}
                 </span>
                 {/* A pattern group says what the pattern does to this device. Nothing is refused,
                     so every device of the group that the daemon flags says so. */}

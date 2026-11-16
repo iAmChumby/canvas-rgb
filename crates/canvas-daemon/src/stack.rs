@@ -22,10 +22,11 @@ use canvas_proto::api::{StackLayerState, StackLayerStatus};
 use canvas_proto::device::DeviceId;
 use canvas_proto::layout::{SamplingMode, CANVAS_HEIGHT, CANVAS_WIDTH};
 use canvas_proto::props::{InputNeeds, Props, PropertyDef, PropertySchema};
+use canvas_proto::scene::Arrangement;
 use canvas_proto::stack::{
     BlendMode, LayerArea, LayerMask, MaskSource, Stack, STACK_ID_PREFIX, STACK_MAX_LAYERS,
 };
-use canvas_proto::traits::{Canvas, Effect, Inputs};
+use canvas_proto::traits::{Canvas, Effect, Inputs, StripRead};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
@@ -160,6 +161,14 @@ pub type AreaBook = Arc<RwLock<AreaMaps>>;
 
 // ---------------------------------------------------------------- the area book
 
+/// Grows a bounding box so it covers one pixel.
+fn grow(extent: &mut Option<[f32; 4]>, fx: f32, fy: f32) {
+    *extent = Some(match *extent {
+        Some([x0, y0, x1, y1]) => [x0.min(fx), y0.min(fy), x1.max(fx + 1.0), y1.max(fy + 1.0)],
+        None => [fx, fy, fx + 1.0, fy + 1.0],
+    });
+}
+
 /// One area's pixels, in render pixels: where the picture is mapped, and which pixels it may
 /// paint. A bit is set where the area covers the pixel.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -167,11 +176,21 @@ pub struct Mask {
     /// The bounding box of the area's rectangles, in render pixels: the layer's whole picture is
     /// mapped over this box.
     pub dest: [f32; 4],
+    /// The same box read as a column (#407): the strip LEDs' own columns over the full height
+    /// of the canvas. A stack that answers the column maps its picture over this box, so the
+    /// strip reads the whole column and not only the cell at mid-height.
+    pub column_dest: [f32; 4],
     /// The bounding box of the pixels the mask covers, in render pixels. It can reach past
     /// `dest`: a ring's cell at the edge of a fan reads pixels just outside the fan's rectangle,
     /// and those must be painted or the LED would average black into it (D95.2.3).
     extent: Option<[f32; 4]>,
+    /// The same box read as a column (#407): the strip LEDs' own columns over the full height
+    /// of the canvas, and nothing else. A light that is not a strip has no column.
+    column_extent: Option<[f32; 4]>,
     words: Vec<u64>,
+    /// The area's cells, read as a column (#407): the strip LEDs' columns only. A fan's or a
+    /// keyboard's cell is not in it: those lights read their cell and never the column.
+    column_words: Vec<u64>,
     width: u32,
     height: u32,
 }
@@ -182,8 +201,11 @@ impl Mask {
         let bits = (width as usize) * (height as usize);
         Self {
             dest: [0.0, 0.0, 0.0, 0.0],
+            column_dest: [0.0, 0.0, 0.0, 0.0],
             extent: None,
+            column_extent: None,
             words: vec![0; bits.div_ceil(64)],
+            column_words: vec![0; bits.div_ceil(64)],
             width,
             height,
         }
@@ -194,6 +216,12 @@ impl Mask {
         self.extent
     }
 
+    /// The bounding box of the pixels the mask covers when it is read as a column (#407), or
+    /// `None` when it covers none.
+    pub fn column_extent(&self) -> Option<[f32; 4]> {
+        self.column_extent
+    }
+
     /// True when the mask covers no pixel at all.
     pub fn is_empty(&self) -> bool {
         self.words.iter().all(|word| *word == 0)
@@ -202,14 +230,31 @@ impl Mask {
     /// True when the mask covers the pixel at `x`, `y`.
     #[inline]
     pub fn contains(&self, x: u32, y: u32) -> bool {
+        self.covers(&self.words, x, y)
+    }
+
+    /// True when the column read covers the pixel at `x`, `y` (#407).
+    #[inline]
+    pub fn contains_column(&self, x: u32, y: u32) -> bool {
+        self.covers(&self.column_words, x, y)
+    }
+
+    /// True when the bits cover the pixel at `x`, `y`.
+    #[inline]
+    fn covers(&self, words: &[u64], x: u32, y: u32) -> bool {
         if x >= self.width || y >= self.height {
             return false;
         }
         let bit = (y as usize) * (self.width as usize) + (x as usize);
-        self.words[bit / 64] & (1u64 << (bit % 64)) != 0
+        words[bit / 64] & (1u64 << (bit % 64)) != 0
     }
 
     /// Sets the bit for one pixel; out-of-canvas pixels are ignored.
+    ///
+    /// The cell read and the column read are two different pictures of the area (#407): the
+    /// cell read is every LED's own cell, the column read is the strip LEDs' columns over the
+    /// full height. A cell pixel is not a column pixel: a fan or a keyboard reads its cell and
+    /// never the column, so the two bitmaps stay apart.
     #[inline]
     fn set(&mut self, x: i64, y: i64) {
         if x < 0 || y < 0 || x >= i64::from(self.width) || y >= i64::from(self.height) {
@@ -218,14 +263,27 @@ impl Mask {
         let bit = (y as usize) * (self.width as usize) + (x as usize);
         self.words[bit / 64] |= 1u64 << (bit % 64);
         let (fx, fy) = (x as f32, y as f32);
-        self.extent = Some(match self.extent {
-            Some([x0, y0, x1, y1]) => [x0.min(fx), y0.min(fy), x1.max(fx + 1.0), y1.max(fy + 1.0)],
-            None => [fx, fy, fx + 1.0, fy + 1.0],
-        });
+        grow(&mut self.extent, fx, fy);
+    }
+
+    /// Sets the bit for one pixel of the column read only (#407): the strip LED's own x-range
+    /// over the full height of the canvas.
+    #[inline]
+    fn set_column(&mut self, x: i64, y: i64) {
+        if x < 0 || y < 0 || x >= i64::from(self.width) || y >= i64::from(self.height) {
+            return;
+        }
+        let bit = (y as usize) * (self.width as usize) + (x as usize);
+        self.column_words[bit / 64] |= 1u64 << (bit % 64);
+        let (fx, fy) = (x as f32, y as f32);
+        grow(&mut self.column_extent, fx, fy);
     }
 
     /// Adds the pixels one LED's sampling mode reads (D95.2.3).
-    fn add_led(&mut self, led: &geometry::LedSample, mode: SamplingMode) {
+    ///
+    /// `column` says the LED is a strip's: the column read (#407) takes its own x-range over
+    /// the full height of the canvas, so the area covers that column as well.
+    fn add_led(&mut self, led: &geometry::LedSample, mode: SamplingMode, column: bool) {
         if !led.sampled || self.width == 0 || self.height == 0 {
             return;
         }
@@ -274,7 +332,64 @@ impl Mask {
                 }
             }
         }
+        if column {
+            self.add_column(led);
+        }
     }
+
+    /// Adds the pixels the column read of one LED covers (#407): its own x-range over the full
+    /// height of the canvas, the range `sampling::sample_led_columns` averages over.
+    ///
+    /// A layer in an area the strip reads as a column is painted over that column, so the strip
+    /// reads the whole picture and not only the cell at mid-height.
+    fn add_column(&mut self, led: &geometry::LedSample) {
+        if !led.sampled || self.width == 0 || self.height == 0 {
+            return;
+        }
+        let max_x = i64::from(self.width) - 1;
+        let x0 = ((led.bounds[0] - 0.5).ceil() as i64).clamp(0, max_x);
+        let x1 = ((led.bounds[2] - 0.5).floor() as i64).clamp(0, max_x).max(x0);
+        for x in x0..=x1 {
+            for y in 0..i64::from(self.height) {
+                self.set_column(x, y);
+            }
+        }
+    }
+}
+
+/// Which pixels of an area a layer paints, read with the area's own reading (#407).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Coverage {
+    /// The cells the area's LEDs read.
+    Cell,
+    /// The columns the area's strip LEDs read: their own x-range over the full height.
+    Column,
+    /// The cells the column read does not cover: the lights that are not a strip, a fan or a
+    /// keyboard. They read their cell and never the column, so they are painted over the area's
+    /// own box and read exactly as they read before.
+    CellOnly,
+}
+
+impl Coverage {
+    /// True when the area's mask covers the pixel, read this way.
+    fn covers(self, mask: &Mask, x: u32, y: u32) -> bool {
+        match self {
+            Coverage::Cell => mask.contains(x, y),
+            Coverage::Column => mask.contains_column(x, y),
+            Coverage::CellOnly => mask.contains(x, y) && !mask.contains_column(x, y),
+        }
+    }
+}
+
+/// Where one layer's picture is mapped, and which pixels it may paint (#407).
+#[derive(Debug, Clone, Copy)]
+struct PaintBox {
+    /// The box the picture is mapped over.
+    dest: [f32; 4],
+    /// The box it may paint: the pixels the area's mask covers.
+    paint: [f32; 4],
+    /// Which of the area's pixels it may paint, read with the layer's own reading.
+    coverage: Coverage,
 }
 
 /// Every device's and zone's mask, at one group, render scale and sampling mode.
@@ -323,6 +438,9 @@ impl AreaMap {
         };
         for samples in plan.lights.iter() {
             let Some(light) = lights.iter().find(|l| l.id == samples.light) else { continue };
+            // A strip LED reads the column when the group's effect asks for it (#407); the mask
+            // is built for both reads, and the compositor picks the one the stack answers.
+            let column = light.arrangement == Arrangement::Strip;
             let device_mask = map.devices.entry(light.device_id.clone()).or_insert_with(|| Mask::new(width, height));
             let zone_mask = map
                 .zones
@@ -330,8 +448,8 @@ impl AreaMap {
                 .or_insert_with(|| Mask::new(width, height));
             for led in &samples.leds {
                 let scaled = scale_sample(led, scale);
-                device_mask.add_led(&scaled, sampling);
-                zone_mask.add_led(&scaled, sampling);
+                device_mask.add_led(&scaled, sampling, column);
+                zone_mask.add_led(&scaled, sampling, column);
             }
         }
         // A device or zone with no LED of its own paints nothing, and has no box.
@@ -339,6 +457,7 @@ impl AreaMap {
         map.zones.retain(|_, mask| !mask.is_empty());
         for mask in map.devices.values_mut().chain(map.zones.values_mut()) {
             mask.dest = mask.extent().unwrap_or([0.0, 0.0, 0.0, 0.0]);
+            mask.column_dest = mask.column_extent().unwrap_or([0.0, 0.0, 0.0, 0.0]);
         }
         map
     }
@@ -356,20 +475,31 @@ impl AreaMap {
         match area {
             LayerArea::Canvas => Some(ResolvedArea {
                 dest: [0.0, 0.0, paint_w as f32, paint_h as f32],
+                column_dest: [0.0, 0.0, paint_w as f32, paint_h as f32],
                 mask: None,
                 whole_canvas: true,
             }),
             LayerArea::Rect { x, y, width, height } => {
                 let dest = rect_px(*x, *y, *width, *height, paint_scale, paint_w, paint_h)?;
-                Some(ResolvedArea { dest, mask: None, whole_canvas: false })
+                Some(ResolvedArea { dest, column_dest: dest, mask: None, whole_canvas: false })
             }
             LayerArea::Device { device } => {
                 let mask = self.devices.get(device)?;
-                Some(ResolvedArea { dest: mask.dest, mask: Some(mask), whole_canvas: false })
+                Some(ResolvedArea {
+                    dest: mask.dest,
+                    column_dest: mask.column_dest,
+                    mask: Some(mask),
+                    whole_canvas: false,
+                })
             }
             LayerArea::Zone { device, zone } => {
                 let mask = self.zones.get(&(device.clone(), *zone))?;
-                Some(ResolvedArea { dest: mask.dest, mask: Some(mask), whole_canvas: false })
+                Some(ResolvedArea {
+                    dest: mask.dest,
+                    column_dest: mask.column_dest,
+                    mask: Some(mask),
+                    whole_canvas: false,
+                })
             }
         }
     }
@@ -416,12 +546,13 @@ impl AreaMaps {
             None => match area {
                 LayerArea::Canvas => Some(ResolvedArea {
                     dest: [0.0, 0.0, CANVAS_WIDTH as f32, CANVAS_HEIGHT as f32],
+                    column_dest: [0.0, 0.0, CANVAS_WIDTH as f32, CANVAS_HEIGHT as f32],
                     mask: None,
                     whole_canvas: true,
                 }),
                 LayerArea::Rect { x, y, width, height } => {
                     let dest = rect_px(*x, *y, *width, *height, 1.0, CANVAS_WIDTH, CANVAS_HEIGHT)?;
-                    Some(ResolvedArea { dest, mask: None, whole_canvas: false })
+                    Some(ResolvedArea { dest, column_dest: dest, mask: None, whole_canvas: false })
                 }
                 LayerArea::Device { .. } | LayerArea::Zone { .. } => None,
             },
@@ -439,6 +570,10 @@ impl AreaMaps {
 pub struct ResolvedArea<'a> {
     /// The bounding box of the area's rectangles, in render pixels.
     pub dest: [f32; 4],
+    /// The same box read as a column (#407): the strip LEDs' own x-range over the full height of
+    /// the canvas. The compositor maps the picture over this box when the stack answers the
+    /// column.
+    pub column_dest: [f32; 4],
     /// The per-LED mask, or `None` for a whole-canvas or rectangular area (whose bounding box is
     /// the whole area).
     pub mask: Option<&'a Mask>,
@@ -452,13 +587,19 @@ pub struct ResolvedArea<'a> {
 #[derive(Debug, Clone, PartialEq)]
 struct OwnedArea {
     dest: [f32; 4],
+    column_dest: [f32; 4],
     mask: Option<Mask>,
     whole_canvas: bool,
 }
 
 impl OwnedArea {
     fn from_resolved(area: ResolvedArea<'_>) -> Self {
-        Self { dest: area.dest, mask: area.mask.cloned(), whole_canvas: area.whole_canvas }
+        Self {
+            dest: area.dest,
+            column_dest: area.column_dest,
+            mask: area.mask.cloned(),
+            whole_canvas: area.whole_canvas,
+        }
     }
 }
 
@@ -721,6 +862,10 @@ struct Layer {
     last_ms: Option<f32>,
     /// True when a panic was already logged for this layer: a faulted layer logs once.
     panic_logged: bool,
+    /// True when the layer's effect panicked while it was asked how a strip reads it (#407).
+    /// Such a layer is faulted for good: the engine does not call a failed effect again until
+    /// it is replaced, and the stack is replaced when it is built again.
+    strip_read_faulted: bool,
     /// The layer's mask, built and run beside it (#256), or `None` when it draws whole.
     mask: Option<MaskLayer>,
     /// Why the layer's mask is not applied: its effect did not build. The layer draws unmasked.
@@ -809,6 +954,15 @@ pub struct StackEffect {
     frame_panicked: bool,
     /// True once the compositor's own start panicked: it logs once and keeps going.
     init_panicked: bool,
+    /// How the stack itself is read on a strip (#407): the column when every layer that paints
+    /// answers the column, the cell otherwise.
+    ///
+    /// The answer is read once, when the effect is set, so it cannot follow a layer that
+    /// comes and goes. It is the column only when the layers agree on it: then the picture the
+    /// compositor draws is the picture the engine reads over the full height. When the layers
+    /// disagree the stack answers the cell, and the strip shows the picture's cell at
+    /// mid-height.
+    read: StripRead,
 }
 
 impl StackEffect {
@@ -817,7 +971,7 @@ impl StackEffect {
     /// `leaf` builds one layer's effect and refuses `stack:` ids; a layer whose effect does not
     /// build is kept, skipped, and reported missing.
     pub fn new(stack: &Stack, leaf: LeafBuilder, live: LiveStack, areas: AreaBook) -> Self {
-        let layers = stack
+        let mut layers: Vec<Layer> = stack
             .layers
             .iter()
             .take(STACK_MAX_LAYERS)
@@ -901,11 +1055,71 @@ impl StackEffect {
                     hold: Hold::Running,
                     last_ms: None,
                     panic_logged: false,
+                    strip_read_faulted: false,
                     mask,
                     mask_error,
                 }
             })
             .collect();
+        // Each layer is read on its own (#407): a layer whose meaning is how high its picture
+        // reaches (Fire, Audio Spectrum) is read over the LED's column, every other layer over
+        // the LED's cell. The stack answers the column only when every layer that paints
+        // answers it, and the cell otherwise.
+        let mut layer_reads: Vec<StripRead> = Vec::with_capacity(layers.len());
+        for layer in layers.iter_mut() {
+            let Some(effect) = layer.built.as_ref() else {
+                // A layer that did not build paints nothing: it does not answer anything.
+                layer_reads.push(StripRead::Cell);
+                continue;
+            };
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| effect.strip_read())) {
+                Ok(read) => layer_reads.push(read),
+                Err(payload) => {
+                    // The engine's contract for the same call (`canvas-core`'s engine): an effect
+                    // that panics while it is asked how a strip reads it is installed as failed,
+                    // with the text of the panic, and is not called again until it is replaced
+                    // (#407). The layer is faulted here: its picture is black, it is not run
+                    // again, and the rest of the stack runs.
+                    let reason = panic_text(&payload);
+                    layer.hold = Hold::Faulted;
+                    layer.panic_logged = true;
+                    layer.strip_read_faulted = true;
+                    layer.canvas.fill([0.0, 0.0, 0.0]);
+                    tracing::error!(
+                        stack = %stack.id,
+                        layer = %layer.id,
+                        effect = %layer.effect,
+                        reason = %reason,
+                        "a layer's effect panicked while it was asked how a strip reads it; it is faulted, its picture is black and the rest of the stack runs"
+                    );
+                    layer_reads.push(StripRead::Cell);
+                }
+            }
+        }
+        // The stack answers the column when every layer that paints answers it (#407): the
+        // picture the compositor draws is then the picture the engine reads over the full
+        // height, and a flame keeps its height. A layer that is hidden, that has no opacity or
+        // that did not build paints nothing, so it does not hold the answer back.
+        let mut painting = 0usize;
+        let mut every_painting_layer_answers_the_column = true;
+        for (layer, read) in layers.iter().zip(layer_reads.iter()) {
+            let paints = layer.values.visible
+                && layer.values.opacity > 0
+                && layer.built.is_some()
+                && !matches!(layer.hold, Hold::Faulted);
+            if !paints {
+                continue;
+            }
+            painting += 1;
+            if *read != StripRead::Column {
+                every_painting_layer_answers_the_column = false;
+            }
+        }
+        let read = if painting > 0 && every_painting_layer_answers_the_column {
+            StripRead::Column
+        } else {
+            StripRead::Cell
+        };
         Self {
             stack_id: stack.id.clone(),
             layers,
@@ -922,6 +1136,7 @@ impl StackEffect {
             frame_size: (0, 0),
             frame_panicked: false,
             init_panicked: false,
+            read,
         }
     }
 
@@ -971,9 +1186,14 @@ impl StackEffect {
     /// Starts a faulted layer again: a reactivation or a structure change clears it.
     fn clear_faults(&mut self) {
         for layer in &mut self.layers {
-            layer.hold = Hold::Running;
-            layer.last_ms = None;
-            layer.panic_logged = false;
+            // A layer whose `strip_read` panicked stays faulted: the engine does not call a
+            // failed effect again until it is replaced, and the stack is replaced when it is
+            // built again (#407).
+            if !layer.strip_read_faulted {
+                layer.hold = Hold::Running;
+                layer.last_ms = None;
+                layer.panic_logged = false;
+            }
             if let Some(mask) = &mut layer.mask {
                 mask.hold = Hold::Running;
                 mask.last_ms = None;
@@ -1169,6 +1389,19 @@ impl StackEffect {
     }
 
     /// The pixels of one layer's canvas, composited into `target`.
+    ///
+    /// The stack answers one read for its whole picture (#407), and the picture is drawn the
+    /// way that read reads it:
+    ///
+    /// - the stack answers the **column**: the picture is mapped over the area's columns, the
+    ///   strip LEDs' own x-range over the full height of the canvas, and the strip reads the
+    ///   whole column. A flame (Fire, Audio Spectrum) keeps its height.
+    /// - the stack answers the **cell**: the picture is mapped over the area's own box and
+    ///   painted where the area's LEDs read, exactly as before #407.
+    ///
+    /// A light that is not a strip (a fan, a keyboard) reads its cell and never the column, so
+    /// when the stack answers the column those cells are painted over the area's own box, as
+    /// they always were: the fan reads the layer exactly as it read before.
     fn composite_layer(
         &self,
         index: usize,
@@ -1176,16 +1409,63 @@ impl StackEffect {
         values: &LiveLayer,
         target: &mut Canvas,
     ) {
-        let layer = &self.layers[index];
         let a = f32::from(values.opacity.min(100)) / 100.0;
         if a <= 0.0 || !values.visible {
             return;
         }
+        let column = self.read == StripRead::Column;
         let dest = if area.whole_canvas {
             [0.0, 0.0, target.width as f32, target.height as f32]
+        } else if column {
+            area.column_dest
         } else {
             area.dest
         };
+        // A masked area paints every pixel its LEDs read, which for a ring can reach just past
+        // the rectangle the picture is mapped over (D95.2.3).
+        let paint = match &area.mask {
+            Some(mask) => {
+                if column {
+                    mask.column_extent().unwrap_or(dest)
+                } else {
+                    mask.extent().unwrap_or(dest)
+                }
+            }
+            None => dest,
+        };
+        let coverage = if column { Coverage::Column } else { Coverage::Cell };
+        self.paint_area(index, area, values, target, PaintBox { dest, paint, coverage });
+        if column {
+            if let Some(mask) = &area.mask {
+                // The lights that are not a strip read their cells, and the columns do not
+                // cover them: the layer paints them over its own box, as it always did.
+                let dest = area.dest;
+                let paint = mask.extent().unwrap_or(dest);
+                self.paint_area(
+                    index,
+                    area,
+                    values,
+                    target,
+                    PaintBox { dest, paint, coverage: Coverage::CellOnly },
+                );
+            }
+        }
+    }
+
+    /// Paints one layer's picture over the box, where the area's mask allows it.
+    fn paint_area(
+        &self,
+        index: usize,
+        area: &OwnedArea,
+        values: &LiveLayer,
+        target: &mut Canvas,
+        box_: PaintBox,
+    ) {
+        let layer = &self.layers[index];
+        let a = f32::from(values.opacity.min(100)) / 100.0;
+        let dest = box_.dest;
+        let paint = box_.paint;
+        let coverage = box_.coverage;
         if !dest.iter().all(|v| v.is_finite()) {
             return;
         }
@@ -1194,12 +1474,6 @@ impl StackEffect {
         if dw <= 0.0 || dh <= 0.0 {
             return;
         }
-        // A masked area paints every pixel its LEDs read, which for a ring can reach just past
-        // the rectangle the picture is mapped over (D95.2.3).
-        let paint = match &area.mask {
-            Some(mask) => mask.extent().unwrap_or(dest),
-            None => dest,
-        };
         let x0 = (paint[0].floor().max(0.0) as u32).min(target.width);
         let y0 = (paint[1].floor().max(0.0) as u32).min(target.height);
         let x1 = (paint[2].ceil().max(0.0) as u32).min(target.width);
@@ -1216,7 +1490,7 @@ impl StackEffect {
         for y in y0..y1 {
             for x in x0..x1 {
                 if let Some(area_mask) = &area.mask {
-                    if !area_mask.contains(x, y) {
+                    if !coverage.covers(area_mask, x, y) {
                         continue;
                     }
                 }
@@ -1335,6 +1609,20 @@ impl Effect for StackEffect {
             presets: Vec::new(),
             thumbnail: None,
         }
+    }
+
+    /// A stack answers the column when every layer that paints answers it, and the cell
+    /// otherwise (#407).
+    ///
+    /// The stack draws one picture, so one read has to serve every layer: a cell at mid-height
+    /// misses a flame (Fire, Audio Spectrum answer the column), and a column over the whole
+    /// height averages a thin moving line (Rain) away by about thirty times. The compositor
+    /// therefore draws the picture the way the read reads it: over the strip LEDs' columns when
+    /// the stack answers the column, and over the area's own cells when it answers the cell.
+    ///
+    /// The answer is read once, when the effect is set, and it does not depend on the props.
+    fn strip_read(&self) -> StripRead {
+        self.read
     }
 
     fn init(&mut self, props: &Props) {
@@ -1599,6 +1887,9 @@ impl StackEffect {
             self.composite_layer(index, area, values, canvas);
         }
         self.resolved = resolved;
+        // The frame is the composite of the layers and nothing else (#407): the stack writes
+        // into the group's canvas only where its own layers paint, so the picture the editor
+        // shows is the picture the lights read.
         if changed {
             self.report_statuses();
         }
@@ -1858,7 +2149,7 @@ mod tests {
         // 24.80..25.20 (holds no pixel centre). The sampler reads (24, 25); the nearest pixel is (25, 25).
         let led = geometry::LedSample { center_x: 24.69, center_y: 25.0, bounds: [24.49, 24.80, 24.90, 25.20], sampled: true };
         let mut mask = Mask::new(80, 50);
-        mask.add_led(&led, SamplingMode::AreaAverage);
+        mask.add_led(&led, SamplingMode::AreaAverage, false);
         assert!(mask.contains(24, 25), "the pixel the sampler reads");
         assert!(!mask.contains(25, 25), "not the nearest pixel");
         let mut canvas = vec![[0.0f32; 3]; 80 * 50];
@@ -1866,6 +2157,84 @@ mod tests {
         let mut out = Vec::new();
         canvas_core::sampling::sample_leds(&canvas, 80, 50, &[led], SamplingMode::AreaAverage, &mut out);
         assert_eq!(out[0].r, 255, "the sampler reads that pixel");
+    }
+
+    /// #407: a strip LED's mask is built for the column as well: the column read covers the
+    /// LED's own x-range over the full height of the canvas, and the cell read only the cell at
+    /// mid-height. A layer in that area is painted over the column, so the strip reads the whole
+    /// picture.
+    #[test]
+    fn a_strip_leds_mask_covers_its_whole_column_for_the_column_read() {
+        let devices = vec![device("a", vec![zone(0, ZoneKind::Linear, 4)])];
+        let lights = vec![light("a#z0", "a", 0)];
+        let map = group_map(&["a#z0"], &lights, &devices, canvas_proto::scene::GroupMode::FlowAcross);
+        let area = LayerArea::Device { device: DeviceId("a".into()) };
+        let resolved = map
+            .resolve(Some("g"), &area)
+            .expect("the device has a mask");
+        let mask = resolved.mask.expect("the device has a mask");
+        // The column reaches the whole canvas, the cell only the band at mid-height.
+        let column = mask.column_extent().expect("the column has a box");
+        assert!(column[1] <= 0.0, "the column starts at the top: {column:?}");
+        assert!(
+            (column[3] - 50.0).abs() < 0.001,
+            "the column reaches the bottom: {column:?}"
+        );
+        let cell = mask.extent().expect("the cell has a box");
+        assert!(cell[1] > 0.0, "the cell is not at the top: {cell:?}");
+        assert!(cell[3] < 50.0, "the cell is not at the bottom: {cell:?}");
+        // A pixel of the leftmost column above the cell is covered by the column read only.
+        let x = column[0] as u32;
+        assert!(mask.contains_column(x, 0), "the column read reaches the top");
+        assert!(!mask.contains(x, 0), "the cell read does not");
+        // The strip's own cell is inside the column: the column is the full height of the
+        // strip's own x-range.
+        for y in 0..50 {
+            for x in 0..80 {
+                if mask.contains(x, y) {
+                    assert!(
+                        mask.contains_column(x, y),
+                        "the column covers the strip's cell pixel ({x}, {y})"
+                    );
+                }
+            }
+        }
+    }
+
+    /// #407: a light that is not a strip reads its cell and never the column, so its cell is
+    /// not in the column read: the fan in the same group reads the layer as it did before.
+    #[test]
+    fn a_fans_cell_is_not_in_the_column_read() {
+        let devices = vec![device(
+            "a",
+            vec![zone(0, ZoneKind::Linear, 4), zone(1, ZoneKind::Linear, 4)],
+        )];
+        let mut lights = vec![light("a#z0", "a", 0)];
+        // The second light of the device is a fan: a ring is not a strip.
+        let mut fan = light("a#z1", "a", 1);
+        fan.arrangement = canvas_proto::scene::Arrangement::Ring;
+        lights.push(fan);
+        let map = group_map(
+            &["a#z0", "a#z1"],
+            &lights,
+            &devices,
+            canvas_proto::scene::GroupMode::FlowAcross,
+        );
+        let area = LayerArea::Device { device: DeviceId("a".into()) };
+        let resolved = map
+            .resolve(Some("g"), &area)
+            .expect("the device has a mask");
+        let mask = resolved.mask.expect("the device has a mask");
+        // The fan's cell is in the cell read.
+        let mut fan_cells = 0;
+        for y in 0..50 {
+            for x in 0..80 {
+                if mask.contains(x, y) && !mask.contains_column(x, y) {
+                    fan_cells += 1;
+                }
+            }
+        }
+        assert!(fan_cells > 0, "the fan's cell is in the cell read");
     }
 
     /// A group the book does not hold resolves to nothing: "not in this group".
@@ -2017,6 +2386,43 @@ mod tests {
             .resolve(None, &LayerArea::Rect { x: 0.0, y: 0.0, width: -4.0, height: 10.0 })
             .is_none());
         assert!(book.resolve(None, &LayerArea::Canvas).is_some());
+    }
+
+    /// A guard (#382): `copies` only counts. The plan and the sampled frame of a mirrored header
+    /// (one light of 8 LEDs, shown 8 times) are the same with `copies` 8 and with none, and both
+    /// are 8 LEDs long: the engine writes the run once, never 64.
+    #[test]
+    fn the_frames_of_a_mirrored_header_are_the_same_with_copies_eight_and_with_none() {
+        use canvas_proto::layout::LedSlice;
+        let devices = vec![device("hdr", vec![zone(0, ZoneKind::Linear, 8)])];
+        let mut once = light("hdr#z0p1", "hdr", 0);
+        once.leds = Some(LedSlice { start: 0, count: 8 });
+        let mut mirrored = once.clone();
+        mirrored.copies = Some(8);
+        let members = vec![once.id.clone()];
+        let plan_of = |l: &canvas_proto::scene::Light| {
+            canvas_core::arrangement::build_group_plan(
+                &members,
+                canvas_proto::scene::GroupMode::FlowAcross,
+                std::slice::from_ref(l),
+                &devices,
+            )
+        };
+        let (plan_once, plan_mirrored) = (plan_of(&once), plan_of(&mirrored));
+        assert_eq!(plan_once, plan_mirrored, "copies changes nothing in the plan");
+        assert_eq!(plan_mirrored.lights[0].leds.len(), 8, "the run is planned once, not 8 times");
+
+        // A canvas that is a ramp, so every LED reads its own colour.
+        let mut canvas = Canvas::new(64, 64);
+        for (i, px) in canvas.pixels.iter_mut().enumerate() {
+            let v = (i % 64) as f32 / 63.0;
+            *px = [v, 1.0 - v, 0.5];
+        }
+        let frame_once = sample_group(&plan_once, std::slice::from_ref(&once), &devices, &canvas);
+        let frame_mirrored =
+            sample_group(&plan_mirrored, std::slice::from_ref(&mirrored), &devices, &canvas);
+        assert_eq!(frame_once, frame_mirrored, "the frames are byte for byte the same");
+        assert_eq!(frame_mirrored[&DeviceId("hdr".into())].len(), 8, "8 LEDs, not 64");
     }
 
     #[test]

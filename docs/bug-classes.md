@@ -212,6 +212,18 @@ or acts as if a step worked without checking that it did.
   OpenRGB has found any device (`devices=0`), and the service moves on as if it had worked.
 - [#19](https://github.com/iAmChumby/canvas-rgb/issues/19): the daemon's exits leave no line, so
   the service's "crashed" is the only account and it is a guess.
+- [#419](https://github.com/iAmChumby/canvas-rgb/issues/419): a per-group save retried every group
+  a scene had dark without reading why it was dark, so a group the HTML limit left dark was rebuilt
+  and ran past the cap. Fixed: the retry reads the scene's own order
+  (`scenes::groups_over_the_html_limit`), so only a real build failure is tried again.
+- [#393](https://github.com/iAmChumby/canvas-rgb/issues/393): a keyboard the app drives itself
+  also came through OpenRGB as a second device the daemon never drives, and the scenes code made
+  a light for it without asking. Devices showed a nameless, not connected light. One question,
+  "does the daemon drive this device?", now gates every place a light is made
+  (`crates/canvas-daemon/src/scenes.rs`, `scene_migration.rs`, `composite.rs`), and the leftover
+  already stored is removed at start, after a snapshot, only when the owner never touched it.
+  The rule itself now lives in one shared place, `crates/canvas-adapters/src/drive.rs`
+  (`is_driven`), so the service's boot and black paint ask it too (#413).
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
@@ -347,6 +359,25 @@ line. Three mechanisms, and one bug the timing only exposed.
   awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
   engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
   fake bumps), never on a flag the code sets before the awaited work.
+- [#411](https://github.com/iAmChumby/canvas-rgb/issues/411): `the_timeout_restores_the_length_and_the_lights`
+  (`crates/canvas-daemon/tests/chains.rs`) waited for the header's length, then read the restore
+  record, the hold and the session at once. The daemon ends those after it restores the length, so
+  a busy runner read them in the gap. The same rule as #282: each state the assert reads is waited
+  for. Two more tests in that file made the same read (`a_failed_rollback_keeps_both_records`,
+  `start_up_rolls_back_a_leftover_intent`) and wait now. No guard: the mistake is two correct
+  lines in the wrong order, which `timing_class.rs` cannot tell from a read that is safe.
+- [#429](https://github.com/iAmChumby/canvas-rgb/issues/429):
+  `a_failed_resize_changes_nothing_and_keeps_the_session_for_a_retry` (`crates/canvas-daemon/tests/chains.rs`)
+  failed once in CI with `left: None` where the setup session should be. The wait was right; the product
+  was wrong. A refused resize is five seconds of the adapter's silence (`REPLY_TIMEOUT`,
+  `crates/canvas-adapters/src/openrgb.rs`) against the setup's six-second idle limit (`SETUP_TIMEOUT_MS`,
+  `crates/canvas-proto/src/scene.rs`), so a loaded runner pushed the commit past the limit and the
+  identify ticker ended the session under the save. Measured: the refused commit took 5.043 s of the
+  6 s; 30 of 30 passes alone and 16 of 16 with two copies at once, and with the limit set to 500 ms the
+  old code loses the session in every run. **Rule:** a session that is serving a request does not idle
+  out (`identify::SetupService`: every chain route that waits on the device holds one, and the idle
+  clock restarts when it ends); a test for that changes the limit, never the wait, so the verdict
+  stops depending on how fast the machine is.
 - [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
   another starter while one is loading, and lands both"
   (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
@@ -982,3 +1013,40 @@ uses.
   and the test fails on an entry that names no control. A colour control has no two ends and no
   built-in has a bool control, so neither is driven; a control added later is covered without
   editing the test.
+
+### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
+
+A strip LED reads a part of the effect's picture, and one rule decided which part for every
+effect. A rule tuned for one picture (a thin moving line) reads black from another (a picture
+whose meaning is how high it reaches).
+
+- [#372](https://github.com/iAmChumby/canvas-rgb/issues/372): the full-height band averaged
+  Rain's thin streaks away, so Rain stood still on strips and fans. The fix read a small cell at
+  mid-height.
+- [#400](https://github.com/iAmChumby/canvas-rgb/issues/400): that cell read Fire and Audio
+  Spectrum dark on a strip, because their picture sits at the bottom of the canvas.
+- [#407](https://github.com/iAmChumby/canvas-rgb/issues/407): a stack answered the cell for
+  every one of its layers, so Fire or Audio Spectrum inside a stack still read dark on a strip.
+- **Class fix:** done (#400), guarded again (#407). The effect says how a strip reads it
+  (`StripRead` in `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names
+  every built-in with its read (`crates/canvas-effects/src/lib.rs`,
+  `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
+  decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
+  on a strip to a measured level. A stack answers the column when every layer that paints
+  answers it, and the cell otherwise (`crates/canvas-daemon/src/stack.rs`, `StackEffect::read`):
+  the picture is then drawn the way that read reads it, over the strip LEDs' columns or over the
+  area's own cells. The stack writes nothing into the group's canvas beyond its own layers, so
+  the picture the editor shows is the picture the lights read. The area mask is built for the
+  column as well, so a layer kept to a device or a zone is painted over the strip LEDs' whole
+  columns, and a light that is not a strip (a fan, a keyboard) keeps reading the cells it read
+  before. Tests in `crates/canvas-daemon/tests/stacks.rs` hold a stack's Fire and Audio Spectrum
+  on a strip to a measured level, hold Rain's motion over a flame to the bar of #372, hold a
+  fan and a keyboard to the colours they read before, and measure both orders of a mixed stack.
+- **The guard over the daemon's own effects** (`crates/canvas-daemon/src/strip_read_guard.rs`,
+  `every_effect_the_daemon_implements_answers_how_a_strip_reads_it`): every effect the daemon
+  implements is checked, and a scan over the daemon's own source fails with `file:line` when an
+  effect appears that the test does not cover. The stack follows the every-layer rule, the HTML
+  tile forwards the read of the effect it holds, and a pattern holds no effect. What the guard
+  does not cover: an effect in another crate that the daemon wraps without saying so, and the
+  blend of a stack whose layers answer differently (the stack answers the cell, and the top
+  layer's cell is what a strip shows).
