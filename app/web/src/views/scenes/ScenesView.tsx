@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { ArrowClockwise, ArrowCounterClockwise, CopySimple, DotsThree, PencilSimple, Plus, SquaresFour, Trash } from "@phosphor-icons/react";
+import { ArrowClockwise, ArrowCounterClockwise, ArrowLeft, ArrowRight, CopySimple, DotsThree, PencilSimple, Plus, SquaresFour, Trash } from "@phosphor-icons/react";
 import { Button, IconButton } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { ErrorPanel, LoadFrame } from "@/components/Loading";
@@ -213,9 +213,27 @@ export function ScenesView() {
     return id;
   };
 
+  /**
+   * The scenes in another order, with the one that plays moved one place (#371). This is the
+   * phone's path, and the path for a finger: the strip scrolls sideways there.
+   */
+  const moveScene = (delta: number) => {
+    const ids = use.scenes.map((s) => s.id);
+    const at = ids.indexOf(scene?.id ?? "");
+    if (at < 0) return;
+    const to = at + delta;
+    if (to < 0 || to >= ids.length) return;
+    const order = [...ids];
+    const [moved] = order.splice(at, 1);
+    order.splice(to, 0, moved!);
+    use.reorderScenes(order);
+  };
+
+  /** Where the scene that plays is in the order of the keys. */
+  const sceneAt = use.scenes.findIndex((s) => s.id === scene?.id);
+
   /** A device was picked for the group being made: the group exists and plays from now on. */
-  const onPicked = (lightId: string) => {
-    const id = freshGroupId();
+  const onPicked = (lightId: string) => {    const id = freshGroupId();
     const name = `Group ${(scene?.groups.length ?? 0) + 1}`;
     let emptied: string[] = [];
     use.edit((draft) => {
@@ -393,6 +411,32 @@ export function ScenesView() {
           <Button
             variant="ghost"
             size="sm"
+            icon={<ArrowLeft size={16} />}
+            disabled={!scene || sceneAt <= 0}
+            title={sceneAt <= 0 ? "It is already first." : undefined}
+            onClick={() => {
+              setSceneMenu(false);
+              moveScene(-1);
+            }}
+          >
+            Move earlier
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
+            icon={<ArrowRight size={16} />}
+            disabled={!scene || sceneAt < 0 || sceneAt >= use.scenes.length - 1}
+            title={sceneAt >= 0 && sceneAt >= use.scenes.length - 1 ? "It is already last." : undefined}
+            onClick={() => {
+              setSceneMenu(false);
+              moveScene(1);
+            }}
+          >
+            Move later
+          </Button>
+          <Button
+            variant="ghost"
+            size="sm"
             icon={<Trash size={16} />}
             disabled={!scene || use.scenes.length <= 1}
             onClick={() => {
@@ -414,6 +458,7 @@ export function ScenesView() {
         onSet={use.setActive}
         onNew={() => newScene(false)}
         onJumpToNew={jumpToNotice}
+        onReorder={(order, options) => use.reorderScenes(order, options)}
       />
 
       <LightFeedContext.Provider value={feed}>

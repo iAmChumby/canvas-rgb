@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 // The Scenes page's data: the active scene, the lights no group holds, and every way to change
 // them.
@@ -27,13 +27,19 @@
 // reads a ref.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { dismissNotification, notify } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { getSnap, patchSnap, refreshLights, refreshScenes, useSnap } from "@/lib/store";
+import { moveEmptiedMessage } from "@/views/scenes/groupEdit";
 import type { Group } from "@/proto/Group";
 import type { GroupState } from "@/proto/GroupState";
+import type { GroupMoved } from "@/proto/GroupMoved";
 import type { LightView } from "@/proto/LightView";
+import type { Plays } from "@/proto/Plays";
 import type { Scene } from "@/proto/Scene";
+import type { SceneWrite } from "@/proto/SceneWrite";
+import type { ScenesResponse } from "@/proto/ScenesResponse";
 import type { Props } from "@/proto/props";
 import type { PropValue } from "@/proto/PropValue";
 
@@ -57,6 +63,35 @@ export const LIVE_FAILURES = 3;
 export const LIVE_READ_TIMEOUT_MS = 5000;
 /** What the page says after a 409. */
 export const CONFLICT_MESSAGE = "Changed in another window";
+/** What the page says when another window changed the scenes before a move could land. */
+export const NOTHING_MOVED = "Changed in another window. Nothing moved.";
+/** What the page says when another window changed the scenes before an undo could land. */
+export const NOTHING_UNDONE = "Changed in another window. Nothing undone.";
+/**
+ * How long a burst of key presses waits before the order goes to the daemon. A burst is one
+ * order and one write: the screen shows every press at once, the daemon hears one order.
+ */
+export const ORDER_COALESCE_MS = 250;
+/** What the undo step of a move is called. */
+export const MOVE_STEP_LABEL = "Move the group to another scene";
+/** What the undo step of a copy is called. */
+export const COPY_STEP_LABEL = "Copy the group to another scene";
+
+/**
+ * What the daemon says about a move that has not been made yet (#368).
+ *
+ * The daemon's own dry run is the answer: the page does not work the rules out a second time,
+ * so a move can never be allowed here and refused there.
+ */
+export type MoveCheck =
+  /** The answer is on its way. */
+  | { state: "pending" }
+  /** The daemon's answer: what the move would do. */
+  | { state: "answered"; answer: GroupMoved }
+  /** The daemon refused it, in its own words. */
+  | { state: "refused"; message: string }
+  /** The check could not be made: the daemon was not there, or it failed. */
+  | { state: "failed" };
 
 const EMPTY_SCENES: Scene[] = [];
 const EMPTY_LIGHTS: LightView[] = [];
@@ -110,6 +145,50 @@ function propText(value: PropValue): string {
       return unknown;
     }
   }
+}
+
+/** True when two groups play the same thing with the same values. */
+function samePlays(a: Plays, b: Plays): boolean {
+  if (a.type !== b.type) return false;
+  if (a.type === "off") return true;
+  if (a.type !== "effect" || b.type !== "effect") return false;
+  if (a.effect !== b.effect) return false;
+  // The props are compared by what they say, not by their key order: the daemon's own map has no
+  // order of its own.
+  for (const key of Object.keys(a.props)) {
+    const mine = a.props[key];
+    const theirs = b.props[key];
+    if (!mine || !theirs) return false;
+    if (propText(mine) !== propText(theirs)) return false;
+  }
+  return Object.keys(a.props).length === Object.keys(b.props).length;
+}
+
+/**
+ * True when two scenes hold the same groups, in the same order, with the same lights and the
+ * same effect values. The undo compares the scene the daemon has now with the one the move left:
+ * the same groups mean nothing else touched it, so the undo may write it back.
+ */
+function sameGroups(a: Group[], b: Group[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((group, i) => {
+    const other = b[i];
+    if (!other) return false;
+    if (group.id !== other.id || group.name !== other.name) return false;
+    if (group.mode !== other.mode || group.brightness !== other.brightness) return false;
+    if (group.members.length !== other.members.length) return false;
+    if (!group.members.every((m, j) => m === other.members[j])) return false;
+    return samePlays(group.plays, other.plays);
+  });
+}
+
+/**
+ * True when two orders name the same scenes in the same order. The order the daemon answers with
+ * is compared with the order this window shows, to know whether the daemon has the order on the
+ * screen.
+ */
+function sameOrder(a: string[], b: string[]): boolean {
+  return a.length === b.length && a.every((id, i) => id === b[i]);
 }
 
 /**
@@ -189,10 +268,13 @@ interface GroupLive {
 export interface Command {
   /** What the change was called. */
   label: string;
-  /** Puts the world back the way it was. */
-  undo: () => Promise<void>;
-  /** Does it again. */
-  redo: () => Promise<void>;
+  /**
+   * Puts the world back the way it was. `false` when it could not: the step is dropped and the
+   * page says why, so the undo stack never keeps a step that does nothing.
+   */
+  undo: () => Promise<boolean | void>;
+  /** Does it again. `false` when it could not. */
+  redo: () => Promise<boolean | void>;
 }
 
 /** One step of the undo history. */
@@ -229,6 +311,12 @@ interface View {
   error: string | null;
   canUndo: boolean;
   canRedo: boolean;
+  /**
+   * What the Undo would take back: the label of the top step of the history, or null when there
+   * is none. A toast that offers an Undo asks for this: the Undo is only the answer it means
+   * while the step it belongs to is still the top one.
+   */
+  undoLabel: string | null;
   /** The scene the history belongs to. */
   historyScene: string;
   live: Record<string, Live>;
@@ -240,6 +328,7 @@ const BLANK_VIEW: View = {
   error: null,
   canUndo: false,
   canRedo: false,
+  undoLabel: null,
   historyScene: "",
   live: {},
 };
@@ -270,10 +359,35 @@ export interface UseScene {
   remove(id: string): void;
   /** A scene's own name, whether or not it is the one playing. */
   renameScene(id: string, name: string): void;
+  /**
+   * Asks the daemon what a move would do, without writing anything (#368). The daemon's own
+   * dry run is the answer: the page does not work the rules out a second time.
+   */
+  dryRunMove(groupId: string, toSceneId: string, copy: boolean): Promise<MoveCheck>;
+  /**
+   * Moves or copies one group to another scene (#368). The daemon writes both scenes in one save
+   * and answers what it did; an Undo puts both scenes back. The answer is what the page says.
+   *
+   * `expected` names the revisions the move is made from: the ones a dry run answered with, so
+   * the move that follows a dry run carries the same ones.
+   */
+  moveGroup(
+    groupId: string,
+    toSceneId: string,
+    copy: boolean,
+    expected?: { from: number; to: number },
+  ): Promise<GroupMoved | null>;
+  /**
+   * Puts the scenes in another order (#371). The order shows at once; the daemon is told in one
+   * write. A burst of key presses is one order and one write (`coalesce`).
+   */
+  reorderScenes(order: string[], options?: { coalesce?: boolean }): void;
   undo(): void;
   redo(): void;
   canUndo: boolean;
   canRedo: boolean;
+  /** What the Undo would take back: the label of the top step of the history, or null. */
+  undoLabel: string | null;
   error: string | null;
 }
 
@@ -390,6 +504,31 @@ export function useScene(): UseScene {
   const liveBusy = useRef(0);
   /** The whole-scene writes that wait for the live writes to finish. */
   const liveWaiters = useRef<Array<() => void>>([]);
+  /** The sends of one group that are on their way: a move waits for them. */
+  const liveIdle = useRef(new Map<string, Array<() => void>>());
+  /** The writes that wait for one scene to be quiet (a move waits for the edit before it). */
+  const quiet = useRef(new Map<string, Array<() => void>>());
+  /** The order the page shows while a reorder of this window is on its way. */
+  const [localOrder, setLocalOrder] = useState<string[] | null>(null);
+  /** The same order, for the callbacks that run between renders. */
+  const localOrderRef = useRef<string[] | null>(null);
+  /** The order the daemon last confirmed: what a write names as the order it was made from. */
+  const knownOrder = useRef<string[]>([]);
+  /** The order writes go one after the other: the next one names the order the last one sent. */
+  const orderChain = useRef<Promise<void>>(Promise.resolve());
+  /**
+   * The message the last move left in the toast lane, and the undo step it belongs to. An Undo
+   * takes the top step of the history back, so the toast may only offer the Undo while the move is
+   * still on top: when it is not, the toast goes and the move is forgotten.
+   */
+  const lastMove = useRef<{ text: string; tone: "ok" | "warn"; label: string; id: string } | null>(null);
+  /**
+   * Whether the toast of the last move offers the Undo now. The toast is taken away when that
+   * changes, so a move is said once and a later change does not bring it back.
+   */
+  const undoOffered = useRef(false);
+  /** The timer that sends one order for a burst of key presses. */
+  const orderTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const mounted = useRef(false);
   // What the daemon last said, for the callbacks that run between renders.
   const known = useRef<{ server: Scene | null; activeId: string | null }>({ server: null, activeId: null });
@@ -411,6 +550,7 @@ export function useScene(): UseScene {
       error: error.current,
       canUndo: h.past.length > 0,
       canRedo: h.future.length > 0,
+      undoLabel: h.past.length > 0 ? (h.past[h.past.length - 1]?.label ?? null) : null,
       historyScene: h.sceneId,
       live: shown,
     });
@@ -452,6 +592,64 @@ export function useScene(): UseScene {
     [],
   );
 
+  /** Waits until one group has nothing left to send. */
+  const waitLiveGroup = useCallback(
+    (key: string) =>
+      new Promise<void>((resolve) => {
+        const list = liveIdle.current.get(key) ?? [];
+        list.push(resolve);
+        liveIdle.current.set(key, list);
+      }),
+    [],
+  );
+
+  /** Says that one group has nothing left to send: the waiters for it may go on. */
+  const settleLiveGroup = useCallback((key: string) => {
+    const list = liveIdle.current.get(key);
+    if (!list) return;
+    liveIdle.current.delete(key);
+    for (const resolve of list) resolve();
+  }, []);
+
+  /** Resolves when the scene has no whole-scene write on its way or waiting. */
+  const waitQuiet = useCallback(
+    (sceneId: string) =>
+      new Promise<void>((resolve) => {
+        if (!outgoing.current.has(sceneId)) {
+          resolve();
+          return;
+        }
+        const list = quiet.current.get(sceneId) ?? [];
+        list.push(resolve);
+        quiet.current.set(sceneId, list);
+      }),
+    [],
+  );
+
+  /** Says that a scene is quiet again: the write that was on its way has landed or failed. */
+  const settleQuiet = useCallback((sceneId: string) => {
+    const list = quiet.current.get(sceneId);
+    if (!list) return;
+    quiet.current.delete(sceneId);
+    for (const resolve of list) resolve();
+  }, []);
+
+  /**
+   * Puts the daemon's answer for several scenes into the snapshot, so the page shows it at once.
+   * A scene the answer is older than is left alone: a poll that landed in between must not take
+   * a newer scene back.
+   */
+  const adoptScenes = useCallback((scenes: Scene[]) => {
+    const current = getSnap().scenes;
+    if (!current) return;
+    const byId = new Map(current.scenes.map((s) => [s.id, s]));
+    for (const scene of scenes) {
+      const old = byId.get(scene.id);
+      if (!old || scene.rev >= old.rev) byId.set(scene.id, scene);
+    }
+    patchSnap({ scenes: { ...current, scenes: [...byId.values()] } });
+  }, []);
+
   /** The scene a whole-scene write sends: the draft with the live values on top. */
   const body = useCallback((scene: Scene): Scene => {
     const shown: Record<string, Live> = {};
@@ -472,6 +670,37 @@ export function useScene(): UseScene {
     }
     void sendLiveRef.current(liveKey(g.sceneId, g.groupId));
   }, []);
+
+  /**
+   * Sends the live values of one scene now, without the 60 ms wait, and waits until they have
+   * landed.
+   *
+   * A move carries the revision these writes leave, so it may not go before them: an edit made
+   * inside the throttle window would otherwise be sent to a scene that no longer holds the
+   * group, and the daemon would answer 404 and the edit would be lost.
+   */
+  const flushLiveScene = useCallback(
+    async (sceneId: string) => {
+      for (;;) {
+        const groups = [...live.current.values()].filter((g) => g.sceneId === sceneId);
+        const waiting = groups.filter(
+          (g) =>
+            g.sending ||
+            g.timer !== null ||
+            g.queued.props !== undefined ||
+            g.queued.brightness !== undefined,
+        );
+        if (waiting.length === 0) return;
+        // The sends that are on their way are waited for. The wait is booked before the values
+        // are sent, so an answer that lands at once is not missed.
+        const landed = waiting.map((g) => waitLiveGroup(liveKey(g.sceneId, g.groupId)));
+        // The values that wait for their turn go now, without the 60 ms wait.
+        for (const g of groups) flushLive(g);
+        await Promise.all(landed);
+      }
+    },
+    [flushLive, waitLiveGroup],
+  );
 
   useEffect(() => {
     mounted.current = true;
@@ -552,6 +781,7 @@ export function useScene(): UseScene {
             continue;
           }
           outgoing.current.delete(sceneId);
+          settleQuiet(sceneId);
           error.current = null;
           publish();
           return;
@@ -577,6 +807,7 @@ export function useScene(): UseScene {
             continue;
           }
           outgoing.current.delete(sceneId);
+          settleQuiet(sceneId);
           error.current = CONFLICT_MESSAGE;
           publish();
           return;
@@ -585,6 +816,7 @@ export function useScene(): UseScene {
         // undo is not a no-op.
         const dropped = (now?.changes ?? sentChanges).map((c) => c.id);
         outgoing.current.delete(sceneId);
+        settleQuiet(sceneId);
         history.current = {
           ...history.current,
           past: history.current.past.filter((e) => e.changeId === undefined || !dropped.includes(e.changeId)),
@@ -598,7 +830,7 @@ export function useScene(): UseScene {
       // A write that came while this loop was on its way goes now.
       if (outgoing.current.size > 0) void flush();
     }
-  }, [adoptScene, body, fail, publish, waitForLive]);
+  }, [adoptScene, body, fail, publish, settleQuiet, waitForLive]);
 
   /** Puts `next` on screen and on its way to the daemon. */
   const edit = useCallback(
@@ -657,7 +889,17 @@ export function useScene(): UseScene {
       // A change to the scenes themselves: it is put back by its own command. The active scene
       // may change under it, so the history keeps its steps.
       h.keep = true;
-      void previous.command.undo();
+      const command = previous.command;
+      // The command is waited for: a command that could not put the world back says so, and its
+      // step is dropped (the future forgets it), so the next Undo is the one before it.
+      void (async () => {
+        const done = await command.undo();
+        if (done === false) {
+          const now = history.current;
+          history.current = { ...now, future: now.future.filter((e) => e !== previous) };
+        }
+        publish();
+      })();
       publish();
       return;
     }
@@ -691,7 +933,15 @@ export function useScene(): UseScene {
     if (next.command) {
       // A change to the scenes themselves: it is done again by its own command.
       h.keep = true;
-      void next.command.redo();
+      const command = next.command;
+      void (async () => {
+        const done = await command.redo();
+        if (done === false) {
+          const now = history.current;
+          history.current = { ...now, past: now.past.filter((e) => e !== next) };
+        }
+        publish();
+      })();
       publish();
       return;
     }
@@ -849,6 +1099,7 @@ export function useScene(): UseScene {
       if (g.timer) return;
       if (g.queued.props === undefined && g.queued.brightness === undefined) {
         retireIfIdle(key, g);
+        settleLiveGroup(key);
         return;
       }
       if (writing.current) {
@@ -966,8 +1217,22 @@ export function useScene(): UseScene {
       // The values that came while this write was out go next, one write at a time.
       kickLive();
       retireIfIdle(key, g);
+      // Nothing of this group is left to send: whoever waits for it may go on.
+      if (!g.sending && !g.timer && g.queued.props === undefined && g.queued.brightness === undefined) {
+        settleLiveGroup(key);
+      }
     },
-    [adoptLive, afterLostAnswer, fail, knownRev, kickLive, liveConflict, publish, retireIfIdle],
+    [
+      adoptLive,
+      afterLostAnswer,
+      fail,
+      knownRev,
+      kickLive,
+      liveConflict,
+      publish,
+      retireIfIdle,
+      settleLiveGroup,
+    ],
   );
 
   useEffect(() => {
@@ -1162,10 +1427,390 @@ export function useScene(): UseScene {
     [pushCommand, putName, run, runAsync],
   );
 
+  /**
+   * Puts the scenes the daemon has back, after checking that nothing else touched them.
+   *
+   * The scenes are read again first: an undo that wrote a remembered rev would be refused by
+   * this window's own later edit, and one that wrote over another window's change would lose it.
+   * `write` is what goes back, `expect` is what the scene must hold now; when they differ, the
+   * undo says so and drops itself.
+   */
+  const restoreScenes = useCallback(
+    async (write: Scene[], expect: Scene[], ids: string[]): Promise<boolean> => {
+      let answer: ScenesResponse;
+      try {
+        answer = await api.scenes.list();
+      } catch (e) {
+        fail(messageOf(e));
+        return false;
+      }
+      const writes: SceneWrite[] = [];
+      for (const id of ids) {
+        const now = answer.scenes.find((s) => s.id === id);
+        const wanted = expect.find((s) => s.id === id);
+        const back = write.find((s) => s.id === id);
+        // A scene that is gone, or that another window changed since, is not written over. The
+        // name counts as part of the scene: an undo that wrote the old name back would take a
+        // rename another window made away.
+        if (!now || !wanted || !back || !sameGroups(now.groups, wanted.groups) || now.name !== wanted.name) {
+          fail(NOTHING_UNDONE);
+          return false;
+        }
+        writes.push({ scene: back, expected_rev: now.rev });
+      }
+      try {
+        const saved = await api.scenes.write({ scenes: writes });
+        adoptScenes(saved.scenes);
+        fail(null);
+        return true;
+      } catch (e) {
+        // A 409 means another window changed the scene; anything else is the daemon's own
+        // refusal. Both drop the undo and say what the daemon said.
+        if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_UNDONE);
+        else fail(messageOf(e));
+        return false;
+      } finally {
+        await refreshScenes();
+      }
+    },
+    [adoptScenes, fail],
+  );
+
+  /**
+   * Asks the daemon what a move would do, and writes nothing (#368).
+   *
+   * The daemon's own dry run is the answer: its rules, its refusals and its words. The page does
+   * not work them out a second time, so a move can never be allowed here and refused there.
+   */
+  const dryRunMove = useCallback(
+    async (groupId: string, toSceneId: string, copy: boolean): Promise<MoveCheck> => {
+      const fromId = known.current.activeId;
+      if (!fromId) return { state: "failed" };
+      // The live edits of this scene's groups go first: the answer must be about the scene as it
+      // will be, and the move that follows carries the revision they leave.
+      await flushLiveScene(fromId);
+      await waitQuiet(fromId);
+      await waitQuiet(toSceneId);
+      const fromRev = knownRev(fromId);
+      const toRev = knownRev(toSceneId);
+      if (fromRev === null || toRev === null) return { state: "failed" };
+      try {
+        const answer = await api.scenes.moveGroup(fromId, groupId, {
+          to: toSceneId,
+          copy,
+          expected_rev_from: fromRev,
+          expected_rev_to: toRev,
+          dry_run: true,
+        });
+        return { state: "answered", answer };
+      } catch (e) {
+        // The daemon's own refusal (422) is shown on the row, in its own words.
+        if (e instanceof ApiFailure && e.status === 422) {
+          return { state: "refused", message: e.message };
+        }
+        // Another window saved first: the scenes are read again, so a retry asks with the
+        // revision the daemon has now.
+        if (e instanceof ApiFailure && e.status === 409) await refreshScenes();
+        return { state: "failed" };
+      }
+    },
+    [flushLiveScene, knownRev, refreshScenes, waitQuiet],
+  );
+
+  /**
+   * Moves or copies one group to another scene (#368).
+   *
+   * The daemon's one route writes both scenes in one save and answers what it did: the scenes
+   * after, the scenes before, the lights it took and the groups it removed. The undo puts both
+   * scenes back through `PUT /api/v1/scenes`, after reading them again.
+   *
+   * `expected` names the revisions the move is made from: the ones a dry run answered with, so
+   * the move that follows a dry run carries the same ones.
+   */
+  const moveGroup = useCallback(
+    async (
+      groupId: string,
+      toSceneId: string,
+      copy: boolean,
+      expected?: { from: number; to: number },
+    ): Promise<GroupMoved | null> => {
+      const fromId = known.current.activeId;
+      if (!fromId) return null;
+      // The names the toast says: the group that goes and the scene it goes to. They are read
+      // before the move, because the move takes the group out of the scene it was in.
+      const held = getSnap().scenes?.scenes ?? [];
+      const groupName =
+        held.find((s) => s.id === fromId)?.groups.find((g) => g.id === groupId)?.name ?? "the group";
+      const sceneName = held.find((s) => s.id === toSceneId)?.name ?? "the scene";
+      // The live edits of this scene's groups go first: the move carries the revision they
+      // leave, and an edit sent after the move would go to a scene that no longer holds the
+      // group.
+      await flushLiveScene(fromId);
+      // A whole-scene write of either scene that is on its way goes first: the move carries the
+      // revision that write left.
+      await waitQuiet(fromId);
+      await waitQuiet(toSceneId);
+      const fromRev = expected?.from ?? knownRev(fromId);
+      const toRev = expected?.to ?? knownRev(toSceneId);
+      if (fromRev === null || toRev === null) {
+        fail("The scenes could not be read.");
+        return null;
+      }
+      let answer: GroupMoved;
+      try {
+        answer = await api.scenes.moveGroup(fromId, groupId, {
+          to: toSceneId,
+          copy,
+          expected_rev_from: fromRev,
+          expected_rev_to: toRev,
+        });
+      } catch (e) {
+        // Another window saved first: nothing moved, and the page says so.
+        if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_MOVED);
+        else fail(messageOf(e));
+        await refreshScenes();
+        return null;
+      }
+      adoptScenes(answer.scenes);
+      fail(null);
+      // The undo: the scenes the move left are read again and compared, and the ones before are
+      // written back. A copy leaves the source as it was, so the source is not written.
+      const ids = copy ? [toSceneId] : [fromId, toSceneId];
+      pushCommand(
+        {
+          label: copy ? COPY_STEP_LABEL : MOVE_STEP_LABEL,
+          undo: () => restoreScenes(answer.before, answer.scenes, ids),
+          redo: () => restoreScenes(answer.scenes, answer.before, ids),
+        },
+        false,
+      );
+      // The toast: what happened, and the Undo while the move is the top step of the history.
+      const emptied = moveEmptiedMessage(answer.emptied);
+      const first = `${copy ? "Copied" : "Moved"} ${groupName} to ${sceneName}.`;
+      const text = emptied ? `${first} ${emptied}` : first;
+      const tone = emptied ? "warn" : "ok";
+      const label = copy ? COPY_STEP_LABEL : MOVE_STEP_LABEL;
+      undoOffered.current = true;
+      // The toast's own id says which message it is: it is the one taken away when the move is
+      // no longer the top step of the history.
+      const id = notify(
+        text,
+        tone,
+        {
+          label: "Undo",
+          onClick: () => {
+            // The toast goes with its answer: it is not said again.
+            lastMove.current = null;
+            undoOffered.current = false;
+            undo();
+          },
+        },
+        // The reader takes the toast away: the move is forgotten, so no later change says it
+        // again.
+        { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
+      );
+      lastMove.current = { text, tone, label, id };
+      await refreshScenes();
+      return answer;
+    },
+    [
+      adoptScenes,
+      fail,
+      flushLiveScene,
+      knownRev,
+      pushCommand,
+      refreshScenes,
+      restoreScenes,
+      undo,
+      waitQuiet,
+    ],
+  );
+
+  /**
+   * The toast of the last move, and the Undo it offers.
+   *
+   * An Undo takes the top step of the history back, so the toast may only offer it while the move
+   * is the top step. When another change came after the move, the Undo it offers is not the one
+   * the page's Undo would take: the toast goes, and the move is forgotten, so it is never said
+   * again.
+   */
+  useEffect(() => {
+    const move = lastMove.current;
+    if (!move) return;
+    const top = view.undoLabel === move.label;
+    if (top === undoOffered.current) return;
+    undoOffered.current = top;
+    if (top) {
+      // The move is the top step of the history: the Undo it offers is the one the page's Undo
+      // takes, so the toast offers it.
+      notify(
+        move.text,
+        move.tone,
+        {
+          label: "Undo",
+          onClick: () => {
+            lastMove.current = null;
+            undoOffered.current = false;
+            undo();
+          },
+        },
+        // The reader takes the toast away: the move is forgotten, so no later change says it
+        // again.
+        { onClose: () => { lastMove.current = null; undoOffered.current = false; } },
+      );
+      return;
+    }
+    // The move is not the top step any more: its toast goes, and the move is forgotten, so it is
+    // never said again.
+    lastMove.current = null;
+    dismissNotification(move.id);
+  }, [undo, view.undoLabel]);
+
+  /**
+   * Shows an order of this window while it is on its way, and forgets it when it is gone. The ref
+   * keeps the same order for the callbacks that run between renders.
+   */
+  const showLocalOrder = useCallback((order: string[] | null) => {
+    localOrderRef.current = order;
+    setLocalOrder(order);
+  }, []);
+
+  /**
+   * The daemon is told the order of the scenes, with the order it last confirmed. A window that
+   * put the scenes in another order in between is refused, and nothing is written.
+   *
+   * The answer is the order the daemon has now: the known order follows it, so the next write
+   * names the order the daemon has and not the one this window had. `null` when the write did
+   * not go through.
+   */
+  const writeOrder = useCallback(
+    async (order: string[], expected: string[]): Promise<string[] | null> => {
+      try {
+        const answer = await api.scenes.write({ order, expected_order: expected });
+        adoptScenes(answer.scenes);
+        // The order the daemon has now: the next write names it.
+        const landed = answer.scenes.map((s) => s.id);
+        knownOrder.current = landed;
+        fail(null);
+        await refreshScenes();
+        return landed;
+      } catch (e) {
+        if (e instanceof ApiFailure && e.status === 409) fail(NOTHING_MOVED);
+        else fail(messageOf(e));
+        await refreshScenes();
+        return null;
+      }
+    },
+    [adoptScenes, fail],
+  );
+
+  /** The undo of an order: the old order goes back, with the new one as the order it was made from. */
+  const pushOrderCommand = useCallback(
+    (from: string[], to: string[]) => {
+      pushCommand(
+        {
+          label: "Put the scenes in another order",
+          undo: async () => {
+            showLocalOrder(from);
+            const landed = await writeOrder(from, to);
+            showLocalOrder(null);
+            return landed !== null;
+          },
+          redo: async () => {
+            showLocalOrder(to);
+            const landed = await writeOrder(to, from);
+            showLocalOrder(null);
+            return landed !== null;
+          },
+        },
+        false,
+      );
+    },
+    [pushCommand, showLocalOrder, writeOrder],
+  );
+
+  /**
+   * Puts the scenes in another order (#371).
+   *
+   * The order shows at once; the daemon is told in one write, with the order it last confirmed.
+   * A burst of key presses is one order and one write (`coalesce`), so the screen shows every
+   * press at once and the daemon hears one order.
+   *
+   * Two orders that come one after the other go one after the other as well: the second one is
+   * sent after the first has landed and names the order the first one sent. The daemon refuses
+   * a stale order, and the order this window sent is the one the daemon has.
+   */
+  const reorderScenes = useCallback(
+    (order: string[], options?: { coalesce?: boolean }) => {
+      if (knownOrder.current.length === 0 && (getSnap().scenes?.scenes.length ?? 0) === 0) return;
+      showLocalOrder(order);
+      const send = () => {
+        const run = async () => {
+          try {
+            const expected = knownOrder.current.length
+              ? knownOrder.current
+              : (getSnap().scenes?.scenes.map((s) => s.id) ?? []);
+            if (expected.length === 0) return;
+            const landed = await writeOrder(order, expected);
+            if (landed === null) {
+              showLocalOrder(null);
+              return;
+            }
+            pushOrderCommand(expected, order);
+            // The daemon's answer is the order it has now. When it carries the order this window
+            // showed, the strip follows the daemon again, so the order another window made shows
+            // as soon as it lands. The answer says so, not a read of the snapshot after the wait:
+            // that read can hold another window's order, and the local order would then stay for
+            // good. A newer order of this window is on its way: that one is shown until it lands.
+            const local = localOrderRef.current;
+            if (local && sameOrder(landed, local)) showLocalOrder(null);
+          } catch {
+            showLocalOrder(null);
+          }
+        };
+        orderChain.current = orderChain.current.then(run, run);
+      };
+      if (options?.coalesce) {
+        if (orderTimer.current) clearTimeout(orderTimer.current);
+        orderTimer.current = setTimeout(() => {
+          orderTimer.current = null;
+          send();
+        }, ORDER_COALESCE_MS);
+        return;
+      }
+      send();
+    },
+    [pushOrderCommand, showLocalOrder, writeOrder],
+  );
+
+  // The order the daemon last confirmed. While a reorder of this window is on its way the
+  // daemon's answer is still the old order: a write names the order it was made from, not the
+  // one on the screen.
+  useEffect(() => {
+    const order = scenesAnswer?.scenes.map((s) => s.id) ?? [];
+    if (order.length === 0 || localOrder) return;
+    knownOrder.current = order;
+  }, [scenesAnswer, localOrder]);
+
   // The scene on screen: what this window changed, else the newest the daemon has, with the
   // live values laid over the group they belong to.
   const shown = view.draft ?? newest(server, view.saved, activeId);
   const scene = useMemo(() => overlay(shown, view.live), [shown, view.live]);
+
+  /** The scenes as the page shows them: the daemon's order, or the page's own while a reorder is on its way. */
+  const scenes = useMemo(() => {
+    const all = scenesAnswer?.scenes ?? EMPTY_SCENES;
+    if (!localOrder) return all;
+    const byId = new Map(all.map((s) => [s.id, s]));
+    const ordered: Scene[] = [];
+    for (const id of localOrder) {
+      const scene = byId.get(id);
+      if (scene) ordered.push(scene);
+    }
+    // A scene this window has not seen yet (made elsewhere) keeps its place at the end.
+    for (const other of all) if (!localOrder.includes(other.id)) ordered.push(other);
+    return ordered;
+  }, [scenesAnswer, localOrder]);
 
   const unassigned = useMemo(() => {
     if (!lights) return EMPTY_LIGHTS;
@@ -1176,7 +1821,7 @@ export function useScene(): UseScene {
   const ownsHistory = view.historyScene === (activeId ?? "");
   return {
     scene,
-    scenes: scenesAnswer?.scenes ?? EMPTY_SCENES,
+    scenes,
     unassigned,
     states: scenesAnswer?.group_states ?? EMPTY_STATES,
     edit,
@@ -1186,10 +1831,14 @@ export function useScene(): UseScene {
     create,
     remove,
     renameScene,
+    dryRunMove,
+    moveGroup,
+    reorderScenes,
     undo,
     redo,
     canUndo: ownsHistory && view.canUndo,
     canRedo: ownsHistory && view.canRedo,
+    undoLabel: ownsHistory ? view.undoLabel : null,
     error: view.error,
   };
 }

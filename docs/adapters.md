@@ -120,7 +120,8 @@ The daemon builds its adapters in `crates/canvas-daemon/src/main.rs`, around lin
 prefix (`ROYUAN_PREFIX`). A second native LED device means extending `CompositeAdapter` in
 every call it routes. If OpenRGB also detects the device, its driver may break the device when
 frames stream to it. Then add its HID path to `NOT_DRIVEN` in
-`crates/canvas-daemon/src/lib.rs` (line 69), as the keyboard's `VID_3151&PID_4015` is.
+`crates/canvas-adapters/src/drive.rs`, as the keyboard's `VID_3151&PID_4015` is. The daemon and
+the service both ask `is_driven` before they write to a device (#393, #413).
 
 **A numeric display.** `main.rs` builds one `ChioneDisplay`, and the app's display hub takes one
 adapter (`state.rs`). A second display means changing the hub.
@@ -509,6 +510,7 @@ what it did, because the adapter may have to hold the last colour instead.
 6. Add the write path behind the gate. Refuse unknown keys and out-of-range values before a send.
 7. Add `pub mod` in `crates/canvas-adapters/src/lib.rs`, and register the adapter in `main.rs`,
    plus `composite.rs` or `peripherals.rs` as section 4 says.
-8. If OpenRGB also drives the device, add its HID path to `NOT_DRIVEN`.
+8. If OpenRGB also drives the device, add its HID path to `NOT_DRIVEN`
+   (`crates/canvas-adapters/src/drive.rs`).
 9. Add a `NOTICE` entry and a `docs/thanks.md` paragraph for any protocol you learned from others.
 10. Confirm the editor shows the new device's schema, with screenshots at 1440 and 390.

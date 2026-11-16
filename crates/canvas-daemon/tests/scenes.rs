@@ -3788,3 +3788,254 @@ mod scene_ops {
         assert_eq!(status, StatusCode::OK, "{answer}");
     }
 }
+
+// ---------------------------------------------------------------- group order is display order (#384)
+
+/// The order a scene's groups are listed in is display order only (#384). A reorder of the playing
+/// scene builds no effect and hands the engine nothing: every group keeps the effect it runs, so
+/// the lights never restart. The saved order is the new one, and every group's report is the same,
+/// by id.
+#[tokio::test]
+async fn reordering_the_groups_of_the_playing_scene_rebuilds_nothing() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two groups once");
+    let path = route(routes::SCENE, &[("id", "main")]);
+    let states = |body: &serde_json::Value| {
+        let list: ScenesResponse = serde_json::from_value(body.clone()).unwrap();
+        let mut states: Vec<(String, Option<String>)> =
+            list.group_states.iter().map(|g| (g.id.clone(), g.failed.clone())).collect();
+        states.sort();
+        states
+    };
+    let before_states = states(&send(&rig, "GET", routes::SCENES, None).await.1);
+
+    // `right` goes above `left`: the same two groups, in another order.
+    let mut scene = stored(&rig, "main").await;
+    scene.groups.reverse();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(rig.app.scene.builds(), built, "a reorder builds no effect, so no light restarts");
+
+    let now = stored(&rig, "main").await;
+    assert_eq!(
+        now.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["right", "left"],
+        "the saved order is the new one"
+    );
+    assert_eq!(now.rev, 2, "the save landed");
+    shows(&rig.a, rgb(RED), "the left group still plays its own effect").await;
+    shows(&rig.b, rgb(BLUE), "the right group still plays its own effect").await;
+    assert_eq!(
+        states(&send(&rig, "GET", routes::SCENES, None).await.1),
+        before_states,
+        "every group's report is the same, by id"
+    );
+    let (status, body) = send(&rig, "GET", routes::SCENES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list: ScenesResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        list.group_states.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["right", "left"],
+        "the rows are handed over in the new order, which is display order"
+    );
+
+    // A save after the reorder pairs the groups by id too: a value change on one of them builds
+    // nothing, whatever place it holds now.
+    let path = route(routes::GROUP_PROPS, &[("id", "main"), ("group", "left")]);
+    let (status, answer) = send(&rig, "PATCH", &path, Some(serde_json::to_value(color(GREEN)).unwrap())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(rig.app.scene.builds(), built, "the group is paired by id, not by place");
+    shows(&rig.a, rgb(GREEN), "the left group took the new value").await;
+    shows(&rig.b, rgb(BLUE), "the right group was not touched").await;
+}
+
+/// Which groups of a scene over the HTML limit run is keyed on their ids, not their place (#384).
+/// A full apply — a device list, a pattern change, a takeover's end — keeps the groups the first
+/// build kept on, whatever order the scene's rows are in, so the dark group never moves because a
+/// row moved. The first build seeds the choice from the saved order, which is what the scene did
+/// before this change (and an over-limit scene cannot be reordered through the API at all:
+/// `check_saveable` refuses a save of one, #370).
+#[tokio::test]
+async fn a_scene_over_the_html_limit_keeps_the_same_groups_on_whatever_order_it_is_in() {
+    let rig = rig_loaded(&three_html_scenes(), &[]).await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the first two runtimes");
+    let dark = |rig: &Rig| rig.app.scene.failures();
+    assert_eq!(
+        dark(&rig).get("three").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the third in the saved order is the dark one"
+    );
+
+    // The scene's rows are put in the order three, one, two: what a saved reorder leaves behind.
+    {
+        let mut store = rig.app.store.write().await;
+        store.scenes.scenes[0].groups.rotate_left(2);
+    }
+    canvas_daemon::scenes::apply_active(&rig.app, false).await;
+    let failures = dark(&rig);
+    assert_eq!(failures.len(), 1, "still one dark group: {failures:?}");
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the full apply kept the same groups on: {failures:?}"
+    );
+    assert_eq!(
+        rig.app.scene.builds(),
+        built + 2,
+        "the two kept groups were built again, the third not"
+    );
+}
+
+/// A scene saved before this change loads exactly as it did (#384): the groups that run are the
+/// first two in the saved order, even where their ids would sort another way, because the first
+/// build of the scene seeds the choice from the file.
+#[tokio::test]
+async fn a_scene_saved_before_this_change_loads_with_the_same_groups_on() {
+    // Ids sort alpha, middle, zebra; the file order is zebra, alpha, middle.
+    let written = ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![Scene {
+            id: "main".into(),
+            name: "Main".into(),
+            rev: 1,
+            groups: vec![
+                group("zebra", &["fake:a#z0"], "html:mine", Props::new()),
+                group("alpha", &["fake:b#z0"], "html:audio", Props::new()),
+                group("middle", &["fake:c#z0"], "html:more", Props::new()),
+            ],
+        }],
+    };
+    let rig = rig_loaded(&written, &[]).await;
+    assert_eq!(rig.app.scene.builds(), 2, "the first two in the saved order were built");
+    let failures = rig.app.scene.failures();
+    assert_eq!(failures.len(), 1, "one group is over the limit: {failures:?}");
+    assert_eq!(
+        failures.get("middle").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the third in the saved order is the dark one, as it was before: {failures:?}"
+    );
+    // The rows keep the file's order, so the editor's row index — the accent it takes (#384, step
+    // 2) — is what it was before this change.
+    let (status, body) = send(&rig, "GET", routes::SCENES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list: ScenesResponse = serde_json::from_value(body).unwrap();
+    assert_eq!(
+        list.group_states.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["zebra", "alpha", "middle"],
+        "the saved order is the order the editor is handed, as before"
+    );
+}
+
+/// One save that reorders the groups and changes one group's effect does both: the groups are
+/// paired by id, so only the group whose effect changed is built, and the row that moved keeps
+/// what it plays (#384). A pairing by place would have handed the untouched group the other's
+/// values, or built both.
+#[tokio::test]
+async fn a_reorder_and_one_group_s_effect_change_in_one_save_builds_that_group_only() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two groups once");
+
+    // `right` goes above `left`, and `left` takes another effect: one PUT does both.
+    let mut scene = stored(&rig, "main").await;
+    scene.groups.reverse();
+    scene.groups[1].plays = Plays::Effect { effect: "white".into(), props: Props::new() };
+    let path = route(routes::SCENE, &[("id", "main")]);
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.builds(),
+        built + 1,
+        "exactly the group whose effect changed was built, though both rows moved"
+    );
+
+    // The changed group plays the new effect (a flat white, no colour of its own), and the one
+    // that only moved keeps its own (blue): a pairing by place would have swapped the two.
+    let start = Instant::now();
+    let mut white = None;
+    while start.elapsed() < Duration::from_secs(20) {
+        if let Some(frame) = rig.a.last() {
+            let flat = frame.len() == LEDS as usize && frame.iter().all(|c| *c == frame[0]);
+            if flat && frame[0] != rgb(RED) && frame[0] != rgb(BLUE) {
+                white = frame.first().copied();
+                break;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        white.is_some(),
+        "the left group took its new effect; last frame {:?}",
+        rig.a.last().map(|f| f[0])
+    );
+    shows(&rig.b, rgb(BLUE), "the group that only moved kept its own effect").await;
+    let now = stored(&rig, "main").await;
+    assert_eq!(
+        now.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["right", "left"],
+        "the saved order is the new one, and the change is in the same scene"
+    );
+}
+
+/// Removing one group and adding another with a new id is a change of the scene's shape: the
+/// engine takes the whole scene again, so every effect is built, and the new group plays (#384).
+#[tokio::test]
+async fn a_group_removed_and_another_added_in_one_save_takes_the_whole_scene_again() {
+    let rig = rig().await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two groups once");
+
+    let mut scene = stored(&rig, "main").await;
+    scene.groups.retain(|g| g.id != "right");
+    scene.groups.push(group("new", &["fake:b#z0"], "solid", color(GREEN)));
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(
+        rig.app.scene.builds(),
+        built + 2,
+        "a group added and one removed is a change of shape: the whole scene is built again"
+    );
+    shows(&rig.a, rgb(RED), "the group that stayed still plays its own effect").await;
+    shows(&rig.b, rgb(GREEN), "the new group plays").await;
+    let now = stored(&rig, "main").await;
+    assert_eq!(
+        now.groups.iter().map(|g| g.id.as_str()).collect::<Vec<_>>(),
+        ["left", "new"],
+        "the scene holds the group that stayed and the one that was added"
+    );
+}
+
+/// A deleted scene leaves no record of the HTML runtimes it kept: `html_kept` is keyed by scene id,
+/// and nothing else names a deleted scene (#418 review, NIT 2).
+#[tokio::test]
+async fn deleting_a_scene_over_the_html_limit_forgets_the_groups_it_kept() {
+    let mut written = three_html_scenes();
+    written.scenes.push(Scene {
+        id: "other".into(),
+        name: "Other".into(),
+        rev: 1,
+        groups: vec![group("all", &["fake:a#z0"], "html:mine", Props::new())],
+    });
+    let rig = rig_loaded(&written, &[]).await;
+    assert_eq!(rig.app.scene.html_kept("main").len(), 2, "the first build kept two groups on");
+    assert!(rig.app.scene.html_kept("other").is_empty(), "a scene under the limit keeps nothing");
+
+    // `other` plays, so `main` can be deleted; what `main` kept is still remembered until then.
+    let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(rig.app.scene.html_kept("main").len(), 2, "another scene's apply left it alone");
+
+    let (status, answer) = send(&rig, "DELETE", &route(routes::SCENE, &[("id", "main")]), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert!(
+        rig.app.scene.html_kept("main").is_empty(),
+        "a deleted scene keeps no record: {:?}",
+        rig.app.scene.html_kept("main")
+    );
+}

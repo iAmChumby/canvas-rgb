@@ -156,10 +156,14 @@ function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, 
     create: spy("create"),
     remove: spy("remove"),
     renameScene: spy("renameScene"),
+    dryRunMove: spy("dryRunMove") as unknown as UseScene["dryRunMove"],
+    moveGroup: spy("moveGroup") as unknown as UseScene["moveGroup"],
+    reorderScenes: spy("reorderScenes"),
     undo: spy("undo"),
     redo: spy("redo"),
     canUndo: false,
     canRedo: false,
+    undoLabel: null,
     error: null,
   };
   return Object.assign({ ...base, ...over }, { calls });
@@ -239,6 +243,33 @@ describe("the Scenes page", () => {
     mount(use);
     fireEvent.click(screen.getByRole("button", { name: "Evening" }));
     expect(use.calls.setActive).toEqual([["evening"]]);
+  });
+
+  it("the scene menu has Move earlier and Move later, and they are disabled at an end", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByTestId("scene-menu"));
+    const earlier = screen.getByRole("button", { name: /Move earlier/ });
+    const later = screen.getByRole("button", { name: /Move later/ });
+    // The scene that plays is the first one: it cannot go earlier.
+    expect((earlier as HTMLButtonElement).disabled).toBe(true);
+    expect(earlier.getAttribute("title")).toBe("It is already first.");
+    expect((later as HTMLButtonElement).disabled).toBe(false);
+  });
+
+  it("Move later puts the scene one place later", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.click(screen.getByTestId("scene-menu"));
+    fireEvent.click(screen.getByRole("button", { name: /Move later/ }));
+    expect(use.calls.reorderScenes).toEqual([[["focus", "gaming", "evening"]]]);
+  });
+
+  it("the arrow keys on a scene key put the scenes in another order", () => {
+    const use = fake();
+    mount(use);
+    fireEvent.keyDown(screen.getByRole("button", { name: "Evening" }), { key: "ArrowLeft" });
+    expect(use.calls.reorderScenes).toEqual([[["gaming", "evening", "focus"], { coalesce: true }]]);
   });
 
   it("a failed group shows the daemon's own words when its effect is installed", () => {

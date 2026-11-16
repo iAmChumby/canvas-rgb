@@ -58,7 +58,11 @@ import { PERIPHERALS, type DemoPeripheral } from "@/lib/peripheralFixtures";
 import type { Status } from "@/proto/Status";
 import type { Scene } from "@/proto/Scene";
 import type { Group } from "@/proto/Group";
+import type { GroupMove } from "@/proto/GroupMove";
+import type { GroupMoved } from "@/proto/GroupMoved";
+import type { GroupTaken } from "@/proto/GroupTaken";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { ScenesWrite } from "@/proto/ScenesWrite";
 import type { ScenePut } from "@/proto/ScenePut";
 import type { SceneCreate } from "@/proto/SceneCreate";
 import type { LightView } from "@/proto/LightView";
@@ -144,6 +148,18 @@ function htmlRuntimesOf(s: DemoState, effect: string | null): number {
   if (effect.startsWith(HTML_ID_PREFIX)) return 1;
   const stack = s.stacks[effect];
   return stack ? stackHtmlSlots(stack, s.effects) : 0;
+}
+
+/**
+ * The HTML runtimes a scene starts, by the daemon's own count (`html_runtime_count` in
+ * `crates/canvas-daemon/src/scenes.rs`): one for an `html:` group, and one for each HTML layer or
+ * mask of a stack. The limit counts these, not groups.
+ */
+function sceneHtmlRuntimes(s: DemoState, scene: Scene): number {
+  return scene.groups.reduce(
+    (n, group) => n + htmlRuntimesOf(s, group.plays.type === "effect" ? group.plays.effect : null),
+    0,
+  );
 }
 /** The daemon's sentence when a pattern's kind has nothing plugged in (0.16.0). */
 const NO_DEVICE_OF_KIND = "no device of this kind is connected";
@@ -955,6 +971,139 @@ function checkScene(s: DemoState, scene: Scene): void {
 
 let demoSceneCounter = 0;
 
+/**
+ * An id no group of `taken` holds: the base when it is free, else the base with a number on the
+ * end (`fresh_id` in the daemon).
+ */
+function freshGroupId(base: string, taken: string[]): string {
+  const held = new Set(taken);
+  if (!held.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const id = `${base}-${n}`;
+    if (!held.has(id)) return id;
+  }
+}
+
+/**
+ * The daemon's move route in the demo (#368): the same rules and the same answer. The group's
+ * lights are taken out of the target's other groups, a group left with no light goes, the group
+ * lands at the end of the target, and a copy always gets a fresh id. A dry run answers the same
+ * way and saves nothing.
+ */
+function moveGroupRoute(s: DemoState, fromId: string, groupId: string, body: GroupMove): GroupMoved {
+  const from = sceneOrNotFound(s, fromId);
+  const to = sceneOrNotFound(s, body.to);
+  if (from.id === to.id) fail(422, "validation", "A group goes to another scene.");
+  if (from.rev !== body.expected_rev_from) {
+    fail(409, "conflict", `scene ${from.name} changed in another window (it is at revision ${from.rev})`);
+  }
+  if (to.rev !== body.expected_rev_to) {
+    fail(409, "conflict", `scene ${to.name} changed in another window (it is at revision ${to.rev})`);
+  }
+  const moving = from.groups.find((g) => g.id === groupId);
+  if (!moving) fail(404, "not_found", `no group ${groupId} in scene ${from.name}`);
+
+  const taken: GroupTaken[] = [];
+  const emptied: string[] = [];
+  const kept: Group[] = [];
+  for (const other of to.groups) {
+    const gone = other.members.filter((m) => moving.members.includes(m));
+    if (gone.length === 0) {
+      kept.push(structuredClone(other));
+      continue;
+    }
+    taken.push({ group_id: other.id, group_name: other.name, lights: gone });
+    const left = other.members.filter((m) => !moving.members.includes(m));
+    if (left.length === 0) emptied.push(other.name);
+    else kept.push({ ...structuredClone(other), members: left });
+  }
+  // The id: a move keeps its own when the target is free of it; a copy always mints one that
+  // neither scene holds.
+  const held = body.copy
+    ? [...kept.map((g) => g.id), ...from.groups.map((g) => g.id)]
+    : kept.map((g) => g.id);
+  const id = freshGroupId(moving.id, held);
+  kept.push({ ...structuredClone(moving), id });
+
+  const toAfter: Scene = { ...structuredClone(to), rev: to.rev + 1, groups: kept };
+  const fromAfter: Scene = body.copy
+    ? structuredClone(from)
+    : {
+        ...structuredClone(from),
+        rev: from.rev + 1,
+        groups: from.groups.filter((g) => g.id !== groupId).map((g) => structuredClone(g)),
+      };
+  const answer: GroupMoved = {
+    group_id: id,
+    saved: !body.dry_run,
+    scenes: [fromAfter, toAfter],
+    before: [structuredClone(from), structuredClone(to)],
+    taken,
+    emptied,
+  };
+  // Every scene that would be written passes the daemon's own checks before anything is
+  // written, a dry run included: the HTML limit is the daemon's check (`check_html_limit` in
+  // `crates/canvas-daemon/src/scenes.rs`), and its sentence is what the page shows on the row it
+  // refuses. The daemon's sentence names no scene here: `check_saveable` gives it plain.
+  if (!body.copy) {
+    const count = sceneHtmlRuntimes(s, fromAfter);
+    if (count > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(count));
+  }
+  const toCount = sceneHtmlRuntimes(s, toAfter);
+  if (toCount > SCENE_HTML_MAX) fail(422, "validation", htmlLimitSentence(toCount));
+  if (body.dry_run) return answer;
+  // The write: both scenes land, as the daemon's one save does.
+  s.scenes[s.scenes.indexOf(from)] = fromAfter;
+  s.scenes[s.scenes.indexOf(to)] = toAfter;
+  return answer;
+}
+
+/**
+ * The daemon's whole-list write in the demo (#368 undo, #371 order): the order of the scene bar
+ * and/or whole scenes, all checked before anything is written.
+ */
+function writeScenesRoute(s: DemoState, body: ScenesWrite): ScenesResponse {
+  const ids = s.scenes.map((x) => x.id);
+  // The shape first: every scene named once, and an order that names every scene once.
+  const seen = new Set<string>();
+  for (const item of body.scenes ?? []) {
+    if (!ids.includes(item.scene.id)) {
+      fail(422, "validation", `there is no scene with the id ${item.scene.id}`);
+    }
+    if (seen.has(item.scene.id)) fail(422, "validation", `the scene ${item.scene.id} is named twice`);
+    seen.add(item.scene.id);
+  }
+  if (body.order) {
+    const named = [...body.order].sort().join("|");
+    if (named !== [...ids].sort().join("|")) {
+      fail(422, "validation", "The order must name every scene once.");
+    }
+  }
+  // Then the staleness of every revision and of the order.
+  for (const item of body.scenes ?? []) {
+    const now = s.scenes.find((x) => x.id === item.scene.id);
+    if (now && now.rev !== item.expected_rev) {
+      fail(409, "conflict", `scene ${now.name} changed in another window (it is at revision ${now.rev})`);
+    }
+  }
+  if (body.expected_order && body.expected_order.join("|") !== ids.join("|")) {
+    fail(409, "conflict", "the scenes were put in another order in another window");
+  }
+  // The write: the scenes land at the rev they are made from plus one.
+  for (const item of body.scenes ?? []) {
+    const at = s.scenes.findIndex((x) => x.id === item.scene.id);
+    const saved: Scene = { ...structuredClone(item.scene), rev: s.scenes[at]!.rev + 1 };
+    checkScene(s, saved);
+    s.scenes[at] = saved;
+  }
+  if (body.order && body.order.join("|") !== ids.join("|")) {
+    s.scenes = body.order
+      .map((id) => s.scenes.find((x) => x.id === id))
+      .filter((x): x is Scene => x !== undefined);
+  }
+  return scenesAnswer(s);
+}
+
 function createScene(s: DemoState, body: SceneCreate): Scene {
   const name = (body.name ?? "").trim();
   if (!name) fail(422, "validation", "a scene needs a name");
@@ -988,6 +1137,7 @@ function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown)
   if (seg.length === 1) {
     if (method === "GET") return scenesAnswer(s);
     if (method === "POST") return createScene(s, body as SceneCreate);
+    if (method === "PUT") return writeScenesRoute(s, body as ScenesWrite);
     return bad();
   }
   if (seg[1] === "active") {
@@ -1022,6 +1172,9 @@ function scenesRoute(s: DemoState, method: string, seg: string[], body: unknown)
   if (seg[2] === "groups" && seg.length === 5) {
     const group = scene.groups.find((g) => g.id === seg[3]);
     if (!group) fail(404, "not_found", `no group ${seg[3]} in scene ${scene.name}`);
+    if (seg[4] === "move" && method === "POST") {
+      return moveGroupRoute(s, id, seg[3]!, body as GroupMove);
+    }
     if (seg[4] === "props" && method === "PATCH") {
       if (group.plays.type !== "effect") fail(422, "validation", `group ${group.name} plays nothing`);
       group.plays = { ...group.plays, props: { ...group.plays.props, ...(body as Props) } };
