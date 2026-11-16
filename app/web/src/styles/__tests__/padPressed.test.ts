@@ -110,7 +110,7 @@ describe("the plan's numbers on a phone", () => {
     expect(block).toMatch(/\.pad-print \{\s*font-size: 16px;/);
     // Nothing that places a box or a coordinate moves, so no panel can shift.
     const declared = [...block.matchAll(/^\s+([a-z-]+):/gm)].map((m) => m[1]);
-    expect(new Set(declared)).toEqual(new Set(["font-size", "min-height"]));
+    expect(new Set(declared)).toEqual(new Set(["font-size"]));
   });
 
   it("leaves the stick numbers as page text at the floor", () => {
@@ -135,6 +135,9 @@ describe("the plan's numbers on a phone", () => {
   });
 
   it("holds three lines of the strip in every state, so the note cannot move a panel", () => {
-    expect(narrowBlock()).toMatch(/\.pad-state \{\s*min-height:/);
+    const at = css.indexOf("@media (max-width: 620px)");
+    expect(at).toBeGreaterThan(-1);
+    const end = css.indexOf("\n}", at);
+    expect(css.slice(at, end)).toMatch(/\.pad-state \{\s*min-height:/);
   });
 });

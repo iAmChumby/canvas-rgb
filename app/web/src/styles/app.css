@@ -6894,9 +6894,13 @@ button.chip:hover {
   .pad-print {
     font-size: 16px;
   }
+}
 
-  /* Here the note under the state's words takes a line of its own and can wrap to a second,
-     so three lines are held in every state: the strip is the same height in all of them. */
+/*
+ * The second line can wrap to two lines at a phone's width, so three lines are held in every
+ * state here: the strip is the same height in all of them, and no panel below it moves.
+ */
+@media (max-width: 620px) {
   .pad-state {
     min-height: calc(var(--t14) * 3 * 1.45);
   }
