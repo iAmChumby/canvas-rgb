@@ -118,7 +118,8 @@ export interface ChainSetup {
   markEmpty(): Promise<boolean>;
   later(): void;
   error: string | null;
-  retry(): void;
+  /** Sends again what failed: a commit, the empty call, or a whole new session. One call at a time. */
+  retry(): Promise<void>;
   /** The slider reached the header's own maximum and the header goes on past it. */
   capped: boolean;
   /** `saved` after a commit, `empty` after the header was marked empty. */
@@ -248,6 +249,10 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
   const opened = useRef(false);
   /** True while the empty call is out: a second press sends nothing. */
   const emptying = useRef(false);
+  /** True while the commit is out: the Save key and the error banner's Retry cannot both land. */
+  const confirming = useRef(false);
+  /** True while a Retry is out, whatever it sends: a second press of the same key is dropped. */
+  const retrying = useRef(false);
   /** What a Start is for, as `begin` reads it after the daemon has answered. */
   const intentRef = useRef<ChainIntent>("setup");
   /** When the last light call went, and the trailing call waiting for its window. */
@@ -383,6 +388,24 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       apply({ step: "done" }, { send: false });
       return true;
     } catch (e) {
+      if (e instanceof ApiFailure && e.status === 409) {
+        // The daemon has let the session go (its 6 s timeout, or another window): the empty write
+        // cannot be sent on it again. The flow ends on the error screen and Retry opens a new
+        // session, as a stale commit does. The introduction holds a session it never lights (its
+        // screen is the same one orange LED, drawn by the previous step), so nothing here can keep
+        // a timeout from happening; this branch is the way out of it.
+        finished.current = true;
+        session.current = null;
+        stopTrailing();
+        failure.current = "stale";
+        // Retry starts a new session, and that session is a setup: the empty write the owner asked
+        // for was never accepted, and repeating a write that keeps them dark is theirs to ask again.
+        intentRef.current = "setup";
+        setIntent("setup");
+        setError(messageOf(e));
+        apply({ step: "error" }, { send: false });
+        return false;
+      }
       // The header stays as it was: the screen the key was pressed on shows the daemon's words and
       // Retry, and the session stays open. "Nothing is plugged in here" was never shown a light, so
       // it goes back to the introduction; the checklist would advise about a light nobody saw.
@@ -603,7 +626,10 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
 
   const confirm = useCallback(async () => {
     const id = session.current;
-    if (id === null || finished.current) return;
+    // A ref, not state: the Save key and the error banner's Retry can both be pressed inside one
+    // tick, where neither has rendered its busy state yet, and the daemon must see one commit.
+    if (id === null || finished.current || confirming.current) return;
+    confirming.current = true;
     failure.current = null;
     setError(null);
     const at = live.current;
@@ -645,18 +671,28 @@ export function useChainSetup(chain: ChainView, intro: IntroKind = "none"): Chai
       // The step stays, and so does the session: the daemon keeps it open for a retry.
       failure.current = "commit";
       setError(messageOf(e));
+    } finally {
+      confirming.current = false;
     }
   }, [apply, device, stopTrailing, zone]);
 
-  const retry = useCallback(() => {
-    if (failure.current === "commit") void confirm();
-    else if (failure.current === "empty") void markEmpty();
-    else {
-      // A new session: the old one is gone (a failed start, or the daemon let it go).
-      finished.current = false;
-      session.current = null;
-      apply({ step: "starting" }, { send: false });
-      void begin();
+  const retry = useCallback(async () => {
+    // One retry at a time: the banner and the error screen both offer the key, and two presses in
+    // one tick would otherwise open two sessions or send two commits.
+    if (retrying.current) return;
+    retrying.current = true;
+    try {
+      if (failure.current === "commit") await confirm();
+      else if (failure.current === "empty") await markEmpty();
+      else {
+        // A new session: the old one is gone (a failed start, or the daemon let it go).
+        finished.current = false;
+        session.current = null;
+        apply({ step: "starting" }, { send: false });
+        await begin();
+      }
+    } finally {
+      retrying.current = false;
     }
   }, [apply, begin, confirm, markEmpty]);
 
