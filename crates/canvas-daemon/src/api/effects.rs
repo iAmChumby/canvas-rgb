@@ -76,7 +76,7 @@ fn layer_schema(user: &UserEffects, id: &str) -> Option<PropertySchema> {
     find_among(&all, id)
 }
 
-/// The user effect files that did not parse, with the parser's message.
+/// The user effect files that did not load, with why: a parse error or a load timeout.
 fn failed_effects(user: &UserEffects) -> Vec<FailedEffect> {
     user.failures()
         .into_iter()

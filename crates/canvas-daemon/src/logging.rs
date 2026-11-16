@@ -11,6 +11,15 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+/// The daemon's own log target: the name a `RUST_LOG` filter says for the daemon's lines
+/// (`RUST_LOG=canvas_rgbd=info`). It is spelled here and nowhere else.
+///
+/// A line that lived in the `canvas-rgbd` binary and moved into this library keeps it by
+/// passing `target: LOG_TARGET`, so it goes on answering the same filter instead of the
+/// module target it landed in (`canvas_daemon::device_sync` and the like), which a narrowed
+/// `RUST_LOG` drops (#87, #446). The default filter below names it too.
+pub const LOG_TARGET: &str = "canvas_rgbd";
+
 /// How long a day's log file may grow before the daemon stops writing to it.
 pub const MAX_BYTES_PER_DAY: u64 = canvas_proto::consts::LOG_MAX_BYTES_PER_DAY;
 
@@ -213,7 +222,7 @@ pub fn init(name: &str) -> std::io::Result<()> {
     *DIRECT_TARGET.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((dir.clone(), name.to_string()));
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("canvas_daemon=info,canvas_rgbd=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new(format!("canvas_daemon=info,{LOG_TARGET}=info,warn")));
 
     // `try_init` fails when a subscriber is already installed (which happens in tests).
     let subscriber = tracing_subscriber::registry()
@@ -538,6 +547,110 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].contains("WARN") && lines[0].contains("0 devices") && lines[0].contains("nothing was written"), "{text}");
         assert!(lines[1].contains("INFO") && lines[1].contains("2 devices"), "{text}");
+    }
+
+    /// Every log line that lived in the `canvas-rgbd` binary before it moved into this library,
+    /// with the file it lives in now and the commit that moved it (#446). A line that moved keeps
+    /// `target: LOG_TARGET`, or a narrowed `RUST_LOG=canvas_rgbd=...` drops it (#87).
+    const MOVED_FROM_THE_BINARY: [(&str, &str, &str); 5] = [
+        ("device_sync.rs", "78eeb8bb", "this device is never driven; it gets no frames"),
+        ("device_sync.rs", "78eeb8bb", "device gone; its frame sink is removed"),
+        ("device_sync.rs", "78eeb8bb", "device frame sink added"),
+        ("scenes.rs", "9104caa8", "the active scene was restored"),
+        ("scenes.rs", "9104caa8", "the user effect file is missing; install it to run this effect"),
+    ];
+
+    /// Every `.rs` file under this crate's `src`, keyed by its path inside `src` (`scenes.rs`,
+    /// `api/scenes.rs`), with its text.
+    fn source_files() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, root: &std::path::Path, into: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("the source folder is readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, into);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("a source file is readable");
+                    let name = path.strip_prefix(root).expect("under src").to_string_lossy().replace('\\', "/");
+                    into.push((name, text));
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files);
+        files
+    }
+
+    /// The line `offset` falls on, 1-based.
+    fn line_of(source: &str, offset: usize) -> usize {
+        source[..offset].matches('\n').count() + 1
+    }
+
+    /// The `tracing::...!` call that holds `offset`, from `tracing::` to its closing `)`.
+    fn log_call_around(source: &str, offset: usize) -> Option<&str> {
+        let start = source[..offset].rfind("tracing::")?;
+        let open = start + source[start..].find('(')?;
+        let mut depth = 0usize;
+        for (i, c) in source[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[start..open + i + 1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// #446: a line that came from the `canvas-rgbd` binary logs under the daemon's target, so the
+    /// filter that names the binary still catches it. The five un-drivable lines are read from
+    /// the source; the frame-write warning, which a test can drive, is checked through `captured`
+    /// in `writer.rs` (`the_frame_write_warning_keeps_the_daemon_target`).
+    #[test]
+    fn every_line_that_came_from_the_binary_keeps_the_daemon_target() {
+        let files = source_files();
+        for (file, commit, message) in MOVED_FROM_THE_BINARY {
+            let (_, text) = files
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("{file} is gone: the list in this test is out of date"));
+            let offset = text.find(message).unwrap_or_else(|| {
+                panic!("{file}: the line \"{message}\" (moved in {commit}) is gone; update the list")
+            });
+            let call = log_call_around(text, offset).unwrap_or_else(|| {
+                panic!("{file}:{}: the line \"{message}\" is not inside a tracing call", line_of(text, offset))
+            });
+            assert!(
+                call.contains("target:") && call.contains("LOG_TARGET"),
+                "{file}:{}: \"{message}\" (moved out of the canvas-rgbd binary in {commit}) logs \
+                 under its module target, so a RUST_LOG={LOG_TARGET}=... filter drops it; give it \
+                 target: crate::logging::LOG_TARGET",
+                line_of(text, offset)
+            );
+        }
+    }
+
+    /// #446: the daemon's log target is spelled once, in [`LOG_TARGET`]. A second copy of the
+    /// string drifts from this one the moment the daemon is renamed.
+    #[test]
+    fn the_daemon_log_target_is_spelled_once() {
+        let quoted = format!("\"{LOG_TARGET}\"");
+        for (path, text) in source_files() {
+            if path == "logging.rs" {
+                continue;
+            }
+            if let Some(offset) = text.find(&quoted) {
+                panic!(
+                    "crates/canvas-daemon/src/{path}:{}: the daemon's log target is written out \
+                     here instead of using logging::LOG_TARGET",
+                    line_of(&text, offset)
+                );
+            }
+        }
     }
 
     #[test]

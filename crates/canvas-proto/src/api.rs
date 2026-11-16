@@ -485,17 +485,18 @@ pub struct DeletePatternResponse {
 pub struct EffectsResponse {
     pub effects: Vec<EffectSummary>,
     pub active: Option<String>,
-    /// User effect files in the effects folder that did not parse, so an author sees why.
+    /// User effect files in the effects folder that did not load (a parse error, or a script
+    /// that ran out of time), so an author sees why.
     pub failed: Vec<FailedEffect>,
 }
 
-/// A user effect file that did not parse.
+/// A user effect file that did not load: it did not parse, or its script ran out of time.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct FailedEffect {
     /// The file name inside the effects folder, e.g. `"my-effect.html"`.
     pub file: String,
-    /// The parser's message.
+    /// Why it did not load: the parser's message, or a sentence saying the script ran out of time.
     pub error: String,
 }
 

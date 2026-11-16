@@ -1017,6 +1017,40 @@ uses.
   built-in has a bool control, so neither is driven; a control added later is covered without
   editing the test.
 
+**A second mechanism, same cause: a log line wired to the target of the module it moved into.**
+
+A line that lived in the `canvas-rgbd` binary logs under the target `canvas_rgbd`, and a
+`RUST_LOG=canvas_rgbd=...` filter selects lines by that name. Move the same line into the
+`canvas_daemon` library and it is wired to `canvas_daemon::<module>` instead, which that filter
+does not select. Nothing errors: the line is still written, to a name the owner's filter never
+matches, so a narrowed log silently loses it.
+
+- [#87](https://github.com/iAmChumby/canvas-rgb/issues/87): the frame-write warning moved from the
+  binary into `crates/canvas-daemon/src/writer.rs` and became `canvas_daemon::writer`. The default
+  filter (`canvas_daemon=info,canvas_rgbd=info,warn`) still passed it, so only a narrowed
+  `RUST_LOG` lost it.
+- [#446](https://github.com/iAmChumby/canvas-rgb/issues/446): five more lines moved the same way,
+  three into `crates/canvas-daemon/src/device_sync.rs` (`78eeb8bb`) and two into
+  `crates/canvas-daemon/src/scenes.rs` (`9104caa8`). The issue counted one line in `scenes.rs`;
+  the history has two (`the active scene was restored` and the missing user effect file).
+- **Class fix:** done (#446). The target is one constant, `logging::LOG_TARGET`
+  (`crates/canvas-daemon/src/logging.rs`), which the default filter names and every moved line
+  passes as `target:`. One test over the crate,
+  `every_line_that_came_from_the_binary_keeps_the_daemon_target`, lists each line that moved with
+  the commit that moved it, finds its `tracing::` call in the source, and fails with `file:line`
+  when the call has no `target: LOG_TARGET`. The frame-write warning, which a test can drive, is
+  checked through `test_logs::captured` (`writer.rs`,
+  `the_frame_write_warning_keeps_the_daemon_target`: the line reads `WARN canvas_rgbd:`).
+  `the_daemon_log_target_is_spelled_once` fails when the string is written out in any file but
+  `logging.rs`.
+- **Sibling search (#446):** every log line in the `canvas_daemon` library was compared with the
+  binary's history (`git log -S` on `crates/canvas-daemon/src/main.rs`); the six above are the
+  complete set. Lines the library gained after the move, and the binaries' own lines, keep their
+  module target on purpose.
+- **How to check a new log line:** a line that lived in the `canvas-rgbd` binary sets
+  `target: crate::logging::LOG_TARGET`; `cargo test -p canvas-daemon` fails when a known moved
+  line logs without it.
+
 ### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
 
 A strip LED reads a part of the effect's picture, and one rule decided which part for every

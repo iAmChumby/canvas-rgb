@@ -64,6 +64,11 @@ pub async fn list_devices(
 ///
 /// Saves the new LED count to `zones.json` (keyed by the device fingerprint) and resizes
 /// the zone in OpenRGB. The size is re-applied on every OpenRGB connect.
+///
+/// The OpenRGB work runs on a task of its own (#308): a client that goes away in the middle
+/// of the resize must not cancel a request OpenRGB already answered. A cancelled request
+/// breaks the OpenRGB link (the reply may still come, and it would answer the next
+/// request), and every light would pause for one reconnect.
 pub async fn patch_zone(
     State(app): State<Arc<App>>,
     Path((id, zone)): Path<(String, u32)>,
@@ -90,6 +95,38 @@ pub async fn patch_zone(
         )));
     }
 
+    // The work runs on its own task: the client may go away while it runs, and the OpenRGB
+    // request must not be cancelled with it.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let for_the_work = Arc::clone(&app);
+    let work_id = id.clone();
+    tokio::spawn(async move {
+        let result = resize_the_zone(&for_the_work, work_id.clone(), zone, patch.led_count).await;
+        // A client that went away gets no answer; a failed resize must still be on record.
+        if let Err(Err(failure)) = reply.send(result) {
+            tracing::warn!(device = %work_id, zone, ?failure, "a zone resize failed after the client went away");
+        }
+    });
+    // The task answers, or it is gone.
+    answer
+        .await
+        .map_err(|_| ApiFailure::internal("the zone resize task ended"))??;
+
+    Ok(Json(serde_json::json!({ "ok": true, "device_id": id, "zone": zone, "led_count": patch.led_count })))
+}
+
+/// The resize itself: the chain lock, the check, the resize in OpenRGB, the saved size, the
+/// device list with the new LED count, and the scenes that follow it.
+///
+/// It runs on a task of its own, so a client that goes away does not cancel it (#308). The
+/// device list is written here and not in the handler: a list that keeps the old LED count
+/// sends frames of the wrong size until the next refresh re-applies the saved size.
+async fn resize_the_zone(
+    app: &Arc<App>,
+    id: String,
+    zone: u32,
+    led_count: u32,
+) -> ApiResult<()> {
     // A chain setup owns the header it raised until it ends (#338): a resize here would leave it
     // at neither its earlier length nor the one the setup saves. The step lock keeps a setup from
     // opening on this header while the resize runs.
@@ -104,7 +141,7 @@ pub async fn patch_zone(
     {
         let mut adapter = app.adapter.lock().await;
         adapter
-            .set_zone_size(&device_id, zone, patch.led_count)
+            .set_zone_size(&DeviceId(id.clone()), zone, led_count)
             .await
             .map_err(|e| ApiFailure::internal(format!("could not resize the zone: {e}")))?;
     }
@@ -113,7 +150,7 @@ pub async fn patch_zone(
     {
         let home = app.store.read().await.home.clone();
         let mut zones = app.zones.write().await;
-        zones.entry(id.clone()).or_default().insert(zone, patch.led_count);
+        zones.entry(id.clone()).or_default().insert(zone, led_count);
         let file = home.join(canvas_proto::config::ZONES_FILE);
         let snapshot = canvas_proto::config::ZonesFile {
             schema_version: canvas_proto::config::ZONES_SCHEMA,
@@ -139,10 +176,10 @@ pub async fn patch_zone(
         *list = devices.clone();
     }
     // The scene's plans are built from the zone sizes: the groups follow the new count.
-    crate::scenes::apply_for_devices(&app).await;
+    crate::scenes::apply_for_devices(app).await;
 
-    tracing::info!(device = %id, zone, leds = patch.led_count, "the zone size changed");
-    Ok(Json(serde_json::json!({ "ok": true, "device_id": id, "zone": zone, "led_count": patch.led_count })))
+    tracing::info!(device = %id, zone, leds = led_count, "the zone size changed");
+    Ok(())
 }
 
 /// `POST /api/v1/devices/{id}/identify`.

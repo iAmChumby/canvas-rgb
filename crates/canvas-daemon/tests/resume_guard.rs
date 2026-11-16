@@ -234,11 +234,17 @@ fn indent(line: &str) -> &str {
     &line[..line.len() - line.trim_start().len()]
 }
 
-/// The first line of the item an attribute at line `at` applies to (after further attributes).
+/// The first line of the item an attribute at line `at` applies to, after further attributes
+/// and outer doc comments.
 fn item_after(lines: &[&str], at: usize) -> usize {
     let mut item = at + 1;
-    while item < lines.len() && lines[item].trim().starts_with("#[") {
-        item += 1;
+    while item < lines.len() {
+        let line = lines[item].trim_start();
+        if line.starts_with("#[") || line.starts_with("///") || line.starts_with("//!") {
+            item += 1;
+        } else {
+            break;
+        }
     }
     item
 }
@@ -263,11 +269,13 @@ fn test_lines(lines: &[&str]) -> Vec<bool> {
             // A declaration, or an item that closes on its own line.
             item
         } else {
-            // An item with a body: it ends at the line that closes it at the item's indent.
+            // An item with a body: it ends at the line that closes it at the item's indent. An
+            // item whose closing line this cannot find marks only itself, so the scan then reads
+            // the rest of the file as production code and fails loudly, rather than hiding it.
             let margin = indent(first);
             (item + 1..lines.len())
                 .find(|&k| lines[k].trim() == "}" && indent(lines[k]) == margin)
-                .unwrap_or(lines.len() - 1)
+                .unwrap_or(item)
         };
         for line in skip.iter_mut().take(end + 1).skip(i) {
             *line = true;
@@ -379,6 +387,18 @@ fn the_scan_reads_production_code_wherever_it_sits() {
         let lines: Vec<&str> = text.lines().collect();
         assert!(test_lines(&lines).iter().all(|skipped| !skipped), "{attr}: this is production code");
     }
+    // A doc comment between the attribute and its item belongs to the item: the item after it is
+    // still production code, not the rest of the file.
+    let text = "#[cfg(test)]\n/// the fakes\nmod fakes;\nimpl DeviceAdapter for Real {\n}";
+    let lines: Vec<&str> = text.lines().collect();
+    let skip = test_lines(&lines);
+    assert!(skip[1], "the doc comment belongs to the test module");
+    assert!(!skip[3], "an impl after a doc-commented test module is production code");
+    // An item whose closing brace the scan cannot find (no closing line on its own) marks only
+    // itself; the scan fails loudly on what follows instead of calling it test code.
+    let text = "#[cfg(test)]\nmod fakes {\nimpl DeviceAdapter for Fake {\n";
+    let lines: Vec<&str> = text.lines().collect();
+    assert!(!test_lines(&lines)[2], "an item with no closing line does not hide the rest of the file");
     // A test-only `mod x;` makes `x.rs` test code. A file that is merely named `*_tests.rs` is
     // not test code unless a test-only `mod` pulls it in.
     let lib = Path::new("crates/c/src/lib.rs");

@@ -119,7 +119,7 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
         .filter(|d| {
             let driven = crate::is_driven(&d.id);
             if !driven && !sinks.contains_key(&d.id) {
-                tracing::info!(device = %d.id, "this device is never driven; it gets no frames");
+                tracing::info!(target: crate::logging::LOG_TARGET, device = %d.id, "this device is never driven; it gets no frames");
             }
             driven
         })
@@ -131,14 +131,17 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
         }
         app.engine.remove_sink(id);
         writer.abort();
-        tracing::info!(device = %id, "device gone; its frame sink is removed");
+        tracing::info!(target: crate::logging::LOG_TARGET, device = %id, "device gone; its frame sink is removed");
         false
     });
     for id in live {
         if sinks.contains_key(&id) {
             continue;
         }
-        let (tx, rx) = tokio::sync::mpsc::channel::<Vec<canvas_proto::Rgb8>>(1);
+        // The newest frame, and the writer that takes it. A watch channel and not a queue:
+        // the device is often slower than the render loop, and the frame that matters is
+        // the newest one (#308).
+        let (tx, rx) = tokio::sync::watch::channel::<Vec<canvas_proto::Rgb8>>(Vec::new());
         // The writer task records the time of every frame that went out (#81). It lives in the
         // library, so a test can run it and prove that it records.
         let writer = tokio::spawn(crate::writer::writer_loop_with_lane(
@@ -152,7 +155,7 @@ pub async fn sync_device_sinks(app: &Arc<App>, devices: &[DeviceInfo]) {
             id.clone(),
             Arc::new(crate::state::DeviceSink::with_gate(id.clone(), tx, app.identify.clone())),
         );
-        tracing::info!(device = %id, "device frame sink added");
+        tracing::info!(target: crate::logging::LOG_TARGET, device = %id, "device frame sink added");
         sinks.insert(id, writer);
     }
 }

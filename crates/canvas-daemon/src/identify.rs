@@ -89,7 +89,7 @@ struct Inner {
     /// The chain setup while one is open; one at a time.
     setup: Option<Setup>,
     /// The writer channel of every device the daemon drives.
-    sinks: HashMap<DeviceId, tokio::sync::mpsc::Sender<Vec<Rgb8>>>,
+    sinks: HashMap<DeviceId, tokio::sync::watch::Sender<Vec<Rgb8>>>,
     ticker_running: bool,
     /// How long after its last request the setup ends: [`SETUP_TIMEOUT`] unless a test sets
     /// another, so a test can make a request outlast the limit without waiting it out.
@@ -151,8 +151,6 @@ pub enum PushOutcome {
 pub enum DropReason {
     /// The device has no writer: it is never driven, or its writer is gone.
     NoSink,
-    /// The writer's channel is full: the device is behind.
-    Full,
     /// The writer's channel is closed: the device is gone.
     Closed,
 }
@@ -162,7 +160,6 @@ impl DropReason {
     pub fn describe(self) -> &'static str {
         match self {
             Self::NoSink => "the device has no writer",
-            Self::Full => "the device's writer is behind",
             Self::Closed => "the device's writer is gone",
         }
     }
@@ -294,7 +291,7 @@ impl IdentifyGate {
     }
 
     /// Registers a device's writer channel so the ticker can reach it.
-    pub fn register(&self, device: DeviceId, tx: tokio::sync::mpsc::Sender<Vec<Rgb8>>) {
+    pub fn register(&self, device: DeviceId, tx: tokio::sync::watch::Sender<Vec<Rgb8>>) {
         self.lock().sinks.insert(device, tx);
     }
 
@@ -357,8 +354,9 @@ impl IdentifyGate {
         Tick::Frames(frames(inner.target.as_ref(), inner.setup.as_ref(), devices))
     }
 
-    /// Sends frames to the registered writers. A full channel drops the frame; the next
-    /// tick sends it again.
+    /// Sends frames to the registered writers. The newest frame wins: a writer that is behind
+    /// takes the frame that is there when it is ready, so a frame is never dropped for being
+    /// late (#308).
     ///
     /// Returns what happened to every frame (#81): a frame that the writer's channel did not
     /// take was not sent, and the log may not say it was. Every frame comes back with its
@@ -373,16 +371,16 @@ impl IdentifyGate {
             let first = colors.iter().position(|c| *c != Rgb8::BLACK);
             let mut closed = false;
             let outcome = match inner.sinks.get(&device) {
-                Some(tx) => match tx.try_send(colors) {
-                    Ok(()) => PushOutcome::Queued,
-                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                        PushOutcome::Dropped(DropReason::Full)
-                    }
-                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                        closed = true;
-                        PushOutcome::Dropped(DropReason::Closed)
-                    }
-                },
+                Some(tx) if tx.receiver_count() == 0 => {
+                    // The writer is gone: nobody will take the frame.
+                    closed = true;
+                    PushOutcome::Dropped(DropReason::Closed)
+                }
+                Some(tx) => {
+                    // The newest frame wins: the writer takes it when it is ready.
+                    let _ = tx.send_replace(colors);
+                    PushOutcome::Queued
+                }
                 None => PushOutcome::Dropped(DropReason::NoSink),
             };
             if closed {
@@ -456,7 +454,7 @@ fn run_of(device: &DeviceInfo, zone: u32, led: u32, count: u32) -> Option<std::o
 /// other device got an all-black frame.
 ///
 /// The line says the frame was queued only when the writer's channel took it. A frame that was
-/// dropped (no writer, or a writer that is behind) gets its own line saying so and why. One line
+/// dropped (no writer, or a writer that is gone) gets its own line saying so and why. One line
 /// per request (the page chases a part every 125 ms and lights a whole part every 2 s), not per
 /// tick.
 ///
@@ -726,8 +724,8 @@ mod tests {
         devices[1].adapter_index = 4;
         devices[1].location = "SMBus 0x71".into();
         // A writer for every device, so every frame is queued.
-        let (board_tx, _board_rx) = tokio::sync::mpsc::channel(4);
-        let (ram_tx, mut ram_rx) = tokio::sync::mpsc::channel(4);
+        let (board_tx, _board_rx) = tokio::sync::watch::channel(Vec::new());
+        let (ram_tx, mut ram_rx) = tokio::sync::watch::channel(Vec::new());
         gate.register(DeviceId("openrgb:board".into()), board_tx);
         gate.register(DeviceId("openrgb:ram".into()), ram_tx);
         gate.start(DeviceId("openrgb:ram".into()), 0, 5, 2, t0);
@@ -742,7 +740,7 @@ mod tests {
         assert!(text.contains("1 other device gets an all-black frame"), "{text}");
         assert!(!text.contains("nothing was sent"), "the frame was queued: {text}");
         // The frame really went to the writer.
-        let frame = ram_rx.try_recv().expect("the writer got the frame");
+        let frame = ram_rx.borrow_and_update().clone();
         assert_eq!(lit(&frame), vec![5, 6]);
     }
 
@@ -761,46 +759,50 @@ mod tests {
         use crate::state::DeviceSink;
         use canvas_proto::traits::FrameSink;
         let gate = Arc::new(IdentifyGate::default());
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         let id = DeviceId("openrgb:ram".into());
         let sink = DeviceSink::with_gate(id.clone(), tx, gate.clone());
 
         // Not active: an engine frame passes.
         sink.submit(vec![Rgb8::new(9, 9, 9); 8]);
-        assert_eq!(rx.try_recv().unwrap()[0], Rgb8::new(9, 9, 9));
+        assert_eq!(rx.borrow()[0], Rgb8::new(9, 9, 9));
 
         // Active: the engine (running or not) is silent; the override frame arrives.
         let devices = vec![device("openrgb:ram", vec![zone(0, 8)])];
         let t0 = Instant::now();
         gate.start(id.clone(), 0, 2, 3, t0);
-        sink.submit(vec![Rgb8::new(9, 9, 9); 8]);
-        assert!(rx.try_recv().is_err(), "the engine's frame was dropped");
+        sink.submit(vec![Rgb8::new(1, 2, 3); 8]);
+        assert_eq!(rx.borrow()[0], Rgb8::new(9, 9, 9), "the engine's frame was dropped");
         gate.push(frames_of(gate.tick(t0, &devices)));
-        let frame = rx.try_recv().expect("the override frame reached the writer");
+        let frame = rx.borrow().clone();
         assert_eq!(lit(&frame), vec![2, 3, 4]);
 
         // Ended: engine frames pass again.
         gate.stop();
-        sink.submit(vec![Rgb8::new(9, 9, 9); 8]);
-        assert_eq!(rx.try_recv().unwrap()[0], Rgb8::new(9, 9, 9));
+        sink.submit(vec![Rgb8::new(4, 5, 6); 8]);
+        assert_eq!(rx.borrow()[0], Rgb8::new(4, 5, 6));
     }
 
-    /// A writer that is behind drops the frame, and the log may not say it went out (#87).
+    /// A writer that is behind keeps the newest frame: the frame that is there when it is
+    /// ready is the one that goes out (#308). The log may not say a frame went out that the
+    /// writer did not take (#87).
     #[test]
-    fn a_full_channel_drops_the_frame() {
+    fn a_writer_that_is_behind_keeps_the_newest_frame() {
         let gate = IdentifyGate::default();
         let id = DeviceId("openrgb:ram".into());
-        // A channel that holds one frame.
-        let (tx, _rx) = tokio::sync::mpsc::channel(1);
+        // A channel that holds the newest frame.
+        let (tx, mut rx) = tokio::sync::watch::channel(Vec::new());
         gate.register(id.clone(), tx);
 
         let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
         assert_eq!(pushed[0].outcome, PushOutcome::Queued);
 
-        // The channel is full now: the frame is dropped and the next tick sends it again.
-        let pushed = gate.push(vec![(id.clone(), vec![Rgb8::WHITE; 8])]);
-        assert_eq!(pushed[0].outcome, PushOutcome::Dropped(DropReason::Full));
+        // The writer is behind: the newest frame replaces the older one instead of being
+        // dropped.
+        let pushed = gate.push(vec![(id.clone(), vec![Rgb8::BLACK; 8])]);
+        assert_eq!(pushed[0].outcome, PushOutcome::Queued);
         assert_eq!(pushed[0].device, id);
+        assert_eq!(rx.borrow_and_update().clone(), vec![Rgb8::BLACK; 8]);
     }
 
     /// A chip's LED index inside its zone, its own length and colour: the zone that is open
@@ -1017,7 +1019,7 @@ mod tests {
     fn a_closed_channel_drops_the_frame_and_removes_the_sink() {
         let gate = IdentifyGate::default();
         let id = DeviceId("openrgb:ram".into());
-        let (tx, rx) = tokio::sync::mpsc::channel(4);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         gate.register(id.clone(), tx);
         drop(rx);
 

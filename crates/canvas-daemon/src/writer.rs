@@ -17,10 +17,14 @@ use crate::last_frame::LastFrame;
 ///
 /// A frame that failed to be written is not recorded: the last frame is the last one that reached
 /// the device, not the last one that was tried.
+///
+/// The frames come from a watch channel: the writer takes the newest frame there is, so a device
+/// that is behind shows the newest colours and not the oldest ones it has not written yet
+/// (#308).
 pub async fn writer_loop(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     device: DeviceId,
-    frames: tokio::sync::mpsc::Receiver<Vec<Rgb8>>,
+    frames: tokio::sync::watch::Receiver<Vec<Rgb8>>,
     last_frame: Arc<LastFrame>,
 ) {
     writer_loop_with_lane(adapter, None, device, frames, last_frame).await;
@@ -36,12 +40,20 @@ pub async fn writer_loop_with_lane(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
     device: DeviceId,
-    mut frames: tokio::sync::mpsc::Receiver<Vec<Rgb8>>,
+    mut frames: tokio::sync::watch::Receiver<Vec<Rgb8>>,
     last_frame: Arc<LastFrame>,
 ) {
     let lane = lane.filter(|_| crate::composite::CompositeAdapter::is_openrgb_device(&device));
     let mut failures = 0u32;
-    while let Some(frame) = frames.recv().await {
+    // The newest frame wins: a frame that arrives while the device is behind replaces the
+    // older one, and the writer takes it when it is ready (#308).
+    while frames.changed().await.is_ok() {
+        let frame = {
+            // The borrow ends here: the frame is copied out, so the sender is never held up
+            // while the write runs.
+            let current = frames.borrow_and_update();
+            current.clone()
+        };
         let result = match &lane {
             Some(lane) => lane.write_frame_shared(&device, &frame).await,
             None => adapter.lock().await.write_frame(&device, &frame).await,
@@ -60,7 +72,7 @@ pub async fn writer_loop_with_lane(
                 // `canvas_daemon::writer`, which a `RUST_LOG=canvas_rgbd=...` filter drops.
                 if failures == 1 || failures.is_multiple_of(300) {
                     tracing::warn!(
-                        target: "canvas_rgbd",
+                        target: crate::logging::LOG_TARGET,
                         device = %device,
                         error = %e,
                         failures,
@@ -136,7 +148,7 @@ mod tests {
             Box::new(FakeAdapter { frames: Mutex::new(Vec::new()) }) as Box<dyn DeviceAdapter>,
         ));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         let writer = tokio::spawn(writer_loop(
             adapter,
             DeviceId("fake:ram".into()),
@@ -144,7 +156,7 @@ mod tests {
             Arc::clone(&last_frame),
         ));
 
-        tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
+        tx.send_replace(vec![Rgb8::WHITE; 8]);
         // Closing the channel ends the writer, after the frame it already has.
         drop(tx);
         writer.await.expect("the writer ends");
@@ -224,13 +236,13 @@ mod tests {
         let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
         let adapter = Arc::new(tokio::sync::Mutex::new(failing));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         let device = DeviceId("fake:ram".into());
         // The writer runs on this thread, so its warning goes into this capture.
         let (_, text) = crate::test_logs::captured(|| {
             runtime.block_on(async {
                 let frame = vec![Rgb8::WHITE; 8];
-                tx.send(frame).await.expect("the writer takes the frame");
+                tx.send_replace(frame);
                 // Closing the channel ends the writer.
                 drop(tx);
                 writer_loop(adapter, device, rx, Arc::clone(&last_frame)).await;
@@ -246,56 +258,15 @@ mod tests {
         );
     }
 
-    /// A subscriber that records the target of the frame-write warning (#87).
-    #[derive(Default)]
-    struct Targets(Arc<Mutex<Vec<String>>>);
-
-    impl tracing::Subscriber for Targets {
-        fn register_callsite(
-            &self,
-            _: &'static tracing::Metadata<'static>,
-        ) -> tracing::subscriber::Interest {
-            tracing::subscriber::Interest::sometimes()
-        }
-        fn enabled(&self, _: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-        fn new_span(&self, _: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-        fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record<'_>) {}
-        fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-        fn event(&self, event: &tracing::Event<'_>) {
-            struct Message(String);
-            impl tracing::field::Visit for Message {
-                fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-                    if field.name() == "message" {
-                        self.0 = format!("{value:?}");
-                    }
-                }
-                fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-                    if field.name() == "message" {
-                        self.0 = value.to_string();
-                    }
-                }
-            }
-            let mut message = Message(String::new());
-            event.record(&mut message);
-            if message.0.contains("frame write failed") {
-                self.0.lock().unwrap_or_else(|e| e.into_inner()).push(event.metadata().target().to_string());
-            }
-        }
-        fn enter(&self, _: &tracing::span::Id) {}
-        fn exit(&self, _: &tracing::span::Id) {}
-    }
-
     /// The frame-write warning keeps the daemon's own target after the writer moved out of the
     /// binary into the library (#87): a `RUST_LOG=canvas_rgbd=...` filter still catches it. On the
     /// old target (`canvas_daemon::writer`) that filter drops every line from this module.
+    ///
+    /// `captured` prints the target, so the line reads `WARN canvas_rgbd: frame write failed`
+    /// (class `cause:timing-test`: a capture reads lines through `test_logs::captured`, never
+    /// through a subscriber a test installs itself, #45).
     #[test]
-    fn the_frame_write_warning_keeps_the_canvas_rgbd_target() {
-        let targets = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = Targets(Arc::clone(&targets));
+    fn the_frame_write_warning_keeps_the_daemon_target() {
         let runtime = tokio::runtime::Builder::new_current_thread()
             .enable_all()
             .build()
@@ -303,18 +274,19 @@ mod tests {
         let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
         let adapter = Arc::new(tokio::sync::Mutex::new(failing));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
-        tracing::subscriber::with_default(subscriber, || {
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
+        // The writer runs on this thread, so its warning goes into this capture.
+        let (_, text) = crate::test_logs::captured(|| {
             runtime.block_on(async {
-                tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
+                tx.send_replace(vec![Rgb8::WHITE; 8]);
                 drop(tx);
                 writer_loop(adapter, DeviceId("fake:ram".into()), rx, last_frame).await;
             });
         });
-        let targets = targets.lock().unwrap_or_else(|e| e.into_inner());
+        let target = crate::logging::LOG_TARGET;
         assert!(
-            targets.iter().any(|target| target == "canvas_rgbd"),
-            "the frame-write warning must use the canvas_rgbd target, got {targets:?}"
+            text.lines().any(|line| line.contains(&format!("WARN {target}:"))),
+            "the frame-write warning must use the {target} target: {text}"
         );
     }
 }

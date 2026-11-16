@@ -2806,8 +2806,12 @@ try {
         Assert-Equal ($version -replace '-dev\..*$', '') '0.9.1' 'the dev version is the next patch of the release it follows'
         $number = $version -replace '.*-dev\.', ''
         Assert-True (-not $number.StartsWith('0')) 'the number has no leading zero, so semver compares it as a number'
-        $now = [long][DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
-        Assert-True ([Math]::Abs($now - [long]$number) -le 2) "the number is the UTC time of the run: [$number] against [$now]"
+        # Compare as times, not as 14-digit numbers: 20261116180759 and 20261116180800 are one second
+        # apart but 41 apart as numbers, so a numeric tolerance failed whenever the run crossed a
+        # minute (cause:timing-test).
+        $built = [DateTime]::ParseExact($number, 'yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        $skew = [Math]::Abs(([DateTime]::UtcNow - $built).TotalSeconds)
+        Assert-True ($skew -le 30) "the number is the UTC time of the run: [$number] is $([int]$skew) s from now"
         # The order the tray uses: a later build is a newer version, whichever workflow made it.
         Assert-True ((Compare-SemverVersion '0.9.1-dev.20261106130000' '0.9.1-dev.20261106120000') -gt 0) 'a later timestamp is a newer version'
         Assert-True ((Compare-SemverVersion '0.9.1-dev.20261106130000' '0.9.1-dev.50') -gt 0) 'a timestamp is newer than any run number of the same build'

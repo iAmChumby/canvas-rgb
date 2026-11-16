@@ -14,7 +14,28 @@ use crate::state::App;
 /// `GET /api/v1/diag/readback`.
 ///
 /// The colours as the hardware side reports them (OpenRGB's REQUEST_CONTROLLER_DATA).
+///
+/// The readback runs on a task of its own (#308): a client that goes away in the middle of
+/// it must not cancel a request OpenRGB already answered. A cancelled request breaks the
+/// OpenRGB link (the reply may still come, and it would answer the next request), and
+/// every light would pause for one reconnect.
 pub async fn readback(State(app): State<Arc<App>>) -> ApiResult<Json<ReadbackResponse>> {
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let for_the_work = Arc::clone(&app);
+    tokio::spawn(async move {
+        let _ = reply.send(read_the_colours(&for_the_work).await);
+    });
+    let devices = answer
+        .await
+        .map_err(|_| ApiFailure::internal("the readback task ended"))?;
+    Ok(Json(ReadbackResponse { devices }))
+}
+
+/// The colours of every device the daemon knows, as the hardware side reports them.
+///
+/// A device that cannot be read is left out and the reason is logged: the answer is what
+/// the hardware says, not a guess.
+async fn read_the_colours(app: &Arc<App>) -> Vec<ReadbackDevice> {
     let devices = app.devices.read().await.clone();
     let mut out = Vec::new();
     for device in devices {
@@ -35,7 +56,7 @@ pub async fn readback(State(app): State<Arc<App>>) -> ApiResult<Json<ReadbackRes
             colors,
         });
     }
-    Ok(Json(ReadbackResponse { devices: out }))
+    out
 }
 
 /// The body of `POST /api/v1/diag/fail-sensor`.

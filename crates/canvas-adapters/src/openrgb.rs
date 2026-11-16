@@ -1542,3 +1542,212 @@ mod rescan_signal_tests {
         assert!(!complete.has_changed().expect("alive"), "an overtaken reader counted a completion");
     }
 }
+
+// ---- the link-break rule: a request or a write that is given up on
+
+/// The rule, in three parts (#308):
+///
+/// - a request that went out and was given up on breaks the link: OpenRGB answers in order
+///   and puts no request id in a reply, so the late reply would answer the next request;
+/// - a request that was given up on before it went out breaks nothing: nothing is owed;
+/// - a write that was given up on breaks the link while it still holds the socket lock, so
+///   a writer that waits for the lock cannot write into the middle of the half-written packet.
+///
+/// The fakes: the fake OpenRGB server and the real adapter, so the whole link is walked.
+#[cfg(test)]
+mod link_break_tests {
+    use super::*;
+    use crate::fake::FakeOpenRgbServer;
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll};
+
+    /// How many LEDs the controller has. A frame of this size is a big packet, so the socket
+    /// fills up after a few of them.
+    const LEDS: u32 = 8192;
+
+    /// A controller with many LEDs, as the fake server reports it.
+    fn big_stick() -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId("openrgb:big".into()),
+            name: "Big stick".into(),
+            vendor: "fake".into(),
+            kind: DeviceKind::Dram,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: "big".into(),
+            location: "smbus".into(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "RGB".into(),
+                kind: ZoneKind::Linear,
+                led_count: LEDS,
+                min_leds: LEDS,
+                max_leds: LEDS,
+                resizable: false,
+            }],
+            connected: true,
+        }
+    }
+
+    /// Waits until `ready` is true. The wait is on the thing the assert reads; the long limit
+    /// only ends a test that would hang.
+    async fn until(what: &str, mut ready: impl FnMut() -> bool) {
+        tokio::time::timeout(Duration::from_secs(30), async {
+            while !ready() {
+                tokio::time::sleep(Duration::from_millis(2)).await;
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("never happened: {what}"));
+    }
+
+    /// Whether the future cannot go on: it is still pending after one poll.
+    ///
+    /// The poll is the whole check: a write to a socket with no room for it cannot start, and
+    /// the future says so. No clock is involved, and nothing is waited for.
+    fn is_blocked<F: Future>(future: &mut Pin<Box<F>>) -> bool {
+        let mut context = Context::from_waker(std::task::Waker::noop());
+        matches!(future.as_mut().poll(&mut context), Poll::Pending)
+    }
+
+    /// A write that cannot go out, holding the socket lock.
+    ///
+    /// The server stops reading, so the socket fills up and a write cannot start. The write
+    /// stays alive: it is stuck in the middle of its packet and holds the socket lock, the
+    /// way a write that a caller gave up on does.
+    fn stuck_write<'a>(
+        adapter: &'a OpenRgbAdapter,
+        id: &'a DeviceId,
+        colors: &'a [Rgb8],
+    ) -> Pin<Box<dyn Future<Output = ()> + 'a>> {
+        for _ in 0..200 {
+            let mut write = Box::pin(adapter.write_frame_shared(id, colors));
+            if is_blocked(&mut write) {
+                return Box::pin(async move {
+                    let _ = write.await;
+                });
+            }
+            // The write went out: the socket is filling up.
+        }
+        panic!("the socket never filled: the write never blocked");
+    }
+
+    /// A request that went out and was given up on leaves the link unusable.
+    ///
+    /// The request goes out and the server keeps the reply. The caller gives up on it (a
+    /// client that went away): the reply may still come, and it would answer the next
+    /// request, so the link is dropped and the supervisor reconnects.
+    #[tokio::test]
+    async fn a_request_that_went_out_and_was_given_up_on_leaves_the_link_broken() {
+        let server = FakeOpenRgbServer::start(vec![big_stick()]).await.expect("the fake server");
+        let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+        adapter.connect().await.expect("connect");
+        adapter.discover().await.expect("discover");
+
+        // The server keeps its replies: the request goes out and waits for an answer.
+        server.hold_replies(true);
+        let id = DeviceId("openrgb:big".into());
+        let mut asking = adapter.clone();
+        let asking_id = id.clone();
+        let request = tokio::spawn(async move { asking.read_back(&asking_id).await });
+        until("the request waits for a reply that never comes", || server.held_replies() == 1).await;
+
+        // The caller gives up on it.
+        request.abort();
+        let _ = request.await;
+
+        assert!(
+            !adapter.is_connected(),
+            "the link stayed up after a request that went out and was given up on"
+        );
+    }
+
+    /// A request that was given up on before it went out leaves the link whole.
+    ///
+    /// The socket is full, so the request waits for the socket lock and never goes out.
+    /// Nothing is owed, so nothing is broken: the link stays up and the next request gets
+    /// its own answer.
+    #[tokio::test]
+    async fn a_request_that_was_given_up_on_before_it_went_out_leaves_the_link_whole() {
+        let server = FakeOpenRgbServer::start(vec![big_stick()]).await.expect("the fake server");
+        let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+        adapter.connect().await.expect("connect");
+        adapter.discover().await.expect("discover");
+
+        // The socket fills up, so a write cannot go out and holds the socket lock.
+        server.stop_reading(true);
+        let id = DeviceId("openrgb:big".into());
+        let colors = vec![Rgb8::WHITE; LEDS as usize];
+        let stuck = stuck_write(&adapter, &id, &colors);
+
+        // A request waits for the socket lock: it has not gone out.
+        let mut asking = adapter.clone();
+        let asking_id = id.clone();
+        let request = tokio::spawn(async move { asking.read_back(&asking_id).await });
+        // The request has taken its reply slot, so it is waiting for the socket lock.
+        until("the request waits for the socket lock", || {
+            guard(&adapter.link.session).pending.is_some()
+        })
+        .await;
+
+        // The caller gives up on it.
+        request.abort();
+        let _ = request.await;
+
+        assert!(
+            adapter.is_connected(),
+            "the link broke over a request that never went out"
+        );
+        drop(stuck);
+    }
+
+    /// A write that was given up on breaks the link before the socket lock is released.
+    ///
+    /// The write is stuck in the middle of its packet and holds the socket lock. A second
+    /// writer waits for that lock. The first write is given up on: the link is broken while
+    /// the lock is still held, so the second writer cannot take the lock, see a whole link
+    /// and write into the middle of the half-written packet.
+    #[tokio::test]
+    async fn a_write_that_was_given_up_on_breaks_the_link_before_the_socket_lock_is_released() {
+        let server = FakeOpenRgbServer::start(vec![big_stick()]).await.expect("the fake server");
+        let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
+        adapter.connect().await.expect("connect");
+        adapter.discover().await.expect("discover");
+
+        // The socket fills up, so a write cannot go out and holds the socket lock.
+        server.stop_reading(true);
+        let id = DeviceId("openrgb:big".into());
+        let colors = vec![Rgb8::WHITE; LEDS as usize];
+        let stuck = stuck_write(&adapter, &id, &colors);
+
+        // A second writer waits for the socket lock. It says so before it waits, so the test
+        // knows it is queued: the lock is held until the first write is given up on.
+        let (started, waiting) = oneshot::channel();
+        let second = adapter.clone();
+        let second_id = id.clone();
+        let second_colors = colors.clone();
+        let writer = tokio::spawn(async move {
+            let _ = started.send(());
+            second.write_frame_shared(&second_id, &second_colors).await
+        });
+        waiting.await.expect("the second writer starts");
+
+        // The first write is given up on: the guard breaks the link while it still holds the
+        // socket lock.
+        drop(stuck);
+
+        let result = tokio::time::timeout(Duration::from_secs(30), writer)
+            .await
+            .expect("the second writer ends")
+            .expect("its task ends");
+        assert!(
+            result.is_err(),
+            "the second writer wrote into the middle of the half-written packet"
+        );
+        assert!(
+            !adapter.is_connected(),
+            "the link stayed up after a write that was given up on"
+        );
+    }
+}

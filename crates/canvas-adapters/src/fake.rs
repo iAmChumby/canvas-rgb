@@ -17,7 +17,15 @@ pub struct FakeOpenRgbServer {
     acceptor: JoinHandle<()>,
     /// Bumped by `release_replies`; each connection writes its held replies when it changes.
     release: tokio::sync::watch::Sender<u64>,
+    /// Bumped whenever a controller's colours change, so a test can wait for a write to land
+    /// instead of polling for it.
+    writes: tokio::sync::watch::Sender<u64>,
 }
+
+/// How long [`FakeOpenRgbServer::wait_for_colors`] waits before it gives up. It is a hang guard,
+/// never a verdict: the wait ends on the write that lands the colours, and the colours it
+/// returns are the server's real ones, so a write that never lands fails the caller's assert.
+const COLOR_WAIT_CAP: std::time::Duration = std::time::Duration::from_secs(10);
 
 struct FakeState {
     devices: Vec<FakeDevice>,
@@ -216,22 +224,25 @@ impl FakeOpenRgbServer {
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
+        let (writes, _) = tokio::sync::watch::channel(0_u64);
         let acceptor = {
             let state = Arc::clone(&state);
             let connections = Arc::clone(&connections);
             let release = release.clone();
+            let writes = writes.clone();
             tokio::spawn(async move {
                 let mut next_connection = 0_u64;
                 while let Ok((stream, _)) = listener.accept().await {
                     next_connection += 1;
-                    let handle = tokio::spawn(serve(stream, Arc::clone(&state), next_connection, release.subscribe()));
+                    let handle =
+                        tokio::spawn(serve(stream, Arc::clone(&state), next_connection, release.subscribe(), writes.clone()));
                     let mut open = guard(&connections);
                     open.retain(|conn| !conn.is_finished());
                     open.push(handle.abort_handle());
                 }
             })
         };
-        Ok(Self { port, state, connections, acceptor, release })
+        Ok(Self { port, state, connections, acceptor, release, writes })
     }
 
     pub fn port(&self) -> u16 {
@@ -352,6 +363,34 @@ impl FakeOpenRgbServer {
         guard(&self.state).devices.get(index as usize).map(|device| device.colors.clone()).unwrap_or_default()
     }
 
+    /// A receiver that changes whenever this server applies a write to a controller's colours,
+    /// so a test can wait on `changed()` instead of polling `colors()`.
+    pub fn write_ticks(&self) -> tokio::sync::watch::Receiver<u64> {
+        self.writes.subscribe()
+    }
+
+    /// Waits until controller `index` holds `expected`, then returns what it holds.
+    /// The wait is woken by the write that changes a controller's colours, so it costs nothing
+    /// when they have already landed and the test never reads its verdict off a clock. The cap
+    /// ([`COLOR_WAIT_CAP`]) only stops a write that never lands from hanging the test; the
+    /// colours it returns then are the server's real ones, so the caller's assert says why.
+    pub async fn wait_for_colors(&self, index: u32, expected: &[Rgb8]) -> Vec<Rgb8> {
+        let mut changed = self.writes.subscribe();
+        tokio::time::timeout(COLOR_WAIT_CAP, async {
+            loop {
+                let colors = self.colors(index);
+                if colors == expected {
+                    return colors;
+                }
+                if changed.changed().await.is_err() {
+                    return self.colors(index);
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| self.colors(index))
+    }
+
     /// How many times SETCUSTOMMODE was received for controller `index`.
     pub fn custom_mode_writes(&self, index: u32) -> u32 {
         guard(&self.state).devices.get(index as usize).map_or(0, |device| device.custom_mode_writes)
@@ -401,6 +440,8 @@ impl FakeOpenRgbServer {
                 device.custom_mode_writes = 0;
             }
         }
+        // The colours were reset: a test waiting on them sees the new (black) values.
+        self.writes.send_modify(|n| *n += 1);
         for connection in guard(&self.connections).drain(..) {
             connection.abort();
         }
@@ -421,6 +462,7 @@ async fn serve(
     state: Arc<Mutex<FakeState>>,
     connection: u64,
     mut release: tokio::sync::watch::Receiver<u64>,
+    writes: tokio::sync::watch::Sender<u64>,
 ) -> std::io::Result<()> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -542,6 +584,10 @@ async fn serve(
                 }
             }
             let reply = handle(&state, connection, device, packet_id, &payload);
+            if packet_id == UPDATE_LEDS {
+                // The colours are applied: wake a test that waits for them instead of polling.
+                writes.send_modify(|n| *n += 1);
+            }
             if reply.is_empty() {
                 continue;
             }

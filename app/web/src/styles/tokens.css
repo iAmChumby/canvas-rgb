@@ -145,6 +145,14 @@
   --rail-w: 200px;
   --rail-w-icon: 64px;
   --control-h: 32px;
+  /* The phone dock's link (#57): the icon row, the name row and their gap, plus the link's
+     height. They live here with the rest of the sizes so the phone dock link in app.css's
+     max-width:720px block reads its sizes from tokens. The name and the gap come from the type and
+     space scales; only the icon and the link height are dock-specific. */
+  --nav-link-h: 56px;
+  --nav-row-icon: 18px;
+  --nav-row-name: var(--t16);
+  --nav-row-gap: calc(var(--s1) / 2);
   /* the audio readings (#166): fixed heights, so the panel keeps its shape */
   --audio-meter-h: 16px;
   --audio-readings-h: 96px;
