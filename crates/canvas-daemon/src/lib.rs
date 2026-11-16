@@ -38,6 +38,7 @@ pub mod state;
 pub mod stack;
 pub mod stacks;
 pub mod storage;
+pub mod strip_read_guard;
 pub mod thumbnail;
 pub mod transient;
 pub mod token;
