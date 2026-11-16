@@ -228,21 +228,25 @@ describe("the move step", () => {
 
     // The step switches to the copy. The first render of the copy is committed on its own: the
     // effect that asks the daemon about the copy has not run yet.
-    act(() => {
-      flushSync(() => {
-        root.render(
-          <MoveStep groupId="g-desk" copy use={use} lights={lights()} onClose={vi.fn()} />,
-        );
+    try {
+      act(() => {
+        flushSync(() => {
+          root.render(
+            <MoveStep groupId="g-desk" copy use={use} lights={lights()} onClose={vi.fn()} />,
+          );
+        });
+        // The row is not the move's answer: it is held until the daemon answers the copy.
+        expect((row as HTMLButtonElement).disabled).toBe(true);
+        expect(document.getElementById("move-outcome-evening")?.textContent).not.toContain("Adds 1 device.");
       });
-      // The row is not the move's answer: it is held until the daemon answers the copy.
-      expect((row as HTMLButtonElement).disabled).toBe(true);
-      expect(document.getElementById("move-outcome-evening")?.textContent).not.toContain("Adds 1 device.");
-    });
-
-    await act(async () => {
-      root.unmount();
-    });
-    container.remove();
+    } finally {
+      // The step goes away, even when the reads above failed: a step left on the page would be
+      // found by the tests that follow.
+      await act(async () => {
+        root.unmount();
+      });
+      container.remove();
+    }
   });
 
   it("a row is not enabled with the other mode's answer when the step switches", async () => {
