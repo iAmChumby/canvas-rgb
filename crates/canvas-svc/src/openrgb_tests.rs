@@ -131,22 +131,8 @@ async fn the_boot_color_is_written_to_every_device_when_no_daemon_is_connected()
     assert!(!sup.boot_written(), "the count has been seen once; it must hold still before the write");
     // The service ticks once a second: the second tick sees the same count and writes.
     sup.tick(now + Duration::from_secs(1), false, Some(boot)).await;
-    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
-    assert_eq!(wait_for_colors(&fake, 1, &[boot; 6]).await, vec![boot; 6]);
-}
-
-/// The adapter sends LED updates without waiting for a reply, and the fake server applies them
-/// on its own task, so a test polls until the colors land (or gives up after 2 s).
-async fn wait_for_colors(fake: &FakeOpenRgbServer, index: u32, expected: &[Rgb8]) -> Vec<Rgb8> {
-    let mut last = Vec::new();
-    for _ in 0..100 {
-        last = fake.colors(index);
-        if last == expected {
-            break;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
-    }
-    last
+    assert_eq!(fake.wait_for_colors(0, &[boot; 4]).await, vec![boot; 4]);
+    assert_eq!(fake.wait_for_colors(1, &[boot; 6]).await, vec![boot; 6]);
 }
 
 #[tokio::test]
@@ -158,7 +144,7 @@ async fn an_absent_boot_color_means_black() {
     let now = Instant::now();
     sup.tick(now, false, None).await;
     sup.tick(now + Duration::from_secs(1), false, None).await;
-    assert_eq!(wait_for_colors(&fake, 0, &[Rgb8::BLACK; 3]).await, vec![Rgb8::BLACK; 3]);
+    assert_eq!(fake.wait_for_colors(0, &[Rgb8::BLACK; 3]).await, vec![Rgb8::BLACK; 3]);
 }
 
 /// OpenRGB's copy of the ROYUAN MonsGeek keyboard, whose id carries the HID path
@@ -188,7 +174,7 @@ async fn neither_the_boot_color_nor_the_black_paint_writes_to_the_keyboards_open
         sup.tick(start + Duration::from_secs(1), false, Some(boot)).await;
 
         assert_eq!(
-            wait_for_colors(&fake, 0, &[boot; 4]).await,
+            fake.wait_for_colors(0, &[boot; 4]).await,
             vec![boot; 4],
             "the ordinary device got the boot colour"
         );
@@ -208,7 +194,7 @@ async fn neither_the_boot_color_nor_the_black_paint_writes_to_the_keyboards_open
         sup.tick(black + Duration::from_secs(1), false, None).await;
 
         assert_eq!(
-            wait_for_colors(&fake, 0, &[Rgb8::BLACK; 4]).await,
+            fake.wait_for_colors(0, &[Rgb8::BLACK; 4]).await,
             vec![Rgb8::BLACK; 4],
             "the ordinary device got the black paint"
         );
@@ -253,7 +239,7 @@ async fn a_resume_starts_the_boot_color_watch_window_again() {
     let now = Instant::now();
     sup.tick(now, false, Some(boot)).await;
     sup.tick(now + Duration::from_secs(1), false, Some(boot)).await;
-    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
+    assert_eq!(fake.wait_for_colors(0, &[boot; 4]).await, vec![boot; 4]);
     assert!(sup.boot_pending(), "the watch window runs after the first write");
 
     // The machine sleeps for an hour. The clock may have counted it.
@@ -266,7 +252,7 @@ async fn a_resume_starts_the_boot_color_watch_window_again() {
     fake.announce(device(1, 6));
     sup.tick(woke + Duration::from_secs(1), false, Some(boot)).await;
     assert_eq!(
-        wait_for_colors(&fake, 1, &[boot; 6]).await,
+        fake.wait_for_colors(1, &[boot; 6]).await,
         vec![boot; 6],
         "the controller announced after the wake did not get the boot color"
     );
@@ -310,9 +296,9 @@ async fn the_boot_color_waits_until_openrgb_has_found_its_devices() {
         sup.tick(Instant::now(), false, Some(boot)).await;
     }
     assert!(sup.boot_written(), "the boot color was written once detection settled");
-    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
-    assert_eq!(wait_for_colors(&fake, 1, &[boot; 6]).await, vec![boot; 6]);
-    assert_eq!(wait_for_colors(&fake, 2, &[boot; 3]).await, vec![boot; 3], "the last device to appear is painted too");
+    assert_eq!(fake.wait_for_colors(0, &[boot; 4]).await, vec![boot; 4]);
+    assert_eq!(fake.wait_for_colors(1, &[boot; 6]).await, vec![boot; 6]);
+    assert_eq!(fake.wait_for_colors(2, &[boot; 3]).await, vec![boot; 3], "the last device to appear is painted too");
 }
 
 #[tokio::test]
@@ -392,9 +378,9 @@ async fn a_controller_announced_after_the_boot_write_is_painted_too() {
         }
     }
     assert!(written_with_two, "the boot color was written while device 2 was still unannounced");
-    assert_eq!(wait_for_colors(&fake, 0, &[boot; 4]).await, vec![boot; 4]);
-    assert_eq!(wait_for_colors(&fake, 1, &[boot; 6]).await, vec![boot; 6]);
-    assert_eq!(wait_for_colors(&fake, 2, &[boot; 3]).await, vec![boot; 3], "the late controller got the boot color");
+    assert_eq!(fake.wait_for_colors(0, &[boot; 4]).await, vec![boot; 4]);
+    assert_eq!(fake.wait_for_colors(1, &[boot; 6]).await, vec![boot; 6]);
+    assert_eq!(fake.wait_for_colors(2, &[boot; 3]).await, vec![boot; 3], "the late controller got the boot color");
 }
 
 /// The 5 s cap used to warn only for a count of zero. A count that is above zero but still
