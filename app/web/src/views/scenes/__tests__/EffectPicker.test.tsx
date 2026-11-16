@@ -389,6 +389,20 @@ describe("the effect picker", () => {
     );
   });
 
+  it("a group already playing HTML may swap it in an over-limit scene: the count stays the same", async () => {
+    // Three HTML groups, which is one over the limit. This group's own HTML is the slot it swaps,
+    // so its count does not change: the picker leaves its rows open, and the daemon's refusal on
+    // save (if the scene is still over the limit) is what the owner sees.
+    const over = answer(2);
+    over.scenes[0]!.groups[0]!.plays = { type: "effect", effect: "html:sample", props: {} };
+    patchSnap({ scenes: over });
+    api.scenes.list.mockResolvedValue(over);
+    render(<Harness groupId="g-one" />);
+    const html = await screen.findByRole("button", { name: /Sample/ });
+    expect(html.getAttribute("aria-disabled")).toBeNull();
+    expect(within(html).queryByText(/HTML already/)).toBeNull();
+  });
+
   // Plan Task 11: patterns are in the picker with the effects, under a heading of their own, and
   // each says what it was built on and how it would land on this group.
   it("a Patterns heading lists the patterns with their kind", async () => {

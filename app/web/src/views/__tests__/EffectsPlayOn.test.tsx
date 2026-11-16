@@ -273,6 +273,43 @@ describe("Play on …", () => {
     expect(within(dialog).queryByRole("checkbox", { name: "Every group" })).toBeNull();
   });
 
+  it("marks a stack whose only HTML is a mask as one HTML effect", async () => {
+    window.history.replaceState({}, "", "/effects/?state=complete,stack");
+    await act(async () => {
+      await refreshAll();
+    });
+    patchSnap({
+      status: {
+        ...getSnap().status!,
+        active_scene: { id: "s", name: "Scene" },
+        active_effects: ["stack:Sunset glow"],
+      },
+      scenes: scenesWith([group("g-case", "Case fans"), group("g-ram", "Memory")]),
+    });
+    // A warm layer shaped by an HTML mask: the daemon counts the mask as an HTML runtime, so Play
+    // on offers one group at a time.
+    vi.spyOn(api, "stack").mockResolvedValue({
+      stack: {
+        id: "stack:Sunset glow",
+        layers: [{ effect: "solid", mask: { effect: "html:fixture-sample" } }],
+      },
+      layers: [],
+    } as never);
+    render(
+      <StripSlotsProvider>
+        <StripSlot kind="title" />
+        <StripSlot kind="actions" />
+        <EffectsView />
+      </StripSlotsProvider>,
+    );
+    expect(await screen.findByRole("heading", { name: "Sunset glow" })).toBeTruthy();
+    const play = (await screen.findAllByRole("button", { name: "Play on …" }))[0]!;
+    fireEvent.click(play);
+    const dialog = await screen.findByRole("dialog", { name: "Play on" });
+    expect(await within(dialog).findByText(new RegExp(`A scene runs ${SCENE_HTML_MAX} HTML effects at a time`))).toBeTruthy();
+    expect(within(dialog).queryByRole("checkbox", { name: "Every group" })).toBeNull();
+  });
+
   it("still plays on everything when the daemon has no scenes", async () => {
     window.history.replaceState({}, "", URL);
     await act(async () => {

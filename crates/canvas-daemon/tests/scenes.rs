@@ -2612,29 +2612,34 @@ async fn a_plain_stack_saves_beside_a_scene_that_is_already_over_the_limit() {
 /// an HTML layer is refused with the sentence and writes nothing.
 #[tokio::test]
 async fn a_stack_a_scene_over_the_limit_plays_saves_when_it_takes_html_away() {
-    // The scene on file plays the stack beside two HTML effects: three runtimes, over the limit.
+    // The scene on file plays the stack beside two HTML effects: the stack's two HTML layers make
+    // four runtimes, over the limit of two.
     let mut scenes = three_html_scenes();
     scenes.scenes[0].groups[0].plays = plays("stack:Html");
     let rig = rig_loaded(&scenes, &[]).await;
     // The stack as saved, written past the route as an older version would have left it.
     let legacy: canvas_proto::stack::Stack = serde_json::from_value(serde_json::json!({
         "id": "stack:Html",
-        "layers": [{ "id": "l1", "name": "One", "effect": "html:mine" }],
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "html:mine" },
+            { "id": "l2", "name": "Two", "effect": "html:audio" },
+        ],
     }))
     .expect("a stack");
     let known = canvas_daemon::stacks::KnownEffects::from_user(&rig.app.user_effects);
     rig.app.stacks.put(legacy, &known).expect("the legacy stack is written");
 
-    // Fewer HTML layers: the scene's count drops to two, and the save is allowed.
+    // One HTML layer fewer: the scene's count drops from four to three, so the save is allowed
+    // even though the scene is still over the limit. This is the owner's way out of the loop.
     let fewer = serde_json::json!({
         "id": "stack:Html",
-        "layers": [{ "id": "l1", "name": "One", "effect": "solid" }],
+        "layers": [{ "id": "l1", "name": "One", "effect": "html:mine" }],
     });
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(fewer)).await;
     assert_eq!(status, StatusCode::OK, "the save lowers the count: {answer}");
     let file = std::fs::read(rig.home.path.join("stacks.json")).unwrap();
 
-    // More HTML layers: the scene would run four, and nothing is written.
+    // More HTML layers: the scene would run four again, and nothing is written.
     let more = serde_json::json!({
         "id": "stack:Html",
         "layers": [
@@ -2644,10 +2649,12 @@ async fn a_stack_a_scene_over_the_limit_plays_saves_when_it_takes_html_away() {
     });
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(more)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+    // Four runtimes: the two-layer stack and the scene's two HTML groups.
+    let four = canvas_daemon::scenes::html_limit_sentence(4);
+    assert_eq!(answer["message"].as_str(), Some(four.as_str()), "{answer}");
     let kept = rig.app.stacks.get("stack:Html").expect("the stack is still there");
     assert_eq!(kept.layers.len(), 1, "refused: the saved stack is the one-lower one");
-    assert_eq!(kept.layers[0].effect, "solid", "refused: nothing was written");
+    assert_eq!(kept.layers[0].effect, "html:mine", "refused: nothing was written");
     assert_eq!(
         std::fs::read(rig.home.path.join("stacks.json")).unwrap(),
         file,
@@ -2678,7 +2685,9 @@ async fn a_group_whose_build_fails_still_takes_its_html_runtime() {
     );
 }
 
-
+/// #370: a scene over the limit stays a valid file, and each door that would put it on the lights
+/// refuses with the daemon's sentence and writes nothing: setting it, activating an effect on its
+/// groups, and a takeover of one of its effects.
 #[tokio::test]
 async fn set_scene_activate_and_takeover_refuse_an_over_limit_scene() {
     let rig = rig_loaded(&three_html_scenes(), &[]).await;
