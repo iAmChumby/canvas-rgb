@@ -1,6 +1,6 @@
 "use client";
 
-import type { ReactNode, Ref } from "react";
+import type { DragEvent, KeyboardEvent, PointerEvent, ReactNode, Ref } from "react";
 
 /** A small label that is also a toggle when `onClick` is given. */
 export function Chip({
@@ -10,10 +10,17 @@ export function Chip({
   html,
   marked,
   pending,
+  disabled,
   className,
   onClick,
+  onPointerDown,
+  onKeyDown,
+  onDragStart,
   label,
   title,
+  dataScene,
+  describedBy,
+  testId,
   ref,
 }: {
   children: ReactNode;
@@ -24,11 +31,25 @@ export function Chip({
   marked?: boolean;
   /** The change this chip stands for is on its way to the daemon: it is held, not pressable. */
   pending?: boolean;
+  /** The chip cannot be pressed: a key the daemon refuses, or one that is not ready yet. */
+  disabled?: boolean;
   className?: string;
   onClick?: () => void;
+  /** The pointer pressed the chip: a drag starts here (#371). */
+  onPointerDown?: (event: PointerEvent<HTMLButtonElement>) => void;
+  /** A key was pressed on the chip. */
+  onKeyDown?: (event: KeyboardEvent<HTMLButtonElement>) => void;
+  /** The browser tried to drag the chip away: a chip is a control, not a picture. */
+  onDragStart?: (event: DragEvent<HTMLButtonElement>) => void;
   label?: string;
   /** The native tooltip. It explains the chip without changing its name. */
   title?: string;
+  /** What this chip stands for, in the page's own words (the scene key's id). */
+  dataScene?: string;
+  /** The id of the element that describes this chip: the move step's outcome line. */
+  describedBy?: string;
+  /** The name the tests find this chip by. */
+  testId?: string;
   ref?: Ref<HTMLButtonElement>;
 }) {
   const cls = ["chip", html && "chip-html", pressed && "chip-on", marked && "chip-marked", pending && "chip-pending", className]
@@ -42,10 +63,16 @@ export function Chip({
         className={cls}
         aria-pressed={pressed ?? false}
         aria-busy={pending || undefined}
-        disabled={pending}
+        aria-describedby={describedBy}
+        disabled={disabled || pending}
         aria-label={label}
         title={title}
+        data-scene={dataScene}
+        data-testid={testId}
         onClick={onClick}
+        onPointerDown={onPointerDown}
+        onKeyDown={onKeyDown}
+        onDragStart={onDragStart}
       >
         {icon}
         {children}
@@ -53,7 +80,7 @@ export function Chip({
     );
   }
   return (
-    <span className={cls}>
+    <span className={cls} data-scene={dataScene}>
       {icon}
       {children}
     </span>

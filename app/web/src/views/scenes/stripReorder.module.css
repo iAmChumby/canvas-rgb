@@ -1,0 +1,69 @@
+/*
+ * The scene strip's drag (#371).
+ *
+ * The copy of the lifted key follows the pointer; it is a flat key face, the way the keys in the
+ * strip are, with the focus ring and no shadow. The marker is a 2 px bar in the accent, standing
+ * in the gap the key would land in. Neither takes room: the strip shifts nothing around it.
+ */
+
+/* The copy of the lifted key. It is drawn over the page, so the strip's own overflow cannot clip
+   it. */
+.copy {
+  position: fixed;
+  z-index: 60;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  height: 40px;
+  /* The width of the key it was lifted from, or the room its whole name needs: never an ellipsis. */
+  box-sizing: border-box;
+  padding: 0 var(--s4) 0 var(--s3);
+  border: 1px solid var(--line-2);
+  border-radius: var(--r-md);
+  background: var(--raised);
+  color: var(--ink);
+  font: 500 var(--t15) / 1 var(--fu);
+  white-space: nowrap;
+  /* Solid: the neighbour's name must not show through the lifted key. */
+  opacity: 1;
+  pointer-events: none;
+  user-select: none;
+  -webkit-user-select: none;
+  outline: 2px solid var(--focus);
+  outline-offset: 2px;
+}
+
+/* The name is the point of the lifted key: it is drawn whole. */
+.copy > span {
+  overflow: visible;
+  text-overflow: clip;
+}
+
+/* The key's own light: the same 7 px dot the keys in the strip carry. */
+.copy::before {
+  content: "";
+  width: 7px;
+  height: 7px;
+  flex: 0 0 auto;
+  border-radius: 50%;
+  background: var(--dot);
+}
+
+/* The gap the key would land in: a thin bar in the live colour. */
+.marker {
+  position: absolute;
+  top: 2px;
+  width: 2px;
+  height: 40px;
+  border-radius: 1px;
+  background: var(--live);
+  pointer-events: none;
+  animation: strip-marker var(--dur-fast) var(--ease) both;
+}
+
+@keyframes strip-marker {
+  from {
+    opacity: 0;
+    transform: scaleY(0.6);
+  }
+}

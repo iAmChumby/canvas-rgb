@@ -17,17 +17,19 @@ const { api, notifySpy } = vi.hoisted(() => ({
       setActive: vi.fn(),
       patchGroupProps: vi.fn(),
       putGroupBrightness: vi.fn(),
+      moveGroup: vi.fn(),
+      write: vi.fn(),
     },
     lights: { list: vi.fn(), patch: vi.fn(), flash: vi.fn() },
-    effect: vi.fn(),
     stacks: vi.fn(),
+    effect: vi.fn(),
     createPreset: vi.fn(),
   },
   notifySpy: vi.fn(),
 }));
 
 vi.mock("@/lib/endpoints", () => ({ api }));
-vi.mock("@/components/Notify", () => ({ notify: notifySpy }));
+vi.mock("@/components/Notify", () => ({ notify: notifySpy, dismissNotification: vi.fn() }));
 vi.mock("next/navigation", () => ({
   usePathname: () => "/",
   useRouter: () => ({ push: () => {}, replace: () => {}, prefetch: () => {} }),
@@ -42,6 +44,7 @@ import { GroupSheet } from "@/views/scenes/GroupSheet";
 import { useScene } from "@/views/scenes/useScene";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import type { GroupMove } from "@/proto/GroupMove";
 import type { LightFit } from "@/proto/LightFit";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
@@ -179,6 +182,31 @@ function patternAnswer(fits: LightFit[]): ScenesResponse {
 /** The rev the fake daemon is at. */
 let serverRev = 7;
 
+/** The scene the group is in, and another scene it may go to. */
+function twoScenes(): ScenesResponse {
+  const s = scene();
+  const other: Scene = {
+    id: "evening",
+    name: "Evening",
+    rev: 2,
+    groups: [
+      {
+        id: "g-warm",
+        name: "Warm Wash",
+        members: [SECOND?.light.id ?? ""],
+        plays: { type: "effect", effect: "aurora", props: {} },
+        mode: "flow_across",
+        brightness: 100,
+      },
+    ],
+  };
+  return {
+    active: s.id,
+    scenes: [s, other],
+    group_states: s.groups.map((g) => ({ id: g.id, failed: null, fits: [] })),
+  };
+}
+
 beforeEach(() => {
   for (const group of Object.values(api.scenes)) group.mockReset();
   for (const fn of Object.values(api.lights)) fn.mockReset();
@@ -210,9 +238,30 @@ beforeEach(() => {
     next.rev = serverRev;
     return next;
   });
+  // The daemon's answer to the move route: the step asks it with a dry run, and the answer is
+  // what the row says.
+  api.scenes.moveGroup.mockImplementation(
+    async (_sceneId: string, groupId: string, body: GroupMove) => {
+      const from = scene();
+      const to = twoScenes().scenes.find((s) => s.id === body.to) ?? from;
+      const moving = from.groups.find((g) => g.id === groupId) ?? from.groups[0]!;
+      return {
+        group_id: groupId,
+        saved: !body.dry_run,
+        scenes: [
+          { ...from, rev: from.rev + 1, groups: from.groups.filter((g) => g.id !== groupId) },
+          { ...to, rev: to.rev + 1, groups: [...to.groups, moving] },
+        ],
+        before: [from, to],
+        taken: [],
+        emptied: [],
+      };
+    },
+  );
   api.lights.list.mockResolvedValue({ lights: clone(DEMO_LIGHTS) });
   api.lights.flash.mockResolvedValue({ ok: true });
   api.effect.mockResolvedValue(clone(DETAIL));
+  api.stacks.mockResolvedValue({ stacks: [] });
   patchSnap({
     scenes: answer(),
     scenesError: null,
@@ -320,6 +369,44 @@ describe("the open group", () => {
     await waitFor(() => expect(screen.getByRole("dialog")).toBeTruthy());
     const back = api.scenes.put.mock.calls.at(-1)?.[1] as { scene: Scene };
     expect(back.scene.groups.map((g) => g.id)).toEqual(["g-one", "g-two"]);
+  });
+
+  it("the menu offers a move and a copy, and both are disabled with one scene", async () => {
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const move = await screen.findByRole("button", { name: /Move to scene/ });
+    const copy = await screen.findByRole("button", { name: /Copy to scene/ });
+    expect((move as HTMLButtonElement).disabled).toBe(true);
+    expect(move.getAttribute("title")).toBe("There is no other scene.");
+    expect((copy as HTMLButtonElement).disabled).toBe(true);
+    expect(copy.getAttribute("title")).toBe("There is no other scene.");
+  });
+
+  it("choosing Move to scene opens the step, and it lists the other scene", async () => {
+    api.scenes.list.mockResolvedValue(twoScenes());
+    patchSnap({ scenes: twoScenes(), scenesError: null });
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const move = await screen.findByRole("button", { name: /Move to scene/ });
+    expect((move as HTMLButtonElement).disabled).toBe(false);
+    fireEvent.click(move);
+    // The step is open: it names the scene the group may go to, and what the move does. The
+    // line is the daemon's own answer, so it comes when the daemon has answered.
+    expect(await screen.findByText("Move to Evening")).toBeTruthy();
+    expect(await screen.findByText(/Adds 1 device\./)).toBeTruthy();
+  });
+
+  it("the step goes back to the group, and the way out of it is the sheet's own", async () => {
+    api.scenes.list.mockResolvedValue(twoScenes());
+    patchSnap({ scenes: twoScenes(), scenesError: null });
+    open("g-one");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    fireEvent.click(await screen.findByRole("button", { name: /Move to scene/ }));
+    await screen.findByText("Move to Evening");
+    // The header's key is the way back: the step closes into the group.
+    fireEvent.click(screen.getByRole("button", { name: "Back" }));
+    await waitFor(() => expect(screen.queryByText("Move to Evening")).toBeNull());
+    expect(screen.getByText("Presets")).toBeTruthy();
   });
 
   it("says no Save and no Revert: every change is undoable", async () => {
