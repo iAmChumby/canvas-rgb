@@ -54,7 +54,7 @@ Repeat the sentence to the person word for word. Then do the next step.
 | `{id} is played by the scene "A"` or `the scenes "A", "B"; nothing deleted. Move those groups to another effect first.` | A scene plays the effect. | Delete or edit those scenes away first (they are this run's, so `scenes delete --run`), then delete the effect. |
 | `the preset "{name}" of {effect} was not made by run {run}; nothing changed` | The run did not save that preset. | Leave it. |
 | `{effect} has no preset of yours named "{name}"; nothing changed` | No preset of that name. | Run `canvas-rgb effects preset list {effect} --json`. |
-| `the API returned 409: ...` from `effects preset save` | The name exists, a built-in preset's too. Nothing was overwritten. | Pick a new name. |
+| `the API returned 409: {name} is already a preset of this effect` | `effects preset save` met a name that exists, a built-in preset's too. Nothing was overwritten. | Pick a new name. |
 | `"{arg}" is not a key=value pair` | A `--prop` has no `=`. | Write `--prop key=value`. |
 | `--prop {key} is given twice; give each property once` | A key repeats. | Give it once. |
 | `{key} is not a property of this effect` | The effect has no such property. | Read the property names from `canvas-rgb effects check <file>` or `effects list`. |
