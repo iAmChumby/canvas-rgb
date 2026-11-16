@@ -928,8 +928,14 @@ impl Store {
     /// Refuses while the file could not be read at load, or while the scenes are only in memory
     /// ([`Store::finish_scenes`] writes them first).
     pub fn save_scenes(&self) -> std::io::Result<()> {
-        self.may_write_scenes_files(SCENES_FILE, self.scenes_blocked)?;
+        self.scenes_writable()?;
         write_json(&self.home.join(SCENES_FILE), &self.scenes)
+    }
+
+    /// Whether `scenes.json` may be written now: what [`Store::save_scenes`] asks before it
+    /// writes, so a dry run can refuse what the real save would refuse (#377).
+    pub fn scenes_writable(&self) -> std::io::Result<()> {
+        self.may_write_scenes_files(SCENES_FILE, self.scenes_blocked)
     }
 
     fn may_write_scenes_files(&self, name: &str, blocked: bool) -> std::io::Result<()> {

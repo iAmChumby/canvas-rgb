@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
+- The command line can list your lights and create, edit and delete a scene from a file, with a dry run that saves nothing. (#377)
 
 ### Changed
 
@@ -31,6 +32,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Rain: Trail Length now changes how long each streak is (#383)
 - Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 - A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
+- Fire and Audio Spectrum fill a strip again, flame height and bar height included. Inside a stack they still read dark on a strip. (#400)
 
 ## [0.16.0] - 2026-11-15
 

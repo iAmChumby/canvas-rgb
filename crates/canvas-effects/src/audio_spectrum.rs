@@ -4,7 +4,7 @@ use crate::color::{mix, to_linear, Rgb, WHITE};
 use crate::props_util as p;
 use crate::schema::SchemaBuilder;
 use canvas_proto::traits::AudioSpectrum as Spectrum;
-use canvas_proto::{Canvas, Effect, Inputs, PropertySchema, Props};
+use canvas_proto::{Canvas, Effect, Inputs, PropertySchema, Props, StripRead};
 
 /// The Audio Spectrum effect.
 pub struct AudioSpectrum {
@@ -162,6 +162,13 @@ impl Effect for AudioSpectrum {
                 }
             }
         }
+    }
+
+    /// A bar grows upward from the bottom, so a strip LED at mid-height reads black until the
+    /// bar passes it (#400). The LED reads its whole column instead: the bar's height becomes
+    /// the level it shows, and a quiet band is dim rather than dark.
+    fn strip_read(&self) -> StripRead {
+        StripRead::Column
     }
 }
 

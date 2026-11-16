@@ -1,5 +1,6 @@
 //! canvas-rgbd internals, shared by the daemon and CLI binaries.
 
+pub mod agent_run;
 pub mod api;
 pub mod auth;
 pub mod bundle;

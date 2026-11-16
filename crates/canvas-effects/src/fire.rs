@@ -8,7 +8,7 @@
 use crate::props_util as p;
 use crate::rng::Rng;
 use crate::schema::SchemaBuilder;
-use canvas_proto::{Canvas, Effect, PropertySchema, Props};
+use canvas_proto::{Canvas, Effect, PropertySchema, Props, StripRead};
 
 /// Entries in the palette lookup. Fine enough that the ramp looks continuous.
 const LUT_SIZE: usize = 1024;
@@ -170,6 +170,13 @@ impl Effect for Fire {
             return;
         }
         self.update_with(dt, canvas);
+    }
+
+    /// Fire's meaning is how high the flame reaches, and a strip LED stands at mid-height: a
+    /// small cell there reads the cold gap above the flame and shows black (#400). The LED
+    /// reads its whole column instead, so the flame's height is the level it shows.
+    fn strip_read(&self) -> StripRead {
+        StripRead::Column
     }
 }
 
