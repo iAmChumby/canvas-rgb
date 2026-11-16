@@ -268,6 +268,8 @@ export function applyStatusScenarios(status: Status): Status {
   if (linksConnecting()) next = { ...next, openrgb: "connecting", service: "connecting" };
   if (openRgbConnecting()) next = { ...next, openrgb: "connecting" };
   if (fanConnecting()) next = { ...next, service: "connecting" };
+  // The lights are paused (#378): the engine sends nothing, so the stage says so.
+  if (has(STAGE_PAUSED)) next = { ...next, power: "paused" };
   return next;
 }
 
@@ -491,6 +493,27 @@ export const PATTERN_FITS = "pattern-fits";
 export const PATTERN_STRETCH = "pattern-stretch";
 export const PATTERN_FLAGS = "pattern-flags";
 export const PATTERN_GONE = "pattern-gone";
+
+/** The stage's own states (#378). The demo's group preview answers like the daemon, so the
+ *  stage's states can be seen and shot:
+ *
+ *   stage-connecting   the preview is open and has said nothing yet
+ *   stage-stopped      the preview was refused: another group preview took over
+ *   stage-paused       the lights are paused, so the engine sends nothing
+ */
+export const STAGE_CONNECTING = "stage-connecting";
+export const STAGE_STOPPED = "stage-stopped";
+export const STAGE_PAUSED = "stage-paused";
+
+/** What the demo's group preview does: it sends the group's picture, it opens and says nothing
+ *  yet, or it is refused the way a socket the daemon closes is. */
+export type DemoGroupPreviewMode = "live" | "connecting" | "stopped";
+
+export function demoGroupPreviewMode(): DemoGroupPreviewMode {
+  if (has(STAGE_STOPPED)) return "stopped";
+  if (has(STAGE_CONNECTING)) return "connecting";
+  return "live";
+}
 
 /** The pattern the fit states play: a ring of 40, seeded by the demo. */
 export const PATTERN_FRONT_FANS = "pattern:Front fans";

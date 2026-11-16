@@ -1,6 +1,7 @@
 "use client";
 
 import type { KeyboardEvent, ReactNode } from "react";
+import { padSlot } from "@/lib/padInput";
 
 /**
  * The 8BitDo Ultimate 2, drawn flat: a front view with every remappable button as a target,
@@ -14,6 +15,11 @@ import type { KeyboardEvent, ReactNode } from "react";
  *
  * Every target is at least 34 drawing units across, which is 28 px or more at the narrowest
  * width the plan is drawn at.
+ *
+ * What the plan carries of the pad's own state (#375): a held button is filled, the two triggers
+ * fill their slots in the strip above the plan, and each stick carries a dot that stands where
+ * the stick stands. The four paddles are ghosts: XInput cannot see them, so they are drawn as
+ * dashed outlines and never light.
  */
 
 export interface PadButton {
@@ -38,6 +44,8 @@ interface Spot {
   h: number;
   round?: boolean;
   mark: Mark;
+  /** The stick this spot is the well of, when it is one. */
+  stick?: "l" | "r";
 }
 
 const FRONT_W = 340;
@@ -48,7 +56,7 @@ const mirror = (s: Spot, mark: Mark): Spot => ({ ...s, cx: FRONT_W - s.cx, mark 
 const L2: Spot = { cx: 78, cy: 17, w: 60, h: 24, mark: { text: "L2" } };
 const L1: Spot = { cx: 80, cy: 51, w: 60, h: 24, mark: { text: "L1" } };
 const P3: Spot = { cx: 26, cy: 60, w: 34, h: 26, mark: { text: "P3" } };
-const L3: Spot = { cx: 72, cy: 100, w: 44, h: 44, round: true, mark: { text: "L3" } };
+const L3: Spot = { cx: 72, cy: 100, w: 44, h: 44, round: true, mark: { text: "L3" }, stick: "l" };
 
 /** Where each button of the front view sits. */
 const FRONT: Record<string, Spot> = {
@@ -59,7 +67,7 @@ const FRONT: Record<string, Spot> = {
   "paddle-3": P3,
   "paddle-4": mirror(P3, { text: "P4" }),
   l3: L3,
-  r3: { cx: 222, cy: 152, w: 44, h: 44, round: true, mark: { text: "R3" } },
+  r3: { cx: 222, cy: 152, w: 44, h: 44, round: true, mark: { text: "R3" }, stick: "r" },
   select: { cx: 132, cy: 86, w: 26, h: 26, round: true, mark: { glyph: "select" } },
   home: { cx: 170, cy: 86, w: 30, h: 30, round: true, mark: { glyph: "home" } },
   start: { cx: 208, cy: 86, w: 26, h: 26, round: true, mark: { glyph: "start" } },
@@ -91,13 +99,18 @@ const DPAD =
   "M 105 126 L 131 126 L 131 139 L 157 139 L 157 165 L 131 165 L 131 178 " +
   "L 105 178 L 105 165 L 79 165 L 79 139 L 105 139 Z";
 
-/** The name each key carries on the plan: the schema's key without its prefix. */
-function placeOf(key: string): string {
-  if (key.startsWith("button-")) return key.slice("button-".length);
-  const paddle = /paddle-(\d+)$/.exec(key);
-  if (paddle) return `paddle-${paddle[1]}`;
-  return key;
-}
+/* ---- the strip above the plan, where the two triggers travel ---- */
+
+/** The strip the trigger slots stand in, above the plan. */
+const TRIGGER_TOP = -38;
+const TRIGGER_SLOT_Y = -30;
+const TRIGGER_SLOT_H = 20;
+const TRIGGER_SLOT_W = 100;
+const TRIGGER_LEFT_X = 30;
+const TRIGGER_RIGHT_X = 210;
+
+/** How far the stick's dot may travel from the middle of its well. */
+const STICK_TRAVEL = 14;
 
 /** A glyph, drawn around the point (0, 0). */
 function Glyph({ name }: { name: GlyphName }): ReactNode {
@@ -146,6 +159,8 @@ export function ControllerOutline({
 
   const target = (b: PadButton, spot: Spot) => {
     const on = selected === b.key;
+    // The four paddles are ghosts: XInput cannot see them.
+    const ghost = padSlot(b.key).startsWith("paddle-");
     // The hit area is never smaller than 34 units, whatever is drawn inside it.
     const hw = Math.max(spot.w, 34);
     const hh = Math.max(spot.h, 34);
@@ -153,6 +168,8 @@ export function ControllerOutline({
       <g
         key={b.key}
         className="pad-target"
+        data-pad-key={b.key}
+        data-ghost={ghost ? "true" : "false"}
         role="button"
         tabIndex={0}
         aria-label={`Map ${b.label}`}
@@ -175,6 +192,17 @@ export function ControllerOutline({
             rx={7}
           />
         )}
+        {spot.stick && (
+          // The stick's dot: where the stick stands inside its well.
+          <circle
+            className="pad-stick-dot"
+            data-pad-dot={spot.stick}
+            cx={spot.cx}
+            cy={spot.cy}
+            r={6}
+            aria-hidden="true"
+          />
+        )}
         {"text" in spot.mark ? (
           <text className="pad-print" x={spot.cx} y={spot.cy} textAnchor="middle" dominantBaseline="central">
             {spot.mark.text}
@@ -188,25 +216,138 @@ export function ControllerOutline({
     );
   };
 
-  const front = buttons.filter((b) => FRONT[placeOf(b.key)]);
-  const rear = buttons.filter((b) => REAR[placeOf(b.key)]);
+  const front = buttons.filter((b) => FRONT[padSlot(b.key)]);
+  const rear = buttons.filter((b) => REAR[padSlot(b.key)]);
 
   return (
     <div className="pad-views">
-      <svg className="pad-plan" viewBox="0 0 340 244" role="group" aria-label="The 8BitDo Ultimate 2, front">
+      <svg
+        className="pad-plan"
+        viewBox={`0 ${TRIGGER_TOP} ${FRONT_W} ${244 - TRIGGER_TOP}`}
+        role="group"
+        aria-label="The 8BitDo Ultimate 2, front"
+      >
+        {/* The two triggers: a slot that fills with the travel, and the number beside it. */}
+        <g className="pad-travels" aria-hidden="true">
+          <text className="pad-travel-label" x={6} y={TRIGGER_SLOT_Y + TRIGGER_SLOT_H / 2} textAnchor="start" dominantBaseline="central">
+            LT
+          </text>
+          <rect
+            className="pad-travel-slot"
+            data-pad-slot="lt"
+            x={TRIGGER_LEFT_X}
+            y={TRIGGER_SLOT_Y}
+            width={TRIGGER_SLOT_W}
+            height={TRIGGER_SLOT_H}
+            rx={6}
+          />
+          <rect
+            className="pad-travel-fill"
+            data-pad-travel="lt"
+            x={TRIGGER_LEFT_X}
+            y={TRIGGER_SLOT_Y}
+            width={0}
+            height={TRIGGER_SLOT_H}
+            rx={3}
+          />
+          <text
+            className="pad-travel-value"
+            data-pad-value="lt"
+            x={TRIGGER_LEFT_X + TRIGGER_SLOT_W + 6}
+            y={TRIGGER_SLOT_Y + TRIGGER_SLOT_H / 2}
+            textAnchor="start"
+            dominantBaseline="central"
+          >
+            000
+          </text>
+          <text
+            className="pad-travel-value"
+            data-pad-value="rt"
+            x={TRIGGER_RIGHT_X - 6}
+            y={TRIGGER_SLOT_Y + TRIGGER_SLOT_H / 2}
+            textAnchor="end"
+            dominantBaseline="central"
+          >
+            000
+          </text>
+          <rect
+            className="pad-travel-slot"
+            data-pad-slot="rt"
+            x={TRIGGER_RIGHT_X}
+            y={TRIGGER_SLOT_Y}
+            width={TRIGGER_SLOT_W}
+            height={TRIGGER_SLOT_H}
+            rx={6}
+          />
+          <rect
+            className="pad-travel-fill"
+            data-pad-travel="rt"
+            x={TRIGGER_RIGHT_X}
+            y={TRIGGER_SLOT_Y}
+            width={0}
+            height={TRIGGER_SLOT_H}
+            rx={3}
+          />
+          <text
+            className="pad-travel-label"
+            x={TRIGGER_RIGHT_X + TRIGGER_SLOT_W + 6}
+            y={TRIGGER_SLOT_Y + TRIGGER_SLOT_H / 2}
+            textAnchor="start"
+            dominantBaseline="central"
+          >
+            RT
+          </text>
+        </g>
         <path className="pad-body" d={BODY} />
         <path className="pad-body" d={DPAD} />
-        {front.map((b) => target(b, FRONT[placeOf(b.key)]!))}
+        {front.map((b) => target(b, FRONT[padSlot(b.key)]!))}
       </svg>
       <div className="pad-rear">
         <svg className="pad-plan" viewBox="0 0 200 124" role="group" aria-label="The 8BitDo Ultimate 2, rear">
           <g transform="translate(15 2) scale(0.5)">
             <path className="pad-body" d={BODY} />
           </g>
-          {rear.map((b) => target(b, REAR[placeOf(b.key)]!))}
+          {rear.map((b) => target(b, REAR[padSlot(b.key)]!))}
         </svg>
         <span className="pad-caption">Rear</span>
       </div>
+      {/* The two sticks, in numbers: where each one stands. */}
+      <div className="pad-readouts">
+        <span className="pad-readout">
+          <span className="pad-readout-name">L</span>
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">X</span>
+            <span className="pad-readout-value" data-pad-stick="lx">
+              +0
+            </span>
+          </span>
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">Y</span>
+            <span className="pad-readout-value" data-pad-stick="ly">
+              +0
+            </span>
+          </span>
+        </span>
+        <span className="pad-readout">
+          <span className="pad-readout-name">R</span>
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">X</span>
+            <span className="pad-readout-value" data-pad-stick="rx">
+              +0
+            </span>
+          </span>
+          <span className="pad-readout-pair">
+            <span className="pad-readout-axis">Y</span>
+            <span className="pad-readout-value" data-pad-stick="ry">
+              +0
+            </span>
+          </span>
+        </span>
+      </div>
+      <p className="pad-note">Paddles are not visible in XInput mode.</p>
     </div>
   );
 }
+
+/** How far the stick's dot travels, for the painter that moves it. */
+export const PAD_STICK_TRAVEL = STICK_TRAVEL;

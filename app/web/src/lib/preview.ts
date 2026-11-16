@@ -105,7 +105,12 @@ export function usePreviewStatus(): PreviewStatus {
   );
 }
 
-function parseFrame(buf: ArrayBuffer): Frame | null {
+/**
+ * Reads one binary frame: u16 LE width, u16 LE height, then width*height*3 RGB bytes.
+ *
+ * The group preview (#378) reads its frames with this too, so the wire format has one reader.
+ */
+export function parseFrame(buf: ArrayBuffer): Frame | null {
   if (buf.byteLength < 4) return null;
   const view = new DataView(buf);
   const width = view.getUint16(0, true);

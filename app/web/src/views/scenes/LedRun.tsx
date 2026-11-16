@@ -10,6 +10,7 @@
 
 import { createContext, useContext, useEffect, useRef } from "react";
 import type { LightColours } from "@/views/scenes/useLightFeed";
+import { shownTimes, shownWords } from "@/views/chain/limits";
 import type { LightView } from "@/proto/LightView";
 import s from "@/views/scenes/scenes.module.css";
 
@@ -185,7 +186,11 @@ function drawSlot(
 export function runLabel(name: string, lights: LightView[]): string {
   const leds = lights.reduce((n, l) => n + l.led_count, 0);
   const away = lights.filter((l) => !l.connected).length;
-  return `${name}: ${lights.length} ${lights.length === 1 ? "device" : "devices"}, ${leds} LEDs${away > 0 ? `, ${away} not connected` : ""}`;
+  const mirrored = lights
+    .filter((l) => shownTimes(l) >= 2)
+    .map((l) => `, ${l.label} ${shownWords(l)}`)
+    .join("");
+  return `${name}: ${lights.length} ${lights.length === 1 ? "device" : "devices"}, ${leds} LEDs${mirrored}${away > 0 ? `, ${away} not connected` : ""}`;
 }
 
 /**

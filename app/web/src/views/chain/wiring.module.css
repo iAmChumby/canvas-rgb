@@ -1,6 +1,7 @@
 /*
- * The chain's wiring: the takeover that offers a header setup over Scenes, and the Devices row
- * that shows one header and starts its flow again.
+ * The chain's wiring: the takeover that offers a header setup over Scenes (and that a Devices row
+ * opens too, so the rows below stay where they are), and the Devices row that shows one header and
+ * starts its flow again.
  *
  * The takeover is a plain dim over the page (the `--scrim` token, no blur and no gradient) with
  * the flow's own instrument standing in it, so the Scenes page and the lights are still the thing
@@ -129,14 +130,17 @@
 .partWho {
   display: flex;
   flex: 1 1 140px;
+  /* The LED count drops under the name when the name needs the room: a name is never cut short. */
+  flex-wrap: wrap;
   align-items: center;
   gap: var(--s2);
   min-width: 0;
 }
 
 .partName {
+  flex: none;
   min-width: 0;
-  max-width: 24ch;
+  max-width: min(100%, 40ch);
   justify-content: flex-start;
   text-align: left;
 }
@@ -165,12 +169,6 @@
 
 .partError {
   flex-basis: 100%;
-}
-
-/* The flow, opened inline under its own row. It keeps its own frame; the row only gives it room. */
-.setup {
-  border-top: 1px dashed var(--line);
-  padding-top: var(--s2);
 }
 
 /* ---------- a phone in the hand ---------- */

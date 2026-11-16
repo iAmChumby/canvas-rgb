@@ -66,7 +66,7 @@ beforeAll(() => {
 
 const DEVICE = "openrgb:A1B2C3D4E5F6";
 const SESSION = "session-1";
-const SETUP = { name: "Chain setup" };
+const SETUP = { name: "Light setup" };
 
 const STATUS = {
   onboarding_complete: true,
@@ -129,6 +129,16 @@ async function press(name: string): Promise<void> {
     fireEvent.click(screen.getByRole("button", { name }));
     await vi.advanceTimersByTimeAsync(0);
   });
+}
+
+/** Walks the flow from the introduction to the save, and closes it with Done. */
+async function finish(): Promise<void> {
+  await press("Start");
+  await press("Next");
+  await press("Next");
+  await press("Next");
+  await press("Yes, save these devices");
+  await press("Done");
 }
 
 /**
@@ -210,6 +220,9 @@ describe("the header setup the app offers by itself", () => {
 
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
     await flush();
+    // The introduction first: the session opens on Start.
+    expect(api.chains.start).not.toHaveBeenCalled();
+    await press("Start");
     expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 1);
   });
 
@@ -231,7 +244,8 @@ describe("the header setup the app offers by itself", () => {
     await show([chain(1, "JARGB 1", "not_set_up", 0)]);
 
     expect(screen.queryByRole("region", SETUP)).toBeNull();
-    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    // Later on the introduction opened no session, then or now.
+    expect(api.chains.start).not.toHaveBeenCalled();
     expect(offeredChains().has(chainKey(DEVICE, 1))).toBe(true);
   });
 
@@ -252,7 +266,7 @@ describe("the header setup the app offers by itself", () => {
 
   it("Escape is remembered when the window is opened again", async () => {
     const first = await show([chain(1, "JARGB 1", "not_set_up", 0)]);
-    await flush();
+    await press("Start");
     expect(api.chains.start).toHaveBeenCalledTimes(1);
 
     await act(async () => {
@@ -275,10 +289,7 @@ describe("the header setup the app offers by itself", () => {
 
     // The flow ends: the daemon says the header is set up, and the close key ends the visit.
     api.chains.list.mockResolvedValue({ chains: [chain(1, "JARGB 1", "set_up", 8)] });
-    await press("Next");
-    await press("Next");
-    await press("Yes");
-    await press("Close");
+    await finish();
     expect(screen.queryByRole("region", SETUP)).toBeNull();
     first.unmount();
 
@@ -291,7 +302,7 @@ describe("the header setup the app offers by itself", () => {
 
   it("Later puts off every header the visit has not shown yet", async () => {
     const first = await show([chain(1, "JARGB 1", "not_set_up", 0), chain(2, "JARGB 2", "not_set_up", 0)]);
-    expect(screen.getByText(/JARGB 1/)).toBeTruthy();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 1/)).toBeTruthy();
     await press("Later");
     first.unmount();
 
@@ -302,7 +313,7 @@ describe("the header setup the app offers by itself", () => {
 
     expect(screen.queryByText(/JARGB 1/)).toBeNull();
     expect(screen.queryByText(/JARGB 2/)).toBeNull();
-    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    expect(api.chains.start).not.toHaveBeenCalled();
   });
 
   it("a request is spent by the visit that serves it", async () => {
@@ -316,10 +327,7 @@ describe("the header setup the app offers by itself", () => {
     api.chains.list.mockResolvedValue({
       chains: [chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 8)],
     });
-    await press("Next");
-    await press("Next");
-    await press("Yes");
-    await press("Close");
+    await finish();
     first.unmount();
 
     // The next visit: the request is spent, so the app asks for nothing. A header is offered by
@@ -340,10 +348,7 @@ describe("the header setup the app offers by itself", () => {
     api.chains.list.mockResolvedValue({
       chains: [chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 0)],
     });
-    await press("Next");
-    await press("Next");
-    await press("Yes");
-    await press("Close");
+    await finish();
     first.unmount();
 
     // The next visit: the request is spent, and the header an earlier launch put off is not
@@ -357,7 +362,7 @@ describe("the header setup the app offers by itself", () => {
     await showStrict([chain(1, "JARGB 1", "not_set_up", 8)]);
 
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
-    expect(screen.getByText(/JARGB 1/)).toBeTruthy();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 1/)).toBeTruthy();
   });
 
   it("strict mode's double effect does not serve the request twice", async () => {
@@ -381,7 +386,7 @@ describe("the header setup the app offers by itself", () => {
     await flush();
 
     expect(screen.getByRole("region", SETUP)).toBeTruthy();
-    await flush();
+    await press("Start");
     expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 1);
   });
 });
