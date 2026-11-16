@@ -117,8 +117,8 @@ describe("the scene strip's order", () => {
     const { keys } = setup();
     dragFrom(keys[0]!, 200);
     const marker = screen.getByTestId("strip-marker");
-    // The gap is between the first key and the second: the marker stands in it.
-    
+    // The gap is between the second key and the third: the marker stands in it.
+    expect(marker.style.left).toBe("216px");
   });
 
   it("Escape calls the drag off, and nothing is written", () => {
