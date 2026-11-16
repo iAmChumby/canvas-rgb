@@ -15,6 +15,8 @@
   align-items: center;
   gap: var(--s2);
   height: 40px;
+  /* The width of the key it was lifted from, or the room its whole name needs: never an ellipsis. */
+  box-sizing: border-box;
   padding: 0 var(--s4) 0 var(--s3);
   border: 1px solid var(--line-2);
   border-radius: var(--r-md);
@@ -22,12 +24,19 @@
   color: var(--ink);
   font: 500 var(--t15) / 1 var(--fu);
   white-space: nowrap;
-  opacity: 0.92;
+  /* Solid: the neighbour's name must not show through the lifted key. */
+  opacity: 1;
   pointer-events: none;
   user-select: none;
   -webkit-user-select: none;
   outline: 2px solid var(--focus);
   outline-offset: 2px;
+}
+
+/* The name is the point of the lifted key: it is drawn whole. */
+.copy > span {
+  overflow: visible;
+  text-overflow: clip;
 }
 
 /* The key's own light: the same 7 px dot the keys in the strip carry. */

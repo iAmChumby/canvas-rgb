@@ -229,7 +229,7 @@ export function SceneStrip({
             style={{
               left: reorder.drag.x - reorder.drag.grabX,
               top: reorder.drag.y - reorder.drag.grabY,
-              width: reorder.drag.width,
+              minWidth: reorder.drag.width,
             }}
             aria-hidden="true"
           >
