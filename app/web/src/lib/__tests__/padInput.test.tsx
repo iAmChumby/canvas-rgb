@@ -4,8 +4,8 @@
 // drive that loop by hand: the frame callback is called when the test says so, never after a
 // wait, so the verdict never depends on how fast the machine is.
 
-import { act, cleanup, render } from "@testing-library/react";
-import { useEffect } from "react";
+import { act, cleanup, render, renderHook } from "@testing-library/react";
+import { Profiler, useEffect, type ReactNode } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   devicePadMatch,
@@ -69,6 +69,20 @@ function Harness({ pad, seen }: { pad: StubPad; seen: PadFrame[] }) {
   const register = input.register;
   useEffect(() => register((frame) => seen.push(frame)), [register, seen]);
   return <div data-testid="status">{input.status}</div>;
+}
+
+/**
+ * Counts the page's draws, with React's own profiler.
+ *
+ * The profiler's callback runs once for every commit of what is inside it, so a pad held still
+ * across 600 frames adds nothing to the count. The count is a spy: it is read, never reassigned.
+ */
+function Drawn({ count, children }: { count: () => void; children: ReactNode }) {
+  return (
+    <Profiler id="pad" onRender={count}>
+      {children}
+    </Profiler>
+  );
 }
 
 describe("the pad's input", () => {
@@ -290,19 +304,14 @@ describe("the stub in the shipped app", () => {
       mapping: "",
       others: 1,
     };
-    let input: ReturnType<typeof usePadInput> | null = null;
-    function Probe() {
-      input = usePadInput({ source: "stub" });
-      return <div data-testid="status">{input.status}</div>;
-    }
-    const { getByTestId } = render(<Probe />);
+    const { result } = renderHook(() => usePadInput({ source: "stub" }));
     frames.step();
 
-    expect(getByTestId("status").textContent).toBe("live");
+    expect(result.current.status).toBe("live");
     // The pad the harness stamps is the one read, and the second pad makes the page say so.
-    expect(input!.showing).toBe("Showing pad 1 of 2.");
+    expect(result.current.showing).toBe("Showing pad 1 of 2.");
     // Its layout cannot be read, so no key is lit.
-    expect(input!.unreadable).toBe(true);
+    expect(result.current.unreadable).toBe(true);
   });
 });
 
@@ -404,26 +413,25 @@ describe("the trigger's key", () => {
 describe("the frame loop's cost", () => {
   it("asks the page to draw nothing across 600 identical frames", () => {
     const pad = new StubPad();
-    let renders = 0;
-    /** The panel's own render, counted: one render is one call of this component. */
-    function Counting() {
-      renders += 1;
-      const input = usePadInput({ getGamepads: () => [pad.read()] });
-      return <div>{input.status}</div>;
-    }
-    render(<Counting />);
+    // The profiler's callback is the page's own draw count: one call is one commit.
+    const drawn = vi.fn();
+    renderHook(() => usePadInput({ getGamepads: () => [pad.read()] }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <Drawn count={drawn}>{children}</Drawn>
+      ),
+    });
 
     // The first frame and the press that follows it are drawn.
     frames.step();
     pad.buttons.add(0);
     frames.step();
-    const drawn = renders;
-    expect(drawn).toBeGreaterThan(1);
+    const commits = drawn.mock.calls.length;
+    expect(commits).toBeGreaterThan(1);
 
     for (let i = 0; i < 600; i++) frames.step();
 
     // Held still: the status was not written again, and no frame was drawn again.
-    expect(renders).toBe(drawn);
+    expect(drawn.mock.calls.length).toBe(commits);
   });
 });
 
@@ -431,27 +439,26 @@ describe("the wake state", () => {
   it("starts the read on its own when no gamepadconnected ever arrives", () => {
     const pad = new StubPad();
     const list: PadGamepad[] = [];
-    let renders = 0;
-    function Counting() {
-      renders += 1;
-      const input = usePadInput({ getGamepads: () => list });
-      return <div data-testid="status">{input.status}</div>;
-    }
-    const { getByTestId } = render(<Counting />);
-    expect(getByTestId("status").textContent).toBe("wake");
+    const drawn = vi.fn();
+    const { result } = renderHook(() => usePadInput({ getGamepads: () => list }), {
+      wrapper: ({ children }: { children: ReactNode }) => (
+        <Drawn count={drawn}>{children}</Drawn>
+      ),
+    });
+    expect(result.current.status).toBe("wake");
 
     // The first frame draws the empty pad once and asks for another.
     frames.step();
-    const settled = renders;
+    const settled = drawn.mock.calls.length;
     // The next frames get the same answer, so nothing is drawn again.
     for (let i = 0; i < 3; i++) frames.step();
-    expect(getByTestId("status").textContent).toBe("wake");
-    expect(renders).toBe(settled);
+    expect(result.current.status).toBe("wake");
+    expect(drawn.mock.calls.length).toBe(settled);
 
     // The fifth frame: the list is filled, and no `gamepadconnected` was ever sent.
     list.push(pad.read());
     frames.step();
-    expect(getByTestId("status").textContent).toBe("live");
+    expect(result.current.status).toBe("live");
     expect(PAD_STATUS_WORDS.wake).toBe("No pad seen yet. Press any button on the pad.");
   });
 });
