@@ -167,7 +167,15 @@ export function GroupStage({
         </p>
       </div>
       <div className={s.stageSide}>
-        <div className={s.stageControls}>{children}</div>
+        <div className={s.stageControls}>
+          {children}
+          {/* A pattern group has no mode control: its row is kept, so the band is the same
+              height for an effect group and a pattern group and nothing moves under the
+              pointer when the sheet is opened on another group. */}
+          {pattern && (
+            <div className={s.stageModeRow} data-testid="stage-mode-row" aria-hidden="true" />
+          )}
+        </div>
         {/* The note keeps its room whether there is a device away or not, so the stage's box
             is the same size in every state. */}
         <p className={s.stageAway}>

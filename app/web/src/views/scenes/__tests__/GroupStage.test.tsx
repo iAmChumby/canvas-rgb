@@ -140,6 +140,18 @@ describe("the stage", () => {
     expect(screen.getByRole("img", { name: "Preview of Aurora" })).toBeTruthy();
   });
 
+  it("keeps the mode control's row for a pattern group, so the band is the same height", async () => {
+    render(stage());
+    await settle();
+    // An effect group has the mode control itself: no row is kept empty.
+    expect(screen.queryByTestId("stage-mode-row")).toBeNull();
+
+    render(stage({ pattern: true }));
+    await settle();
+    // A pattern group has no mode control: its row is kept, so the band does not change height.
+    expect(screen.getByTestId("stage-mode-row")).toBeTruthy();
+  });
+
   it("says a pattern is drawn on the lights only, and opens no socket for it", async () => {
     render(stage({ pattern: true }));
     await settle();
