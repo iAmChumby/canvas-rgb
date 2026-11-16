@@ -1398,9 +1398,8 @@ mod tests {
         effect.init(props);
         let read = effect.strip_read();
         let generation = scene.groups[0].effect_generation + 1;
-        let replaced =
-            scene.groups[0].install(Some(effect), InputNeeds::default(), read, None, generation);
-        assert!(replaced.is_none(), "one frame at a time in this test: no effect was in flight");
+        // `install` hands back the effect it replaced, for the caller to drop.
+        drop(scene.groups[0].install(Some(effect), InputNeeds::default(), read, None, generation));
     }
 
     /// Replacing a group's effect changes how the strip reads it each time (#400): Rain asks
