@@ -71,6 +71,8 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 8_000", "open: 8 s ceiling on two 2 s load budgets (the import's parse and the rescan's, #56)"),
     ("canvas-daemon/tests/scenes.rs", "start.elapsed() < Duration::from_secs(20)", "hang guard: a 20 s deadline on a poll loop for a brightness change that lands within one frame"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
+    ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(started.elapsed() < Duration::from_secs(2), \"waited past the first window", "open: pins the rescan's 1.5 s first window (no list change means detection did not start); 0.5 s slack over the window it asserts, #290"),
+    ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(took >= Duration::from_secs(3) && took < Duration::from_secs(5)", "open: pins the 3 s detection cap set for this test: the call must return at the cap, not before and not long after; 2 s slack, #290"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),
     ("canvas-html/tests/effects.rs", "started.elapsed().as_millis() <= 2_000", "hang guard: a frame after a runaway loop must not be stuck as well; 2 s"),
     ("canvas-html/tests/effects.rs", "elapsed.as_millis() < 30 * canvas_html::FRAME_BUDGET_MS as u128", "hang guard: 30 frames against 30 frame budgets of the engine"),
@@ -83,6 +85,8 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
 /// inside a loop that polls to a deadline. "open" means the sleep stands in for a state the code is
 /// expected to reach in time, which a stalled runner can miss: a real sibling, not yet fixed.
 const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
+    ("canvas-adapters/tests/openrgb_rescan.rs", "tokio::time::sleep(Duration::from_millis(100)).await;", "absence check: a SET_CUSTOM_MODE that must NOT be sent; the frame write before it has already returned, so 100 ms gives a wrong extra write time to land, #290"),
+    ("canvas-daemon/tests/devices_rescan.rs", "tokio::time::sleep(Duration::from_millis(300)).await;", "absence check: after the refresh read the mid-detection list (waited for by count), a wrong apply must NOT happen; 300 ms lets one land, #290"),
     ("canvas-daemon/src/scene_migration.rs", "sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of the file shows as a new mtime; a slower runner only widens the gap"),
     ("canvas-daemon/src/storage.rs", "std::thread::sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of layouts.json shows as a new mtime; a slower runner only widens the gap"),
     ("attack_shark_x6/hid_cache.rs", "sleep(Duration::from_millis(350))", "safe: sleeps past a 300 ms TTL; a slower runner only ages the cache more"),

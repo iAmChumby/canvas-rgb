@@ -403,14 +403,14 @@ async fn a_keyboard_frame_is_not_blocked_while_a_rescan_waits_for_detection() {
     // Packet 140 is at OpenRGB: the supervisor is now waiting for the list to go quiet.
     until("packet 140 reached OpenRGB", || server.rescan_count() == 1).await;
 
-    let (frames, rx) = tokio::sync::mpsc::channel(1);
+    let (frames, rx) = tokio::sync::watch::channel(Vec::new());
     let writer = tokio::spawn(canvas_daemon::writer::writer_loop(
         rig.app.adapter.clone(),
         DeviceId("royuan:keyboard".into()),
         rx,
         Arc::new(canvas_daemon::last_frame::LastFrame::default()),
     ));
-    frames.send(vec![Rgb8::WHITE; 4]).await.expect("the writer takes the frame");
+    frames.send_replace(vec![Rgb8::WHITE; 4]);
     drop(frames);
     tokio::time::timeout(Duration::from_secs(1), writer)
         .await
