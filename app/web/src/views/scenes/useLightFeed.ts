@@ -17,8 +17,12 @@ import { getSnap } from "@/lib/store";
 /** The colours of one light's LEDs as RGB triples, or null while the feed has none for it. */
 export type LightColours = (lightId: string) => Uint8Array | null;
 
-/** The wait before the socket is tried again after it closed: 1.2 s, doubling, up to 15 s. */
-function retryWait(failures: number): number {
+/**
+ * The wait before the socket is tried again after it closed: 1.2 s, doubling, up to 15 s.
+ *
+ * The group preview (#378) waits the same way, with this helper and not a copy of it.
+ */
+export function retryWait(failures: number): number {
   return Math.min(15000, 1200 * Math.pow(2, Math.min(4, failures)));
 }
 
