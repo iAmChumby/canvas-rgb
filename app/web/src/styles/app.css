@@ -3954,18 +3954,12 @@ button.chip:hover {
   }
 }
 
-/* phone: the row wraps to two lines, the name and its state on the first, the id, the drawing
-   and the count on the second. */
+/* A narrow page: the row wraps to two lines, the name and its state on the first, the id, the
+   drawing and the count on the second. The list keeps its own scroller: this container query also
+   fires on a desktop shell (a 721-752 px window), where `.content` is clipped, so handing the
+   scroll back to the document here left the rows cut off (#89). The phone hand-back is below,
+   keyed on the window. */
 @container page (max-width: 640px) {
-  .rd-devices .rd-dev-list {
-    overflow: visible;
-    flex: 0 0 auto;
-  }
-
-  .rd-devices .load-frame[data-state="ready"] {
-    flex: 0 0 auto;
-  }
-
   .rd-devices .rd-dev-row {
     display: flex;
     flex-wrap: wrap;
@@ -5323,6 +5317,15 @@ button.chip:hover {
     padding: 0;
   }
 
+  /* The Devices list is the last pane to hand scrolling back to the document, and only on a
+     phone. On a desktop shell its page can be just as narrow, but `.content` is clipped there, so
+     it must keep its own scroller (#89). */
+  .rd-devices .rd-dev-list,
+  .rd-devices .load-frame[data-state="ready"] {
+    flex: 0 0 auto;
+    overflow: visible;
+  }
+
   .rd-fans .rd-fans-right > .panel {
     overflow: visible;
   }
@@ -6280,6 +6283,27 @@ button.chip:hover {
   }
 }
 
+/* A desktop shell whose page is 641-660 px wide (a 753-772 px window) is the band where the window
+   is not a phone but the head still needs about 661 px to keep Access on one line: the 639 px block
+   above and the 720 px window rules below both miss it, and the Read/Change switches ran up to 20 px
+   past the page (#89). Wrap the head here too, with the same gap and alignment as the 639 px block so
+   pages 639 and 640 look the same; the sections keep their columns. */
+@container page (max-width: 660px) {
+  .rd-peripherals .peripheral-head {
+    flex-wrap: wrap;
+  }
+
+  .rd-peripherals .rd-peri-access {
+    margin-left: 0;
+    padding-left: 0;
+    border-left: 0;
+    flex: 1 1 100%;
+    flex-wrap: wrap;
+    gap: var(--s3);
+    justify-content: flex-end;
+  }
+}
+
 /* The strip is outside the content box, so it follows the window, like the shell's own strip
    rules do: the pending count and the Revert label give way to the title and Apply, which
    have to fit at 390 px. */
@@ -6397,6 +6421,9 @@ button.chip:hover {
   display: flex;
   align-items: center;
   gap: var(--s3);
+  /* Let the Access switches drop to their own line whenever they stop fitting, at any window width.
+     While everything fits on one line the wrap never triggers, so wide windows look the same (#89). */
+  flex-wrap: wrap;
 }
 
 .peripheral-head-icon {
