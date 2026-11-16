@@ -96,16 +96,16 @@ describe("the colour set", () => {
 });
 
 describe("a part's name", () => {
-  it("says Fan, Strip or Part, counted from one", () => {
+  it("says Fan, Strip or Device, counted from one", () => {
     expect(defaultName("fan", 1)).toBe("Fan 1");
     expect(defaultName("strip", 2)).toBe("Strip 2");
-    expect(defaultName("other", 3)).toBe("Part 3");
+    expect(defaultName("other", 3)).toBe("Device 3");
   });
 
   it("follows a new kind unless the owner typed a name", () => {
     expect(renameForKind("Fan 1", false, "strip", 1)).toBe("Strip 1");
     expect(renameForKind("Top intake", true, "strip", 1)).toBe("Top intake");
     // A name that is only the old default is the app's, not the owner's.
-    expect(renameForKind("Fan 2", false, "other", 2)).toBe("Part 2");
+    expect(renameForKind("Fan 2", false, "other", 2)).toBe("Device 2");
   });
 });

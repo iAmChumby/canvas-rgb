@@ -17,6 +17,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - A scene can have two groups playing HTML effects (#370)
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+- Setting up an ARGB header starts with a short introduction, counts the orange lights you can see first, and names every step in plain words; a header you cannot see into has a way out. (#381)
 
 ### Fixed
 
@@ -33,6 +34,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - The sidebar strip shows your lights' real colours in a scene (#379)
 - Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
 - Rain: Trail Length now changes how long each streak is (#383)
+- A header whose devices all show the same lights (a splitter, a hub) is saved as one light shown several times, no longer as many one-LED fans. (#382)
 - Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 - A leftover entry for a keyboard the app drives itself no longer shows up in Devices as a nameless, not connected light. (#393)
 - The boot colour and the black paint no longer write to OpenRGB's copy of a keyboard the app drives itself. (#413)

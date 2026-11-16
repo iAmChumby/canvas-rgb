@@ -681,7 +681,7 @@ export function DevicesView() {
                         </span>
                       </div>
                       {chainOf(z.index) ? (
-                        <ChainRow chain={chainOf(z.index)!} />
+                        <ChainRow chain={chainOf(z.index)!} named={false} />
                       ) : lightOf(z.index) ? (
                         <LightControls view={lightOf(z.index)!} zone={z} />
                       ) : null}

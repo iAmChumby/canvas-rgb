@@ -2019,6 +2019,43 @@ mod tests {
         assert!(book.resolve(None, &LayerArea::Canvas).is_some());
     }
 
+    /// A guard (#382): `copies` only counts. The plan and the sampled frame of a mirrored header
+    /// (one light of 8 LEDs, shown 8 times) are the same with `copies` 8 and with none, and both
+    /// are 8 LEDs long: the engine writes the run once, never 64.
+    #[test]
+    fn the_frames_of_a_mirrored_header_are_the_same_with_copies_eight_and_with_none() {
+        use canvas_proto::layout::LedSlice;
+        let devices = vec![device("hdr", vec![zone(0, ZoneKind::Linear, 8)])];
+        let mut once = light("hdr#z0p1", "hdr", 0);
+        once.leds = Some(LedSlice { start: 0, count: 8 });
+        let mut mirrored = once.clone();
+        mirrored.copies = Some(8);
+        let members = vec![once.id.clone()];
+        let plan_of = |l: &canvas_proto::scene::Light| {
+            canvas_core::arrangement::build_group_plan(
+                &members,
+                canvas_proto::scene::GroupMode::FlowAcross,
+                std::slice::from_ref(l),
+                &devices,
+            )
+        };
+        let (plan_once, plan_mirrored) = (plan_of(&once), plan_of(&mirrored));
+        assert_eq!(plan_once, plan_mirrored, "copies changes nothing in the plan");
+        assert_eq!(plan_mirrored.lights[0].leds.len(), 8, "the run is planned once, not 8 times");
+
+        // A canvas that is a ramp, so every LED reads its own colour.
+        let mut canvas = Canvas::new(64, 64);
+        for (i, px) in canvas.pixels.iter_mut().enumerate() {
+            let v = (i % 64) as f32 / 63.0;
+            *px = [v, 1.0 - v, 0.5];
+        }
+        let frame_once = sample_group(&plan_once, std::slice::from_ref(&once), &devices, &canvas);
+        let frame_mirrored =
+            sample_group(&plan_mirrored, std::slice::from_ref(&mirrored), &devices, &canvas);
+        assert_eq!(frame_once, frame_mirrored, "the frames are byte for byte the same");
+        assert_eq!(frame_mirrored[&DeviceId("hdr".into())].len(), 8, "8 LEDs, not 64");
+    }
+
     #[test]
     fn props_are_namespaced_and_unnamespaced_again() {
         let mut merged = Props::new();

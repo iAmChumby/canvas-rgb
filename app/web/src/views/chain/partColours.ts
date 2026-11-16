@@ -5,7 +5,9 @@
 // are full-saturation hues, which stay apart on an LED (a dimmed or whitened colour washes out
 // next to its neighbour), and every one is a long way from white: white is the colour step 1
 // draws the chain in, so a part never reads as that. The first colour avoids the editor's blue,
-// because it is the one that marks the last LED of the chain.
+// because it is the one that marks the last LED of the chain. These hex values and the white and
+// orange the flow sends are the LEDs' own colours, not the editor's tokens: they are pixels on
+// hardware, and the same value must reach the daemon and the screen.
 //
 // Which colour is which on real fans is checked in the hardware session (Task 12): the owner looks
 // at seven fans and answers whether two neighbours look the same.
@@ -40,11 +42,11 @@ export function hexToRgb8(hex: string): Rgb8 {
   return full;
 }
 
-/** The word a kind is named with: "Fan 1", "Strip 2", and "Part 3" for what the owner called other. */
+/** The word a kind is named with: "Fan 1", "Strip 2", and "Device 3" for what the owner called other. */
 function nounOf(kind: ChainPartKind): string {
   if (kind === "fan") return "Fan";
   if (kind === "strip") return "Strip";
-  return "Part";
+  return "Device";
 }
 
 /** The name a part is given before the owner types one. `position` counts from 1 among all parts. */

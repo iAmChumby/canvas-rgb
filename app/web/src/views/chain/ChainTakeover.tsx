@@ -1,10 +1,16 @@
 "use client";
 
-// The chain takeover: the first run's answer to "what is plugged into a header", offered by itself.
+// The chain takeover: the first run's answer to "what is plugged into an ARGB header", offered by
+// itself.
 //
 // It opens when the hello is behind the owner and a header has never been set up, and it offers
 // one header at a time. Finish a header and the next one follows; mark one empty and it is never
 // offered again; when every header is set up or empty, nothing opens.
+//
+// The first header of a visit opens on the full introduction; the headers after it open on a short
+// card ("Next: JARGB 2"), because the owner has read the introduction. When the header before was
+// marked empty, the card says so above itself. A header marked empty while others wait closes at
+// once and the next one opens, so an empty header costs one press.
 //
 // What the owner says about a header is remembered per header, and it survives the window
 // (#380): the record is the header's own, in this viewer's storage, so a header is offered by
@@ -92,6 +98,8 @@ function ChainVisit({
   const [shownBefore, setShownBefore] = useState<readonly string[]>([]);
   /** The header the flow is on, pinned so nothing the daemon says can swap it out. */
   const [pinned, setPinned] = useState<string | null>(wantedAt);
+  /** The header the owner marked empty a moment ago, for the card of the header after it. */
+  const [previousEmpty, setPreviousEmpty] = useState<string | null>(null);
 
   // The request belongs to the visit that serves it, so it is read once, when the visit starts.
   // A later visit is a visit of its own: it is asked for nothing.
@@ -111,6 +119,8 @@ function ChainVisit({
 
   const offerable = offerableFor(status, chains, shownBefore, asked, wanted, offered);
   const next = offerable[0] ?? null;
+  // More headers wait after the one on screen: a header marked empty then closes at once.
+  const more = offerable.some((chain) => pinned === null || idOf(chain) !== pinned);
   const shown = pinned !== null ? (chains?.find((chain) => idOf(chain) === pinned) ?? null) : next;
 
   // The first header offered becomes the header on screen, so the flow keeps its place while the
@@ -149,6 +159,7 @@ function ChainVisit({
     // The header is remembered whatever closed it: the app does not offer it by itself again.
     markChainOffered(idOf(at));
     setShownBefore((seen) => [...seen, idOf(at)]);
+    setPreviousEmpty(now === "empty" ? at.zone_name : null);
     if (now === "not_set_up") {
       // Later, Back from the first step, or Escape: the owner said "not now", and the question is
       // the same for every header this visit has not shown yet. They are put off for good as well,
@@ -187,7 +198,14 @@ function ChainVisit({
 
   return (
     <div className={s.takeover}>
-      <ChainSetup key={idOf(shown)} chain={shown} onClose={close} />
+      <ChainSetup
+        key={idOf(shown)}
+        chain={shown}
+        onClose={close}
+        intro={shownBefore.length === 0 ? "full" : "next"}
+        previousEmpty={previousEmpty}
+        more={more}
+      />
     </div>
   );
 }

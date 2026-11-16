@@ -1,6 +1,6 @@
 "use client";
 
-// The length step's fader: the chain's length, with the figure the owner watches count.
+// The length step's fader: the header's length, with the figure the owner watches count.
 //
 // It is the component layer's Slider, not a native range: a slot with a flat cap, which takes the
 // pointer over the whole 44 px of its height while the cap itself is 14 x 24. The arrows move the
@@ -50,13 +50,13 @@ export function LengthSlider({
         <span className={s.count} data-testid="chain-length" style={{ minWidth: `${String(max).length}ch` }}>
           <AnimatedNumber value={value} />
         </span>
-        <span className={s.countWord}>LEDs</span>
+        <span className={s.countWord}>{value === 1 ? "LED" : "LEDs"}</span>
       </div>
       <Slider
         value={value}
         min={1}
         max={max}
-        label="Chain length"
+        label="LEDs on this header"
         onChange={onChange}
         onCommit={onCommit}
       />

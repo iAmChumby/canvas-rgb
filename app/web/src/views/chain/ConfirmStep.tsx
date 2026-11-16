@@ -1,10 +1,10 @@
 "use client";
 
-// Step 3: does each one have its own colour?
+// The series check: does each device show its own colour?
 //
-// One row per part, in the colour its light shows. A row's LED count moves the boundary into its
+// One row per device, in the colour its light shows. A row's LED count moves the boundary into its
 // neighbour: the pair hold the same LEDs between them, the neighbour keeps at least one, and the
-// lights follow at once. The last row is the end of the chain, so it may grow to the header's own
+// lights follow at once. The last row is the end of the header, so it may grow to the header's own
 // maximum and no further.
 
 import type { ChainPartKind } from "@/proto/ChainPartKind";
@@ -21,7 +21,7 @@ export function ConfirmStep({
   onLeds,
 }: {
   parts: ChainPartRow[];
-  /** The chain's length now: the parts add up to it, except after the last row is grown. */
+  /** The header's length now: the devices add up to it, except after the last row is grown. */
   length: number;
   /** The header's own longest length. */
   max: number;
@@ -31,9 +31,9 @@ export function ConfirmStep({
 }) {
   return (
     <div className={s.stepWrap}>
-      <h3 className={s.prompt}>Does each one have its own colour?</h3>
-      <p className={s.second}>Change a part&rsquo;s LEDs to move where its colour ends.</p>
-      <ul className={s.list} aria-label="Parts on this chain">
+      <h3 className={s.prompt}>Does each device show its own colour?</h3>
+      <p className={s.second}>Change a device&rsquo;s LEDs to move where its colour ends.</p>
+      <ul className={s.list} aria-label="Devices on this header">
         {parts.map((part, i) => {
           const next = parts[i + 1];
           const most = next
