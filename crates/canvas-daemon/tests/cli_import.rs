@@ -337,7 +337,7 @@ fn the_import_command_refuses_a_file_over_the_limit() {
     let (code, _stdout, stderr) = run_import(&home.0, port, &effect);
     assert_ne!(code, 0);
     assert!(
-        stderr.contains("the limit is"),
+        stderr.contains(&format!("is over {} bytes", canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES)),
         "the message names the limit: {stderr}"
     );
     // The file was never posted.

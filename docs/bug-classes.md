@@ -212,6 +212,12 @@ or acts as if a step worked without checking that it did.
   OpenRGB has found any device (`devices=0`), and the service moves on as if it had worked.
 - [#19](https://github.com/iAmChumby/canvas-rgb/issues/19): the daemon's exits leave no line, so
   the service's "crashed" is the only account and it is a guess.
+- [#393](https://github.com/iAmChumby/canvas-rgb/issues/393): a keyboard the app drives itself
+  also came through OpenRGB as a second device the daemon never drives, and the scenes code made
+  a light for it without asking. Devices showed a nameless, not connected light. One question,
+  "does the daemon drive this device?", now gates every place a light is made
+  (`crates/canvas-daemon/src/scenes.rs`, `scene_migration.rs`, `composite.rs`), and the leftover
+  already stored is removed at start, after a snapshot, only when the owner never touched it.
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
