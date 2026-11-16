@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import { checkPeripheralValue, demoRequest } from "@/lib/demo";
+import { stackHtmlSlots } from "@/lib/demoStacks";
+import type { DemoEffect } from "@/lib/fixtures";
 import type { DemoPeripheral } from "@/lib/peripheralFixtures";
 import { ApiFailure, messageOf } from "@/lib/errors";
 import { htmlLimitSentence } from "@/lib/htmlLimit";
@@ -7,6 +9,8 @@ import type { EffectsResponse } from "@/proto/EffectsResponse";
 import type { Pattern } from "@/proto/Pattern";
 import type { PatternsResponse } from "@/proto/PatternsResponse";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
+import type { Stack } from "@/proto/Stack";
+import type { StacksResponse } from "@/proto/StacksResponse";
 
 // The demo backend's own words. The editor shows them behind a disclosure, and they are the
 // only words a person reads when nothing answers: they say canvas-rgb, not "the daemon".
@@ -51,6 +55,51 @@ describe("the demo's HTML limit (#370)", () => {
       message = messageOf(e);
     }
     expect(message).toBe(htmlLimitSentence(3));
+  });
+});
+
+describe("the demo's HTML slots (#370)", () => {
+  /** One layer, its effect and its mask: what the scene's limit counts on a group playing it. */
+  function maskedStack(effect: string, mask: string): Stack {
+    return {
+      id: "stack:Test",
+      layers: [
+        {
+          id: "l1",
+          name: "One",
+          effect,
+          props: {},
+          area: { kind: "canvas" },
+          blend: "normal",
+          opacity: 100,
+          visible: true,
+          mask: { effect: mask, props: {}, source: "luma", invert: false, amount: 100 },
+        },
+      ],
+    };
+  }
+  /** The library's effects, by id: only the one that resolves is here. */
+  const effects = { "html:ink-drop": {} } as unknown as Record<string, DemoEffect>;
+
+  it("a layer's HTML effect and its HTML mask each take a slot, as the daemon counts them", () => {
+    // Two slots on one layer: the stacks route reports 2 for it, and the scene's limit counts 2.
+    expect(stackHtmlSlots(maskedStack("html:ink-drop", "html:ink-drop"), effects)).toBe(2);
+  });
+
+  it("a mask whose effect is gone takes no slot, and neither does a plain layer", () => {
+    expect(stackHtmlSlots(maskedStack("html:ink-drop", "html:gone"), effects)).toBe(1);
+    expect(stackHtmlSlots(maskedStack("solid", "html:gone"), effects)).toBe(0);
+  });
+
+  it("the stacks route reports the slots, not the layers", async () => {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=stack-gone-mask");
+    const demo = await import("@/lib/demo");
+    const list = (await demo.demoRequest("GET", "/api/v1/stacks", undefined)) as StacksResponse;
+    const gone = list.stacks.find((stack) => stack.id === "stack:Gone mask");
+    // One layer, whose effect is no HTML and whose HTML mask resolves to nothing.
+    expect(gone?.layers).toBe(1);
+    expect(gone?.html_layers).toBe(0);
   });
 });
 

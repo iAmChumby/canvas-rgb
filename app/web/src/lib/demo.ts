@@ -118,6 +118,7 @@ import {
   stackAsEffect,
   stackDetail,
   stackEffectSummary,
+  stackHtmlSlots,
   stackProps,
   stackSummary,
 } from "@/lib/demoStacks";
@@ -135,20 +136,14 @@ const HTML_ID_PREFIX = "html:";
 
 /**
  * The HTML runtimes a group starts (#370): one for an `html:` effect, and one for each HTML layer
- * or mask of a stack. The scene's limit counts these, not groups (design Q5).
+ * or mask of a stack, by the daemon's own rule (`stackHtmlSlots`): a mask whose effect does not
+ * resolve takes no slot. The scene's limit counts these, not groups (design Q5).
  */
 function htmlRuntimesOf(s: DemoState, effect: string | null): number {
   if (effect === null) return 0;
   if (effect.startsWith(HTML_ID_PREFIX)) return 1;
   const stack = s.stacks[effect];
-  if (!stack) return 0;
-  return stack.layers.reduce(
-    (total, layer) =>
-      total +
-      (layer.effect.startsWith(HTML_ID_PREFIX) ? 1 : 0) +
-      (layer.mask && layer.mask.effect.startsWith(HTML_ID_PREFIX) ? 1 : 0),
-    0,
-  );
+  return stack ? stackHtmlSlots(stack, s.effects) : 0;
 }
 /** The daemon's sentence when a pattern's kind has nothing plugged in (0.16.0). */
 const NO_DEVICE_OF_KIND = "no device of this kind is connected";
@@ -2352,7 +2347,7 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       }
       if (name.toLowerCase() === "preview") fail(422, "validation", `"${name}" is reserved for the stack preview route`);
       if (next.layers.length > 8) fail(422, "validation", `a stack holds at most 8 layers, and this one has ${next.layers.length}`);
-      const html = next.layers.filter((layer) => layer.effect.startsWith("html:")).length;
+      const html = stackHtmlSlots(next, s.effects);
       if (html > 2) fail(422, "validation", `a stack holds at most 2 HTML layers, and this one has ${html}`);
       const ids: string[] = [];
       for (const layer of next.layers) {

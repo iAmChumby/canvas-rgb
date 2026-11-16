@@ -8,6 +8,9 @@
 // and fails when this copy drifts from them.
 //
 // The daemon is the one that refuses: this copy is what the picker shows before the owner asks.
+//
+// The spine does not export `SCENE_HTML_MAX` to the web, so this literal is the copy: the number
+// is accepted as it is, and `htmlLimitCopy.test.ts` is the guard that keeps it the spine's.
 
 /** How many HTML effects one scene may play at a time (`SCENE_HTML_MAX` in the spine). The type
  *  is `number`, not the literal 2, because the sentence's plural is read from the value. */

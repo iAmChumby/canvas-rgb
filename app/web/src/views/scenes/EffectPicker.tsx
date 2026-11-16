@@ -9,9 +9,9 @@
 // picker puts the old effect back.
 //
 // An HTML effect is the engine's own runtime, and a scene may hold `SCENE_HTML_MAX` of them at a
-// time (two, #370). A stack counts one for each of its HTML layers. When the scene's runtimes are
-// already spoken for by other groups, the HTML effects are shown and say why they cannot be
-// chosen; they are not offered.
+// time (two, #370). A stack counts one for each of its HTML layers and masks. When the scene's
+// runtimes are already spoken for by other groups, the HTML effects are shown and say why they
+// cannot be chosen; they are not offered.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { DotsNine, Moon } from "@phosphor-icons/react";
@@ -177,9 +177,10 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   const restoreRef = useRef<() => void>(() => undefined);
 
   /**
-   * The scene's saved stacks and how many HTML layers each holds. A group playing a stack starts
-   * one HTML runtime for each of those (design Q5: runtimes, not groups), and the pane has no other
-   * way to know: the scene names the stack by id only.
+   * The scene's saved stacks and the HTML slots each takes: what a group playing one starts
+   * (design Q5: runtimes, not groups). A layer's HTML effect and its HTML mask each count, which
+   * is the number the daemon counts and the stacks route reports. The pane has no other way to
+   * know: the scene names the stack by id only.
    */
   const [knownStacks, setKnownStacks] = useState<Map<string, number>>(() => new Map());
   useEffect(() => {
@@ -194,7 +195,7 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
       alive = false;
     };
   }, []);
-  /** The HTML runtimes one effect starts: 1 for an `html:` effect, a stack's HTML layers. */
+  /** The HTML runtimes one effect starts: 1 for an `html:` effect, a stack's HTML slots. */
   const runtimesOf = useCallback(
     (id: string | null) => {
       if (id === null) return 0;
@@ -216,8 +217,14 @@ export function EffectPicker({ groupId, use, onClose }: EffectPickerProps) {
   }, [scene, groupId, runtimesOf]);
   /** This group already starts an HTML runtime: choosing another HTML effect replaces its own. */
   const groupIsHtml = group?.plays.type === "effect" && runtimesOf(group.plays.effect) > 0;
-  /** No runtime is left for this group: the HTML effects are shown and say why. */
-  const htmlBlocked = !groupIsHtml && otherHtml >= SCENE_HTML_MAX;
+  /**
+   * The rule itself: the scene's count with this choice, which is this group's own runtime added
+   * to the other groups' runtimes, against the limit. A group that already plays HTML keeps its
+   * slot when it swaps one HTML effect for another, so its count does not change: in a scene that
+   * is already over the limit its rows stay open in the picker, and the daemon's refusal on save
+   * is what the owner sees.
+   */
+  const htmlBlocked = !groupIsHtml && otherHtml + 1 > SCENE_HTML_MAX;
   /** Why a blocked row is blocked: the daemon's sentence, with this group's own runtime counted. */
   const blockedWords = htmlLimitSentence(otherHtml + 1);
   /** What a blocked row itself says: short enough to be read whole beside the picture. */

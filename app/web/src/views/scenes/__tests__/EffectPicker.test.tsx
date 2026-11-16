@@ -333,14 +333,16 @@ describe("the effect picker", () => {
     expect(screen.getByText(htmlLimitSentence(3))).toBeTruthy();
     fireEvent.blur(html);
     expect(screen.queryByText(htmlLimitSentence(3))).toBeNull();
-    // Clicking it does nothing at all: no preview and no choice.
+    // Clicking it does nothing at all: no preview and no choice. Nothing is written, proved
+    // without a wait: the one allowed action after the blocked click writes once, and that write
+    // is the highlight of Fire, not the blocked row.
     fireEvent.click(html);
-    fireEvent.pointerEnter(html);
-    await new Promise((r) => setTimeout(r, 30));
-    expect(api.scenes.put).not.toHaveBeenCalled();
+    fireEvent.pointerEnter(screen.getByRole("button", { name: /^Fire/ }));
+    await waitFor(() => expect(api.scenes.put).toHaveBeenCalledTimes(1));
+    expect(lastPlays()).toEqual({ type: "effect", effect: "fire" });
   });
 
-  it("a second HTML effect can be chosen beside one, and a third cannot", async () => {
+  it("a second HTML effect can be chosen beside one", async () => {
     patchSnap({ scenes: answer(1) });
     api.scenes.list.mockResolvedValue(answer(1));
     render(<Harness />);
@@ -359,6 +361,24 @@ describe("the effect picker", () => {
     api.stacks.mockResolvedValue({
       stacks: [
         { id: "stack:Twice", name: "Twice", layers: 2, html_layers: SCENE_HTML_MAX, missing: [] },
+      ],
+    });
+    render(<Harness groupId="g-one" />);
+    const html = await screen.findByRole("button", { name: /Sample/ });
+    await waitFor(() => expect(html.getAttribute("aria-disabled")).toBe("true"));
+    expect(within(html).getByText("2 HTML already").getAttribute("title")).toBe(
+      htmlLimitSentence(SCENE_HTML_MAX + 1),
+    );
+  });
+
+  it("a stack with one layer and an HTML mask takes both runtimes, as the daemon counts them", async () => {
+    patchSnap({ scenes: stacked() });
+    api.scenes.list.mockResolvedValue(stacked());
+    // One layer whose effect and mask are both HTML: the daemon counts two slots, and the stacks
+    // route reports that number as `html_layers`. The picker must count the number, not the layers.
+    api.stacks.mockResolvedValue({
+      stacks: [
+        { id: "stack:Twice", name: "Twice", layers: 1, html_layers: SCENE_HTML_MAX, missing: [] },
       ],
     });
     render(<Harness groupId="g-one" />);
