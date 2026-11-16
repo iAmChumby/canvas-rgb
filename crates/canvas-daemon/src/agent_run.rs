@@ -2,7 +2,8 @@
 //! changes or deletes it (#377).
 //!
 //! A run is named by `canvas-rgb ... --run <run>`: 1 to 64 of `A-Z`, `a-z`, `0-9`, `.`, `_` and
-//! `-`, never `..`, checked before it is ever joined to a path. The record is
+//! `-`, never `..`, never a leading or trailing `.`, never a Windows device name (`con`, `nul`,
+//! `com1`...), checked before it is ever joined to a path. The record is
 //! `<home>/agent-runs/<run>.json`, where `<home>` is [`crate::paths::home`], so
 //! `CANVAS_RGB_HOME` moves it. Every scene an `edit` or a `delete` is about to change is
 //! written whole, first, to `<home>/agent-runs/<run>/<scene>.rev<rev>.json`: that copy is the
@@ -22,7 +23,9 @@ pub const RUNS_DIR: &str = "agent-runs";
 /// The most characters a run id holds.
 pub const RUN_ID_MAX: usize = 64;
 
-/// True when `run` is a run id: 1 to [`RUN_ID_MAX`] of `A-Z a-z 0-9 . _ -`, and no `..`.
+/// True when `run` is a run id: 1 to [`RUN_ID_MAX`] of `A-Z a-z 0-9 . _ -`, no `..`, no leading
+/// or trailing `.` (Windows drops a trailing dot, so `x.` and `x` would share a folder), and
+/// not a Windows device name.
 pub fn is_run_id(run: &str) -> bool {
     !run.is_empty()
         && run.chars().count() <= RUN_ID_MAX
@@ -30,12 +33,26 @@ pub fn is_run_id(run: &str) -> bool {
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
         && !run.contains("..")
+        && !run.starts_with('.')
+        && !run.ends_with('.')
+        && !is_device_name(run)
+}
+
+/// True when the part of `name` before its first dot is a Windows device name (`con`, `prn`,
+/// `aux`, `nul`, `com1`-`com9`, `lpt1`-`lpt9`), in any case: `con.json` is the console too.
+fn is_device_name(name: &str) -> bool {
+    let stem = name.split('.').next().unwrap_or_default().to_ascii_lowercase();
+    matches!(stem.as_str(), "con" | "prn" | "aux" | "nul")
+        || ["com", "lpt"].iter().any(|prefix| {
+            stem.strip_prefix(prefix)
+                .is_some_and(|n| matches!(n, "1" | "2" | "3" | "4" | "5" | "6" | "7" | "8" | "9"))
+        })
 }
 
 /// The refusal a bad run id gets: the rule, so the caller can fix it.
 pub fn bad_run_id(run: &str) -> String {
     format!(
-        "{run:?} is not a run id: use 1 to {RUN_ID_MAX} characters of A-Z, a-z, 0-9, '.', '_' or '-', with no '..'"
+        "{run:?} is not a run id: use 1 to {RUN_ID_MAX} characters of A-Z, a-z, 0-9, '.', '_' or '-', with no '..', no '.' first or last, and not a Windows device name such as con or nul"
     )
 }
 
@@ -77,6 +94,17 @@ pub struct MadeScene {
     pub rev: u64,
 }
 
+/// A write that was about to be sent, or was sent and not yet noted: saved to the record before
+/// the request goes out and removed once the record has its own update, so a crash in between
+/// leaves a visible trace.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Pending {
+    /// `create`, `edit` or `delete`.
+    pub op: String,
+    /// What the write is about: the new scene's name for a `create`, the scene's id otherwise.
+    pub scene: String,
+}
+
 /// The record of one run: `agent-runs/<run>.json`. It is written as:
 ///
 /// ```json
@@ -84,11 +112,12 @@ pub struct MadeScene {
 ///   "run": "agent-20261115-1530",
 ///   "prior_active": "gaming",
 ///   "before": { "active": "gaming", "scenes": [], "group_states": [] },
-///   "scenes": [{ "id": "night", "name": "Night", "rev": 1 }]
+///   "scenes": [{ "id": "night", "name": "Night", "rev": 1 }],
+///   "pending": [{ "op": "create", "scene": "Day" }]
 /// }
 /// ```
 ///
-/// `before` is the `scenes list --json` answer the run read at its first write, and `scenes` is
+/// `pending` is left out when empty (an older record has none). `before` is the `scenes list --json` answer the run read at its first write, and `scenes` is
 /// what the run made, in the order it made them.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RunRecord {
@@ -101,6 +130,10 @@ pub struct RunRecord {
     /// What the run made, and where each scene stood at the run's last write.
     #[serde(default)]
     pub scenes: Vec<MadeScene>,
+    /// Writes sent, or about to be sent, that the record has not caught up with. An entry that
+    /// stays is a write whose outcome this CLI never saw.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pending: Vec<Pending>,
 }
 
 impl RunRecord {
@@ -111,7 +144,28 @@ impl RunRecord {
             prior_active: active_of(before).to_string(),
             before: before.clone(),
             scenes: Vec::new(),
+            pending: Vec::new(),
         }
+    }
+
+    /// Notes that a write is about to be sent. [`save`](Self::save) it before sending.
+    pub fn begin(&mut self, op: &str, scene: &str) {
+        self.pending.push(Pending { op: op.to_string(), scene: scene.to_string() });
+    }
+
+    /// Removes the first pending entry for this write: the record has caught up with it.
+    pub fn finish(&mut self, op: &str, scene: &str) {
+        if let Some(at) = self.pending.iter().position(|p| p.op == op && p.scene == scene) {
+            self.pending.remove(at);
+        }
+    }
+
+    /// True when the scene was in the `before` list the run read at its first write.
+    pub fn had_before(&self, id: &str) -> bool {
+        self.before
+            .get("scenes")
+            .and_then(|v| v.as_array())
+            .is_some_and(|scenes| scenes.iter().any(|s| s.get("id").and_then(|v| v.as_str()) == Some(id)))
     }
 
     /// What the record says about one scene, if the run made it.
@@ -213,13 +267,30 @@ mod tests {
     fn a_run_id_is_one_to_sixty_four_of_the_safe_characters_and_never_dot_dot() {
         let longest = "a".repeat(RUN_ID_MAX);
         let too_long = "a".repeat(RUN_ID_MAX + 1);
-        for good in ["a", "agent-20261115-1530", "Agent_1.2", ".", "_", "-", longest.as_str()] {
+        for good in ["a", "agent-20261115-1530", "Agent_1.2", "_", "-", "console", "com10", "a.b", longest.as_str()] {
             assert!(is_run_id(good), "{good:?} is a run id");
         }
-        for bad in ["", "..", "../x", "a/b", r"a\b", "a b", too_long.as_str(), "a..b", "café", "a:b"] {
+        for bad in [
+            "", "..", "../x", "a/b", r"a\b", "a b", too_long.as_str(), "a..b", "café", "a:b",
+            ".", ".x", "x.", "con", "CON", "Nul", "aux", "prn", "com1", "COM9", "lpt1", "LPT9", "con.json",
+            "nul.x.y",
+        ] {
             assert!(!is_run_id(bad), "{bad:?} is not a run id");
         }
         assert!(check_run_id("../x").unwrap_err().contains("is not a run id"));
         assert!(check_run_id("agent-1").is_ok());
+    }
+
+    #[test]
+    fn a_record_without_pending_loads_and_saves_without_it() {
+        let old = r#"{ "run": "r", "prior_active": "a", "before": {}, "scenes": [] }"#;
+        let mut record: RunRecord = serde_json::from_str(old).expect("an old record loads");
+        assert!(record.pending.is_empty());
+        assert!(!serde_json::to_string(&record).unwrap().contains("pending"));
+        record.begin("create", "Night");
+        record.begin("delete", "night");
+        record.finish("create", "Night");
+        assert_eq!(record.pending, vec![Pending { op: "delete".into(), scene: "night".into() }]);
+        assert!(serde_json::to_string(&record).unwrap().contains("\"pending\""));
     }
 }
