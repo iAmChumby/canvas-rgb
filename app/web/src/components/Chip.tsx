@@ -10,6 +10,7 @@ export function Chip({
   html,
   marked,
   pending,
+  disabled,
   className,
   onClick,
   onPointerDown,
@@ -18,6 +19,8 @@ export function Chip({
   label,
   title,
   dataScene,
+  describedBy,
+  testId,
   ref,
 }: {
   children: ReactNode;
@@ -28,6 +31,8 @@ export function Chip({
   marked?: boolean;
   /** The change this chip stands for is on its way to the daemon: it is held, not pressable. */
   pending?: boolean;
+  /** The chip cannot be pressed: a key the daemon refuses, or one that is not ready yet. */
+  disabled?: boolean;
   className?: string;
   onClick?: () => void;
   /** The pointer pressed the chip: a drag starts here (#371). */
@@ -41,6 +46,10 @@ export function Chip({
   title?: string;
   /** What this chip stands for, in the page's own words (the scene key's id). */
   dataScene?: string;
+  /** The id of the element that describes this chip: the move step's outcome line. */
+  describedBy?: string;
+  /** The name the tests find this chip by. */
+  testId?: string;
   ref?: Ref<HTMLButtonElement>;
 }) {
   const cls = ["chip", html && "chip-html", pressed && "chip-on", marked && "chip-marked", pending && "chip-pending", className]
@@ -54,10 +63,12 @@ export function Chip({
         className={cls}
         aria-pressed={pressed ?? false}
         aria-busy={pending || undefined}
-        disabled={pending}
+        aria-describedby={describedBy}
+        disabled={disabled || pending}
         aria-label={label}
         title={title}
         data-scene={dataScene}
+        data-testid={testId}
         onClick={onClick}
         onPointerDown={onPointerDown}
         onKeyDown={onKeyDown}

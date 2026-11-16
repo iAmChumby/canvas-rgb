@@ -44,6 +44,7 @@ import { GroupSheet } from "@/views/scenes/GroupSheet";
 import { useScene } from "@/views/scenes/useScene";
 import type { EffectDetail } from "@/proto/EffectDetail";
 import type { EffectSummary } from "@/proto/EffectSummary";
+import type { GroupMove } from "@/proto/GroupMove";
 import type { LightFit } from "@/proto/LightFit";
 import type { Scene } from "@/proto/Scene";
 import type { ScenesResponse } from "@/proto/ScenesResponse";
@@ -235,6 +236,26 @@ beforeEach(() => {
     next.rev = serverRev;
     return next;
   });
+  // The daemon's answer to the move route: the step asks it with a dry run, and the answer is
+  // what the row says.
+  api.scenes.moveGroup.mockImplementation(
+    async (_sceneId: string, groupId: string, body: GroupMove) => {
+      const from = scene();
+      const to = twoScenes().scenes.find((s) => s.id === body.to) ?? from;
+      const moving = from.groups.find((g) => g.id === groupId) ?? from.groups[0]!;
+      return {
+        group_id: groupId,
+        saved: !body.dry_run,
+        scenes: [
+          { ...from, rev: from.rev + 1, groups: from.groups.filter((g) => g.id !== groupId) },
+          { ...to, rev: to.rev + 1, groups: [...to.groups, moving] },
+        ],
+        before: [from, to],
+        taken: [],
+        emptied: [],
+      };
+    },
+  );
   api.lights.list.mockResolvedValue({ lights: clone(DEMO_LIGHTS) });
   api.lights.flash.mockResolvedValue({ ok: true });
   api.effect.mockResolvedValue(clone(DETAIL));
@@ -367,9 +388,10 @@ describe("the open group", () => {
     const move = await screen.findByRole("button", { name: /Move to scene/ });
     expect((move as HTMLButtonElement).disabled).toBe(false);
     fireEvent.click(move);
-    // The step is open: it names the scene the group may go to, and what the move does.
+    // The step is open: it names the scene the group may go to, and what the move does. The
+    // line is the daemon's own answer, so it comes when the daemon has answered.
     expect(await screen.findByText("Move to Evening")).toBeTruthy();
-    expect(screen.getByText(/Adds 1 device\./)).toBeTruthy();
+    expect(await screen.findByText(/Adds 1 device\./)).toBeTruthy();
   });
 
   it("the step goes back to the group, and the way out of it is the sheet's own", async () => {

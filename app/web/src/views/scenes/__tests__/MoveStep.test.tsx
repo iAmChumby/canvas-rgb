@@ -1,10 +1,11 @@
-import { cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 
-// The move step: one row per other scene, the action, and the line that says what it does.
+// The move step: one row per other scene, the key that does it, and the line that says what it
+// does.
 //
-// The daemon is the truth: the page's own copy of the rules says what will happen, and the
-// daemon's answer says what did.
+// The daemon is the truth: the step asks the daemon's own dry run, once per scene, and says
+// what it answered. A row the daemon refuses says the daemon's own words.
 
 const { api, notifySpy } = vi.hoisted(() => ({
   api: {
@@ -30,7 +31,10 @@ vi.mock("@/components/Notify", () => ({ notify: notifySpy }));
 
 import { DEMO_LIGHTS } from "@/lib/fixtures";
 import { MoveStep } from "@/views/scenes/MoveStep";
+import { type MoveCheck } from "@/views/scenes/useScene";
+import type { Group } from "@/proto/Group";
 import type { GroupMoved } from "@/proto/GroupMoved";
+import type { GroupTaken } from "@/proto/GroupTaken";
 import type { LightView } from "@/proto/LightView";
 import type { Scene } from "@/proto/Scene";
 import type { UseScene } from "@/views/scenes/useScene";
@@ -63,8 +67,8 @@ function group(id: string, name: string, members: string[], effect = "solid") {
   };
 }
 
-/** The scene the group is in, and the scene it may go to. */
-function scenes(): { from: Scene; to: Scene } {
+/** The scene the group is in, and the two scenes it may go to. */
+function scenes(): { from: Scene; to: Scene; third: Scene } {
   const from: Scene = {
     id: "gaming",
     name: "Gaming",
@@ -77,14 +81,56 @@ function scenes(): { from: Scene; to: Scene } {
     rev: 2,
     groups: [group("g-warm", "Warm Wash", [SECOND])],
   };
-  return { from, to };
+  const third: Scene = {
+    id: "focus",
+    name: "Focus",
+    rev: 1,
+    groups: [group("g-lamp", "Lamp", [THIRD])],
+  };
+  return { from, to, third };
+}
+
+/**
+ * The daemon's own answer to a dry run of the move of `groupId` into Evening: the scenes after,
+ * the scenes before, the lights it took and the groups it emptied.
+ */
+function dryAnswer(groupId: string): GroupMoved {
+  const { from, to } = scenes();
+  const moving = from.groups.find((g) => g.id === groupId);
+  if (!moving) throw new Error(`the scene holds no group ${groupId}`);
+  const taken: GroupTaken[] = [];
+  const emptied: string[] = [];
+  const kept: Group[] = [];
+  for (const other of to.groups) {
+    const gone = other.members.filter((m) => moving.members.includes(m));
+    if (gone.length === 0) {
+      kept.push(other);
+      continue;
+    }
+    taken.push({ group_id: other.id, group_name: other.name, lights: gone });
+    const left = other.members.filter((m) => !moving.members.includes(m));
+    if (left.length === 0) emptied.push(other.name);
+    else kept.push({ ...other, members: left });
+  }
+  kept.push({ ...moving });
+  return {
+    group_id: groupId,
+    saved: false,
+    scenes: [
+      { ...from, rev: from.rev + 1, groups: from.groups.filter((g) => g.id !== groupId) },
+      { ...to, rev: to.rev + 1, groups: kept },
+    ],
+    before: [from, to],
+    taken,
+    emptied,
+  };
 }
 
 function fakeUse(over: Partial<UseScene> = {}): UseScene {
-  const { from, to } = scenes();
+  const { from, to, third } = scenes();
   return {
     scene: from,
-    scenes: [from, to],
+    scenes: [from, to, third],
     unassigned: [],
     states: [],
     edit: vi.fn(),
@@ -94,12 +140,14 @@ function fakeUse(over: Partial<UseScene> = {}): UseScene {
     create: vi.fn(),
     remove: vi.fn(),
     renameScene: vi.fn(),
+    dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "answered", answer: dryAnswer("g-desk") })),
     moveGroup: vi.fn(async () => null),
     reorderScenes: vi.fn(),
     undo: vi.fn(),
     redo: vi.fn(),
     canUndo: false,
     canRedo: false,
+    undoLabel: null,
     error: null,
     ...over,
   };
@@ -116,6 +164,9 @@ function lights(): LightView[] {
 beforeEach(() => {
   api.stacks.mockReset();
   api.stacks.mockResolvedValue({ stacks: [] });
+  api.scenes.write.mockReset();
+  api.scenes.put.mockReset();
+  api.scenes.moveGroup.mockReset();
   notifySpy.mockReset();
 });
 
@@ -131,19 +182,74 @@ describe("the move step", () => {
     expect(screen.getByTestId("move-to-evening").textContent).toContain("Move to Evening");
   });
 
-  it("says what lands in the scene and what is taken out of it", async () => {
-    render(<MoveStep groupId="g-case" copy={false} use={fakeUse()} lights={lights()} onClose={vi.fn()} />);
-    // The group holds the light the target's group holds: it is taken out of it, and the target's
-    // group is left with nothing.
-    const line = await screen.findByText(/Takes 1 device from Warm Wash/);
-    expect(line.textContent).toContain("Adds 1 device.");
-    expect(line.textContent).toContain("Warm Wash has no devices left and is removed.");
+  it("asks the daemon about every scene once, and writes nothing", async () => {
+    const use = fakeUse();
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(2));
+    expect(use.dryRunMove).toHaveBeenCalledWith("g-desk", "evening", false);
+    expect(use.dryRunMove).toHaveBeenCalledWith("g-desk", "focus", false);
+    // Nothing was written: the daemon's answer is a dry run.
+    expect(use.moveGroup).not.toHaveBeenCalled();
+    expect(api.scenes.write).not.toHaveBeenCalled();
+    expect(api.scenes.put).not.toHaveBeenCalled();
+  });
+
+  it("asks again when the step switches between moving and copying", async () => {
+    const use = fakeUse();
+    const view = render(
+      <MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />,
+    );
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(2));
+    view.rerender(<MoveStep groupId="g-desk" copy use={use} lights={lights()} onClose={vi.fn()} />);
+    await waitFor(() => expect(use.dryRunMove).toHaveBeenCalledTimes(4));
+    expect(use.dryRunMove).toHaveBeenLastCalledWith("g-desk", "focus", true);
+  });
+
+  it("a row is held until the daemon answers, and it says so in the same box", async () => {
+    const releases: Record<string, (answer: MoveCheck) => void> = {};
+    const use = fakeUse({
+      dryRunMove: vi.fn(
+        (_group: string, to: string) =>
+          new Promise<MoveCheck>((resolve) => {
+            releases[to] = resolve;
+          }),
+      ),
+    });
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
+    const row = await screen.findByTestId("move-to-evening");
+    expect((row as HTMLButtonElement).disabled).toBe(true);
+    // The line is there, in the same box, and it says the check is on its way.
+    expect(document.getElementById("move-outcome-evening")?.textContent).toBe("Checking…");
+    await act(async () => {
+      releases["evening"]?.({ state: "answered", answer: dryAnswer("g-desk") });
+    });
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
+  });
+
+  it("says what the daemon answered: what lands in the scene and what is taken out of it", async () => {
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({
+        state: "answered",
+        answer: dryAnswer("g-case"),
+      })),
+    });
+    render(<MoveStep groupId="g-case" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
+    await waitFor(() =>
+      expect(document.getElementById("move-outcome-evening")?.textContent).toContain(
+        "Takes 1 device from Warm Wash",
+      ),
+    );
+    const line = document.getElementById("move-outcome-evening");
+    expect(line?.textContent).toContain("Adds 1 device.");
+    expect(line?.textContent).toContain("Warm Wash has no devices left and is removed.");
   });
 
   it("says how many of the group's devices are away", async () => {
     render(<MoveStep groupId="g-case" copy={false} use={fakeUse()} lights={lights()} onClose={vi.fn()} />);
-    const line = await screen.findByText(/not connected/);
-    expect(line.textContent).toContain("1 not connected.");
+    await waitFor(() =>
+      expect(document.getElementById("move-outcome-evening")?.textContent).toContain("not connected"),
+    );
+    expect(document.getElementById("move-outcome-evening")?.textContent).toContain("1 not connected.");
   });
 
   it("the outcome line is the row's own description, so it is read on focus", async () => {
@@ -151,80 +257,55 @@ describe("the move step", () => {
     const row = await screen.findByTestId("move-to-evening");
     const described = row.getAttribute("aria-describedby");
     expect(described).toBe("move-outcome-evening");
-    expect(document.getElementById(described ?? "")?.textContent).toContain("Adds 1 device.");
+    await waitFor(() => expect(document.getElementById(described ?? "")?.textContent).toContain("Adds 1 device."));
   });
 
   it("the step opens with the focus on the first scene row", async () => {
     render(<MoveStep groupId="g-desk" copy={false} use={fakeUse()} lights={lights()} onClose={vi.fn()} />);
-    await waitFor(() => expect(document.activeElement?.getAttribute("data-testid")).toBe("move-to-evening"));
-  });
-
-  it("a move the daemon would refuse is disabled, with the daemon's own sentence", async () => {
-    // The target runs two HTML effects and the group that would go plays one too: three. The
-    // group holds a light of its own, so the move takes nothing out of the target.
-    const { from, to } = scenes();
-    const htmlTo: Scene = {
-      ...to,
-      groups: [
-        group("h1", "H1", [FIRST], "html:one"),
-        group("h2", "H2", [SECOND], "html:two"),
-      ],
-    };
-    const htmlFrom: Scene = {
-      ...from,
-      groups: [group("g-desk", "Desk", [THIRD], "html:three"), group("g-case", "Case fans", [SECOND])],
-    };
-    const use = fakeUse({ scene: htmlFrom, scenes: [htmlFrom, htmlTo] });
-    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
-    const row = await screen.findByTestId("move-to-evening");
-    expect((row as HTMLButtonElement).disabled).toBe(true);
-    const line = document.getElementById("move-outcome-evening");
-    expect(line?.textContent).toBe(
-      "at most 2 groups of a scene may play an HTML effect (a stack with an HTML layer counts); 3 do",
+    await waitFor(() =>
+      expect(document.activeElement?.getAttribute("data-testid")).toBe("move-to-evening"),
     );
   });
 
-  it("a stack with an HTML layer counts toward the limit", async () => {
-    api.stacks.mockResolvedValue({ stacks: [{ id: "stack:Glow", name: "Glow", layers: 2, html_layers: 1, missing: [] }] });
-    const { from, to } = scenes();
-    const stackTo: Scene = {
-      ...to,
-      groups: [
-        group("h1", "H1", [FIRST], "html:one"),
-        group("s1", "S1", [SECOND], "stack:Glow"),
-      ],
-    };
-    const htmlFrom: Scene = {
-      ...from,
-      groups: [group("g-desk", "Desk", [THIRD], "html:three"), group("g-case", "Case fans", [SECOND])],
-    };
-    const use = fakeUse({ scene: htmlFrom, scenes: [htmlFrom, stackTo] });
+  it("a move the daemon refuses is disabled, with the daemon's own sentence", async () => {
+    const sentence =
+      "at most 2 groups of a scene may play an HTML effect (a stack with an HTML layer counts); 3 do";
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({ state: "refused", message: sentence })),
+    });
     render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
     const row = await screen.findByTestId("move-to-evening");
-    // The stack holds an HTML layer, so the scene would run three HTML groups: refused.
+    await waitFor(() => expect(document.getElementById("move-outcome-evening")?.textContent).toBe(sentence));
     expect((row as HTMLButtonElement).disabled).toBe(true);
-    expect(document.getElementById("move-outcome-evening")?.textContent).toContain("3 do");
   });
 
-  it("a stack without an HTML layer is not one", async () => {
-    api.stacks.mockResolvedValue({ stacks: [{ id: "stack:Plain", name: "Plain", layers: 2, html_layers: 0, missing: [] }] });
-    const { from, to } = scenes();
-    const stackTo: Scene = {
-      ...to,
-      groups: [
-        group("h1", "H1", [FIRST], "html:one"),
-        group("s1", "S1", [SECOND], "stack:Plain"),
-      ],
-    };
-    const htmlFrom: Scene = {
-      ...from,
-      groups: [group("g-desk", "Desk", [THIRD], "html:three"), group("g-case", "Case fans", [SECOND])],
-    };
-    const use = fakeUse({ scene: htmlFrom, scenes: [htmlFrom, stackTo] });
+  it("a dry run the daemon could not answer leaves the row disabled, with a way to ask again", async () => {
+    const dryRunMove = vi.fn(async (): Promise<MoveCheck> => ({ state: "failed" }));
+    const use = fakeUse({ dryRunMove });
     render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
-    const row = await screen.findByTestId("move-to-evening");
-    // Two HTML groups are the limit: the move is allowed.
-    expect((row as HTMLButtonElement).disabled).toBe(false);
+    await waitFor(() => expect(screen.getByTestId("move-retry-evening")).toBeTruthy());
+    expect(document.getElementById("move-outcome-evening")?.textContent).toBe("Could not check this move.");
+    expect((screen.getByTestId("move-to-evening") as HTMLButtonElement).disabled).toBe(true);
+    // The retry asks the daemon again.
+    fireEvent.click(screen.getByTestId("move-retry-evening"));
+    await waitFor(() => expect(dryRunMove).toHaveBeenCalledTimes(2));
+  });
+
+  it("an answer that comes back after the step closed changes nothing", async () => {
+    let release: (answer: MoveCheck) => void = () => {};
+    const use = fakeUse({
+      dryRunMove: vi.fn(() => new Promise<MoveCheck>((resolve) => { release = resolve; })),
+    });
+    const view = render(
+      <MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />,
+    );
+    await screen.findByTestId("move-to-evening");
+    view.unmount();
+    await act(async () => {
+      release({ state: "answered", answer: dryAnswer("g-desk") });
+    });
+    expect(use.moveGroup).not.toHaveBeenCalled();
+    expect(notifySpy).not.toHaveBeenCalled();
   });
 
   it("a copy keeps the group in its scene and says so in the row", async () => {
@@ -233,39 +314,66 @@ describe("the move step", () => {
     expect(row.textContent).toContain("Copy to Evening");
   });
 
-  it("the toast says what happened and names the groups the move emptied", async () => {
-    const answer: GroupMoved = {
-      group_id: "g-case",
-      saved: true,
-      scenes: [],
-      before: [],
-      taken: [],
-      emptied: ["Warm Wash"],
-    };
-    const undo = vi.fn();
-    const use = fakeUse({ moveGroup: vi.fn(async () => answer), undo });
-    const onClose = vi.fn();
-    render(<MoveStep groupId="g-case" copy={false} use={use} lights={lights()} onClose={onClose} />);
+  it("confirming sends the real move with the revisions the dry run answered with", async () => {
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({
+        state: "answered",
+        answer: dryAnswer("g-desk"),
+      })),
+    });
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
     const row = await screen.findByTestId("move-to-evening");
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(row);
-    await waitFor(() => expect(notifySpy).toHaveBeenCalled());
-    const [text, tone, action] = notifySpy.mock.calls[0] as [string, string, { label: string; onClick: () => void }];
-    expect(text).toBe("Moved Case fans to Evening. Warm Wash had no lights left and was removed.");
-    expect(tone).toBe("warn");
-    expect(action.label).toBe("Undo");
-    expect(onClose).toHaveBeenCalled();
-    action.onClick();
-    expect(undo).toHaveBeenCalled();
+    await waitFor(() => expect(use.moveGroup).toHaveBeenCalled());
+    // The revisions are the ones the dry run answered with: the daemon has them.
+    expect(use.moveGroup).toHaveBeenCalledWith("g-desk", "evening", false, { from: 7, to: 2 });
   });
 
-  it("a move the daemon refuses leaves the sheet open and says nothing of its own", async () => {
-    const use = fakeUse({ moveGroup: vi.fn(async () => null) });
+  it("two clicks make one move: every row is held while a move is on its way", async () => {
+    let release: (answer: GroupMoved | null) => void = () => {};
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({
+        state: "answered",
+        answer: dryAnswer("g-desk"),
+      })),
+      moveGroup: vi.fn(() => new Promise<GroupMoved | null>((resolve) => { release = resolve; })),
+    });
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={vi.fn()} />);
+    const evening = await screen.findByTestId("move-to-evening");
+    const focus = await screen.findByTestId("move-to-focus");
+    await waitFor(() => expect((evening as HTMLButtonElement).disabled).toBe(false));
+    fireEvent.click(evening);
+    await waitFor(() => expect((focus as HTMLButtonElement).disabled).toBe(true));
+    fireEvent.click(focus);
+    expect(use.moveGroup).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      release(null);
+    });
+  });
+
+  it("a move the daemon refuses leaves the sheet open", async () => {
+    const use = fakeUse({
+      dryRunMove: vi.fn(async (): Promise<MoveCheck> => ({
+        state: "answered",
+        answer: dryAnswer("g-desk"),
+      })),
+      moveGroup: vi.fn(async () => null),
+    });
     const onClose = vi.fn();
     render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={onClose} />);
     const row = await screen.findByTestId("move-to-evening");
+    await waitFor(() => expect((row as HTMLButtonElement).disabled).toBe(false));
     fireEvent.click(row);
     await waitFor(() => expect(use.moveGroup).toHaveBeenCalled());
     expect(onClose).not.toHaveBeenCalled();
-    expect(notifySpy).not.toHaveBeenCalled();
+  });
+
+  it("the step closes when its group is gone", async () => {
+    const { from } = scenes();
+    const use = fakeUse({ scene: { ...from, groups: from.groups.filter((g) => g.id !== "g-desk") } });
+    const onClose = vi.fn();
+    render(<MoveStep groupId="g-desk" copy={false} use={use} lights={lights()} onClose={onClose} />);
+    await waitFor(() => expect(onClose).toHaveBeenCalled());
   });
 });
