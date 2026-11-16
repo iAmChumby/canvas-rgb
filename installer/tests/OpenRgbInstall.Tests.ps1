@@ -126,7 +126,7 @@ function Get-Process { [CmdletBinding()] param([string]$Name, [int]$Id) if ($Nam
 # -ServiceStatus is what the stubbed service reports before the run; -Stuck puts an OpenRGB in the
 # install folder that will not stop (the update fails after it stopped the service); without it
 # the OpenRGB on the list has a path nobody can read (the update refuses at step 1).
-function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck, [switch]$MarkerBlocked, [switch]$MachineHomeUnsafe, [switch]$MarkerUnreadable, [switch]$NoOpenRgb) {
+function Invoke-StopCanvasSandbox([string]$Name, [string]$ServiceStatus, [switch]$Stuck, [switch]$MarkerBlocked, [switch]$MachineHomeUnsafe, [switch]$MarkerUnreadable, [switch]$NoOpenRgb, [switch]$StartFails, [switch]$NoService) {
     $root = Join-Path $dir $Name
     $scripts = Join-Path $root 'scripts'; $inst = Join-Path $root 'install'
     # The machine home is faked too: the note that carries "this run stopped a running service" to
@@ -152,6 +152,14 @@ function Get-CimInstance { param(`$ClassName, `$Filter) [pscustomobject]@{ Proce
         # is stopped (and the note about it is written).
         $stubs += "`r`nfunction Get-CimInstance { param(`$ClassName, `$Filter) }`r`n"
     }
+    if ($StartFails) {
+        # The service refuses to start again when the stop step fails (#77).
+        $stubs += "`r`nfunction Start-Service { param(`$Name) Write-Host 'CALL Start-Service'; throw 'the service could not be started' }`r`n"
+    }
+    if ($NoService) {
+        # There is no service object at all: the restart has nothing to start (#77).
+        $stubs += "`r`nfunction Get-Service { param(`$Name) }`r`n"
+    }
     if ($MarkerBlocked) {
         # The note cannot be written (a machine home that refuses the write).
         $stubs += "`r`nfunction Set-StoppedServiceMarker { return `$false }`r`n"
@@ -172,7 +180,7 @@ function Get-CimInstance { param(`$ClassName, `$Filter) [pscustomobject]@{ Proce
     # stopped a running service" to the next step goes in there, and the real one is not ours.
     $cmd = '$env:ProgramData=''{0}''; & ''{1}'' -InstallDir ''{2}'' -LogFile ''{3}''; exit $LASTEXITCODE' -f (Join-Path $root 'PD'), (Join-Path $scripts 'stop-canvas.ps1'), $inst, $log
     $out = & powershell.exe -NoProfile -Command $cmd 2>&1 | Out-String
-    return @{ Out = $out; Code = $LASTEXITCODE; Marker = (Join-Path $root 'PD\canvas-rgb\stopped-service.marker'); Log = $log }
+    return @{ Out = $out; Code = $LASTEXITCODE; Marker = (Join-Path $root 'PD\canvas-rgb\stopped-service.marker'); RestartNote = (Join-Path $root 'PD\canvas-rgb\restart-failed.marker'); Log = $log }
 }
 
 # The two steps of an Inno update, one after the other, against fakes:
@@ -791,6 +799,25 @@ try {
         Assert-True ($stop -match 'Clear-StoppedServiceMarker') 'a marker from an earlier run is cleared'
         $setup = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\setup-elevated.ps1'))
         Assert-True ($setup -match '\[switch\]\$StoppedRunningService') 'the elevated step takes the switch'
+    }
+    Test-Case 'a failed self-restart leaves the plain sentence the installer shows in its final note (#77)' {
+        # The stop step fails after it stopped a running service, and the service refuses to start
+        # again. Today that is only a line in the log. The person must read it in Setup's final note.
+        $r = Invoke-StopCanvasSandbox 'stop77-fail' -ServiceStatus 'Running' -MarkerBlocked -StartFails
+        Assert-Equal $r.Code 1 "the stop fails: $($r.Out)"
+        Assert-True (Test-Path -LiteralPath $r.RestartNote) "the note the installer reads is written: $($r.Out)"
+        $words = [System.IO.File]::ReadAllText($r.RestartNote)
+        Assert-True ($words -match 'could not be started again after setup failed') "it says what failed: $words"
+        Assert-True ($words -match 'Start menu') "it says what to do: $words"
+        # The installer must actually read that marker into the note, not just leave it on disk.
+        $iss = [System.IO.File]::ReadAllText((Join-Path $PSScriptRoot '..\inno\canvas-rgb.iss'))
+        Assert-True ($iss -match [regex]::Escape("{commonappdata}\canvas-rgb\restart-failed.marker")) 'the installer reads the marker the stop step wrote'
+        $deinit = Get-IssFunction 'procedure DeinitializeSetup'
+        Assert-True ($deinit -match 'RestartFailedNote') "the installer puts its words in the final note: $deinit"
+        # A restart that worked must leave no note, or a later failure would show a false one.
+        $ok = Invoke-StopCanvasSandbox 'stop77-ok' -ServiceStatus 'Running' -NoOpenRgb
+        Assert-Equal $ok.Code 0 "the stop succeeds: $($ok.Out)"
+        Assert-True (-not (Test-Path -LiteralPath $ok.RestartNote)) 'a restart that worked leaves no note'
     }
     Test-Case 'the uninstall refusal names what was already stopped and removed' {
         $r = Invoke-UninstallSandbox 'uninst4' -CimFailsLate -FakeApp

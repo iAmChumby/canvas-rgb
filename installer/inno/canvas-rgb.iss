@@ -532,6 +532,27 @@ begin
   end;
 end;
 
+// The plain sentence stop-canvas.ps1 left when it stopped a running service and could not start it
+// again (#77). It lives in the same protected machine home as the other hand-off markers, and the
+// final note below reads it through the same LoadStringFromFile/Utf8Decode channel.
+function RestartFailedNotePath: String;
+begin
+  Result := ExpandConstant('{commonappdata}\canvas-rgb\restart-failed.marker');
+end;
+
+function RestartFailedNote: String;
+var
+  Text: AnsiString;
+begin
+  Result := '';
+  if LoadStringFromFile(RestartFailedNotePath, Text) then
+  begin
+    Result := Utf8Decode(Text);
+    if (Length(Result) > 0) and (Result[1] = #65279) then Result := Copy(Result, 2, MaxInt);
+    Result := Trim(Result);
+  end;
+end;
+
 // Before any file is copied: fetch and verify OpenRGB (nothing is changed if this fails), then stop a running install.
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
@@ -587,6 +608,7 @@ begin
   WizardForm.PreparingLabel.Caption := 'Closing canvas-rgb if it is running...';
   // A marker from an earlier run says nothing about this one.
   DeleteFile(StoppedServiceMarkerPath);
+  DeleteFile(RestartFailedNotePath);
   if not RunPs(ExpandConstant('{tmp}\stop-canvas.ps1'), '-LogFile "' + Log + '" -InstallDir "' + ExpandConstant('{app}') + '"', False, Code) or (Code <> 0) then
   begin
     // Nothing was copied: the checks above all ran before a single file was touched. What was
@@ -741,11 +763,18 @@ begin
       was left stopped on purpose, is named as stopped, so the message is true. }
     if (not Ok) and (not IsServiceUpdateRun) then
     begin
-      RestartCode := RestartCanvasRgb;
-      if RestartCode = 2 then
-        Note := 'canvas-rgb is stopped: the install folder may hold a mix of the old and the new files, so it was not started again. Your fans are on your motherboard''s own settings. Run setup again.'
-      else if RestartCode = 1 then
-        Note := 'canvas-rgb is stopped and could not be started again: your fans are on your motherboard''s own settings. Run setup again.';
+      // A restart stop-canvas.ps1 tried and failed is the most specific account of why canvas-rgb
+      // is down: show its plain words instead of only the log tail (#77). The generic restart-code
+      // note below is for the other failed restarts; it must not overwrite this one.
+      Note := RestartFailedNote;
+      if Note = '' then
+      begin
+        RestartCode := RestartCanvasRgb;
+        if RestartCode = 2 then
+          Note := 'canvas-rgb is stopped: the install folder may hold a mix of the old and the new files, so it was not started again. Your fans are on your motherboard''s own settings. Run setup again.'
+        else if RestartCode = 1 then
+          Note := 'canvas-rgb is stopped and could not be started again: your fans are on your motherboard''s own settings. Run setup again.';
+      end;
     end;
     // Not an update: nothing else would tell the person that canvas-rgb is stopped.
     if (not IsUpdateRun) and (Note <> '') then SuppressibleMsgBox(Note, mbError, MB_OK, IDOK);
@@ -886,9 +915,9 @@ begin
         // unknown (the machine home would not take the state file), so the wrapper must not
         // claim that nothing was removed (#64).
         if Code = 1 then
-          Msg := 'canvas-rgb could not stop running or give the fans back to your motherboard (code ' + IntToStr(Code) + '). Nothing was removed.'
+          Msg := 'canvas-rgb was not removed: the uninstall stopped before anything was taken away. Nothing was removed. The log below says what happened.'
         else
-          Msg := 'canvas-rgb was not removed cleanly. The log below says what was done.';
+          Msg := 'canvas-rgb was not removed cleanly, and the uninstall could not record what it had already done. The log below says what happened.';
       end;
       MsgBox(Msg + #13#10 + #13#10 + LogTail(Log), mbError, MB_OK);
     end;

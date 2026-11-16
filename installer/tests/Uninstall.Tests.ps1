@@ -610,6 +610,21 @@ function Start-Process { Write-Host 'STUB Start-Process'; [pscustomobject]@{ Exi
         Assert-True ($before -match 'if Code = 1 then') 'it is only used for the code that means nothing was removed'
         Assert-True ($un -match 'was not removed cleanly') 'every other code says the state is unknown'
     }
+    Test-Case 'the no-home uninstall note says only what the script can know (#77)' {
+        # With no machine home and nothing removed, exit 1 reaches this fixed sentence. The script
+        # cannot tell "there was no service" from "the stop step never ran", so the sentence must
+        # say only what is true for both: nothing was taken away.
+        $un = Get-IssFunction 'function InitializeUninstall'
+        $iCode1 = $un.IndexOf('if Code = 1 then')
+        Assert-True ($iCode1 -gt 0) 'the nothing-was-removed branch is there'
+        $branch = $un.Substring($iCode1, [Math]::Min(420, $un.Length - $iCode1))
+        Assert-True ($branch -match 'stopped before anything was taken away') "it says the uninstall stopped before removing anything: $branch"
+        Assert-True ($branch -notmatch 'could not stop running or give the fans back') "it must not claim a stop it never made: $branch"
+        # Exit 5 means the state could not be recorded: the words must say that, not more.
+        $iElse = $un.IndexOf('was not removed cleanly')
+        Assert-True ($iElse -gt $iCode1) 'the state-unknown branch follows'
+        Assert-True ($un.Substring($iElse) -match 'could not record') 'the state-unknown branch says the state could not be recorded'
+    }
     Test-Case 'an uninstall that fails and cannot record its state does not let the wrapper say nothing was removed' {
         # The state file cannot be written, and the service was touched, so what happened is not
         # known. The exit code then says the state is unknown, and the wrapper must not claim that

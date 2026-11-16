@@ -14,6 +14,7 @@ try {
     if (-not (Test-IsAdmin)) { throw 'stop-canvas.ps1 must run elevated.' }
     # A marker from an earlier run says nothing about this one.
     Clear-StoppedServiceMarker
+    Clear-RestartFailedMarker
     Stop-CanvasRgbRunning -InstallDir $InstallDir -Result $stopState | ForEach-Object { Write-Step $_ $LogFile }
     Write-Step '  nothing left running' $LogFile
     # The Inno installer runs the elevated setup step after it copied the files, and that step finds
@@ -47,6 +48,8 @@ try {
         Write-Step '  canvas-rgb was started again' $LogFile
     } elseif ($restart.Failed -or $restart.Missing) {
         Write-Step '  canvas-rgb could not be started again: your fans stay on your motherboard''s own settings until you run setup again' $LogFile
+        # The log alone is not enough: leave the plain sentence for Inno to show in the final note (#77).
+        Set-RestartFailedMarker | Out-Null
     }
     exit 1
 }

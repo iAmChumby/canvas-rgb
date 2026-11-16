@@ -1111,6 +1111,40 @@ function Clear-StoppedServiceMarker {
     try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
 }
 
+# ---- a restart that stop-canvas.ps1 tried and could not finish (#77) ----
+# When the stop step fails it starts the service again itself. A start that fails is otherwise known
+# only from the log. This marker carries the plain sentence Inno shows in Setup's final note; it is
+# written only when the restart really failed, so a later success cannot show a false note. Like the
+# stopped-service marker it lives in the protected machine home, which is never created here.
+$script:RestartFailedWords = 'canvas-rgb could not be started again after setup failed; start it from the Start menu to get your lights working, and the fans stay on your motherboard''s own settings until you run setup again.'
+
+function Get-RestartFailedMarkerPath {
+    $c = Get-CanvasConst
+    return (Join-Path (Join-Path $env:ProgramData $c.AppName) 'restart-failed.marker')
+}
+
+# Best effort: this runs inside the failure handler, and a home that is missing or unsafe must not
+# turn the failure into a different one.
+function Set-RestartFailedMarker {
+    param([string]$Text = '', [string]$Path = '')
+    if (-not $Text) { $Text = $script:RestartFailedWords }
+    if (-not $Path) { $Path = Get-RestartFailedMarkerPath }
+    $dir = Split-Path -Parent $Path
+    if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+    try { Assert-MachineHomeSafe -Path $dir } catch { return $false }
+    try {
+        [System.IO.File]::WriteAllText($Path, $Text)
+        return $true
+    } catch { return $false }
+}
+
+# A marker from an earlier run says nothing about this one.
+function Clear-RestartFailedMarker {
+    param([string]$Path = '')
+    if (-not $Path) { $Path = Get-RestartFailedMarkerPath }
+    try { if (Test-Path -LiteralPath $Path -PathType Leaf) { Remove-Item -LiteralPath $Path -Force } } catch { }
+}
+
 # ---- what an unfinished uninstall leaves behind (#64) ----
 # The uninstall can fail half way: the service can be gone and the program files still there. The
 # person must be told what is true, not "nothing was removed". The script records what it removed
