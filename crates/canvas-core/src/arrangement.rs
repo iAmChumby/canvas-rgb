@@ -25,10 +25,12 @@
 //! # The cells
 //!
 //! Every sample carries the cell it averages over, clamped to the canvas:
-//! - a strip cell is `slot.w / n` wide and the slot's whole height,
+//! - a strip cell is a square of at most `STRIP_CELL_MAX` units, centred on the LED
+//!   at mid-height,
 //! - a grid cell is the matrix's own cell,
 //! - a single light's cell is one logical unit at the slot's centre,
-//! - a ring cell is the square of one LED's share of the circle, `2 * pi * r / n`.
+//! - a ring cell is the square of one LED's share of the circle, `2 * pi * r / n`,
+//!   at most `STRIP_CELL_MAX` units.
 //!
 //! Three edge cases the cells meet:
 //! - **The one-unit minimum is logical.** A cell never falls below one canvas unit, but
@@ -80,6 +82,25 @@ use crate::geometry::LedSample;
 
 /// How far the ring's circle stays inside its slot, in canvas units.
 const RING_INSET: f32 = 4.0;
+
+/// The biggest cell an LED averages over, in canvas units.
+///
+/// An LED is a point on the picture, the way SignalRGB and OpenRGB's effect engine
+/// treat it: it reads the colour where it stands, not a band of the picture. A wide
+/// cell averages thin moving detail away, so Rain's falling lines never reached an
+/// 8-LED strip: the full-height band moved 6 of 255 and a square cell as wide as the
+/// LED's share still moved 12 to 18 (#372).
+///
+/// Seven units is about one and three quarter pixels of the scene canvas. It is the
+/// smallest cell that clears the bar of 30 (of 255) that a strip LED has to move for
+/// Rain: measured over 120 frames after a 120-frame warm-up, a cell of 10 units moved
+/// 33 to 52 in "each its own" but only 27 to 47 across two strips, and a cell of 7
+/// units moved 33 to 52 and 33 to 59. It is one number: a softer cell only costs the
+/// motion.
+///
+/// The cap is on the cell only. A strip's LEDs still stand spread over the whole
+/// slot, and a ring's still stand on its circle.
+pub const STRIP_CELL_MAX: f32 = 7.0;
 
 /// The most LEDs one zone may plan for.
 ///
@@ -264,15 +285,22 @@ fn build_light_leds(
 
 /// A strip: left to right at mid-height, each LED in the middle of its own cell.
 ///
-/// The cell is `slot.w / n` wide and the slot's whole height.
+/// The LED stands at the middle of its share of the slot, and the cell it reads is a
+/// square of at most [`STRIP_CELL_MAX`] units, centred on the LED at mid-height: an LED
+/// is a position on the picture, not a column through it. A full-height band, and a
+/// square cell as wide as the LED's share, averaged a thin falling line (Rain) into a
+/// steady colour (#372).
 fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
-    let cell_w = slot.w / n as f32;
+    // Where the LED stands: its share of the slot, spread over the whole slot.
+    let share = slot.w / n as f32;
+    // The cell it reads: a square, at most the cap, at most the slot's height.
+    let side = share.min(slot.h).min(STRIP_CELL_MAX);
     let y = slot.y + slot.h / 2.0;
     (0..n)
         .map(|j| {
-            let x = slot.x + cell_w * (j as f32 + 0.5);
+            let x = slot.x + share * (j as f32 + 0.5);
             let bounds =
-                clamp_cell(x - cell_w / 2.0, slot.y, x + cell_w / 2.0, slot.y + slot.h);
+                clamp_cell(x - side / 2.0, y - side / 2.0, x + side / 2.0, y + side / 2.0);
             LedSample { center_x: x, center_y: y, bounds, sampled: true }
         })
         .collect()
@@ -281,13 +309,15 @@ fn strip_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
 /// A ring: the largest circle that fits the slot, from the top, clockwise.
 ///
 /// The cell is the square of one LED's share of the circle, `2 * pi * r / n`, capped at
-/// the circle's own diameter.
+/// the circle's own diameter and at [`STRIP_CELL_MAX`] units: a ring of few LEDs has a
+/// wide share of the circle (75 units for eight LEDs on the whole canvas), and a cell
+/// that wide averages the picture away just as a full-height band did (#372).
 fn ring_samples(slot: &Slot, n: usize) -> Vec<LedSample> {
     let (cx, cy) = slot.centre();
     // The circle keeps a 4px inset from the slot's edges.
     let r = ((slot.w.min(slot.h) - 2.0 * RING_INSET) / 2.0).max(0.0);
     // The LED's cell: a square as wide as the LEDs are apart around the circle.
-    let side = (std::f32::consts::TAU * r / n as f32).min(2.0 * r);
+    let side = (std::f32::consts::TAU * r / n as f32).min(2.0 * r).min(STRIP_CELL_MAX);
     (0..n)
         .map(|j| {
             // -90° is the top of the circle; the angle grows clockwise (y grows downward).
@@ -464,6 +494,7 @@ mod tests {
             arrangement,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
@@ -525,20 +556,29 @@ mod tests {
         let plan = build_group_plan(&ids(&["a", "b"]), GroupMode::EachItsOwn, &lights, &devices);
         assert_eq!(plan.lights.len(), 2);
         for light in &plan.lights {
-            // The slot is the whole canvas: the first cell starts at 0 and the last ends
-            // at 320, so the light covers the whole picture and not a part of it.
+            // The slot is the whole canvas: the light's LEDs stand spread over the whole
+            // picture, the first at its share's edge and the last at the other one.
+            let share = CANVAS_WIDTH as f32 / light.leds.len() as f32;
             let first = light.leds.first().expect("the light has LEDs");
             let last = light.leds.last().expect("the light has LEDs");
-            assert!(first.bounds[0].abs() < 0.05, "{} starts at {}", light.light, first.bounds[0]);
+            assert!((first.center_x - share / 2.0).abs() < 0.05, "{} starts at {}", light.light, first.center_x);
             assert!(
-                (last.bounds[2] - CANVAS_WIDTH as f32).abs() < 0.05,
+                (last.center_x - (CANVAS_WIDTH as f32 - share / 2.0)).abs() < 0.05,
                 "{} ends at {}",
                 light.light,
-                last.bounds[2]
+                last.center_x
             );
-            assert!(first.bounds[1].abs() < 0.05, "{} starts at {}", light.light, first.bounds[1]);
+            // Vertically the cell is a square of at most the cap, centred at mid-height
+            // (#372): the LED reads the picture where it stands, not a column of it.
+            let side = share.min(CANVAS_HEIGHT as f32).min(STRIP_CELL_MAX);
             assert!(
-                (last.bounds[3] - CANVAS_HEIGHT as f32).abs() < 0.05,
+                (first.bounds[1] - (CANVAS_HEIGHT as f32 - side) / 2.0).abs() < 0.05,
+                "{} starts at {}",
+                light.light,
+                first.bounds[1]
+            );
+            assert!(
+                (last.bounds[3] - (CANVAS_HEIGHT as f32 + side) / 2.0).abs() < 0.05,
                 "{} ends at {}",
                 light.light,
                 last.bounds[3]
@@ -655,21 +695,22 @@ mod tests {
     }
 
     /// The bounds of a sample hold its centre and are the cell around it: a strip cell is
-    /// `slot.w / n` wide, a grid cell is the grid's own cell, a single light's cell is one
+    /// a square of at most `STRIP_CELL_MAX` units, a grid cell is the grid's own cell, a single light's cell is one
     /// logical unit at the slot's centre, and a ring cell is the square of one LED's share
-    /// of the circle.
+    /// of the circle, at most `STRIP_CELL_MAX` units.
     #[test]
     fn every_bounds_holds_its_centre_and_its_cell() {
         let width = CANVAS_WIDTH as f32;
         let height = CANVAS_HEIGHT as f32;
 
-        // A strip alone: the slot is the whole canvas, so each of its 8 cells is a
-        // 320/8 = 40 wide column of the whole height.
+        // A strip alone: the slot is the whole canvas, so its 8 LEDs stand 320/8 = 40
+        // apart and each reads a square of at most the cap, centred at mid-height.
         let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, 8)])];
         let plan =
             build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &[strip("a", "d0")], &devices);
+        let strip_side = (width / 8.0).min(height).min(STRIP_CELL_MAX);
         for led in &plan.lights[0].leds {
-            assert_cell(led, width / 8.0, height, "a strip cell");
+            assert_cell(led, strip_side, strip_side, "a strip cell");
         }
 
         // A grid alone on a 4x4 matrix: each cell is 320/4 by 200/4.
@@ -703,7 +744,7 @@ mod tests {
         let lights = vec![light("a", "d0", 0, Arrangement::Ring)];
         let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &lights, &devices);
         let radius = (height.min(width) - 2.0 * RING_INSET) / 2.0;
-        let side = std::f32::consts::TAU * radius / 8.0;
+        let side = (std::f32::consts::TAU * radius / 8.0).min(STRIP_CELL_MAX);
         for led in &plan.lights[0].leds {
             let [x0, y0, x1, y1] = led.bounds;
             assert!(
@@ -723,6 +764,33 @@ mod tests {
                 "a ring cell: the cell is {} tall",
                 y1 - y0
             );
+        }
+    }
+
+    /// No LED reads a cell wider or taller than the cap: an LED is a point on the
+    /// picture, not a band of it (#372).
+    #[test]
+    fn no_led_reads_a_cell_bigger_than_the_cap() {
+        for n in [1u32, 2, 4, 8, 12, 24, 60, 61, 240, 512] {
+            let devices = vec![device("d0", vec![zone(0, ZoneKind::Linear, n)])];
+            for arrangement in [Arrangement::Strip, Arrangement::Ring] {
+                let l = light("a", "d0", 0, arrangement);
+                let plan = build_group_plan(&ids(&["a"]), GroupMode::EachItsOwn, &[l], &devices);
+                for led in &plan.lights[0].leds {
+                    let [x0, y0, x1, y1] = led.bounds;
+                    let what = format!("{arrangement:?} n={n}");
+                    assert!(
+                        x1 - x0 <= STRIP_CELL_MAX + 0.05,
+                        "{what}: the cell is {} wide",
+                        x1 - x0
+                    );
+                    assert!(
+                        y1 - y0 <= STRIP_CELL_MAX + 0.05,
+                        "{what}: the cell is {} tall",
+                        y1 - y0
+                    );
+                }
+            }
         }
     }
 

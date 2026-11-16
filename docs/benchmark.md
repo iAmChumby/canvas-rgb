@@ -163,10 +163,14 @@ Worst p95 of the three runs, in ms (the bar is 16.6 ms):
 | `wet-smear` | 1.302 | 10.491 | 18.350 | 28.141 | **1** |
 
 Every stock effect fits at 1 and none fits at 3. At 2, `ink-drop` fits by 0.27 ms and the other two miss
-by 7.3 and 1.8 ms, in all three runs each. The limit on HTML groups per scene is therefore **1**
-(`SCENE_HTML_MAX`, unchanged): it would rise to 2 only if every stock effect fit at 2. The `ink-drop` number
-is the nearest to the bar and its third run had 5 late frames (max 124.579 ms, a stall of the machine), so
-even that row is not a safe 2.
+by 7.3 and 1.8 ms, in all three runs each. On the 16.6 ms bar the limit would stay **1**, rising to 2 only if
+every stock effect fit at 2. The `ink-drop` number is the nearest to the bar and its third run had 5 late
+frames (max 124.579 ms, a stall of the machine), so even that row is not a safe 2 on that bar.
+
+2026-11-15: the limit is raised to 2 on a 25 ms bar. This is the main agent's default from the #370 design
+review; Luke was told and has not yet confirmed the bar. No new measurement was made for this change; the
+pairwise run through the real engine (#370, measurement M1) is still owed, and the limit goes back to 1 if a
+stock pair misses 25 ms.
 
 Compared with the update-and-sampling bench above, the engine's whole frame adds little: `ink-drop` at 1
 HTML + 19 built-in is 7.027 ms p95 there and 7.789 to 7.876 ms here. The 20 built-in groups alone are

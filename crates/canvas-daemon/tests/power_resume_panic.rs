@@ -67,6 +67,7 @@ fn run_on(
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     };
     engine.set_scene(
         vec![light.clone()],

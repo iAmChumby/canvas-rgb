@@ -50,7 +50,7 @@ afterEach(() => {
 });
 
 const NOT_READ_TEXT =
-  "Not read yet. canvas-rgb reads it while you're not using the mouse, or press Read again (this pauses the mouse for a few seconds).";
+  "Not read yet. The mouse's settings are read while you are away. Press Read again to read them now.";
 
 /** A mouse with a DPI section; `readAt` is when the daemon read it (Unix ms), or null for never. */
 function mouse(id: string, readAt: number | null): PeripheralDetail {

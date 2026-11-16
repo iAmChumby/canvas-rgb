@@ -7,7 +7,9 @@
 use crate::device::DeviceInfo;
 use crate::fans::{FanMode, FanProfile, FansStatus};
 use crate::props::{InputNeeds, Preset, Props, PropertySchema};
-use crate::scene::{Arrangement, ChainPartKind, Light, LightId, Scene};
+use crate::scene::{
+    Arrangement, ChainPartKind, GroupMode, Light, LightId, Plays, Scene, GROUP_BRIGHTNESS_MAX,
+};
 use crate::traits::GroupState;
 use serde::{Deserialize, Serialize};
 use ts_rs::TS;
@@ -164,11 +166,19 @@ pub mod routes {
     pub const PREVIEW: &str = "/api/v1/preview";
 
     // Scenes (0.14.0).
-    /// `GET` [`super::ScenesResponse`]; `POST` [`super::SceneCreate`] makes a scene and answers it.
+    /// `GET` [`super::ScenesResponse`]; `POST` [`super::SceneCreate`] makes a scene and answers it
+    /// (with `dry_run`, see [`super::SceneCreate`]); `PUT` [`super::ScenesWrite`] writes several scenes and/or the scene order in ONE save, all or
+    /// nothing: `409 conflict` when any `expected_rev` or the `expected_order` is stale (nothing
+    /// is written), `422 validation` for a rule broken, an unknown or repeated id, or an order
+    /// that is not a permutation of every scene id; answers [`super::ScenesResponse`]. The
+    /// handler is the daemon's (#368, #371); the collection path is reused so no scene id is
+    /// shadowed by a static segment.
     pub const SCENES: &str = "/api/v1/scenes";
     /// `PUT` [`super::ScenePut`] replaces a scene whole: `409 conflict` with the current scene
-    /// when `expected_rev` is stale, `422 validation` when a scene rule is broken. `DELETE`
-    /// refuses the last scene with `409`.
+    /// when `expected_rev` is stale, `422 validation` when a scene rule is broken (the HTML-group
+    /// limit is the daemon's own check, with its own sentence). With `dry_run` it runs every
+    /// check, saves nothing and answers a [`super::SceneDryRun`]. `DELETE` refuses the last
+    /// scene with `409`.
     pub const SCENE: &str = "/api/v1/scenes/{id}";
     /// `PUT` [`super::SceneActivePut`]: sets a scene (with a fade).
     pub const SCENE_ACTIVE: &str = "/api/v1/scenes/active";
@@ -177,6 +187,12 @@ pub mod routes {
     pub const GROUP_PROPS: &str = "/api/v1/scenes/{id}/groups/{group}/props";
     /// `PUT` [`super::GroupBrightnessPut`]. As [`GROUP_PROPS`]: saved, `rev` + 1, answers the scene.
     pub const GROUP_BRIGHTNESS: &str = "/api/v1/scenes/{id}/groups/{group}/brightness";
+    /// `POST` [`super::GroupMove`]: moves or copies one group of scene `{id}` to another scene in
+    /// ONE save (both scenes land or neither), answers a [`super::GroupMoved`]. `404` for an
+    /// unknown scene or group, `409 conflict` (with `which`: `"from"` or `"to"`, and that scene)
+    /// when a rev is stale, `422 validation` for the same scene or a broken scene rule. With
+    /// `dry_run` every check runs, nothing is saved and `saved` is `false` (#368).
+    pub const GROUP_MOVE: &str = "/api/v1/scenes/{id}/groups/{group}/move";
     /// `GET` [`super::LightsResponse`].
     pub const LIGHTS: &str = "/api/v1/lights";
     /// `PATCH` [`super::LightPatch`].
@@ -188,6 +204,14 @@ pub mod routes {
     /// the scene or the lights change); then binary frames: per light a `u16 LE` index, a
     /// `u16 LE` LED count, then that many RGB triples. At most 15 a second.
     pub const PREVIEW_LIGHTS: &str = "/api/v1/preview/lights";
+    /// WebSocket (#378). The picture ONE group draws, as it is handed to the LEDs (the group's
+    /// own 80x50 canvas times the group's brightness; black for an Off or failed group; no frame
+    /// for a pattern group). Query: `token`, and [`crate::consts::GROUP_PREVIEW_QUERY`] (the
+    /// group id). Binary messages in the [`PREVIEW`] format: `u16 LE width, u16 LE height,
+    /// width*height*3 RGB bytes`, at most [`crate::consts::PREVIEW_MAX_FPS`]. Its own sink: the
+    /// effects editor's [`PREVIEW`] socket is not touched. The newest group socket wins; the
+    /// older one is closed with `1013`. The handler is the daemon's.
+    pub const PREVIEW_GROUP: &str = "/api/v1/preview/group";
     /// `PATCH` with a `Props` body: an effect's starting values (`EffectsFile.saved`). A group
     /// already playing the effect keeps its own.
     pub const EFFECT_DEFAULTS: &str = "/api/v1/effects/{id}/defaults";
@@ -203,6 +227,18 @@ pub mod routes {
     pub const CHAIN_SETUP_COMMIT: &str = "/api/v1/chains/{device}/{zone}/setup/commit";
     /// `POST` [`super::SetupEmpty`]: nothing is plugged into this header.
     pub const CHAIN_SETUP_EMPTY: &str = "/api/v1/chains/{device}/{zone}/setup/empty";
+}
+
+#[cfg(test)]
+mod preview_group_tests {
+    use super::*;
+
+    #[test]
+    fn the_group_preview_route_and_its_query_key_are_named() {
+        assert_eq!(routes::PREVIEW_GROUP, "/api/v1/preview/group");
+        assert_eq!(crate::consts::GROUP_PREVIEW_QUERY, "group");
+        assert!(routes::PREVIEW_GROUP.starts_with(routes::PREVIEW.trim_end_matches("/preview")));
+    }
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize, TS)]
@@ -568,7 +604,7 @@ pub struct StackSummary {
     pub name: String,
     /// How many layers it has.
     pub layers: u32,
-    /// How many of those are HTML effects (the slow, capped kind).
+    /// How many HTML runtimes it starts (the slow, capped kind): one for each layer whose effect is HTML and one for each HTML mask.
     pub html_layers: u32,
     /// The ids of the layers whose effect could not be found, so the library can say so.
     #[serde(default)]
@@ -927,7 +963,8 @@ pub struct ScenesResponse {
 }
 
 /// `POST` [`routes::SCENES`]. With `copy_of`, the new scene copies that scene's groups under
-/// new ids; without it, one group of every light, set to Off.
+/// new ids; with `groups` (#377), the new scene holds exactly those groups; without either, one
+/// group of every light, set to Off. `copy_of` and `groups` together are refused with `422`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
 #[ts(export)]
 pub struct SceneCreate {
@@ -935,6 +972,36 @@ pub struct SceneCreate {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub copy_of: Option<String>,
+    /// The groups the new scene holds, in order. The daemon mints each group's id and runs the
+    /// scene rules and the HTML-group limit before it saves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub groups: Option<Vec<NewGroup>>,
+    /// Run every check and save nothing: the answer is a [`SceneDryRun`] with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// One group of a scene being made with [`SceneCreate::groups`]: a [`Group`] without its id.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct NewGroup {
+    pub name: String,
+    pub members: Vec<LightId>,
+    pub plays: Plays,
+    /// Left out: [`GroupMode::FlowAcross`], as a [`Group`] reads it.
+    #[serde(default)]
+    #[ts(optional, as = "Option<GroupMode>")]
+    pub mode: GroupMode,
+    /// 0..=100. Left out: 100, as a [`Group`] reads it.
+    #[serde(default = "default_new_group_brightness")]
+    #[ts(optional, as = "Option<u8>")]
+    pub brightness: u8,
+}
+
+fn default_new_group_brightness() -> u8 {
+    GROUP_BRIGHTNESS_MAX
 }
 
 /// `PUT` [`routes::SCENE`].
@@ -945,6 +1012,95 @@ pub struct ScenePut {
     /// The `rev` the change was made from.
     #[ts(type = "number")]
     pub expected_rev: u64,
+    /// Run every check and save nothing: the answer is a [`SceneDryRun`] with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// What a dry run of a scene write answers (#377): the scene as it would be saved (`rev`
+/// included), and `saved: false`. A move's dry run answers the real [`GroupMoved`] the same way,
+/// with `saved: false`: one shape for "what would happen".
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneDryRun {
+    /// Always `false` for a dry run.
+    pub saved: bool,
+    pub scene: Scene,
+}
+
+#[cfg(test)]
+mod scene_skill_tests {
+    //! #377: groups and dry runs on create and put, and the one dry-run answer.
+    use super::*;
+
+    fn scene(id: &str, rev: u64) -> Scene {
+        Scene { id: id.into(), name: id.to_uppercase(), rev, groups: Vec::new() }
+    }
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn an_old_scene_create_body_still_loads() {
+        let old: SceneCreate = serde_json::from_str(r#"{"name":"Evening","copy_of":"main"}"#).unwrap();
+        assert_eq!((old.groups.is_none(), old.dry_run), (true, false));
+        let bare: SceneCreate = serde_json::from_str(r#"{"name":"Blank"}"#).unwrap();
+        assert_eq!((bare.copy_of, bare.groups, bare.dry_run), (None, None, false));
+        // What the old editor writes is what the new one writes when it uses none of the new fields.
+        assert_eq!(
+            serde_json::to_string(&SceneCreate { name: "x".into(), copy_of: None, groups: None, dry_run: false }).unwrap(),
+            r#"{"name":"x"}"#
+        );
+    }
+
+    #[test]
+    fn a_scene_create_with_groups_round_trips_and_a_new_group_defaults_like_a_group() {
+        let json = r#"{"name":"Night","dry_run":true,"groups":[
+            {"name":"Fans","members":["fake:a#z0"],"plays":{"type":"off"}},
+            {"name":"Desk","members":["fake:b#z0"],"plays":{"type":"effect","effect":"html:ink-drop","props":{}},"mode":"each_its_own","brightness":40}]}"#;
+        let body: SceneCreate = serde_json::from_str(json).unwrap();
+        assert!(body.dry_run);
+        let groups = body.groups.clone().unwrap();
+        assert_eq!((groups[0].mode, groups[0].brightness), (GroupMode::FlowAcross, 100), "left out: as a Group reads it");
+        assert_eq!((groups[1].mode, groups[1].brightness), (GroupMode::EachItsOwn, 40));
+        round_trip(&body);
+    }
+
+    #[test]
+    fn an_old_scene_put_body_still_loads_and_a_dry_run_is_off() {
+        let body = format!(r#"{{"scene":{},"expected_rev":1}}"#, serde_json::to_string(&scene("a", 1)).unwrap());
+        let old: ScenePut = serde_json::from_str(&body).unwrap();
+        assert!(!old.dry_run);
+        assert_eq!(serde_json::to_string(&old).unwrap(), body, "a real put writes what it always wrote");
+        let probe = ScenePut { dry_run: true, ..old };
+        assert!(round_trip(&probe).contains(r#""dry_run":true"#));
+    }
+
+    #[test]
+    fn a_scene_dry_run_round_trips_with_saved_false() {
+        assert!(round_trip(&SceneDryRun { saved: false, scene: scene("a", 2) }).contains(r#""saved":false"#));
+    }
+
+    #[test]
+    fn the_skill_cli_names_are_distinct_from_the_old_ones() {
+        use crate::cli::*;
+        let all = [
+            SCENES_LIST, SCENES_SET, LIGHTS_LIST, SCENES_CREATE, SCENES_EDIT, SCENES_DELETE,
+            EFFECTS_LIST, EFFECTS_ACTIVATE, EFFECTS_DELETE, EFFECTS_PRESET_LIST,
+            EFFECTS_PRESET_SAVE, EFFECTS_PRESET_DELETE, EFFECTS_SOURCE, SCENES_GROUP_ORDER,
+        ];
+        let mut seen = std::collections::HashSet::new();
+        for name in all {
+            assert!(seen.insert(name), "{name:?} is named twice");
+        }
+    }
 }
 
 /// `PUT` [`routes::SCENE_ACTIVE`].
@@ -960,6 +1116,167 @@ pub struct SceneActivePut {
 pub struct GroupBrightnessPut {
     /// 0..=100.
     pub brightness: u8,
+}
+
+/// `POST` [`routes::GROUP_MOVE`] (#368).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupMove {
+    /// The id of the scene the group goes to.
+    pub to: String,
+    /// Copy instead of move: the source scene keeps the group and its `rev`; the copy always gets
+    /// a fresh group id.
+    pub copy: bool,
+    /// The `rev` of the source scene (the `{id}` of the route) the request was made from.
+    #[ts(type = "number")]
+    pub expected_rev_from: u64,
+    /// The `rev` of the target scene the request was made from.
+    #[ts(type = "number")]
+    pub expected_rev_to: u64,
+    /// Run every check and save nothing: the answer is the [`GroupMoved`] it would have been,
+    /// with `saved: false`.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    #[ts(optional, as = "Option<bool>")]
+    pub dry_run: bool,
+}
+
+/// The lights a move or copy took out of another group of the target, so the target holds each
+/// light once. A group left with no lights is removed (see [`GroupMoved::emptied`]).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupTaken {
+    /// The target scene's group the lights were taken from.
+    pub group_id: String,
+    pub group_name: String,
+    pub lights: Vec<LightId>,
+}
+
+/// The answer to [`GroupMove`] (#368).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct GroupMoved {
+    /// The id the group has in the target scene: its own when the target lacks it, else a fresh
+    /// one; a copy always has a fresh one.
+    pub group_id: String,
+    /// `false` for a dry run: nothing was written and the scenes below are what would be.
+    pub saved: bool,
+    /// The scenes after, `[from, to]`; a copy leaves `from` as it was (same `rev`).
+    pub scenes: Vec<Scene>,
+    /// The scenes before, `[from, to]`: what an undo writes back.
+    pub before: Vec<Scene>,
+    /// The lights taken out of the target's other groups.
+    pub taken: Vec<GroupTaken>,
+    /// The names of the groups (of either scene) that held no light afterwards and were removed.
+    pub emptied: Vec<String>,
+}
+
+/// One scene of a [`ScenesWrite`]: the whole scene and the `rev` it was made from.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct SceneWrite {
+    pub scene: Scene,
+    #[ts(type = "number")]
+    pub expected_rev: u64,
+}
+
+/// `PUT` [`routes::SCENES`] (#368 undo/redo, #371 scene order). Every check runs before anything
+/// is written, then ONE save writes the lot. Each written scene lands at `rev` = current + 1.
+#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct ScenesWrite {
+    /// Scenes to replace whole. Left out (or empty) for an order-only write.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    #[ts(optional, as = "Option<Vec<SceneWrite>>")]
+    pub scenes: Vec<SceneWrite>,
+    /// The new order: every scene id exactly once. The same order as now is a `200` with no write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub order: Option<Vec<String>>,
+    /// The order the caller last saw; a different current order is a `409` carrying it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub expected_order: Option<Vec<String>>,
+}
+
+#[cfg(test)]
+mod scenes_ops_tests {
+    //! #368, #371: the move route, the answer types and the whole-list write.
+    use super::*;
+
+    fn scene(id: &str, rev: u64) -> Scene {
+        Scene { id: id.into(), name: id.to_uppercase(), rev, groups: Vec::new() }
+    }
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn group_move_round_trips_and_a_dry_run_is_off_when_left_out() {
+        let body = GroupMove { to: "movie".into(), copy: true, expected_rev_from: 3, expected_rev_to: 5, dry_run: false };
+        let json = round_trip(&body);
+        assert!(!json.contains("dry_run"), "a real move writes no dry_run: {json}");
+        let probe = GroupMove { dry_run: true, ..body };
+        assert!(round_trip(&probe).contains(r#""dry_run":true"#));
+        let old: GroupMove =
+            serde_json::from_str(r#"{"to":"m","copy":false,"expected_rev_from":1,"expected_rev_to":2}"#).unwrap();
+        assert!(!old.dry_run);
+    }
+
+    #[test]
+    fn group_moved_round_trips_with_saved_true_and_false() {
+        let moved = |saved| GroupMoved {
+            group_id: "desk".into(),
+            saved,
+            scenes: vec![scene("a", 2), scene("b", 4)],
+            before: vec![scene("a", 1), scene("b", 3)],
+            taken: vec![GroupTaken { group_id: "all".into(), group_name: "Everything".into(), lights: vec!["d#z0".into()] }],
+            emptied: vec!["Everything".into()],
+        };
+        round_trip(&moved(true));
+        assert!(round_trip(&moved(false)).contains(r#""saved":false"#));
+    }
+
+    #[test]
+    fn scenes_write_reads_an_order_only_body_and_a_scenes_only_body() {
+        let order_only: ScenesWrite = serde_json::from_str(r#"{"order":["b","a"],"expected_order":["a","b"]}"#).unwrap();
+        assert!(order_only.scenes.is_empty());
+        assert_eq!(order_only.order.as_deref(), Some(&["b".to_string(), "a".to_string()][..]));
+        let scenes_only: ScenesWrite =
+            serde_json::from_str(&format!(r#"{{"scenes":[{{"scene":{},"expected_rev":2}}]}}"#, serde_json::to_string(&scene("a", 2)).unwrap()))
+                .unwrap();
+        assert_eq!((scenes_only.scenes.len(), scenes_only.order, scenes_only.expected_order), (1, None, None));
+        let json = round_trip(&ScenesWrite {
+            scenes: vec![SceneWrite { scene: scene("a", 3), expected_rev: 2 }],
+            order: Some(vec!["a".into()]),
+            expected_order: Some(vec!["a".into()]),
+        });
+        assert!(json.contains("expected_rev") && json.contains("expected_order"), "{json}");
+        assert_eq!(serde_json::to_string(&ScenesWrite::default()).unwrap(), "{}");
+    }
+
+    #[test]
+    fn the_move_route_names_both_placeholders_and_the_order_write_reuses_the_collection() {
+        assert_eq!(routes::GROUP_MOVE, "/api/v1/scenes/{id}/groups/{group}/move");
+        assert!(routes::GROUP_MOVE.starts_with(routes::GROUP_PROPS.trim_end_matches("/props")));
+        // The order write reuses the collection path, so no static segment hides a scene id.
+        assert_eq!(routes::SCENES, "/api/v1/scenes");
+    }
+
+    #[test]
+    fn the_scene_ops_cli_names_are_distinct_from_the_old_ones() {
+        use crate::cli::*;
+        let all = [SCENES_LIST, SCENES_SET, SCENES_ORDER, SCENES_GROUP_MOVE, SCENES_GROUP_ORDER, EFFECTS_SOURCE];
+        let mut seen = std::collections::HashSet::new();
+        for name in all {
+            assert!(seen.insert(name), "{name:?} is named twice");
+        }
+    }
 }
 
 /// `GET` [`routes::LIGHTS`].
@@ -1088,6 +1405,41 @@ pub struct SetupPart {
     pub name: String,
     pub kind: ChainPartKind,
     pub leds: u32,
+    /// How many times the header shows this run (#381, #382): 8 fans that all show the same
+    /// 8 LEDs are ONE part of 8 LEDs with `copies: 8`. Left out (or 1): once. At most
+    /// [`crate::scene::COPIES_MAX`]; 2 or more only when this is the header's only part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub copies: Option<u32>,
+}
+
+#[cfg(test)]
+mod chain_copies_tests {
+    //! #381, #382: `copies` on the setup part.
+    use super::*;
+
+    fn round_trip<T>(value: &T) -> String
+    where
+        T: Serialize + serde::de::DeserializeOwned + PartialEq + std::fmt::Debug,
+    {
+        let json = serde_json::to_string(value).unwrap();
+        assert_eq!(&serde_json::from_str::<T>(&json).unwrap(), value, "{json}");
+        json
+    }
+
+    #[test]
+    fn a_setup_part_without_copies_loads_and_with_copies_round_trips() {
+        let old: SetupPart = serde_json::from_str(r#"{"name":"Fan","kind":"fan","leds":12}"#).unwrap();
+        assert_eq!(old.copies, None);
+        assert!(!serde_json::to_string(&old).unwrap().contains("copies"), "a part without copies writes none");
+        let mirror = SetupPart { name: "Same lights, shown 8 times".into(), kind: ChainPartKind::Other, leds: 8, copies: Some(8) };
+        assert!(round_trip(&mirror).contains(r#""copies":8"#));
+    }
+
+    #[test]
+    fn the_cap_is_what_the_design_names() {
+        assert_eq!(crate::scene::COPIES_MAX, 32);
+    }
 }
 
 /// `POST` [`routes::CHAIN_SETUP_COMMIT`]: parts in chain order; their LEDs add up to the final

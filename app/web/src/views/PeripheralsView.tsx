@@ -618,7 +618,9 @@ export function PeripheralsView() {
               <button
                 key={p.id}
                 type="button"
-                className="peripheral-row rd-devkey"
+                // `tab-key` is the shared type of the app's tabs (#373): the device key is set
+                // like every other tab, and this page sets only its box.
+                className="peripheral-row rd-devkey tab-key"
                 data-on={p.id === selectedId ? "true" : "false"}
                 aria-current={p.id === selectedId ? "true" : undefined}
                 onClick={() => {
@@ -705,6 +707,13 @@ function PeripheralDetail({
   const readsOff = !reads;
   const showsSettings = !unread && !readsOff;
   const noun = nounOf(info.kind);
+  // The "Read again" tooltip (#374). Only the mouse's read is known to hitch: it is five report
+  // exchanges with the pointer's own reports among them. The pad's read is 36 chunks of its
+  // profile image with no pointer in it, so the pad's tooltip promises the read and no more
+  // (#387).
+  const readAgainWords = isMouse
+    ? `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself. The ${noun} may stutter briefly while it reads.`
+    : `Reads the settings from the ${noun} again, to pick up changes made on the ${noun} itself.`;
   const nowMs = useNowMs(30_000);
   const readAt = detail.read_at_ms == null ? null : Number(detail.read_at_ms);
   const ago = readAt === null ? null : readAgo(readAt, nowMs);
@@ -813,7 +822,7 @@ function PeripheralDetail({
                 shown={reads && ago ? ago.text : undefined}
               />
             </span>
-            <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing" className="rd-peri-tip">
+            <Tooltip label={`Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Read</span>
                 <Toggle
@@ -823,7 +832,21 @@ function PeripheralDetail({
                 />
               </span>
             </Tooltip>
-            <Tooltip label={`asks the device for its settings again, for changes made on the ${noun} itself; this pauses the ${noun} for a few seconds`} className="rd-peri-tip">
+            {/* What a read does, in the words of the code (#374): the editor asks the daemon for
+                the device with `?fresh=true` (`GET /peripherals/{id}`, the daemon's
+                `crates/canvas-daemon/src/api/peripherals.rs`), the daemon opens the device and
+                reads its reports (`read_fresh_stamped`, `crates/canvas-daemon/src/peripherals.rs`),
+                and the adapter's read is a series of short report exchanges with a pause between
+                them (`crates/canvas-adapters/src/attack_shark_x6/mod.rs`: five reports, a 250 ms
+                wait for each grant and a 500 ms pause between the reports). The device is busy
+                with those exchanges while the read runs and is usable again when it ends; it is
+                never held still for the whole read. The wording says that, and says reading.
+                The stutter is the mouse's own report exchange and is claimed for the mouse only
+                (#387): the pad's read is 36 chunks of its profile image
+                (`crates/canvas-adapters/src/eightbitdo_ultimate2/mod.rs`) with no pointer in it,
+                and nothing has measured what its buttons do during one, so its tooltip promises
+                only the read. */}
+            <Tooltip label={readAgainWords} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <Button
                   size="sm"
@@ -836,7 +859,7 @@ function PeripheralDetail({
                 </Button>
               </span>
             </Tooltip>
-            <Tooltip label="lets canvas-rgb change settings on the device" className="rd-peri-tip">
+            <Tooltip label={`Lets canvas-rgb change the settings on the ${noun}.`} className="rd-peri-tip">
               <span className="rd-peri-toggle">
                 <span className="rd-peri-toggle-label">Change</span>
                 <Toggle
@@ -863,7 +886,7 @@ function PeripheralDetail({
               <ClockCountdown size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`Not read yet. canvas-rgb reads it while you're not using the ${noun}, or press Read again (this pauses the ${noun} for a few seconds).`}
+              {`Not read yet. The ${noun}'s settings are read while you are away. Press Read again to read them now.`}
             </p>
           </div>
         </Panel>
@@ -879,10 +902,10 @@ function PeripheralDetail({
               <EyeSlash size={22} />
             </span>
             <p className="rd-peri-unread-text">
-              {`canvas-rgb reads this ${noun}'s settings only when you turn reading on; reading pauses the ${noun} for a few seconds.`}
+              {`The ${noun}'s settings are read only when you turn reading on.`}
             </p>
             <span className="rd-peri-reads-off-action">
-              <Tooltip label="canvas-rgb opens the device and asks for its settings; it changes nothing">
+              <Tooltip label={`Opens the ${noun} and asks for its settings. It changes nothing on the ${noun}.`}>
                 <Button variant="primary" size="sm" onClick={() => onReadToggle(true)}>
                   Turn on reading
                 </Button>
@@ -958,7 +981,10 @@ function DpiPanel({
         optionLabel={choiceWord}
         onChange={onChange}
       />
-      <div className="dpi-stages" role="group" aria-label="DPI stages">
+      {/* The stage count is on the element so the columns are chosen from it (#387): the row is a
+          grid of equal cells, and a count that cannot fill its last row evenly (four, which would
+          be 3 + 1) takes two columns instead. */}
+      <div className="dpi-stages" role="group" aria-label="DPI stages" data-stages={stages.length}>
         {count === null && <UnreadValue label="DPI stages" />}
         {stages.map((s) => (
           <button

@@ -247,6 +247,7 @@ fn a_consumer_that_arrives_between_the_park_decision_and_the_wait_is_not_slept_t
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     };
     engine.set_scene(
         vec![light],
@@ -358,6 +359,7 @@ mod scene {
             arrangement: Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
@@ -373,6 +375,7 @@ mod scene {
             arrangement: Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
@@ -1542,5 +1545,267 @@ mod scene {
         );
         assert_eq!(&frame[12..], &source[..], "the part's LEDs play the pattern");
         engine.shutdown();
+    }
+    // ------------------------------------------------------------ group preview (#378)
+
+    mod group_preview {
+        use super::*;
+        use canvas_proto::traits::PreviewSink;
+
+        /// A recording group-preview sink: every picture it is handed, in order.
+        #[derive(Default)]
+        struct Pictures {
+            frames: Mutex<Vec<(u32, u32, Vec<u8>)>>,
+        }
+
+        impl Pictures {
+            fn new() -> Arc<Self> {
+                Arc::new(Self::default())
+            }
+            fn count(&self) -> usize {
+                self.frames.lock().unwrap_or_else(|e| e.into_inner()).len()
+            }
+            fn all(&self) -> Vec<(u32, u32, Vec<u8>)> {
+                self.frames.lock().unwrap_or_else(|e| e.into_inner()).clone()
+            }
+            /// The first pixel of picture `i`.
+            fn first_pixel(&self, i: usize) -> [u8; 3] {
+                let frames = self.all();
+                [frames[i].2[0], frames[i].2[1], frames[i].2[2]]
+            }
+        }
+
+        impl PreviewSink for Pictures {
+            fn submit(&self, width: u32, height: u32, rgb: Vec<u8>) {
+                self.frames.lock().unwrap_or_else(|e| e.into_inner()).push((width, height, rgb));
+            }
+        }
+
+        /// Two groups, `a` (red) on `d1` and `b` (blue) on `d2`, with a sink on each device.
+        fn two_groups() -> (Arc<dyn Engine>, Arc<RecordingSink>) {
+            let engine = spawn(settings(60));
+            let sink = RecordingSink::new();
+            engine.add_sink(DeviceId("d1".into()), sink.clone());
+            engine.add_sink(DeviceId("d2".into()), RecordingSink::new());
+            engine.set_scene(
+                vec![light_of("d1"), light_of("d2")],
+                vec![strip_device("d1", 12), strip_device("d2", 12)],
+                vec![
+                    group("a", &["d1#z0"], solid([1.0, 0.0, 0.0])),
+                    group("b", &["d2#z0"], solid([0.0, 0.0, 1.0])),
+                ],
+                false,
+            );
+            (engine, sink)
+        }
+
+        /// Waits for the device sink to render `frames` more frames, so a quiet sink is quiet
+        /// for a reason and not because the engine was idle.
+        fn let_it_render(sink: &RecordingSink, frames: u32) {
+            let start = sink.frame_count();
+            assert!(wait_until(FIRST_FRAME_WAIT, || sink.frame_count() >= start + frames));
+        }
+
+        #[test]
+        fn a_selected_group_gets_its_own_80_by_50_picture() {
+            let (engine, _) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("b".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            let (w, h, rgb) = pictures.all()[0].clone();
+            assert_eq!((w, h), (80, 50));
+            assert_eq!(rgb.len(), 12_000);
+            assert!(
+                rgb.chunks(3).all(|p| p == [0, 0, 255]),
+                "group b paints blue, group a's red must not appear"
+            );
+            engine.shutdown();
+        }
+
+        #[test]
+        fn the_groups_brightness_is_in_the_picture() {
+            let engine = spawn(settings(60));
+            engine.add_sink(DeviceId("d1".into()), RecordingSink::new());
+            let mut dim = group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]));
+            dim.brightness = 50;
+            engine.set_scene(vec![light_of("d1")], vec![strip_device("d1", 12)], vec![dim], false);
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            assert_eq!(pictures.first_pixel(0), [128, 0, 0]);
+            engine.shutdown();
+        }
+
+        #[test]
+        fn the_newest_selection_wins_and_the_older_sink_goes_quiet() {
+            let (engine, device) = two_groups();
+            let first = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(first.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || first.count() > 0));
+            let second = Pictures::new();
+            engine.set_group_preview(Some("b".into()), Some(second.clone()));
+            let at_takeover = first.count();
+            assert!(wait_until(FIRST_FRAME_WAIT, || second.count() > 0));
+            assert_eq!(second.first_pixel(0), [0, 0, 255], "the newest call's group");
+            let_it_render(&device, 30);
+            // One picture may have been in flight when the call returned; none after it.
+            assert!(
+                first.count() <= at_takeover + 1,
+                "the older sink got {} pictures after the takeover",
+                first.count() - at_takeover
+            );
+            engine.shutdown();
+        }
+
+        #[test]
+        fn none_stops_the_tap_and_the_engine_keeps_rendering() {
+            let (engine, device) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            engine.set_group_preview(None, None);
+            let stopped_at = pictures.count();
+            let_it_render(&device, 30);
+            assert!(pictures.count() <= stopped_at + 1, "no pictures after None");
+            engine.shutdown();
+        }
+
+        #[test]
+        fn a_group_without_a_sink_or_a_sink_without_a_group_copies_nothing() {
+            let (engine, device) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), None);
+            engine.set_group_preview(None, Some(pictures.clone()));
+            let_it_render(&device, 30);
+            assert_eq!(pictures.count(), 0);
+            engine.shutdown();
+        }
+
+        #[test]
+        fn a_group_that_does_not_exist_sends_nothing_and_the_engine_survives() {
+            let (engine, device) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("no-such-group".into()), Some(pictures.clone()));
+            let_it_render(&device, 30);
+            assert_eq!(pictures.count(), 0, "nothing for a group the scene does not hold");
+            // And it did not take the render thread with it: a real selection still works.
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            engine.shutdown();
+        }
+
+        #[test]
+        fn an_off_group_sends_black() {
+            let engine = spawn(settings(60));
+            let device = RecordingSink::new();
+            engine.add_sink(DeviceId("d1".into()), device.clone());
+            engine.set_scene(
+                vec![light_of("d1")],
+                vec![strip_device("d1", 12)],
+                vec![group("a", &["d1#z0"], None)],
+                false,
+            );
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            assert!(pictures.all()[0].2.iter().all(|b| *b == 0));
+            engine.shutdown();
+        }
+
+        #[test]
+        fn a_pattern_group_sends_no_picture() {
+            let engine = spawn(settings(60));
+            let device = RecordingSink::new();
+            engine.add_sink(DeviceId("d1".into()), device.clone());
+            let pattern = pattern_on(12, Arrangement::Strip, ramp(12));
+            engine.set_scene(
+                vec![light_of("d1")],
+                vec![strip_device("d1", 12)],
+                vec![group("a", &["d1#z0"], playing(pattern))],
+                false,
+            );
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            let_it_render(&device, 30);
+            assert_eq!(pictures.count(), 0);
+            engine.shutdown();
+        }
+
+        #[test]
+        fn pictures_are_capped_at_the_preview_rate() {
+            let (engine, device) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            let started = Instant::now();
+            let p0 = pictures.count();
+            let d0 = device.frame_count();
+            assert!(wait_until(FIRST_FRAME_WAIT, || device.frame_count() > d0 + 60));
+            let seconds = started.elapsed().as_secs_f64();
+            let sent = pictures.count() - p0;
+            assert!(sent > 0, "a second of frames sent no picture");
+            let limit = seconds * f64::from(PREVIEW_MAX_FPS) + 2.0;
+            assert!(
+                sent as f64 <= limit,
+                "{sent} pictures in {seconds:.3}s: more than {PREVIEW_MAX_FPS} a second"
+            );
+            engine.shutdown();
+        }
+
+        #[test]
+        fn a_scene_switch_never_shows_the_old_scenes_group_under_the_new_one() {
+            let (engine, device) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            assert_eq!(pictures.first_pixel(0), [255, 0, 0], "scene one: group a is red");
+            // Scene two has a group of the same id that paints green. The selection is kept by
+            // id, so the stage follows the group the scene now holds.
+            engine.set_scene(
+                vec![light_of("d1")],
+                vec![strip_device("d1", 12)],
+                vec![group("a", &["d1#z0"], solid([0.0, 1.0, 0.0]))],
+                false,
+            );
+            assert!(wait_until(FIRST_FRAME_WAIT, || {
+                pictures.all().iter().any(|(_, _, rgb)| rgb[..3] == [0, 255, 0])
+            }));
+            let_it_render(&device, 30);
+            let all = pictures.all();
+            let first_green = all.iter().position(|(_, _, rgb)| rgb[..3] == [0, 255, 0]).unwrap();
+            assert!(
+                all[first_green..].iter().all(|(_, _, rgb)| rgb[..3] == [0, 255, 0]),
+                "a red picture arrived after the new scene's first one"
+            );
+            engine.shutdown();
+        }
+
+        #[test]
+        fn a_scene_without_the_group_sends_nothing_and_keeping_the_selection_resumes() {
+            let (engine, device) = two_groups();
+            let pictures = Pictures::new();
+            engine.set_group_preview(Some("a".into()), Some(pictures.clone()));
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > 0));
+            // A scene that holds only group `b`.
+            engine.set_scene(
+                vec![light_of("d2")],
+                vec![strip_device("d2", 12)],
+                vec![group("b", &["d2#z0"], solid([0.0, 0.0, 1.0]))],
+                false,
+            );
+            let_it_render(&device, 5);
+            let quiet_at = pictures.count();
+            let_it_render(&device, 30);
+            assert!(pictures.count() <= quiet_at + 1, "a group the scene lost sends no picture");
+            // The scene with `a` comes back: the selection was kept, the pictures resume.
+            engine.set_scene(
+                vec![light_of("d1")],
+                vec![strip_device("d1", 12)],
+                vec![group("a", &["d1#z0"], solid([1.0, 0.0, 0.0]))],
+                false,
+            );
+            assert!(wait_until(FIRST_FRAME_WAIT, || pictures.count() > quiet_at + 1));
+            engine.shutdown();
+        }
     }
 }

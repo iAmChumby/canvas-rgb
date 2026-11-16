@@ -79,6 +79,7 @@ fn one_light() -> (Vec<Light>, Vec<DeviceInfo>, EngineGroup) {
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     };
     let device = DeviceInfo {
         id: device_id,

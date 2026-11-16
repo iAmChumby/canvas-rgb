@@ -95,6 +95,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
         arrangement: Arrangement::default_for(&zone.kind),
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
@@ -227,21 +228,9 @@ pub fn repair(scenes: &mut ScenesFile, lights: &LightsFile) -> Vec<String> {
             }
             seen.push(group.id.clone());
         }
-        // At most SCENE_HTML_MAX groups play an HTML effect: later ones, in scene order, go Off.
-        let mut html = 0;
-        for group in &mut scene.groups {
-            let is_html = matches!(&group.plays, Plays::Effect { effect, .. } if effect.starts_with(HTML_EFFECT_PREFIX));
-            if is_html {
-                html += 1;
-                if html > SCENE_HTML_MAX {
-                    group.plays = Plays::Off;
-                    changes.push(format!(
-                        "scene {}: group {} was set to Off (more than {SCENE_HTML_MAX} HTML effect groups)",
-                        scene.id, group.id
-                    ));
-                }
-            }
-        }
+        // The HTML limit is not repaired here (#370): a scene keeps what the owner saved. The
+        // groups past the limit are not built, and each says why on its own row
+        // ([`html_limit_sentence`], [`build_and_set`]).
     }
     if scenes.scenes.is_empty() {
         *scenes = default_scenes(lights);
@@ -561,26 +550,52 @@ pub fn running_effect(scene: &Scene) -> Option<(String, Props)> {
 
 /// Builds every group's effect and hands the scene to the engine. A group whose effect cannot be
 /// built is dark (`effect: None`) and named in the failures that come back; the others run.
+///
+/// The HTML limit is enforced here, in scene order (#370): the first [`SCENE_HTML_MAX`] HTML
+/// runtimes run, a group past them is not built, and the row of each such group carries the
+/// sentence ([`html_limit_sentence`]). The scene keeps it: nothing is written Off.
 fn build_and_set(app: &App, lights: &[Light], devices: &[DeviceInfo], scene: &Scene, fade: bool) -> BTreeMap<String, String> {
     app.stacks.clear_running();
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    let slots_of = |id: &str| saved_stack_slots(app, id, &known);
+    let total = html_runtime_count(scene, &slots_of);
+    let mut runtimes = 0usize;
     let mut needs = InputNeeds::default();
     let mut failures = BTreeMap::new();
     let mut groups = Vec::with_capacity(scene.groups.len());
     for group in &scene.groups {
         let (effect, props) = match &group.plays {
             Plays::Off => (None, Props::new()),
-            Plays::Effect { effect: id, props } => match build_effect(app, id, Some(&group.id)) {
-                Ok((built, group_needs)) => {
-                    needs.screen |= group_needs.screen;
-                    needs.audio |= group_needs.audio;
-                    (Some(built), props.clone())
-                }
-                Err(why) => {
-                    tracing::warn!(group = %group.id, effect = %id, error = %why, "a group's effect could not be built; the group is dark");
-                    failures.insert(group.id.clone(), why);
+            Plays::Effect { effect: id, props } => {
+                let slots = group_html_runtimes(group, &slots_of);
+                // A group takes its runtime before it is built, so a group whose build fails keeps
+                // its place: the first SCENE_HTML_MAX runtimes in scene order are the ones that
+                // run, built or not, and a later group does not move up into a freed slot.
+                if runtimes + slots > SCENE_HTML_MAX {
+                    // Over the limit: the group keeps what the owner saved, and does not run.
+                    tracing::warn!(
+                        group = %group.id,
+                        effect = %id,
+                        "a group over the scene's HTML limit did not build; its row says why"
+                    );
+                    failures.insert(group.id.clone(), html_limit_sentence(total));
                     (None, props.clone())
+                } else {
+                    runtimes += slots;
+                    match build_effect(app, id, Some(&group.id)) {
+                        Ok((built, group_needs)) => {
+                            needs.screen |= group_needs.screen;
+                            needs.audio |= group_needs.audio;
+                            (Some(built), props.clone())
+                        }
+                        Err(why) => {
+                            tracing::warn!(group = %group.id, effect = %id, error = %why, "a group's effect could not be built; the group is dark");
+                            failures.insert(group.id.clone(), why);
+                            (None, props.clone())
+                        }
+                    }
                 }
-            },
+            }
         };
         groups.push(EngineGroup {
             id: group.id.clone(),
@@ -1624,59 +1639,57 @@ pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> Vec<Gro
         .collect()
 }
 
-/// How many groups of `scene` play an HTML effect, counting a stack as HTML when any of its layers
-/// or masks is (`has_html_layer` answers for a stack id). Each is a script of its own, the slowest
-/// group there is (`SCENE_HTML_MAX`).
-pub fn html_group_count(scene: &Scene, has_html_layer: &dyn Fn(&str) -> bool) -> usize {
-    scene
-        .groups
-        .iter()
-        .filter(|g| match &g.plays {
-            Plays::Effect { effect, .. } => effect.starts_with(HTML_EFFECT_PREFIX) || has_html_layer(effect),
-            Plays::Off => false,
-        })
-        .count()
+/// How many HTML runtimes `scene` starts, in scene order (#370): one for an `html:` group, and one
+/// for each HTML layer or mask of a stack. A stack with two HTML layers is two, and `slots_of`
+/// answers that for the effect ids a stack has (design Q5: runtimes, not groups).
+///
+/// **The one count.** Every door reads it: save and create ([`check_saveable`]), setting a scene
+/// and activating (`api/scenes.rs`), a takeover ([`check_takeover_html_limit`], `draft.rs`) and
+/// saving a stack ([`check_stack_html_limit`], `api/stacks.rs`). [`build_and_set`] walks it in the
+/// same order to decide which groups run.
+pub fn html_runtime_count(scene: &Scene, slots_of: &dyn Fn(&str) -> usize) -> usize {
+    scene.groups.iter().map(|group| group_html_runtimes(group, slots_of)).sum()
 }
 
-/// True when the saved stack `id` has an HTML layer or mask.
-pub fn stack_has_html(stacks: &crate::stacks::Stacks, id: &str) -> bool {
-    stacks.get(id).is_some_and(|stack| stack_has_html_layers(&stack))
-}
-
-/// True when the stack has an HTML layer or mask.
-pub fn stack_has_html_layers(stack: &canvas_proto::stack::Stack) -> bool {
-    stack.layers.iter().any(|layer| {
-        layer.effect.starts_with(HTML_EFFECT_PREFIX)
-            || layer.mask.as_ref().is_some_and(|m| m.effect.starts_with(HTML_EFFECT_PREFIX))
-    })
-}
-
-/// True when the effect plays an HTML effect, or a stack with an HTML layer in it.
-pub fn effect_is_html(app: &App, effect: &str) -> bool {
-    effect.starts_with(HTML_EFFECT_PREFIX) || stack_has_html(&app.stacks, effect)
-}
-
-/// True when the group plays an HTML effect, or a stack with an HTML layer in it.
-fn group_is_html(app: &App, group: &Group) -> bool {
+/// The HTML runtimes one group starts: 1 when it plays an `html:` effect, `slots_of` when it plays
+/// anything else (a stack's HTML slots, and 0 for a canvas effect).
+pub fn group_html_runtimes(group: &Group, slots_of: &dyn Fn(&str) -> usize) -> usize {
     match &group.plays {
-        Plays::Effect { effect, .. } => effect_is_html(app, effect),
-        Plays::Off => false,
+        Plays::Effect { effect, .. } if effect.starts_with(HTML_EFFECT_PREFIX) => 1,
+        Plays::Effect { effect, .. } => slots_of(effect),
+        Plays::Off => 0,
     }
 }
 
-/// The sentence when the scene would run more HTML groups than it may.
-///
-/// At most [`SCENE_HTML_MAX`] groups of a scene may play an HTML effect: each is a script of
-/// its own, the slowest group there is. A stack with an HTML layer counts as one.
+/// [`html_runtime_count`] against the app's own stacks: the count every door uses.
+pub fn scene_html_runtimes(app: &App, scene: &Scene) -> usize {
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    html_runtime_count(scene, &|id| saved_stack_slots(app, id, &known))
+}
+
+/// The HTML slots of the saved stack `id`: its HTML layers and the HTML masks that resolve, by
+/// the same rule that caps a stack ([`crate::stacks::html_slots`]).
+fn saved_stack_slots(app: &App, id: &str, known: &crate::stacks::KnownEffects) -> usize {
+    app.stacks.get(id).map_or(0, |stack| stack_slots(&stack, known))
+}
+
+/// The HTML slots of `stack`, layer by layer.
+fn stack_slots(stack: &canvas_proto::stack::Stack, known: &crate::stacks::KnownEffects) -> usize {
+    stack.layers.iter().map(|layer| crate::stacks::html_slots(layer, known)).sum()
+}
+
+/// The sentence for a scene that starts more HTML runtimes than it may (#370, design Q3), with the
+/// limit and the scene's own count in it. One function, so every refusal and the row of every group
+/// past the limit say the same words, and the words name the number and the fix.
 pub fn html_limit_sentence(count: usize) -> String {
     format!(
-        "at most {SCENE_HTML_MAX} group{} of a scene may play an HTML effect (a stack with an HTML layer counts); {count} do",
+        "A scene runs {SCENE_HTML_MAX} HTML effect{} at a time. This one has {count}. Move one to another scene.",
         if SCENE_HTML_MAX == 1 { "" } else { "s" }
     )
 }
 
-/// Checks the HTML limit for a takeover of `effect` on `targets`: the scene must not run more
-/// HTML groups than it may.
+/// Checks the HTML limit for a takeover of `effect` on `targets`: the scene must not start more
+/// HTML runtimes than it may.
 ///
 /// `stack` is the stack the takeover brings, when it brings one: the draft's own layers count,
 /// not the saved stack's, because the draft is what runs.
@@ -1690,25 +1703,28 @@ pub async fn check_takeover_html_limit(
         let store = app.store.read().await;
         active_scene(&store.scenes).clone()
     };
-    let html = match stack {
-        Some(stack) => stack_has_html_layers(stack),
-        None => effect_is_html(app, effect),
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    // The runtimes each targeted group starts: the takeover's own, on every group it lands on.
+    let runtimes = match stack {
+        Some(stack) => stack_slots(stack, &known),
+        None if effect.starts_with(HTML_EFFECT_PREFIX) => 1,
+        None => saved_stack_slots(app, effect, &known),
     };
     let count = if targets.iter().any(|group| group == TAKEOVER_GROUP) {
         // The takeover group replaces the scene's groups, so only the takeover's effect counts.
-        usize::from(html)
+        runtimes
     } else {
         scene
             .groups
             .iter()
-            .filter(|group| {
+            .map(|group| {
                 if targets.contains(&group.id) {
-                    html
+                    runtimes
                 } else {
-                    group_is_html(app, group)
+                    group_html_runtimes(group, &|id| saved_stack_slots(app, id, &known))
                 }
             })
-            .count()
+            .sum()
     };
     if count > SCENE_HTML_MAX {
         return Err(html_limit_sentence(count));
@@ -1716,50 +1732,89 @@ pub async fn check_takeover_html_limit(
     Ok(())
 }
 
-/// Checks the HTML limit for a stack that a group of a scene plays: the scene must not run more
-/// HTML groups than it may.
+/// Checks the HTML limit for a stack save: a save is refused only when it puts a scene that plays
+/// this stack over the limit.
 ///
-/// Every scene is checked, not only the active one: a scene the owner sets later must be able
-/// to run.
-///
-/// The stack is the one being saved, not the saved one: a new HTML layer is what makes the
-/// scene run one group too many.
+/// The rule is per scene, before and after the draft: a scene's count with the stack as saved
+/// against its count with the stack being saved. Two things make a save harmless, and both are
+/// allowed: a stack no scene plays (its count is the same before and after), and a save that keeps
+/// or lowers the count (nothing got worse). The second is what lets the owner fix an over-limit
+/// scene by editing the stack, so a pair already over the limit on file is not locked. A save is
+/// refused when it raises a scene's count to more than [`SCENE_HTML_MAX`]. The refusal starts
+/// with the scene's name: the stack builder shows it, and there "this one" would name nothing.
 pub async fn check_stack_html_limit(
     app: &App,
     stack: &canvas_proto::stack::Stack,
 ) -> Result<(), String> {
-    if !stack_has_html_layers(stack) {
-        return Ok(());
-    }
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    let draft = stack_slots(stack, &known);
+    // The group's effect names this stack as `Stacks::get` finds it: its id or its name, ignoring
+    // ASCII case, trimmed. A scene holds either.
+    let names_this = |effect: &str| {
+        let wanted = effect.trim();
+        wanted.eq_ignore_ascii_case(&stack.id) || wanted.eq_ignore_ascii_case(stack.name())
+    };
     let scenes = {
         let store = app.store.read().await;
         store.scenes.scenes.clone()
     };
     for scene in &scenes {
-        let count = scene
-            .groups
-            .iter()
-            .filter(|group| match &group.plays {
-                Plays::Effect { effect, .. } if effect == &stack.id => true,
-                Plays::Effect { effect, .. } => effect_is_html(app, effect),
-                Plays::Off => false,
-            })
-            .count();
-        if count > SCENE_HTML_MAX {
-            return Err(html_limit_sentence(count));
+        let old = html_runtime_count(scene, &|id| saved_stack_slots(app, id, &known));
+        let new = html_runtime_count(scene, &|id| {
+            if names_this(id) {
+                draft
+            } else {
+                saved_stack_slots(app, id, &known)
+            }
+        });
+        if new > old && new > SCENE_HTML_MAX {
+            return Err(format!("{}: {}", scene.name, html_limit_sentence(new)));
         }
     }
     Ok(())
 }
 
-/// `Err` with the sentence to show when `scene` plays more HTML effects than a scene may.
+/// `Err` with the sentence to show when `scene` starts more HTML runtimes than a scene may. The
+/// spine's `validate_scene` does not count them (#370), so every path that saves or sets a scene
+/// calls this, and the user reads this sentence.
 pub fn check_html_limit(app: &App, scene: &Scene) -> Result<(), String> {
-    let count = html_group_count(scene, &|id| stack_has_html(&app.stacks, id));
+    let count = scene_html_runtimes(app, scene);
     if count > SCENE_HTML_MAX {
-        return Err(format!(
-            "at most {SCENE_HTML_MAX} group{} of a scene may play an HTML effect (a stack with an HTML layer counts); {count} do",
-            if SCENE_HTML_MAX == 1 { "" } else { "s" }
-        ));
+        return Err(html_limit_sentence(count));
+    }
+    Ok(())
+}
+
+/// Every check a scene passes before it is written, in the order a save reports them: the
+/// spine's [`canvas_proto::scene::validate_scene`] against `lights`, the scene's and groups'
+/// names, then [`check_html_limit`]. Each failure is a 422 with the sentence its own check gives.
+///
+/// Every new write path (group move, `PUT /api/v1/scenes`, create with `groups`, undo) must call
+/// this and not the three checks one by one: a path that forgets one lets a scene onto the disk
+/// that the other paths refuse.
+pub fn check_saveable(app: &App, scene: &Scene, lights: &[Light]) -> Result<(), crate::api::ApiFailure> {
+    use crate::api::ApiFailure;
+    canvas_proto::scene::validate_scene(scene, lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
+    check_names(scene)?;
+    check_html_limit(app, scene).map_err(ApiFailure::validation)
+}
+
+/// A scene and its groups have a name, within the length the create route keeps.
+fn check_names(scene: &Scene) -> Result<(), crate::api::ApiFailure> {
+    use crate::api::ApiFailure;
+    if scene.name.trim().is_empty() {
+        return Err(ApiFailure::validation("a scene needs a name"));
+    }
+    if scene.name.chars().count() > SCENE_NAME_MAX {
+        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
+    }
+    for group in &scene.groups {
+        if group.name.trim().is_empty() {
+            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
+        }
+        if group.name.chars().count() > GROUP_NAME_MAX {
+            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
+        }
     }
     Ok(())
 }
@@ -2001,11 +2056,11 @@ pub(crate) mod tests {
     /// Property-style: damaged scenes built from a seeded generator all validate after repair,
     /// whatever mix of faults they hold.
     #[test]
-    fn html_groups_over_the_limit_are_set_off_in_scene_order() {
+    fn repair_keeps_html_groups_over_the_limit() {
         let ls = LightsFile {
             chains: Vec::new(),
             schema_version: LIGHTS_SCHEMA,
-            lights: ["a", "b", "c"].iter().map(|id| Light {
+            lights: ["a", "b", "c", "d"].iter().map(|id| Light {
                 id: (*id).into(),
                 device_id: canvas_proto::DeviceId("fake:1".into()),
                 zone_index: 0,
@@ -2014,6 +2069,7 @@ pub(crate) mod tests {
                 arrangement: Arrangement::Strip,
                 reversed: false,
                 kind: None,
+                copies: None,
             }).collect(),
         };
         let g = |id: &str, member: &str, effect: &str| Group {
@@ -2024,6 +2080,7 @@ pub(crate) mod tests {
             mode: GroupMode::FlowAcross,
             brightness: 100,
         };
+        // One group over the limit: SCENE_HTML_MAX HTML groups, a built-in one, then one more.
         let mut file = ScenesFile {
             schema_version: SCENES_SCHEMA,
             active: "s".into(),
@@ -2031,18 +2088,21 @@ pub(crate) mod tests {
                 id: "s".into(),
                 name: "s".into(),
                 rev: 1,
-                groups: vec![g("g1", "a", "html:ink-drop"), g("g2", "b", "aurora"), g("g3", "c", "html:wet-smear")],
+                groups: vec![
+                    g("g1", "a", "html:ink-drop"),
+                    g("g2", "b", "aurora"),
+                    g("g3", "c", "html:wet-smear"),
+                    g("g4", "d", "html:palette-knife"),
+                ],
             }],
         };
+        let written = file.clone();
         let changes = repair(&mut file, &ls);
-        let plays: Vec<bool> = file.scenes[0].groups.iter().map(|g| g.plays == Plays::Off).collect();
-        // With a limit of one, the first HTML group keeps playing and the second goes Off.
-        let mut expect = vec![false, false, false];
-        if SCENE_HTML_MAX < 2 {
-            expect[2] = true;
-        }
-        assert_eq!(plays, expect);
-        assert_eq!(changes.iter().filter(|c| c.contains("set to Off")).count(), expect.iter().filter(|x| **x).count());
+        // #370: repair stops rewriting the owner's scene. The group past the limit is kept as it
+        // was saved; `build_and_set` is what does not build it, and its row says why.
+        assert_eq!(SCENE_HTML_MAX, 2);
+        assert_eq!(file, written, "the scene reads back as it was written, group for group");
+        assert!(changes.iter().all(|c| !c.contains("set to Off")), "{changes:?}");
         assert_eq!(canvas_proto::scene::validate_scene(&file.scenes[0], &ls.lights), Ok(()));
     }
 
@@ -2101,9 +2161,10 @@ pub(crate) mod tests {
         assert_eq!(ids, vec!["a", "a-2"]);
     }
 
-    /// A group playing a stack whose layers include HTML counts as HTML (the scene's HTML limit).
+    /// #370 counts HTML runtimes, not groups (design Q5): a stack with two HTML layers is two, so
+    /// one `html:` group beside it is over the limit of two.
     #[test]
-    fn a_stack_with_an_html_layer_counts_as_an_html_group() {
+    fn a_stack_with_two_html_layers_counts_as_two_runtimes() {
         let play = |id: &str, effect: &str| Group {
             plays: Plays::Effect { effect: effect.into(), props: Props::new() },
             ..group(id, &["x"])
@@ -2120,9 +2181,11 @@ pub(crate) mod tests {
                 group("e", &["y"]),
             ],
         };
-        let has_html = |id: &str| id == "stack:glow";
-        assert_eq!(html_group_count(&scene, &has_html), 2, "the html: group and the stack with an HTML layer");
-        assert_eq!(html_group_count(&scene, &|_| false), 1);
+        let slots = |id: &str| if id == "stack:glow" { 2 } else { 0 };
+        assert_eq!(html_runtime_count(&scene, &slots), 3, "the html: group and two HTML layers");
+        assert_eq!(group_html_runtimes(&scene.groups[1], &slots), 2, "the stack alone");
+        assert_eq!(group_html_runtimes(&scene.groups[2], &slots), 0);
+        assert_eq!(html_runtime_count(&scene, &|_| 0), 1);
     }
 
     #[test]

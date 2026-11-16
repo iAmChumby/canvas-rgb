@@ -347,6 +347,40 @@ line. Three mechanisms, and one bug the timing only exposed.
   awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
   engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
   fake bumps), never on a flag the code sets before the awaited work.
+- [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
+  another starter while one is loading, and lands both"
+  (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
+  re-run of the same commit (PR #324, PR #386), with
+  `expected [ 'Warm white' ] to deeply equal [ 'Warm white', 'Sparkles', …(2) ]`. The wait was not the
+  fault; it was the product's draft mirror. The builder's async edits read `draftRef`, and the builder
+  assigned that mirror from a passive effect (`StackBuilder.tsx`), so a commit could land after an edit
+  had already written a newer draft. Under load the builder's own first commit (its empty draft) ran
+  late: a starter wrote its three layers, the mirror was put back to empty, and the queued starter
+  composed on an empty stack (`useStackEdits.ts` `addStack`) and landed alone, overwriting the first.
+  Measured in a loaded run of `src/views` (98 files in parallel): the test failed, log order `land
+  sunset 3` → `ref-sync 0` → `land warm 1`. The trigger is the loaded machine: the file run alone
+  failed once in 48 runs.
+- **Class fix:** done (#332) for this mirror. One object, `DraftMirror`
+  (`app/web/src/views/effects/draftMirror.ts`): `write()` is what an edit calls with the draft it
+  wrote and its version, `commit()` is what the builder's effect calls with the draft React committed
+  and its version, and either is ignored when its version is older than the mirror's, so the mirror
+  only moves forward. The version comes from `useStackHistory`, which numbers every queued change
+  (`versionOf` is the version on screen). Versions rather than arrival times, because both orders
+  happen: a commit of an older draft arrives after a write (#332), and a load or a save resets the
+  draft after a write (the reverse, which an identity-only rule broke: `StackBuilderStates.test.tsx`
+  failed 4 of 6 runs). `addOne` and `addStack` write through the mirror; every other hook still reads
+  `draftRef.current`. Test: `app/web/src/views/__tests__/DraftMirror.test.ts` (the late empty commit,
+  a reset newer than a write, the write's own commit, a write older than the mirror) and
+  `StackHistoryVersions.test.tsx`, which makes the late commit by hand on the real hook, with no
+  wait, and checks that undo, redo and a reset each get a newer version. The queue test then passed
+  60 times in two loaded runs of `src/views` (30 repetitions of it per run, 100 files in parallel).
+- **The rule this adds:** a mirror of React state that async code reads is written by the code that
+  writes the state, never assigned from every commit; a commit is followed only when it is at least as new as what
+  the mirror already holds. Siblings of the shape, found and not fixed: the same file's two sleeps that decide a
+  verdict (`StackBuilderStarters.test.tsx:111`, `:121`, 150 ms and 50 ms) and
+  `EffectDraft.test.tsx:204` (120 ms then a count of PUTs, which failed once in a loaded run of
+  `src/views` and passed on the next).
+
 - [#45](https://github.com/iAmChumby/canvas-rgb/issues/45), [#55](https://github.com/iAmChumby/canvas-rgb/issues/55)
   (a third sighting on #39): `every_daemon_kill_is_preceded_by_a_line_naming_the_reason` failed with a
   line missing from the capture. The line was not always the same one: the "terminating the daemon" INFO
@@ -730,6 +764,30 @@ scroll, so the content was clipped and unreachable.
   Chromium: the static export is served on loopback, the menu opened, every row hovered in turn,
   and each box measured with `getBoundingClientRect()` before and after (the samples for #367 and
   #369 sit beside the screenshots in `.build/screens`, in the main checkout, which is gitignored).
+- A fifth mechanism, same cause: a control's type comes from a different source than its
+  neighbours' type, so two controls of the same kind are drawn in two different faces.
+  [#373](https://github.com/iAmChumby/canvas-rgb/issues/373): the device keys on Peripherals were
+  a raw `<button>` with no font of its own, so the browser's stylesheet gave them its default face
+  (Arial 13.33 px) while the scene keys on Scenes, the same kind of control, were set in the app's
+  own face at the body size.
+- **Class fix, fourth mechanism:** the type of a tab is one shared class, `.tab-key`
+  (`app/web/src/styles/app.css`), and no page sets a tab's font for itself: the scene key's own
+  `font:` shorthand is gone (`app/web/src/views/scenes/scenes.module.css`), and the device key
+  takes the shared class (`app/web/src/views/PeripheralsView.tsx`). One rule keeps every control
+  in the app's face (`button { font-family: var(--fu) }`): a `<button>` does not inherit a font from
+  the page, so a control that says nothing about its type is drawn in the system font. The sibling
+  search found 29 such controls on the nine pages (the device key, the DPI chip, and the icon
+  buttons, switches and swatches); after the fix a headless pass over every page finds 0 (the
+  number fields stay in the app's mono face, which is the app's rule for figures).
+- **The check, fourth mechanism** (`app/web/src/views/__tests__/PeripheralTabsType.test.tsx`):
+  it renders both tab rows — the Peripherals device row and the Scenes strip — and asks *every*
+  button in each for `.tab-key`, so a new raw `<button>` tab fails it (proved by adding one to
+  each row, watching both cases fail, and taking it out again). The pinned "+" key in the Scenes
+  strip is the one button that is not a tab, and it is named as the exception. The rule that
+  `.tab-key` declares, and the `button` reset, are read from `app.css` instead of rendered:
+  jsdom has no stylesheet. The "0 controls in the system face" number above is *not* this test's
+  job — it comes from the headless scan over every page's controls, which is the check to re-run
+  after a control is added.
 
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 
@@ -863,3 +921,64 @@ retries can wait for one busy answer.
 - Left: the installed-app checks on #97 (Back/Forward and mouse back with unsaved code, the close/reload
   warning, CSS `round()` in WebView2), the phone code layer and screen readers need the installed app
   and are out of the fakes' reach. #97 carries no `cause:` label (not applied; left to the main agent).
+
+### `cause:hand-rolled-notice`: a message that comes and goes, drawn outside the notification lane
+
+The editor has one notification lane: `app/web/src/components/Notify.tsx` owns the policy (tone, life,
+hold while the pointer is on it) and sonner owns the look, the stacking, the motion and the swipe. A notice
+built anywhere else gets its own markup, its own timer and its own look, so the app says the same kind of
+thing three ways and Luke asks for one toast again (#168, #125, #12, #366). The notice itself may be a
+toast (it appears and goes), or a standing banner (it waits for a key or for its condition to end); the
+class is the handmade *clock*, not the words.
+
+- [#168](https://github.com/iAmChumby/canvas-rgb/issues/168): sonner arrived behind one wrapper, but the
+  "Updated to X.Y.Z" greeting stayed a `Banner` with its own hold, fade and removal timers
+  (`app/web/src/shell/GlobalBanners.tsx:129-197`), so it was not a toast at all.
+- [#125](https://github.com/iAmChumby/canvas-rgb/issues/125): that banner sat over the release notes it
+  linked to, and stayed until it was pressed. A `position: fixed` notice over `app.css:778-785` covers
+  whatever is under it; a toast in the lane does not, and it is not drawn on `/updates/` at all.
+- [#12](https://github.com/iAmChumby/canvas-rgb/issues/12): the first toast host restarted its own timer
+  on every status poll, so a toast never cleared. The lane's clock is module state, not an effect, so a
+  re-render cannot restart it (`app/web/src/components/Notify.tsx:118-147`).
+- [#366](https://github.com/iAmChumby/canvas-rgb/issues/366): the last two. The update toast said
+  "You have 0.16.0." under "Updated to 0.16.0", and the preset strip printed its own "Deleted X / Undo"
+  line beside the same toast on its own 8 s timer (`app/web/src/views/EffectsView.tsx:367-373`,
+  `app/web/src/views/PresetStrip.tsx:325-341`).
+- **Class fix:** done (#366). Every toast goes through `notify()` and has one anatomy: icon, title,
+  optional description, optional action, close. How long a message stays is `NOTE_MS` or `lifeMs`, never a
+  component's timer. `app/web/src/test/toastGuard.test.ts` reads every source file and fails on a second
+  `sonner` import (through `from`, `import()` or `require()`), a second toast body (`notify-*`), a
+  `<Banner>` outside the shell and the scene list, or a `setTimeout` that clears a message: a state set to
+  `null`, `false`, `undefined` or `""`, or a call named `clear*`, `dismiss*` or `hide*`, on a delay of two
+  seconds or more, a delay named by a `const` in the same file, or a delay the file does not define.
+  `Banner` is a standing notice
+  and no longer takes a leaving fade. Sibling search for the timer shape (`git grep -n "setTimeout" app/web/src`)
+  found no other message clock: the rest are debounces, animation flags, retries and the fixture's install
+  walk. Left: the fan service's "Fan control is unavailable" notice stays a banner because it reports a
+  running condition, not a moment (#168's decision); it is untouched.
+
+### `cause:wiring`: a control built but never connected to the frame
+
+An effect declares a property, the editor draws a control for it, and no code reads it: the value
+is stored and never reaches the picture. The control looks alive and the setting does nothing.
+Every effect reads its own props in `init`, so nothing notices a declared control that nothing
+uses.
+
+- [#383](https://github.com/iAmChumby/canvas-rgb/issues/383): Rain's Trail Length resized a
+  `trail` buffer in `init` and `update` never read it; every streak came from a fixed 0.88 fade
+  (`crates/canvas-effects/src/rain.rs`). The control now sets how long a drop's light lingers:
+  the per-frame fade is derived from it (`per_frame_fade`), and the default (14) on the 1/30 s
+  frame gives exactly the old 0.88 at every Speed, so a saved scene or preset keeps its picture
+  at 30 frames a second (checked against a frame fingerprint recorded from the old code,
+  `the_default_trail_length_keeps_the_old_frames`). The unused buffer is gone.
+- **Class fix:** done (#383). One test over every built-in effect
+  (`crates/canvas-effects/src/lib.rs`, `every_numeric_or_choice_control_changes_the_frame`)
+  renders each effect at the two ends of every numeric, angle and choice control with the same
+  seed, keeps one fingerprint per frame, and fails naming the effect and the control when the
+  frames are identical. The capture effects get the crate's own input, and the screen changes
+  colour and the spectrum falls partway through so Smoothing, Decay and Peak Hold have something
+  to act on. It drives 31 controls over the 12 effects and found no other dead control; on the
+  pre-#383 code it fails only on Rain's Trail Length. The exception list (`KNOWN_DEAD`) is empty,
+  and the test fails on an entry that names no control. A colour control has no two ends and no
+  built-in has a bool control, so neither is driven; a control added later is covered without
+  editing the test.

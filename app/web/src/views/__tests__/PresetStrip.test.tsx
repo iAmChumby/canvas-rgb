@@ -266,9 +266,8 @@ describe("PresetStrip", () => {
     await waitFor(() => expect(h.onRename).toHaveBeenCalledWith("Storm", "STORM"));
   });
 
-  it("offers the page's Undo beside the keys and calls it", async () => {
+  it("holds no Deleted/Undo line of its own: that message is the lane's (#366)", () => {
     const h = handlers();
-    const onUndo = vi.fn<() => Promise<void>>(async () => {});
     render(
       <PresetStrip
         builtIn={builtIn}
@@ -276,14 +275,13 @@ describe("PresetStrip", () => {
         defs={defs}
         live={{} as never}
         running={null}
-        undo={{ name: "Storm" }}
-        onUndo={onUndo}
         {...h}
       />,
     );
-    expect(screen.getByText(/Deleted/).textContent).toBe("Deleted Storm");
-    fireEvent.click(screen.getByRole("button", { name: /Undo/ }));
-    await waitFor(() => expect(onUndo).toHaveBeenCalledTimes(1));
+    // The strip used to print "Deleted Storm" with its own Undo key beside the same toast, on a
+    // timer of its own. One message, one place: the notification lane.
+    expect(screen.queryByText(/Deleted/)).toBeNull();
+    expect(screen.queryByRole("button", { name: /Undo/ })).toBeNull();
   });
 
   it("keeps the running key lit when another preset is deleted", () => {

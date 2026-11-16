@@ -26,6 +26,7 @@ import { LayerList } from "@/views/effects/LayerList";
 import { StackStage } from "@/views/effects/StackStage";
 import { StarterTiles } from "@/views/effects/StarterTiles";
 import { STARTER_STACKS } from "@/lib/demoStacks";
+import { DraftMirror } from "@/views/effects/draftMirror";
 import {
   ChooseEffectPopover,
   DragGhost,
@@ -140,9 +141,9 @@ export function StackBuilder({
   const [session] = useState(() => ({ current: new StackSession(newEpoch()) }));
 
   const history = useStackHistory({ id: "stack:", layers: [] }, () => areaDraggingRef.current);
-  const { edit, setEdit, draft, setDraft, resetDraft, historyMoves, steppedRef, undoNow, redoNow, canUndo, canRedo } =
+  const { edit, setEdit, draft, setDraft, resetDraft, versionOf, historyMoves, steppedRef, undoNow, redoNow, canUndo, canRedo } =
     history;
-  const draftRef = useRef<Stack>(draft);
+  const [draftRef] = useState(() => new DraftMirror(draft, versionOf));
 
   /** Picking a layer: a mask refusal belongs to the layer it was said on, so it clears here (#256). */
   const pick = (id: string | null) => {
@@ -153,10 +154,11 @@ export function StackBuilder({
   const load = useStackLoad({ initialName, isNew, mountedRef, areaDraggingRef, resetDraft, pick });
 
   // The refs the async senders read. They are synced here, before the preview and draft hooks
-  // register their own effects, so a send always sees the draft it was rendered from.
+  // register their own effects, so a send always sees the draft it was rendered from. The mirror
+  // takes the commit's version, so a commit older than a change already written is ignored (#332).
   useEffect(() => {
-    draftRef.current = draft;
-  }, [draft]);
+    draftRef.commit(draft, versionOf);
+  }, [draft, versionOf]);
   useEffect(() => {
     nameRef.current = nameDraft;
   }, [nameDraft]);

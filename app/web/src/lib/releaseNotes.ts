@@ -205,6 +205,15 @@ interface RawSection {
  * one, and a line that is neither a heading nor a bullet is an item of the section it follows.
  */
 export function parseRelease(md: string): ReleaseNotes {
+  const { version, date, raw } = readRaw(md);
+  const sections = raw
+    .map((s) => ({ title: s.title, items: s.lines.map(parseItem) }))
+    .filter((s) => s.items.length > 0);
+  return { version, date, sections };
+}
+
+/** The notes as their headings and the lines under each, before a line is read as an item. */
+function readRaw(md: string): { version: string | null; date: string | null; raw: RawSection[] } {
   const raw: RawSection[] = [];
   let cur: RawSection | null = null;
   let version: string | null = null;
@@ -258,8 +267,61 @@ export function parseRelease(md: string): ReleaseNotes {
     open = false;
   }
 
-  const sections = raw
-    .map((s) => ({ title: s.title, items: s.lines.map(parseItem) }))
-    .filter((s) => s.items.length > 0);
-  return { version, date, sections };
+  return { version, date, raw };
+}
+
+/** How much of a note fits on one line of a toast before it is cut. */
+export const NOTE_LINE_MAX = 64;
+
+/** How much of a note must stand before the ellipsis for the cut to read as a phrase. */
+export const NOTE_CUT_MIN = 24;
+
+/** A cut mark that ends a clause: `,`, `;`, `:`, a full stop, or the word "and". */
+const CLAUSE = /[,;:]|\.(?=\s|$)|\s+and\s+/g;
+
+/**
+ * One note on one line. A note that fits is shown whole; a longer one is cut at the last clause
+ * mark that leaves a phrase, so the line ends where the sentence takes a breath instead of
+ * stopping before its object (#389: "…looks for a newer release at start and once…"). With no
+ * such mark it cuts at the last space, and a single word longer than the line is cut at the line
+ * as the last resort. The cut word is never a fragment of the one that follows.
+ */
+function onOneLine(text: string, max: number): string {
+  if (text.length <= max) return text;
+  const tidy = (part: string): string => part.replace(/[\s,;:.…-]+$/, "");
+  // Everything after the mark goes; the mark itself is the sentence taking its breath.
+  let cut = -1;
+  for (const m of text.matchAll(CLAUSE)) {
+    const end = m[0].trim() === "and" ? m.index : m.index + 1;
+    if (end > max) break;
+    if (tidy(text.slice(0, end)).length >= NOTE_CUT_MIN) cut = end;
+  }
+  if (cut > 0) return `${tidy(text.slice(0, cut))}…`;
+  const space = text.lastIndexOf(" ", max);
+  if (space > 0) return `${tidy(text.slice(0, space))}…`;
+  return `${tidy(text.slice(0, max))}…`;
+}
+
+/**
+ * The first note of a release, on one line, for the place that has room for one line and no more
+ * (the "Updated to" toast). It is the release's own first item: something true about what
+ * changed, where the toast used to repeat the version the title already gave (#366). Null when
+ * the notes hold nothing a person can read, and when there are no notes at all (`undefined` at
+ * runtime: the wire is not the type).
+ */
+export function firstNote(md: string, max = NOTE_LINE_MAX): string | null {
+  if (typeof md !== "string") return null;
+  for (const section of readRaw(md).raw) {
+    for (const line of section.lines) {
+      // The issue references at the end of a line are for the page, which links them.
+      const words = parseInline(splitRefs(line).body)
+        .map((part) => part.text)
+        .join("")
+        .replace(/\s+/g, " ")
+        .trim();
+      if (words === "") continue;
+      return onOneLine(words, max);
+    }
+  }
+  return null;
 }

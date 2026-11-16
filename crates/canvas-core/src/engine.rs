@@ -27,7 +27,7 @@ use canvas_proto::traits::{
 };
 use tracing::{info, warn};
 
-use crate::scene_engine::{FrameParams, GroupSlot, SceneRunner, SceneState};
+use crate::scene_engine::{FrameParams, GroupFrame, GroupSlot, GroupTap, SceneRunner, SceneState};
 use crate::timer::FrameTimer;
 
 use crate::effect_guard;
@@ -56,6 +56,14 @@ struct SinkEntry {
     led_count: u32,
 }
 
+/// The group preview's selection (#378): which group, where its picture goes, and which call
+/// chose it.
+struct GroupPreview {
+    group: String,
+    sink: Arc<dyn PreviewSink>,
+    serial: u64,
+}
+
 /// Everything the render thread reads and the API mutates.
 struct State {
     fps: u32,
@@ -73,6 +81,11 @@ struct State {
     preview: Option<Arc<dyn PreviewSink>>,
     /// Scenes: where the editor's live LEDs go.
     light_preview: Option<Arc<dyn LightPreviewSink>>,
+    /// Scenes (#378): the one group whose picture goes to a sink of its own. At most one: the
+    /// newest `set_group_preview` call replaces the one before it.
+    group_preview: Option<GroupPreview>,
+    /// Scenes (#378): the number the next `set_group_preview` selection gets.
+    group_preview_counter: u64,
     /// Scenes: the running scene. The engine runs scenes only (#310).
     scene: Option<SceneState>,
     /// Scenes: the next generation to give an effect. Unique for the engine's whole life, so
@@ -127,6 +140,8 @@ impl State {
             sinks: Vec::new(),
             preview: None,
             light_preview: None,
+            group_preview: None,
+            group_preview_counter: 0,
             scene: None,
             scene_effect_counter: 0,
             scene_counter: 0,
@@ -146,7 +161,20 @@ impl State {
 
     /// Whether anything consumes frames.
     fn has_consumers(&self) -> bool {
-        !self.sinks.is_empty() || self.preview.is_some() || self.light_preview.is_some()
+        !self.sinks.is_empty()
+            || self.preview.is_some()
+            || self.light_preview.is_some()
+            || self.group_preview.is_some()
+    }
+
+    /// The sink a group picture goes to, when the picture is still wanted: the scene it was
+    /// built under is the running one and the selection it was built for is the current one. A
+    /// scene switch, or a newer `set_group_preview`, between the frame's start and its delivery
+    /// drops the picture, so a group of the old scene is never shown under the new one.
+    fn group_sink_for(&self, frame: &GroupFrame) -> Option<Arc<dyn PreviewSink>> {
+        let tap = self.group_preview.as_ref()?;
+        let current = self.scene.as_ref()?.generation == frame.generation;
+        (current && tap.serial == frame.serial).then(|| Arc::clone(&tap.sink))
     }
 
     /// The measured fps over the last second.
@@ -600,6 +628,23 @@ impl Engine for CoreEngine {
         info!(enabled, "light preview changed");
     }
 
+    /// #378: the picture of one group, through a sink of its own. One selection at a time: the
+    /// newest call wins. `None` for either stops the tap. The picture is built on the render
+    /// thread only while a group is selected (see `SceneRunner::group_frame`).
+    fn set_group_preview(&self, group: Option<String>, sink: Option<Arc<dyn PreviewSink>>) {
+        let enabled = group.is_some() && sink.is_some();
+        self.mutate(|state| {
+            state.group_preview = match (group, sink) {
+                (Some(group), Some(sink)) => {
+                    state.group_preview_counter += 1;
+                    Some(GroupPreview { group, sink, serial: state.group_preview_counter })
+                }
+                _ => None,
+            };
+        });
+        info!(enabled, "group preview changed");
+    }
+
     fn group_states(&self) -> Vec<GroupState> {
         let state = self.state.lock().unwrap_or_else(|e| e.into_inner());
         state
@@ -857,6 +902,12 @@ fn render_scene_frame(
         // The runner's group buffer goes into the frame and comes back with it.
         let generation = runner.generation();
         let works = runner.take_works();
+        // The selected group's place in this frame's scene, found by id. Nothing is looked up
+        // while no group is selected.
+        let group_preview = state.group_preview.as_ref().and_then(|tap| {
+            let index = scene.groups.iter().position(|g| g.id == tap.group)?;
+            Some(GroupTap { index, serial: tap.serial })
+        });
         let input = scene.take_input(&state.devices, generation, works);
         let dt = frame_start.duration_since(*last_frame_at).as_secs_f32();
         *last_frame_at = frame_start;
@@ -868,6 +919,7 @@ fn render_scene_frame(
             white_balance: Arc::clone(&state.white_balance),
             input_source: state.input_source.clone(),
             want_light_preview: state.light_preview.is_some(),
+            group_preview,
         };
         (input, params)
     };
@@ -879,7 +931,7 @@ fn render_scene_frame(
     }
 
     // The effects go back, the frames go out.
-    let (superseded, light_sink) = {
+    let (superseded, light_sink, group_sink) = {
         let mut state = engine.state.lock().unwrap_or_else(|e| e.into_inner());
         let superseded = match state.scene.as_mut() {
             Some(scene) => scene.put_back(runner.done()),
@@ -918,11 +970,18 @@ fn render_scene_frame(
             state.pending_sink = false;
             state.pending_resume = false;
         }
-        (superseded, state.light_preview.clone())
+        // The group picture goes out only if its scene is still the running one and its
+        // selection is still the current one.
+        let group_sink = output.group_frame.as_ref().and_then(|frame| state.group_sink_for(frame));
+        (superseded, state.light_preview.clone(), group_sink)
     };
     engine.drop_effects(superseded);
     if let (Some(sink), Some(frame)) = (light_sink, output.light_frame) {
         sink.submit(frame);
+    }
+    // Like the light sink: handed over with no lock held, and the sink never blocks.
+    if let (Some(sink), Some(frame)) = (group_sink, output.group_frame) {
+        sink.submit(frame.width, frame.height, frame.rgb);
     }
 
     finish_frame(engine, frame_start);
@@ -1054,5 +1113,82 @@ mod power_tests {
             "the resume asks for the last good frame again"
         );
         assert!(!s.pending_black, "the resume asks for no black frame");
+    }
+}
+
+/// The delivery guard of the group preview (#378): a picture is handed over only while the scene
+/// it was built under and the selection it was built for are both still current.
+#[cfg(test)]
+mod group_preview_guard_tests {
+    use super::*;
+
+    struct Null;
+    impl PreviewSink for Null {
+        fn submit(&self, _width: u32, _height: u32, _rgb: Vec<u8>) {}
+    }
+
+    fn state_with_scene(generation: u64) -> State {
+        let mut s = State::new(&EngineSettings {
+            fps: 60,
+            power: Power::Running,
+            brightness: 100,
+            warmth: canvas_proto::consts::WARMTH_OFF,
+        });
+        s.scene = Some(SceneState {
+            generation,
+            lights: Vec::new(),
+            groups: Vec::new(),
+            fade_pending: false,
+        });
+        s
+    }
+
+    fn picture(generation: u64, serial: u64) -> GroupFrame {
+        GroupFrame { generation, serial, width: 80, height: 50, rgb: Vec::new() }
+    }
+
+    fn select(s: &mut State, serial: u64) {
+        s.group_preview = Some(GroupPreview { group: "g".into(), sink: Arc::new(Null), serial });
+    }
+
+    #[test]
+    fn a_picture_for_the_running_scene_and_the_current_selection_is_delivered() {
+        let mut s = state_with_scene(4);
+        select(&mut s, 9);
+        assert!(s.group_sink_for(&picture(4, 9)).is_some());
+    }
+
+    #[test]
+    fn a_picture_built_under_a_replaced_scene_is_dropped() {
+        let mut s = state_with_scene(5);
+        select(&mut s, 9);
+        assert!(
+            s.group_sink_for(&picture(4, 9)).is_none(),
+            "the scene changed after the frame started: the old scene's group is never shown"
+        );
+    }
+
+    #[test]
+    fn a_picture_for_an_older_selection_is_dropped() {
+        let mut s = state_with_scene(4);
+        select(&mut s, 10);
+        assert!(s.group_sink_for(&picture(4, 9)).is_none(), "a newer call took over");
+    }
+
+    #[test]
+    fn nothing_is_delivered_without_a_selection_or_without_a_scene() {
+        let mut s = state_with_scene(4);
+        assert!(s.group_sink_for(&picture(4, 9)).is_none(), "no selection");
+        select(&mut s, 9);
+        s.scene = None;
+        assert!(s.group_sink_for(&picture(4, 9)).is_none(), "no scene");
+    }
+
+    #[test]
+    fn a_selection_alone_keeps_the_engine_awake() {
+        let mut s = state_with_scene(1);
+        assert!(!s.has_consumers());
+        select(&mut s, 1);
+        assert!(s.has_consumers(), "the stage animates even with no device sink");
     }
 }

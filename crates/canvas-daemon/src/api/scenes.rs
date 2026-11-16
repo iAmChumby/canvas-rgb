@@ -10,16 +10,18 @@ use axum::extract::{Path, State};
 use axum::response::IntoResponse;
 use axum::Json;
 use canvas_proto::api::{
-    FlashRequest, GroupBrightnessPut, SceneActivePut, SceneCreate, ScenePut, ScenesResponse,
+    FlashRequest, GroupBrightnessPut, GroupMove, GroupMoved, SceneActivePut, SceneCreate, ScenePut,
+    ScenesResponse, ScenesWrite,
 };
 use canvas_proto::props::Props;
 use canvas_proto::scene::{
-    validate_scene, Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, GROUP_NAME_MAX, SCENE_NAME_MAX,
+    Group, Plays, Scene, GROUP_BRIGHTNESS_MAX, SCENE_NAME_MAX,
 };
 use canvas_proto::stack::STACK_ID_PREFIX;
 use std::sync::Arc;
 
 use crate::api::{ApiFailure, ApiResult};
+use crate::scene_move;
 use crate::scenes::{self, fresh_id, slug, SceneLock};
 use crate::state::App;
 
@@ -31,10 +33,14 @@ const RESERVED_SCENE_ID: &str = "active";
 /// mistake (or an attack on the lookup below), so it is refused before any light is looked up.
 pub const FLASH_LIGHTS_MAX: usize = 256;
 
-/// A route's failure: the API's usual error, or a `409` that carries the scene as it is now.
+/// A route's failure: the API's usual error, or a `409` that carries what is stale as it is now.
 pub enum SceneFailure {
     Api(ApiFailure),
-    Conflict(Box<Scene>),
+    /// A scene's `rev` is stale. `which` is `"from"` or `"to"` for a group move, and absent for a
+    /// whole-scene write; `scene` is the scene as it is now.
+    Conflict { which: Option<&'static str>, scene: Box<Scene> },
+    /// The scene order is stale; the body carries the order as it is now.
+    OrderConflict(Vec<String>),
 }
 
 impl From<ApiFailure> for SceneFailure {
@@ -47,12 +53,23 @@ impl IntoResponse for SceneFailure {
     fn into_response(self) -> axum::response::Response {
         match self {
             Self::Api(failure) => failure.into_response(),
-            Self::Conflict(scene) => (
-                axum::http::StatusCode::CONFLICT,
-                Json(serde_json::json!({
+            Self::Conflict { which, scene } => {
+                let mut body = serde_json::json!({
                     "error": canvas_proto::api::error_codes::CONFLICT,
                     "message": "this scene was changed in another window; its current state is in `scene`",
                     "scene": scene,
+                });
+                if let Some(which) = which {
+                    body["which"] = serde_json::json!(which);
+                }
+                (axum::http::StatusCode::CONFLICT, Json(body)).into_response()
+            }
+            Self::OrderConflict(order) => (
+                axum::http::StatusCode::CONFLICT,
+                Json(serde_json::json!({
+                    "error": canvas_proto::api::error_codes::CONFLICT,
+                    "message": "the scenes were put in another order in another window; the current order is in `order`",
+                    "order": order,
                 })),
             )
                 .into_response(),
@@ -92,6 +109,32 @@ pub(crate) async fn replace_saved(app: &App, new: Scene) -> ApiResult<Scene> {
     let old = std::mem::replace(&mut store.scenes.scenes[slot], new);
     if let Err(e) = store.save_scenes() {
         store.scenes.scenes[slot] = old;
+        return Err(save_failure(&store, e));
+    }
+    Ok(old)
+}
+
+/// Replaces every scene in `new` (by id) and saves the whole file ONCE. On a failed save every
+/// replaced scene is back as it was and the error says why; the file on disk is never half
+/// written (`write_json` writes a temp file and renames it). Returns the scenes it replaced, in
+/// the order of `new`.
+pub(crate) async fn replace_all_saved(app: &App, new: Vec<Scene>) -> ApiResult<Vec<Scene>> {
+    let mut store = app.store.write().await;
+    let mut slots = Vec::with_capacity(new.len());
+    for scene in &new {
+        let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == scene.id) else {
+            return Err(ApiFailure::not_found(format!("no scene with the id {}", scene.id)));
+        };
+        slots.push(slot);
+    }
+    let mut old = Vec::with_capacity(new.len());
+    for (slot, scene) in slots.iter().zip(new) {
+        old.push(std::mem::replace(&mut store.scenes.scenes[*slot], scene));
+    }
+    if let Err(e) = store.save_scenes() {
+        for (slot, was) in slots.iter().zip(old) {
+            store.scenes.scenes[*slot] = was;
+        }
         return Err(save_failure(&store, e));
     }
     Ok(old)
@@ -181,16 +224,14 @@ pub async fn put_scene(
         return Err(ApiFailure::validation("the scene's id must be the id in the path").into());
     }
     if old.rev != put.expected_rev {
-        return Err(SceneFailure::Conflict(Box::new(old)));
+        return Err(SceneFailure::Conflict { which: None, scene: Box::new(old) });
     }
     let mut new = put.scene;
     new.rev = old.rev + 1;
-    check_names(&new)?;
     {
         let store = app.store.read().await;
-        validate_scene(&new, &store.lights.lights).map_err(|e| ApiFailure::validation(e.to_string()))?;
+        scenes::check_saveable(&app, &new, &store.lights.lights)?;
     }
-    scenes::check_html_limit(&app, &new).map_err(ApiFailure::validation)?;
     fit_group_props(&app, &mut new)?;
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {
@@ -206,23 +247,178 @@ pub async fn put_scene(
     Ok(Json(new))
 }
 
-/// A scene and its groups have a name, within the length the create route keeps.
-fn check_names(scene: &Scene) -> ApiResult<()> {
-    if scene.name.trim().is_empty() {
-        return Err(ApiFailure::validation("a scene needs a name"));
+/// What the engine is told after the active scene changed from `old` to `new`: the same tail as
+/// [`put_scene`]. A takeover that held the lights ends and the whole scene goes on again; else
+/// the engine follows the change (a group added or removed rebuilds the scene's effects, as any
+/// change of its shape does).
+async fn tell_engine(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scene, new: &Scene) {
+    let replace = crate::draft::hold_for_replace(app).await;
+    if replace.ended_takeover() {
+        replace.end_takeover(app, true).await;
+    } else {
+        scenes::apply_group_change(app, lock, old, new).await;
     }
-    if scene.name.chars().count() > SCENE_NAME_MAX {
-        return Err(ApiFailure::validation(format!("a scene's name is at most {SCENE_NAME_MAX} characters")));
+}
+
+/// `POST /api/v1/scenes/{id}/groups/{group}/move` (#368).
+///
+/// Moves or copies one group to another scene. Both scenes land or neither: every check runs
+/// before anything is written, then ONE save writes the lot ([`replace_all_saved`]). The engine
+/// hears of it once, after the write, and only when the active scene is one of the two.
+pub async fn move_group(
+    State(app): State<Arc<App>>,
+    Path((id, group)): Path<(String, String)>,
+    Json(request): Json<GroupMove>,
+) -> Result<Json<GroupMoved>, SceneFailure> {
+    let lock = app.scene.lock().await;
+    let from = find_scene(&app, &id).await?;
+    let to = find_scene(&app, &request.to).await?;
+    if from.id == to.id {
+        return Err(ApiFailure::validation("A group goes to another scene.").into());
     }
-    for group in &scene.groups {
-        if group.name.trim().is_empty() {
-            return Err(ApiFailure::validation(format!("group {} needs a name", group.id)));
+    if from.rev != request.expected_rev_from {
+        return Err(SceneFailure::Conflict { which: Some("from"), scene: Box::new(from) });
+    }
+    if to.rev != request.expected_rev_to {
+        return Err(SceneFailure::Conflict { which: Some("to"), scene: Box::new(to) });
+    }
+    let plan = scene_move::plan_move(&from, &to, &group, request.copy).map_err(|e| match e {
+        scene_move::MoveError::SameScene => ApiFailure::validation("A group goes to another scene."),
+        scene_move::MoveError::NoGroup(group) => {
+            ApiFailure::not_found(format!("scene {} has no group {group}", from.id))
         }
-        if group.name.chars().count() > GROUP_NAME_MAX {
-            return Err(ApiFailure::validation(format!("a group's name is at most {GROUP_NAME_MAX} characters")));
+    })?;
+    // Every scene that would be written passes the one door every write path uses.
+    {
+        let store = app.store.read().await;
+        if plan.from_changed {
+            scenes::check_saveable(&app, &plan.from, &store.lights.lights)?;
+        }
+        scenes::check_saveable(&app, &plan.to, &store.lights.lights)?;
+    }
+    let answer = |saved: bool| GroupMoved {
+        group_id: plan.group_id.clone(),
+        saved,
+        scenes: vec![plan.from.clone(), plan.to.clone()],
+        before: vec![from.clone(), to.clone()],
+        taken: plan.taken.clone(),
+        emptied: plan.emptied.clone(),
+    };
+    if request.dry_run {
+        return Ok(Json(answer(false)));
+    }
+    let mut written = vec![plan.to.clone()];
+    if plan.from_changed {
+        written.insert(0, plan.from.clone());
+    }
+    replace_all_saved(&app, written).await?;
+    let active = scenes::active_scene(&app.store.read().await.scenes).id.clone();
+    if active == from.id && plan.from_changed {
+        tell_engine(&app, &lock, &from, &plan.from).await;
+    } else if active == to.id {
+        tell_engine(&app, &lock, &to, &plan.to).await;
+    }
+    Ok(Json(answer(true)))
+}
+
+/// `PUT /api/v1/scenes` (#368 undo and redo, #371 scene order).
+///
+/// Writes several whole scenes and/or the order of the scene bar in ONE save, all or nothing.
+/// Checked in this order, before anything is written: a repeated or unknown scene id and an order
+/// that is not a permutation are a 422; every `expected_rev` and the `expected_order` are a 409
+/// when stale (the body names the scene, or carries the order); each scene then passes
+/// [`scenes::check_saveable`] and the props fit. A written scene lands at `rev` = current + 1. The
+/// same order as now, with no scenes, is a 200 with no write.
+pub async fn put_scenes(
+    State(app): State<Arc<App>>,
+    Json(write): Json<ScenesWrite>,
+) -> Result<Json<ScenesResponse>, SceneFailure> {
+    let lock = app.scene.lock().await;
+    let (current, ids): (Vec<Scene>, Vec<String>) = {
+        let store = app.store.read().await;
+        (store.scenes.scenes.clone(), store.scenes.scenes.iter().map(|s| s.id.clone()).collect())
+    };
+
+    // Shape first: ids that name a scene, each once; an order that names every scene once.
+    let mut seen = std::collections::HashSet::new();
+    for item in &write.scenes {
+        let id = item.scene.id.as_str();
+        if !ids.iter().any(|known| known == id) {
+            return Err(ApiFailure::validation(format!("there is no scene with the id {id}")).into());
+        }
+        if !seen.insert(id) {
+            return Err(ApiFailure::validation(format!("the scene {id} is named twice")).into());
         }
     }
-    Ok(())
+    if let Some(order) = &write.order {
+        let mut sorted_new: Vec<&String> = order.iter().collect();
+        let mut sorted_now: Vec<&String> = ids.iter().collect();
+        sorted_new.sort();
+        sorted_now.sort();
+        if sorted_new != sorted_now {
+            return Err(ApiFailure::validation("The order must name every scene once.").into());
+        }
+    }
+
+    // Then every revision and the order, before any write.
+    for item in &write.scenes {
+        let now = current.iter().find(|s| s.id == item.scene.id).expect("checked above");
+        if now.rev != item.expected_rev {
+            return Err(SceneFailure::Conflict { which: None, scene: Box::new(now.clone()) });
+        }
+    }
+    if let Some(expected) = &write.expected_order {
+        if *expected != ids {
+            return Err(SceneFailure::OrderConflict(ids));
+        }
+    }
+
+    // Each scene is saveable as it will be written.
+    let mut planned: Vec<(Scene, Scene)> = Vec::with_capacity(write.scenes.len());
+    {
+        let store = app.store.read().await;
+        for item in write.scenes {
+            let old = current.iter().find(|s| s.id == item.scene.id).expect("checked above").clone();
+            let mut new = item.scene;
+            new.rev = old.rev + 1;
+            scenes::check_saveable(&app, &new, &store.lights.lights)?;
+            fit_group_props(&app, &mut new)?;
+            planned.push((old, new));
+        }
+    }
+    let reorder = write.order.filter(|order| *order != ids);
+    if planned.is_empty() && reorder.is_none() {
+        return Ok(Json(response(&app).await));
+    }
+
+    // One save for the lot; a failed save puts everything back.
+    {
+        let mut store = app.store.write().await;
+        let before = store.scenes.clone();
+        for (_, new) in &planned {
+            if let Some(slot) = store.scenes.scenes.iter().position(|s| s.id == new.id) {
+                store.scenes.scenes[slot] = new.clone();
+            }
+        }
+        if let Some(order) = &reorder {
+            let mut sorted = Vec::with_capacity(order.len());
+            for id in order {
+                if let Some(slot) = store.scenes.scenes.iter().position(|s| &s.id == id) {
+                    sorted.push(store.scenes.scenes[slot].clone());
+                }
+            }
+            store.scenes.scenes = sorted;
+        }
+        if let Err(e) = store.save_scenes() {
+            store.scenes = before;
+            return Err(save_failure(&store, e).into());
+        }
+    }
+    let active = scenes::active_scene(&app.store.read().await.scenes).id.clone();
+    if let Some((old, new)) = planned.iter().find(|(_, new)| new.id == active) {
+        tell_engine(&app, &lock, old, new).await;
+    }
+    Ok(Json(response(&app).await))
 }
 
 /// The caps and the schema fit a props patch applies, for every group of a whole scene. A stack
@@ -276,8 +472,8 @@ pub async fn delete_scene(
 
 /// `PUT /api/v1/scenes/active`.
 ///
-/// The scene that is set must be able to run: a scene with more HTML groups than a scene may
-/// have is refused, before the lights change.
+/// The scene that is set must be able to run: a scene that starts more HTML runtimes than a scene
+/// may have is refused, before the lights change.
 pub async fn put_active(
     State(app): State<Arc<App>>,
     Json(request): Json<SceneActivePut>,
@@ -288,7 +484,7 @@ pub async fn put_active(
         let Some(scene) = store.scenes.scenes.iter().find(|s| s.id == request.id) else {
             return Err(ApiFailure::not_found(format!("no scene with the id {}", request.id)));
         };
-        // The scene must not run more HTML groups than a scene may: it is about to be on the
+        // The scene must not start more HTML runtimes than a scene may: it is about to be on the
         // lights.
         scenes::check_html_limit(&app, scene).map_err(ApiFailure::validation)?;
         let before = std::mem::replace(&mut store.scenes.active, request.id.clone());

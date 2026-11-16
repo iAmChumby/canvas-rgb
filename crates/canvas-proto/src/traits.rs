@@ -102,6 +102,21 @@ pub trait InputSource: Send + Sync {
 
 // ---------------------------------------------------------------- effects
 
+/// How one LED of a strip (or of a ring) reads an effect's picture (#400).
+///
+/// A strip LED stands at mid-height of its part of the canvas. Most effects are read there, in a
+/// small square cell, so a thin moving line (Rain) passes through each LED and is seen. An effect
+/// whose meaning is how HIGH it reaches (a flame, a spectrum bar) is missed by a cell at
+/// mid-height: it asks for the whole column above and below the LED.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum StripRead {
+    /// The mean of a small square cell at the LED. The default.
+    #[default]
+    Cell,
+    /// The mean of the cell's width over the full height of the canvas.
+    Column,
+}
+
 pub trait Effect: Send {
     /// Declared once; the editor renders controls from it.
     fn schema(&self) -> PropertySchema;
@@ -112,6 +127,12 @@ pub trait Effect: Send {
     /// `Some` for a pattern (0.16.0): the engine reads its colours and never calls `update`.
     fn as_pattern(&self) -> Option<&crate::pattern::Pattern> {
         None
+    }
+    /// How a strip LED reads this effect (#400). Grids and single lights are not affected. The
+    /// engine asks once when the effect is set, not every frame, so the answer must not depend on
+    /// the props. A stack and an HTML effect keep the default.
+    fn strip_read(&self) -> StripRead {
+        StripRead::Cell
     }
 }
 
@@ -223,6 +244,12 @@ pub trait Engine: Send + Sync {
     /// One group's brightness, 0..=100.
     fn set_group_brightness(&self, group: &str, brightness: u8);
     fn set_light_preview(&self, sink: Option<Arc<dyn LightPreviewSink>>);
+    /// #378: sends the picture of group `group` (its own canvas times its brightness; black for
+    /// an Off or failed group) to `sink`, at most [`crate::consts::PREVIEW_MAX_FPS`] a second,
+    /// through a sink of its own so the effects editor's preview is not touched. `None` for
+    /// either stops it and copies nothing. Required, like [`Engine::set_light_preview`]: an
+    /// engine that forgot it would compile and show a blank stage.
+    fn set_group_preview(&self, group: Option<String>, sink: Option<Arc<dyn PreviewSink>>);
     /// Every group of the running scene, in scene order. Empty outside scene mode.
     fn group_states(&self) -> Vec<GroupState>;
 }

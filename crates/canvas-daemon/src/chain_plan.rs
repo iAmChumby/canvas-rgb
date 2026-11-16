@@ -88,6 +88,7 @@ pub fn plan_commit(
             arrangement: part.kind.arrangement(),
             reversed: previous.map(|l| l.reversed).unwrap_or(false),
             kind: Some(part.kind),
+            copies: None,
         });
         start += part.leds;
     }
@@ -274,6 +275,7 @@ mod tests {
             arrangement: Arrangement::Strip,
             reversed: false,
             kind: None,
+            copies: None,
         }
     }
 
@@ -295,11 +297,12 @@ mod tests {
             arrangement: kind.arrangement(),
             reversed,
             kind: Some(kind),
+            copies: None,
         }
     }
 
     fn part(name: &str, kind: ChainPartKind, leds: u32) -> SetupPart {
-        SetupPart { name: name.into(), kind, leds }
+        SetupPart { name: name.into(), kind, leds, copies: None }
     }
 
     fn group(id: &str, members: &[&str]) -> Group {

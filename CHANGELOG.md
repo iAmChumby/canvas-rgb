@@ -9,15 +9,28 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Peripherals: the controller drawing lights the buttons you press, and shows the trigger travel and where the sticks stand (#375)
+- The command line can put the scenes in a new order (`canvas-rgb scenes order`) and move or copy a group to another scene (`canvas-rgb scenes group move`), with a dry run that saves nothing. (#368, #371)
 
 ### Changed
 
+- A scene can have two groups playing HTML effects (#370)
 - What's new shows each release as sections grouped by area, with a link to each issue (#365)
+
 ### Fixed
 
+- The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
+- Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)
+- Peripherals: the DPI stages sit in even columns at every window size, so the mouse's settings no longer reshuffle the panels beside them. (#373)
+- Peripherals: a device with a long name keeps its row in the page, cutting the name with an ellipsis. (#373)
+- Peripherals: the "Read again" tooltip says what a read really does, and nothing claims the mouse pauses for seconds. (#374)
+- Peripherals: the tooltip promises the stutter only for the mouse, the one device whose read has been watched. (#374)
+- Every message looks the same, and the update notice no longer repeats the version (#366)
 - Scenes: the effect picker keeps one width when you point at a row, and the tag that says what the group plays no longer moves the menu. (#367)
 - Colour picker: the colour swatch and its preview no longer pulse while you drag a colour. (#369)
 - The sidebar strip shows your lights' real colours in a scene (#379)
+- Effects: adding a second starter stack while the first is still loading keeps both stacks' layers. (#332)
+- Rain: Trail Length now changes how long each streak is (#383)
+- Effects with thin moving lines, like Rain, now animate on strips and fans. (#372)
 
 ## [0.16.0] - 2026-11-15
 

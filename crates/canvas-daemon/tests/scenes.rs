@@ -27,6 +27,8 @@ const TOKEN: &str = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789a
 
 const A: &str = "fake:a";
 const B: &str = "fake:b";
+/// The third device: a scene loaded from disk can hold a third HTML group on it.
+const C: &str = "fake:c";
 const LEDS: u32 = 12;
 
 struct TempHome {
@@ -125,6 +127,7 @@ fn light(device: &str) -> Light {
         arrangement: Arrangement::Strip,
         reversed: false,
         kind: None,
+        copies: None,
     }
 }
 
@@ -322,6 +325,43 @@ async fn rig_unstarted_with(
     let mut store = canvas_daemon::storage::Store::at(&home.path);
     store.lights = LightsFile { chains: Vec::new(), schema_version: LIGHTS_SCHEMA, lights: vec![light(A), light(B)] };
     store.scenes = scenes;
+    rig_of(home, store, builder, &[A, B]).await
+}
+
+/// The rig as a start-up finds it: `lights.json` and `scenes.json` written first, then loaded with
+/// [`canvas_daemon::storage::Store::load_from`], so the file goes through `repair` as it does on a
+/// real start. Three lights, so a scene can hold three groups.
+async fn rig_loaded(scenes: &ScenesFile, html: &[(&str, &str)]) -> Rig {
+    let home = TempHome::new();
+    let effects = home.path.join("effects");
+    std::fs::create_dir_all(&effects).expect("the effects folder is created");
+    for (name, source) in html {
+        std::fs::write(effects.join(name), source).expect("the effect file is written");
+    }
+    let lights = LightsFile {
+        chains: Vec::new(),
+        schema_version: LIGHTS_SCHEMA,
+        lights: vec![light(A), light(B), light(C)],
+    };
+    std::fs::write(home.path.join("lights.json"), serde_json::to_vec(&lights).unwrap())
+        .expect("lights.json is written");
+    std::fs::write(home.path.join("scenes.json"), serde_json::to_vec(scenes).unwrap())
+        .expect("scenes.json is written");
+    let store = canvas_daemon::storage::Store::load_from(&home.path);
+    let rig = rig_of(home, store, fake_builder(), &[A, B, C]).await;
+    // The way start-up applies the saved scenes.
+    canvas_daemon::scenes::restore_active(&rig.app).await;
+    rig
+}
+
+/// The daemon around `store`, in `home`, with a device sink for each device in `devices`.
+async fn rig_of(
+    home: TempHome,
+    store: canvas_daemon::storage::Store,
+    builder: canvas_daemon::user_effects::Builder,
+    devices: &[&str],
+) -> Rig {
+    let effects = home.path.join("effects");
     let engine: Arc<dyn Engine> = canvas_core::spawn(EngineSettings {
         fps: 30,
         power: canvas_proto::api::Power::Running,
@@ -348,10 +388,15 @@ async fn rig_unstarted_with(
     app.draft = canvas_daemon::draft::Draft::with_builder(Arc::new(|| Duration::ZERO), builder);
     app.user_effects.rescan(&effects);
     let app = Arc::new(app);
-    *app.devices.write().await = vec![device(A), device(B)];
+    *app.devices.write().await = devices.iter().map(|id| device(id)).collect();
     let (a, b) = (Arc::new(Rec::default()), Arc::new(Rec::default()));
     engine.add_sink(DeviceId(A.into()), a.clone());
     engine.add_sink(DeviceId(B.into()), b.clone());
+    for id in devices {
+        if *id != A && *id != B {
+            engine.add_sink(DeviceId((*id).into()), Arc::new(Rec::default()));
+        }
+    }
     Rig { router: canvas_daemon::api::router(app.clone()), app, a, b, home }
 }
 
@@ -475,7 +520,7 @@ async fn put_scene_applies_and_bumps_rev() {
     shows(&rig.a, rgb(RED), "before").await;
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "solid".into(), props: color(GREEN) };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(scene_of(answer).rev, 2);
@@ -494,7 +539,7 @@ async fn stale_rev_is_a_conflict() {
     let before = rig.app.store.read().await.scenes.clone();
     let mut scene = stored(&rig, "main").await;
     scene.name = "Renamed".into();
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 99 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 99, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::CONFLICT, "{answer}");
     assert_eq!(answer["error"], "conflict");
@@ -510,7 +555,7 @@ async fn a_light_in_two_groups_is_a_422() {
     let before = stored(&rig, "main").await;
     let mut scene = before.clone();
     scene.groups[1].members.push("fake:a#z0".into());
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     assert_eq!(answer["error"], "validation");
@@ -519,15 +564,112 @@ async fn a_light_in_two_groups_is_a_422() {
     assert!(!on_disk.exists(), "refused: nothing was written");
 }
 
+/// A scene's HTML runtimes are limited by the daemon (`check_html_limit`), not by the spine's
+/// `validate_scene` (#370): two save, and three are refused with the daemon's own sentence.
+const HTML_LIMIT_SENTENCE: &str = "A scene runs 2 HTML effects at a time. This one has 3. Move one to another scene.";
+
+/// A third light, so a scene can hold three groups. The rig's engine does not know it: the
+/// scene API only needs it in `lights.json`.
+async fn add_third_light(rig: &Rig) {
+    rig.app.store.write().await.lights.lights.push(light("fake:c"));
+}
+
+/// Adds a third group playing `effect` on a third light to the stored scene `id`, after start-up:
+/// the limit is two HTML groups, so a test that needs a scene "at the limit" holds two and one
+/// more is the change under test.
+async fn add_third_group(rig: &Rig, id: &str, effect: &str) {
+    add_third_light(rig).await;
+    let mut store = rig.app.store.write().await;
+    let scene = store.scenes.scenes.iter_mut().find(|s| s.id == id).expect("the scene is there");
+    scene.groups.push(group("third", &["fake:c#z0"], effect, Props::new()));
+}
+
 #[tokio::test]
-async fn two_html_groups_are_a_422() {
+async fn two_html_groups_save() {
     let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].plays = Plays::Effect { effect: "html:mine".into(), props: Props::new() };
+    scene.groups[1].plays = Plays::Effect { effect: "html:audio".into(), props: Props::new() };
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let saved = stored(&rig, "main").await;
+    assert_eq!(saved.rev, 2, "saved");
+    assert_eq!(canvas_proto::scene::html_groups(&saved), 2);
+}
+
+#[tokio::test]
+async fn three_html_groups_are_a_422_with_the_daemons_sentence() {
+    let rig = rig().await;
+    add_third_light(&rig).await;
+    let before = stored(&rig, "main").await;
+    let mut scene = before.clone();
+    scene.groups[0].plays = Plays::Effect { effect: "html:one".into(), props: Props::new() };
+    scene.groups[1].plays = Plays::Effect { effect: "html:two".into(), props: Props::new() };
+    scene.groups.push(group("third", &["fake:c#z0"], "html:three", Props::new()));
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["error"], "validation");
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains(HTML_LIMIT_SENTENCE), "the daemon's sentence: {message}");
+    assert!(!message.contains("more than"), "not the spine's text: {message}");
+    assert_eq!(stored(&rig, "main").await, before, "refused: the stored groups are as they were");
+    assert!(!rig.home.path.join("scenes.json").exists(), "refused: nothing was written");
+}
+
+/// `scenes::check_saveable` is the one door every write path goes through (#391): it runs the
+/// spine's `validate_scene`, the name check and the HTML limit, and each refusal keeps the
+/// sentence it had when the PUT handler called the three separately.
+async fn saveable(rig: &Rig, scene: &Scene) -> Result<(), canvas_daemon::api::ApiFailure> {
+    let store = rig.app.store.read().await;
+    canvas_daemon::scenes::check_saveable(&rig.app, scene, &store.lights.lights)
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_three_html_groups_with_the_daemons_sentence() {
+    let rig = rig().await;
+    add_third_light(&rig).await;
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "html:one".into(), props: Props::new() };
     scene.groups[1].plays = Plays::Effect { effect: "html:two".into(), props: Props::new() };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
-    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
-    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    scene.groups.push(group("third", &["fake:c#z0"], "html:three", Props::new()));
+    let refused = saveable(&rig, &scene).await.expect_err("three HTML groups are refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert!(refused.message.contains(HTML_LIMIT_SENTENCE), "{}", refused.message);
+    assert!(!refused.message.contains("more than"), "not the spine's text: {}", refused.message);
+    scene.groups.pop();
+    saveable(&rig, &scene).await.expect("two HTML groups are saveable");
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_a_repeated_group_id_with_the_spines_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    let first = scene.groups[0].id.clone();
+    scene.groups[1].id = first.clone();
+    let refused = saveable(&rig, &scene).await.expect_err("a repeated group id is refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.message, format!("two groups have the id {first}"));
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_an_unknown_light_with_the_spines_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].members = vec!["fake:nope#z0".into()];
+    let refused = saveable(&rig, &scene).await.expect_err("an unknown light is refused");
+    assert_eq!(refused.status, StatusCode::UNPROCESSABLE_ENTITY);
+    assert_eq!(refused.message, "there is no light fake:nope#z0");
+}
+
+#[tokio::test]
+async fn check_saveable_refuses_an_empty_scene_name_with_the_name_sentence() {
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    scene.name = "  ".into();
+    let refused = saveable(&rig, &scene).await.expect_err("a blank name is refused");
+    assert_eq!(refused.message, "a scene needs a name");
 }
 
 // ---------------------------------------------------------------- create, delete, set
@@ -787,6 +929,9 @@ async fn a_stack_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() 
     scenes.scenes[0].groups[1].plays =
         Plays::Effect { effect: "html:mine".into(), props: Props::new() };
     let rig = rig_with(scenes).await;
+    // A third group plays an HTML effect too: with the stack still plain, the scene is AT the
+    // limit of two.
+    add_third_group(&rig, "main", "html:audio").await;
     // The stack is saved first: it has no HTML layer yet.
     let stack = serde_json::json!({
         "id": "stack:Html",
@@ -794,7 +939,7 @@ async fn a_stack_with_an_html_layer_is_refused_when_the_scene_is_at_the_limit() 
     });
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
-    // Now it has an HTML layer: the scene would run two HTML groups.
+    // Now it has an HTML layer: the scene would run three HTML groups.
     let stack = serde_json::json!({
         "id": "stack:Html",
         "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
@@ -996,6 +1141,7 @@ async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_li
     scenes.scenes[0].groups[1].plays =
         Plays::Effect { effect: "html:mine".into(), props: Props::new() };
     let rig = rig_with(scenes).await;
+    add_third_group(&rig, "main", "html:audio").await;
     // The stack is saved first: it has no HTML layer yet.
     let stack = serde_json::json!({
         "id": "stack:Html",
@@ -1004,7 +1150,7 @@ async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_li
     let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(stack)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
 
-    // A draft of it with an HTML layer: the scene would run two HTML groups.
+    // A draft of it with an HTML layer: the scene would run three HTML groups.
     let body = serde_json::json!({
         "stack": {
             "id": "stack:Html",
@@ -1021,16 +1167,19 @@ async fn a_stack_draft_with_an_html_layer_is_refused_when_the_scene_is_at_the_li
 }
 
 /// A stack with an HTML layer is refused when a scene that is not the active one plays it beside
-/// another HTML group: that scene would run two when the owner sets it.
+/// two other HTML groups: that scene would run three when the owner sets it.
 #[tokio::test]
 async fn a_stack_with_an_html_layer_is_refused_when_another_scene_plays_it() {
     let mut scenes = draft_scenes_file();
-    // The scene that is not active plays the stack beside an HTML effect.
+    // The scene that is not active plays the stack beside two HTML effects: at the limit of two
+    // once the stack has an HTML layer, it would run three.
     scenes.scenes[1].groups = vec![
         group("all", &["fake:a#z0"], "stack:Html", Props::new()),
         group("other", &["fake:b#z0"], "html:mine", Props::new()),
+        group("third", &["fake:c#z0"], "html:audio", Props::new()),
     ];
     let rig = rig_with(scenes).await;
+    add_third_light(&rig).await;
     let stack = serde_json::json!({
         "id": "stack:Html",
         "layers": [{ "id": "l1", "name": "l1", "effect": "html:mine" }],
@@ -1047,18 +1196,18 @@ async fn a_stack_with_an_html_layer_is_refused_when_another_scene_plays_it() {
 #[tokio::test]
 async fn setting_a_scene_that_runs_too_many_html_groups_is_refused() {
     let mut scenes = draft_scenes_file();
-    // The scene that is not active runs two HTML groups.
+    // The scene that is not active runs three HTML groups.
     scenes.scenes[1].groups = vec![
         group("all", &["fake:a#z0"], "html:mine", Props::new()),
         group("other", &["fake:b#z0"], "html:audio", Props::new()),
+        group("third", &["fake:c#z0"], "html:more", Props::new()),
     ];
     let rig = rig_with(scenes).await;
+    add_third_light(&rig).await;
     let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(serde_json::json!({ "id": "other" }))).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-    assert!(
-        answer["message"].as_str().unwrap_or_default().contains("HTML"),
-        "{answer}"
-    );
+    let message = answer["message"].as_str().unwrap_or_default();
+    assert!(message.contains(HTML_LIMIT_SENTENCE), "the daemon's sentence: {message}");
     assert_eq!(rig.app.store.read().await.scenes.active, "main", "the scene did not change");
 }
 
@@ -1157,7 +1306,7 @@ async fn a_scene_put_over_a_draft_ends_the_draft_on_the_engine() {
     // The save changes only the other group.
     let mut scene = stored(&rig, "main").await;
     scene.groups[1].brightness = 20;
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) =
         send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
@@ -1302,7 +1451,7 @@ async fn a_scene_save_ends_the_greeting_on_the_engine() {
 
     let mut scene = stored(&rig, "main").await;
     scene.groups[1].brightness = 20;
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) =
         send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
@@ -2162,14 +2311,14 @@ async fn put_scene_rebuilds_only_what_changed() {
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "solid".into(), props: color(GREEN) };
     scene.groups[1].brightness = 60;
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rig.app.scene.builds(), built, "new values and a new brightness rebuild nothing");
 
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props: Props::new() };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 2 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 2, dry_run: false }).unwrap();
     let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rig.app.scene.builds(), built + 1, "one group's new effect builds one effect");
@@ -2177,7 +2326,7 @@ async fn put_scene_rebuilds_only_what_changed() {
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].members.push("fake:b#z0".into());
     scene.groups.remove(1);
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 3 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 3, dry_run: false }).unwrap();
     let (status, _) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
     assert_eq!(rig.app.scene.builds(), built + 2, "a changed membership takes the one group that is left, built again");
@@ -2224,7 +2373,7 @@ async fn put_scene_caps_and_fits_the_props_like_a_patch() {
     }
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props: huge };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "10 000 keys: {answer}");
     assert_eq!(stored(&rig, "main").await.rev, 1, "refused: nothing changed");
@@ -2235,7 +2384,7 @@ async fn put_scene_caps_and_fits_the_props_like_a_patch() {
     props.insert("nonsense".into(), PropValue::Bool(true));
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "gradient".into(), props };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     let answered = scene_of(answer);
@@ -2316,37 +2465,311 @@ fn plays(effect: &str) -> Plays {
 #[tokio::test]
 async fn a_stack_with_an_html_layer_counts_toward_the_html_limit() {
     let rig = rig_in(scenes_file(), &[("spark.html", SPARK)]).await;
+    add_third_group(&rig, "main", "solid").await;
     save_stack(&rig, "Glow", "html:spark").await;
     save_stack(&rig, "Plain", "solid").await;
     let path = route(routes::SCENE, &[("id", "main")]);
     let before = stored(&rig, "main").await;
 
-    // PUT: an HTML stack and an HTML effect are two HTML groups.
+    // PUT: an HTML stack and two HTML effects are three HTML groups (the limit is two).
     let mut scene = before.clone();
     scene.groups[0].plays = plays("stack:Glow");
     scene.groups[1].plays = plays("html:spark");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    scene.groups[2].plays = plays("html:spark");
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     assert!(answer["message"].as_str().is_some_and(|m| m.contains("HTML")), "{answer}");
     assert_eq!(stored(&rig, "main").await, before, "refused: nothing changed");
 
-    // A stack without an HTML layer is not one: two of them pass.
+    // A stack without an HTML layer is not one: two of them pass, beside a plain group.
     let mut scene = before.clone();
     scene.groups[0].plays = plays("stack:Plain");
     scene.groups[1].plays = plays("stack:Plain");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
 
-    // Activate on every group: two groups playing one HTML effect, or one HTML stack, is over the
-    // limit; so is naming a second group for an HTML effect while the first already plays one.
+    // Activate on every group: three groups playing one HTML effect, or one HTML stack, is over
+    // the limit of two.
     let before = stored(&rig, "main").await;
     for effect in ["html:spark", "stack:Glow"] {
         let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", effect)]), Some(serde_json::json!({}))).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{effect}: {answer}");
     }
     assert_eq!(stored(&rig, "main").await, before, "refused: the scene is as it was");
+}
+
+/// Three groups, each playing an HTML effect, on the rig's three lights: the scene starts three
+/// runtimes where the limit is two. The first two share `html:mine`, so a takeover of it lands on
+/// two groups; the third plays `html:audio`.
+fn three_html_scenes() -> ScenesFile {
+    ScenesFile {
+        schema_version: SCENES_SCHEMA,
+        active: "main".into(),
+        scenes: vec![Scene {
+            id: "main".into(),
+            name: "Main".into(),
+            rev: 1,
+            groups: vec![
+                group("one", &["fake:a#z0"], "html:mine", Props::new()),
+                group("two", &["fake:b#z0"], "html:mine", Props::new()),
+                group("three", &["fake:c#z0"], "html:audio", Props::new()),
+            ],
+        }],
+    }
+}
+
+/// The lights of [`three_html_scenes`], as a bundle and as `lights.json` carry them.
+fn three_html_lights() -> LightsFile {
+    LightsFile {
+        chains: Vec::new(),
+        schema_version: LIGHTS_SCHEMA,
+        lights: vec![light(A), light(B), light(C)],
+    }
+}
+
+/// #370: a scene loaded from disk keeps every group the owner saved. Nothing goes Off, the first
+/// two HTML runtimes run, and the third is not built and says why on its row.
+#[tokio::test]
+async fn a_stored_scene_over_the_html_limit_keeps_its_groups_and_marks_the_third() {
+    let written = three_html_scenes();
+    let rig = rig_loaded(&written, &[]).await;
+
+    // The file reads back as it was written, group for group: repair did not turn the third Off.
+    let on_disk: ScenesFile =
+        serde_json::from_slice(&std::fs::read(rig.home.path.join("scenes.json")).unwrap()).unwrap();
+    assert_eq!(on_disk, written, "the scene in the file is the scene the owner wrote");
+    assert_eq!(stored(&rig, "main").await, written.scenes[0].clone());
+
+    // Two of the three were built: the first two HTML runtimes, in scene order.
+    assert_eq!(rig.app.scene.builds(), 2, "the third group was not built");
+    let failures = rig.app.scene.failures();
+    assert_eq!(failures.len(), 1, "the groups under the limit ran: {failures:?}");
+    assert_eq!(failures.get("three").map(String::as_str), Some(HTML_LIMIT_SENTENCE), "{failures:?}");
+
+    // And the row of the third says it, through the API.
+    let (status, body) = send(&rig, "GET", routes::SCENES, None).await;
+    assert_eq!(status, StatusCode::OK, "{body}");
+    let list: ScenesResponse = serde_json::from_value(body).unwrap();
+    let failed: Vec<Option<&str>> = list.group_states.iter().map(|g| g.failed.as_deref()).collect();
+    assert_eq!(failed, [None, None, Some(HTML_LIMIT_SENTENCE)], "{:?}", list.group_states);
+}
+
+/// #370: an imported bundle with an over-limit scene keeps every group too: the file is the
+/// bundle's scene, and the third group waits with the same sentence on its row.
+#[tokio::test]
+async fn an_imported_bundle_over_the_html_limit_keeps_its_groups_and_marks_the_third() {
+    let rig = rig_in(scenes_file(), &[]).await;
+    // The owner's own export, with the three-group scene and its lights swapped in.
+    let (status, mut bundle) = send(&rig, "GET", routes::CONFIG_EXPORT, None).await;
+    assert_eq!(status, StatusCode::OK, "{bundle}");
+    let written = three_html_scenes();
+    bundle["scenes"] = serde_json::to_value(&written).unwrap();
+    bundle["lights"] = serde_json::to_value(three_html_lights()).unwrap();
+    // The third light is on this machine.
+    *rig.app.devices.write().await = vec![device(A), device(B), device(C)];
+
+    let built = rig.app.scene.builds();
+    let (status, answer) = send(&rig, "POST", routes::CONFIG_IMPORT, Some(bundle)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    let on_disk: ScenesFile =
+        serde_json::from_slice(&std::fs::read(rig.home.path.join("scenes.json")).unwrap()).unwrap();
+    assert_eq!(on_disk, written, "the imported file is the bundle's scene, group for group");
+    assert_eq!(stored(&rig, "main").await, written.scenes[0].clone());
+    assert_eq!(rig.app.scene.builds() - built, 2, "the import built the first two runtimes only");
+    let failures = rig.app.scene.failures();
+    assert_eq!(failures.get("three").map(String::as_str), Some(HTML_LIMIT_SENTENCE), "{failures:?}");
+}
+
+/// #370, review of PR #401, BLOCKER 1: a stack save beside a scene that is already over the limit
+/// is allowed when the stack is plain and no scene plays it. The file's over-limit scene is not a
+/// reason to refuse a save that cannot change it.
+#[tokio::test]
+async fn a_plain_stack_saves_beside_a_scene_that_is_already_over_the_limit() {
+    let plain = serde_json::json!({
+        "id": "stack:Plain",
+        "layers": [{ "id": "l1", "name": "One", "effect": "solid" }],
+    });
+    // The control: the same save on a file whose scene is within the limit.
+    let mut within = three_html_scenes();
+    within.scenes[0].groups[2].plays = plays("solid");
+    let control = rig_loaded(&within, &[]).await;
+    let (status, answer) =
+        send(&control, "PUT", "/api/v1/stacks/stack:Plain", Some(plain.clone())).await;
+    assert_eq!(status, StatusCode::OK, "control, two HTML groups: {answer}");
+
+    // The file the review describes: three HTML groups saved by an older version.
+    let rig = rig_loaded(&three_html_scenes(), &[]).await;
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Plain", Some(plain)).await;
+    assert_eq!(status, StatusCode::OK, "the plain stack touches no scene: {answer}");
+    assert!(rig.app.stacks.get("stack:Plain").is_some(), "the stack was written");
+}
+
+/// #370, review of PR #401, BLOCKER 1: the stack a scene over the limit plays can still be saved
+/// when the save takes HTML away from it, which is how the owner fixes the scene; a save that adds
+/// an HTML layer is refused with the sentence and writes nothing.
+#[tokio::test]
+async fn a_stack_a_scene_over_the_limit_plays_saves_when_it_takes_html_away() {
+    // The scene on file plays the stack beside two HTML effects: the stack's two HTML layers make
+    // four runtimes, over the limit of two.
+    let mut scenes = three_html_scenes();
+    scenes.scenes[0].groups[0].plays = plays("stack:Html");
+    let rig = rig_loaded(&scenes, &[]).await;
+    // The stack as saved, written past the route as an older version would have left it.
+    let legacy: canvas_proto::stack::Stack = serde_json::from_value(serde_json::json!({
+        "id": "stack:Html",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "html:mine" },
+            { "id": "l2", "name": "Two", "effect": "html:audio" },
+        ],
+    }))
+    .expect("a stack");
+    let known = canvas_daemon::stacks::KnownEffects::from_user(&rig.app.user_effects);
+    rig.app.stacks.put(legacy, &known).expect("the legacy stack is written");
+
+    // One HTML layer fewer: the scene's count drops from four to three, so the save is allowed
+    // even though the scene is still over the limit. This is the owner's way out of the loop.
+    let fewer = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [{ "id": "l1", "name": "One", "effect": "html:mine" }],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(fewer)).await;
+    assert_eq!(status, StatusCode::OK, "the save lowers the count: {answer}");
+    let file = std::fs::read(rig.home.path.join("stacks.json")).unwrap();
+
+    // More HTML layers: the scene would run four again, and nothing is written.
+    let more = serde_json::json!({
+        "id": "stack:Html",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "html:mine" },
+            { "id": "l2", "name": "Two", "effect": "html:audio" },
+        ],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Html", Some(more)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    // Four runtimes: the two-layer stack and the scene's two HTML groups.
+    let four = canvas_daemon::scenes::html_limit_sentence(4);
+    let message = answer["message"].as_str().unwrap_or_default();
+    // The refusal names the scene first: the stack builder shows it, away from any scene.
+    assert!(message.ends_with(four.as_str()) && message.len() > four.len() + 2, "{answer}");
+    let kept = rig.app.stacks.get("stack:Html").expect("the stack is still there");
+    assert_eq!(kept.layers.len(), 1, "refused: the saved stack is the one-lower one");
+    assert_eq!(kept.layers[0].effect, "html:mine", "refused: nothing was written");
+    assert_eq!(
+        std::fs::read(rig.home.path.join("stacks.json")).unwrap(),
+        file,
+        "refused: the file is as it was"
+    );
+}
+
+/// #370, review of PR #401, NIT 8: a group whose effect cannot be built still takes its place in
+/// the scene's order, so the first two HTML runtimes are the first two groups, built or not, and a
+/// later group does not move up into the slot a failed build left free.
+#[tokio::test]
+async fn a_group_whose_build_fails_still_takes_its_html_runtime() {
+    let mut scenes = three_html_scenes();
+    scenes.scenes[0].groups[0].plays = plays("html:gone");
+    let rig = rig_loaded(&scenes, &[]).await;
+
+    // The first group took the first runtime and its build was attempted and failed; the second
+    // took the second and built. The third was never attempted: the failed group kept its slot.
+    assert_eq!(rig.app.scene.builds(), 2, "the first two groups were attempted, the third was not");
+    let failures = rig.app.scene.failures();
+    assert!(
+        failures.get("one").is_some_and(|why| why.as_str() != HTML_LIMIT_SENTENCE),
+        "the first group says why it could not build: {failures:?}"
+    );
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the third waits for the slot the failed group kept: {failures:?}"
+    );
+}
+
+/// #370: a scene over the limit stays a valid file, and each door that would put it on the lights
+/// refuses with the daemon's sentence and writes nothing: setting it, activating an effect on its
+/// groups, and a takeover of one of its effects.
+#[tokio::test]
+async fn set_scene_activate_and_takeover_refuse_an_over_limit_scene() {
+    let rig = rig_loaded(&three_html_scenes(), &[]).await;
+    let before = stored(&rig, "main").await;
+    let file = std::fs::read(rig.home.path.join("scenes.json")).unwrap();
+
+    // Set scene.
+    let body = serde_json::json!({ "id": "main" });
+    let (status, answer) = send(&rig, "PUT", routes::SCENE_ACTIVE, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+
+    // Activate: the whole scene is the target, so all three groups would play it.
+    let body = serde_json::json!({});
+    let (status, answer) = send(&rig, "POST", &route(routes::EFFECT_ACTIVATE, &[("id", "html:audio")]), Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+
+    // Takeover: a draft of the saved effect lands on the two groups that play it, and the third
+    // group's own runtime makes three.
+    let body = serde_json::json!({ "html": MINE, "props": {} });
+    let (status, answer) = send(&rig, "PUT", routes::EFFECT_DRAFT, Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+
+    assert_eq!(stored(&rig, "main").await, before, "refused: the scene is as it was");
+    assert_eq!(std::fs::read(rig.home.path.join("scenes.json")).unwrap(), file, "refused: nothing was written");
+}
+
+/// #370, design Q5: a stack with two HTML layers plus one HTML group is over the limit, and every
+/// door that would save it refuses with the daemon's sentence and writes nothing.
+#[tokio::test]
+async fn a_stack_with_two_html_layers_plus_a_group_is_refused_by_every_save() {
+    let rig = rig_in(scenes_file(), &[]).await;
+    add_third_light(&rig).await;
+    // A stack with one HTML layer, saved before a scene plays it.
+    let one_layer = serde_json::json!({
+        "id": "stack:Twice",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "html:mine" },
+        ],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Twice", Some(one_layer)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // Save: one group plays the stack and one plays an HTML effect, which is two runtimes, and
+    // saves. A third HTML group makes it three.
+    let before = stored(&rig, "main").await;
+    let mut two = before.clone();
+    two.groups[0].plays = plays("stack:Twice");
+    two.groups[1].plays = plays("html:mine");
+    let body = serde_json::to_value(ScenePut { scene: two, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let saved = stored(&rig, "main").await;
+
+    let mut three = saved.clone();
+    three.groups.push(group("third", &["fake:c#z0"], "html:mine", Props::new()));
+    let body = serde_json::to_value(ScenePut { scene: three, expected_rev: 2, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert_eq!(answer["message"].as_str(), Some(HTML_LIMIT_SENTENCE), "{answer}");
+    assert_eq!(stored(&rig, "main").await, saved, "refused: nothing was written");
+
+    // A stack save that puts the saved scene over the limit is refused too: a second HTML layer
+    // makes the stack two runtimes, and the scene already has one HTML group.
+    let two_layers = serde_json::json!({
+        "id": "stack:Twice",
+        "layers": [
+            { "id": "l1", "name": "One", "effect": "html:mine" },
+            { "id": "l2", "name": "Two", "effect": "html:audio" },
+        ],
+    });
+    let (status, answer) = send(&rig, "PUT", "/api/v1/stacks/stack:Twice", Some(two_layers)).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    // A stack save's refusal names the scene it would put over the limit.
+    let named = format!("Main: {HTML_LIMIT_SENTENCE}");
+    assert_eq!(answer["message"].as_str(), Some(named.as_str()), "{answer}");
+    assert_eq!(stored(&rig, "main").await, saved, "refused: nothing was written");
 }
 
 /// A whole-scene write refuses an empty scene or group name, as create does, and an over-long one.
@@ -2366,7 +2789,7 @@ async fn put_scene_refuses_empty_names() {
     for (what, change) in cases {
         let mut scene = before.clone();
         change(&mut scene);
-        let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+        let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
         let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{what}: {answer}");
     }
@@ -2416,7 +2839,7 @@ async fn a_dark_group_is_rebuilt_when_its_file_returns_and_a_save_names_it() {
     rig.app.user_effects.rescan(&rig.home.path.join("effects"));
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = Plays::Effect { effect: "html:spark".into(), props: color(GREEN) };
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(state(&rig), None, "no longer named as failed");
@@ -2433,7 +2856,7 @@ async fn a_save_that_cannot_build_leaves_the_store_and_the_engine_agreeing() {
     shows(&rig.a, rgb(RED), "before").await;
     let mut scene = stored(&rig, "main").await;
     scene.groups[0].plays = plays("html:not-there");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(stored(&rig, "main").await.groups[0].plays, plays("html:not-there"), "the store keeps what was saved");
@@ -2461,7 +2884,7 @@ async fn status_lists_each_active_effect_once_and_only_from_the_active_scene() {
     // A second effect in the active scene is a second entry, in the scene's order.
     let mut scene = stored(&rig, "main").await;
     scene.groups[1].plays = plays("gradient");
-    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1 }).unwrap();
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
     let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert_eq!(effects(&rig).await, vec!["solid".to_string(), "gradient".to_string()]);
@@ -2494,4 +2917,584 @@ async fn start_up_applies_the_active_scene() {
     shows(&rig.b, Rgb8::BLACK, "the group whose effect is gone is dark").await;
     assert!(rig.app.scene.failures().get("right").is_some_and(|why| why.contains("deleted")));
     // No fade at start-up: no frame between the colours the engine has not shown.
+}
+
+// ---------------------------------------------------------------- moving groups, writing the list (#368, #371)
+
+/// The two routes of #368 and #371, driven in-process on the fakes (no port 9430).
+mod scene_ops {
+    use super::*;
+    use canvas_proto::api::{GroupMove, GroupMoved, SceneWrite, ScenesWrite};
+
+    /// `main` (active, rev 1): left = A red, right = B blue. `other` (rev 1): all = A and B green.
+    /// `spare` (rev 1): no group at all.
+    fn ops_file() -> ScenesFile {
+        let mut file = scenes_file();
+        file.scenes.push(Scene { id: "spare".into(), name: "Spare".into(), rev: 1, groups: Vec::new() });
+        file
+    }
+
+    async fn ops_rig() -> Rig {
+        let rig = rig_with(ops_file()).await;
+        persist(&rig).await;
+        rig
+    }
+
+    /// Writes the store's scenes to `scenes.json` now, so a later test can compare the file's bytes.
+    async fn persist(rig: &Rig) {
+        rig.app.store.read().await.save_scenes().expect("the scenes are written");
+    }
+
+    fn file_bytes(rig: &Rig) -> Option<Vec<u8>> {
+        std::fs::read(rig.home.path.join("scenes.json")).ok()
+    }
+
+    async fn all_scenes(rig: &Rig) -> Vec<Scene> {
+        rig.app.store.read().await.scenes.scenes.clone()
+    }
+
+    fn mv_body(to: &str, copy: bool, rev_from: u64, rev_to: u64, dry_run: bool) -> serde_json::Value {
+        serde_json::to_value(GroupMove { to: to.into(), copy, expected_rev_from: rev_from, expected_rev_to: rev_to, dry_run })
+            .unwrap()
+    }
+
+    async fn mv(
+        rig: &Rig,
+        from: &str,
+        group: &str,
+        body: serde_json::Value,
+    ) -> (StatusCode, serde_json::Value) {
+        let path = route(routes::GROUP_MOVE, &[("id", from), ("group", group)]);
+        send(rig, "POST", &path, Some(body)).await
+    }
+
+    fn moved(json: serde_json::Value) -> GroupMoved {
+        serde_json::from_value(json).expect("a GroupMoved")
+    }
+
+    fn ids(scene: &Scene) -> Vec<&str> {
+        scene.groups.iter().map(|g| g.id.as_str()).collect()
+    }
+
+    fn write(scenes: Vec<(Scene, u64)>, order: Option<&[&str]>, expected: Option<&[&str]>) -> serde_json::Value {
+        let list = |o: &[&str]| o.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        serde_json::to_value(ScenesWrite {
+            scenes: scenes.into_iter().map(|(scene, expected_rev)| SceneWrite { scene, expected_rev }).collect(),
+            order: order.map(list),
+            expected_order: expected.map(list),
+        })
+        .unwrap()
+    }
+
+    // ---- move
+
+    #[tokio::test]
+    async fn a_move_takes_the_lights_out_of_the_target_groups() {
+        let rig = ops_rig().await;
+        let (status, answer) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let done = moved(answer);
+        assert!(done.saved);
+        assert_eq!(done.group_id, "left");
+        assert_eq!(done.taken.len(), 1);
+        assert_eq!((done.taken[0].group_id.as_str(), done.taken[0].lights.clone()), ("all", vec!["fake:a#z0".to_string()]));
+        assert!(done.emptied.is_empty());
+        let other = stored(&rig, "other").await;
+        assert_eq!(ids(&other), ["all", "left"], "the moved group lands at the end");
+        assert_eq!(other.groups[0].members, ["fake:b#z0"], "A was taken out of `all`");
+        let main = stored(&rig, "main").await;
+        assert_eq!(ids(&main), ["right"]);
+        assert_eq!((main.rev, other.rev), (2, 2));
+        assert_eq!(done.scenes, vec![main, other], "the answer is [from, to] after");
+        let on_disk: ScenesFile = serde_json::from_slice(&file_bytes(&rig).unwrap()).unwrap();
+        assert_eq!(on_disk, rig.app.store.read().await.scenes, "one save wrote both scenes");
+    }
+
+    #[tokio::test]
+    async fn a_move_that_empties_a_group_removes_it() {
+        let rig = ops_rig().await;
+        // `all` holds A and B: moving it to `main` takes both lights, which empties `left` and `right`.
+        let (status, answer) = mv(&rig, "other", "all", mv_body("main", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let done = moved(answer);
+        assert_eq!(done.emptied, ["LEFT", "RIGHT"]);
+        assert_eq!(done.taken.len(), 2);
+        let main = stored(&rig, "main").await;
+        assert_eq!(ids(&main), ["all"]);
+        assert!(stored(&rig, "other").await.groups.is_empty(), "the source may be left with no group");
+    }
+
+    #[tokio::test]
+    async fn move_keeps_the_id_when_free_and_mints_when_taken() {
+        let rig = ops_rig().await;
+        let (_, answer) = mv(&rig, "main", "left", mv_body("spare", false, 1, 1, false)).await;
+        assert_eq!(moved(answer).group_id, "left", "the target had no `left`: the id stays");
+
+        // Now `other` holds `all` (A, B); `spare` holds `left` (A). Move `all` there: it takes A
+        // out of `left`, which is removed, so the id `all` is free anyway. Make the id collide
+        // with a group that keeps a light instead: a group `all` in `spare` on another light.
+        let rig = ops_rig().await;
+        {
+            let mut store = rig.app.store.write().await;
+            let spare = store.scenes.scenes.iter_mut().find(|s| s.id == "spare").unwrap();
+            spare.groups.push(group("left", &["fake:b#z0"], "solid", color(BLUE)));
+        }
+        let (status, answer) = mv(&rig, "main", "left", mv_body("spare", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let done = moved(answer);
+        assert_eq!(done.group_id, "left-2", "the target keeps its own `left`");
+        let spare = stored(&rig, "spare").await;
+        assert_eq!(ids(&spare), ["left", "left-2"]);
+        assert_eq!(spare.groups[1].members, ["fake:a#z0"]);
+    }
+
+    #[tokio::test]
+    async fn copy_mints_a_fresh_id() {
+        let rig = ops_rig().await;
+        let (status, answer) = mv(&rig, "main", "left", mv_body("spare", true, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let done = moved(answer);
+        assert_eq!(done.group_id, "left-2", "a copy never keeps the id, even into a scene that lacks it");
+        assert_eq!(ids(&stored(&rig, "spare").await), ["left-2"]);
+    }
+
+    #[tokio::test]
+    async fn copy_keeps_the_source_byte_for_byte() {
+        let rig = ops_rig().await;
+        let before = serde_json::to_vec(&stored(&rig, "main").await).unwrap();
+        let (status, answer) = mv(&rig, "main", "left", mv_body("other", true, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let after = serde_json::to_vec(&stored(&rig, "main").await).unwrap();
+        assert_eq!(before, after, "the source is the same bytes, rev 1 included");
+        let done = moved(answer);
+        assert_eq!(done.scenes[0], done.before[0], "the answer says so too");
+        assert_eq!(stored(&rig, "other").await.rev, 2, "only the target's rev rose");
+        let on_disk: ScenesFile = serde_json::from_slice(&file_bytes(&rig).unwrap()).unwrap();
+        assert_eq!(on_disk.scenes[0], stored(&rig, "main").await);
+    }
+
+    #[tokio::test]
+    async fn a_move_of_a_group_whose_lights_sit_in_two_groups_of_the_target_takes_from_both() {
+        let rig = ops_rig().await;
+        // `other.all` holds A and B; `main.left` holds A, `main.right` holds B. Move `all` into
+        // `main`: A and B come out of two different groups.
+        let (status, answer) = mv(&rig, "other", "all", mv_body("main", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let done = moved(answer);
+        let from_groups: Vec<_> = done.taken.iter().map(|t| (t.group_id.as_str(), t.lights.len())).collect();
+        assert_eq!(from_groups, [("left", 1), ("right", 1)]);
+        let main = stored(&rig, "main").await;
+        let mut lights: Vec<_> = main.groups.iter().flat_map(|g| g.members.clone()).collect();
+        lights.sort();
+        assert_eq!(lights, ["fake:a#z0", "fake:b#z0"], "each light is in exactly one group");
+    }
+
+    #[tokio::test]
+    async fn move_to_the_same_scene_is_422() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let (status, answer) = mv(&rig, "main", "left", mv_body("main", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "A group goes to another scene.");
+        assert_eq!(all_scenes(&rig).await, before);
+    }
+
+    #[tokio::test]
+    async fn move_with_a_stale_rev_is_409_which_from_and_which_to() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let (status, answer) = mv(&rig, "main", "left", mv_body("other", false, 99, 1, false)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["error"], "conflict");
+        assert_eq!(answer["which"], "from");
+        assert_eq!(answer["scene"]["id"], "main", "the body carries the stale scene as it is now");
+        assert_eq!(answer["scene"]["rev"], 1);
+        let (status, answer) = mv(&rig, "main", "left", mv_body("other", false, 1, 99, false)).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["which"], "to");
+        assert_eq!(answer["scene"]["id"], "other");
+        assert_eq!(all_scenes(&rig).await, before, "a 409 writes nothing");
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    #[tokio::test]
+    async fn move_of_an_unknown_group_or_scene_is_404() {
+        let rig = ops_rig().await;
+        // The control: the same call with a real group answers (the route exists).
+        let (status, _) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, true)).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = mv(&rig, "main", "nope", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = mv(&rig, "main", "left", mv_body("nowhere", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        let (status, _) = mv(&rig, "nowhere", "left", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    /// `other` holds two HTML groups (A and B); `main` holds a third HTML group on a third light.
+    async fn html_rig() -> Rig {
+        let rig = ops_rig().await;
+        add_third_light(&rig).await;
+        {
+            let mut store = rig.app.store.write().await;
+            for scene in &mut store.scenes.scenes {
+                match scene.id.as_str() {
+                    "other" => {
+                        scene.groups = vec![
+                            group("h1", &["fake:a#z0"], "html:one", Props::new()),
+                            group("h2", &["fake:b#z0"], "html:two", Props::new()),
+                        ]
+                    }
+                    "main" => scene.groups = vec![group("h3", &["fake:c#z0"], "html:three", Props::new())],
+                    _ => {}
+                }
+            }
+        }
+        persist(&rig).await;
+        rig
+    }
+
+    #[tokio::test]
+    async fn moving_an_html_group_into_an_html_scene_is_422() {
+        let rig = html_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let (status, answer) = mv(&rig, "main", "h3", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        let message = answer["message"].as_str().unwrap_or_default();
+        assert!(message.contains(HTML_LIMIT_SENTENCE), "the daemon's sentence: {message}");
+        assert_eq!(all_scenes(&rig).await, before);
+        assert_eq!(file_bytes(&rig), bytes, "nothing was written");
+    }
+
+    // ---- dry run, failed save, atomicity
+
+    #[tokio::test]
+    async fn dry_run_saves_nothing() {
+        let rig = ops_rig().await;
+        let bytes = file_bytes(&rig);
+        let before = all_scenes(&rig).await;
+        let (status, answer) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, true)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let probe = moved(answer);
+        assert!(!probe.saved, "a dry run says it saved nothing");
+        assert_eq!(file_bytes(&rig), bytes, "the file's bytes are the same");
+        assert_eq!(all_scenes(&rig).await, before, "the store is the same, revs included");
+        // The real move answers the same body, with saved: true.
+        let (_, answer) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, false)).await;
+        let real = moved(answer);
+        assert_eq!(GroupMoved { saved: false, ..real }, probe, "the dry run is the real answer");
+    }
+
+    #[tokio::test]
+    async fn a_dry_run_still_refuses_what_the_real_move_refuses() {
+        let rig = html_rig().await;
+        let (status, _) = mv(&rig, "main", "h3", mv_body("other", false, 1, 1, true)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        let (status, _) = mv(&rig, "main", "h3", mv_body("other", false, 7, 1, true)).await;
+        assert_eq!(status, StatusCode::CONFLICT);
+    }
+
+    #[tokio::test]
+    async fn a_failed_save_leaves_both_scenes_as_they_were() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        // The scenes file refuses a write: both replaced scenes must come back.
+        rig.app.store.write().await.scenes_blocked = true;
+        let (status, answer) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert_eq!(all_scenes(&rig).await, before, "the first scene was put back, and so was the second");
+        assert_eq!(file_bytes(&rig), bytes, "the file on disk is the old file");
+        // The same for the whole-list write.
+        let (status, _) = send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["other", "main", "spare"]), None))).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE);
+        assert_eq!(all_scenes(&rig).await, before, "the order is back too");
+    }
+
+    /// The second half fails its checks (the target would hold three HTML groups) while the first
+    /// half (the source) is perfectly saveable: the first half must not be written either.
+    #[tokio::test]
+    async fn a_move_whose_second_scene_fails_writes_the_first_scene_neither() {
+        let rig = html_rig().await;
+        let bytes = file_bytes(&rig);
+        let (status, _) = mv(&rig, "main", "h3", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY);
+        assert_eq!(ids(&stored(&rig, "main").await), ["h3"], "the source still holds the group");
+        assert_eq!(stored(&rig, "main").await.rev, 1);
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    // ---- the engine
+
+    #[tokio::test]
+    async fn moving_a_group_of_the_active_scene_reapplies_it() {
+        let rig = ops_rig().await;
+        let built = rig.app.scene.builds();
+        // `right` (B, blue) leaves the playing scene: its shape changes, so the engine takes the
+        // scene again.
+        let (status, answer) = mv(&rig, "main", "right", mv_body("other", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(rig.app.scene.builds() > built, "the playing scene was applied again");
+        shows(&rig.a, rgb(RED), "the group that stayed still plays").await;
+    }
+
+    #[tokio::test]
+    async fn moving_a_group_into_the_active_scene_puts_it_on_the_lights_and_undo_takes_it_off() {
+        let rig = ops_rig().await;
+        let built = rig.app.scene.builds();
+        let seen = (rig.a.seen(), rig.b.seen());
+        // Copy `all` (green on A and B) into the playing scene: it takes both lights.
+        let (status, answer) = mv(&rig, "other", "all", mv_body("main", true, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let done = moved(answer);
+        assert!(rig.app.scene.builds() > built, "the playing scene was applied again");
+        shows_after(&rig.a, seen.0, rgb(GREEN), "A plays the copied group").await;
+        shows_after(&rig.b, seen.1, rgb(GREEN), "B plays the copied group").await;
+
+        // Undo: the whole-list write with the scenes as they were.
+        let seen = (rig.a.seen(), rig.b.seen());
+        let built = rig.app.scene.builds();
+        let back: Vec<(Scene, u64)> = done.before.iter().cloned().zip(done.scenes.iter().map(|s| s.rev)).collect();
+        let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(back, None, None))).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        assert!(rig.app.scene.builds() > built, "the undo applied the playing scene again");
+        shows_after(&rig.a, seen.0, rgb(RED), "A is back to its own group").await;
+        shows_after(&rig.b, seen.1, rgb(BLUE), "B is back to its own group").await;
+    }
+
+    #[tokio::test]
+    async fn moving_between_two_scenes_that_do_not_play_leaves_the_lights_alone() {
+        let rig = ops_rig().await;
+        let built = rig.app.scene.builds();
+        let (status, _) = mv(&rig, "other", "all", mv_body("spare", false, 1, 1, false)).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(rig.app.scene.builds(), built, "the engine was not told");
+    }
+
+    // ---- PUT /api/v1/scenes
+
+    #[tokio::test]
+    async fn scenes_write_restores_both_scenes_and_bumps_rev() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let (_, answer) = mv(&rig, "main", "left", mv_body("other", false, 1, 1, false)).await;
+        let done = moved(answer);
+        // A later edit bumped `main` again: the undo reads the current revs, not the move's.
+        let back = vec![(done.before[0].clone(), 2), (done.before[1].clone(), 2)];
+        let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(back, None, None))).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let now = all_scenes(&rig).await;
+        assert_eq!(now[0].groups, before[0].groups);
+        assert_eq!(now[1].groups, before[1].groups);
+        assert_eq!((now[0].rev, now[1].rev), (3, 3), "rev is the current one plus 1, never the old one");
+        let on_disk: ScenesFile = serde_json::from_slice(&file_bytes(&rig).unwrap()).unwrap();
+        assert_eq!(on_disk.scenes, now, "one save wrote both");
+        let list: ScenesResponse = serde_json::from_value(answer).unwrap();
+        assert_eq!(list.scenes, now, "the answer is the whole list");
+    }
+
+    #[tokio::test]
+    async fn scenes_write_with_one_stale_rev_writes_nothing() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let mut renamed = before[0].clone();
+        renamed.name = "Renamed".into();
+        let mut other = before[1].clone();
+        other.name = "Also renamed".into();
+        // The FIRST scene is current, the SECOND is stale: neither may be written.
+        let (status, answer) =
+            send(&rig, "PUT", routes::SCENES, Some(write(vec![(renamed, 1), (other, 99)], None, None))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["scene"]["id"], "other", "the body names the stale scene");
+        assert_eq!(answer["scene"]["rev"], 1);
+        assert!(answer.get("which").is_none() && answer.get("order").is_none());
+        assert_eq!(all_scenes(&rig).await, before, "the current scene was not written");
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    #[tokio::test]
+    async fn scenes_write_refuses_three_html_groups() {
+        let rig = html_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let mut scene = before[1].clone();
+        scene.groups.push(group("h3", &["fake:c#z0"], "html:three", Props::new()));
+        // A second, perfectly good scene rides along: it must not be written either.
+        let mut fine = before[0].clone();
+        fine.name = "Fine".into();
+        let (status, answer) =
+            send(&rig, "PUT", routes::SCENES, Some(write(vec![(fine, 1), (scene, 1)], None, None))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        let message = answer["message"].as_str().unwrap_or_default();
+        assert!(message.contains(HTML_LIMIT_SENTENCE), "the daemon's sentence: {message}");
+        assert_eq!(all_scenes(&rig).await, before);
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    #[tokio::test]
+    async fn scenes_write_refuses_what_validate_scene_refuses() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let mut scene = before[0].clone();
+        scene.groups[1].members.push("fake:a#z0".into());
+        let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(vec![(scene, 1)], None, None))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "light fake:a#z0 is in more than one group");
+        assert_eq!(all_scenes(&rig).await, before);
+    }
+
+    #[tokio::test]
+    async fn scenes_write_order_is_a_permutation_or_422() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let sentence = "The order must name every scene once.";
+        // A missing id, an extra id, a repeated id: all 422, nothing written.
+        for bad in [vec!["other", "main"], vec!["other", "main", "spare", "ghost"], vec!["main", "main", "other"]] {
+            let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&bad), None))).await;
+            assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{bad:?}: {answer}");
+            assert_eq!(answer["message"], sentence, "{bad:?}");
+        }
+        assert_eq!(all_scenes(&rig).await, before);
+        assert_eq!(file_bytes(&rig), bytes);
+        // A permutation is written; the revs do not change and the active scene stays.
+        let built = rig.app.scene.builds();
+        let (status, answer) =
+            send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["spare", "main", "other"]), Some(&["main", "other", "spare"])))).await;
+        assert_eq!(status, StatusCode::OK, "{answer}");
+        let list: ScenesResponse = serde_json::from_value(answer).unwrap();
+        let order: Vec<_> = list.scenes.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(order, ["spare", "main", "other"]);
+        assert!(list.scenes.iter().all(|s| s.rev == 1), "an order write bumps no rev");
+        assert_eq!(list.active, "main");
+        let on_disk: ScenesFile = serde_json::from_slice(&file_bytes(&rig).unwrap()).unwrap();
+        assert_eq!(on_disk.scenes.iter().map(|s| s.id.as_str()).collect::<Vec<_>>(), ["spare", "main", "other"]);
+        assert_eq!(rig.app.scene.builds(), built, "an order write does not touch the engine");
+    }
+
+    #[tokio::test]
+    async fn scenes_write_with_a_missing_id_in_the_order_is_422() {
+        let rig = ops_rig().await;
+        let (status, answer) =
+            send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["main", "other"]), Some(&["main", "other", "spare"])))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "The order must name every scene once.");
+    }
+
+    #[tokio::test]
+    async fn scenes_write_with_a_stale_order_is_409() {
+        let rig = ops_rig().await;
+        let bytes = file_bytes(&rig);
+        let (status, answer) =
+            send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["spare", "main", "other"]), Some(&["other", "main", "spare"])))).await;
+        assert_eq!(status, StatusCode::CONFLICT, "{answer}");
+        assert_eq!(answer["error"], "conflict");
+        assert_eq!(answer["order"], serde_json::json!(["main", "other", "spare"]), "the body carries the current order");
+        assert!(answer.get("scene").is_none());
+        assert_eq!(file_bytes(&rig), bytes, "nothing was written");
+    }
+
+    #[tokio::test]
+    async fn scenes_write_with_a_stale_order_writes_no_scene_either() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let mut renamed = before[0].clone();
+        renamed.name = "Renamed".into();
+        let (status, _) = send(
+            &rig,
+            "PUT",
+            routes::SCENES,
+            Some(write(vec![(renamed, 1)], Some(&["spare", "main", "other"]), Some(&["other", "main", "spare"]))),
+        )
+        .await;
+        assert_eq!(status, StatusCode::CONFLICT);
+        assert_eq!(all_scenes(&rig).await, before);
+    }
+
+    #[tokio::test]
+    async fn scenes_write_with_an_unknown_or_repeated_id_is_422() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        let ghost = Scene { id: "ghost".into(), name: "Ghost".into(), rev: 1, groups: Vec::new() };
+        let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(vec![(ghost, 1)], None, None))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "there is no scene with the id ghost");
+        let twice = vec![(before[0].clone(), 1), (before[0].clone(), 1)];
+        let (status, answer) = send(&rig, "PUT", routes::SCENES, Some(write(twice, None, None))).await;
+        assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        assert_eq!(answer["message"], "the scene main is named twice");
+        assert_eq!(all_scenes(&rig).await, before);
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    #[tokio::test]
+    async fn scenes_write_with_the_same_order_is_a_200_with_no_write() {
+        let rig = ops_rig().await;
+        let bytes = file_bytes(&rig);
+        let (status, _) =
+            send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["main", "other", "spare"]), Some(&["main", "other", "spare"])))).await;
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(file_bytes(&rig), bytes);
+    }
+
+    // ---- who may call them
+
+    /// A request the way a hostile or careless caller makes it, with the headers named.
+    async fn raw(
+        rig: &Rig,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: serde_json::Value,
+    ) -> (StatusCode, String) {
+        let mut request = Request::builder().method(method).uri(path).header("content-type", "application/json");
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        let response = rig.router.clone().oneshot(request.body(Body::from(body.to_string())).unwrap()).await.unwrap();
+        let status = response.status();
+        let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.unwrap();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap_or(serde_json::Value::Null);
+        (status, json["error"].as_str().unwrap_or_default().to_string())
+    }
+
+    /// The new routes refuse a request without the token, with the wrong token, from a browser
+    /// origin and from a foreign host exactly as `PUT /api/v1/scenes/{id}` does.
+    #[tokio::test]
+    async fn the_new_routes_refuse_what_put_scene_refuses() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bearer = format!("Bearer {TOKEN}");
+        let cases: [(&str, Vec<(&str, &str)>); 4] = [
+            ("no token", vec![("host", "127.0.0.1:9430")]),
+            ("wrong token", vec![("host", "127.0.0.1:9430"), ("authorization", "Bearer not-the-token")]),
+            ("browser origin", vec![("host", "127.0.0.1:9430"), ("origin", "https://evil.example"), ("authorization", &bearer)]),
+            ("foreign host", vec![("host", "evil.example"), ("authorization", &bearer)]),
+        ];
+        let scene_path = route(routes::SCENE, &[("id", "main")]);
+        let put_scene_body = serde_json::to_value(ScenePut { scene: before[0].clone(), expected_rev: 1, dry_run: false }).unwrap();
+        let move_path = route(routes::GROUP_MOVE, &[("id", "main"), ("group", "left")]);
+        for (what, headers) in &cases {
+            let reference = raw(&rig, "PUT", &scene_path, headers, put_scene_body.clone()).await;
+            assert!(
+                reference.0 == StatusCode::UNAUTHORIZED || reference.0 == StatusCode::FORBIDDEN,
+                "{what}: the reference route refuses ({reference:?})"
+            );
+            let mover = raw(&rig, "POST", &move_path, headers, mv_body("other", false, 1, 1, false)).await;
+            assert_eq!(mover, reference, "{what}: the move route answers as PUT /scenes/{{id}} does");
+            let writer = raw(&rig, "PUT", routes::SCENES, headers, write(vec![], Some(&["other", "main", "spare"]), None)).await;
+            assert_eq!(writer, reference, "{what}: the whole-list write answers as PUT /scenes/{{id}} does");
+        }
+        assert_eq!(all_scenes(&rig).await, before, "a refused request changed nothing");
+        // The control: with the token both routes answer, so the refusals above are the guard's
+        // and not a missing route's.
+        let (status, _) = send(&rig, "POST", &move_path, Some(mv_body("other", false, 1, 1, true))).await;
+        assert_eq!(status, StatusCode::OK);
+        let (status, _) = send(&rig, "PUT", routes::SCENES, Some(write(vec![], Some(&["other", "main", "spare"]), None))).await;
+        assert_eq!(status, StatusCode::OK);
+    }
 }

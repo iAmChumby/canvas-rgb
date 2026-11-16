@@ -129,7 +129,8 @@
   gap: var(--s2);
   border-radius: var(--r-md);
   color: var(--dim);
-  font: 600 var(--t15) / 1 var(--fu);
+  /* The type is the shared tab key's (`.tab-key` in app.css): this page sets the key's box,
+     never its own font, so the scene key cannot drift from the other tabs in the app (#373). */
 }
 
 .strip button.sceneKey::before {
@@ -998,11 +999,21 @@
   overflow-wrap: normal;
 }
 
-/* Why an effect cannot be chosen, on the row it applies to. */
+/* Why an effect cannot be chosen, on the row it applies to (#370): a few words that fit whole.
+   One line, always: two lines are taller than the strip beside them and would make this row
+   taller than the others, and the row's height must not depend on its content (#367). The
+   daemon's sentence is this line's `title`, and the line under the list says it in full while
+   the row is pointed at or focused. */
 .pickNote {
+  display: block;
+  max-width: 100%;
+  min-width: 0;
+  overflow: hidden;
   color: var(--warn);
   font-size: var(--t14);
   line-height: 1.25;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 
 /* What a pattern was built on and how it lands on this group: one small line under its name.
@@ -1065,6 +1076,11 @@
   -webkit-box-orient: vertical;
   -webkit-line-clamp: 2;
   line-clamp: 2;
+}
+
+/* The line is saying why a row cannot be chosen: the same box, in the warning colour. */
+.pickerHint[data-why] {
+  color: var(--warn);
 }
 
 /* The head of the picker when it hangs under a row's key: what it is, and the way out. */

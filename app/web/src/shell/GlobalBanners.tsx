@@ -52,8 +52,12 @@ export function StandingNotices() {
    * after "Later", and it opens on Scenes whether this page is Scenes already or not.
    */
   const openSetup = () => {
-    requestChainSetup();
-    requestNavigation(() => router.push("/"));
+    // The request is made only when the page change happens: a change the owner cancels
+    // (Keep editing) must not leave a request behind for the next visit to Scenes.
+    requestNavigation(() => {
+      requestChainSetup();
+      router.push("/");
+    });
   };
 
   if (!conflict && !noScene && !status?.show_zone_panel) return null;
