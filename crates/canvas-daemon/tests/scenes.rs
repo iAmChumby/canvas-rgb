@@ -3652,6 +3652,26 @@ mod scene_ops {
         assert_eq!(scene_of(answer), probe.scene, "the dry run carried what would be saved");
     }
 
+    /// A dry run answers what the real write would: a scenes file that cannot be written is a
+    /// 503 for the create and for the save, and nothing changes.
+    #[tokio::test]
+    async fn a_dry_run_refuses_when_the_scenes_cannot_be_saved() {
+        let rig = ops_rig().await;
+        let before = all_scenes(&rig).await;
+        let bytes = file_bytes(&rig);
+        rig.app.store.write().await.scenes_blocked = true;
+        let groups = vec![new_group("Fans", &["fake:a#z0"], "solid")];
+        let (status, answer) = create(&rig, create_body("Night", Some(groups), None, true)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        let scene = stored(&rig, "main").await;
+        let path = route(routes::SCENE, &[("id", "main")]);
+        let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: true }).unwrap();
+        let (status, answer) = send(&rig, "PUT", &path, Some(body)).await;
+        assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{answer}");
+        assert_eq!(all_scenes(&rig).await, before, "the store is as it was");
+        assert_eq!(file_bytes(&rig), bytes, "the file's bytes are the same");
+    }
+
     #[tokio::test]
     async fn a_failed_save_leaves_no_scene() {
         let rig = ops_rig().await;

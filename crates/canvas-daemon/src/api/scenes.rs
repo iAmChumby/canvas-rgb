@@ -207,7 +207,7 @@ fn asked_groups(scenes: &[Scene], asked: &[NewGroup]) -> Vec<Group> {
 /// and it then passes every check [`put_scene`] runs, in its order — [`scenes::check_saveable`]
 /// (the spine's `validate_scene`, the names, the HTML limit) and then [`fit_group_props`] — before
 /// ONE save; a failed save pops the scene, so the store is as it was. With `dry_run` the checks
-/// run and nothing is written: the answer is the scene it would save. A scene made this way is
+/// run (those of `groups`, when it has them) and nothing is written: the answer is the scene it would save. A scene made this way is
 /// never made active and the engine is not told, as before. Without `groups` the route is what it
 /// was, byte for byte, except that a dry run saves nothing.
 pub async fn create_scene(
@@ -263,6 +263,10 @@ pub async fn create_scene(
         fit_group_props(&app, &mut scene)?;
     }
     if dry_run {
+        // A dry run refuses what the save would refuse: a scenes file that waits or is blocked.
+        if let Err(e) = store.scenes_writable() {
+            return Err(save_failure(&store, e));
+        }
         return Ok(SceneAnswer::DryRun(SceneDryRun { saved: false, scene }));
     }
     store.scenes.scenes.push(scene.clone());
@@ -300,6 +304,11 @@ pub async fn put_scene(
     }
     fit_group_props(&app, &mut new)?;
     if dry_run {
+        // A dry run refuses what the save would refuse: a scenes file that waits or is blocked.
+        let store = app.store.read().await;
+        if let Err(e) = store.scenes_writable() {
+            return Err(save_failure(&store, e).into());
+        }
         return Ok(SceneAnswer::DryRun(SceneDryRun { saved: false, scene: new }));
     }
     replace_saved(&app, new.clone()).await?;

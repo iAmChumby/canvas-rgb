@@ -1304,8 +1304,18 @@ async fn a_failed_rollback_keeps_both_records() {
         "the header is not at its earlier length: {:?}",
         rig.server.zone_leds(0, 0)
     );
-    assert!(rig.app.zone_holds.read().await.is_empty(), "nothing is held");
-    assert_eq!(rig.app.identify.setup_session(), None, "the setup is over");
+    // Each is waited for, not read the moment the length is seen (#411).
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            rig.app.zone_holds.try_read().is_ok_and(|holds| holds.is_empty())
+        })
+        .await,
+        "nothing is held"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || rig.app.identify.setup_session().is_none()).await,
+        "the setup is over"
+    );
 }
 
 /// Review Focus 3: a daemon start that finds an intent record undoes the interrupted commit: the
@@ -1378,8 +1388,15 @@ async fn start_up_rolls_back_a_leftover_intent() {
         "start-up never put the header back: {:?}",
         rig.server.zone_leds(0, 0)
     );
-    assert!(!rig.home.join(CHAIN_INTENT_FILE).exists(), "the intent is deleted");
-    assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "the restore record is deleted");
+    // Each is waited for, not read the moment the length is seen (#411).
+    assert!(
+        wait_until(Duration::from_secs(30), || !rig.home.join(CHAIN_INTENT_FILE).exists()).await,
+        "the intent is deleted"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || !rig.home.join(CHAIN_RESTORE_FILE).exists()).await,
+        "the restore record is deleted"
+    );
     assert_eq!(zone_parts(&read_lights(&rig.home), 0).len(), 1, "lights.json is the earlier one");
     assert_eq!(read_lights(&rig.home), before_lights);
     assert_eq!(read_scenes(&rig.home), before_scenes);
