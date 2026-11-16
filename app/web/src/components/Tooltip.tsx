@@ -42,12 +42,25 @@ function boundsAround(bubble: HTMLElement): TipRect {
  * when the window has no room for one line of it. Reduced motion needs nothing here: the move
  * has no transition, and the stylesheet's reduced-motion block already drops the fade.
  *
- * The bubble is held back while its control is pressed: a drag lifts a row over the rows under
- * it (#384), and a bubble over the drag covers what the owner is looking at. It comes back when
- * the pointer has really left the control: the row a drag moved may come to rest under the
- * pointer, and that is not the pointer leaving.
+ * The bubble is held back while its control is pressed, but only for a control that asks for it
+ * (`holdOnPress`): a drag lifts a row over the rows under it (#384), and a bubble over the drag
+ * covers what the owner is looking at. It comes back when the pointer has really left the
+ * control: the row a drag moved may come to rest under the pointer, and that is not the pointer
+ * leaving. Every other bubble behaves as it did before: a press on a normal control does not
+ * take its bubble away.
  */
-export function Tooltip({ label, children, className }: { label: string; children: ReactNode; className?: string }) {
+export function Tooltip({
+  label,
+  children,
+  className,
+  holdOnPress = false,
+}: {
+  label: string;
+  children: ReactNode;
+  className?: string;
+  /** The bubble is held back while the control is pressed: for a handle a drag lifts over the page. */
+  holdOnPress?: boolean;
+}) {
   const tip = useRef<HTMLSpanElement>(null);
   const bubble = useRef<HTMLSpanElement>(null);
   /** The bubble is held back: the control is pressed. */
@@ -193,9 +206,11 @@ export function Tooltip({ label, children, className }: { label: string; childre
     };
 
     // The control is pressed: the bubble goes, and it waits for the pointer to leave the control
-    // for good. A bubble over a drag covers the rows under it (#384).
+    // for good. A bubble over a drag covers the rows under it (#384). Only a control that asks
+    // for it holds its bubble back.
     const press = () => {
       pressed = true;
+      if (!holdOnPress) return;
       held = true;
       setHold(true);
       watch(true);
@@ -222,7 +237,7 @@ export function Tooltip({ label, children, className }: { label: string; childre
       watch(false);
       unbind();
     };
-  }, []);
+  }, [holdOnPress]);
 
   return (
     <span ref={tip} className={className ? `tip ${className}` : "tip"} data-hold={hold ? "true" : undefined}>

@@ -1,4 +1,4 @@
-import { cleanup, render } from "@testing-library/react";
+import { act, cleanup, render } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { Tooltip } from "@/components/Tooltip";
 
@@ -127,5 +127,53 @@ describe("Tooltip (#271)", () => {
     unmount();
     expect(removed()).toBe(4);
     vi.restoreAllMocks();
+  });
+});
+
+describe("the bubble and the press (#384)", () => {
+  /** The tip as the trigger, its bubble and the mark that holds the bubble back. */
+  function tipOf(props: { holdOnPress?: boolean }) {
+    const { container } = render(
+      <Tooltip label="Move Case fans" {...props}>
+        <button type="button">Move</button>
+      </Tooltip>,
+    );
+    return container.querySelector(".tip") as HTMLElement;
+  }
+
+  /** A press on the control: the mark on the tip is set in the state it holds. */
+  function press(tip: HTMLElement) {
+    act(() => {
+      tip.dispatchEvent(new Event("pointerdown"));
+    });
+  }
+
+  it("a press on a normal control does not take its bubble away", () => {
+    const tip = tipOf({});
+    press(tip);
+    // The bubble stays: a press on a button is not a drag over the page.
+    expect(tip.getAttribute("data-hold")).toBeNull();
+  });
+
+  it("a control that asks for it holds its bubble back while it is pressed", () => {
+    const tip = tipOf({ holdOnPress: true });
+    press(tip);
+    expect(tip.getAttribute("data-hold")).toBe("true");
+    // The pointer lets go and leaves the control: the bubble comes back.
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+      window.dispatchEvent(new MouseEvent("pointermove", { clientX: 600, clientY: 600 }));
+    });
+    expect(tip.getAttribute("data-hold")).toBeNull();
+  });
+
+  it("a press on a control that does not ask for it leaves the bubble alone, and so does a second press", () => {
+    const tip = tipOf({});
+    press(tip);
+    act(() => {
+      window.dispatchEvent(new Event("pointerup"));
+    });
+    press(tip);
+    expect(tip.getAttribute("data-hold")).toBeNull();
   });
 });

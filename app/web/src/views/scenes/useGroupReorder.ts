@@ -237,8 +237,12 @@ export function useGroupReorder(
         return;
       }
       const where = gap.current;
-      const order = orderWith(start.id, where?.before ?? null);
       const was = groups.map((g) => g.id);
+      // The order the rows would have, with the lifted one in the gap. A group that was deleted
+      // while the drag lasted is gone from the scene, so it is not in the order either: the drop
+      // then changes nothing, and nothing is written and no undo step is made.
+      const here = new Set(was);
+      const order = orderWith(start.id, where?.before ?? null).filter((id) => here.has(id));
       lifted.current = false;
       gap.current = null;
       setDrag(null);
@@ -275,6 +279,16 @@ export function useGroupReorder(
       window.removeEventListener("blur", blur);
     };
   }, [gapAt, groups, onReorder, orderWith]);
+
+  // The page goes away while a drag lasts: the handle lets the pointer go, so the browser is not
+  // left holding a capture for a node that is gone.
+  useEffect(
+    () => () => {
+      const start = press.current;
+      if (start) releaseCapture(start);
+    },
+    [],
+  );
 
   return { drag, marker, begin, refuse };
 }

@@ -142,11 +142,13 @@ export function GroupRow({
       aria-label={group.name}
     >
       {/* The handle: the pointer drags the row by it, and the arrow keys move the group one place
-          while it has the focus. */}
+          while it has the focus. Its bubble is held back while it is pressed: the dragged row
+          passes over the rows under the pointer, and a bubble there covers them. */}
       <IconButton
         label={`Move ${group.name}`}
         className={s.grip}
         size="sm"
+        holdOnPress
         icon={<DotsSixVertical size={16} />}
         onClick={() => undefined}
         onPointerDown={(event) => onGripDown(group, event)}

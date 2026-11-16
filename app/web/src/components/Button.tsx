@@ -243,6 +243,7 @@ export function IconButton({
   className,
   tip = true,
   shortcut,
+  holdOnPress = false,
   onClick,
   onPointerDown,
   onKeyDown,
@@ -257,6 +258,8 @@ export function IconButton({
   busy?: boolean;
   /** False when the control sits where a bubble would only be in the way (an open name field). */
   tip?: boolean;
+  /** The bubble is held back while the control is pressed: for a handle a drag lifts over the page. */
+  holdOnPress?: boolean;
   size?: "sm" | "md";
   disabled?: boolean;
   className?: string;
@@ -287,7 +290,13 @@ export function IconButton({
       <BusySlot icon={icon} spinning={spinning} size={size === "sm" ? 14 : 16} />
     </button>
   );
-  return tip ? <Tooltip label={shortcut ? `${label} (${shortcut})` : label}>{button}</Tooltip> : button;
+  return tip ? (
+    <Tooltip label={shortcut ? `${label} (${shortcut})` : label} holdOnPress={holdOnPress}>
+      {button}
+    </Tooltip>
+  ) : (
+    button
+  );
 }
 
 /** A button that opens a file picker and hands the chosen file to `onFile`. */

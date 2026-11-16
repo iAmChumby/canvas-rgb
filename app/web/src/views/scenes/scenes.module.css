@@ -1307,10 +1307,13 @@
 }
 
 /* The handle a thing is dragged by: the group's row (#384) and the devices in a group. It never
-   starts a native drag, and the text around it is never selected. */
+   starts a native drag, and the text around it is never selected.
+   A finger does not drag (the drag is with a mouse or a pen), so the handle must not take the
+   page's scrolling away either: a vertical pan that starts on it scrolls the page, and only a
+   sideways pan is the handle's own. */
 .grip {
   cursor: grab;
-  touch-action: none;
+  touch-action: pan-y;
   user-select: none;
   -webkit-user-select: none;
 }

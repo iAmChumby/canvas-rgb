@@ -184,16 +184,20 @@ function fake(over: Partial<UseScene> = {}): UseScene & { calls: Record<string, 
   return Object.assign({ ...base, ...over }, { calls });
 }
 
-function mount(use: UseScene) {
-  scene.current = use;
-  return render(
+function tree() {
+  return (
     <StripSlotsProvider>
       <StripSlot kind="title" />
       <StripSlot kind="actions" />
       <Rail pathname="/" />
       <ScenesView />
-    </StripSlotsProvider>,
+    </StripSlotsProvider>
   );
+}
+
+function mount(use: UseScene) {
+  scene.current = use;
+  return render(tree());
 }
 
 beforeEach(() => {
@@ -772,6 +776,43 @@ describe("the order of the groups inside a scene", () => {
     expect(tip.getAttribute("data-hold")).toBe("true");
     fireEvent.pointerMove(window, { pointerType: "mouse", clientX: 600, clientY: 600 });
     expect(tip.getAttribute("data-hold")).toBeNull();
+  });
+
+  it("a group deleted while it is dragged leaves the order alone: no write and no undo step", () => {
+    const use = fake();
+    const view = mount(use);
+    placeRows();
+    // The first group is dragged down past the second one.
+    dragHandle(handle(rows()[0] as HTMLElement), 190);
+    // The group is deleted while the drag lasts: it is gone from the scene.
+    const before = use.scene as Scene;
+    use.scene = { ...before, groups: before.groups.filter((g) => g.id !== "g-case") };
+    view.rerender(tree());
+    // The row is dropped. The group is not there any more, so the drop changes nothing and
+    // nothing is written: a PUT with the same order would push an undo step that does nothing.
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("the page goes away mid-drag: the handle lets the pointer go", () => {
+    const use = fake();
+    const view = mount(use);
+    placeRows();
+    // jsdom has no pointer capture: the calls are counted here.
+    const released: number[] = [];
+    const proto = Element.prototype as unknown as { releasePointerCapture?: (id: number) => void };
+    proto.releasePointerCapture = (id: number) => {
+      released.push(id);
+    };
+    try {
+      dragHandle(handle(rows()[0] as HTMLElement), 190);
+      view.unmount();
+    } finally {
+      delete proto.releasePointerCapture;
+    }
+    // The handle let the pointer go, so the browser is not left holding a capture for a node
+    // that is gone.
+    expect(released.length).toBeGreaterThan(0);
   });
 
   it("the arrow keys on a group's handle put it one place up or down", () => {
