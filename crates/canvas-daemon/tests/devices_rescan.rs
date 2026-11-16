@@ -506,3 +506,56 @@ async fn the_api_waits_out_the_detection_cap_before_it_gives_up_on_the_superviso
     let (status, body) = get(&rig, "/api/v1/devices?rescan=1").await;
     assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
 }
+
+/// #290 review 2: the answer is the whole new list even when OpenRGB's detection is slow to bring
+/// its first controller back. On release_1.1 the list is cleared when detection starts and the first
+/// controller registers only after the I2C and DRAM detectors (`DetectionManager.cpp:810-856`,
+/// `:1030-1100`), seconds later; the rescan used to answer 750 ms after the clear with the old
+/// device only, while the new one appeared ~6 s on. The windows are the daemon's own
+/// (`RescanTiming::default()`); the fake clears the list for 2.5 s, then registers a controller
+/// every 400 ms.
+#[tokio::test]
+async fn a_rescan_with_a_slow_first_controller_answers_with_the_whole_new_list() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.add_hidden_device(stick("two"));
+    server.rescan_timing(Duration::from_millis(2500), Duration::from_millis(400));
+    let rig = rig_timed("slow-first", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    assert_eq!(ids(&rig, "/api/v1/devices").await, ["openrgb:one"]);
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"]);
+    assert_eq!(rig.app.devices.read().await.len(), 2, "the answer was not applied");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"]);
+}
+
+/// #290 review 2: after a rescan that never settled, the 5 s refresh reads the part list OpenRGB has
+/// mid-detection (here none), and the lights must not go dark: frames keep going to the controllers
+/// the daemon holds, as OpenRGB drops what names an index that is not registered and keeps the link.
+/// The old adapter cached the empty read, so every frame after it re-read the list and was dropped.
+#[tokio::test]
+async fn frames_keep_reaching_the_held_controllers_after_an_unsettled_rescan_and_a_refresh() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.hold_detection(true);
+    let rig = rig("dark", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    let sink = wait_for_sink(&rig, "openrgb:one").await;
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one"], "the held list answers");
+    // The supervisor's own 5 s refresh reads the list OpenRGB has mid-detection: empty.
+    until("the 5 s refresh read the mid-detection list", || server.reads_during_detection() >= 1).await;
+    let reads = server.reads_during_detection();
+
+    for shade in [10_u8, 20, 30] {
+        let before = server.frames_to_unregistered();
+        sink.submit(vec![Rgb8 { r: shade, g: shade, b: shade }; 8]);
+        tokio::time::timeout(Duration::from_secs(10), async {
+            while server.frames_to_unregistered() == before {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("a frame never reached OpenRGB: the held controller was forgotten");
+    }
+    assert_eq!(server.reads_during_detection(), reads, "a frame re-read the list while OpenRGB was mid-detection");
+    assert!(rig.app.adapter.lock().await.is_connected());
+}

@@ -85,6 +85,11 @@ struct FakeState {
     /// How many times the client asked for the controller count while a rescan was still
     /// re-registering controllers: reads of a list that is mid-detection (#290).
     reads_during_detection: u32,
+    /// How many frame packets (`UPDATE_LEDS`, `SET_CUSTOM_MODE`) named a controller that was not
+    /// registered at that moment of a rescan. release_1.1 finds no controller thread for such an id
+    /// and drops the packet without a reply or an error to a protocol 5 client, and the link stays
+    /// up (`NetworkServer.cpp:1495-1531`, `:1583-1587`, `:3562-3568`) (#290).
+    frames_to_unregistered: u32,
     /// The protocol version each connection negotiated: the lower of the client's and the
     /// server's, as OpenRGB's `NetworkServer` keeps in `client_protocol_version`.
     negotiated: std::collections::HashMap<u64, u32>,
@@ -117,6 +122,11 @@ struct PendingResize {
 }
 
 impl FakeState {
+    /// Whether controller `index` is not registered right now, in the middle of a rescan.
+    fn unregistered(&self, index: u32) -> bool {
+        self.rescan_listed.is_some_and(|listed| index as usize >= listed)
+    }
+
     /// How many controllers the server announces right now.
     fn visible(&self) -> usize {
         if let Some(listed) = self.rescan_listed {
@@ -220,6 +230,7 @@ impl FakeOpenRgbServer {
             rescan_listed: None,
             rescan_runs: Vec::new(),
             reads_during_detection: 0,
+            frames_to_unregistered: 0,
             negotiated: std::collections::HashMap::new(),
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
@@ -269,6 +280,18 @@ impl FakeOpenRgbServer {
         guard(&self.state).hidden.push(FakeDevice::new(info));
     }
 
+    /// Removes controller `index` from the server, as a device unplugged since OpenRGB last
+    /// detected: the controllers after it move up one index, and the next detection finds one
+    /// fewer (#290).
+    pub fn unplug_device(&self, index: u32) {
+        let mut state = guard(&self.state);
+        if (index as usize) < state.devices.len() {
+            state.devices.remove(index as usize);
+            state.led_writes.remove(index as usize);
+            state.resize_writes.remove(index as usize);
+        }
+    }
+
     /// While held, a rescan clears the list and then announces list changes (100) forever
     /// without registering a controller again: a detection that never settles, with the list
     /// empty the whole time (#290).
@@ -295,6 +318,13 @@ impl FakeOpenRgbServer {
     /// controllers (the list was mid-detection).
     pub fn reads_during_detection(&self) -> u32 {
         guard(&self.state).reads_during_detection
+    }
+
+    /// How many frame packets named a controller that was not registered at that moment of a
+    /// rescan (dropped, as release_1.1 drops them): proof a frame was still being sent to the index
+    /// the client held while OpenRGB re-registered its controllers.
+    pub fn frames_to_unregistered(&self) -> u32 {
+        guard(&self.state).frames_to_unregistered
     }
 
     /// The protocol version a connection negotiated, in connection order from 1.
@@ -574,7 +604,7 @@ async fn serve(
                 let mut state = guard(&state);
                 if is_request(packet_id) {
                     state.outstanding += 1;
-                } else if packet_id == UPDATE_LEDS {
+                } else if packet_id == UPDATE_LEDS && !state.unregistered(device) {
                     if state.outstanding > 0 {
                         state.frames_while_waiting += 1;
                     }
@@ -727,6 +757,10 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
             },
             None => Vec::new(),
         },
+        SET_CUSTOM_MODE | UPDATE_LEDS if state.unregistered(device) => {
+            state.frames_to_unregistered += 1;
+            Vec::new()
+        }
         SET_CUSTOM_MODE => {
             if let Some(target) = state.devices.get_mut(device as usize) {
                 target.custom_mode_writes += 1;
