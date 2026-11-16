@@ -6,8 +6,15 @@ name: Release
 # The installer is NOT code-signed, so Windows SmartScreen warns on first run ("Windows protected your PC":
 # More info, then Run anyway). Compare the SHA-256 below with the one in the job log before running it.
 # Every third-party action is pinned to a full commit SHA (tag in the comment). The build job is read-only;
-# only the publish job holds contents: write (and actions: write, to start the site's build once the release
-# is out). The update signing key lives in the sign job alone.
+# only the publish job holds contents: write, and the site's build is started by a job of its own that holds
+# actions: write and does nothing else (#189).
+#
+# The update signing key is an environment secret of the `release` environment, and only the sign job
+# names that environment, so no other job of this workflow can read the key (#234). The environment's
+# `v*` rule is a name pattern, not a permission: anyone who can push a tag named vX.Y.Z runs this
+# workflow from that tag, and its sign job would deploy. Who may create a `v*` tag is therefore the
+# boundary, and it is a repository ruleset on refs/tags/v* that only an admin can bypass (the settings
+# in docs/releasing.md), not a line in this file.
 on:
   push:
     tags:
@@ -95,11 +102,16 @@ jobs:
   # was written and tested for Windows PowerShell).
   # The tray's updater trusts one minisign key. The signature carries the version (--app-version), so a
   # tampered latest.json cannot pair a new version number with an older signed installer.
-  # The private key is the UPDATE_SIGNING_KEY secret (backup: outside the repo, see docs/releasing.md).
+  # The private key is the UPDATE_SIGNING_KEY secret of the `release` environment (backup: outside the
+  # repo, see docs/releasing.md). This job names the environment, so no other job of this workflow can
+  # read the key whatever the file says. The environment allows a `v*` tag, which is a name pattern:
+  # a person with push access can create one, so who may create a `v*` tag is the boundary, and the
+  # repository ruleset on refs/tags/v* is what restricts it to admins (#234).
   sign:
     needs: build
     runs-on: windows-latest
     timeout-minutes: 10
+    environment: release
     permissions:
       contents: read
     steps:
@@ -177,7 +189,6 @@ jobs:
     runs-on: ubuntu-latest
     permissions:
       contents: write # the only job that can write to the release
-      actions: write # it starts the site's build, so the site can show the new hash
     steps:
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
@@ -212,16 +223,32 @@ jobs:
           body_path: dist/release-notes.md
           generate_release_notes: true
 
-      # The site prints the installer's SHA-256, and it reads it from the release's own .sha256
-      # asset when the site is built (#83). The site's build is started here, after the assets
-      # are attached, because a "release: published" event cannot start it: this workflow
-      # publishes with GITHUB_TOKEN, and GitHub does not start workflows from events that token
-      # creates. The build runs on main, which holds the release commit, so the page shows the
-      # version that was just released and any site fix that landed with it.
+  # The site prints the installer's SHA-256, and it reads it from the release's own .sha256 asset when
+  # the site is built (#83). The site's build is started here, after the assets are attached, because a
+  # "release: published" event cannot start it: this workflow publishes with GITHUB_TOKEN, and GitHub
+  # does not start workflows from events that token creates.
+  #
+  # It runs at `main`, not at the tag. pages.yml deploys in the `github-pages` environment, and that
+  # environment's deployment policy allows the `main` branch alone: a dispatch at a tag ref is refused
+  # by GitHub and the site never updates after a release. A dispatch's build retries for the release's
+  # .sha256 asset instead of skipping without it (pages.yml:53), so main's page is built with this
+  # release's hash.
+  #
+  # A job of its own (#189): `actions: write` can start a workflow run, but also cancel and re-run every
+  # run and delete artifacts and caches, so it is kept away from the third-party release action the
+  # publish job runs. This job checks out nothing and runs no third-party action.
+  dispatch-site:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: write # the dispatch, and nothing else in this job can use it
+    steps:
       - name: Build the site
         env:
           GH_TOKEN: ${{ github.token }}
-          # The publish job has no checkout, so gh has no git remote to read the repository
-          # from and exits 1 with "not a git repository". GH_REPO names the repository instead.
+          # The job has no checkout, so gh has no git remote to read the repository from and exits 1
+          # with "not a git repository". GH_REPO names the repository instead.
           GH_REPO: ${{ github.repository }}
         run: gh workflow run pages.yml --ref main

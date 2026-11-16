@@ -725,11 +725,12 @@ pub async fn restore_active(app: &Arc<App>) {
     let failures = app.scene.failures();
     let store = app.store.read().await;
     let scene = active_scene(&store.scenes);
-    tracing::info!(scene = %scene.name, groups = scene.groups.len(), dark = failures.len(), "the active scene was restored");
+    tracing::info!(target: crate::logging::LOG_TARGET, scene = %scene.name, groups = scene.groups.len(), dark = failures.len(), "the active scene was restored");
     for group in &scene.groups {
         let Plays::Effect { effect, .. } = &group.plays else { continue };
         if failures.contains_key(&group.id) && effect == crate::migration::USER_POISON_ID {
             tracing::warn!(
+                target: crate::logging::LOG_TARGET,
                 path = %crate::paths::effects_dir().join(crate::migration::USER_POISON_FILE).display(),
                 "the user effect file is missing; install it to run this effect"
             );

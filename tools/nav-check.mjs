@@ -30,9 +30,8 @@ import { fileURLToPath } from "node:url";
 const here = path.dirname(fileURLToPath(import.meta.url));
 const repo = path.resolve(here, "..");
 const out = path.join(repo, "app", "web", "out");
-const require = createRequire(path.join(repo, "tools", "poison-compare", "js", "package.json"));
-const { chromium } = require("playwright");
-
+// Playwright is loaded inside main(), so judge() can be imported by tools/tests without needing
+// the browser install. The tool's CLI behaviour is unchanged.
 const args = process.argv.slice(2);
 const flag = (name) => {
   const i = args.indexOf(name);
@@ -43,7 +42,7 @@ const shotTag = shotsDir ? args[args.indexOf("--shots") + 2] : null;
 const WIDTHS = (flag("--widths") ?? "360,390,430").split(",").map(Number);
 const SCHEMES = ["dark", "light"];
 const mutateLabels = args.includes("--mutate-labels");
-const PAGES = [
+export const PAGES = [
   { name: "scenes", url: "/", label: "Scenes" },
   { name: "effects", url: "/effects/", label: "Effects" },
   { name: "devices", url: "/devices/", label: "Devices" },
@@ -154,7 +153,7 @@ const MEASURE = () => {
   };
 };
 
-function judge(m, page, width) {
+export function judge(m, page, width) {
   const bad = [];
   if (m.error) return [m.error];
   if (m.nav.position !== "fixed") return [`nav is ${m.nav.position}, not the fixed bottom bar`];
@@ -181,12 +180,17 @@ function judge(m, page, width) {
   else if (active[0].hidden) bad.push(`${active[0].text}: the active link shows no label`);
   if (drawn === 0) bad.push("no label is drawn at all");
   // Every icon in the dock is on one line: the active link's name must not lift its icon.
-  const withIcon = m.links.filter((l) => l.iconCentre !== null);
-  if (withIcon.length) {
-    const lo = Math.min(...withIcon.map((l) => l.iconCentre));
-    const hi = Math.max(...withIcon.map((l) => l.iconCentre));
+  // #57: a link with no .rail-icon used to be dropped from this assertion, so the check could
+  // pass with a silent hole in the dock. A missing icon is a failure now, not a skipped link.
+  for (const l of m.links) {
+    if (l.iconCentre === null) bad.push(`${l.text}: no .rail-icon in the dock`);
+  }
+  const centres = m.links.map((l) => l.iconCentre).filter((c) => c !== null);
+  if (centres.length) {
+    const lo = Math.min(...centres);
+    const hi = Math.max(...centres);
     if (hi - lo > 1) {
-      const where = withIcon.map((l) => `${l.text} ${l.iconCentre.toFixed(1)}`).join(", ");
+      const where = m.links.filter((l) => l.iconCentre !== null).map((l) => `${l.text} ${l.iconCentre.toFixed(1)}`).join(", ");
       bad.push(`the icons are not on one line: ${(hi - lo).toFixed(1)}px apart (${where})`);
     }
   }
@@ -223,6 +227,8 @@ async function checkNames(page) {
 }
 
 async function main() {
+  const require = createRequire(path.join(repo, "tools", "poison-compare", "js", "package.json"));
+  const { chromium } = require("playwright");
   await new Promise((resolve) => server.listen(0, "127.0.0.1", resolve));
   const port = server.address().port;
   let browser;
@@ -300,7 +306,10 @@ async function main() {
   if (failures.length) process.exitCode = 1;
 }
 
-main().catch((e) => {
-  console.error(e);
-  process.exit(2);
-});
+// Only run the CLI when invoked as a script; tools/tests imports judge() without a browser.
+if (process.argv[1] && path.resolve(process.argv[1]) === fileURLToPath(import.meta.url)) {
+  main().catch((e) => {
+    console.error(e);
+    process.exit(2);
+  });
+}

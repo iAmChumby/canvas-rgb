@@ -61,8 +61,8 @@ jobs:
   # could replace the Release workflow's pending build; with one entry a push has no second
   # place to queue. What is still possible: a push that builds, queued after a dispatch is
   # pending, replaces that pending entry. It runs at the push's commit, which is the release
-  # commit or a later one, finds its own version's .sha256, and builds the same version with the
-  # same hash, so it deploys the same page. Nothing cancels a run that is going
+  # commit or a later one, finds its own version's .sha256, and builds that version with its
+  # own hash, so it deploys the same page or a newer one. Nothing cancels a run that is going
   # (cancel-in-progress: false): the Release workflow's build of the site must go out, and a
   # push that lands while it runs must not cancel it (GitHub's own Pages workflows queue the
   # same way, actions/starter-workflows pages/static.yml). What it costs: the site's builds are

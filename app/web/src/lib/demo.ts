@@ -219,7 +219,7 @@ interface DemoState {
   peripherals: DemoPeripheral[];
   /** What the daemon may do with each peripheral. Nothing is on until the owner says so. */
   peripheralAccess: Record<string, PeripheralAccess>;
-  /** The user effect files that did not parse. */
+  /** The user effect files that did not load (a parse error or a load timeout). */
   failedEffects: FailedEffect[];
   /** The draft on the lights, in memory only, as the daemon holds one. */
   draft: {

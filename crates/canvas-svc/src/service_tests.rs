@@ -79,20 +79,6 @@ fn core(fake_port: u16, boot: Rgb8, home: &TempDir) -> (Core, FakeProcesses) {
     (Core::new(fans, openrgb, daemon), processes)
 }
 
-/// The adapter sends LED updates without waiting for a reply, and the fake server applies them
-/// on its own task, so a test polls until the colors land (or gives up after 2 s).
-async fn wait_for_colors(fake: &FakeOpenRgbServer, index: u32, expected: &[Rgb8]) -> Vec<Rgb8> {
-    let mut last = Vec::new();
-    for _ in 0..100 {
-        last = fake.colors(index);
-        if last == expected {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(20)).await;
-    }
-    last
-}
-
 /// A daemon that has not beaten yet is not connected, so the boot color is painted while it
 /// starts (#163). On the branch before the fix the grace made it count as connected, and the
 /// lights stayed dark until the daemon said it was up.
@@ -111,7 +97,7 @@ async fn the_boot_color_is_painted_while_the_daemon_starts() {
     // A second tick a second later: the count has held still, so the boot color goes out.
     core.tick(t0 + Duration::from_secs(1)).await;
     assert_eq!(
-        wait_for_colors(&fake, 0, &[boot; 4]).await,
+        fake.wait_for_colors(0, &[boot; 4]).await,
         vec![boot; 4],
         "the boot color was not painted while the daemon starts"
     );

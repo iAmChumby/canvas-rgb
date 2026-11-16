@@ -4,6 +4,7 @@ import type { FailedEffect } from "./FailedEffect";
 
 export type EffectsResponse = { effects: Array<EffectSummary>, active: string | null, 
 /**
- * User effect files in the effects folder that did not parse, so an author sees why.
+ * User effect files in the effects folder that did not load (a parse error, or a script
+ * that ran out of time), so an author sees why.
  */
 failed: Array<FailedEffect>, };

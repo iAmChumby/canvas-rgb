@@ -11,6 +11,15 @@ use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
+/// The daemon's own log target: the name a `RUST_LOG` filter says for the daemon's lines
+/// (`RUST_LOG=canvas_rgbd=info`). It is spelled here and nowhere else.
+///
+/// A line that lived in the `canvas-rgbd` binary and moved into this library keeps it by
+/// passing `target: LOG_TARGET`, so it goes on answering the same filter instead of the
+/// module target it landed in (`canvas_daemon::device_sync` and the like), which a narrowed
+/// `RUST_LOG` drops (#87, #446). The default filter below names it too.
+pub const LOG_TARGET: &str = "canvas_rgbd";
+
 /// How long a day's log file may grow before the daemon stops writing to it.
 pub const MAX_BYTES_PER_DAY: u64 = canvas_proto::consts::LOG_MAX_BYTES_PER_DAY;
 
@@ -130,6 +139,20 @@ const WRITE_PENDING: u8 = 0;
 const WRITE_STARTED: u8 = 1;
 const WRITE_TAKEN_BACK: u8 = 2;
 
+/// Puts the state back to PENDING if the helper unwinds. A `write` that panics after taking
+/// the line must not leave it STARTED: the caller would then read "the helper owns the line",
+/// skip the fallback, and lose the line entirely (follow-up #72). On a normal return the state
+/// stays STARTED, so a caller that timed out still knows the helper owns the line.
+struct ResetOnPanic(std::sync::Arc<std::sync::atomic::AtomicU8>);
+
+impl Drop for ResetOnPanic {
+    fn drop(&mut self) {
+        if std::thread::panicking() {
+            self.0.store(WRITE_PENDING, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+}
+
 /// Runs `write` on a helper thread and waits at most `limit`, so that the line is written AT MOST
 /// ONCE. Returns `true` when the line is in the file, or the helper has begun writing it and may
 /// still finish after the limit (the caller must not write it again: a late append plus a second
@@ -149,13 +172,15 @@ pub fn write_once_within(
         if helper_state.compare_exchange(WRITE_PENDING, WRITE_STARTED, SeqCst, SeqCst).is_err() {
             return;
         }
+        let _reset = ResetOnPanic(std::sync::Arc::clone(&helper_state));
         helper_wrote.store(write().is_ok(), SeqCst);
     });
     if finished {
         wrote.load(SeqCst)
     } else {
         // Past the limit: if the helper has not begun, take the write back (it will skip it);
-        // if it has begun, it owns the line.
+        // if it has begun (or it panicked and put it back), the caller owns the line when the
+        // take-back succeeds.
         state.compare_exchange(WRITE_PENDING, WRITE_TAKEN_BACK, SeqCst, SeqCst).is_err()
     }
 }
@@ -197,7 +222,7 @@ pub fn init(name: &str) -> std::io::Result<()> {
     *DIRECT_TARGET.lock().unwrap_or_else(|poisoned| poisoned.into_inner()) = Some((dir.clone(), name.to_string()));
 
     let filter = EnvFilter::try_from_default_env()
-        .unwrap_or_else(|_| EnvFilter::new("canvas_daemon=info,canvas_rgbd=info,warn"));
+        .unwrap_or_else(|_| EnvFilter::new(format!("canvas_daemon=info,{LOG_TARGET}=info,warn")));
 
     // `try_init` fails when a subscriber is already installed (which happens in tests).
     let subscriber = tracing_subscriber::registry()
@@ -488,6 +513,20 @@ mod tests {
         assert!(write_once_within(std::time::Duration::from_millis(250), || Ok(())));
     }
 
+    /// #36 follow-up (#72): a helper that panics must not leave the state STARTED. If it does,
+    /// `write_once_within` reports "the helper owns the line" and the caller skips the fallback,
+    /// so the line is lost. The panic guard puts the state back so the caller takes the write back.
+    #[test]
+    fn a_panicking_helper_lets_the_caller_write_the_fallback() {
+        let caller_owns_line = write_once_within(std::time::Duration::from_millis(50), || {
+            panic!("the direct write panicked");
+        });
+        assert!(
+            !caller_owns_line,
+            "a panicked helper wrote nothing: the caller must be told to write the fallback"
+        );
+    }
+
     #[test]
     fn a_bounded_run_gives_up_on_a_stuck_step_and_waits_for_a_quick_one() {
         let limit = std::time::Duration::from_millis(250);
@@ -508,6 +547,110 @@ mod tests {
         let lines: Vec<&str> = text.lines().collect();
         assert!(lines[0].contains("WARN") && lines[0].contains("0 devices") && lines[0].contains("nothing was written"), "{text}");
         assert!(lines[1].contains("INFO") && lines[1].contains("2 devices"), "{text}");
+    }
+
+    /// Every log line that lived in the `canvas-rgbd` binary before it moved into this library,
+    /// with the file it lives in now and the commit that moved it (#446). A line that moved keeps
+    /// `target: LOG_TARGET`, or a narrowed `RUST_LOG=canvas_rgbd=...` drops it (#87).
+    const MOVED_FROM_THE_BINARY: [(&str, &str, &str); 5] = [
+        ("device_sync.rs", "78eeb8bb", "this device is never driven; it gets no frames"),
+        ("device_sync.rs", "78eeb8bb", "device gone; its frame sink is removed"),
+        ("device_sync.rs", "78eeb8bb", "device frame sink added"),
+        ("scenes.rs", "9104caa8", "the active scene was restored"),
+        ("scenes.rs", "9104caa8", "the user effect file is missing; install it to run this effect"),
+    ];
+
+    /// Every `.rs` file under this crate's `src`, keyed by its path inside `src` (`scenes.rs`,
+    /// `api/scenes.rs`), with its text.
+    fn source_files() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, root: &std::path::Path, into: &mut Vec<(String, String)>) {
+            for entry in std::fs::read_dir(dir).expect("the source folder is readable").flatten() {
+                let path = entry.path();
+                if path.is_dir() {
+                    walk(&path, root, into);
+                } else if path.extension().is_some_and(|e| e == "rs") {
+                    let text = std::fs::read_to_string(&path).expect("a source file is readable");
+                    let name = path.strip_prefix(root).expect("under src").to_string_lossy().replace('\\', "/");
+                    into.push((name, text));
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src");
+        let mut files = Vec::new();
+        walk(&root, &root, &mut files);
+        files
+    }
+
+    /// The line `offset` falls on, 1-based.
+    fn line_of(source: &str, offset: usize) -> usize {
+        source[..offset].matches('\n').count() + 1
+    }
+
+    /// The `tracing::...!` call that holds `offset`, from `tracing::` to its closing `)`.
+    fn log_call_around(source: &str, offset: usize) -> Option<&str> {
+        let start = source[..offset].rfind("tracing::")?;
+        let open = start + source[start..].find('(')?;
+        let mut depth = 0usize;
+        for (i, c) in source[open..].char_indices() {
+            match c {
+                '(' => depth += 1,
+                ')' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return Some(&source[start..open + i + 1]);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
+    /// #446: a line that came from the `canvas-rgbd` binary logs under the daemon's target, so the
+    /// filter that names the binary still catches it. The five un-drivable lines are read from
+    /// the source; the frame-write warning, which a test can drive, is checked through `captured`
+    /// in `writer.rs` (`the_frame_write_warning_keeps_the_daemon_target`).
+    #[test]
+    fn every_line_that_came_from_the_binary_keeps_the_daemon_target() {
+        let files = source_files();
+        for (file, commit, message) in MOVED_FROM_THE_BINARY {
+            let (_, text) = files
+                .iter()
+                .find(|(name, _)| name == file)
+                .unwrap_or_else(|| panic!("{file} is gone: the list in this test is out of date"));
+            let offset = text.find(message).unwrap_or_else(|| {
+                panic!("{file}: the line \"{message}\" (moved in {commit}) is gone; update the list")
+            });
+            let call = log_call_around(text, offset).unwrap_or_else(|| {
+                panic!("{file}:{}: the line \"{message}\" is not inside a tracing call", line_of(text, offset))
+            });
+            assert!(
+                call.contains("target:") && call.contains("LOG_TARGET"),
+                "{file}:{}: \"{message}\" (moved out of the canvas-rgbd binary in {commit}) logs \
+                 under its module target, so a RUST_LOG={LOG_TARGET}=... filter drops it; give it \
+                 target: crate::logging::LOG_TARGET",
+                line_of(text, offset)
+            );
+        }
+    }
+
+    /// #446: the daemon's log target is spelled once, in [`LOG_TARGET`]. A second copy of the
+    /// string drifts from this one the moment the daemon is renamed.
+    #[test]
+    fn the_daemon_log_target_is_spelled_once() {
+        let quoted = format!("\"{LOG_TARGET}\"");
+        for (path, text) in source_files() {
+            if path == "logging.rs" {
+                continue;
+            }
+            if let Some(offset) = text.find(&quoted) {
+                panic!(
+                    "crates/canvas-daemon/src/{path}:{}: the daemon's log target is written out \
+                     here instead of using logging::LOG_TARGET",
+                    line_of(&text, offset)
+                );
+            }
+        }
     }
 
     #[test]
