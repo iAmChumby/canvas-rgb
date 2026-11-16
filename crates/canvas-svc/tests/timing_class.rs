@@ -108,6 +108,8 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-svc/src/openrgb_tests.rs", "sleep(between)", "open: a real sleep between two steps that run on synthetic clocks, to let the fake OpenRGB server see the first write; whether a stalled runner needs longer is not traced (UNKNOWN)"),
     ("canvas-svc/src/update_install_tests.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop of a killed child, with a 10 s deadline that fails"),
     ("canvas-svc/src/update_install_tests.rs", "sleep(Duration::from_millis(300))", "safe: asserts a suspended setup has NOT run"),
+    ("app/src-tauri/src/gpui_editor.rs", "sleep(Duration::from_millis(100))", "safe: lets the clock move so a rewrite of the prefs file shows as a new mtime; a slower runner only widens the gap"),
+    ("app/src-tauri/src/gpui_editor.rs", "sleep(Duration::from_millis(20))", "safe: the poll loop that waits for the event, with a 20 s deadline that fails"),
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -299,6 +301,8 @@ fn scan_repo() -> (usize, Vec<Finding>, Used) {
     let root = repo_root();
     let mut files = Vec::new();
     collect(&root.join("crates"), &mut files);
+    // The tray's own test code (`app/src-tauri/src`): the same class, another area (#242).
+    collect(&root.join("app/src-tauri/src"), &mut files);
     let mut read = Vec::new();
     for path in &files {
         let rel = path

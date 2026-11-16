@@ -505,6 +505,21 @@ line. Three mechanisms, and one bug the timing only exposed.
   one free for a connect, and nothing is asked to bind it later; the ones that keep their listener bound for
   the whole check (`crates/canvas-daemon/src/cli.rs`, both `peer.rs` copies, `tests/exit_lines.rs`,
   `tests/quit.rs`'s `free_port` for OpenRGB) hold the socket while they read it.
+- [#242](https://github.com/iAmChumby/canvas-rgb/issues/242): one full `cargo test -p canvas-rgb-tray`
+  run failed four update tests and hung on the service-report test. Four shapes, all in the tray's
+  own test code. A port was picked and given up (`app/src-tauri/src/api.rs:188`,
+  `app/src-tauri/src/update/tests.rs:654` and `:1678`), so another socket could answer for it: the
+  client then read a stranger's answer, or a read timeout, instead of a closed port. A test folder
+  was named after the process id and a counter (`app/src-tauri/src/update/tests.rs:62`), so a run
+  that was killed left its folder behind and the next run with the same process id and the same
+  counter took it again, with the earlier run's state file and report in it. A report was dated by
+  the machine's clock, and the tray reads a report only when it was written at or after the start
+  of the install it belongs to (`read_fresh_result`), so a clock that stepped back made the tray
+  ignore a report that was really this install's. And the download had no deadline of the test's
+  own, so a server that never answered held the run for the production's fifteen minutes. Fixed:
+  the port is held while the test runs (`closed_port`), the folder is emptied before it is used,
+  the report carries the time of the install it belongs to, and the tests set their own download
+  deadline (`Settings::download_timeout`). The guard below scans the tray's test code too.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
@@ -567,7 +582,7 @@ line. Three mechanisms, and one bug the timing only exposed.
     ticker that paces the ticks and a clock that reads the ticks are two clocks, and the gap between
     them is the machine's speed.
 - **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
-  the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
+  the test code under `crates/` and the tray's own test code (`app/src-tauri/src`, #242) (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
   `main.rs` declares as a `#[cfg(test)]` module such as `canvas-core/src/cpu.rs`, and a source file from
   its last `#[cfg(test)] mod`) and fails with `file:line` on (1) a measured duration compared with `<` or `<=`
   (`elapsed()`, `took`, `waited`, `.as_millis()` and similar), and (2) a `sleep(` followed within three
