@@ -240,6 +240,42 @@ describe("the chain takeover", () => {
     expect(api.chains.start).toHaveBeenLastCalledWith(DEVICE, 2);
   });
 
+  it("the introduction is drawn once per visit and the next header gets the short card", async () => {
+    const second = chain(2, "JARGB 2", "not_set_up");
+    await show([chain(1, "JARGB 1", "not_set_up"), second]);
+    expect(screen.getByText("Tell the app about your lights.")).toBeTruthy();
+
+    api.chains.list.mockResolvedValue({
+      chains: [chain(1, "JARGB 1", "set_up", [part(1, "Fan 1", 120, 0, "fan")], 120), second],
+    });
+    await finish();
+    await press("Done");
+    await flush();
+
+    expect(screen.getByText("Next: JARGB 2.")).toBeTruthy();
+    expect(screen.getByText("Is anything plugged into it?")).toBeTruthy();
+    expect(screen.queryByText("Tell the app about your lights.")).toBeNull();
+    // The card has the same three keys, and no session is open until Start.
+    expect(screen.getByRole("button", { name: "Start" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Nothing is plugged in here" })).toBeTruthy();
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+  });
+
+  it("a header marked empty on the introduction opens the next card with the notice above it", async () => {
+    const second = chain(2, "JARGB 2", "not_set_up");
+    await show([chain(1, "JARGB 1", "not_set_up"), second]);
+
+    api.chains.list.mockResolvedValue({ chains: [chain(1, "JARGB 1", "empty"), second] });
+    await press("Nothing is plugged in here");
+    await flush();
+
+    expect(api.chains.empty).toHaveBeenCalledWith(DEVICE, 1, { session: SESSION });
+    expect(screen.getByText("Next: JARGB 2.")).toBeTruthy();
+    expect(
+      screen.getByText("JARGB 1 is marked empty. Set it up again from Devices, then add its lights to your scenes."),
+    ).toBeTruthy();
+  });
+
   it("an empty header is not offered again", async () => {
     const second = chain(2, "JARGB 2", "not_set_up");
     await show([chain(1, "JARGB 1", "empty"), second]);
