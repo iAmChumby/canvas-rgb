@@ -91,7 +91,20 @@ describe("the demo's HTML slots (#370)", () => {
     expect(stackHtmlSlots(maskedStack("solid", "html:gone"), effects)).toBe(0);
   });
 
-  it("the stacks route reports the slots, not the layers", async () => {
+  it("the stacks route reports a layer's HTML mask as a slot of its own", async () => {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/?state=html,stack");
+    const demo = await import("@/lib/demo");
+    // One layer whose effect and its mask are both HTML: the route reports two slots, where a
+    // count of the layers alone would report one.
+    await demo.demoRequest("PUT", "/api/v1/stacks/stack:Masked", maskedStack("html:ink-drop", "html:ink-drop"));
+    const list = (await demo.demoRequest("GET", "/api/v1/stacks", undefined)) as StacksResponse;
+    const found = list.stacks.find((stack) => stack.id === "stack:Masked");
+    expect(found?.layers).toBe(1);
+    expect(found?.html_layers).toBe(2);
+  });
+
+  it("a mask whose effect is gone takes no slot on the route either", async () => {
     vi.resetModules();
     window.history.replaceState({}, "", "/?state=stack-gone-mask");
     const demo = await import("@/lib/demo");

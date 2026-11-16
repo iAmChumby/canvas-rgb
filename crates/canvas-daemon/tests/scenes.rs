@@ -2671,8 +2671,9 @@ async fn a_group_whose_build_fails_still_takes_its_html_runtime() {
     scenes.scenes[0].groups[0].plays = plays("html:gone");
     let rig = rig_loaded(&scenes, &[]).await;
 
-    // The first group took the first runtime and built nothing; the second took the second.
-    assert_eq!(rig.app.scene.builds(), 1, "only the second group built");
+    // The first group took the first runtime and its build was attempted and failed; the second
+    // took the second and built. The third was never attempted: the failed group kept its slot.
+    assert_eq!(rig.app.scene.builds(), 2, "the first two groups were attempted, the third was not");
     let failures = rig.app.scene.failures();
     assert!(
         failures.get("one").is_some_and(|why| why.as_str() != HTML_LIMIT_SENTENCE),

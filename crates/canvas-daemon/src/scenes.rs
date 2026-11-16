@@ -1678,11 +1678,6 @@ fn stack_slots(stack: &canvas_proto::stack::Stack, known: &crate::stacks::KnownE
     stack.layers.iter().map(|layer| crate::stacks::html_slots(layer, known)).sum()
 }
 
-/// True when `group` plays the stack `stack`.
-fn plays_stack(group: &Group, stack: &str) -> bool {
-    matches!(&group.plays, Plays::Effect { effect, .. } if effect == stack)
-}
-
 /// The sentence for a scene that starts more HTML runtimes than it may (#370, design Q3), with the
 /// limit and the scene's own count in it. One function, so every refusal and the row of every group
 /// past the limit say the same words, and the words name the number and the fix.
@@ -1737,46 +1732,42 @@ pub async fn check_takeover_html_limit(
     Ok(())
 }
 
-/// Checks the HTML limit for a stack save: a save is refused only when it puts a scene that
-/// plays this stack over the limit.
+/// Checks the HTML limit for a stack save: a save is refused only when it puts a scene that plays
+/// this stack over the limit.
 ///
-/// Two things make a save harmless, and both are allowed: a stack no scene plays (the file cannot
-/// change any scene's count with it), and a save that keeps or lowers the count of every scene
-/// that plays it. The second is what lets the owner fix an over-limit scene by editing the stack:
-/// a pair already over the limit on file is not made worse by a save that takes HTML away, so it
-/// is not refused. A save is refused when it adds an HTML runtime to a scene whose count with it
-/// would be over [`SCENE_HTML_MAX`].
+/// The rule is per scene, before and after the draft: a scene's count with the stack as saved
+/// against its count with the stack being saved. Two things make a save harmless, and both are
+/// allowed: a stack no scene plays (its count is the same before and after), and a save that keeps
+/// or lowers the count (nothing got worse). The second is what lets the owner fix an over-limit
+/// scene by editing the stack, so a pair already over the limit on file is not locked. A save is
+/// refused when it raises a scene's count to more than [`SCENE_HTML_MAX`].
 pub async fn check_stack_html_limit(
     app: &App,
     stack: &canvas_proto::stack::Stack,
 ) -> Result<(), String> {
     let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
     let draft = stack_slots(stack, &known);
-    // The stack as saved: a stack that is not on file counts nothing, so its first save is
-    // measured against zero.
-    let saved = saved_stack_slots(app, &stack.id, &known);
-    if draft <= saved {
-        return Ok(());
-    }
+    // The group's effect names this stack as `Stacks::get` finds it: its id or its name, ignoring
+    // ASCII case, trimmed. A scene holds either.
+    let names_this = |effect: &str| {
+        let wanted = effect.trim();
+        wanted.eq_ignore_ascii_case(&stack.id) || wanted.eq_ignore_ascii_case(stack.name())
+    };
     let scenes = {
         let store = app.store.read().await;
         store.scenes.scenes.clone()
     };
     for scene in &scenes {
-        // A scene that does not play the stack is untouched by the save: its count stays what it
-        // is, over the limit or not.
-        if !scene.groups.iter().any(|group| plays_stack(group, &stack.id)) {
-            continue;
-        }
-        let count = html_runtime_count(scene, &|id| {
-            if id == stack.id {
+        let old = html_runtime_count(scene, &|id| saved_stack_slots(app, id, &known));
+        let new = html_runtime_count(scene, &|id| {
+            if names_this(id) {
                 draft
             } else {
                 saved_stack_slots(app, id, &known)
             }
         });
-        if count > SCENE_HTML_MAX {
-            return Err(html_limit_sentence(count));
+        if new > old && new > SCENE_HTML_MAX {
+            return Err(html_limit_sentence(new));
         }
     }
     Ok(())
