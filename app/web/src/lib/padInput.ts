@@ -343,7 +343,10 @@ export interface PadStub {
   id?: string;
   /** "standard", or "" for a pad whose buttons the app cannot place. */
   mapping?: string;
-  /** How many more pads the list carries after this one, each with nothing held. */
+  /**
+   * How many more pads the list carries after this one, each with nothing held, so a shot can
+   * show the page naming which pad it reads.
+   */
   others?: number;
   /** The button indices that are held down, the standard numbering. */
   buttons?: number[];
@@ -422,11 +425,14 @@ function stubPads(): PadGamepad[] | null {
       axes: [stub.lx ?? 0, stub.ly ?? 0, stub.rx ?? 0, stub.ry ?? 0],
     },
   ];
-  // The other pads a shot needs: each says it is standard, carries no ids of its own, and
-  // holds nothing, so the page has to choose and says which one it shows.
+  // The other pads a shot needs: each holds nothing, and each says it is in a layout the page
+  // cannot read. That keeps the page on the pad the harness stamps: when several pads are
+  // connected and none carries the device's ids, the page reads the first one it can place
+  // (`pickPad`), so a readable extra would take the shot away from the pad the harness drives.
+  // The page still has to name its choice: it says "Showing pad 1 of N.".
   const up = Array.from({ length: count }, () => ({ pressed: false, value: 0 }));
   for (let i = 0; i < (stub.others ?? 0); i++) {
-    pads.push({ connected: true, mapping: "standard", buttons: up, axes: [0, 0, 0, 0] });
+    pads.push({ connected: true, mapping: "", buttons: up, axes: [0, 0, 0, 0] });
   }
   stubCache = { stub, pads };
   return pads;
