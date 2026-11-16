@@ -640,9 +640,23 @@ async fn the_timeout_restores_the_length_and_the_lights() {
         wait_until(Duration::from_secs(40), || rig.server.zone_leds(0, 0) == Some(EARLIER)).await,
         "the timeout never put the header's length back"
     );
-    assert!(!rig.home.join(CHAIN_RESTORE_FILE).exists(), "the record is deleted");
-    assert!(rig.app.zone_holds.read().await.is_empty(), "the hold is dropped");
-    assert!(rig.app.identify.setup_session().is_none(), "the setup ended");
+    // The daemon deletes the record, drops the hold and ends the setup after it puts the
+    // length back, so each is waited for, not read the moment the length is seen.
+    assert!(
+        wait_until(Duration::from_secs(30), || !rig.home.join(CHAIN_RESTORE_FILE).exists()).await,
+        "the record is deleted"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            rig.app.zone_holds.try_read().is_ok_and(|holds| holds.is_empty())
+        })
+        .await,
+        "the hold is dropped"
+    );
+    assert!(
+        wait_until(Duration::from_secs(30), || rig.app.identify.setup_session().is_none()).await,
+        "the setup ended"
+    );
 
     let sink = sink_of(&rig, BOARD).await.expect("the board has a frame sink");
     sink.submit(vec![Rgb8::WHITE; 180]);
