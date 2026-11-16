@@ -134,6 +134,88 @@ pub enum EffectsCommand {
     Import(ImportArgs),
     /// Check a SignalRGB-format HTML effect. No daemon needed.
     Check(CheckArgs),
+    /// Print an effect's HTML source, or write it to a new file (#377).
+    Source(SourceArgs),
+    /// Delete an effect this run imported (#377).
+    Delete(EffectDeleteArgs),
+    /// The presets of an effect (#377).
+    #[command(subcommand)]
+    Preset(PresetCommand),
+}
+
+/// `canvas-rgb effects preset ...` (#377)
+#[derive(Debug, Subcommand)]
+pub enum PresetCommand {
+    /// List an effect's presets: the built-in ones and yours.
+    List(PresetListArgs),
+    /// Save a new preset of yours: a name and the properties.
+    Save(PresetSaveArgs),
+    /// Delete a preset this run saved.
+    Delete(PresetDeleteArgs),
+}
+
+/// `canvas-rgb effects preset list <effect>` (#377)
+#[derive(Debug, Args)]
+pub struct PresetListArgs {
+    /// The effect's id.
+    pub effect: String,
+}
+
+/// `canvas-rgb effects preset save <effect> <name> [--prop k=v]... [--run <run>]` (#377)
+#[derive(Debug, Args)]
+pub struct PresetSaveArgs {
+    /// The effect's id.
+    pub effect: String,
+    /// The preset's name: a new one, at most 40 characters.
+    pub name: String,
+    /// A property of the preset, as `key=value`. Repeatable.
+    #[arg(long = "prop", value_name = "KEY=VALUE")]
+    pub props: Vec<String>,
+    /// The run this save belongs to: its record is `agent-runs/<run>.json`.
+    #[arg(long, value_name = "RUN")]
+    pub run: Option<String>,
+}
+
+/// `canvas-rgb effects preset delete <effect> <name> --run <run> [--dry-run]` (#377)
+#[derive(Debug, Args)]
+pub struct PresetDeleteArgs {
+    /// The effect's id.
+    pub effect: String,
+    /// The preset's name.
+    pub name: String,
+    /// The run that saved the preset: its record is `agent-runs/<run>.json`.
+    #[arg(long, value_name = "RUN")]
+    pub run: String,
+    /// Run every check and print what would happen; delete nothing.
+    #[arg(long)]
+    pub dry_run: bool,
+}
+
+/// `canvas-rgb effects source <effect> [--out <file>]` (#377)
+#[derive(Debug, Args)]
+pub struct SourceArgs {
+    /// The effect's id: an `html:` effect, a stock one included.
+    pub effect: String,
+    /// Write the source to this new file instead of printing it. An existing file is not
+    /// written over.
+    #[arg(long, value_name = "FILE")]
+    pub out: Option<String>,
+}
+
+/// `canvas-rgb effects delete <effect> [--keep-presets] --run <run> [--dry-run]` (#377)
+#[derive(Debug, Args)]
+pub struct EffectDeleteArgs {
+    /// The effect's id.
+    pub effect: String,
+    /// Keep the effect's presets in the library. Without it they go with the effect.
+    #[arg(long)]
+    pub keep_presets: bool,
+    /// The run that imported the effect: its record is `agent-runs/<run>.json`.
+    #[arg(long, value_name = "RUN")]
+    pub run: String,
+    /// Run every check and print what would happen; delete nothing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 /// `canvas-rgb effects activate <Name|id> [--<prop> <value>]...`
@@ -288,17 +370,20 @@ pub struct GroupMoveArgs {
     pub dry_run: bool,
 }
 
-/// `canvas-rgb effects import <file> [--replace]`
+/// `canvas-rgb effects import <file> [--replace] [--run <run>]`
 #[derive(Debug, Args)]
 pub struct ImportArgs {
     /// The HTML file to import.
     pub file: String,
-    /// Overwrite an effect of the same name.
+    /// Overwrite an effect of the same name. With `--run`, only an effect that run imported.
     #[arg(long)]
     pub replace: bool,
+    /// The run this import belongs to: its record is `agent-runs/<run>.json` (#377).
+    #[arg(long, value_name = "RUN")]
+    pub run: Option<String>,
 }
 
-/// `canvas-rgb effects check <file> [--png <path>] [--preview <dir>]`
+/// `canvas-rgb effects check <file> [--png <path>] [--preview <dir>] [--prop k=v]...`
 #[derive(Debug, Args)]
 pub struct CheckArgs {
     /// The HTML file to check.
@@ -309,6 +394,10 @@ pub struct CheckArgs {
     /// Write the library tile as a GIF and a contact sheet of its frames into this folder.
     #[arg(long, value_name = "DIR")]
     pub preview: Option<String>,
+    /// A property to draw the 120 frames and the PNG with, as `key=value`. Repeatable. The
+    /// library tile is always drawn at the defaults (#377).
+    #[arg(long = "prop", value_name = "KEY=VALUE")]
+    pub props: Vec<String>,
 }
 
 /// `canvas-rgb output ...`
@@ -489,6 +578,52 @@ pub fn parse_prop_pair(pair: &str) -> Result<(String, String), String> {
     Ok((key.trim().to_string(), value.trim().to_string()))
 }
 
+/// Parses the `--prop key=value` arguments of `effects check` and `effects preset save` (#377).
+///
+/// Each argument is split at its first `=`, so a value may hold more of them. An argument with
+/// no `=`, one with no key, and a key given twice are refused with one plain sentence each; a
+/// repeated key would otherwise win silently by its place.
+pub fn parse_prop_args(args: &[String]) -> Result<Vec<(String, String)>, String> {
+    let mut pairs: Vec<(String, String)> = Vec::with_capacity(args.len());
+    for arg in args {
+        let (key, value) = parse_prop_pair(arg)?;
+        if key.is_empty() {
+            return Err(format!("{arg:?} has no property name before the ="));
+        }
+        if pairs.iter().any(|(seen, _)| *seen == key) {
+            return Err(format!("--prop {key} is given twice; give each property once"));
+        }
+        pairs.push((key, value));
+    }
+    Ok(pairs)
+}
+
+/// Turns parsed `--prop` pairs into typed properties, each checked against the kind `kind_of`
+/// finds for its key. A key the effect does not have, and a value of the wrong kind or outside
+/// its range, are refused.
+fn typed_props(
+    pairs: &[(String, String)],
+    kind_of: impl Fn(&str) -> Option<canvas_proto::props::PropKind>,
+) -> Result<canvas_proto::props::Props, String> {
+    let mut props = canvas_proto::props::Props::new();
+    for (key, raw) in pairs {
+        let Some(kind) = kind_of(key) else {
+            return Err(format!("{key} is not a property of this effect"));
+        };
+        let value = parse_prop_value(&kind, raw).map_err(|e| format!("--prop {key}: {e}"))?;
+        props.insert(key.clone(), value);
+    }
+    Ok(props)
+}
+
+/// The kind of the property `key` in an effect's schema as the daemon's JSON carries it.
+fn json_prop_kind(properties: &[serde_json::Value], key: &str) -> Option<canvas_proto::props::PropKind> {
+    let found = properties
+        .iter()
+        .find(|property| property.get("key").and_then(|v| v.as_str()) == Some(key))?;
+    serde_json::from_value(found.get("kind")?.clone()).ok()
+}
+
 /// Parses the `--<prop> <value>` pairs the CLI takes after `effects activate`.
 pub fn parse_activate_props(args: &[String]) -> Result<BTreeMap<String, String>, String> {
     let mut map = BTreeMap::new();
@@ -555,8 +690,15 @@ pub struct CheckReport {
 /// The file is read and handed to [`check_source`]. The error is the parser's own message, or
 /// why the file could not be read.
 pub fn check_effect(path: &str, png: Option<&str>) -> Result<CheckReport, String> {
+    check_effect_with(path, png, &[])
+}
+
+/// [`check_effect`] with `--prop key=value` arguments: the frames and the PNG are drawn with
+/// those properties laid over the defaults. The arguments are parsed before the file is read.
+pub fn check_effect_with(path: &str, png: Option<&str>, props: &[String]) -> Result<CheckReport, String> {
+    parse_prop_args(props)?;
     let source = std::fs::read_to_string(path).map_err(|e| format!("could not read {path}: {e}"))?;
-    check_source(&source, png)
+    check_source_with(&source, png, props)
 }
 
 /// Checks a SignalRGB-format HTML effect's source, with no daemon involved.
@@ -565,10 +707,21 @@ pub fn check_effect(path: &str, png: Option<&str>) -> Result<CheckReport, String
 /// the 320x200 canvas. The error is the parser's own message. `effects check` reads a file and
 /// calls this; the editor's preview route renders a draft with the same runtime.
 pub fn check_source(source: &str, png: Option<&str>) -> Result<CheckReport, String> {
+    check_source_with(source, png, &[])
+}
+
+/// [`check_source`] with `--prop key=value` arguments laid over the effect's defaults (#377). A
+/// key the effect does not have, or a value its kind refuses, is an error and nothing is drawn.
+pub fn check_source_with(source: &str, png: Option<&str>, prop_args: &[String]) -> Result<CheckReport, String> {
+    let pairs = parse_prop_args(prop_args)?;
     let mut effect = canvas_html::HtmlEffect::from_source("check", source, &canvas_proto::props::Props::new())
         .map_err(|e| e.to_string())?;
     let schema = effect.schema();
-    effect.init(&schema.defaults());
+    let mut props = schema.defaults();
+    props.extend(typed_props(&pairs, |key| {
+        schema.properties.iter().find(|p| p.key == key).map(|p| p.kind.clone())
+    })?);
+    effect.init(&props);
 
     let mut canvas = canvas_proto::Canvas::new(CHECK_WIDTH, CHECK_HEIGHT);
     let inputs = canvas_proto::Inputs::default();
@@ -921,14 +1074,22 @@ impl CliError {
     }
 }
 
-/// What `--json` prints on stdout when `scenes create`, `scenes edit` or `scenes delete` fails:
-/// one document, `{"saved": false, "run": <run or null>, "error": "<text>"}`, for every kind of
-/// failure. Any other command answers `None` and keeps its own output.
+/// What `--json` prints on stdout when `scenes create`, `scenes edit`, `scenes delete` or one of
+/// the effects commands of #377 (`effects import`, `check`, `source`, `delete` and `preset
+/// list|save|delete`) fails: one document, `{"saved": false, "run": <run or null>, "error":
+/// "<text>"}`, for every kind of failure. Any other command answers `None` and keeps its own
+/// output.
 pub fn failure_document(command: &Command, error: &CliError) -> Option<serde_json::Value> {
     let run = match command {
         Command::Scenes(ScenesCommand::Create(args)) => args.run.as_deref(),
         Command::Scenes(ScenesCommand::Edit(args)) => Some(args.run.as_str()),
         Command::Scenes(ScenesCommand::Delete(args)) => Some(args.run.as_str()),
+        Command::Effects(EffectsCommand::Import(args)) => args.run.as_deref(),
+        Command::Effects(EffectsCommand::Delete(args)) => Some(args.run.as_str()),
+        Command::Effects(EffectsCommand::Check(_) | EffectsCommand::Source(_)) => None,
+        Command::Effects(EffectsCommand::Preset(PresetCommand::List(_))) => None,
+        Command::Effects(EffectsCommand::Preset(PresetCommand::Save(args))) => args.run.as_deref(),
+        Command::Effects(EffectsCommand::Preset(PresetCommand::Delete(args))) => Some(args.run.as_str()),
         _ => return None,
     };
     Some(serde_json::json!({ "saved": false, "run": run, "error": error.to_string() }))
@@ -1891,6 +2052,513 @@ pub fn scenes_list_text(answer: &serde_json::Value) -> String {
         out.push_str(&format!("{marker} {id:<24} {name}\n"));
     }
     out
+}
+
+// Effects and presets (#377).
+//
+// None of these commands needs [`check_daemon_version`]: the version gate exists for a request
+// whose body carries a field an older daemon would ignore and then write without. Every request
+// here is one the daemon has served since 0.10 (a preset POST and DELETE, an effect DELETE and its
+// `keep_presets` query, an import and its `replace`, the source route), and an older daemon that
+// lacks a route answers 404, loudly, with nothing written.
+
+/// `text` as one path segment: everything but `A-Z a-z 0-9 - . _ ~` is percent-encoded, so an
+/// effect id like `html:my effect` or a preset name with a `/` in it cannot change the route.
+fn path_segment(text: &str) -> String {
+    let mut out = String::with_capacity(text.len());
+    for byte in text.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'.' | b'_' | b'~') {
+            out.push(char::from(byte));
+        } else {
+            out.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    out
+}
+
+/// A route with `{id}` filled in with an effect's id.
+fn effect_route(route: &str, effect: &str) -> String {
+    route.replace("{id}", &path_segment(effect))
+}
+
+/// The route of one preset of an effect.
+fn preset_route(effect: &str, name: &str) -> String {
+    canvas_proto::api::routes::EFFECT_PRESET
+        .replace("{id}", &path_segment(effect))
+        .replace("{name}", &path_segment(name))
+}
+
+/// The effect's canonical id in an `GET /effects/{id}` answer, or what the caller typed.
+fn effect_id_of(detail: &serde_json::Value, typed: &str) -> String {
+    detail
+        .get("schema")
+        .and_then(|schema| schema.get("id"))
+        .and_then(|v| v.as_str())
+        .unwrap_or(typed)
+        .to_string()
+}
+
+/// Reads a file of at most `max` bytes as text, reading no more than `max + 1` bytes of it. A
+/// file over the cap is refused with one sentence before anything is sent.
+fn read_capped(file: &str, max: usize, what: &str) -> Result<String, CliError> {
+    use std::io::Read as _;
+    let unreadable = |e: std::io::Error| CliError::Other(format!("could not read {file}: {e}"));
+    let mut bytes = Vec::new();
+    std::fs::File::open(file)
+        .map_err(unreadable)?
+        .take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(unreadable)?;
+    if bytes.len() > max {
+        return Err(CliError::Other(format!("{file} is over {max} bytes, more than {what} may hold")));
+    }
+    String::from_utf8(bytes).map_err(|_| CliError::Other(format!("{file} is not text (UTF-8)")))
+}
+
+/// Writes `bytes` to a file that does not exist yet.
+fn write_new_file(path: &str, bytes: &[u8]) -> Result<(), CliError> {
+    use std::io::Write as _;
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(path)
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::AlreadyExists {
+                CliError::Other(format!("{path} already exists; pick another file name"))
+            } else {
+                CliError::Other(format!("could not create {path}: {e}"))
+            }
+        })?;
+    file.write_all(bytes)
+        .map_err(|e| CliError::Other(format!("could not write {path}: {e}")))
+}
+
+/// The record of a run that is about to write for the first time: the one it has, or a new one
+/// started from the scenes as they are now (the `before` an undo needs).
+fn record_for_write(
+    api: &dyn Api,
+    run: &str,
+    existing: Option<crate::agent_run::RunRecord>,
+) -> Result<crate::agent_run::RunRecord, CliError> {
+    match existing {
+        Some(record) => Ok(record),
+        None => {
+            let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+            Ok(crate::agent_run::RunRecord::start(run, &list))
+        }
+    }
+}
+
+/// Saves the record with a write pending, before the request goes out. A record that cannot be
+/// written sends nothing.
+fn begin_write(record: &mut crate::agent_run::RunRecord, op: &str, what: &str) -> Result<(), CliError> {
+    record.begin(op, what);
+    record
+        .save()
+        .map(|_| ())
+        .map_err(|e| CliError::Other(format!("{e}; nothing was sent")))
+}
+
+/// The refusal for a thing a run did not make: `<what> was not made by run <run>; nothing
+/// changed`, with the writes the run holds with no known outcome named.
+fn not_made_by(record: &crate::agent_run::RunRecord, run: &str, what: &str) -> CliError {
+    CliError::Other(format!("{what} was not made by run {run}; nothing changed{}", pending_note(record, run)))
+}
+
+/// True when any group of the scene plays the effect (the id matches without regard to case).
+fn scene_plays_effect(scene: &serde_json::Value, effect: &str) -> bool {
+    scene.get("groups").and_then(|v| v.as_array()).is_some_and(|groups| {
+        groups.iter().any(|group| {
+            let plays = group.get("plays");
+            plays.and_then(|p| p.get("type")).and_then(|v| v.as_str()) == Some("effect")
+                && plays
+                    .and_then(|p| p.get("effect"))
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|played| played.eq_ignore_ascii_case(effect))
+        })
+    })
+}
+
+/// The whole of an effect, copied into the run's folder before it is deleted or written over: its
+/// id, file name and source, and with `presets` also its user presets (a delete takes them too).
+/// The effect's source is read from the daemon; an answer with no source is an error, and nothing
+/// is copied or sent.
+fn copy_effect(api: &dyn Api, run: &str, effect: &str, presets: bool) -> Result<(), CliError> {
+    let answer = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT_SOURCE, effect), None)?;
+    let Some(source) = answer.get("source").and_then(|v| v.as_str()) else {
+        return Err(CliError::Other(format!("the daemon sent no source for {effect}; nothing changed")));
+    };
+    let mut doc = serde_json::json!({
+        "id": effect,
+        "file_name": answer.get("file_name").cloned().unwrap_or(serde_json::Value::Null),
+        "source": source,
+    });
+    if presets {
+        let detail = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT, effect), None)?;
+        doc["user_presets"] = detail
+            .get("user_presets")
+            .cloned()
+            .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    }
+    crate::agent_run::save_effect_copy(run, &doc)?;
+    Ok(())
+}
+
+/// `canvas-rgb effects import <file> [--replace] [--run <run>]`.
+///
+/// The file is read first, capped at [`canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES`]: a file
+/// that is missing or too big is a local problem, reported without asking the daemon anything.
+/// With `--run` the import is saved to the run's record as pending before the request goes out,
+/// and the new effect's id is noted after. With `--run` and `--replace`, an effect that already
+/// has the file's name is overwritten only when the run imported it, and its whole content is
+/// copied into the run's folder first; any other is refused. Without `--run` nothing is recorded
+/// or copied, as before.
+pub fn effects_import(api: &dyn Api, args: &ImportArgs, json: bool) -> Result<Output, CliError> {
+    // A run id is checked before it is joined to a path, and before anything is read or sent.
+    let existing = match &args.run {
+        Some(run) => crate::agent_run::read(run)?,
+        None => None,
+    };
+    let path = std::path::Path::new(&args.file);
+    let file_name = path
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .ok_or_else(|| CliError::Other(format!("{} has no file name", args.file)))?;
+    let html = read_capped(&args.file, canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES, "an effect file")?;
+
+    let mut record = None;
+    if let Some(run) = &args.run {
+        if args.replace {
+            // The id the file will have, as the daemon derives it: `html:` and the file's stem.
+            let stem = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
+            let id = format!("{}{stem}", crate::user_effects::USER_EFFECT_PREFIX);
+            let listed = api.call("GET", canvas_proto::api::routes::EFFECTS, None)?;
+            let exists = listed
+                .get("effects")
+                .and_then(|v| v.as_array())
+                .is_some_and(|list| list.iter().any(|e| str_of(e, "id").eq_ignore_ascii_case(&id)));
+            if exists {
+                let made = existing.as_ref().and_then(|r| r.made_effect(&id)).map(|m| m.id.clone());
+                let Some(made) = made else {
+                    return Err(match &existing {
+                        Some(record) => not_made_by(record, run, &id),
+                        None => CliError::Other(format!("{id} was not made by run {run}; nothing changed")),
+                    });
+                };
+                // The copy goes first: a failed copy sends nothing.
+                copy_effect(api, run, &made, false)?;
+            }
+        }
+        let mut started = record_for_write(api, run, existing)?;
+        begin_write(&mut started, "import", &file_name)?;
+        record = Some(started);
+    }
+    let body = serde_json::json!({ "file_name": file_name, "html": html, "replace": args.replace }).to_string();
+    let answer = match api.call("POST", canvas_proto::api::routes::EFFECTS_IMPORT, Some(&body)) {
+        Ok(answer) => answer,
+        Err(e) => {
+            if let Some(record) = record.as_mut() {
+                settle_pending(record, "import", &file_name, &e);
+            }
+            return Err(e);
+        }
+    };
+    let effect = answer.get("effect");
+    let id = effect.and_then(|e| e.get("id")).and_then(|v| v.as_str()).map(str::to_string);
+    let name = effect.and_then(|e| e.get("name")).and_then(|v| v.as_str()).unwrap_or("?").to_string();
+    let replaced = answer.get("replaced").and_then(|v| v.as_bool()).unwrap_or(false);
+    if let Some(mut record) = record {
+        // An answer with no id leaves the pending entry: the effect may be there, unnamed.
+        let Some(id) = &id else {
+            return Err(CliError::Other(format!(
+                "the daemon's answer named no effect, so {file_name} is not in the run record; check canvas-rgb effects list"
+            )));
+        };
+        record.note_effect(id);
+        record.finish("import", &file_name);
+        record.save().map_err(|e| {
+            CliError::Other(format!("the effect {id} was imported, but its run record could not be written: {e}"))
+        })?;
+    }
+    let id = id.unwrap_or_else(|| "?".to_string());
+    Ok(if json {
+        Output::Json(serde_json::json!({
+            "saved": true,
+            "run": args.run,
+            "effect": effect.cloned().unwrap_or(serde_json::Value::Null),
+            "replaced": replaced,
+        }))
+    } else if replaced {
+        Output::Text(format!("imported {id} ({name}); it replaced the file of the same name\n"))
+    } else {
+        Output::Text(format!("imported {id} ({name})\n"))
+    })
+}
+
+/// `canvas-rgb effects source <effect> [--out <file>]`: an `html:` effect's source, stock ones
+/// included. Printed as it is, or written to a new file (an existing file is never written over).
+pub fn effects_source(api: &dyn Api, args: &SourceArgs, json: bool) -> Result<Output, CliError> {
+    let answer = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT_SOURCE, &args.effect), None)?;
+    let Some(source) = answer.get("source").and_then(|v| v.as_str()) else {
+        return Err(CliError::Other(format!("the daemon sent no source for {}", args.effect)));
+    };
+    let Some(out) = &args.out else {
+        return Ok(if json { Output::Json(answer.clone()) } else { Output::Text(source.to_string()) });
+    };
+    write_new_file(out, source.as_bytes())?;
+    Ok(if json {
+        Output::Json(serde_json::json!({
+            "id": args.effect,
+            "file_name": answer.get("file_name").cloned().unwrap_or(serde_json::Value::Null),
+            "out": out,
+            "bytes": source.len(),
+        }))
+    } else {
+        Output::Text(format!("wrote {} bytes of {} to {out}\n", source.len(), args.effect))
+    })
+}
+
+/// `canvas-rgb effects delete <effect> [--keep-presets] --run <run> [--dry-run]`.
+///
+/// Refused, before anything is sent, for an effect the run did not import, and for an effect any
+/// scene still plays (the scenes are named; there is no flag to force it, because the groups
+/// would go dark). The effect's whole content is copied into the run's folder, and the delete is
+/// saved to the record as pending, before the delete is sent. A dry run runs the checks and
+/// sends, copies and writes nothing.
+pub fn effects_delete(api: &dyn Api, args: &EffectDeleteArgs, json: bool) -> Result<Output, CliError> {
+    let mut record = crate::agent_run::load(&args.run)?;
+    let Some(made) = record.made_effect(&args.effect).map(|m| m.id.clone()) else {
+        return Err(not_made_by(&record, &args.run, &args.effect));
+    };
+    let list = api.call("GET", canvas_proto::api::routes::SCENES, None)?;
+    let players: Vec<String> = scenes_of(&list)
+        .iter()
+        .filter(|scene| scene_plays_effect(scene, &made))
+        .map(|scene| format!("\"{}\"", str_of(scene, "name")))
+        .collect();
+    if !players.is_empty() {
+        return Err(CliError::Other(format!(
+            "{made} is played by {} {}; nothing deleted. Move those groups to another effect first.",
+            if players.len() == 1 { "the scene" } else { "the scenes" },
+            players.join(", ")
+        )));
+    }
+    if args.dry_run {
+        return Ok(effect_deleted_output(&args.run, &made, None, true, json));
+    }
+    // The copy goes first: the effect is still there if the delete fails.
+    copy_effect(api, &args.run, &made, true)?;
+    begin_write(&mut record, "effect-delete", &made)?;
+    let mut path = effect_route(canvas_proto::api::routes::EFFECT, &made);
+    if args.keep_presets {
+        path.push_str("?keep_presets=true");
+    }
+    let answer = match api.call("DELETE", &path, None) {
+        Ok(answer) => answer,
+        Err(e) => {
+            settle_pending(&mut record, "effect-delete", &made, &e);
+            return Err(e);
+        }
+    };
+    record.forget_effect(&made);
+    if !args.keep_presets {
+        record.forget_presets_of(&made);
+    }
+    record.finish("effect-delete", &made);
+    record.save().map_err(|e| {
+        CliError::Other(format!("the effect {made} was deleted, but its run record could not be written: {e}"))
+    })?;
+    Ok(effect_deleted_output(&args.run, &made, Some(&answer), false, json))
+}
+
+/// What `effects delete` prints: `deleted html:x (2 presets removed)`, or `would delete html:x`.
+fn effect_deleted_output(
+    run: &str,
+    id: &str,
+    answer: Option<&serde_json::Value>,
+    dry_run: bool,
+    json: bool,
+) -> Output {
+    let removed = answer.and_then(|a| a.get("presets_removed")).and_then(|v| v.as_u64()).unwrap_or(0);
+    if json {
+        return Output::Json(serde_json::json!({
+            "saved": !dry_run,
+            "run": run,
+            "deleted": id,
+            "presets_removed": removed,
+        }));
+    }
+    let said = if dry_run { "would delete" } else { "deleted" };
+    let tail = match removed {
+        0 => String::new(),
+        1 => " (1 preset removed)".to_string(),
+        n => format!(" ({n} presets removed)"),
+    };
+    Output::Text(format!("{said} {id}{tail}\n"))
+}
+
+/// `canvas-rgb effects preset list <effect>`: the built-in presets and the user's own.
+pub fn preset_list(api: &dyn Api, args: &PresetListArgs, json: bool) -> Result<Output, CliError> {
+    let detail = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT, &args.effect), None)?;
+    let built_in = detail
+        .get("schema")
+        .and_then(|schema| schema.get("presets"))
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    let user = detail
+        .get("user_presets")
+        .cloned()
+        .unwrap_or_else(|| serde_json::Value::Array(Vec::new()));
+    if json {
+        return Ok(Output::Json(serde_json::json!({
+            "effect": effect_id_of(&detail, &args.effect),
+            "presets": built_in,
+            "user_presets": user,
+        })));
+    }
+    Ok(Output::Text(preset_list_text(&built_in, &user)))
+}
+
+/// The presets, one per line: where it comes from, its name, and its properties as `key=value`.
+fn preset_list_text(built_in: &serde_json::Value, user: &serde_json::Value) -> String {
+    let mut text = String::new();
+    for (source, list) in [("built-in", built_in), ("yours", user)] {
+        for preset in list.as_array().into_iter().flatten() {
+            let props = preset
+                .get("props")
+                .and_then(|v| v.as_object())
+                .map(|props| {
+                    props
+                        .iter()
+                        .map(|(key, value)| format!("{key}={}", prop_value_text(value)))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                })
+                .unwrap_or_default();
+            text.push_str(&format!("{source:<9} {:<40} {props}\n", str_of(preset, "name")));
+        }
+    }
+    if text.is_empty() {
+        "no presets\n".to_string()
+    } else {
+        text
+    }
+}
+
+/// `canvas-rgb effects preset save <effect> <name> [--prop k=v]... [--run <run>]`.
+///
+/// The properties are parsed, and checked against the effect's schema, before anything is
+/// written. A save is a POST only: a name that already exists (a built-in preset's included) is a
+/// `409`, never an overwrite. With `--run` the save is pending in the record before the request
+/// goes out and the preset is noted after.
+pub fn preset_save(api: &dyn Api, args: &PresetSaveArgs, json: bool) -> Result<Output, CliError> {
+    let existing = match &args.run {
+        Some(run) => crate::agent_run::read(run)?,
+        None => None,
+    };
+    let pairs = parse_prop_args(&args.props)?;
+    let detail = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT, &args.effect), None)?;
+    let effect = effect_id_of(&detail, &args.effect);
+    let properties = detail
+        .get("schema")
+        .and_then(|schema| schema.get("properties"))
+        .and_then(|v| v.as_array())
+        .cloned()
+        .unwrap_or_default();
+    let props = typed_props(&pairs, |key| json_prop_kind(&properties, key))?;
+    let name = args.name.trim().to_string();
+    let what = format!("{effect}/{name}");
+
+    let mut record = None;
+    if let Some(run) = &args.run {
+        let mut started = record_for_write(api, run, existing)?;
+        begin_write(&mut started, "preset-save", &what)?;
+        record = Some(started);
+    }
+    let body = serde_json::to_string(&canvas_proto::api::PresetCreate { name: name.clone(), props })
+        .map_err(|e| CliError::Other(e.to_string()))?;
+    let answer = match api.call("POST", &effect_route(canvas_proto::api::routes::EFFECT_PRESETS, &effect), Some(&body)) {
+        Ok(answer) => answer,
+        Err(e) => {
+            if let Some(record) = record.as_mut() {
+                settle_pending(record, "preset-save", &what, &e);
+            }
+            return Err(e);
+        }
+    };
+    if let Some(mut record) = record {
+        record.note_preset(&effect, &name);
+        record.finish("preset-save", &what);
+        record.save().map_err(|e| {
+            CliError::Other(format!(
+                "the preset \"{name}\" of {effect} was saved, but its run record could not be written: {e}"
+            ))
+        })?;
+    }
+    Ok(if json {
+        Output::Json(serde_json::json!({
+            "saved": true,
+            "run": args.run,
+            "effect": effect,
+            "preset": name,
+            "user_presets": answer.get("user_presets").cloned().unwrap_or(serde_json::Value::Null),
+        }))
+    } else {
+        Output::Text(format!("saved preset \"{name}\" of {effect}\n"))
+    })
+}
+
+/// `canvas-rgb effects preset delete <effect> <name> --run <run> [--dry-run]`.
+///
+/// Only a preset the run saved may be deleted: any other is refused before anything is sent. The
+/// preset is copied whole into the run's folder, and the delete is saved to the record as
+/// pending, before the delete is sent. A dry run runs the checks and writes nothing.
+pub fn preset_delete(api: &dyn Api, args: &PresetDeleteArgs, json: bool) -> Result<Output, CliError> {
+    let mut record = crate::agent_run::load(&args.run)?;
+    let detail = api.call("GET", &effect_route(canvas_proto::api::routes::EFFECT, &args.effect), None)?;
+    let effect = effect_id_of(&detail, &args.effect);
+    let wanted = args.name.trim();
+    let found = detail
+        .get("user_presets")
+        .and_then(|v| v.as_array())
+        .and_then(|list| list.iter().find(|p| str_of(p, "name").eq_ignore_ascii_case(wanted)))
+        .cloned();
+    let Some(found) = found else {
+        return Err(CliError::Other(format!(
+            "{effect} has no preset of yours named \"{wanted}\"; nothing changed"
+        )));
+    };
+    let name = str_of(&found, "name").to_string();
+    if record.made_preset(&effect, &name).is_none() {
+        return Err(not_made_by(&record, &args.run, &format!("the preset \"{name}\" of {effect}")));
+    }
+    if !args.dry_run {
+        let what = format!("{effect}/{name}");
+        // The copy goes first: the preset is still there if the delete fails.
+        crate::agent_run::save_preset_copy(&args.run, &effect, &found)?;
+        begin_write(&mut record, "preset-delete", &what)?;
+        if let Err(e) = api.call("DELETE", &preset_route(&effect, &name), None) {
+            settle_pending(&mut record, "preset-delete", &what, &e);
+            return Err(e);
+        }
+        record.forget_preset(&effect, &name);
+        record.finish("preset-delete", &what);
+        record.save().map_err(|e| {
+            CliError::Other(format!(
+                "the preset \"{name}\" of {effect} was deleted, but its run record could not be written: {e}"
+            ))
+        })?;
+    }
+    Ok(if json {
+        Output::Json(serde_json::json!({
+            "saved": !args.dry_run,
+            "run": args.run,
+            "deleted": { "effect": effect, "preset": name },
+        }))
+    } else {
+        let said = if args.dry_run { "would delete" } else { "deleted" };
+        Output::Text(format!("{said} preset \"{name}\" of {effect}\n"))
+    })
 }
 
 /// `canvas-rgb fans status`: the fan headers, the temperatures and the active profile.
