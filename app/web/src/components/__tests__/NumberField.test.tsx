@@ -17,7 +17,7 @@ function setup(over: Partial<React.ComponentProps<typeof NumberField>> = {}) {
 const field = () => screen.getByRole("textbox", { name: "Devices on JARGB 1" }) as HTMLInputElement;
 
 describe("NumberField", () => {
-  it("puts the value back on Escape, commits nothing and keeps the focus", () => {
+  it("puts the value back on Escape and commits nothing", () => {
     const onCommit = setup();
     const input = field();
     fireEvent.focus(input);
