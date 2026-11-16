@@ -357,8 +357,9 @@ line. Three mechanisms, and one bug the timing only exposed.
   had already written a newer draft. Under load the builder's own first commit (its empty draft) ran
   late: a starter wrote its three layers, the mirror was put back to empty, and the queued starter
   composed on an empty stack (`useStackEdits.ts` `addStack`) and landed alone, overwriting the first.
-  Measured in a loaded run of `src/views` (98 files in parallel): 1 failed of 1, log order `land
-  sunset 3` → `ref-sync 0` → `land warm 1`; 49 single-file runs before it had not failed.
+  Measured in a loaded run of `src/views` (98 files in parallel): the test failed, log order `land
+  sunset 3` → `ref-sync 0` → `land warm 1`. The trigger is the loaded machine: the file run alone
+  failed once in 48 runs.
 - **Class fix:** done (#332) for this mirror. One object, `DraftMirror`
   (`app/web/src/views/effects/draftMirror.ts`): `write()` is what an edit calls with the draft it
   wrote and its version, `commit()` is what the builder's effect calls with the draft React committed
@@ -369,12 +370,13 @@ line. Three mechanisms, and one bug the timing only exposed.
   draft after a write (the reverse, which an identity-only rule broke: `StackBuilderStates.test.tsx`
   failed 4 of 6 runs). `addOne` and `addStack` write through the mirror; every other hook still reads
   `draftRef.current`. Test: `app/web/src/views/__tests__/DraftMirror.test.ts` (the late empty commit,
-  a reset newer than a write, the write's own commit, a write older than the mirror). The queue test
-  then passed 60 times in two loaded runs of `src/views` (30 repetitions of it per run, 100 files in
-  parallel) where the unfixed code failed on the first such run.
+  a reset newer than a write, the write's own commit, a write older than the mirror) and
+  `StackHistoryVersions.test.tsx`, which makes the late commit by hand on the real hook, with no
+  wait, and checks that undo, redo and a reset each get a newer version. The queue test then passed
+  60 times in two loaded runs of `src/views` (30 repetitions of it per run, 100 files in parallel).
 - **The rule this adds:** a mirror of React state that async code reads is written by the code that
-  writes the state, never assigned from every commit; a commit is followed only when nothing newer is
-  in flight. Siblings of the shape, found and not fixed: the same file's two sleeps that decide a
+  writes the state, never assigned from every commit; a commit is followed only when it is at least as new as what
+  the mirror already holds. Siblings of the shape, found and not fixed: the same file's two sleeps that decide a
   verdict (`StackBuilderStarters.test.tsx:111`, `:121`, 150 ms and 50 ms) and
   `EffectDraft.test.tsx:204` (120 ms then a count of PUTs, which failed once in a loaded run of
   `src/views` and passed on the next).
