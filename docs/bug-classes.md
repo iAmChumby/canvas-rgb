@@ -218,6 +218,8 @@ or acts as if a step worked without checking that it did.
   "does the daemon drive this device?", now gates every place a light is made
   (`crates/canvas-daemon/src/scenes.rs`, `scene_migration.rs`, `composite.rs`), and the leftover
   already stored is removed at start, after a snapshot, only when the owner never touched it.
+  The rule itself now lives in one shared place, `crates/canvas-adapters/src/drive.rs`
+  (`is_driven`), so the service's boot and black paint ask it too (#413).
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
