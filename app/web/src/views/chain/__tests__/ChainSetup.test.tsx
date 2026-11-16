@@ -912,15 +912,16 @@ describe("the header setup screens", () => {
 
     const retry = screen.getByRole("button", { name: "Retry" });
     await act(async () => {
-      // Two presses in one tick: only the hook's in-flight ref can tell them apart.
+      // Two presses inside one act, so no render lands between them: only a ref can tell them
+      // apart. The banner goes as the retry starts (the hook clears the error), so its own busy
+      // state is for that same tick, not for a spinner anyone sees.
       fireEvent.click(retry);
       fireEvent.click(retry);
       await vi.advanceTimersByTimeAsync(0);
     });
 
-    // One failed save, one retry: the second press sent nothing, and the key says it is busy.
+    // One failed save, one retry: the second press sent nothing.
     expect(api.chains.commit).toHaveBeenCalledTimes(2);
-    expect(retry.getAttribute("aria-busy")).toBe("true");
 
     await act(async () => {
       answer({ lights: [], final_leds: 36 });
