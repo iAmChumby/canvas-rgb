@@ -124,7 +124,8 @@ export function MoveStep({ groupId, copy, use, lights, onClose }: MoveStepProps)
   // moving and copying.
   useEffect(() => {
     const born = ++epoch.current;
-    setChecks({});
+    // Each question puts its own row back to pending as it is asked, so no answer of the last
+    // question is left on a row; a scene that is no longer listed has no row to show one on.
     for (const id of targetIds) void ask(id, born);
     return () => {
       // The step closed, or the question changed: every answer still on its way is stale.
