@@ -114,7 +114,8 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
 /// labels, arrangements and `reversed` flags are gone (the files hold the only copy).
 pub fn sync_lights(lights: &mut LightsFile, devices: &[DeviceInfo]) -> Vec<LightId> {
     let mut added = Vec::new();
-    for device in devices {
+    // A device the daemon never drives (`crate::is_driven`) gets no light (#393).
+    for device in devices.iter().filter(|d| crate::is_driven(&d.id)) {
         for zone in device.zones.iter().filter(|z| z.led_count > 0) {
             let empty = lights.chains.iter().any(|c| {
                 c.device_id == device.id
