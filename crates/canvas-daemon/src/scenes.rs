@@ -1414,6 +1414,36 @@ async fn build_one(build: &EffectBuilder, group: &str) -> Result<Box<dyn Effect>
         .map_err(|e| format!("the effect load task failed: {e}"))?
 }
 
+/// The groups of `scene` the HTML limit leaves dark: by the time the scene order reaches one of
+/// them, the groups before it have already spent [`SCENE_HTML_MAX`] runtimes (#370). This is
+/// [`build_and_set`]'s rule, read from the scene a save left, so [`apply_group_change`] can tell a
+/// group the limit left dark from one whose effect could not be built (#419). A group whose build
+/// failed still spent its runtime, so it is not one of these.
+fn groups_over_the_html_limit(app: &App, scene: &Scene) -> HashSet<String> {
+    let known = crate::stacks::KnownEffects::from_user(&app.user_effects);
+    let slots_of = |id: &str| saved_stack_slots(app, id, &known);
+    let mut runtimes = 0usize;
+    let mut over = HashSet::new();
+    for group in &scene.groups {
+        let slots = group_html_runtimes(group, &slots_of);
+        if runtimes + slots > SCENE_HTML_MAX {
+            over.insert(group.id.clone());
+        } else {
+            runtimes += slots;
+        }
+    }
+    over
+}
+
+/// The effect a group's plays names, when it plays one. A pattern or a stack is an id like any
+/// other: whether it spends an HTML runtime is [`group_html_runtimes`]'s question.
+fn effect_named(plays: &Plays) -> Option<&str> {
+    match plays {
+        Plays::Effect { effect, .. } => Some(effect),
+        Plays::Off => None,
+    }
+}
+
 /// Brings the engine from `old` to `new`, the same scene saved with a change. It rebuilds only the
 /// groups that changed: a new value for the same effect (`set_group_props`), a new brightness, a
 /// group set to Off or to another effect (`set_group_effect` for that group alone). When a group
@@ -1446,17 +1476,24 @@ pub async fn apply_group_change(app: &Arc<App>, lock: &SceneLock<'_>, old: &Scen
         return;
     }
     let mut failures = app.scene.failures();
+    // The groups the HTML limit leaves dark, read from the scene the save left (#419).
+    let over_the_limit = groups_over_the_html_limit(app, new);
     for (before, after) in old.groups.iter().zip(&new.groups) {
         // A group the takeover holds keeps the draft: its change lands when the takeover ends.
         if taken_over && held.contains(&after.id) {
             continue;
         }
-        // A group that is dark (its effect could not be built) is tried again on every save, even
-        // one that names the same effect: the file may be back.
+        // A group that is dark because its effect could not be built is tried again on every
+        // save, even one that names the same effect: the file may be back. A group the HTML limit
+        // left dark is not (#419): this save freed no runtime, so building it would put the
+        // engine over the cap the scene was loaded past. It is built again when its own effect
+        // changes, or when a full build decides it runs.
         let dark = failures.contains_key(&after.id);
-        if before.plays != after.plays || dark {
+        let limited =
+            dark && over_the_limit.contains(&after.id) && effect_named(&before.plays) == effect_named(&after.plays);
+        if before.plays != after.plays || (dark && !limited) {
             match (&before.plays, &after.plays) {
-                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && !dark => {
+                (Plays::Effect { effect: was, .. }, Plays::Effect { effect: now, props }) if was == now && (!dark || limited) => {
                     app.engine.set_group_props(&after.id, props);
                 }
                 (_, Plays::Off) => {

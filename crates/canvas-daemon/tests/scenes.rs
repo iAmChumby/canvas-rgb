@@ -2688,6 +2688,90 @@ async fn a_group_whose_build_fails_still_takes_its_html_runtime() {
     );
 }
 
+/// #419: a save of one group's brightness or props does not retry a group the HTML limit left
+/// dark. The save freed no runtime, so building that group would run the scene past the cap it was
+/// loaded past. The two groups that run keep running, the third stays dark, and nothing is built.
+#[tokio::test]
+async fn a_group_save_beside_a_scene_over_the_html_limit_builds_nothing() {
+    let scene = Scene {
+        id: "main".into(),
+        name: "Main".into(),
+        rev: 1,
+        groups: vec![
+            group("one", &["fake:a#z0"], "html:spark", Props::new()),
+            group("two", &["fake:b#z0"], "html:spark", Props::new()),
+            group("three", &["fake:c#z0"], "html:spark", Props::new()),
+        ],
+    };
+    let written = ScenesFile { schema_version: SCENES_SCHEMA, active: "main".into(), scenes: vec![scene] };
+    // The real HTML builder, so the effect's own schema keeps the property the patch names: a
+    // props route that changes nothing would not exercise the path a slider or an editor takes.
+    let rig = rig_unstarted_with(written, &[("spark.html", SPARK)], canvas_daemon::user_effects::html_builder()).await;
+    canvas_daemon::scenes::restore_active(&rig.app).await;
+    let built = rig.app.scene.builds();
+    assert_eq!(built, 2, "start-up built the two runtimes the limit allows");
+    assert_eq!(
+        rig.app.scene.failures().get("three").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the third group is the one the limit leaves dark"
+    );
+
+    // A brightness write on one running group: what a slider sends.
+    let path = route(routes::GROUP_BRIGHTNESS, &[("id", "main"), ("group", "one")]);
+    let (status, answer) = send(&rig, "PUT", &path, Some(serde_json::json!({ "brightness": 40 }))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // A props change on the other running group: a real change, so the route does its work.
+    let path = route(routes::GROUP_PROPS, &[("id", "main"), ("group", "two")]);
+    let mut patch = Props::new();
+    patch.insert("speed".into(), PropValue::Number(42.0));
+    let (status, answer) = send(&rig, "PATCH", &path, Some(serde_json::to_value(patch).unwrap())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    // No effect was built: the dark group was not retried, so the engine runs two HTML effects,
+    // not three.
+    assert_eq!(
+        rig.app.scene.builds(),
+        built,
+        "a group save builds nothing, so the dark group does not run past the cap"
+    );
+    let failures = rig.app.scene.failures();
+    assert_eq!(failures.len(), 1, "one group is still dark: {failures:?}");
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(HTML_LIMIT_SENTENCE),
+        "the group the limit left dark is still the same one: {failures:?}"
+    );
+
+    // Both writes landed in the store: a full build puts them on the lights.
+    let saved = stored(&rig, "main").await;
+    assert_eq!(saved.groups[0].brightness, 40, "the brightness write was saved");
+    assert!(
+        matches!(&saved.groups[1].plays, Plays::Effect { props, .. } if props.get("speed") == Some(&PropValue::Number(42.0))),
+        "the props change was saved: {:?}",
+        saved.groups[1].plays
+    );
+}
+
+/// #419 keeps what was already there: a group dark because its effect could not be built is still
+/// tried again on every save, because the file may be back.
+#[tokio::test]
+async fn a_group_dark_for_a_build_failure_is_still_retried_by_a_save() {
+    let mut scenes = scenes_file();
+    scenes.scenes[0].groups[0].plays = plays("html:not-there");
+    let rig = rig_in(scenes, &[]).await;
+    let built = rig.app.scene.builds();
+    let state = |rig: &Rig| rig.app.scene.failures().get("left").cloned();
+    assert!(state(&rig).is_some_and(|why| why.contains("not-there")), "named: {:?}", state(&rig));
+
+    // A brightness save on the dark group names no effect change, and still tries it.
+    let path = route(routes::GROUP_BRIGHTNESS, &[("id", "main"), ("group", "left")]);
+    let (status, answer) = send(&rig, "PUT", &path, Some(serde_json::json!({ "brightness": 30 }))).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(rig.app.scene.builds(), built + 1, "a group dark for a real failure is tried again");
+    assert!(state(&rig).is_some_and(|why| why.contains("not-there")), "still dark, still named: {:?}", state(&rig));
+}
+
 /// #370: a scene over the limit stays a valid file, and each door that would put it on the lights
 /// refuses with the daemon's sentence and writes nothing: setting it, activating an effect on its
 /// groups, and a takeover of one of its effects.
