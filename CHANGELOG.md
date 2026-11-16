@@ -24,6 +24,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Scenes: the lights no group holds keep their row at the bottom of the list, the group's menu lines every item up, and a row's tooltip stays out of the way while the row is dragged. (#384)
 - Scenes: putting the groups in a new order no longer restarts their effects, so the lights stay as they are. The order is for display only. (#384)
 - The header setup no longer opens by itself once you say Later, close it or press Escape (#380)
 - Peripherals: the device tabs are set in the same font as the tabs on the other pages. (#373)

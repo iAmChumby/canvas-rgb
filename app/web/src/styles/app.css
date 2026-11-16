@@ -2086,6 +2086,14 @@ button.chip:hover {
   opacity: 1;
 }
 
+/* A bubble that is held back: its control is pressed, so the bubble is in the way (a drag lifts
+   a row over the rows under it). The rule stands after the hover ones, so it wins over them, and
+   the host only carries the mark while the control is pressed: without the script the answer
+   above is still the one. */
+.tip[data-hold="true"] .tip-bubble {
+  opacity: 0;
+}
+
 /* ---------- state dot, sparkline ---------- */
 
 .state {

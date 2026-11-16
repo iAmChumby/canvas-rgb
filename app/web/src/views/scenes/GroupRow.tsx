@@ -1,6 +1,6 @@
 "use client";
 
-import type { CSSProperties, KeyboardEvent, PointerEvent } from "react";
+import type { CSSProperties, DragEvent, KeyboardEvent, PointerEvent } from "react";
 import { useRef, useState } from "react";
 import { ArrowsHorizontal, CopySimple, DotsSixVertical, Moon, Sparkle, WarningCircle, X } from "@phosphor-icons/react";
 import { AnimatedNumber } from "@/components/AnimatedNumber";
@@ -94,6 +94,8 @@ export interface GroupRowProps {
   onBrightness: (groupId: string, n: number) => void;
   /** A press on the row's handle: the pointer drags the row. */
   onGripDown: (group: Group, event: PointerEvent<HTMLButtonElement>) => void;
+  /** The browser tried to drag the row away: the handle is a control, not a picture. */
+  onGripDrag: (event: DragEvent<HTMLButtonElement>) => void;
   /** A key on the row's handle: the arrows that move the group one place. */
   onGripKey: (group: Group, event: KeyboardEvent<HTMLButtonElement>) => void;
 }
@@ -118,6 +120,7 @@ export function GroupRow({
   onOpen,
   onBrightness,
   onGripDown,
+  onGripDrag,
   onGripKey,
 }: GroupRowProps) {
   const off = group.plays.type === "off";
@@ -147,6 +150,7 @@ export function GroupRow({
         icon={<DotsSixVertical size={16} />}
         onClick={() => undefined}
         onPointerDown={(event) => onGripDown(group, event)}
+        onDragStart={onGripDrag}
         onKeyDown={(event) => onGripKey(group, event)}
       />
       <Button
@@ -236,6 +240,9 @@ export function GroupRow({
 export function UnassignedRow({ lights, lightsState = "ready" }: { lights: LightView[]; lightsState?: LightsState }) {
   return (
     <article className={s.row} data-testid="unassigned-row" data-unassigned="true" aria-label="Unassigned">
+      {/* The handle's own column: this row has no handle, but it keeps the room of the one the
+          group rows have, so its name and its preview stand where they stand there. */}
+      <span className={s.gripSpace} data-testid="grip-space" />
       <div className={`${s.who} ${s.whoStatic}`}>
         <span className={s.name}>Unassigned</span>
         <Summary lights={lights} state={lightsState} />

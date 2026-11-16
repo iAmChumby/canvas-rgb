@@ -43,7 +43,7 @@ function ScenesShape({ rows }: { rows: number }) {
       {Array.from({ length: rows }, (_, i) => (
         <div className={s.row} key={i} aria-hidden="true">
           {/* The handle's own column: the placeholder keeps the place of the real row. */}
-          <span className={s.gripSpace} />
+          <span className={s.gripSpace} data-testid="grip-space" />
           <div className={s.who}>
             <Skeleton width={SKEL_NAMES[i % SKEL_NAMES.length]} height={16} />
             <Skeleton width="68%" height={14} />
@@ -551,6 +551,7 @@ export function ScenesView() {
                   }}
                   onBrightness={use.setBrightness}
                   onGripDown={reorder.begin}
+                  onGripDrag={reorder.refuse}
                   onGripKey={onGripKey}
                 />
               );

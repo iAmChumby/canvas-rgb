@@ -371,9 +371,11 @@
   text-align: right;
 }
 
+/* The "dark" mark of the Unassigned row. It stands in the effect's column, the column the group
+   rows' effect key stands in, so the two rows line up. */
 .dark {
   display: inline-flex;
-  grid-column: 3 / -1;
+  grid-column: 4 / -1;
   align-items: center;
   gap: 6px;
   color: var(--mute);
@@ -863,7 +865,8 @@
   text-transform: uppercase;
 }
 
-/* The menu of the sheet and of the scene: one key a row. */
+/* The menu of the sheet and of the scene: one key a row. Every item starts at the same place,
+   the link ("Edit effect") as well as the keys. */
 .sheetMenu {
   display: flex;
   flex-direction: column;
@@ -871,7 +874,8 @@
   min-width: 190px;
 }
 
-.sheetMenu > button {
+.sheetMenu > button,
+.sheetMenu > a {
   justify-content: flex-start;
 }
 

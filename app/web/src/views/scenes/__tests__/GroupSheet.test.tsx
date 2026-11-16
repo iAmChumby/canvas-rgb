@@ -393,6 +393,17 @@ describe("the open group", () => {
     expect((down as HTMLButtonElement).disabled).toBe(false);
   });
 
+  it("the last group cannot go down, and the first one cannot go up", async () => {
+    open("g-two");
+    fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));
+    const up = await screen.findByRole("button", { name: "Move up" });
+    const down = await screen.findByRole("button", { name: "Move down" });
+    // The group is the last one: it cannot go down, but it can go up.
+    expect((down as HTMLButtonElement).disabled).toBe(true);
+    expect(down.getAttribute("title")).toBe("It is already last.");
+    expect((up as HTMLButtonElement).disabled).toBe(false);
+  });
+
   it("Move down puts the group one place down, in one save with the revision the page read", async () => {
     open("g-one");
     fireEvent.click(await screen.findByRole("button", { name: "More about this group" }));

@@ -300,6 +300,22 @@ describe("the Scenes page", () => {
     expect(screen.getByTestId("unassigned-row")).toBeTruthy();
   });
 
+  it("the Unassigned row keeps the handle's column, so its name and its preview are not squashed into it", () => {
+    mount(fake());
+    const group = rows()[0] as HTMLElement;
+    const unassigned = screen.getByTestId("unassigned-row");
+    // The row has no handle, but it keeps the room of the one the group rows have: the same
+    // number of cells, and the handle's column first.
+    expect(unassigned.children.length).toBe(group.children.length);
+    expect(unassigned.firstElementChild?.getAttribute("data-testid")).toBe("grip-space");
+    // Its name stands in the name column and its preview in the run's column, the cells a
+    // group row's stand in, so the two rows line up.
+    expect((unassigned.children[1] as HTMLElement).className).toContain("who");
+    expect((unassigned.children[2] as HTMLElement).className).toContain("runWell");
+    expect((group.children[1] as HTMLElement).className).toContain("who");
+    expect((group.children[2] as HTMLElement).className).toContain("runWell");
+  });
+
   it("pressing a scene key calls setActive with its id", () => {
     const use = fake();
     mount(use);
@@ -738,6 +754,24 @@ describe("the order of the groups inside a scene", () => {
     fireEvent.blur(window);
     fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
     expect(use.calls.reorderGroups).toBeUndefined();
+  });
+
+  it("a row's handle holds its tooltip back while the row is dragged, so the bubble covers nothing", () => {
+    mount(fake());
+    placeRows();
+    const grip = handle(rows()[0] as HTMLElement);
+    const tip = grip.closest(".tip") as HTMLElement;
+    expect(tip).toBeTruthy();
+    expect(tip.getAttribute("data-hold")).toBeNull();
+    // The press begins: the bubble goes, so it cannot cover the row under the pointer.
+    dragHandle(grip, 190);
+    expect(tip.getAttribute("data-hold")).toBe("true");
+    // The row is dropped: the bubble stays away, because the row may have come to rest under
+    // the pointer. It comes back when the pointer has really left the handle.
+    fireEvent.pointerUp(window, { pointerType: "mouse", clientX: 10, clientY: 190 });
+    expect(tip.getAttribute("data-hold")).toBe("true");
+    fireEvent.pointerMove(window, { pointerType: "mouse", clientX: 600, clientY: 600 });
+    expect(tip.getAttribute("data-hold")).toBeNull();
   });
 
   it("the arrow keys on a group's handle put it one place up or down", () => {
