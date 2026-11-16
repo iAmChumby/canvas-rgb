@@ -122,6 +122,7 @@ if ($Rebuild -or -not (Test-Path $daemonExe) -or -not (Test-Path $fakeExe)) {
     Write-Host 'run-fake-daemon: building the debug daemon and the fake OpenRGB server...'
     Push-Location $root
     try {
+        # token: the developer's own, unelevated: the lock script runs cargo and nothing else.
         & powershell -NoProfile -File (Join-Path $root 'tools\with-build-lock.ps1') cargo build -p canvas-daemon --bin canvas-rgbd -p canvas-adapters --example fake_openrgb
         if ($LASTEXITCODE -ne 0) { Write-Error 'run-fake-daemon: build failed.'; exit 1 }
     } finally { Pop-Location }

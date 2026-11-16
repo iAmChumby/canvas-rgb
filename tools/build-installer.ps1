@@ -39,6 +39,7 @@ if (-not $SkipBuild -and -not $env:GITHUB_ACTIONS -and $freeGb -lt $c.MinFreeGb)
 $lockTool = Join-Path $repo 'tools\with-build-lock.ps1'
 function Invoke-Locked([string[]]$Command) {
     Write-Host "build: $($Command -join ' ')"
+    # token: the developer's own, unelevated: the lock script runs the build tools and nothing else.
     & powershell.exe -NoProfile -File $lockTool @Command
     if ($LASTEXITCODE -ne 0) { throw "build failed (exit $LASTEXITCODE): $($Command -join ' ')" }
 }
