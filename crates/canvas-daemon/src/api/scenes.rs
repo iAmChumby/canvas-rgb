@@ -541,6 +541,9 @@ pub async fn delete_scene(
         }
         was_active
     };
+    // The scene is gone, so the groups it kept an HTML runtime for are named by nothing: the
+    // record of the choice (#384) would otherwise outlive it.
+    app.scene.set_html_kept(&id, Vec::new());
     if was_active {
         let _replace = crate::draft::hold_for_replace(&app).await;
         scenes::apply_with(&app, &lock, true).await;
