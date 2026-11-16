@@ -53,7 +53,7 @@ export function LitCountStep({
         </p>
       </div>
       <RunDrawing length={1} />
-      <div className={s.aside}>
+      <div className={`${s.aside} ${s.escapes}`}>
         <Button variant="ghost" size="sm" onClick={onNothing}>
           Nothing lit up
         </Button>

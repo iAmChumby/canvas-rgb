@@ -118,7 +118,7 @@ export function CountStep({
             <span className={s.lineName}>Device {i + 1}</span>
             <span className={s.lineLeds}>
               <AnimatedNumber value={part.leds} />
-              <span className={s.unit}>LEDs</span>
+              <span className={s.unit}>{part.leds === 1 ? "LED" : "LEDs"}</span>
             </span>
           </li>
         ))}

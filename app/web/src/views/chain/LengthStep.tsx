@@ -63,7 +63,7 @@ export function LengthStep({
       </p>
       <div className={s.slot}>
         {panel === null ? (
-          <div className={s.aside}>
+          <div className={`${s.aside} ${s.escapes}`}>
             {copies > 1 && value >= 2 ? (
               <Button variant="ghost" size="sm" onClick={() => setPanel("dark")}>
                 Some went dark

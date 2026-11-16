@@ -297,6 +297,11 @@
   gap: var(--s2);
 }
 
+/* Ghost keys alone in a row: their words, not their padding, line up with the text above. */
+.escapes {
+  margin-left: -10px;
+}
+
 /* The slide's picture: a track of LEDs, the trail white and the last one orange. */
 .track {
   position: relative;
@@ -538,6 +543,11 @@
   line-height: 1.45;
 }
 
+/* The daemon's sentences start in lower case; on screen they start a sentence. */
+.errorText::first-letter {
+  text-transform: uppercase;
+}
+
 .errorScreen {
   display: flex;
   flex-direction: column;
@@ -614,8 +624,10 @@
     padding: var(--s2) var(--s4);
   }
 
+  /* The stage takes the height the phone has (the frame's other rows and the padding come to 289px),
+     so the long screens scroll less; it stays one height on every screen. */
   .chainStage {
-    height: 400px;
+    height: max(400px, calc(100dvh - 289px));
     padding: var(--s4);
   }
 
