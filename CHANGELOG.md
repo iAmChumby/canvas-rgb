@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Fixed
+
+- Finding a light no longer blanks the effect you are editing in the editor while the lights are paused. (#94)
+
 ## [0.17.0] - 2026-11-16
 
 ### Added

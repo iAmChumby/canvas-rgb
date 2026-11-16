@@ -669,6 +669,52 @@ async fn a_saved_activation_ends_the_draft_without_restoring_it() {
     );
 }
 
+/// An identify restore must not write black over a draft on a paused output (#94). The identify
+/// override is sink-level; when it ends on a paused engine the one black frame would replace the
+/// draft's frozen frame while the draft's slot stays active.
+#[tokio::test]
+async fn an_identify_restore_does_not_write_black_over_a_draft_when_paused() {
+    let (router, app, engine, _home, _folder, _clock) = build_with_clock().await;
+    prior_effect(&app, "solid", color("#112233")).await;
+
+    // Paused: the engine renders no new frame, so a restore's black write is the only thing
+    // that reaches the devices.
+    {
+        let mut store = app.store.write().await;
+        store.config.settings.power = canvas_proto::api::Power::Paused;
+    }
+
+    assert_eq!(
+        put_draft(router.clone(), MOVING, serde_json::json!({})).await.status(),
+        StatusCode::OK
+    );
+    assert!(app.draft.is_active(), "the draft is on the lights");
+
+    engine.solid_writes.lock().unwrap().clear();
+    canvas_daemon::identify::restore(&app).await;
+    let writes = engine.solid_writes.lock().unwrap().clone();
+    assert!(writes.is_empty(), "identify restore must not write black over a draft: {writes:?}");
+    assert!(app.draft.is_active(), "the restore leaves the draft slot alone");
+
+    // With no draft the paused output still gets its one black frame.
+    assert_eq!(
+        router
+            .clone()
+            .oneshot(request("DELETE", routes::EFFECT_DRAFT))
+            .await
+            .expect("the router answers")
+            .status(),
+        StatusCode::OK
+    );
+    assert!(!app.draft.is_active());
+    canvas_daemon::identify::restore(&app).await;
+    assert_eq!(
+        engine.solid_writes.lock().unwrap().last().copied(),
+        Some(canvas_proto::Rgb8::BLACK),
+        "a paused output with no draft gets one black frame"
+    );
+}
+
 /// A scene that cannot be built leaves the lights dark and the takeover over: the build task
 /// died, so nothing is left on the takeover.
 #[tokio::test]

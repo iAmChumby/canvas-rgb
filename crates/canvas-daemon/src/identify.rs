@@ -569,9 +569,17 @@ pub fn spawn_ticker(app: Arc<App>) {
 /// The identify is a sink-level override: it never took the lights away from what the engine
 /// runs. A draft on the lights stays on the lights, the onboarding effect is not killed, and
 /// the scene is not rebuilt. Nothing is applied here.
+///
+/// A draft on the lights outranks the black frame: on a paused output the engine renders no
+/// new frame, so a black write would replace the draft's frozen frame with black while the
+/// draft's slot stays active (#94). The black frame is skipped while a draft is on the lights.
+///
+/// This reads the draft's own slot lock, not its async gate: a chain commit calls `restore`
+/// while holding the draft gate, so taking the gate here would deadlock. `is_active` reads only
+/// the slot and never waits on the gate.
 pub async fn restore(app: &Arc<App>) {
     let power = app.store.read().await.config.settings.power;
-    if power == Power::Paused {
+    if power == Power::Paused && !app.draft.is_active() {
         app.engine.write_solid(Rgb8::BLACK);
     }
 }
