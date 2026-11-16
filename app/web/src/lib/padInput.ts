@@ -16,7 +16,22 @@
 // The re-render rule: the loop keeps the last frame's numbers and writes to the page only when
 // one of them moved. The triggers are compared as whole steps of 1/255 and the sticks as whole
 // steps of 1/100, after a dead zone of 0.08 of the travel. At rest, with a pad held still, the
-// numbers do not move, so the page is not drawn again at all.
+// numbers do not move, so the page is not drawn again at all, and the strip's line is written
+// only when the line changes.
+//
+// Which pad: with one pad connected there is nothing to choose. With several, the page reads
+// the pad whose browser name carries the device's own ids (Chromium prints "Vendor: 2dc8
+// Product: 310b" for a pad it does not drive through XInput). An XInput pad's name carries no
+// ids, so when nothing matches the page takes the first pad in the standard layout and says
+// which one it is showing. A pad in a layout the browser cannot place lights no key at all.
+//
+// The read starts before the first pad is seen: while the editor is in front and the list is
+// empty, the loop asks the list once a frame, so a pad whose `gamepadconnected` never arrives
+// (a WebView may not send it) is picked up all the same.
+//
+// The stub (`?pad=stub`, or the global the harness sets) exists only in a build made for the
+// screenshot harness: `NEXT_PUBLIC_PAD_STUB=1`. In the shipped export the flag is unset, the
+// bundler drops the branch, and the stub's query value, global key and words are not there.
 
 import { useCallback, useEffect, useRef, useState } from "react";
 
@@ -34,17 +49,132 @@ export const PAD_STATUS_WORDS: Record<PadStatus, string> = {
   paused: "Input paused: the editor is in the background.",
 };
 
+/**
+ * The strip's second line when the pad's buttons are not in the standard layout: the indices
+ * would be the wrong ones, so no key is lit and the line says why.
+ */
+export const PAD_UNREADABLE_WORD =
+  "This pad reports its buttons in a layout the app cannot read.";
+
+/** The strip's second line when several pads are connected and the page had to guess. */
+export function showingWord(place: number, count: number): string {
+  return `Showing pad ${place} of ${count}.`;
+}
+
 /** As much of a gamepad as this reads. */
 export interface PadGamepad {
   connected?: boolean;
+  /**
+   * The browser's own name for the pad. Chromium prints the ids of a pad it does not drive
+   * through XInput ("Vendor: 2dc8 Product: 310b"); an XInput pad's id carries none.
+   */
+  id?: string;
+  /** "standard" when the buttons are in the standard layout, "" when they are not. */
+  mapping?: string;
   buttons: ArrayLike<{ pressed: boolean; value: number }>;
   axes: ArrayLike<number>;
+}
+
+/** The ids of the pad the page is about, as hex, without the "0x". */
+export interface PadMatch {
+  /** The vendor id, e.g. "2dc8". */
+  vendor: string | null;
+  /** The product id, e.g. "310b"; null when only the vendor is known. */
+  product: string | null;
+}
+
+/**
+ * The vendor and product ids of the device on the page, from what the daemon reports it as.
+ *
+ * The daemon describes the pad by where it sits on the hub (`hid:2dc8:310b`), and its id ends
+ * in the vendor id (`eightbitdo-ultimate-2:2dc8`). Chromium prints both in the browser's own
+ * name for the pad when it is not driven through XInput, so this is what the page matches on.
+ */
+export function devicePadMatch(info: { id?: string; location?: string }): PadMatch | null {
+  const where = /hid:([0-9a-f]{4}):([0-9a-f]{4})/i.exec(info.location ?? "");
+  if (where !== null && where[1] && where[2]) {
+    return { vendor: where[1].toLowerCase(), product: where[2].toLowerCase() };
+  }
+  // The id ends in the vendor id, and in the product id too when the adapter knows it:
+  // "eightbitdo-ultimate-2:2dc8", "attack-shark-x6:1d57:fa60".
+  const ids = /:([0-9a-f]{4})(?::([0-9a-f]{4}))?$/i.exec(info.id ?? "");
+  if (ids !== null && ids[1]) {
+    return { vendor: ids[1].toLowerCase(), product: ids[2]?.toLowerCase() ?? null };
+  }
+  return null;
+}
+
+/** The pads the list carries, and which of them the page is showing. */
+export interface PadPick {
+  /** The pad the page reads, or null when none is connected. */
+  pad: PadGamepad | null;
+  /** How many pads are connected. */
+  count: number;
+  /**
+   * Where the pad sits in the connected list (1-based) when several are connected and none
+   * carries this device's ids: the page had to guess, so it says which one it shows.
+   */
+  showing: number | null;
+}
+
+/**
+ * Which pad the page reads.
+ *
+ * With one pad connected there is nothing to choose. With several, the page takes the pad
+ * whose browser name carries the device's own ids; an XInput pad reports a name with no ids in
+ * it, so when nothing matches the page takes the first pad in the standard layout and says
+ * which one it is showing.
+ */
+export function pickPad(
+  pads: ArrayLike<PadGamepad | null> | null | undefined,
+  match: PadMatch | null,
+): PadPick {
+  if (!pads) return { pad: null, count: 0, showing: null };
+  const live: PadGamepad[] = [];
+  for (let i = 0; i < pads.length; i++) {
+    const pad = pads[i];
+    if (pad && pad.connected !== false) live.push(pad);
+  }
+  if (live.length === 0) return { pad: null, count: 0, showing: null };
+  if (match?.vendor) {
+    const vendor = match.vendor;
+    const product = match.product;
+    for (const pad of live) {
+      const id = (pad.id ?? "").toLowerCase();
+      if (!id.includes(vendor)) continue;
+      if (product && !id.includes(product)) continue;
+      return { pad, count: live.length, showing: null };
+    }
+  }
+  const only = live[0];
+  if (live.length === 1 && only) return { pad: only, count: 1, showing: null };
+  let at = 0;
+  for (let i = 0; i < live.length; i++) {
+    if (live[i]?.mapping === "standard") {
+      at = i;
+      break;
+    }
+  }
+  return { pad: live[at] ?? null, count: live.length, showing: at + 1 };
+}
+
+/**
+ * True when the pad's buttons are the standard ones.
+ *
+ * Chromium says "standard" for a pad in the standard layout and "" for one it cannot place,
+ * whose button indices would be the wrong ones. A pad that says nothing at all (the harness's
+ * own stub) is read as standard: only a pad that states another layout is refused.
+ */
+export function padReadable(pad: PadGamepad): boolean {
+  return pad.mapping === undefined || pad.mapping === "standard";
 }
 
 /** One frame of the pad: what is held, how far the triggers are, where the sticks stand. */
 export interface PadFrame {
   /** False when the pad is gone or the editor is in the background: the keys are cleared. */
   connected: boolean;
+  /** False when the pad's buttons are not in the standard layout: no key is lit. */
+  readable: boolean;
   /** The buttons, index by index. The first seventeen are the standard ones. */
   buttons: boolean[];
   /** The left trigger, 0 to 255. */
@@ -131,6 +261,14 @@ export const STICK_SCALE = 100;
 /** The trigger's readout: 0 to 255, the scale the page prints. */
 export const TRIGGER_SCALE = 255;
 
+/**
+ * The travel, of 255, at which a trigger counts as pressed for the keys: about 10%.
+ *
+ * The travel fill and the number beside it stay raw, so 1/255 of resting noise still shows as
+ * one step; only the key is kept quiet until the trigger has really moved.
+ */
+export const TRIGGER_PRESS_AT = 26;
+
 /** The plan's name for a schema key: "button-a" is "a", "profile-1-paddle-2" is "paddle-2". */
 export function padSlot(key: string): string {
   if (key.startsWith("button-")) return key.slice("button-".length);
@@ -160,15 +298,19 @@ export interface PadMapRow {
 export function litKeys(frame: PadFrame, rows: PadMapRow[]): Set<string> {
   const lit = new Set<string>();
   if (!frame.connected) return lit;
+  // A pad whose buttons are not in the standard layout reports them at other indices: the keys
+  // it would light are the wrong ones, so none is lit and the strip says why.
+  if (!frame.readable) return lit;
 
   const held = new Set<string>();
   for (let i = 0; i < PAD_BUTTONS.length; i++) {
     const name = PAD_BUTTONS[i];
     if (name && frame.buttons[i]) held.add(name);
   }
-  // A trigger with travel under it is a button that is down.
-  if (frame.lt > 0) held.add("left-trigger");
-  if (frame.rt > 0) held.add("right-trigger");
+  // A trigger with 10% of its travel under it is a button that is down. The number beside the
+  // slot stays the raw travel: only the key waits for the trigger to have moved.
+  if (frame.lt >= TRIGGER_PRESS_AT) held.add("left-trigger");
+  if (frame.rt >= TRIGGER_PRESS_AT) held.add("right-trigger");
 
   // A paddle the browser can see lights the button it is mapped to.
   for (let i = 0; i < PAD_PADDLE_SLOTS.length; i++) {
@@ -212,8 +354,21 @@ export interface PadStub {
 const STUB_KEY = "__CANVAS_RGB_PAD_STUB__";
 const SOURCE_KEY = "__CANVAS_RGB_PAD__";
 
+/**
+ * The build-time switch for the stub.
+ *
+ * Next inlines `process.env.NEXT_PUBLIC_PAD_STUB` when it builds, so in the shipped editor the
+ * test is `undefined === "1"`, the early return is taken, and the bundler drops what follows:
+ * the query value, the global key and the stub's own words are not in the export at all. Only
+ * the screenshot harness builds with `NEXT_PUBLIC_PAD_STUB=1`.
+ */
+function stubBuilt(): boolean {
+  return process.env.NEXT_PUBLIC_PAD_STUB === "1";
+}
+
 /** The stub the harness drives, or null when there is none. */
 export function padStub(): PadStub | null {
+  if (!stubBuilt()) return null;
   const holder = globalThis as unknown as Record<string, PadStub | null | undefined>;
   return holder[STUB_KEY] ?? null;
 }
@@ -221,11 +376,13 @@ export function padStub(): PadStub | null {
 /**
  * Which source is in use.
  *
- * The stub is only ever chosen on purpose: a query value (`?pad=stub`) or a global the harness
- * sets. The default is always the browser's own list, so a real pad in a plain browser is never
- * replaced by the script.
+ * The stub is only ever chosen on purpose, in a build made for the harness: a query value
+ * (`?pad=stub`) or a global the harness sets. The default is always the browser's own list, so
+ * a real pad in a plain browser is never replaced by the script, and the shipped app has no
+ * way to reach the stub at all.
  */
 export function padSource(): PadSource {
+  if (!stubBuilt()) return "browser";
   try {
     const search = typeof window === "undefined" ? "" : window.location.search;
     if (new URLSearchParams(search).get("pad") === "stub") return "stub";
@@ -269,6 +426,11 @@ export interface PadInputOptions {
   getGamepads?: () => ArrayLike<PadGamepad | null> | null | undefined;
   /** Which source is in use. The default is the switch the page carries. */
   source?: PadSource;
+  /**
+   * The ids of the device on the page, so the page reads that pad and not another one. The
+   * default is no match: the first pad in the list is read.
+   */
+  match?: PadMatch | null;
 }
 
 /** What the page knows about the pad. */
@@ -281,6 +443,10 @@ export interface PadInput {
   frame: PadFrame | null;
   /** True when the source is the stub, so the page can say that the pad is simulated. */
   simulated: boolean;
+  /** True when the pad's buttons are not in the standard layout, so no key is lit. */
+  unreadable: boolean;
+  /** "Showing pad 1 of 2." when several pads are connected and none is this device. */
+  showing: string | null;
   /** Adds a painter. It is called with every frame that changed, and with the frame it has now. */
   register(painter: PadPainter): () => void;
 }
@@ -343,13 +509,14 @@ function readNumbers(pad: PadGamepad): Numbers {
 }
 
 /** The frame the numbers make. */
-function toFrame(n: Numbers, source: PadSource): PadFrame {
+function toFrame(n: Numbers, source: PadSource, readable: boolean): PadFrame {
   const buttons: boolean[] = [];
   for (let i = 0; i < PAD_BUTTONS.length + PAD_PADDLE_SLOTS.length; i++) {
     buttons.push((n.mask & (1 << i)) !== 0);
   }
   return {
     connected: true,
+    readable,
     buttons,
     lt: n.lt,
     rt: n.rt,
@@ -365,6 +532,7 @@ function toFrame(n: Numbers, source: PadSource): PadFrame {
 function emptyFrame(source: PadSource): PadFrame {
   return {
     connected: false,
+    readable: true,
     buttons: [],
     lt: 0,
     rt: 0,
@@ -403,6 +571,7 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
   const [status, setStatus] = useState<PadStatus>("wake");
   const [frame, setFrame] = useState<PadFrame | null>(null);
   const [source, setSource] = useState<PadSource | null>(null);
+  const [showing, setShowing] = useState<string | null>(null);
 
   // The options are read when the loop starts, and again when it is started again.
   useEffect(() => {
@@ -431,6 +600,26 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     let focused = true;
     let visible = pageVisible();
     let numbers: Numbers | null = null;
+    // What was last drawn. Each of these is written only when it changes, so a pad held still
+    // sets no state at all: React is asked 0 times a frame, not 1.
+    let readableNow: boolean | null = null;
+    let said: PadStatus | null = null;
+    let shown: string | null = null;
+    let cleared = false;
+
+    /** Writes the strip's line, and asks React to draw it, only when the line changes. */
+    const say = (next: PadStatus) => {
+      if (said === next) return;
+      said = next;
+      setStatus(next);
+    };
+
+    /** The strip's second line: written, and drawn, only when it changes. */
+    const showLine = (next: string | null) => {
+      if (shown === next) return;
+      shown = next;
+      setShowing(next);
+    };
 
     const read = (): ArrayLike<PadGamepad | null> | null => {
       if (opts.getGamepads) return opts.getGamepads() ?? null;
@@ -439,24 +628,20 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
       return navigator.getGamepads();
     };
 
-    const first = (): PadGamepad | null => {
-      const pads = read();
-      if (!pads) return null;
-      for (let i = 0; i < pads.length; i++) {
-        const pad = pads[i];
-        if (pad && pad.connected !== false) return pad;
-      }
-      return null;
-    };
+    /** Which pad the page reads this frame, and whether it had to guess. */
+    const pick = (): PadPick => pickPad(read(), optionsRef.current.match ?? null);
 
     const paint = (next: PadFrame) => {
+      cleared = !next.connected;
       frameRef.current = next;
       for (const painter of painters.current) painter(next);
     };
 
-    /** Nothing is held: the keys are cleared and the frame says so. */
+    /** Nothing is held: the keys are cleared and the frame says so, once. */
     const clear = () => {
+      if (cleared) return;
       numbers = null;
+      readableNow = null;
       const empty = emptyFrame(src);
       paint(empty);
       setFrame(empty);
@@ -469,21 +654,56 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
       }
     };
 
+    /**
+     * The wake state's own frame: one read of the list, and nothing else. It runs while the
+     * editor is in front and no pad is in the list, and it moves to the live loop as soon as
+     * one appears. The answer the same as last frame sets no state.
+     */
+    const wake = () => {
+      if (raf !== null || !focused || !visible) return;
+      raf = window.requestAnimationFrame(wakeTick);
+    };
+
+    const wakeTick = () => {
+      raf = null;
+      if (!focused || !visible) return;
+      const picked = pick();
+      if (picked.pad) {
+        seen = true;
+        say("live");
+        raf = window.requestAnimationFrame(tick);
+        return;
+      }
+      say(seen ? "gone" : "wake");
+      showLine(null);
+      clear();
+      raf = window.requestAnimationFrame(wakeTick);
+    };
+
     const tick = () => {
       raf = null;
-      const pad = first();
+      const picked = pick();
+      const pad = picked.pad;
       if (!pad) {
-        stop();
-        setStatus(seen ? "gone" : "wake");
+        say(seen ? "gone" : "wake");
+        showLine(null);
         clear();
+        // No pad in the list yet: keep asking once a frame, so a pad whose event never comes
+        // (the WebView may not send `gamepadconnected`) is picked up all the same.
+        wake();
         return;
       }
       seen = true;
-      setStatus("live");
+      say("live");
+      // Only when several pads are connected and none carries this device's ids does the page
+      // say which one it is showing.
+      showLine(picked.showing === null ? null : showingWord(picked.showing, picked.count));
+      const readable = padReadable(pad);
       const next = readNumbers(pad);
-      if (!sameNumbers(numbers, next)) {
+      if (!sameNumbers(numbers, next) || readableNow !== readable) {
         numbers = next;
-        const drawn = toFrame(next, src);
+        readableNow = readable;
+        const drawn = toFrame(next, src, readable);
         paint(drawn);
         setFrame(drawn);
       }
@@ -491,51 +711,49 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     };
 
     const start = () => {
-      if (raf === null && focused && visible) raf = requestAnimationFrame(tick);
+      if (raf !== null || !focused || !visible) return;
+      if (pick().pad) {
+        say("live");
+        raf = requestAnimationFrame(tick);
+      } else {
+        wake();
+      }
     };
 
     const onConnected = () => {
       seen = true;
-      setStatus("live");
+      say("live");
       start();
     };
     const onDisconnected = () => {
       seen = true;
       stop();
-      setStatus("gone");
+      say("gone");
       clear();
+      // The pad may come back: keep reading the list while the editor is in front.
+      start();
     };
     const onBlur = () => {
       focused = false;
       stop();
-      setStatus("paused");
+      say("paused");
       clear();
     };
     const onFocus = () => {
       focused = true;
       if (!visible) return;
-      if (first()) {
-        setStatus("live");
-        start();
-      } else {
-        setStatus(seen ? "gone" : "wake");
-      }
+      start();
     };
     const onVisibility = () => {
       visible = document.visibilityState !== "hidden";
       if (!visible) {
         stop();
-        setStatus("paused");
+        say("paused");
         clear();
         return;
       }
       if (!focused) return;
-      if (first()) {
-        setStatus("live");
-        start();
-      } else {
-        setStatus(seen ? "gone" : "wake");
-      }
+      start();
     };
 
     window.addEventListener("blur", onBlur);
@@ -544,8 +762,8 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     window.addEventListener("gamepaddisconnected", onDisconnected);
     document.addEventListener("visibilitychange", onVisibility);
 
-    // A pad that is already in the list starts the loop; one that is not waits for the event.
-    if (first()) start();
+    // A pad that is already in the list starts the live loop; no pad starts the wake poll.
+    start();
 
     return () => {
       stop();
@@ -562,6 +780,8 @@ export function usePadInput(options: PadInputOptions = {}): PadInput {
     live: status === "live",
     frame,
     simulated: source === "stub",
+    unreadable: frame !== null && frame.connected && !frame.readable,
+    showing,
     register,
   };
 }

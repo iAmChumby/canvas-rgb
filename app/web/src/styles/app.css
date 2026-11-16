@@ -6717,7 +6717,7 @@ button.chip:hover {
 .pad-travel-label {
   fill: var(--mute);
   font-family: var(--fm);
-  font-size: 13px;
+  font-size: 14px;
 }
 
 .pad-travel-value {
@@ -6774,7 +6774,8 @@ button.chip:hover {
 
 /*
  * The strip that says what the pad is doing (#375). It is the same height in every state, so
- * the panels below it never move: two lines are held for the longest of the four.
+ * the panels below it never move: two lines are held for the longest of the four, and the
+ * second line of the same two carries the one note a state can add.
  */
 .pad-state {
   display: flex;
@@ -6782,6 +6783,15 @@ button.chip:hover {
   gap: var(--s2);
   min-height: calc(var(--t14) * 2 * 1.45);
   margin-bottom: var(--s3);
+}
+
+/* The two lines of the strip, in one column, so the note sits under the state's own words. */
+.pad-state-line {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
 }
 
 .pad-state-dot {
@@ -6805,21 +6815,21 @@ button.chip:hover {
 }
 
 .pad-state-text {
-  flex: 1;
-  min-width: 0;
   color: var(--dim);
   font-size: var(--t14);
 }
 
-/* The badge that says the pad is simulated. Its slot is always there, so the line beside it
-   keeps its width whether the badge is shown or not. */
-.pad-badge {
-  flex: none;
-  visibility: hidden;
+/* The strip's second line: why no key is lit, or which of the pads is being shown. */
+.pad-state-note {
+  color: var(--mute);
+  font-family: var(--fm);
+  font-size: var(--t14);
 }
 
-.pad-badge[data-on="true"] {
-  visibility: visible;
+/* The slot the badge stands in. It is only in a build made for the harness (#375), so the
+   shipped strip gives its width to the words. */
+.pad-badge {
+  flex: none;
 }
 
 /* The row of the button that is held: it takes the live colour and says so at its edge. */
@@ -6850,7 +6860,7 @@ button.chip:hover {
 .pad-print {
   fill: var(--dim);
   font-family: var(--fm);
-  font-size: 11px;
+  font-size: 14px;
   pointer-events: none;
 }
 
@@ -6860,6 +6870,33 @@ button.chip:hover {
   font-size: var(--t14);
   letter-spacing: 0.08em;
   text-transform: uppercase;
+}
+
+/*
+ * The plan is drawn in its own units and scaled to the room it has (#375). On a phone the
+ * drawing is smaller than those units, so the text inside it is written larger: the travel
+ * numbers, their labels and the button legends come out at 14 px or more on the screen. Only
+ * font sizes change, never a coordinate, so the drawing's box and every panel below it stay
+ * where they were.
+ */
+@media (max-width: 560px) {
+  .pad-travel-value {
+    font-size: 18px;
+  }
+
+  .pad-travel-label {
+    font-size: 17px;
+  }
+
+  .pad-print {
+    font-size: 16px;
+  }
+
+  /* Here the note under the state's words takes a line of its own and can wrap to a second,
+     so three lines are held in every state: the strip is the same height in all of them. */
+  .pad-state {
+    min-height: calc(var(--t14) * 3 * 1.45);
+  }
 }
 
 .pad-map {

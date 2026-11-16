@@ -22,8 +22,10 @@ import { Select } from "@/components/Select";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { ControllerOutline, PAD_STICK_TRAVEL, type PadButton } from "@/components/ControllerOutline";
 import {
+  devicePadMatch,
   litKeys,
   PAD_STATUS_WORDS,
+  PAD_UNREADABLE_WORD,
   STICK_SCALE,
   TRIGGER_SCALE,
   usePadInput,
@@ -63,6 +65,14 @@ const KIND_GLYPH = {
   game_controller: GameController,
   keyboard: Keyboard,
 } as const;
+
+/**
+ * True only in a build made for the screenshot harness (#375).
+ *
+ * Next inlines the value at build time, so the badge below is not in the shipped export at
+ * all: the words "Simulated pad" are dropped with the branch that draws them.
+ */
+const PAD_STUB_BUILT = process.env.NEXT_PUBLIC_PAD_STUB === "1";
 
 /** A label without the profile it belongs to: the panel above it names the profile. */
 function plainLabel(label: string): string {
@@ -1073,8 +1083,8 @@ function ControllerPanel({
 
   // What the pad is doing right now (#375). The loop runs only while this panel is on the page
   // and the editor is in front: it stops on blur, when the page is hidden, and when the panel
-  // goes away.
-  const pad = usePadInput();
+  // goes away. The device on the page says which pad to read when several are connected.
+  const pad = usePadInput({ match: devicePadMatch(detail.info) });
   const planRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<HTMLDivElement | null>(null);
   // What each row does, in the words the schema uses. The painter needs it: a button that is
@@ -1088,6 +1098,9 @@ function ControllerPanel({
     [rows, values],
   );
   const mapRowsRef = useRef(mapRows);
+  // The last frame the painter was given. A held key must not go stale: when the map or the
+  // profile changes, the same frame is painted again, so the key it lights is the new one.
+  const lastFrameRef = useRef<PadFrame | null>(null);
   useEffect(() => {
     mapRowsRef.current = mapRows;
   }, [mapRows]);
@@ -1098,6 +1111,7 @@ function ControllerPanel({
    * drawing is right in the frame the press was read in.
    */
   const paint = useCallback((frame: PadFrame) => {
+    lastFrameRef.current = frame;
     const plan = planRef.current;
     const map = mapRef.current;
     if (!plan || !map) return;
@@ -1150,15 +1164,32 @@ function ControllerPanel({
   const register = pad.register;
   useEffect(() => register(paint), [register, paint]);
 
+  // A held key does not go stale: when the map or the profile changes, the frame that is held
+  // is painted again at once, so the light moves to the key the button now is.
+  useEffect(() => {
+    const last = lastFrameRef.current;
+    if (last) paint(last);
+  }, [mapRows, paint]);
+
+  // The strip's second line: why no key is lit, or which pad is being shown.
+  const padNote = pad.unreadable ? PAD_UNREADABLE_WORD : pad.showing;
+
   return (
     <Panel title={detail.info.name}>
-      {/* What the pad is doing: one line, the same height in every state. */}
+      {/* What the pad is doing: two lines held in every state, so nothing below it moves. */}
       <div className="pad-state" data-state={pad.status} role="status">
         <span className="pad-state-dot" aria-hidden="true" />
-        <span className="pad-state-text">{PAD_STATUS_WORDS[pad.status]}</span>
-        <span className="pad-badge" data-on={pad.simulated ? "true" : "false"}>
-          <Chip>Simulated pad</Chip>
+        <span className="pad-state-line">
+          <span className="pad-state-text">{PAD_STATUS_WORDS[pad.status]}</span>
+          <span className="pad-state-note" hidden={padNote === null}>
+            {padNote ?? ""}
+          </span>
         </span>
+        {PAD_STUB_BUILT && pad.simulated && (
+          <span className="pad-badge" data-on="true">
+            <Chip>Simulated pad</Chip>
+          </span>
+        )}
       </div>
       <div className="pad-grid">
         <div className="pad-plan-wrap" ref={planRef}>

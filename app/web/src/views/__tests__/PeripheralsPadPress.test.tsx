@@ -5,7 +5,7 @@
 // button that is held says so. The frame loop is stepped by hand (src/test/padFrames.ts), so no
 // test here waits for the clock.
 
-import { act, cleanup, render, screen } from "@testing-library/react";
+import { act, cleanup, fireEvent, render, screen, within } from "@testing-library/react";
 import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
 import { PeripheralsView } from "@/views/PeripheralsView";
 import { StripSlot, StripSlotsProvider } from "@/shell/PageHeader";
@@ -43,21 +43,27 @@ const pad = {
   ry: 0,
 };
 
+/** The browser's own list of pads, in the browser's own shape. */
+function browserPad(extra: { id?: string; mapping?: string } = {}) {
+  return {
+    connected: pad.connected,
+    ...extra,
+    buttons: Array.from({ length: 21 }, (_, i) => {
+      const value = i === 6 ? pad.lt : i === 7 ? pad.rt : pad.buttons.has(i) ? 1 : 0;
+      return { pressed: value > 0, value };
+    }),
+    axes: [pad.lx, pad.ly, pad.rx, pad.ry],
+  };
+}
+
+/** Gives the page a list of pads, made fresh on every read. */
+function setGamepads(make: () => unknown[]) {
+  Object.defineProperty(navigator, "getGamepads", { configurable: true, value: make });
+}
+
 /** The browser's own list of pads, with the one the test holds. */
 function stubGamepads() {
-  Object.defineProperty(navigator, "getGamepads", {
-    configurable: true,
-    value: () => [
-      {
-        connected: pad.connected,
-        buttons: Array.from({ length: 21 }, (_, i) => {
-          const value = i === 6 ? pad.lt : i === 7 ? pad.rt : pad.buttons.has(i) ? 1 : 0;
-          return { pressed: value > 0, value };
-        }),
-        axes: [pad.lx, pad.ly, pad.rx, pad.ry],
-      },
-    ],
-  });
+  setGamepads(() => [browserPad()]);
 }
 
 /** The device the page shows, with the values a test gives it. */
@@ -332,5 +338,57 @@ describe("the controller drawing", () => {
     frames.step();
     expect(key.getAttribute("data-pressed")).toBe("false");
     expect(target("button-b").getAttribute("data-pressed")).toBe("true");
+  });
+
+  it("moves a held light to the key its button is mapped to, without waiting for a frame", async () => {
+    await open();
+    // X is held down.
+    pad.buttons.add(2);
+    frames.step();
+    expect(target("button-x").getAttribute("data-pressed")).toBe("true");
+    expect(target("button-b").getAttribute("data-pressed")).toBe("false");
+
+    // B is mapped to X while X is still held. No frame is stepped after this: the light must
+    // move on the map's own change, or a held key goes stale.
+    fireEvent.click(screen.getByRole("combobox", { name: "B mapping" }));
+    const list = await screen.findByRole("listbox", { name: "B mapping" });
+    fireEvent.click(within(list).getByRole("option", { name: /^X$/ }));
+
+    expect(target("button-b").getAttribute("data-pressed")).toBe("true");
+    expect(row("button-b").getAttribute("data-pressed")).toBe("true");
+  });
+
+  it("says which pad it is showing when several are connected and none carries the device's ids", async () => {
+    // Two pads, neither named with this device's ids: the first one in the standard layout is
+    // read, and the strip says which one.
+    setGamepads(() => [
+      browserPad({ id: "Controller A", mapping: "" }),
+      browserPad({ id: "Controller B", mapping: "standard" }),
+    ]);
+    await open();
+
+    expect(document.querySelector(".pad-state-note")!.textContent).toBe("Showing pad 2 of 2.");
+    expect(document.querySelector(".pad-state-text")!.textContent).toBe("Pad live");
+
+    // Held buttons are read from the pad the page settled on.
+    pad.buttons.add(0);
+    frames.step();
+    expect(target("button-a").getAttribute("data-pressed")).toBe("true");
+  });
+
+  it("lights no key, and says why, when the pad's buttons are not in the standard layout", async () => {
+    setGamepads(() => [browserPad({ id: "Controller", mapping: "" })]);
+    await open();
+    expect(document.querySelector(".pad-state-note")!.textContent).toBe(
+      "This pad reports its buttons in a layout the app cannot read.",
+    );
+
+    pad.buttons.add(0);
+    pad.lt = 1;
+    frames.step();
+
+    // The indices would be the wrong ones, so nothing is lit, on the plan or in the list.
+    expect(litKeys()).toEqual([]);
+    expect(row("button-a").getAttribute("data-pressed")).toBe("false");
   });
 });

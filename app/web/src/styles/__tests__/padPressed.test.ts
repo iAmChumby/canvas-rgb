@@ -89,3 +89,38 @@ describe("the held key and the focused key", () => {
     expect(ghost!.body).toContain("fill: none");
   });
 });
+
+describe("the plan's numbers on a phone", () => {
+  const css = read("src/styles/app.css").replace(/\/\*[\s\S]*?\*\//g, "");
+
+  /** The body of the narrow-width block, from its own brace to its own closing one. */
+  function narrowBlock(): string {
+    const at = css.indexOf("@media (max-width: 560px)");
+    expect(at).toBeGreaterThan(-1);
+    const end = css.indexOf("\n}", at);
+    expect(end).toBeGreaterThan(at);
+    return css.slice(at, end);
+  }
+
+  it("writes the drawing's text large enough that it is read at 14 px", () => {
+    const block = narrowBlock();
+    // The plan is scaled down to the room it has, so the text inside it is written larger.
+    expect(block).toMatch(/\.pad-travel-value \{\s*font-size: 18px;/);
+    expect(block).toMatch(/\.pad-travel-label \{\s*font-size: 17px;/);
+    expect(block).toMatch(/\.pad-print \{\s*font-size: 16px;/);
+    // Nothing that places a box or a coordinate moves, so no panel can shift.
+    const declared = [...block.matchAll(/^\s+([a-z-]+):/gm)].map((m) => m[1]);
+    expect(new Set(declared)).toEqual(new Set(["font-size", "min-height"]));
+  });
+
+  it("leaves the stick numbers as page text at the floor", () => {
+    // The stick's numbers are not drawing units: they are page text, already at 14 px.
+    const readout = ruleFor(".pad-readout");
+    expect(readout).toBeDefined();
+    expect(readout!.body).toContain("var(--t14)");
+  });
+
+  it("holds three lines of the strip in every state, so the note cannot move a panel", () => {
+    expect(narrowBlock()).toMatch(/\.pad-state \{\s*min-height:/);
+  });
+});
