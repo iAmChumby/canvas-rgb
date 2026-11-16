@@ -18,8 +18,10 @@ concurrency:
 #
 #   changes      which areas a pull request touches (dorny/paths-filter)
 #   versions     every copy of the version matches Cargo.toml
-#   editor       the editor builds, the phone nav measures right, the editor's tests pass
-#   rust         clippy is clean, the workspace's tests pass
+#   editor       the editor builds, the phone nav measures right
+#   editor-tests the editor's tests pass, in three shards side by side
+#   rust         clippy is clean, the tests of every crate but the daemon pass
+#   rust-daemon  the daemon's tests pass (the longest suite, in a job of its own)
 #   rust-release the paint effects and the stock tiles meet their frame budget
 #   installer    the installer's own tests pass
 #   dependencies the dependency gate (unchanged)
@@ -183,12 +185,36 @@ jobs:
         timeout-minutes: 5
         run: node tools/nav-check.mjs
 
-      - name: Test the editor
+  editor-tests:
+    # The editor's own tests (vitest, jsdom), split into three shards that run side by side: one
+    # job ran them in about eight minutes, which made it the second longest job of the run. Every
+    # test file is in exactly one shard, so the three together are the whole suite.
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.editor == 'true'
+    # The same runner as the build, so a test that reads a file sees the paths it always saw.
+    runs-on: windows-latest
+    timeout-minutes: 20
+    strategy:
+      # A red shard does not stop the others: one run names every failing test.
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3]
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 22 # the same as the editor job
+          cache: npm
+          cache-dependency-path: app/web/package-lock.json
+
+      - name: Test the editor (shard ${{ matrix.shard }} of 3)
         working-directory: app/web
-        run: npm test # vitest, jsdom
+        run: npm ci && npm test -- --shard=${{ matrix.shard }}/3
 
   rust:
-    # Clippy and the workspace's tests.
+    # Clippy over the whole workspace, and the tests of every crate but the daemon (its tests
+    # are the job below).
     needs: changes
     if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
     # windows-latest: the workspace has Windows-only crates (canvas-svc drives the Windows
@@ -228,7 +254,30 @@ jobs:
       # this tree, nextest failed ten tests that cargo test passes. The doctests run here too,
       # as part of the workspace build.
       - name: Tests
-        run: cargo test --locked --workspace
+        run: cargo test --locked --workspace --exclude canvas-daemon
+
+  rust-daemon:
+    # The daemon's tests: the longest suite of the workspace, so it runs beside the others and
+    # not after them. Same toolchain, same flags, same `cargo test` (see the note on nextest in
+    # the job above).
+    needs: changes
+    if: needs.changes.outputs.all == 'true' || needs.changes.outputs.rust == 'true'
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2
+        with:
+          # Its own cache: this job builds the daemon's test binaries, which the job above no
+          # longer does, and two jobs saving under one key would evict each other's build.
+          shared-key: check-debug-daemon
+          cache-on-failure: true
+
+      - name: Tests (canvas-daemon)
+        run: cargo test --locked -p canvas-daemon
 
   rust-release:
     # The paint effects fit their 100 ms frame budget in release (5-10 ms); a debug build on a
@@ -350,7 +399,7 @@ jobs:
   # when a job it needs failed or was cancelled. A job that was skipped is not a failure: a
   # pull request that touches one area skips the jobs for the others, and that is a green run.
   ci-ok:
-    needs: [changes, versions, editor, rust, rust-release, installer, dependencies, changelog]
+    needs: [changes, versions, editor, editor-tests, rust, rust-daemon, rust-release, installer, dependencies, changelog]
     if: always()
     runs-on: ubuntu-latest
     timeout-minutes: 5
