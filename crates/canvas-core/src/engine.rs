@@ -23,7 +23,7 @@ use canvas_proto::props::Props;
 use canvas_proto::scene::Light;
 use canvas_proto::traits::{
     Effect, Engine, EngineGroup, EngineSettings, FrameSink, GroupState, InputSource,
-    LightPreviewSink, PreviewSink, RenderStats,
+    LightPreviewSink, PreviewSink, RenderStats, StripRead,
 };
 use tracing::{info, warn};
 
@@ -290,21 +290,25 @@ impl CoreEngine {
         self.wake();
     }
 
-    /// A group as the state holds it: its effect initialised behind the guard, its needs read
-    /// once. An effect that panics in `init` or `schema` is installed as failed, with the text
-    /// of the panic, and is not called again until it is replaced. The caller assigns the
-    /// generation under the lock.
+    /// A group as the state holds it: its effect initialised behind the guard, its needs and how
+    /// a strip reads it (`strip_read`, #400) read once. An effect that panics in `init`,
+    /// `schema` or `strip_read` is installed as failed, with the text of the panic, and is not
+    /// called again until it is replaced. The caller assigns the generation under the lock.
     fn group_slot(&self, group: EngineGroup) -> GroupSlot {
         let mut effect = group.effect;
         let mut failed = None;
         let mut needs = canvas_proto::props::InputNeeds::default();
+        let mut strip_read = StripRead::Cell;
         if let Some(e) = effect.as_mut() {
             let outcome = guarded_call(|| {
                 e.init(&group.props);
-                e.schema().needs
+                (e.schema().needs, e.strip_read())
             });
             match outcome {
-                Ok(n) => needs = n,
+                Ok((n, read)) => {
+                    needs = n;
+                    strip_read = read;
+                }
                 Err(payload) => {
                     report_effect_panic(e.as_ref(), "init", &payload);
                     self.effect_panics.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
@@ -319,6 +323,7 @@ impl CoreEngine {
             brightness: group.brightness.min(100),
             effect,
             needs,
+            strip_read,
             effect_generation: 0,
             started: Instant::now(),
             pending_props: None,
@@ -573,16 +578,13 @@ impl Engine for CoreEngine {
                 .as_mut()
                 .and_then(|scene| scene.groups.iter_mut().find(|g| g.id == group));
             let superseded = match slot {
-                Some(slot) => {
-                    let old = slot.effect.take();
-                    slot.effect = replacement.effect.take();
-                    slot.needs = replacement.needs;
-                    slot.effect_generation = generation;
-                    slot.started = Instant::now();
-                    slot.pending_props = None;
-                    slot.failed = replacement.failed.take();
-                    old
-                }
+                Some(slot) => slot.install(
+                    replacement.effect.take(),
+                    replacement.needs,
+                    replacement.strip_read,
+                    replacement.failed.take(),
+                    generation,
+                ),
                 None => {
                     warn!(group, "set_group_effect: no such group in the running scene");
                     replacement.effect.take()

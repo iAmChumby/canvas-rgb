@@ -347,6 +347,13 @@ line. Three mechanisms, and one bug the timing only exposed.
   awaits the restore (`crates/canvas-daemon/src/draft.rs` `expire_locked`), so a busy runner read the
   engine in the gap. **Rule:** wait on the thing the assert reads (the engine's effect, a counter the
   fake bumps), never on a flag the code sets before the awaited work.
+- [#411](https://github.com/iAmChumby/canvas-rgb/issues/411): `the_timeout_restores_the_length_and_the_lights`
+  (`crates/canvas-daemon/tests/chains.rs`) waited for the header's length, then read the restore
+  record, the hold and the session at once. The daemon ends those after it restores the length, so
+  a busy runner read them in the gap. The same rule as #282: each state the assert reads is waited
+  for. Two more tests in that file made the same read (`a_failed_rollback_keeps_both_records`,
+  `start_up_rolls_back_a_leftover_intent`) and wait now. No guard: the mistake is two correct
+  lines in the wrong order, which `timing_class.rs` cannot tell from a read that is safe.
 - [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
   another starter while one is loading, and lands both"
   (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
@@ -982,3 +989,22 @@ uses.
   and the test fails on an entry that names no control. A colour control has no two ends and no
   built-in has a bool control, so neither is driven; a control added later is covered without
   editing the test.
+
+### `cause:regression`: one sampling rule for every effect darkens an effect it was not written for
+
+A strip LED reads a part of the effect's picture, and one rule decided which part for every
+effect. A rule tuned for one picture (a thin moving line) reads black from another (a picture
+whose meaning is how high it reaches).
+
+- [#372](https://github.com/iAmChumby/canvas-rgb/issues/372): the full-height band averaged
+  Rain's thin streaks away, so Rain stood still on strips and fans. The fix read a small cell at
+  mid-height.
+- [#400](https://github.com/iAmChumby/canvas-rgb/issues/400): that cell read Fire and Audio
+  Spectrum dark on a strip, because their picture sits at the bottom of the canvas.
+- **Class fix:** done (#400). The effect says how a strip reads it (`StripRead` in
+  `crates/canvas-proto/src/traits.rs`, `Effect::strip_read`). One test names every built-in
+  with its read (`crates/canvas-effects/src/lib.rs`,
+  `only_fire_and_audio_spectrum_read_a_strip_as_a_column`), so a new effect fails until someone
+  decides. Tests in `crates/canvas-core/src/scene_engine.rs` hold Rain, Fire and Audio Spectrum
+  on a strip to a measured level. Open: a stack answers the cell, so Fire inside a stack still
+  reads dark on a strip.
