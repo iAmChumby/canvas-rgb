@@ -3603,14 +3603,16 @@ mod scene_ops {
         assert_eq!(html.len(), count);
         let (status, answer) = create(&rig, create_body("Night", Some(html), None, false)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
-        assert_eq!(answer["message"], canvas_daemon::scenes::html_limit_sentence(count), "the daemon's sentence");
+        let message = answer["message"].as_str().unwrap_or_default();
+        assert_eq!(message, canvas_daemon::scenes::html_limit_sentence(count), "the daemon's sentence");
 
         // A name past the limit, for the scene and for a group.
         let long = "x".repeat(canvas_proto::scene::SCENE_NAME_MAX + 1);
         let (status, answer) = create(&rig, create_body(&long, Some(vec![off_group("Fans", &["fake:a#z0"])]), None, false)).await;
         assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+        let message = answer["message"].as_str().unwrap_or_default();
         assert_eq!(
-            answer["message"],
+            message,
             format!("a scene's name is at most {} characters", canvas_proto::scene::SCENE_NAME_MAX)
         );
         let long_group = "y".repeat(canvas_proto::scene::GROUP_NAME_MAX + 1);
