@@ -24,6 +24,7 @@ $out = Join-Path $repo 'app/web/src/lib/__tests__/arrangement.vectors.json'
 Push-Location $repo
 try {
     # The build goes through the lock: one heavy build at a time across every agent.
+    # token: the developer's own, unelevated: the lock script runs the example and nothing else.
     & powershell -NoProfile -File (Join-Path $PSScriptRoot 'with-build-lock.ps1') `
         cargo run --quiet -p canvas-core --example arrangement_vectors -- $out
     if ($LASTEXITCODE -ne 0) {
