@@ -22,7 +22,7 @@ for each one. The skills quote the ones they use. In a checkout, build and run i
 - Check an effect before you install it: `effects check`. It needs no daemon.
 - Write only with a run id: pass the same `--run <run>` on every command that creates,
   edits or deletes. Run `--dry-run` first where a command has it. A delete touches only what
-  that run made.
+  that run made, and an effect that a scene plays or a stack uses is refused too.
 - Never read the API token file and never call the local API yourself. The command line checks
   that the port belongs to the canvas-rgb daemon before it sends the token.
 

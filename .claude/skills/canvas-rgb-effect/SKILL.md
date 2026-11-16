@@ -56,6 +56,8 @@ one of:
 - the script ran over its deadline: the message says how long it had
 - every frame is the same: the effect does not move
 - the picture is one flat colour: nothing is being drawn
+- the file is over 1048576 bytes: the message is `{file} is over 1048576 bytes, more than an
+  effect file may hold`, the same cap an import has
 
 `--png frame.png` writes frame 60 as a PNG, which is the quickest way to see what an
 effect actually draws.
@@ -108,8 +110,8 @@ canvas-rgb effects import my-effect.html --run <run>
 
 The run records the import, so the run can delete the effect later and nothing else. With
 `--run`, `--replace` overwrites only an effect that same run imported (the old file is copied
-into the run's folder first) and refuses any other. Never pass `--replace` while a scene is
-being built.
+into the run's folder first) and refuses any other. Without `--run`, `--replace` is a plain
+overwrite: no record and no copy. Never pass `--replace` while a scene is being built.
 
 ## 5. Look at it in the app before calling it done
 
