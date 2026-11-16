@@ -740,7 +740,7 @@ pub fn check_source(source: &str, png: Option<&str>) -> Result<CheckReport, Stri
 pub fn check_source_with(source: &str, png: Option<&str>, prop_args: &[String]) -> Result<CheckReport, String> {
     let pairs = parse_prop_args(prop_args)?;
     let mut effect = canvas_html::HtmlEffect::from_source("check", source, &canvas_proto::props::Props::new())
-        .map_err(|e| e.to_string())?;
+        .map_err(|e| crate::user_effects::load_error_sentence(&e.to_string()))?;
     let schema = effect.schema();
     let mut props = schema.defaults();
     props.extend(typed_props(&pairs, |key| {
@@ -3334,6 +3334,22 @@ mod tests {
         let file = TempFile::new("broken", "<head><title>No script</title></head>");
         let error = check_effect(&file.path(), None).expect_err("the file must not load");
         assert!(error.contains("parse:"), "the parser's message is kept: {error}");
+    }
+
+    /// SHOULD-FIX 1 of the #75 review: `effects check` reported a load that ran out of time in
+    /// the runtime's raw `timeout: ...` words; it now uses the same plain sentence the editor
+    /// and the daemon's failed list use.
+    #[test]
+    fn a_timed_out_check_is_reported_in_plain_words() {
+        let runaway = r##"<head><title>Loop</title></head>
+<body><canvas id="c" width="16" height="16"></canvas></body>
+<script>
+  while (true) {}
+</script>"##;
+        let error = check_source(runaway, None).expect_err("a runaway top-level script times out");
+        assert!(!error.starts_with("timeout: "), "the runtime's prefix leaked: {error}");
+        assert!(error.contains("took too long to load"), "a plain sentence is shown: {error}");
+        assert!(error.contains("stopped"), "the sentence says the script was stopped: {error}");
     }
 
     /// SHOULD-FIX 4 of the #412 review: `effects check` reads a file given by path like an import

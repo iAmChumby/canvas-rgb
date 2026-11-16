@@ -2,6 +2,7 @@
 
 import { useEffect, useRef } from "react";
 import { Wordmark } from "@editor/components/BrandMark";
+import { DT_MAX, TAU_FOLLOW, TAU_SETTLE, easeK, moveCap } from "./glow";
 
 /** The editor's spectrum, read from its own tokens. */
 const SPECTRUM = ["--rgb-1", "--rgb-2", "--rgb-3", "--rgb-4", "--rgb-5", "--rgb-6"];
@@ -11,9 +12,8 @@ const SPECTRUM = ["--rgb-1", "--rgb-2", "--rgb-3", "--rgb-4", "--rgb-5", "--rgb-
  * a short ease that runs on time and not on frames. Each frame it closes `1 - exp(-dt / tau)`
  * of the gap to the pointer, so it trails by the same amount of time at 30, 60 and 144 Hz.
  */
-const TAU_FOLLOW = 0.075;
-/** And back onto the wordmark, once the pointer has left the hero: slower, so it settles. */
-const TAU_SETTLE = 0.45;
+// The follow and settle time constants (and the frame's cap) live in ./glow, next to the
+// tests that prove the ease is time-based and the cap is independent of the refresh rate.
 /**
  * The light's radius, as a share of the hero's smaller side, so it is round at every size.
  */
@@ -33,20 +33,8 @@ const SCALE = 0.45;
 const REACH = 24;
 /** How long the spectrum in the easel's canvas takes to sweep across, once, on load. */
 const SWEEP = 0.62;
-/**
- * The most elapsed time one frame is allowed to ease over. A frame that is late (a long
- * task, a hidden tab, a laptop waking up) does not get to close the whole gap in one go:
- * the elapsed time is capped, so the light eases back into place over the next frames
- * instead of snapping there. There is no cliff at any gap: every frame moves the light by
- * at most the same distance.
- */
-const DT_MAX = 0.05;
-/**
- * The furthest the light may travel in one frame, as a share of its own radius. It is the
- * same for every frame, whatever the gap, so a late frame slides the light into place
- * instead of jumping it.
- */
-const MOVE_SHARE = 1 / 16;
+// A late frame eases over at most DT_MAX seconds and the light's move is capped by MOVE_RATE
+// per second (./glow): no cliff at any gap, and the same sweep time at every refresh rate.
 
 /**
  * What the site's QA harness sees: one frame's timing, and the light's place in the
@@ -163,6 +151,12 @@ export function HeroWordmark() {
      * straight line across the hero.
      */
     let headerH = 0;
+    /**
+     * The sticky header. Its height can change on its own (a font landing, the nav wrapping),
+     * without the hero resizing, so it is observed as well as the hero (#63): the light's
+     * edge has to follow the header's real bottom edge.
+     */
+    const head = document.querySelector(".site-header");
 
     // The pointer in the frame's pixels, the light, and the last client position.
     const target = { x: 0, y: 0 };
@@ -224,9 +218,8 @@ export function HeroWordmark() {
       // at the frame is drawn over exactly the band the field covers.
       const said = parseFloat(getComputedStyle(field).getPropertyValue("--reach"));
       if (Number.isFinite(said) && said > 0) reach = said;
-      // The sticky header's height, measured once (the header does not change with the
-      // hero's size). Its bottom edge is the line the light must not cross.
-      const head = document.querySelector(".site-header");
+      // The sticky header's bottom edge is the line the light must not cross. It is
+      // re-measured whenever either the hero or the header resizes (see the observers).
       const headBox = head?.getBoundingClientRect();
       headerH = headBox ? headBox.height : 0;
     };
@@ -497,11 +490,14 @@ export function HeroWordmark() {
     const t0 = paint ? paint.startTime : 0;
     let last = 0;
     /**
-     * The site's own QA hook: it is called once per frame with the frame's timing and the
-     * light's place, so that a frame can be measured from the inside. Nothing in the site
-     * listens to it; the harness does.
+     * The site's own QA hook: a harness can set it to read a frame from the inside. It is a
+     * development-only hook: the production build folds NODE_ENV away and ships no reference
+     * to it (#63).
      */
-    const hook = (globalThis as { __heroGlow?: (f: GlowFrame) => void }).__heroGlow;
+    const hook =
+      process.env.NODE_ENV !== "production"
+        ? (globalThis as { __heroGlow?: (f: GlowFrame) => void }).__heroGlow
+        : undefined;
     const frame = (now: number) => {
       const t = (now - t0) / 1000;
       // Time, not frames: the same gap closes in the same seconds at any refresh rate. The
@@ -514,10 +510,10 @@ export function HeroWordmark() {
       last = now;
       const following = inside && seen && !touched;
       const tau = following ? TAU_FOLLOW : TAU_SETTLE;
-      const k = 1 - Math.exp(-dt / tau);
-      // The light never crosses more than a sixteenth of its own radius in one frame: it
-      // slides back into place instead of jumping.
-      const strength = drawField(t, k, rad * MOVE_SHARE);
+      const k = easeK(dt, tau);
+      // The cap is a speed limit per second, not a fixed step per frame: the same long sweep
+      // now takes the same time at 30, 60 and 144 Hz (#63).
+      const strength = drawField(t, k, moveCap(rad, dt));
       drawPane(t, true);
       hook?.({ t, dt, gap, x: pos.x, y: pos.y, alpha: strength });
       raf = requestAnimationFrame(frame);
@@ -554,6 +550,9 @@ export function HeroWordmark() {
       if (!raf) begin();
     });
     ro.observe(hero);
+    // A header-only height change re-measures headerH too, so the light's edge still lands on
+    // the header's bottom edge (#63).
+    if (head) ro.observe(head);
     // The hero off screen: the loop stops, so the page asks for no frames while the hero is
     // not there. It starts again when the hero comes back.
     const io = new IntersectionObserver(

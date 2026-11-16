@@ -60,6 +60,7 @@ try {
     # goes through it, and the graph is resolved against Cargo.lock (--locked).
     $lockTool = Join-Path $Repo 'tools\with-build-lock.ps1'
     $cmd = "cargo metadata --format-version 1 --locked | Set-Content -Path `"$metaFile`" -Encoding utf8"
+    # token: the developer's own, unelevated: the lock script runs cargo metadata and nothing else.
     & powershell.exe -NoProfile -File $lockTool powershell.exe -NoProfile -Command $cmd
     if ($LASTEXITCODE -ne 0) { throw "cargo metadata failed (exit $LASTEXITCODE)" }
     $metadata = ([System.IO.File]::ReadAllText($metaFile) | ConvertFrom-Json)

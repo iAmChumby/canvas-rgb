@@ -3,8 +3,10 @@
 //!
 //! Each file is parsed once to read its schema. The source text is kept, so activation
 //! builds a fresh instance from it. The folder is rescanned on a fixed interval; only
-//! files whose size or modified time changed are parsed again. A file that fails to
-//! parse is logged with its error and left out of the list until it changes.
+//! files whose size, modified time or content changed are parsed again. The content hash in
+//! the stamp catches a same-length edit that lands inside one tick of the file system's clock
+//! (issue #75). A file that fails to parse is logged with its error and left out of the list
+//! until it changes.
 //!
 //! A file whose *load* ran out of time is another case: it says how busy the machine was,
 //! not what the file is, so it is parsed again after a wait (30 s, then twice as long each
@@ -34,12 +36,18 @@ pub const USER_EFFECT_PREFIX: &str = "html:";
 /// stale label the editor kept survives a daemon restart, and two drafts of the same file share
 /// one id.
 pub fn source_hash(source: &str) -> String {
+    format!("{:016x}", fnv1a(source.as_bytes()))
+}
+
+/// FNV-1a over raw bytes: the change-detection stamp hashes a file's bytes, so a same-length
+/// edit inside one tick of the file system's clock is still seen (issue #75).
+fn fnv1a(bytes: &[u8]) -> u64 {
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
-    for byte in source.as_bytes() {
+    for byte in bytes {
         hash ^= *byte as u64;
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
-    format!("{hash:016x}")
+    hash
 }
 
 /// The runtime's position in a draft, from its own message: the `eval_script:<line>:<col>` (or
@@ -207,8 +215,12 @@ pub const STOCK_EFFECTS: &[(&str, &str)] = &[
     ("palette-knife", include_str!("../stock-effects/palette-knife.html")),
 ];
 
-/// A file's identity for change detection: modified time and size.
-type Stamp = (Option<SystemTime>, u64);
+/// A file's identity for change detection: modified time, size and a hash of its content.
+///
+/// The hash is what catches a same-length edit that lands inside one tick of the file
+/// system's clock, when the modified time and the size are both still the same (issue #75).
+/// A file that cannot be read has a hash of zero; its modified time and size still decide.
+type Stamp = (Option<SystemTime>, u64, u64);
 
 #[derive(Clone)]
 struct LoadedEffect {
@@ -607,7 +619,7 @@ impl UserEffects {
                         .failed
                         .get(&path)
                         .filter(|f| f.stamp == stamp && f.attempts > 0)
-                        .map(|f| f.attempts + 1)
+                        .map(|f| f.attempts.saturating_add(1))
                         .unwrap_or(1);
                     let attempts = if failure.depends_on_load { attempts } else { 0 };
                     let retry_at = failure
@@ -679,7 +691,7 @@ impl UserEffects {
                     tracing::error!(%id, %error, "a stock effect failed to build and was left out");
                     let depends_on_load = crate::thumbnail::build_error_depends_on_load(&error);
                     // The same effect, failing the same way, waits twice as long each time.
-                    let attempts = if depends_on_load { attempts + 1 } else { 0 };
+                    let attempts = if depends_on_load { attempts.saturating_add(1) } else { 0 };
                     state.stock_failed.insert(
                         id,
                         StockFailure {
@@ -728,7 +740,8 @@ fn listing(dir: &Path) -> Result<BTreeMap<PathBuf, Stamp>, String> {
             continue;
         }
         let Ok(meta) = entry.metadata() else { continue };
-        out.insert(path, (meta.modified().ok(), meta.len()));
+        let hash = std::fs::read(&path).map(|bytes| fnv1a(&bytes)).unwrap_or(0);
+        out.insert(path, (meta.modified().ok(), meta.len(), hash));
     }
     Ok(out)
 }
@@ -1016,6 +1029,18 @@ mod tests {
                 .expect("the modified time is set");
         }
 
+        /// Writes with an exact modified time, so two edits of the same length can share a
+        /// stamp as they do inside one tick of the file system's clock (issue #75).
+        fn write_at(&self, file: &str, contents: &str, modified: SystemTime) {
+            let path = self.0.join(file);
+            std::fs::write(&path, contents).expect("the file is written");
+            std::fs::File::options()
+                .write(true)
+                .open(&path)
+                .and_then(|f| f.set_modified(modified))
+                .expect("the modified time is set");
+        }
+
         fn remove(&self, file: &str) {
             std::fs::remove_file(self.0.join(file)).expect("the file is removed");
         }
@@ -1050,6 +1075,67 @@ mod tests {
             ]
         );
         assert_eq!(parses.load(Ordering::SeqCst), 2);
+    }
+
+    /// Two edits of the same length that land inside one tick of the file system's clock share
+    /// a modified time and a length. The content hash in the stamp still tells them apart, so
+    /// the rescan parses the new version (issue #75).
+    #[test]
+    fn a_same_length_edit_within_one_clock_tick_is_detected() {
+        let dir = TempDir::new("same-length-edit");
+        let v1 = "Name one\n<canvas></canvas>";
+        let v2 = "Name two\n<canvas></canvas>";
+        assert_eq!(v1.len(), v2.len(), "the two versions must have the same length");
+        // Both writes get the exact same modified time and length: only the content differs.
+        let at = SystemTime::UNIX_EPOCH + Duration::from_secs(1_700_000_000);
+        dir.write_at("slow.html", v1, at);
+
+        let parses = Arc::new(AtomicUsize::new(0));
+        let effects = UserEffects::new(fake_builder(parses.clone()));
+        assert!(effects.rescan(&dir.0));
+        assert_eq!(names(&effects), vec![("html:slow".to_string(), "Name one".to_string())]);
+        assert_eq!(parses.load(Ordering::SeqCst), 1);
+
+        dir.write_at("slow.html", v2, at);
+        assert!(effects.rescan(&dir.0), "a rescan must see the changed content");
+        assert_eq!(parses.load(Ordering::SeqCst), 2, "the edited file was not parsed again");
+        assert_eq!(names(&effects), vec![("html:slow".to_string(), "Name two".to_string())]);
+    }
+
+    /// A load timeout that has already been retried `u32::MAX` times is unreachable in
+    /// practice, but the attempt counter must not overflow on the next retry (issue #75).
+    #[test]
+    fn a_load_timeout_at_the_max_attempt_count_does_not_overflow() {
+        let dir = TempDir::new("max-attempts");
+        dir.write("slow.html", "Slow\n<canvas></canvas>");
+        let parses = Arc::new(AtomicUsize::new(0));
+        let clock = TestClock::new();
+        let effects = UserEffects::with_limits(
+            timing_out_builder(parses.clone(), usize::MAX),
+            &[],
+            crate::thumbnail::TIMEOUT_RETRY_AFTER,
+            clock.clock(),
+        );
+
+        // Put a failure that is due for another retry at the maximum attempt count. On the
+        // old code the `attempts + 1` below overflows and panics in a debug build.
+        let stamp = *listing(&dir.0).expect("the folder is readable").get(&dir.0.join("slow.html")).expect("the file has a stamp");
+        {
+            let mut state = write_lock(&effects.state);
+            state.failed.insert(
+                dir.0.join("slow.html"),
+                Failure {
+                    stamp,
+                    error: "it took too long".to_string(),
+                    attempts: u32::MAX,
+                    retry_at: Some(Duration::ZERO),
+                },
+            );
+        }
+        clock.advance_to(Duration::from_secs(1));
+
+        effects.rescan(&dir.0);
+        assert_eq!(effects.failures().len(), 1, "the file is still reported as waiting");
     }
 
     #[test]
@@ -1316,6 +1402,7 @@ mod tests {
 
         effects.rescan(&dir.0);
         assert_eq!(effects.failures().len(), 1);
+        let generation_after_fail = effects.generation();
 
         dir.remove("slow.html");
         effects.rescan(&dir.0);
@@ -1325,6 +1412,11 @@ mod tests {
             effects.failures()
         );
         assert_eq!(parses.load(Ordering::SeqCst), 1, "the deleted file was parsed again");
+        assert_eq!(
+            effects.generation(),
+            generation_after_fail + 1,
+            "deleting a waiting file must bump the generation so thumbnail caches drop it"
+        );
     }
 
     /// A stock effect is built when the daemon starts; if its load runs out of time then,
