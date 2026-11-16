@@ -1498,7 +1498,7 @@ pub fn scenes_edit(api: &dyn Api, args: &EditArgs, json: bool) -> Result<Output,
             CliError::Other(format!("the scene {} was saved, but its run record could not be written: {e}", scene.id))
         })?;
     }
-    scene_output(false, saved, Some(&args.run), &scene, json)
+    scene_output(false, saved, Some(args.run.as_str()), &scene, json)
 }
 
 /// `canvas-rgb scenes delete <scene> --run <run> [--force] [--dry-run]` (#377).
