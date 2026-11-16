@@ -6848,7 +6848,7 @@ button.chip:hover {
   width: 8ch;
   color: var(--live);
   font-family: var(--fm);
-  font-size: 12px;
+  font-size: var(--t14);
   text-align: right;
   visibility: hidden;
 }
@@ -6861,6 +6861,9 @@ button.chip:hover {
   fill: var(--dim);
   font-family: var(--fm);
   font-size: 14px;
+  /* The weight is here, not in a rule of its own further down: a second rule would take the
+     size with it, and the plan's legends would fall back under the floor again. */
+  font-weight: 600;
   pointer-events: none;
 }
 
@@ -7265,11 +7268,6 @@ button.chip:hover {
   stroke-width: 1.5;
   stroke-linecap: round;
   stroke-linejoin: round;
-}
-
-.pad-print {
-  font-size: 12px;
-  font-weight: 600;
 }
 
 /* The canvas of the reworked editor: the parts, their two fills, the rulers and the stage the

@@ -120,6 +120,20 @@ describe("the plan's numbers on a phone", () => {
     expect(readout!.body).toContain("var(--t14)");
   });
 
+  it("sizes the plan's legend in one rule, so no later rule can shrink it again", () => {
+    // A second `.pad-print` rule further down the sheet took the size with it once: the
+    // legend fell to 12 units and the plan's letters dropped under the floor.
+    const prints = app.filter((rule) => rule.selectors.includes(".pad-print"));
+    // The base rule and the phone's: nothing else may set this size again.
+    expect(prints.length).toBe(2);
+    const sizes = prints.map((rule) => Number(/font-size: (\d+)px/.exec(rule.body)?.[1] ?? "0"));
+    expect(sizes.every((px) => px >= 14)).toBe(true);
+    // The word at the held row's edge is read, so it too is at the floor.
+    const pressed = ruleFor(".pad-map-pressed");
+    expect(pressed).toBeDefined();
+    expect(pressed!.body).toContain("var(--t14)");
+  });
+
   it("holds three lines of the strip in every state, so the note cannot move a panel", () => {
     expect(narrowBlock()).toMatch(/\.pad-state \{\s*min-height:/);
   });

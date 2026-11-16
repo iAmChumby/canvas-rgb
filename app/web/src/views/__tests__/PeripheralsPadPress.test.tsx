@@ -342,20 +342,20 @@ describe("the controller drawing", () => {
 
   it("moves a held light to the key its button is mapped to, without waiting for a frame", async () => {
     await open();
-    // X is held down.
-    pad.buttons.add(2);
+    // The browser reports the pad's first paddle as held, and P1 is mapped to nothing yet.
+    pad.buttons.add(17);
     frames.step();
-    expect(target("button-x").getAttribute("data-pressed")).toBe("true");
-    expect(target("button-b").getAttribute("data-pressed")).toBe("false");
+    expect(row("button-a").getAttribute("data-pressed")).toBe("false");
 
-    // B is mapped to X while X is still held. No frame is stepped after this: the light must
-    // move on the map's own change, or a held key goes stale.
-    fireEvent.click(screen.getByRole("combobox", { name: "B mapping" }));
-    const list = await screen.findByRole("listbox", { name: "B mapping" });
-    fireEvent.click(within(list).getByRole("option", { name: /^X$/ }));
+    // P1 is mapped to A while the paddle is still held. No frame is stepped after this: the
+    // light must move on the map's own change, or a held button goes stale.
+    const name = "Paddle 1 (P1) mapping";
+    fireEvent.click(screen.getByRole("combobox", { name }));
+    const list = await screen.findByRole("listbox", { name });
+    fireEvent.click(within(list).getByRole("option", { name: /^A$/ }));
 
-    expect(target("button-b").getAttribute("data-pressed")).toBe("true");
-    expect(row("button-b").getAttribute("data-pressed")).toBe("true");
+    expect(row("button-a").getAttribute("data-pressed")).toBe("true");
+    expect(target("button-a").getAttribute("data-pressed")).toBe("true");
   });
 
   it("says which pad it is showing when several are connected and none carries the device's ids", async () => {
