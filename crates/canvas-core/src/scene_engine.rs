@@ -847,7 +847,7 @@ fn run_group(
                 // light in any group, reads the cell at the LED as before.
                 let column = work.strip_read == StripRead::Column
                     && group.shapes.get(index).is_some_and(|(_, arrangement)| {
-                        matches!(arrangement, Arrangement::Strip | Arrangement::Ring)
+                        matches!(*arrangement, Arrangement::Strip | Arrangement::Ring)
                     });
                 if column {
                     sampling::sample_led_columns(
