@@ -3404,7 +3404,7 @@ mod tests {
         ]})
     }
 
-    /// A groups file under the home, with two groups: one the scene already has and one it does not.
+    /// A groups file under the home: one group, named `Fans`, with a brightness of 70.
     fn a_groups_file(home: &TempHome) -> String {
         home.write(
             "groups.json",
