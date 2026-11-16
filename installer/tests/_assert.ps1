@@ -2,24 +2,32 @@
 $script:Pass = 0
 $script:Fail = 0
 $script:Skipped = 0
+$script:SkippedThisCase = $false
 
 function Test-Case {
     param([string]$Name, [scriptblock]$Body)
+    $script:SkippedThisCase = $false
     try {
         & $Body
-        $script:Pass++
-        Write-Host "PASS  $Name"
     } catch {
+        if ($script:SkippedThisCase) { return }   # Skip-Case already accounted for this case
         $script:Fail++
         Write-Host "FAIL  $Name"
         Write-Host "      $($_.Exception.Message)"
+        return
     }
+    if ($script:SkippedThisCase) { return }       # a case that called Skip-Case is never a PASS
+    $script:Pass++
+    Write-Host "PASS  $Name"
 }
 
 # A check that could not run here. Shown as SKIP (UNKNOWN), counted separately, never as PASS.
+# Safe inside a Test-Case body: the flag makes Test-Case leave the PASS/Fail counters alone. It is
+# equally safe at the top level (no Test-Case around it), where only the Skipped counter moves.
 function Skip-Case {
     param([string]$Name, [string]$Reason)
     $script:Skipped++
+    $script:SkippedThisCase = $true
     Write-Host "SKIP  $Name  (UNKNOWN, not run: $Reason)"
 }
 
