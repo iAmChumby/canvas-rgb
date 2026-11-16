@@ -5642,17 +5642,15 @@ button.chip:hover {
     /* Two rows: the icon, and the name under it. The rows are the same height for every link,
        so a quiet link's icon and the active link's icon sit on one line, and the active link's
        name takes the row below instead of lifting its icon. The rows sit at the bottom of the
-       link, which is where the dock's icons already were. */
-    --nav-row-icon: 18px;
-    --nav-row-name: 16px;
-    --nav-row-gap: 2px;
+       link, which is where the dock's icons already were. The four sizes come from tokens.css
+       (#57), so this block holds no raw pixel measurements. */
     display: grid;
     grid-template-rows: var(--nav-row-icon) var(--nav-row-name);
     gap: 0;
     row-gap: var(--nav-row-gap);
     justify-items: center;
     align-content: end;
-    height: 56px;
+    height: var(--nav-link-h);
     flex: 1 1 0;
     min-width: 0;
     /* #57: the label of the active link clears the bottom edge of its tile. Every link takes
@@ -5676,7 +5674,7 @@ button.chip:hover {
     position: absolute;
     left: 0;
     right: 0;
-    top: calc(56px - var(--nav-row-icon) - var(--nav-row-gap) - var(--nav-row-name));
+    top: calc(var(--nav-link-h) - var(--nav-row-icon) - var(--nav-row-gap) - var(--nav-row-name));
     bottom: 0;
     background: var(--live-soft);
     border-radius: var(--r-md);
