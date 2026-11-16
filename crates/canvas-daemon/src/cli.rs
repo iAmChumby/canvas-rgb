@@ -5337,4 +5337,1042 @@ mod tests {
         }
         assert_eq!(lights_list_text(&serde_json::json!({ "lights": [] })), "no lights\n");
     }
+
+    // ---- effects and presets (#377 T3) ----
+
+    /// The effect most of these tests are about.
+    const INK: &str = "html:ink";
+
+    /// `html:ink` as `GET /effects/{id}` answers it: two properties, one built-in preset and one
+    /// of the user's.
+    fn ink_detail() -> serde_json::Value {
+        serde_json::json!({
+            "schema": {
+                "id": "html:ink",
+                "name": "Ink",
+                "properties": [
+                    { "key": "speed", "label": "Speed",
+                      "kind": { "type": "number", "min": 0.0, "max": 10.0, "step": 1.0, "default": 5.0 } },
+                    { "key": "tint", "label": "Tint", "kind": { "type": "color", "default": "#112233" } }
+                ],
+                "presets": [ { "name": "Calm", "props": { "speed": { "type": "number", "value": 2.0 } } } ]
+            },
+            "favorite": false,
+            "user_presets": [ { "name": "Night", "props": { "speed": { "type": "number", "value": 7.0 } } } ],
+            "props": {}
+        })
+    }
+
+    /// A daemon for the effects commands: it answers each (method, path) it was told about, the
+    /// scenes list for the scenes route, and `404` for anything else, and records every request.
+    /// What a fake route answers: a value, or a status and a body.
+    type Reply = Result<serde_json::Value, (u16, serde_json::Value)>;
+
+    struct FxApi {
+        scenes: serde_json::Value,
+        routes: Vec<(String, String, Reply)>,
+        /// Runs when a request other than a read arrives, before it is answered.
+        on_write: Option<Box<dyn Fn()>>,
+        /// When set, a request other than a read fails with this error, after `on_write` ran.
+        write_error: Option<Box<dyn Fn() -> CliError>>,
+        asked: std::sync::Mutex<Vec<(String, String, Option<String>)>>,
+    }
+
+    impl FxApi {
+        fn new(scenes: serde_json::Value) -> Self {
+            Self {
+                scenes,
+                routes: Vec::new(),
+                on_write: None,
+                write_error: None,
+                asked: std::sync::Mutex::new(Vec::new()),
+            }
+        }
+
+        fn route(mut self, method: &str, path: &str, answer: serde_json::Value) -> Self {
+            self.routes.push((method.to_string(), path.to_string(), Ok(answer)));
+            self
+        }
+
+        fn refuse(mut self, method: &str, path: &str, status: u16, message: &str) -> Self {
+            self.routes.push((
+                method.to_string(),
+                path.to_string(),
+                Err((status, serde_json::json!({ "message": message }))),
+            ));
+            self
+        }
+
+        fn on_write(mut self, hook: impl Fn() + 'static) -> Self {
+            self.on_write = Some(Box::new(hook));
+            self
+        }
+
+        fn write_fails_with(mut self, make: impl Fn() -> CliError + 'static) -> Self {
+            self.write_error = Some(Box::new(make));
+            self
+        }
+
+        fn asked(&self) -> Vec<(String, String, Option<String>)> {
+            self.asked.lock().unwrap().clone()
+        }
+
+        /// Every request that is not a read.
+        fn writes(&self) -> Vec<(String, String, Option<String>)> {
+            self.asked().into_iter().filter(|(method, _, _)| method != "GET").collect()
+        }
+
+        /// How many times a path was read.
+        fn reads(&self, path: &str) -> usize {
+            self.asked().iter().filter(|(method, at, _)| method == "GET" && at == path).count()
+        }
+    }
+
+    impl Api for FxApi {
+        fn call(&self, method: &str, path: &str, body: Option<&str>) -> Result<serde_json::Value, CliError> {
+            self.asked
+                .lock()
+                .unwrap()
+                .push((method.to_string(), path.to_string(), body.map(str::to_string)));
+            if method != "GET" {
+                if let Some(hook) = &self.on_write {
+                    hook();
+                }
+                if let Some(make) = &self.write_error {
+                    return Err(make());
+                }
+            }
+            if method == "GET" && path == canvas_proto::api::routes::SCENES {
+                return Ok(self.scenes.clone());
+            }
+            for (at_method, at_path, answer) in &self.routes {
+                if at_method == method && at_path == path {
+                    return match answer {
+                        Ok(value) => Ok(value.clone()),
+                        Err((status, body)) => Err(CliError::Api {
+                            status: *status,
+                            message: body.get("message").and_then(|m| m.as_str()).unwrap_or_default().to_string(),
+                            body: Some(body.clone()),
+                        }),
+                    };
+                }
+            }
+            Err(CliError::Api {
+                status: 404,
+                message: format!("the fake daemon has no route for {method} {path}"),
+                body: None,
+            })
+        }
+    }
+
+    /// A failure after which the caller cannot tell whether the daemon acted.
+    fn unknown_outcome(label: &str) -> CliError {
+        match label {
+            "no answer" => CliError::NoAnswer("no answer".into()),
+            _ => CliError::Other("connection reset".into()),
+        }
+    }
+
+    fn ink_route() -> String {
+        effect_route(canvas_proto::api::routes::EFFECT, INK)
+    }
+
+    fn ink_source_route() -> String {
+        effect_route(canvas_proto::api::routes::EFFECT_SOURCE, INK)
+    }
+
+    fn ink_presets_route() -> String {
+        effect_route(canvas_proto::api::routes::EFFECT_PRESETS, INK)
+    }
+
+    fn json_of(output: Output) -> serde_json::Value {
+        match output {
+            Output::Json(value) => value,
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// The record of run `agent-1` with extra top-level fields (`presets`, `effects`, `pending`).
+    fn run_record_with(extra: serde_json::Value) -> String {
+        let mut record: serde_json::Value =
+            serde_json::from_str(&a_record(serde_json::json!([]), "gaming")).expect("the record is JSON");
+        for (key, value) in extra.as_object().expect("an object") {
+            record[key.as_str()] = value.clone();
+        }
+        record.to_string()
+    }
+
+    /// The record of a run that saved `Night` of `html:ink` and imported `html:ink`.
+    fn record_with_ink_and_night() -> String {
+        run_record_with(serde_json::json!({
+            "presets": [{ "effect": "html:ink", "name": "Night" }],
+            "effects": [{ "id": "html:ink" }],
+        }))
+    }
+
+    /// Scenes where Gaming and Movie each play `effect`, and Sleep plays nothing.
+    fn scenes_playing(effect: &str) -> serde_json::Value {
+        serde_json::json!({
+            "active": "gaming",
+            "scenes": [
+                { "id": "gaming", "name": "Gaming", "rev": 4, "groups": [
+                    { "id": "desk", "name": "Desk", "members": ["fake:a#z0"],
+                      "plays": { "type": "effect", "effect": effect, "props": {} } } ] },
+                { "id": "movie", "name": "Movie", "rev": 7, "groups": [
+                    { "id": "lamp", "name": "Lamp", "members": ["fake:b#z0"],
+                      "plays": { "type": "effect", "effect": effect, "props": {} } } ] },
+                { "id": "sleep", "name": "Sleep", "rev": 2, "groups": [
+                    { "id": "bed", "name": "Bed", "members": [], "plays": { "type": "off" } } ] },
+            ],
+            "group_states": []
+        })
+    }
+
+    fn save_args(props: &[&str], run: Option<&str>) -> PresetSaveArgs {
+        PresetSaveArgs {
+            effect: INK.into(),
+            name: "Night".into(),
+            props: props.iter().map(|p| p.to_string()).collect(),
+            run: run.map(str::to_string),
+        }
+    }
+
+    fn preset_delete_args(name: &str, run: &str, dry_run: bool) -> PresetDeleteArgs {
+        PresetDeleteArgs { effect: INK.into(), name: name.into(), run: run.into(), dry_run }
+    }
+
+    fn effect_delete_args(run: &str, keep_presets: bool, dry_run: bool) -> EffectDeleteArgs {
+        EffectDeleteArgs { effect: INK.into(), keep_presets, run: run.into(), dry_run }
+    }
+
+    fn import_args(file: &str, replace: bool, run: Option<&str>) -> ImportArgs {
+        ImportArgs { file: file.into(), replace, run: run.map(str::to_string) }
+    }
+
+    /// The names of the files in a folder, sorted; empty when the folder is not there.
+    fn file_names_in(dir: &std::path::Path) -> Vec<String> {
+        let mut names: Vec<String> = std::fs::read_dir(dir)
+            .map(|entries| entries.flatten().map(|e| e.file_name().to_string_lossy().into_owned()).collect())
+            .unwrap_or_default();
+        names.sort();
+        names
+    }
+
+    /// What was on disk at the moment a write arrived: the record's text and the file names in
+    /// one folder of the run.
+    #[derive(Clone, Default)]
+    struct Seen {
+        record: String,
+        files: Vec<String>,
+    }
+
+    /// A hook that notes the record and the files of a folder when a write arrives.
+    fn seen_at_write(
+        record: PathBuf,
+        folder: PathBuf,
+        seen: std::sync::Arc<std::sync::Mutex<Seen>>,
+    ) -> impl Fn() + 'static {
+        move || {
+            *seen.lock().unwrap() = Seen {
+                record: std::fs::read_to_string(&record).unwrap_or_default(),
+                files: file_names_in(&folder),
+            };
+        }
+    }
+
+    fn seen_pending(seen: &Seen) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(&seen.record)
+            .map(|record| record["pending"].clone())
+            .unwrap_or(serde_json::Value::Null)
+    }
+
+    fn run_folder(home: &TempHome, folder: &str) -> PathBuf {
+        home.path().join("agent-runs").join("agent-1").join(folder)
+    }
+
+    #[test]
+    fn the_effects_commands_are_at_the_spines_names() {
+        use clap::CommandFactory;
+        let root = Cli::command();
+        for path in [
+            canvas_proto::cli::EFFECTS_SOURCE,
+            canvas_proto::cli::EFFECTS_DELETE,
+            canvas_proto::cli::EFFECTS_PRESET_LIST,
+            canvas_proto::cli::EFFECTS_PRESET_SAVE,
+            canvas_proto::cli::EFFECTS_PRESET_DELETE,
+        ] {
+            let mut at = &root;
+            for step in path {
+                at = at.find_subcommand(step).unwrap_or_else(|| panic!("no command {step} on the path {path:?}"));
+            }
+        }
+        let cli = Cli::try_parse_from([
+            "canvas-rgb", "effects", "preset", "save", INK, "Night", "--prop", "speed=7", "--prop",
+            "tint=#ff0000", "--run", "agent-1",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Preset(PresetCommand::Save(args))) => {
+                assert_eq!((args.effect.as_str(), args.name.as_str()), (INK, "Night"));
+                assert_eq!(args.props, ["speed=7", "tint=#ff0000"], "--prop repeats");
+                assert_eq!(args.run.as_deref(), Some("agent-1"));
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "effects", "preset", "save", INK, "Night"]).unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Preset(PresetCommand::Save(args))) => {
+                assert!(args.run.is_none() && args.props.is_empty(), "a save may leave --run and --prop off");
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from([
+            "canvas-rgb", "effects", "delete", INK, "--keep-presets", "--run", "agent-1", "--dry-run",
+        ])
+        .unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Delete(args)) => {
+                assert_eq!((args.effect.as_str(), args.run.as_str()), (INK, "agent-1"));
+                assert!(args.keep_presets && args.dry_run);
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "effects", "preset", "delete", INK, "Night", "--run", "agent-1"])
+            .unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Preset(PresetCommand::Delete(args))) => {
+                assert_eq!((args.name.as_str(), args.run.as_str(), args.dry_run), ("Night", "agent-1", false));
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "effects", "preset", "list", INK]).unwrap();
+        assert!(matches!(cli.command, Command::Effects(EffectsCommand::Preset(PresetCommand::List(_)))));
+        let cli = Cli::try_parse_from(["canvas-rgb", "effects", "source", INK, "--out", "ink.html"]).unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Source(args)) => assert_eq!(args.out.as_deref(), Some("ink.html")),
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "effects", "import", "a.html", "--run", "agent-1"]).unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Import(args)) => {
+                assert_eq!((args.run.as_deref(), args.replace), (Some("agent-1"), false));
+            }
+            other => panic!("{other:?}"),
+        }
+        let cli = Cli::try_parse_from(["canvas-rgb", "effects", "check", "a.html", "--prop", "a=1", "--prop", "b=2"])
+            .unwrap();
+        match cli.command {
+            Command::Effects(EffectsCommand::Check(args)) => assert_eq!(args.props, ["a=1", "b=2"]),
+            other => panic!("{other:?}"),
+        }
+        // --run is required on both deletes: a run's guard cannot be left off by forgetting a flag.
+        assert!(
+            Cli::try_parse_from(["canvas-rgb", "effects", "delete", INK]).is_err(),
+            "an effect delete names the run"
+        );
+        assert!(
+            Cli::try_parse_from(["canvas-rgb", "effects", "preset", "delete", INK, "Night"]).is_err(),
+            "a preset delete names the run"
+        );
+    }
+
+    #[test]
+    fn prop_arguments_split_at_the_first_equals_and_a_bad_one_is_one_plain_sentence() {
+        let args = |list: &[&str]| list.iter().map(|a| a.to_string()).collect::<Vec<String>>();
+        assert_eq!(
+            parse_prop_args(&args(&["tint=#ff0000", "label=a=b"])).unwrap(),
+            vec![("tint".to_string(), "#ff0000".to_string()), ("label".to_string(), "a=b".to_string())],
+            "a value keeps its own ="
+        );
+        assert!(parse_prop_args(&[]).unwrap().is_empty());
+        let missing = parse_prop_args(&args(&["speed"])).unwrap_err();
+        assert!(missing.contains("is not a key=value pair"), "a missing = is refused: {missing}");
+        let twice = parse_prop_args(&args(&["speed=1", "tint=#ffffff", "speed=2"])).unwrap_err();
+        assert_eq!(twice, "--prop speed is given twice; give each property once", "a repeated key is refused");
+        let nameless = parse_prop_args(&args(&["=5"])).unwrap_err();
+        assert!(nameless.contains("no property name"), "{nameless}");
+    }
+
+    #[test]
+    fn a_path_segment_is_percent_encoded_so_a_name_cannot_change_the_route() {
+        assert_eq!(path_segment("html:my effect"), "html%3Amy%20effect");
+        assert_eq!(path_segment("Night / 2"), "Night%20%2F%202");
+        assert_eq!(path_segment("a-b_c.d~e"), "a-b_c.d~e");
+        assert_eq!(path_segment("é"), "%C3%A9", "each UTF-8 byte is encoded");
+        assert_eq!(
+            preset_route("html:ink", "Night / 2"),
+            "/api/v1/effects/html%3Aink/presets/Night%20%2F%202"
+        );
+        assert_eq!(ink_presets_route(), "/api/v1/effects/html%3Aink/presets");
+    }
+
+    #[test]
+    fn a_wrong_property_is_refused_before_anything_is_read_or_written() {
+        let home = TempHome::new("fx-badprop");
+        let fresh = || FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail());
+
+        let api = fresh();
+        let error = preset_save(&api, &save_args(&["speed"], Some("agent-1")), false).unwrap_err();
+        assert!(error.to_string().contains("is not a key=value pair"), "{error}");
+        assert!(api.asked().is_empty(), "a pair with no = sends nothing, not even a read: {:?}", api.asked());
+
+        let api = fresh();
+        let error = preset_save(&api, &save_args(&["speed=1", "speed=2"], Some("agent-1")), false).unwrap_err();
+        assert!(error.to_string().contains("--prop speed is given twice"), "{error}");
+        assert!(api.asked().is_empty(), "a repeated key sends nothing: {:?}", api.asked());
+
+        for (pair, needle) in [
+            ("bogus=1", "bogus is not a property of this effect"),
+            ("speed=99", "--prop speed"),
+            ("tint=blue", "--prop tint"),
+        ] {
+            let api = fresh();
+            let error = preset_save(&api, &save_args(&[pair], Some("agent-1")), false).unwrap_err();
+            assert!(error.to_string().contains(needle), "{pair}: {error}");
+            assert_eq!(
+                api.asked(),
+                vec![("GET".to_string(), ink_route(), None)],
+                "{pair}: only the effect was read; nothing was written"
+            );
+        }
+        assert!(home.files().is_empty(), "no record was started: {:?}", home.files());
+    }
+
+    #[test]
+    fn preset_save_posts_the_typed_props_and_the_record_holds_it_pending_while_the_request_is_on_the_way() {
+        let home = TempHome::new("fx-save");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_route(), ink_detail())
+            .route("POST", &ink_presets_route(), serde_json::json!({ "user_presets": [] }))
+            .on_write(seen_at_write(record_at(&home), run_folder(&home, "presets"), seen.clone()));
+        let text = text_of(
+            preset_save(&api, &save_args(&["speed=7", "tint=#ff0000"], Some("agent-1")), false).unwrap(),
+        );
+        assert_eq!(text, "saved preset \"Night\" of html:ink\n");
+
+        let writes = api.writes();
+        assert_eq!(writes.len(), 1, "one write: {writes:?}");
+        assert_eq!((writes[0].0.as_str(), writes[0].1.as_str()), ("POST", ink_presets_route().as_str()));
+        let body: serde_json::Value = serde_json::from_str(writes[0].2.as_deref().expect("a body")).unwrap();
+        assert_eq!(body["name"], "Night");
+        assert_eq!(body["props"]["speed"], serde_json::json!({ "type": "number", "value": 7.0 }));
+        assert_eq!(body["props"]["tint"], serde_json::json!({ "type": "color", "value": "#ff0000" }));
+
+        assert_eq!(
+            seen_pending(&seen.lock().unwrap()),
+            serde_json::json!([{ "op": "preset-save", "scene": "html:ink/Night" }]),
+            "the record held the save as pending when the request went out"
+        );
+        let record = record_json(&home);
+        assert_eq!(record["presets"], serde_json::json!([{ "effect": "html:ink", "name": "Night" }]), "{record}");
+        assert!(record.get("pending").is_none(), "the pending save is cleared: {record}");
+        assert_eq!(record["prior_active"], "gaming");
+        assert_eq!(record["before"], run_scenes(), "the list at the run's first write");
+    }
+
+    #[test]
+    fn preset_save_without_a_run_writes_no_record_and_reads_no_scenes() {
+        let home = TempHome::new("fx-save-norun");
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_route(), ink_detail())
+            .route("POST", &ink_presets_route(), serde_json::json!({ "user_presets": [] }));
+        let document = json_of(preset_save(&api, &save_args(&["speed=7"], None), true).unwrap());
+        assert_eq!(document["saved"], true);
+        assert_eq!(document["run"], serde_json::Value::Null);
+        assert_eq!((document["effect"].as_str(), document["preset"].as_str()), (Some("html:ink"), Some("Night")));
+        assert_eq!(api.reads(canvas_proto::api::routes::SCENES), 0, "no run, no list of scenes");
+        assert!(home.files().is_empty(), "no record, no copy: {:?}", home.files());
+    }
+
+    #[test]
+    fn a_bad_run_id_is_refused_by_every_effects_command_before_anything_is_read_or_sent() {
+        let home = TempHome::new("fx-badrun");
+        for bad in ["../x", "", "con", "a b"] {
+            let api = FxApi::new(run_scenes());
+            let errors = [
+                preset_save(&api, &save_args(&["speed=1"], Some(bad)), false).unwrap_err(),
+                preset_delete(&api, &preset_delete_args("Night", bad, false), false).unwrap_err(),
+                effects_delete(&api, &effect_delete_args(bad, false, false), false).unwrap_err(),
+                // A file that is not there: the run id is checked first, so the error is about the id.
+                effects_import(&api, &import_args("missing.html", false, Some(bad)), false).unwrap_err(),
+            ];
+            for error in errors {
+                assert!(error.to_string().contains("is not a run id"), "{bad:?}: {error}");
+            }
+            assert!(api.asked().is_empty(), "{bad:?}: the fake was never called: {:?}", api.asked());
+        }
+        assert!(home.files().is_empty(), "nothing was written: {:?}", home.files());
+    }
+
+    #[test]
+    fn a_preset_the_run_did_not_save_is_refused_and_nothing_is_sent_or_copied() {
+        let home = TempHome::new("fx-pdel-notmine");
+        home.write("agent-runs/agent-1.json", &run_record_with(serde_json::json!({})));
+        let before = home.files();
+        let api = FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail());
+        let error = preset_delete(&api, &preset_delete_args("Night", "agent-1", false), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the preset \"Night\" of html:ink was not made by run agent-1; nothing changed",
+            "a preset the record does not list is refused"
+        );
+        assert!(api.writes().is_empty(), "no delete was sent: {:?}", api.asked());
+        assert_eq!(home.files(), before, "no copy was taken");
+
+        // The same refusal names the writes the run holds with no known outcome.
+        home.write(
+            "agent-runs/agent-1.json",
+            &run_record_with(serde_json::json!({ "pending": [{ "op": "preset-save", "scene": "html:ink/Night" }] })),
+        );
+        let error = preset_delete(&api, &preset_delete_args("night", "agent-1", false), false).unwrap_err();
+        assert_eq!(
+            error.to_string(),
+            "the preset \"Night\" of html:ink was not made by run agent-1; nothing changed. Run agent-1 holds writes with no known outcome: preset-save html:ink/Night."
+        );
+        assert!(api.writes().is_empty());
+
+        // A preset that is not in the library at all is its own sentence.
+        let error = preset_delete(&api, &preset_delete_args("Nope", "agent-1", false), false).unwrap_err();
+        assert_eq!(error.to_string(), "html:ink has no preset of yours named \"Nope\"; nothing changed");
+        // A missing record refuses the same way the scenes commands do.
+        let error = preset_delete(&api, &preset_delete_args("Night", "agent-9", false), false).unwrap_err();
+        assert_eq!(error.to_string(), "no record of run agent-9; nothing changed");
+    }
+
+    #[test]
+    fn a_preset_delete_copies_the_preset_whole_first_then_deletes_it_and_forgets_it() {
+        let home = TempHome::new("fx-pdel");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_route(), ink_detail())
+            .route("DELETE", &preset_route("html:ink", "Night"), serde_json::json!({ "user_presets": [] }))
+            .on_write(seen_at_write(record_at(&home), run_folder(&home, "presets"), seen.clone()));
+        // The name matches without regard to case, and the stored name goes in the route.
+        let text = text_of(preset_delete(&api, &preset_delete_args("night", "agent-1", false), false).unwrap());
+        assert_eq!(text, "deleted preset \"Night\" of html:ink\n");
+        let writes = api.writes();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!(
+            (writes[0].0.as_str(), writes[0].1.as_str()),
+            ("DELETE", "/api/v1/effects/html%3Aink/presets/Night")
+        );
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.files.len(), 1, "the copy was on disk when the delete went out: {:?}", seen.files);
+        assert_eq!(
+            seen_pending(&seen),
+            serde_json::json!([{ "op": "preset-delete", "scene": "html:ink/Night" }]),
+            "the record held the delete as pending when the request went out"
+        );
+        let copy: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_folder(&home, "presets").join(&seen.files[0])).expect("the copy is there"),
+        )
+        .unwrap();
+        assert_eq!(copy["effect"], "html:ink");
+        assert_eq!(copy["preset"], ink_detail()["user_presets"][0], "the whole preset, props and all");
+
+        let record = record_json(&home);
+        assert!(record.get("presets").is_none(), "the preset is forgotten: {record}");
+        assert!(record.get("pending").is_none(), "{record}");
+        assert_eq!(record["effects"], serde_json::json!([{ "id": "html:ink" }]), "the effect is untouched");
+    }
+
+    #[test]
+    fn a_preset_copy_that_cannot_be_written_sends_nothing() {
+        let home = TempHome::new("fx-pdel-nocopy");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        // A file where the copy's folder must be.
+        home.write("agent-runs/agent-1/presets", "in the way");
+        let record_before = std::fs::read_to_string(record_at(&home)).unwrap();
+        let api = FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail());
+        let error = preset_delete(&api, &preset_delete_args("Night", "agent-1", false), false).unwrap_err();
+        assert!(error.to_string().contains("could not save the preset"), "{error}");
+        assert!(api.writes().is_empty(), "a copy that cannot be written sends nothing: {:?}", api.asked());
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record_before, "no pending entry");
+    }
+
+    #[test]
+    fn a_dry_run_of_a_delete_writes_nothing_and_sends_no_write() {
+        let home = TempHome::new("fx-dry");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let before = home.files();
+        let record_before = std::fs::read_to_string(record_at(&home)).unwrap();
+
+        let api = FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail());
+        let text = text_of(preset_delete(&api, &preset_delete_args("Night", "agent-1", true), false).unwrap());
+        assert_eq!(text, "would delete preset \"Night\" of html:ink\n");
+        let document = json_of(preset_delete(&api, &preset_delete_args("Night", "agent-1", true), true).unwrap());
+        assert_eq!(document["saved"], false);
+        assert!(api.writes().is_empty(), "a dry run sends no write: {:?}", api.asked());
+
+        let api = FxApi::new(run_scenes());
+        let text = text_of(effects_delete(&api, &effect_delete_args("agent-1", false, true), false).unwrap());
+        assert_eq!(text, "would delete html:ink\n");
+        assert_eq!(
+            api.asked(),
+            vec![("GET".to_string(), canvas_proto::api::routes::SCENES.to_string(), None)],
+            "a dry run only reads the scenes: no source, no copy, no delete"
+        );
+        assert_eq!(home.files(), before, "no record rewrite, no copy: the whole home is as it was");
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record_before);
+    }
+
+    #[test]
+    fn an_effect_the_run_did_not_import_is_refused_without_asking_the_daemon_anything() {
+        let home = TempHome::new("fx-edel-notmine");
+        home.write("agent-runs/agent-1.json", &run_record_with(serde_json::json!({})));
+        let before = home.files();
+        let api = FxApi::new(run_scenes());
+        for effect in ["html:ink", "waves"] {
+            let args = EffectDeleteArgs { effect: effect.into(), keep_presets: false, run: "agent-1".into(), dry_run: false };
+            let error = effects_delete(&api, &args, false).unwrap_err();
+            assert_eq!(error.to_string(), format!("{effect} was not made by run agent-1; nothing changed"));
+        }
+        assert!(api.asked().is_empty(), "not made by the run: no request at all: {:?}", api.asked());
+        assert_eq!(home.files(), before);
+    }
+
+    #[test]
+    fn an_effect_a_scene_plays_is_never_deleted_and_the_scenes_are_named() {
+        let home = TempHome::new("fx-edel-played");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let before = home.files();
+        for keep_presets in [false, true] {
+            let api = FxApi::new(scenes_playing("html:ink"));
+            let error = effects_delete(&api, &effect_delete_args("agent-1", keep_presets, false), false).unwrap_err();
+            assert_eq!(
+                error.to_string(),
+                "html:ink is played by the scenes \"Gaming\", \"Movie\"; nothing deleted. Move those groups to another effect first.",
+                "no flag lets a played effect go"
+            );
+            assert_eq!(
+                api.asked(),
+                vec![("GET".to_string(), canvas_proto::api::routes::SCENES.to_string(), None)],
+                "no source read, no delete"
+            );
+        }
+        // The id matches without regard to case, and one scene is one scene.
+        let one = serde_json::json!({ "active": "x", "scenes": [
+            { "id": "x", "name": "Solo", "rev": 1, "groups": [
+                { "id": "g", "name": "G", "members": [], "plays": { "type": "effect", "effect": "HTML:INK", "props": {} } } ] } ] });
+        let api = FxApi::new(one);
+        let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+        assert!(error.to_string().contains("is played by the scene \"Solo\";"), "{error}");
+        assert_eq!(home.files(), before, "no copy was taken");
+    }
+
+    #[test]
+    fn an_effect_delete_copies_the_source_and_the_presets_first_then_deletes_and_forgets_them() {
+        let home = TempHome::new("fx-edel");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>ink</html>", "file_name": "ink.html" }))
+            .route("GET", &ink_route(), ink_detail())
+            .route(
+                "DELETE",
+                &ink_route(),
+                serde_json::json!({ "ok": true, "id": "html:ink", "presets_removed": 1 }),
+            )
+            .on_write(seen_at_write(record_at(&home), run_folder(&home, "effects"), seen.clone()));
+        let text = text_of(effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap());
+        assert_eq!(text, "deleted html:ink (1 preset removed)\n");
+        let writes = api.writes();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        assert_eq!((writes[0].0.as_str(), writes[0].1.as_str()), ("DELETE", "/api/v1/effects/html%3Aink"));
+
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.files.len(), 1, "the copy was on disk when the delete went out: {:?}", seen.files);
+        assert_eq!(
+            seen_pending(&seen),
+            serde_json::json!([{ "op": "effect-delete", "scene": "html:ink" }]),
+            "the record held the delete as pending when the request went out"
+        );
+        let copy: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_folder(&home, "effects").join(&seen.files[0])).expect("the copy is there"),
+        )
+        .unwrap();
+        assert_eq!(copy["id"], "html:ink");
+        assert_eq!(copy["source"], "<html>ink</html>");
+        assert_eq!(copy["file_name"], "ink.html");
+        assert_eq!(copy["user_presets"], ink_detail()["user_presets"], "the presets go with the effect, so they are copied");
+
+        let record = record_json(&home);
+        assert!(record.get("effects").is_none(), "the effect is forgotten: {record}");
+        assert!(record.get("presets").is_none(), "its presets went with it: {record}");
+        assert!(record.get("pending").is_none(), "{record}");
+
+        // --keep-presets: the query, and the record keeps the presets the library kept.
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>ink</html>", "file_name": "ink.html" }))
+            .route("GET", &ink_route(), ink_detail())
+            .route(
+                "DELETE",
+                &format!("{}?keep_presets=true", ink_route()),
+                serde_json::json!({ "ok": true, "id": "html:ink", "presets_removed": 0 }),
+            );
+        let text = text_of(effects_delete(&api, &effect_delete_args("agent-1", true, false), false).unwrap());
+        assert_eq!(text, "deleted html:ink\n");
+        assert_eq!(api.writes()[0].1, "/api/v1/effects/html%3Aink?keep_presets=true");
+        let record = record_json(&home);
+        assert_eq!(record["presets"], serde_json::json!([{ "effect": "html:ink", "name": "Night" }]), "{record}");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let document = json_of(effects_delete(&api, &effect_delete_args("agent-1", true, false), true).unwrap());
+        assert_eq!(document["deleted"], "html:ink");
+        assert_eq!((document["saved"].as_bool(), document["run"].as_str()), (Some(true), Some("agent-1")));
+    }
+
+    #[test]
+    fn an_effect_copy_that_cannot_be_written_or_has_no_source_sends_nothing() {
+        let home = TempHome::new("fx-edel-nocopy");
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        home.write("agent-runs/agent-1/effects", "in the way");
+        let record_before = std::fs::read_to_string(record_at(&home)).unwrap();
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>ink</html>", "file_name": "ink.html" }))
+            .route("GET", &ink_route(), ink_detail());
+        let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+        assert!(error.to_string().contains("could not save the effect"), "{error}");
+        assert!(api.writes().is_empty(), "a copy that cannot be written sends nothing: {:?}", api.asked());
+        assert_eq!(std::fs::read_to_string(record_at(&home)).unwrap(), record_before, "no pending entry");
+
+        // An answer with no source is no copy either.
+        let api = FxApi::new(run_scenes()).route("GET", &ink_source_route(), serde_json::json!({ "file_name": "ink.html" }));
+        let error = effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+        assert!(error.to_string().contains("the daemon sent no source for html:ink"), "{error}");
+        assert!(api.writes().is_empty(), "{:?}", api.asked());
+    }
+
+    #[test]
+    fn an_import_with_a_run_is_pending_while_it_is_sent_and_the_effect_is_noted() {
+        let home = TempHome::new("fx-import");
+        let file = home.write("ink.html", "<html>ink</html>");
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        let answer = serde_json::json!({ "effect": { "id": "html:ink", "name": "Ink" }, "replaced": false });
+        let api = FxApi::new(run_scenes())
+            .route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, answer)
+            .on_write(seen_at_write(record_at(&home), run_folder(&home, "effects"), seen.clone()));
+        let text = text_of(effects_import(&api, &import_args(&file, false, Some("agent-1")), false).unwrap());
+        assert_eq!(text, "imported html:ink (Ink)\n");
+        let writes = api.writes();
+        assert_eq!(writes.len(), 1, "{writes:?}");
+        let body: serde_json::Value = serde_json::from_str(writes[0].2.as_deref().expect("a body")).unwrap();
+        assert_eq!(body, serde_json::json!({ "file_name": "ink.html", "html": "<html>ink</html>", "replace": false }));
+        assert_eq!(
+            seen_pending(&seen.lock().unwrap()),
+            serde_json::json!([{ "op": "import", "scene": "ink.html" }]),
+            "the record held the import as pending when the request went out"
+        );
+        let record = record_json(&home);
+        assert_eq!(record["effects"], serde_json::json!([{ "id": "html:ink" }]), "{record}");
+        assert!(record.get("pending").is_none(), "{record}");
+        assert_eq!(record["before"], run_scenes());
+        assert!(seen.lock().unwrap().files.is_empty(), "a plain import copies nothing");
+    }
+
+    #[test]
+    fn an_import_without_a_run_writes_no_record_and_answers_one_document() {
+        let home = TempHome::new("fx-import-norun");
+        let file = home.write("ink.html", "<html>ink</html>");
+        let before = home.files();
+        let answer = serde_json::json!({ "effect": { "id": "html:ink", "name": "Ink" }, "replaced": true });
+        let api = FxApi::new(run_scenes()).route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, answer);
+        let text = text_of(effects_import(&api, &import_args(&file, true, None), false).unwrap());
+        assert_eq!(text, "imported html:ink (Ink); it replaced the file of the same name\n");
+        let document = json_of(effects_import(&api, &import_args(&file, true, None), true).unwrap());
+        assert_eq!(document["saved"], true);
+        assert_eq!(document["run"], serde_json::Value::Null);
+        assert_eq!(document["effect"]["id"], "html:ink");
+        assert_eq!(document["replaced"], true);
+        assert_eq!(api.reads(canvas_proto::api::routes::SCENES), 0, "no run, no list of scenes");
+        assert_eq!(home.files(), before, "no record, no copy");
+    }
+
+    #[test]
+    fn an_import_file_over_the_cap_is_refused_in_one_sentence_before_any_request() {
+        let home = TempHome::new("fx-import-big");
+        let big = home.write("big.html", &"x".repeat(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES + 1));
+        let api = FxApi::new(run_scenes());
+        let error = effects_import(&api, &import_args(&big, false, Some("agent-1")), false).unwrap_err();
+        assert!(error.to_string().contains("is over"), "{error}");
+        assert!(!error.to_string().contains('\n'), "one sentence: {error}");
+        assert!(api.asked().is_empty(), "read before any request: {:?}", api.asked());
+        let error = effects_import(&api, &import_args("/no/such/file.html", false, None), false).unwrap_err();
+        assert!(error.to_string().contains("could not read"), "{error}");
+        assert!(api.asked().is_empty());
+        let exact = home.write("exact.html", &"x".repeat(canvas_proto::consts::EFFECT_IMPORT_MAX_BYTES));
+        let answer = serde_json::json!({ "effect": { "id": "html:exact", "name": "Exact" }, "replaced": false });
+        let api = FxApi::new(run_scenes()).route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, answer);
+        effects_import(&api, &import_args(&exact, false, None), false).expect("a file at the cap is accepted");
+    }
+
+    #[test]
+    fn a_replace_with_a_run_overwrites_only_an_effect_the_run_imported_and_copies_it_first() {
+        let home = TempHome::new("fx-replace");
+        let file = home.write("ink.html", "<html>new</html>");
+        let listed = serde_json::json!({ "effects": [{ "id": "html:ink", "name": "Ink" }], "active": null, "failed": [] });
+
+        // The effect is in the library and the run did not import it: refused, nothing copied.
+        home.write("agent-runs/agent-1.json", &run_record_with(serde_json::json!({})));
+        let before = home.files();
+        let api = FxApi::new(run_scenes()).route("GET", canvas_proto::api::routes::EFFECTS, listed.clone());
+        let error = effects_import(&api, &import_args(&file, true, Some("agent-1")), false).unwrap_err();
+        assert_eq!(error.to_string(), "html:ink was not made by run agent-1; nothing changed");
+        assert!(api.writes().is_empty(), "{:?}", api.asked());
+        assert_eq!(home.files(), before, "no copy");
+
+        // A run with no record is refused too.
+        let error = effects_import(&api, &import_args(&file, true, Some("agent-8")), false).unwrap_err();
+        assert_eq!(error.to_string(), "html:ink was not made by run agent-8; nothing changed");
+        assert!(api.writes().is_empty());
+
+        // The run imported it: its source is copied first, then the import goes out with replace.
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(Seen::default()));
+        let answer = serde_json::json!({ "effect": { "id": "html:ink", "name": "Ink" }, "replaced": true });
+        let api = FxApi::new(run_scenes())
+            .route("GET", canvas_proto::api::routes::EFFECTS, listed.clone())
+            .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>old</html>", "file_name": "ink.html" }))
+            .route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, answer.clone())
+            .on_write(seen_at_write(record_at(&home), run_folder(&home, "effects"), seen.clone()));
+        effects_import(&api, &import_args(&file, true, Some("agent-1")), false).unwrap();
+        let seen = seen.lock().unwrap().clone();
+        assert_eq!(seen.files.len(), 1, "the old source was on disk when the import went out: {:?}", seen.files);
+        let copy: serde_json::Value = serde_json::from_str(
+            &std::fs::read_to_string(run_folder(&home, "effects").join(&seen.files[0])).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(copy["source"], "<html>old</html>");
+        let body: serde_json::Value = serde_json::from_str(api.writes()[0].2.as_deref().unwrap()).unwrap();
+        assert_eq!(body["replace"], true);
+
+        // A copy that cannot be written sends nothing.
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let api = FxApi::new(run_scenes())
+            .route("GET", canvas_proto::api::routes::EFFECTS, listed)
+            .route("GET", &ink_source_route(), serde_json::json!({ "source": "<html>old</html>", "file_name": "ink.html" }))
+            .route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, answer);
+        std::fs::remove_dir_all(run_folder(&home, "effects")).unwrap();
+        home.write("agent-runs/agent-1/effects", "in the way");
+        let error = effects_import(&api, &import_args(&file, true, Some("agent-1")), false).unwrap_err();
+        assert!(error.to_string().contains("could not save the effect"), "{error}");
+        assert!(api.writes().is_empty(), "a copy that cannot be written sends nothing: {:?}", api.asked());
+    }
+
+    #[test]
+    fn a_replace_of_a_name_the_library_does_not_have_is_a_plain_create() {
+        let home = TempHome::new("fx-replace-new");
+        let file = home.write("fresh.html", "<html>fresh</html>");
+        let answer = serde_json::json!({ "effect": { "id": "html:fresh", "name": "Fresh" }, "replaced": false });
+        let api = FxApi::new(run_scenes())
+            .route("GET", canvas_proto::api::routes::EFFECTS, serde_json::json!({ "effects": [], "active": null, "failed": [] }))
+            .route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, answer);
+        effects_import(&api, &import_args(&file, true, Some("agent-1")), false).unwrap();
+        assert_eq!(api.writes().len(), 1, "{:?}", api.asked());
+        assert!(!run_folder(&home, "effects").exists(), "nothing existed, so nothing was copied");
+        assert_eq!(record_json(&home)["effects"], serde_json::json!([{ "id": "html:fresh" }]));
+    }
+
+    #[test]
+    fn a_write_the_daemon_may_have_seen_keeps_its_pending_entry_and_a_certain_refusal_clears_it() {
+        let home = TempHome::new("fx-pending");
+        let file = home.write("ink.html", "<html>ink</html>");
+        let ink_save = || save_args(&["speed=7"], Some("agent-1"));
+        // An error the transport raised mid-request, and a request that got no answer: either way
+        // the daemon may have acted.
+        for label in ["other", "no answer"] {
+            home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+
+            let api = FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail()).write_fails_with(move || unknown_outcome(label));
+            preset_save(&api, &ink_save(), false).unwrap_err();
+            assert_eq!(
+                record_json(&home)["pending"],
+                serde_json::json!([{ "op": "preset-save", "scene": "html:ink/Night" }]),
+                "{label}: a save that may have landed stays pending"
+            );
+
+            home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+            let api = FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail()).write_fails_with(move || unknown_outcome(label));
+            preset_delete(&api, &preset_delete_args("Night", "agent-1", false), false).unwrap_err();
+            let record = record_json(&home);
+            assert_eq!(
+                record["pending"],
+                serde_json::json!([{ "op": "preset-delete", "scene": "html:ink/Night" }]),
+                "{label}: a delete that may have landed stays pending"
+            );
+            assert_eq!(record["presets"].as_array().map(|p| p.len()), Some(1), "{label}: the preset is still listed");
+
+            home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+            let api = FxApi::new(run_scenes())
+                .route("GET", &ink_source_route(), serde_json::json!({ "source": "s", "file_name": "ink.html" }))
+                .route("GET", &ink_route(), ink_detail())
+                .write_fails_with(move || unknown_outcome(label));
+            effects_delete(&api, &effect_delete_args("agent-1", false, false), false).unwrap_err();
+            assert_eq!(
+                record_json(&home)["pending"],
+                serde_json::json!([{ "op": "effect-delete", "scene": "html:ink" }]),
+                "{label}: an effect delete that may have landed stays pending"
+            );
+
+            home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+            let api = FxApi::new(run_scenes()).write_fails_with(move || unknown_outcome(label));
+            effects_import(&api, &import_args(&file, false, Some("agent-1")), false).unwrap_err();
+            assert_eq!(
+                record_json(&home)["pending"],
+                serde_json::json!([{ "op": "import", "scene": "ink.html" }]),
+                "{label}: an import that may have landed stays pending"
+            );
+        }
+
+        // A refusal the daemon made, certainly, leaves nothing pending, and the lists stay as they were.
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_route(), ink_detail())
+            .refuse("POST", &ink_presets_route(), 409, "a preset of that name exists");
+        let error = preset_save(&api, &ink_save(), false).unwrap_err();
+        assert!(error.to_string().contains("409"), "{error}");
+        assert!(record_json(&home).get("pending").is_none(), "a 409 is a certain refusal");
+
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let api = FxApi::new(run_scenes())
+            .route("GET", &ink_route(), ink_detail())
+            .refuse("DELETE", &preset_route("html:ink", "Night"), 404, "no such preset");
+        preset_delete(&api, &preset_delete_args("Night", "agent-1", false), false).unwrap_err();
+        let record = record_json(&home);
+        assert!(record.get("pending").is_none(), "{record}");
+        assert_eq!(record["presets"].as_array().map(|p| p.len()), Some(1));
+
+        home.write("agent-runs/agent-1.json", &record_with_ink_and_night());
+        let api = FxApi::new(run_scenes())
+            .route("POST", canvas_proto::api::routes::EFFECTS_IMPORT, serde_json::json!({ "effect": {}, "replaced": false }));
+        let error = effects_import(&api, &import_args(&file, false, Some("agent-1")), false).unwrap_err();
+        assert!(error.to_string().contains("named no effect"), "{error}");
+        assert_eq!(
+            record_json(&home)["pending"],
+            serde_json::json!([{ "op": "import", "scene": "ink.html" }]),
+            "an answer with no id leaves the import pending"
+        );
+    }
+
+    #[test]
+    fn effects_source_prints_the_source_or_writes_it_to_a_new_file_only() {
+        let home = TempHome::new("fx-source");
+        let answer = serde_json::json!({ "source": "<html>ink</html>", "file_name": "ink.html" });
+        let api = FxApi::new(run_scenes()).route("GET", &ink_source_route(), answer.clone());
+        let print = SourceArgs { effect: INK.into(), out: None };
+        assert_eq!(text_of(effects_source(&api, &print, false).unwrap()), "<html>ink</html>");
+        assert_eq!(json_of(effects_source(&api, &print, true).unwrap()), answer);
+
+        let out = home.path().join("copy.html").to_string_lossy().into_owned();
+        let write = SourceArgs { effect: INK.into(), out: Some(out.clone()) };
+        assert_eq!(
+            text_of(effects_source(&api, &write, false).unwrap()),
+            format!("wrote 16 bytes of html:ink to {out}\n")
+        );
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "<html>ink</html>");
+        let error = effects_source(&api, &write, false).unwrap_err();
+        assert!(error.to_string().contains("already exists"), "an existing file is not written over: {error}");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "<html>ink</html>");
+        let document = json_of(
+            effects_source(&api, &SourceArgs { effect: INK.into(), out: Some(format!("{out}.2")) }, true).unwrap(),
+        );
+        assert_eq!((document["id"].as_str(), document["bytes"].as_u64()), (Some("html:ink"), Some(16)));
+
+        // A stock effect the daemon has no source for: its refusal passes through.
+        let api = FxApi::new(run_scenes()).refuse("GET", &ink_source_route(), 404, "waves has no source");
+        let error = effects_source(&api, &print, false).unwrap_err();
+        assert!(error.to_string().contains("404"), "{error}");
+    }
+
+    #[test]
+    fn preset_list_shows_the_built_in_presets_and_the_users_with_their_props() {
+        let api = FxApi::new(run_scenes()).route("GET", &ink_route(), ink_detail());
+        let args = PresetListArgs { effect: INK.into() };
+        let text = text_of(preset_list(&api, &args, false).unwrap());
+        let lines: Vec<Vec<&str>> = text.lines().map(|line| line.split_whitespace().collect()).collect();
+        assert_eq!(lines, vec![vec!["built-in", "Calm", "speed=2"], vec!["yours", "Night", "speed=7"]], "{text}");
+        let document = json_of(preset_list(&api, &args, true).unwrap());
+        assert_eq!(document["effect"], "html:ink");
+        assert_eq!(document["presets"], ink_detail()["schema"]["presets"]);
+        assert_eq!(document["user_presets"], ink_detail()["user_presets"]);
+        assert_eq!(preset_list_text(&serde_json::json!([]), &serde_json::json!([])), "no presets\n");
+        assert!(api.writes().is_empty());
+    }
+
+    /// An image of the effect's frame 60 as bytes, drawn with these `--prop` arguments.
+    fn check_png(tag: &str, props: &[&str]) -> Result<Vec<u8>, String> {
+        let file = TempFile::new(&format!("props-{tag}"), MOVING);
+        let out = std::env::temp_dir().join(format!("canvas-rgb-check-{}-{tag}.png", std::process::id()));
+        let args: Vec<String> = props.iter().map(|p| p.to_string()).collect();
+        let result = check_effect_with(&file.path(), Some(&out.to_string_lossy()), &args);
+        let bytes = std::fs::read(&out).unwrap_or_default();
+        let _ = std::fs::remove_file(&out);
+        result.map(|_| bytes)
+    }
+
+    #[test]
+    fn a_check_with_props_draws_with_them_and_refuses_a_bad_one_before_reading_the_file() {
+        let plain = check_png("plain", &[]).expect("the effect loads");
+        let green = check_png("green", &["tint=#00ff00"]).expect("the effect loads with a prop");
+        assert!(!plain.is_empty() && !green.is_empty(), "both drew a picture");
+        assert_ne!(plain, green, "tint=#00ff00 changes the picture: the prop reached the effect");
+        assert_eq!(plain, check_png("plain2", &[]).expect("loads"), "the same props draw the same picture");
+
+        let unknown = check_png("unknown", &["bogus=1"]).unwrap_err();
+        assert_eq!(unknown, "bogus is not a property of this effect");
+        let range = check_png("range", &["speed=500"]).unwrap_err();
+        assert!(range.contains("--prop speed"), "{range}");
+        let twice = check_png("twice", &["speed=1", "speed=2"]).unwrap_err();
+        assert!(twice.contains("--prop speed is given twice"), "{twice}");
+
+        // The pairs are checked before the file is read: the error is not about the file.
+        let error = check_effect_with("/no/such/file.html", None, &["speed".to_string()]).unwrap_err();
+        assert!(error.contains("is not a key=value pair"), "{error}");
+        let error = check_effect_with("/no/such/file.html", None, &[]).unwrap_err();
+        assert!(error.contains("could not read"), "{error}");
+    }
+
+    #[test]
+    fn under_json_every_failure_of_an_effects_command_is_one_document() {
+        let other = CliError::Other("html:ink was not made by run agent-1; nothing changed".into());
+        let commands = [
+            (Command::Effects(EffectsCommand::Delete(effect_delete_args("agent-1", false, false))), Some("agent-1")),
+            (
+                Command::Effects(EffectsCommand::Preset(PresetCommand::Delete(preset_delete_args("N", "agent-2", false)))),
+                Some("agent-2"),
+            ),
+            (Command::Effects(EffectsCommand::Preset(PresetCommand::Save(save_args(&[], Some("agent-3"))))), Some("agent-3")),
+            (Command::Effects(EffectsCommand::Preset(PresetCommand::Save(save_args(&[], None)))), None),
+            (Command::Effects(EffectsCommand::Import(import_args("a.html", false, Some("agent-4")))), Some("agent-4")),
+            (Command::Effects(EffectsCommand::Import(import_args("a.html", false, None))), None),
+            (Command::Effects(EffectsCommand::Preset(PresetCommand::List(PresetListArgs { effect: INK.into() }))), None),
+            (Command::Effects(EffectsCommand::Source(SourceArgs { effect: INK.into(), out: None })), None),
+            (
+                Command::Effects(EffectsCommand::Check(CheckArgs {
+                    file: "a.html".into(),
+                    png: None,
+                    preview: None,
+                    props: vec![],
+                })),
+                None,
+            ),
+        ];
+        for (command, run) in &commands {
+            assert_eq!(
+                failure_document(command, &other),
+                Some(serde_json::json!({ "saved": false, "run": run, "error": other.to_string() })),
+                "{command:?}"
+            );
+        }
+        // A daemon refusal reads the same way: one document, the status in its text.
+        let refused = CliError::Api { status: 409, message: "a preset of that name exists".into(), body: None };
+        let document = failure_document(&commands[2].0, &refused).unwrap();
+        assert_eq!(document["error"], refused.to_string());
+        assert_eq!(refused.exit_code(), 1);
+        // Commands outside this set keep their own output.
+        assert_eq!(failure_document(&Command::Effects(EffectsCommand::List), &other), None);
+    }
 }
