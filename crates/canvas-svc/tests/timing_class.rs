@@ -86,7 +86,8 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
 /// expected to reach in time, which a stalled runner can miss: a real sibling, not yet fixed.
 const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-adapters/tests/openrgb_rescan.rs", "tokio::time::sleep(Duration::from_millis(100)).await;", "absence check: a SET_CUSTOM_MODE that must NOT be sent; the frame write before it has already returned, so 100 ms gives a wrong extra write time to land, #290"),
-    ("canvas-daemon/tests/devices_rescan.rs", "tokio::time::sleep(Duration::from_millis(300)).await;", "absence check: after the refresh read the mid-detection list (waited for by count), a wrong apply must NOT happen; 300 ms lets one land, #290"),
+    ("canvas-daemon/tests/devices_rescan.rs", "sleep(Duration::from_secs(5))", "safe: tokio's paused clock (start_paused) moves exactly 5 virtual seconds, one refresh of the supervisor; a slow runner cannot overshoot it, #290"),
+    ("canvas-daemon/tests/devices_rescan.rs", "sleep(Duration::from_secs(1))", "safe: tokio's paused clock (start_paused) moves exactly 1 virtual second, inside a detection that lasts 6; asserts the removal has NOT happened yet, #290"),
     ("canvas-daemon/src/scene_migration.rs", "sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of the file shows as a new mtime; a slower runner only widens the gap"),
     ("canvas-daemon/src/storage.rs", "std::thread::sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of layouts.json shows as a new mtime; a slower runner only widens the gap"),
     ("attack_shark_x6/hid_cache.rs", "sleep(Duration::from_millis(350))", "safe: sleeps past a 300 ms TTL; a slower runner only ages the cache more"),

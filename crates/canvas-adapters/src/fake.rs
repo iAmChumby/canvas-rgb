@@ -20,6 +20,9 @@ pub struct FakeOpenRgbServer {
     /// Bumped whenever a controller's colours change, so a test can wait for a write to land
     /// instead of polling for it.
     writes: tokio::sync::watch::Sender<u64>,
+    /// Bumped when the server starts a detection by itself, so every connection looks at its
+    /// rescan runs again.
+    kick: tokio::sync::watch::Sender<u64>,
 }
 
 /// How long [`FakeOpenRgbServer::wait_for_colors`] waits before it gives up. It is a hang guard,
@@ -93,6 +96,29 @@ struct FakeState {
     /// The protocol version each connection negotiated: the lower of the client's and the
     /// server's, as OpenRGB's `NetworkServer` keeps in `client_protocol_version`.
     negotiated: std::collections::HashMap<u64, u32>,
+    /// How many packets 140 were dropped because a detection was already running:
+    /// `DetectionManager::ProcessPreDetection` returns when `detection_in_progress` is set, so
+    /// release_1.1 starts nothing and tells the client nothing (`DetectionManager.cpp:1753-1756`).
+    rescan_dropped: u32,
+    /// The order the controllers register again in: position `k` of the list during a detection
+    /// is `devices[order[k]]`. Protocol 5 names a controller by its position, so a detection that
+    /// finds two identical sticks in the other order hands each index to the other stick. The
+    /// devices are in this order for good once the detection ends. `None`: the order they had.
+    rescan_order: Option<Vec<usize>>,
+    /// The frames that landed on a controller, in order, with the device that received them.
+    landings: Vec<Landing>,
+}
+
+/// One `UPDATE_LEDS` that reached a controller: which device received it, at which index it was
+/// addressed, and its first colour (a test tells its frames apart by colour).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Landing {
+    /// The serial of the device that received the frame.
+    pub serial: String,
+    /// The controller index the frame was addressed to.
+    pub index: u32,
+    /// The first colour of the frame.
+    pub color: Rgb8,
 }
 
 /// A rescan that is re-registering controllers (OpenRGB's `DetectionManager` finding them one by
@@ -103,6 +129,9 @@ struct RescanRun {
     due: tokio::time::Instant,
     /// The next controller to register again.
     next: usize,
+    /// The list was not cleared yet for this client: the first step clears it (a detection the
+    /// server started by itself, which no packet 140 of this client began).
+    clear_pending: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -125,6 +154,33 @@ impl FakeState {
     /// Whether controller `index` is not registered right now, in the middle of a rescan.
     fn unregistered(&self, index: u32) -> bool {
         self.rescan_listed.is_some_and(|listed| index as usize >= listed)
+    }
+
+    /// The device a packet for controller `index` reaches right now: during a detection the
+    /// controller at position `k` is the `k`th to have registered again, in the order the detection
+    /// finds them; `None` for an index that is not registered.
+    fn resolve(&self, index: u32) -> Option<usize> {
+        let at = index as usize;
+        match self.rescan_listed {
+            Some(listed) if at >= listed => None,
+            Some(_) => Some(self.rescan_order.as_ref().and_then(|order| order.get(at).copied()).unwrap_or(at)),
+            None => (at < self.devices.len()).then_some(at),
+        }
+    }
+
+    /// Whether a detection is running: a packet 140 starts nothing then.
+    fn detecting(&self) -> bool {
+        self.rescan_listed.is_some() || !self.rescan_runs.is_empty()
+    }
+
+    /// Puts the devices in the order the detection found them, for good, once it ends.
+    fn finish_order(&mut self) {
+        let Some(order) = self.rescan_order.take() else { return };
+        if order.len() != self.devices.len() {
+            return;
+        }
+        let mut old: Vec<Option<FakeDevice>> = std::mem::take(&mut self.devices).into_iter().map(Some).collect();
+        self.devices = order.iter().filter_map(|&at| old.get_mut(at).and_then(Option::take)).collect();
     }
 
     /// How many controllers the server announces right now.
@@ -232,28 +288,39 @@ impl FakeOpenRgbServer {
             reads_during_detection: 0,
             frames_to_unregistered: 0,
             negotiated: std::collections::HashMap::new(),
+            rescan_dropped: 0,
+            rescan_order: None,
+            landings: Vec::new(),
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
         let (writes, _) = tokio::sync::watch::channel(0_u64);
+        let (kick, _) = tokio::sync::watch::channel(0_u64);
         let acceptor = {
             let state = Arc::clone(&state);
             let connections = Arc::clone(&connections);
             let release = release.clone();
             let writes = writes.clone();
+            let kick = kick.clone();
             tokio::spawn(async move {
                 let mut next_connection = 0_u64;
                 while let Ok((stream, _)) = listener.accept().await {
                     next_connection += 1;
-                    let handle =
-                        tokio::spawn(serve(stream, Arc::clone(&state), next_connection, release.subscribe(), writes.clone()));
+                    let handle = tokio::spawn(serve(
+                        stream,
+                        Arc::clone(&state),
+                        next_connection,
+                        release.subscribe(),
+                        writes.clone(),
+                        kick.subscribe(),
+                    ));
                     let mut open = guard(&connections);
                     open.retain(|conn| !conn.is_finished());
                     open.push(handle.abort_handle());
                 }
             })
         };
-        Ok(Self { port, state, connections, acceptor, release, writes })
+        Ok(Self { port, state, connections, acceptor, release, writes, kick })
     }
 
     pub fn port(&self) -> u16 {
@@ -272,6 +339,51 @@ impl FakeOpenRgbServer {
     /// How many rescan packets (140) the client has sent.
     pub fn rescan_count(&self) -> u32 {
         guard(&self.state).rescan_count
+    }
+
+    /// How many of those packets OpenRGB dropped because a detection was already running
+    /// (`DetectionManager.cpp:1753-1756`): no list change, no 101 and no reply followed them.
+    pub fn rescan_dropped(&self) -> u32 {
+        guard(&self.state).rescan_dropped
+    }
+
+    /// OpenRGB starts a detection by itself (its own window's rescan, a hot plug, a restart of its
+    /// detectors): the list is cleared and announced to the newest client now, and the controllers
+    /// register again as [`rescan_timing`](Self::rescan_timing) says, with no packet 140 from the
+    /// client. A packet 140 sent while it runs is dropped.
+    pub fn start_detection(&self) {
+        {
+            let mut state = guard(&self.state);
+            if state.detecting() {
+                return;
+            }
+            reveal_hidden(&mut state);
+            let Some(connection) = state.negotiated.keys().max().copied() else { return };
+            state.rescan_listed = Some(0);
+            let due = tokio::time::Instant::now();
+            state.rescan_runs.push(RescanRun { connection, due, next: 0, clear_pending: true });
+        }
+        self.kick.send_modify(|n| *n += 1);
+    }
+
+    /// Whether a detection is running and its clear was announced to the client: the client has the
+    /// cleared list in its socket (it may not have read it yet).
+    pub fn list_cleared(&self) -> bool {
+        let state = guard(&self.state);
+        state.rescan_listed.is_some() && !state.rescan_runs.iter().any(|run| run.clear_pending)
+    }
+
+    /// The controllers register again in this order (`order[k]` is the index in the list the
+    /// server was started with, of the controller that registers `k`th) in the next detection, and
+    /// stay in it. Protocol 5 names a controller by its position, so two identical sticks swap
+    /// indices.
+    pub fn rescan_order(&self, order: Vec<usize>) {
+        guard(&self.state).rescan_order = Some(order);
+    }
+
+    /// Every frame that reached a controller, in order, with the device that received it.
+    pub fn landings(&self) -> Vec<Landing> {
+        guard(&self.state).landings.clone()
     }
 
     /// Adds a device OpenRGB has not found yet. It is absent from the controller list until a
@@ -433,16 +545,15 @@ impl FakeOpenRgbServer {
         guard(&self.state).resize_writes.get(index as usize).copied().unwrap_or(0)
     }
 
-    /// While `failing`, a `RESIZE_ZONE` leaves the zone's size alone and announces no device
-    /// list, and the server answers no request: real OpenRGB gives the client silence when it
+    /// While `failing`, a `RESIZE_ZONE` leaves the zone's size alone and the server answers no
+    /// request: real OpenRGB gives the client silence when it
     /// refuses a resize, so the adapter's re-read of the list times out and the resize fails.
     pub fn fail_resizes(&self, failing: bool) {
         guard(&self.state).failing_resizes = failing;
     }
 
-    /// How long a resize takes to reach the device, in milliseconds: the zone's new size and
-    /// the device list that announces it land `ms` after the request instead of while it is
-    /// handled. `0` (the default) lands it at once.
+    /// How long a resize takes to reach the device, in milliseconds: the zone's new size lands
+    /// `ms` after the request instead of while it is handled. `0` (the default) lands it at once.
     pub fn delay_resizes(&self, ms: u64) {
         guard(&self.state).resize_delay = std::time::Duration::from_millis(ms);
     }
@@ -462,6 +573,7 @@ impl FakeOpenRgbServer {
             state.pending_resizes.clear();
             state.rescan_runs.clear();
             state.rescan_listed = None;
+            state.rescan_order = None;
             for device in &mut state.devices {
                 for (zone, initial) in device.info.zones.iter_mut().zip(&device.initial_zone_leds) {
                     zone.led_count = *initial;
@@ -493,6 +605,7 @@ async fn serve(
     connection: u64,
     mut release: tokio::sync::watch::Receiver<u64>,
     writes: tokio::sync::watch::Sender<u64>,
+    mut kick: tokio::sync::watch::Receiver<u64>,
 ) -> std::io::Result<()> {
     let mut buffer: Vec<u8> = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -520,6 +633,8 @@ async fn serve(
                 }
                 continue;
             }
+            // The server started a detection of its own: look at the rescan runs again.
+            _ = kick.changed() => continue,
             changed = release.changed() => {
                 if changed.is_err() {
                     return Ok(());
@@ -538,9 +653,9 @@ async fn serve(
                 continue;
             }
             _ = tokio::time::sleep_until(due.unwrap_or_else(tokio::time::Instant::now)), if due.is_some() => {
-                // The delay is over: the size lands now, and the device list announces it.
-                // Reading and the other branches carry on while a resize waits this out.
-                let bytes = {
+                // The delay is over: the size lands now. Reading and the other branches carry on
+                // while a resize waits this out.
+                {
                     let mut state = guard(&state);
                     let now = tokio::time::Instant::now();
                     let mut landed = Vec::new();
@@ -553,17 +668,9 @@ async fn serve(
                         }
                     }
                     state.pending_resizes = keeping;
-                    let mut bytes = Vec::new();
                     for resize in landed {
-                        if apply_resize(&mut state, resize.device, resize.zone, resize.leds) {
-                            bytes.extend_from_slice(&device_list_updated());
-                        }
+                        apply_resize(&mut state, resize.device, resize.zone, resize.leds);
                     }
-                    bytes
-                };
-                if !bytes.is_empty() {
-                    stream.write_all(&bytes).await?;
-                    stream.flush().await?;
                 }
                 continue;
             }
@@ -635,14 +742,30 @@ async fn serve(
     }
 }
 
-/// Starts a rescan for `connection`: counts packet 140 and, with detection on, clears the list
-/// and announces it. Returns the bytes to send now.
+/// Starts a rescan for `connection`: counts packet 140 and, with detection on and none running,
+/// clears the list and announces it. Returns the bytes to send now.
+///
+/// A packet 140 that arrives while a detection is running is dropped and answered with nothing:
+/// release_1.1's `DetectionManager::ProcessPreDetection` returns when `detection_in_progress` is
+/// set (`DetectionManager.cpp:1753-1756`), so no list change, no 101 and no ACK follow.
 fn start_rescan(state: &mut FakeState, connection: u64) -> Vec<u8> {
     state.rescan_count += 1;
     if state.detection_disabled {
         return Vec::new();
     }
-    // The controllers OpenRGB had not found are found by this detection, in order after the rest.
+    if state.detecting() {
+        state.rescan_dropped += 1;
+        return Vec::new();
+    }
+    reveal_hidden(state);
+    let due = tokio::time::Instant::now() + state.rescan_clear;
+    state.rescan_runs.retain(|run| run.connection != connection);
+    state.rescan_runs.push(RescanRun { connection, due, next: 0, clear_pending: false });
+    clear_the_list(state, connection)
+}
+
+/// The controllers OpenRGB had not found are found by a detection, in order after the rest.
+fn reveal_hidden(state: &mut FakeState) {
     let hidden = std::mem::take(&mut state.hidden);
     if !hidden.is_empty() {
         state.devices.extend(hidden);
@@ -650,10 +773,11 @@ fn start_rescan(state: &mut FakeState, connection: u64) -> Vec<u8> {
         state.led_writes.resize(count, 0);
         state.resize_writes.resize(count, 0);
     }
+}
+
+/// The detection cleared the list: what `connection` is told.
+fn clear_the_list(state: &mut FakeState, connection: u64) -> Vec<u8> {
     state.rescan_listed = Some(0);
-    state.rescan_runs.retain(|run| run.connection != connection);
-    let due = tokio::time::Instant::now() + state.rescan_clear;
-    state.rescan_runs.push(RescanRun { connection, due, next: 0 });
     let mut bytes = Vec::new();
     if state.negotiated.get(&connection).copied().unwrap_or(0) >= 6 {
         bytes.extend_from_slice(&encode_packet(0, DETECTION_STARTED, &[]).unwrap_or_default());
@@ -663,13 +787,19 @@ fn start_rescan(state: &mut FakeState, connection: u64) -> Vec<u8> {
     bytes
 }
 
-/// One step of a rescan: the next controller registers again (a list change), or, once all have,
-/// detection is over. Returns the bytes to send now.
+/// One step of a rescan: the list is cleared (a detection the server started itself), the next
+/// controller registers again (a list change), or, once all have, detection is over. Returns the
+/// bytes to send now.
 fn step_rescan(state: &mut FakeState, connection: u64) -> Vec<u8> {
     let Some(at) = state.rescan_runs.iter().position(|run| run.connection == connection) else {
         return Vec::new();
     };
     let gap = state.rescan_gap;
+    if state.rescan_runs[at].clear_pending {
+        state.rescan_runs[at].clear_pending = false;
+        state.rescan_runs[at].due = tokio::time::Instant::now() + state.rescan_clear;
+        return clear_the_list(state, connection);
+    }
     if state.detection_hold {
         // Never settles: a list change at every gap and no controller back in the list.
         state.rescan_runs[at].due = tokio::time::Instant::now() + gap;
@@ -679,7 +809,10 @@ fn step_rescan(state: &mut FakeState, connection: u64) -> Vec<u8> {
     let next = state.rescan_runs[at].next;
     if next >= total {
         state.rescan_runs.remove(at);
-        state.rescan_listed = None;
+        if state.rescan_runs.is_empty() {
+            state.rescan_listed = None;
+            state.finish_order();
+        }
         if state.negotiated.get(&connection).copied().unwrap_or(0) >= 6 {
             return encode_packet(0, DETECTION_COMPLETE, &[]).unwrap_or_default();
         }
@@ -702,11 +835,16 @@ fn to_io(error: canvas_proto::AdapterError) -> std::io::Error {
 
 /// Applies a resize to the device, as OpenRGB does: a resizable zone takes the size within its
 /// range (a zone that cannot resize keeps its own), and the controller's colours are blanked to
-/// the new length. Returns whether the controller exists: OpenRGB announces a new device list
-/// for any resize of a known controller, as this fake did before the delay hook.
-fn apply_resize(state: &mut FakeState, device: u32, zone: usize, leds: u32) -> bool {
+/// the new length.
+///
+/// Nothing is announced to the client. release_1.1 turns a resize into `ConfigureZone`
+/// (`RGBController.cpp:2271`, `:2274-2287`), whose signal reaches only a client that negotiated
+/// protocol 6 or later (`NetworkServer.cpp:4175-4190`); packet 100 comes only from a change of the
+/// controller list (`:391-392`, the detection and the plugging of devices). A protocol 5 client learns
+/// the new size by reading the list again, which is what the adapter does.
+fn apply_resize(state: &mut FakeState, device: u32, zone: usize, leds: u32) {
     let Some(target) = state.devices.get_mut(device as usize) else {
-        return false;
+        return;
     };
     if let Some(zone) = target.info.zones.get_mut(zone) {
         if zone.resizable && zone.min_leds <= zone.max_leds {
@@ -714,7 +852,6 @@ fn apply_resize(state: &mut FakeState, device: u32, zone: usize, leds: u32) -> b
         }
     }
     target.colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; target.info.led_count() as usize];
-    true
 }
 
 /// The packet OpenRGB sends with no reply owed, to say the device list changed.
@@ -750,7 +887,7 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
             }
             reply(0, packet_id, &(state.visible() as u32).to_le_bytes())
         }
-        REQUEST_CONTROLLER_DATA => match state.devices.get(device as usize).filter(|_| (device as usize) < state.visible()) {
+        REQUEST_CONTROLLER_DATA => match state.resolve(device).and_then(|at| state.devices.get(at)) {
             Some(target) => match wire_controller(target).encode() {
                 Ok(body) => reply(device, packet_id, &body),
                 Err(_) => Vec::new(),
@@ -762,8 +899,8 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
             Vec::new()
         }
         SET_CUSTOM_MODE => {
-            if let Some(target) = state.devices.get_mut(device as usize) {
-                target.custom_mode_writes += 1;
+            if let Some(at) = state.resolve(device) {
+                state.devices[at].custom_mode_writes += 1;
             }
             Vec::new()
         }
@@ -773,10 +910,12 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
             let body = payload.get(6..).unwrap_or_default();
             let (quads, _) = body.as_chunks::<4>();
             let colors: Vec<Rgb8> = quads.iter().take(count).map(|q| Rgb8 { r: q[0], g: q[1], b: q[2] }).collect();
-            if let Some(target) = state.devices.get_mut(device as usize) {
-                for (slot, color) in target.colors.iter_mut().zip(colors) {
+            if let Some(at) = state.resolve(device) {
+                let landing = colors.first().map(|&color| Landing { serial: state.devices[at].info.serial.clone(), index: device, color });
+                for (slot, color) in state.devices[at].colors.iter_mut().zip(colors) {
                     *slot = color;
                 }
+                state.landings.extend(landing);
             }
             Vec::new()
         }
@@ -785,7 +924,7 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
                 *count += 1;
             }
             if state.failing_resizes {
-                // Counted, and that is all: the size stays and no device list follows.
+                // Counted, and that is all: the size stays.
                 return Vec::new();
             }
             if let (Some(zone_bytes), Some(size_bytes)) = (payload.get(..4), payload.get(4..8)) {
@@ -793,8 +932,8 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
                 let leds = u32::from_le_bytes([size_bytes[0], size_bytes[1], size_bytes[2], size_bytes[3]]);
                 let delay = state.resize_delay;
                 if !delay.is_zero() {
-                    // The size lands after the delay, announced then; the request itself is
-                    // over, so the other requests keep flowing in the meantime.
+                    // The size lands after the delay; the request itself is over, so the other
+                    // requests keep flowing in the meantime.
                     state.pending_resizes.push(PendingResize {
                         connection,
                         device,
@@ -804,10 +943,8 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
                     });
                     return Vec::new();
                 }
-                if apply_resize(&mut state, device, zone, leds) {
-                    // OpenRGB sends no reply to RESIZEZONE; it announces the new device list.
-                    return reply(0, DEVICE_LIST_UPDATED, &[]);
-                }
+                // OpenRGB sends no reply to RESIZEZONE, and a protocol 5 client no list change.
+                apply_resize(&mut state, device, zone, leds);
             }
             Vec::new()
         }

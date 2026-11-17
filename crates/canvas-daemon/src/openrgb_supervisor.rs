@@ -300,23 +300,14 @@ pub struct Rescan {
     pub reply: tokio::sync::oneshot::Sender<Result<Vec<DeviceInfo>, String>>,
 }
 
-/// How long after a rescan that could not be trusted the 5 s refresh refuses a list shorter than
-/// the one held (#290): six refreshes, longer than any detection that is going to finish. The
-/// adapter keeps the list its frames go to for the same time (`canvas_adapters::openrgb`).
-///
-/// A list that stays empty after the re-detect (every device unplugged) is held this long too:
-/// protocol 5 has no "detection finished" packet, so an empty list cannot be told from a detection
-/// that has not found its first controller yet. The owner sees the old list for 30 s or more, with
-/// a log line that says so.
-pub const DETECTION_DISTRUST: Duration = canvas_adapters::openrgb::DETECTION_DISTRUST;
-
 /// What a rescan read.
 #[derive(Debug)]
 pub struct RescanReading {
     /// The devices to answer with.
     pub devices: Vec<DeviceInfo>,
-    /// `devices` is the list the supervisor already held: the rescan could not be trusted to have
-    /// settled, so it read nothing and there is nothing to apply again.
+    /// `devices` is the list the supervisor already held: OpenRGB's list is still changing (or is
+    /// empty), so nothing was read and there is nothing to apply again. The adapter keeps its own
+    /// list the same way, and the settled list reaches the 5 s refresh by itself.
     pub kept_held: bool,
 }
 
@@ -337,7 +328,7 @@ enum Detection {
     Redetected(canvas_adapters::openrgb::Redetected),
     /// Nothing was re-detected and the list was not touched: reading it is safe.
     NotRedetected,
-    /// Detection began and never went quiet: the list is mid-detection.
+    /// OpenRGB's list is still changing, or empty, after the wait: detection is still running.
     Unsettled,
     Failed(String),
 }
@@ -355,11 +346,11 @@ async fn detect_on_lane(lane: &canvas_adapters::openrgb::OpenRgbAdapter) -> Dete
                 Detection::NotRedetected
             }
             Some(RescanMiss::Unsettled) => {
+                // The API can say only the list it holds: `DevicesResponse` has no field for "detection
+                // is still running" (a spine change), so the log says it.
                 tracing::warn!(
                     error = %error,
-                    held_for_s = DETECTION_DISTRUST.as_secs(),
-                    "OpenRGB rescan: no settled list within the cap (the list is still changing, or no controller came back;                      OpenRGB 1.1 over protocol 5 does not say when detection is done, so a list that stays empty counts,                      for instance with every device unplugged); keeping the list held and refusing a shorter one for {} s",
-                    DETECTION_DISTRUST.as_secs()
+                    "OpenRGB is still detecting devices: answering with the list held; the settled list is applied when OpenRGB's list stops changing"
                 );
                 Detection::Unsettled
             }
@@ -376,13 +367,14 @@ async fn detect_on_lane(lane: &canvas_adapters::openrgb::OpenRgbAdapter) -> Dete
 /// (see [`supervise_with_lane`]), so it passes `ask = false` and says what happened in `detected`.
 ///
 /// A list is read only when it can be trusted. An adapter that cannot re-detect, or OpenRGB
-/// starting no detection, is logged and the list is read as it stands. A detection that never went
-/// quiet reads nothing and answers with the `held` list: OpenRGB's list is mid-detection and may
-/// be empty. A list that comes back empty after a re-detection while `held` has devices is not
-/// applied either: an empty list seconds after OpenRGB cleared it is a slow detection, not every
-/// device gone, and applying it would leave the lights unmanaged. Any other failure keeps PR
-/// #289's contract: an error and the held list alone. With no connection the adapter connects
-/// first, so a rescan is also a retry of the link.
+/// starting no detection, is logged and the list is read as it stands. A detection that is still
+/// running reads nothing and answers with the `held` list: OpenRGB's list is mid-detection and may
+/// be empty. A list that comes back empty while `held` has devices is not applied either: the
+/// OpenRGB adapter never hands one back (an empty list is a detection that has not found its first
+/// controller yet, and it cannot be told from every device gone), and this keeps an adapter that
+/// does from leaving the lights unmanaged. Any other failure keeps PR #289's contract: an error and
+/// the held list alone. With no connection the adapter connects first, so a rescan is also a retry
+/// of the link.
 pub async fn rescan_devices(
     adapter: &mut dyn DeviceAdapter,
     zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
@@ -408,7 +400,7 @@ pub async fn rescan_devices(
                 Some(RescanMiss::Unsettled) => {
                     tracing::warn!(
                         error = %error,
-                        "OpenRGB rescan: no settled list within the cap (still changing, or no controller came back); keeping the list held"
+                        "OpenRGB is still detecting devices: answering with the list held; the settled list is applied when OpenRGB's list stops changing"
                     );
                     return Ok(keep_held());
                 }
@@ -425,8 +417,7 @@ pub async fn rescan_devices(
         if devices.is_empty() && !held.is_empty() {
             tracing::warn!(
                 held = held.len(),
-                "OpenRGB re-detected and reports no devices; keeping the list held (if every device was unplugged, the 5 s refresh applies the empty list only after {} s)",
-                DETECTION_DISTRUST.as_secs()
+                "OpenRGB re-detected and reports no devices; keeping the list held (an empty list is not told from a detection that has not found its first controller)"
             );
             return Ok(keep_held());
         }
@@ -673,10 +664,6 @@ pub async fn supervise_with_lane<D, L>(
     // The list the supervisor last applied: what a rescan that cannot be trusted answers with.
     // Set on every connect, before any rescan reads it.
     let mut held: Vec<DeviceInfo>;
-    // Until when the 5 s refresh distrusts a list shorter than the one held: a rescan that could
-    // not be trusted to have settled left OpenRGB mid-detection, and its list may still be empty
-    // or part (#290). Applying that would drop the frame sinks of devices that are still there.
-    let mut distrust_shrunk_until: Option<tokio::time::Instant> = None;
     let mut backoff = Backoff::new();
     // The rescans that ended the wait for the next attempt: that attempt answers them.
     let mut waiting: Vec<Rescan> = Vec::new();
@@ -783,9 +770,7 @@ pub async fn supervise_with_lane<D, L>(
                             }
                             let result = match result {
                                 Ok(reading) => {
-                                    if reading.kept_held {
-                                        distrust_shrunk_until = Some(tokio::time::Instant::now() + DETECTION_DISTRUST);
-                                    } else {
+                                    if !reading.kept_held {
                                         last = device_key(&reading.devices);
                                         held = reading.devices.clone();
                                         on_devices(reading.devices.clone()).await;
@@ -816,17 +801,9 @@ pub async fn supervise_with_lane<D, L>(
                         let sizes = current_sizes(&zone_sizes, &holds).await;
                         refresh_devices(guard.as_mut(), &sizes).await
                     };
+                    // The adapter answers with the list it holds while OpenRGB's is still changing, so
+                    // a list read mid-detection is never a different list here (#290).
                     match refreshed {
-                        Ok(devices)
-                            if devices.len() < held.len()
-                                && distrust_shrunk_until.is_some_and(|until| tokio::time::Instant::now() < until) =>
-                        {
-                            tracing::debug!(
-                                read = devices.len(),
-                                held = held.len(),
-                                "OpenRGB may still be detecting after the rescan; keeping the longer list held"
-                            );
-                        }
                         Ok(devices) if device_key(&devices) != last => {
                             tracing::info!(count = devices.len(), "the OpenRGB device list changed");
                             last = device_key(&devices);
@@ -1143,10 +1120,10 @@ mod tests {
         assert!(!text.contains("re-detected:"), "{text}");
     }
 
-    /// A detection that put no controller back, or never went quiet, is unsettled at the cap, and
-    /// the line says why a list that stays empty counts and for how long the held list is kept.
+    /// A detection that is still running at the cap is unsettled, and the line says that OpenRGB is
+    /// still detecting and which list answers (the API has no field for it, so the log says it).
     #[test]
-    fn an_unsettled_detection_says_an_empty_list_counts_and_for_how_long() {
+    fn an_unsettled_detection_says_openrgb_is_still_detecting_and_which_list_answers() {
         use canvas_adapters::fake::FakeOpenRgbServer;
         use canvas_adapters::openrgb::{OpenRgbAdapter, RescanTiming};
         let (detection, text) = captured(|| {
@@ -1164,7 +1141,7 @@ mod tests {
             })
         });
         assert!(matches!(detection, Detection::Unsettled), "{detection:?}");
-        assert!(text.contains("a list that stays empty counts"), "{text}");
-        assert!(text.contains("refusing a shorter one for 30 s"), "{text}");
+        assert!(text.contains("OpenRGB is still detecting devices"), "{text}");
+        assert!(text.contains("answering with the list held"), "{text}");
     }
 }

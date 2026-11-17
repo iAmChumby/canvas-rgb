@@ -36,36 +36,40 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 ///
 /// OpenRGB release_1.1 sends 101 and 103 only to a client that negotiated protocol 6 or later
 /// (`NetworkServer.cpp:4003-4006`, `:3949-3952`), and canvas-rgb negotiates 5. What a protocol 5
-/// client sees after packet 140 is `DEVICE_LIST_UPDATED` (100, ungated, `:4017`): once when the
-/// list is cleared (`DetectionManager.cpp:1707`, then `ResourceManager.cpp:62-65` and `:972-1067`)
-/// and once as each controller registers again (`DetectionManager.cpp:491`). So no packet says
-/// detection is over, and the list is empty from the clear until the first controller registers:
-/// the detectors run in the order I2C buses, I2C devices, DRAM, PCI, HID, others
-/// (`DetectionManager.cpp:810-856`), and the DRAM scan reads the SPD of every slot before its
-/// first controller (`:1030-1100`). The first controller commonly comes seconds after the clear.
+/// client sees is `DEVICE_LIST_UPDATED` (100, ungated, `:4017`): once when the list is cleared
+/// (`DetectionManager.cpp:1707`, then `ResourceManager.cpp:62-65` and `:972-1067`) and once as each
+/// controller registers again (`DetectionManager.cpp:491`). Nothing says detection is over, and a
+/// packet 140 sent while a detection runs is dropped without a word (`DetectionManager.cpp:1753-1756`).
+///
+/// So the adapter does not guess when detection ends. Every list change (100) puts it in the
+/// **unsettled** state, whoever began the detection and whether or not a packet 140 was sent; and
+/// while it is unsettled the cached controller list never changes, a list read is answered with the
+/// cached one, and no frame is written (protocol 5 names a controller by its position, so a frame
+/// sent while the controllers register again can land on another device). The list is **settled**
+/// once a read finds it non-empty and no list change arrived for `settle` before it began or
+/// while it ran; the list read then replaces the cached one, shorter or longer, and the frames
+/// resume. A list that stays empty never settles, however long that takes: an empty list is what a
+/// detection that has not found its first controller yet looks like (`DetectionManager.cpp:810-856`,
+/// the DRAM scan at `:1030-1100`), and with protocol 5 it cannot be told from every device being
+/// unplugged. There is no cap on that hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RescanTiming {
-    /// How long after packet 140 the first list change may take. Detection starts by clearing
-    /// the list, which is immediate, so a silence this long means detection is off or refused:
-    /// the list was not touched. 1.5 s allows a busy server to take its time.
+    /// How long after packet 140 the first list change may take when OpenRGB's list was not
+    /// already changing. Detection starts by clearing the list, which is immediate, so a silence
+    /// this long means detection is off or refused: the list was not touched. 1.5 s allows a busy
+    /// server to take its time. It decides only what a rescan reports, never what is applied.
     pub first: Duration,
-    /// How long the list must stay quiet before detection counts as settled, counted only from a
-    /// list change after which at least one controller has registered again. Until then the list
-    /// is empty and the wait goes on to the cap, however long the silence. 2 s is longer than the
-    /// gap between two controllers of one detector group and than the pause between groups
-    /// (a PCI probe, a HID pass) that a real machine is expected to show; a longer gap inside one
-    /// detection ends the wait early on a part list: the 5 s refresh catches up with the rest,
-    /// and the daemon's refresh does not shrink the list for [`DETECTION_DISTRUST`]. Real timings
-    /// are UNKNOWN until Luke's hardware check. There is no shorter window once as many
-    /// controllers are back as were held: the device a rescan exists to find is one more than the
-    /// held ones, and it can register last.
+    /// How long the list must have been quiet before a read of it is trusted as the settled list.
+    /// A longer gap between two controllers inside one detection only delays the answer: the
+    /// next list change makes the list unsettled again, and the list that was cached stays
+    /// cached meanwhile. Real timings are UNKNOWN until Luke's hardware check.
     pub settle: Duration,
-    /// The longest the whole wait takes. A detection still announcing changes at the cap, or one
-    /// that has put no controller back, is reported as unsettled, and the caller keeps the list
-    /// it holds. 15 s: detection of a machine with DRAM, PCI and many HID devices takes seconds to
-    /// some tens of seconds to start answering (UNKNOWN until measured), and the editor waits 30 s
-    /// for the whole API answer (`DEVICE_RESCAN_TIMEOUT_MS`): 15 s here + 5 s re-read + 5 s queue
-    /// wait leaves 5 s of margin.
+    /// The longest a rescan call waits for the list to settle before it answers that detection is
+    /// still running. This bounds the wait of one call, for the editor's request, and nothing else:
+    /// the list stays unsettled past it, the cached list stays as it is, and the settled list is
+    /// applied whenever it arrives (the daemon's 5 s refresh finds it). The editor waits 30 s for
+    /// the whole API answer (`DEVICE_RESCAN_TIMEOUT_MS`): 15 s here + 5 s re-read + 5 s queue wait
+    /// leaves 5 s of margin.
     pub cap: Duration,
 }
 
@@ -75,20 +79,17 @@ impl Default for RescanTiming {
     }
 }
 
-/// How long after a rescan that could not be trusted (the cap ran out) the adapter keeps the list
-/// its frames are written to, and the daemon's refresh keeps the longer list it holds, against a
-/// shorter one read while OpenRGB may still be detecting (#290). Six refreshes: longer than any
-/// detection that is going to finish.
-pub const DETECTION_DISTRUST: Duration = Duration::from_secs(30);
-
 /// How often a rescan wait looks at whether the link is still up.
 const LINK_CHECK: Duration = Duration::from_millis(100);
 
 /// The error text of a rescan whose detection never began: no list change followed packet 140.
 pub const RESCAN_NOT_REDETECTED_MESSAGE: &str = "OpenRGB did not start detection";
 
-/// The error text of a detection that was still announcing list changes at the cap.
-pub const RESCAN_DETECT_TIMEOUT_MESSAGE: &str = "OpenRGB did not finish detection in time";
+/// The error text of a rescan that gave up waiting while OpenRGB's detection was still running.
+pub const RESCAN_DETECT_TIMEOUT_MESSAGE: &str = "OpenRGB is still detecting devices";
+
+/// The error text of a frame that was not written because OpenRGB's list is changing.
+pub const LIST_UNSETTLED_MESSAGE: &str = "OpenRGB is re-detecting its devices; no frame is written until its list settles";
 
 /// What a rescan that did not re-detect left behind. See [`rescan_miss`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -96,8 +97,9 @@ pub enum RescanMiss {
     /// Nothing was re-detected and the list was not touched: the adapter cannot (the trait
     /// default, a protocol too old) or OpenRGB started no detection. Reading the list is safe.
     NotRedetected,
-    /// Detection began and never went quiet: OpenRGB's list is mid-detection, possibly empty or
-    /// part. Reading it now would hand back a shrunk list.
+    /// OpenRGB's list is still changing, or is empty, after the wait: detection is still running
+    /// (or cannot be told from every device being gone). The adapter keeps the list it holds and
+    /// answers a read with it; the settled list arrives later by itself.
     Unsettled,
 }
 
@@ -118,9 +120,9 @@ pub fn rescan_miss(error: &AdapterError) -> Option<RescanMiss> {
 /// A rescan whose detection went quiet.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Redetected {
-    /// From packet 140 to the end of the quiet window.
+    /// From packet 140 to the list being settled.
     pub settled_after: Duration,
-    /// How many list changes (100) the detection announced.
+    /// How many list changes (100) arrived after packet 140.
     pub list_changes: u32,
 }
 
@@ -217,9 +219,6 @@ struct Link {
     /// Bumped by the reader of the current session on every `DEVICE_LIST_UPDATED` (100). A rescan
     /// watches it for the list changes that detection announces (#290).
     list_changed: tokio::sync::watch::Sender<u64>,
-    /// Bumped by the reader of the current session on `DETECTION_COMPLETE` (103), which OpenRGB
-    /// sends only to a client that negotiated protocol 6 or later (#290).
-    detection_complete: tokio::sync::watch::Sender<u64>,
 }
 
 struct Session {
@@ -250,12 +249,19 @@ struct Session {
     /// discovery is running is skipped: it would have to wait for the request gate the
     /// discovery holds.
     discovering: u32,
-    /// Until when a list read that is shorter than the cached one is returned to its caller but not
-    /// cached (#290). A rescan sets it while OpenRGB may be mid-detection, when a read returns the
-    /// part list of the controllers registered so far: OpenRGB drops a frame for a dead index
-    /// without a word, so the frames keep going to the indices held, and replacing the cache by the
-    /// part list would turn every frame for a missing device into "unknown device".
-    list_hold_until: Option<Instant>,
+    /// OpenRGB's list is changing (#290): a list change (100) arrived and no read has found the list
+    /// settled since. While set, `controllers` is not replaced and no frame is written.
+    unsettled: bool,
+    /// How many list changes (100) this session has seen. A read that began at one count and
+    /// ended at another saw a list that changed under it.
+    list_changes: u64,
+    /// When the last list change arrived.
+    last_list_change: Option<tokio::time::Instant>,
+    /// The `list_changes` count a settle read last found the list not settled at (empty, or
+    /// changed while it was read). A settle is tried again only after another list change.
+    settle_failed_at: Option<u64>,
+    /// A settle read is running, so no second one starts.
+    settling: bool,
 }
 
 /// What a controller's resize is doing.
@@ -282,7 +288,11 @@ impl Default for Session {
             resets: 0,
             resizing: HashMap::new(),
             discovering: 0,
-            list_hold_until: None,
+            unsettled: false,
+            list_changes: 0,
+            last_list_change: None,
+            settle_failed_at: None,
+            settling: false,
         }
     }
 }
@@ -405,6 +415,22 @@ fn guard<T>(mutex: &Mutex<T>) -> MutexGuard<'_, T> {
     mutex.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
+/// Whether no list change arrived for `settle` before now.
+fn list_is_quiet(session: &Session, settle: Duration) -> bool {
+    session.last_list_change.is_none_or(|at| tokio::time::Instant::now().saturating_duration_since(at) >= settle)
+}
+
+/// A settle read that is running: clears the flag however the read ends.
+struct Settling<'a> {
+    link: &'a Link,
+}
+
+impl Drop for Settling<'_> {
+    fn drop(&mut self) {
+        guard(&self.link.session).settling = false;
+    }
+}
+
 impl Link {
     /// Ends the session `epoch` if it is still the current one; aborts its reader.
     fn lose(&self, epoch: u64) {
@@ -466,7 +492,6 @@ impl OpenRgbAdapter {
             request_gate: tokio::sync::Mutex::new(()),
             broken: AtomicBool::new(false),
             list_changed: tokio::sync::watch::channel(0_u64).0,
-            detection_complete: tokio::sync::watch::channel(0_u64).0,
         });
         {
             let mut links = guard(&LINKS);
@@ -537,8 +562,8 @@ impl OpenRgbAdapter {
         self.send_leds(controller.index, colors).await
     }
 
-    /// Asks OpenRGB to look at the hardware again, then waits for its detection to go quiet
-    /// (#290), with no `&mut` on the adapter.
+    /// Asks OpenRGB to look at the hardware again, then waits for its list to settle (#290), with no
+    /// `&mut` on the adapter.
     ///
     /// The wait takes seconds, so the daemon runs it on the frame lane, a clone that shares this
     /// link, and never under its adapter lock: that lock is what the keyboard's frame writer and
@@ -547,22 +572,20 @@ impl OpenRgbAdapter {
     ///
     /// Packet 140 is client-only and gets no reply: it goes out through [`send`](Self::send),
     /// never through `request`, which would wait five seconds for a reply that never comes and
-    /// break the link. What follows is read from the list changes the reader counts (see
-    /// [`RescanTiming`]): the first within `first` of the packet, or the call is
-    /// [`RESCAN_NOT_REDETECTED_MESSAGE`] and the list was never touched. The first change is the
-    /// list being cleared, and the list stays empty until the next one: only after a controller
-    /// has registered again does a quiet window of `settle` end the wait. A list that has put no
-    /// controller back (or is still changing) when the `cap` runs out is
-    /// [`RESCAN_DETECT_TIMEOUT_MESSAGE`]. Only changes after packet 140 count, and nothing here
-    /// resizes or reads the list. The link stays up either way. A protocol 4 server has no such
-    /// packet and is refused as unsupported.
+    /// break the link. It may also be dropped without a word, when a detection is already running
+    /// (`DetectionManager.cpp:1753-1756`); the wait does not care which, because it watches
+    /// OpenRGB's list and not the packet. Three ends:
     ///
-    /// Frames are written to the controllers the adapter held all through the wait: OpenRGB drops
-    /// a frame for an index that is not registered, and the link stays up. The cached list is not
-    /// replaced by a shorter one read mid-detection until the wait ends settled, and for
-    /// [`DETECTION_DISTRUST`] after one that does not. Each list change resets the custom-mode
-    /// cache: a controller that registered again is new to OpenRGB and sits in its built-in mode,
-    /// so the next frame to each must send `SET_CUSTOM_MODE` first.
+    /// - the list is settled and some list change came after packet 140 (or the list was already
+    ///   changing and has settled): `Ok`. The adapter holds the settled list;
+    /// - the list was not changing and no change came within `first`: [`RESCAN_NOT_REDETECTED_MESSAGE`],
+    ///   and the list was never touched;
+    /// - the list is still changing, or empty, when `cap` runs out: [`RESCAN_DETECT_TIMEOUT_MESSAGE`].
+    ///   Detection is still running. The adapter goes on holding the list it has, and answers a read
+    ///   with it, until a read finds the new one settled: no wait here decides that, so a detection
+    ///   of any length wipes nothing. The link stays up in every case.
+    ///
+    /// A protocol 4 server has no such packet and is refused as unsupported.
     pub async fn rescan_shared(&self) -> Result<Redetected, AdapterError> {
         use tokio::time::{sleep_until, Instant};
         self.require_connected()?;
@@ -570,80 +593,100 @@ impl OpenRgbAdapter {
             return Err(AdapterError::Unsupported("OpenRGB protocol 4 cannot re-detect devices"));
         }
         let timing = self.rescan_timing;
-        // Subscribe before writing and mark the current counts seen, so only a change that
-        // arrives after packet 140 counts.
+        // Subscribe before writing and mark the current count seen, so only a change that arrives
+        // after packet 140 wakes the wait.
         let mut changes = self.link.list_changed.subscribe();
-        let mut complete = self.link.detection_complete.subscribe();
         let _ = changes.borrow_and_update();
-        let _ = complete.borrow_and_update();
         let started = Instant::now();
-        // Bounded, so a wait that is dropped leaves no list held for long.
-        self.hold_list(timing.cap + DETECTION_DISTRUST);
-        let mut list_changes = 0_u32;
-        let mut last_change: Option<Instant> = None;
-        let outcome: Result<(), AdapterError> = async {
-            self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
-            let cap = started + timing.cap;
-            loop {
-                // The instant the wait ends if nothing more arrives: the first change is overdue;
-                // or a controller is back and the list has been quiet for the settle window; or,
-                // with the list still empty after the clear, the cap.
-                let quiet_ends = match last_change {
-                    None => started + timing.first,
-                    Some(at) if list_changes >= 2 => at + timing.settle,
-                    Some(_) => cap,
-                };
-                let wake = quiet_ends.min(cap).min(Instant::now() + LINK_CHECK);
-                tokio::select! {
-                    changed = changes.changed() => {
-                        changed.map_err(|_| AdapterError::NotConnected)?;
-                        list_changes += 1;
-                        last_change = Some(Instant::now());
-                        // A controller that registered again is new to OpenRGB: its next frame
-                        // sets the custom mode again, instead of waiting for the wait to end.
-                        self.link.reset_custom_mode();
-                    }
-                    done = complete.changed() => {
-                        // A protocol 6 server says it is done: no quiet window to wait out.
-                        done.map_err(|_| AdapterError::NotConnected)?;
-                        break;
-                    }
-                    () = sleep_until(wake) => {
-                        self.require_connected()?;
-                        let now = Instant::now();
-                        // Woken only to look at the link: the wait goes on.
-                        if now < quiet_ends && now < cap {
-                            continue;
-                        }
-                        match last_change {
-                            None => return Err(AdapterError::Protocol(RESCAN_NOT_REDETECTED_MESSAGE.into())),
-                            Some(_) if list_changes >= 2 && quiet_ends <= cap => break,
-                            Some(_) => return Err(AdapterError::Protocol(RESCAN_DETECT_TIMEOUT_MESSAGE.into())),
-                        }
-                    }
+        let cap = started + timing.cap;
+        let changes_at_start = guard(&self.link.session).list_changes;
+        self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
+        loop {
+            self.require_connected()?;
+            let (unsettled, count, last, failed_at) = {
+                let session = guard(&self.link.session);
+                (session.unsettled, session.list_changes, session.last_list_change, session.settle_failed_at)
+            };
+            let now = Instant::now();
+            let wake = if !unsettled {
+                if count != changes_at_start {
+                    // A detection ran, or one already running went quiet, and its list is the one held.
+                    let seen = u32::try_from(count - changes_at_start).unwrap_or(u32::MAX);
+                    return Ok(Redetected { settled_after: started.elapsed(), list_changes: seen });
                 }
+                // Nothing came after packet 140: detection starts by clearing the list, at once.
+                if now >= started + timing.first {
+                    return Err(AdapterError::Protocol(RESCAN_NOT_REDETECTED_MESSAGE.into()));
+                }
+                started + timing.first
+            } else {
+                if now >= cap {
+                    return Err(AdapterError::Protocol(RESCAN_DETECT_TIMEOUT_MESSAGE.into()));
+                }
+                let quiet_at = last.map_or(now, |at| at + timing.settle);
+                if now < quiet_at {
+                    quiet_at
+                } else if failed_at == Some(count) {
+                    // Read since the last change and not settled: only a change moves it.
+                    cap
+                } else if self.try_settle().await? {
+                    continue;
+                } else {
+                    // Another task is reading the list (a frame that found it quiet): look again
+                    // when it is done.
+                    now + LINK_CHECK
+                }
+            };
+            tokio::select! {
+                changed = changes.changed() => {
+                    changed.map_err(|_| AdapterError::NotConnected)?;
+                }
+                // Also wakes to look at the link: the wait goes on.
+                () = sleep_until(wake.min(cap).min(Instant::now() + LINK_CHECK)) => {}
             }
-            Ok(())
         }
-        .await;
-        // The hold set above lasts until the cap plus `DETECTION_DISTRUST`, which is what a wait that
-        // ran out of cap needs: the list may be empty or part for a while after it. Every other end
-        // lifts it. Settled: the list the caller reads next is the list to keep, even a shorter one
-        // (a device unplugged since the last detection is gone). Never began, or the link is gone:
-        // nothing was cleared, or nothing is held.
-        let unsettled = matches!(&outcome, Err(AdapterError::Protocol(reason)) if reason == RESCAN_DETECT_TIMEOUT_MESSAGE);
-        if !unsettled {
-            self.hold_list(Duration::ZERO);
-        }
-        if last_change.is_some() || outcome.is_ok() {
-            self.link.reset_custom_mode();
-        }
-        outcome.map(|()| Redetected { settled_after: started.elapsed(), list_changes })
     }
 
-    /// Keeps the cached controller list against a shorter read for `for_`; `ZERO` ends the hold.
-    fn hold_list(&self, for_: Duration) {
-        guard(&self.link.session).list_hold_until = (!for_.is_zero()).then(|| Instant::now() + for_);
+    /// Reads the list now if it is unsettled and has been quiet for the settle window, once: the
+    /// read replaces the cached list when it finds the list settled (see [`RescanTiming`]) and
+    /// changes nothing otherwise. Reads nothing (and returns `false`) while another settle read
+    /// runs, or after one that found the list not settled and no list change since.
+    async fn try_settle(&self) -> Result<bool, AdapterError> {
+        {
+            let mut session = guard(&self.link.session);
+            if !session.unsettled || session.settling || session.settle_failed_at == Some(session.list_changes) {
+                return Ok(false);
+            }
+            if !list_is_quiet(&session, self.rescan_timing.settle) {
+                return Ok(false);
+            }
+            session.settling = true;
+        }
+        // Declared after the flag is set: however the read ends, even if this future is dropped,
+        // the flag is cleared.
+        let _settling = Settling { link: &self.link };
+        self.enumerate().await.map(|_| true)
+    }
+
+    /// Fails while OpenRGB's list is changing and a list is cached: an index-addressed packet
+    /// (a frame, a resize, an identify) could reach another device than the one it names. Tries
+    /// to settle the list first, so the lights resume as soon as the list has been quiet.
+    async fn ensure_settled(&self) -> Result<(), AdapterError> {
+        if !self.list_is_unsettled() {
+            return Ok(());
+        }
+        self.try_settle().await?;
+        if self.list_is_unsettled() {
+            return Err(AdapterError::Protocol(LIST_UNSETTLED_MESSAGE.into()));
+        }
+        Ok(())
+    }
+
+    /// Whether OpenRGB's list is changing while this adapter holds a list: what an index in it
+    /// names is not to be trusted.
+    fn list_is_unsettled(&self) -> bool {
+        let session = guard(&self.link.session);
+        session.unsettled && !session.controllers.is_empty()
     }
 
     fn require_connected(&self) -> Result<(), AdapterError> {
@@ -663,6 +706,7 @@ impl OpenRgbAdapter {
     /// Looks up a controller by its daemon-facing id. Enumerates once when this connection has
     /// not discovered anything yet, so a caller that skipped `discover()` still works.
     async fn controller(&self, device: &DeviceId) -> Result<Controller, AdapterError> {
+        self.ensure_settled().await?;
         let (known, empty) = {
             let session = guard(&self.link.session);
             if !session.connected {
@@ -798,8 +842,22 @@ impl OpenRgbAdapter {
     }
 
     /// Re-enumerates every controller. OpenRGB reports zone resizes through this same path.
+    ///
+    /// Returns the list the adapter holds afterwards. Which list that is follows the settle rule
+    /// (see [`RescanTiming`], #290): while OpenRGB's list is changing, the list read replaces the
+    /// cached one only when it is non-empty, no list change arrived for the settle window before
+    /// it began, and none arrived while it ran; every other read leaves the cache as it is and
+    /// answers with it. A list read while it is still changing is not even requested.
     async fn enumerate(&self) -> Result<Vec<Controller>, AdapterError> {
         self.require_connected()?;
+        let settle = self.rescan_timing.settle;
+        let changes_before = {
+            let session = guard(&self.link.session);
+            if session.unsettled && !session.controllers.is_empty() && !list_is_quiet(&session, settle) {
+                return Ok(session.controllers.clone());
+            }
+            session.list_changes
+        };
         let version = self.protocol_version();
         {
             let mut session = guard(&self.link.session);
@@ -825,19 +883,56 @@ impl OpenRgbAdapter {
             controllers.push(Controller { index, wire });
         }
         let mut session = guard(&self.link.session);
-        if session.connected {
-            let holding = session.list_hold_until.is_some_and(|until| Instant::now() < until);
-            if holding && controllers.len() < session.controllers.len() {
+        if !session.connected {
+            return Ok(controllers);
+        }
+        let changed_during = session.list_changes != changes_before;
+        if session.controllers.is_empty() {
+            // Nothing is held, so nothing is at risk: the list read is the list. It is settled when
+            // it is not empty and the list was quiet.
+            session.controllers = controllers.clone();
+            if session.unsettled && !controllers.is_empty() && !changed_during && list_is_quiet(&session, settle) {
+                Self::settled(&mut session);
+            }
+            return Ok(controllers);
+        }
+        if controllers.is_empty() {
+            // An empty list never replaces a held one: it is the list of a detection that has not
+            // found its first controller yet, and protocol 5 cannot tell it from every device
+            // being gone. The list is changing, whether or not a list change said so.
+            session.unsettled = true;
+            session.settle_failed_at = Some(session.list_changes);
+            tracing::debug!(held = session.controllers.len(), "OpenRGB reports no controllers; keeping the list held");
+            return Ok(session.controllers.clone());
+        }
+        if session.unsettled {
+            if changed_during || !list_is_quiet(&session, settle) {
+                session.settle_failed_at = Some(session.list_changes);
                 tracing::debug!(
                     read = controllers.len(),
-                    cached = session.controllers.len(),
-                    "OpenRGB may still be detecting after a rescan; frames keep going to the controllers held"
+                    held = session.controllers.len(),
+                    "OpenRGB's list changed while it was read; keeping the list held"
                 );
-            } else {
-                session.controllers = controllers.clone();
+                return Ok(session.controllers.clone());
             }
+            if session.controllers.len() != controllers.len() {
+                tracing::info!(held = session.controllers.len(), settled = controllers.len(), "OpenRGB's list settled with another count of devices");
+            }
+            session.controllers = controllers.clone();
+            Self::settled(&mut session);
+            return Ok(controllers);
         }
+        session.controllers = controllers.clone();
         Ok(controllers)
+    }
+
+    /// The list read is the settled one: every controller was registered again, so each sits in its
+    /// built-in mode and the next frame to each sends `SET_CUSTOM_MODE` first.
+    fn settled(session: &mut Session) {
+        session.unsettled = false;
+        session.settle_failed_at = None;
+        session.custom_mode.clear();
+        session.resets += 1;
     }
 
     /// The epoch of a controller's resize: bumped on every resize, so a frame that was built
@@ -1053,7 +1148,11 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.custom_mode.clear();
             session.mode_sent.clear();
             session.resizing.clear();
-            session.list_hold_until = None;
+            session.unsettled = false;
+            session.list_changes = 0;
+            session.last_list_change = None;
+            session.settle_failed_at = None;
+            session.settling = false;
             session.reader.take()
         };
         if let Some(reader) = reader {
@@ -1158,19 +1257,26 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
     while let Ok((device, packet_id, payload)) = read_packet(&mut read).await {
         // OpenRGB broadcasts these with no request id and no reply owed, so they can never
         // complete a pending request (which carries a different packet id). 100 (device list
-        // updated) and 103 (detection complete, protocol 6 and later) are what a waiting rescan
-        // reads; 101 (detection started) and 102 (progress) carry no such news (#290). Only the
-        // reader of the current session counts them: a reader that was overtaken by a
-        // reconnect must not wake a rescan that started on the new session.
-        if matches!(packet_id, DEVICE_LIST_UPDATED | DETECTION_COMPLETE) {
-            if guard(&link.session).epoch != epoch {
-                return;
+        // updated) is the one packet a protocol 5 client gets about detection: every one makes the
+        // list unsettled (#290). 101 and 103 (protocol 6 and later only) are not used. Only the
+        // reader of the current session counts a change: a reader that was overtaken by a
+        // reconnect must not touch a session that started after it.
+        if packet_id == DEVICE_LIST_UPDATED {
+            {
+                let mut session = guard(&link.session);
+                if session.epoch != epoch {
+                    return;
+                }
+                session.list_changes += 1;
+                session.last_list_change = Some(tokio::time::Instant::now());
+                // A zone resize sends a protocol 5 client no list change (`RGBController.cpp:2271`,
+                // `NetworkServer.cpp:4175-4190`), so every one of these is a change of the list.
+                session.unsettled = true;
             }
-            let signal = if packet_id == DEVICE_LIST_UPDATED { &link.list_changed } else { &link.detection_complete };
-            signal.send_modify(|n| *n += 1);
+            link.list_changed.send_modify(|n| *n += 1);
             continue;
         }
-        if packet_id == DETECTION_STARTED {
+        if matches!(packet_id, DETECTION_STARTED | DETECTION_COMPLETE) {
             continue;
         }
         let reply = {
@@ -1591,21 +1697,19 @@ mod rescan_signal_tests {
             .expect("the signal is alive");
     }
 
-    /// A reader that a reconnect overtook must not wake a rescan that started on the new session:
-    /// it counts nothing and ends.
+    /// A reader that a reconnect overtook must not wake a rescan that started on the new session, nor
+    /// make its list unsettled: it counts nothing and ends.
     #[tokio::test]
     async fn an_overtaken_reader_signals_nothing_and_ends() {
         let (link, reader, mut server) = reader_on(2, 1).await;
         let changes = link.list_changed.subscribe();
-        let complete = link.detection_complete.subscribe();
         server.write_all(&encode_packet(0, DEVICE_LIST_UPDATED, &[]).expect("packet")).await.expect("write");
-        server.write_all(&encode_packet(0, DETECTION_COMPLETE, &[]).expect("packet")).await.expect("write");
         tokio::time::timeout(Duration::from_secs(5), reader)
             .await
             .expect("the overtaken reader ends")
             .expect("its task ends");
         assert!(!changes.has_changed().expect("alive"), "an overtaken reader counted a list change");
-        assert!(!complete.has_changed().expect("alive"), "an overtaken reader counted a completion");
+        assert!(!guard(&link.session).unsettled, "an overtaken reader made the new session's list unsettled");
     }
 }
 

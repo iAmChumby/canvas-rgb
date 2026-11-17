@@ -306,6 +306,9 @@ async fn the_rescan_flag_follows_the_rule_every_flag_follows() {
 #[tokio::test]
 async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    // OpenRGB with detection off starts none, so its list is not changing and the frames flow; the
+    // rescan goes straight to the re-read that holds the adapter.
+    server.disable_detection(true);
     let rig = rig("stalled", server.port(), RESCAN_BUDGET).await;
     wait_for_link(&rig, LinkState::Connected).await;
     let sink = wait_for_sink(&rig, "openrgb:one").await;
@@ -420,9 +423,9 @@ async fn a_keyboard_frame_is_not_blocked_while_a_rescan_waits_for_detection() {
     assert_eq!(rescan.await.expect("the request task ends"), StatusCode::OK);
 }
 
-/// #290: a detection that never settles leaves OpenRGB's list empty. The rescan answers 200 with
-/// the list the daemon holds, applies nothing, never reads the empty list, and the link stays up:
-/// the lights stay managed. The 5 s refresh then must not apply that empty list either.
+/// #290: a detection that never goes quiet leaves OpenRGB's list empty and changing. The rescan
+/// answers 200 with the list the daemon holds, applies nothing, never reads the list, and the link
+/// stays up: the lights stay managed.
 #[tokio::test]
 async fn a_detection_that_never_settles_keeps_the_held_list_and_the_lights() {
     let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
@@ -433,18 +436,127 @@ async fn a_detection_that_never_settles_keeps_the_held_list_and_the_lights() {
 
     assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one"], "the held list answers");
     assert_eq!(server.rescan_count(), 1);
-    assert_eq!(server.reads_during_detection(), 0, "the rescan read the list while it was mid-detection");
+    assert_eq!(server.reads_during_detection(), 0, "the rescan read the list while it was changing");
     assert_eq!(rig.app.devices.read().await.len(), 1, "the held list was replaced");
     assert_eq!(sink_ids(&rig), ["openrgb:one"], "the device lost its frame sink");
     assert!(rig.app.adapter.lock().await.is_connected(), "the rescan dropped the link");
     assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
 
-    // The supervisor's own 5 s refresh reads the list OpenRGB still has mid-detection (empty) and
-    // must keep the longer list it holds.
-    until("the 5 s refresh read the mid-detection list", || server.reads_during_detection() >= 1).await;
-    tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(rig.app.devices.read().await.len(), 1, "the refresh applied a list that was mid-detection");
-    assert_eq!(sink_ids(&rig), ["openrgb:one"], "the refresh dropped the frame sink");
+/// #290 review 3 (B1): OpenRGB's own detection is already running when the owner presses rescan, so
+/// release_1.1 drops packet 140 without a word (`DetectionManager.cpp:1753-1756`) and the list is
+/// the empty one the detection cleared. The answer is the list the daemon holds, the daemon's list
+/// and its frame sinks stay, and so do they after the 5 s refresh reads the empty list too.
+#[tokio::test]
+async fn an_ignored_rescan_during_a_running_detection_keeps_the_daemons_list_and_sinks() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    // The detection is in its first minute: its list is empty, with no list change after the clear.
+    server.rescan_timing(Duration::from_secs(60), Duration::from_millis(10));
+    let rig = rig("ignored", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:two").await;
+
+    server.start_detection();
+    // OpenRGB has announced the clear before the owner presses the button (the usual order).
+    until("OpenRGB announced the cleared list", || server.list_cleared()).await;
+    let answer = ids(&rig, "/api/v1/devices?rescan=1").await;
+    assert_eq!(answer, ["openrgb:one", "openrgb:two"], "the held list answers");
+    assert_eq!(server.rescan_dropped(), 1, "OpenRGB must have dropped the packet 140 of a running detection");
+    assert_eq!(rig.app.devices.read().await.len(), 2, "the empty list wiped the daemon's list");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "the empty list removed the frame sinks");
+
+    // The supervisor's own 5 s refresh reads the list too: empty, and the held list stays.
+    let reads = server.reads_during_detection();
+    until("the 5 s refresh read the list", || server.reads_during_detection() > reads).await;
+    assert_eq!(rig.app.devices.read().await.len(), 2, "the refresh applied the empty list");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "the refresh removed the frame sinks");
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
+
+/// Waits (on the paused clock) until the app holds `count` devices.
+async fn until_devices(rig: &Rig, count: usize) {
+    loop {
+        if rig.app.devices.read().await.len() == count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
+/// #290 review 3 (B2): a detection can run for a minute. The old 45 s and 30 s distrust guesses ran
+/// out and the 5 s refresh applied the empty list. No list OpenRGB has while it is changing is
+/// applied at any point, however long it takes, and the final list is applied once it has settled.
+/// The clock is paused: the minute is virtual, and a refresh happens every virtual 5 s.
+#[tokio::test(start_paused = true)]
+async fn a_detection_that_runs_a_minute_wipes_nothing_and_its_list_applies_once_settled() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    server.add_hidden_device(stick("three"));
+    // The list is empty for a minute after the clear; then each controller registers 400 ms on.
+    server.rescan_timing(Duration::from_secs(60), Duration::from_millis(400));
+    let rig = rig("minute", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:two").await;
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"], "the held list answers");
+    for second in (5..=55).step_by(5) {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert_eq!(rig.app.devices.read().await.len(), 2, "the list was wiped {second} s into the detection");
+        assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "a frame sink went {second} s into the detection");
+    }
+    tokio::time::timeout(Duration::from_secs(30), until_devices(&rig, 3))
+        .await
+        .expect("the list the detection settled on was never applied");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:three", "openrgb:two"]);
+}
+
+/// #290 review 3: a device that is really gone is removed once the list settles, and not before. The
+/// detection is slow (the list is empty for 6 s), so the first answer is the held list; the removal
+/// follows by itself, within one refresh of the list settling, and the old 30 s distrust is gone.
+#[tokio::test(start_paused = true)]
+async fn a_device_unplugged_before_a_slow_detection_is_removed_when_the_list_settles() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    server.rescan_timing(Duration::from_secs(6), Duration::from_millis(10));
+    let rig = rig("unplugged", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:two").await;
+    server.unplug_device(1);
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"], "the held list answers");
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(rig.app.devices.read().await.len(), 2, "the device went before the list had settled");
+    tokio::time::timeout(Duration::from_secs(15), until_devices(&rig, 1))
+        .await
+        .expect("the unplugged device was not removed once the list settled");
+    assert_eq!(sink_ids(&rig), ["openrgb:one"], "the removed device kept its frame sink");
+}
+
+/// #290 review 3 (N3): while OpenRGB's list is changing no frame goes to any OpenRGB device, and
+/// they resume once the list has settled. The list is empty for 700 ms after the clear; a frame sent
+/// meanwhile would name an index OpenRGB has no controller for (or, with identical sticks, the wrong
+/// one).
+#[tokio::test]
+async fn no_frame_reaches_openrgb_while_its_list_changes_and_the_lights_resume_after() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.rescan_timing(Duration::from_millis(700), Duration::from_millis(100));
+    let rig = rig("gated", server.port(), RESCAN_BUDGET).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    let sink = wait_for_sink(&rig, "openrgb:one").await;
+
+    let rescan = start_rescan(&rig);
+    until("packet 140 reached OpenRGB", || server.rescan_count() == 1).await;
+    let mut shade = 1_u8;
+    while !rescan.is_finished() {
+        sink.submit(vec![Rgb8 { r: shade, g: shade, b: shade }; 8]);
+        shade = shade.wrapping_add(1).max(1);
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    let status = rescan.await.expect("the request task ends");
+    let unregistered = server.frames_to_unregistered();
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(unregistered, 0, "a frame was sent to an index OpenRGB had not registered");
+
+    sink.submit(vec![Rgb8::WHITE; 8]);
+    assert_eq!(server.wait_for_colors(0, &[Rgb8::WHITE; 8]).await, vec![Rgb8::WHITE; 8], "the lights did not resume");
 }
 
 /// #290: the detection wait and the re-read have budgets of their own. Five sticks register again
@@ -526,36 +638,4 @@ async fn a_rescan_with_a_slow_first_controller_answers_with_the_whole_new_list()
     assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"]);
     assert_eq!(rig.app.devices.read().await.len(), 2, "the answer was not applied");
     assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"]);
-}
-
-/// #290 review 2: after a rescan that never settled, the 5 s refresh reads the part list OpenRGB has
-/// mid-detection (here none), and the lights must not go dark: frames keep going to the controllers
-/// the daemon holds, as OpenRGB drops what names an index that is not registered and keeps the link.
-/// The old adapter cached the empty read, so every frame after it re-read the list and was dropped.
-#[tokio::test]
-async fn frames_keep_reaching_the_held_controllers_after_an_unsettled_rescan_and_a_refresh() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
-    server.hold_detection(true);
-    let rig = rig("dark", server.port(), RESCAN_BUDGET).await;
-    wait_for_link(&rig, LinkState::Connected).await;
-    let sink = wait_for_sink(&rig, "openrgb:one").await;
-
-    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one"], "the held list answers");
-    // The supervisor's own 5 s refresh reads the list OpenRGB has mid-detection: empty.
-    until("the 5 s refresh read the mid-detection list", || server.reads_during_detection() >= 1).await;
-    let reads = server.reads_during_detection();
-
-    for shade in [10_u8, 20, 30] {
-        let before = server.frames_to_unregistered();
-        sink.submit(vec![Rgb8 { r: shade, g: shade, b: shade }; 8]);
-        tokio::time::timeout(Duration::from_secs(10), async {
-            while server.frames_to_unregistered() == before {
-                tokio::time::sleep(Duration::from_millis(5)).await;
-            }
-        })
-        .await
-        .expect("a frame never reached OpenRGB: the held controller was forgotten");
-    }
-    assert_eq!(server.reads_during_detection(), reads, "a frame re-read the list while OpenRGB was mid-detection");
-    assert!(rig.app.adapter.lock().await.is_connected());
 }

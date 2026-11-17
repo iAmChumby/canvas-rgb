@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Devices: Rescan now asks OpenRGB to detect hardware again and waits for its device list to come back and settle (up to 15 s) before reading it, and keeps the current list, with the lights still being driven, when OpenRGB has not settled. Checked against a fake OpenRGB only; a real-hardware check is still to do. (#290)
+- Devices: Rescan now asks OpenRGB to detect hardware again. While OpenRGB's device list is changing, including a detection that was already running and ignored the rescan, the lights on OpenRGB devices pause and the list the daemon holds stays. The new list applies once it is not empty and has stopped changing for 2 s, however long the detection runs. A rescan answers with the list held when detection is still running after 15 s. If every OpenRGB device is unplugged, the empty list is not applied until OpenRGB restarts. Checked against a fake OpenRGB only; a real-hardware check is still to do. (#290)
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
 - Devices rows and Peripherals switches stay inside desktop windows from 721px up: the device list scrolls in its pane and the mouse's Access switches wrap to their own line when they stop fitting. (#89)
 - Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)

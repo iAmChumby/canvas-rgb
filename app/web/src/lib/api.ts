@@ -129,7 +129,8 @@ export const CONFIG_TRANSFER_TIMEOUT_MS = 60_000;
  * list again, or connects to OpenRGB first when the link is down. It asks OpenRGB to look at the
  * hardware again, then re-reads what OpenRGB reports.
  * The daemon answers within its own budgets: OpenRGB's detection settling (15 s at most,
- * `RescanTiming::cap` in `crates/canvas-adapters/src/openrgb.rs`) plus `RESCAN_BUDGET` +
+ * `RescanTiming::cap` in `crates/canvas-adapters/src/openrgb.rs`; a detection still running then
+ * is answered with the list the daemon holds, and its list is applied when it settles) plus `RESCAN_BUDGET` +
  * `RESCAN_QUEUE_WAIT` (10 s, `crates/canvas-daemon/src/openrgb_supervisor.rs`), 25 s; the other
  * 5 s of the 30 s are margin.
  */

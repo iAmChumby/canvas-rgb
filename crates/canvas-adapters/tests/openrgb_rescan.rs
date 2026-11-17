@@ -3,10 +3,12 @@
 //! Packet 140 is client-only and gets no reply, so it goes out as a fire-and-forget write. The
 //! fake server models OpenRGB release_1.1: a protocol 5 client sees the list cleared and then
 //! re-registered as list changes (100) and no 101 or 103, which that release sends only to a
-//! protocol 6 client (`NetworkServer.cpp:4003-4006`, `:3949-3952`). So a rescan is over when the
-//! list has been quiet for a settle window. Everything runs against the fake OpenRGB server on
-//! loopback: no real hardware. Each wait is on state the assert reads; the long limit only ends a
-//! test that would hang.
+//! protocol 6 client (`NetworkServer.cpp:4003-4006`, `:3949-3952`), and it drops a packet 140 that
+//! arrives while a detection is already running (`DetectionManager.cpp:1753-1756`). So the adapter
+//! does not guess when detection ends: a list that is changing is never applied, and a list that
+//! has settled (non-empty, quiet) is. Everything runs against the fake OpenRGB server on loopback:
+//! no real hardware. Each wait is on state the assert reads; the long limit only ends a test that
+//! would hang.
 
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::{rescan_miss, OpenRgbAdapter, RescanMiss, RescanTiming};
@@ -175,8 +177,8 @@ async fn no_list_change_after_packet_140_means_detection_did_not_start() {
 }
 
 /// A detection that keeps announcing list changes past the cap is unsettled: the call says so
-/// within the cap, with the link up. The list is empty meanwhile, which is why the caller must not
-/// read it.
+/// within the cap, with the link up. OpenRGB's list is empty meanwhile, so the adapter answers every
+/// read with the list it holds: an empty list is never the answer while the list is changing.
 #[tokio::test]
 async fn a_detection_that_never_settles_is_reported_at_the_cap_with_the_link_up() {
     let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
@@ -192,8 +194,9 @@ async fn a_detection_that_never_settles_is_reported_at_the_cap_with_the_link_up(
     assert!(took >= Duration::from_secs(3) && took < Duration::from_secs(5), "the cap is 3 s: {took:?}");
     assert!(adapter.is_connected(), "a detection timeout broke the link");
     assert_eq!(server.rescan_count(), 1, "packet 140 went out");
-    // The server's list is empty while detection is stuck: a read now would hand back nothing.
-    assert!(adapter.discover().await.expect("discover on a live link").is_empty());
+    // The server's list is empty while detection is stuck; the adapter still answers with the one
+    // it holds.
+    assert_eq!(adapter.discover().await.expect("discover on a live link").len(), 1, "the empty list replaced the held one");
 }
 
 /// A rescan that re-detected resets the custom-mode cache: the controllers OpenRGB registered
@@ -265,9 +268,10 @@ async fn a_detection_packet_is_not_taken_for_a_reply() {
     let ask = tokio::spawn(async move { asking.read_back(&asking_id).await });
     until("the request is waiting for its reply", || server.swallowed_requests() == 1).await;
 
-    // A rescan broadcasts detection packets while that request is still unanswered.
-    let mut scanner = adapter.clone();
-    scanner.rescan().await.expect("rescan");
+    // A rescan broadcasts detection packets while that request is still unanswered. It is not
+    // awaited: settling needs a read of the list, and OpenRGB answers no request meanwhile.
+    let scanner = adapter.clone();
+    let rescanning = tokio::spawn(async move { scanner.rescan_shared().await });
     until("packet 140 went out", || server.rescan_count() == 1).await;
 
     // The broadcasts did not answer the request: it still fails on its own reply timeout.
@@ -277,6 +281,7 @@ async fn a_detection_packet_is_not_taken_for_a_reply() {
         .expect("its task ends");
     assert!(failed.is_err(), "a detection packet was taken for the request's reply");
     server.stall_replies(false);
+    rescanning.abort();
 }
 
 // ---- #290 review 2: the wait is for the list to come back, not for the clear to go quiet
@@ -342,13 +347,14 @@ async fn a_list_that_stays_empty_after_the_clear_is_unsettled_at_the_cap() {
     assert!(adapter.is_connected());
 }
 
-/// The lights of a rescan: OpenRGB deletes every controller at the clear and answers a frame for a
-/// dead id with nothing (the link stays up), so frames keep going to the index the client held. The
-/// adapter's list of controllers must not be replaced by the empty or part list a read mid-detection
-/// returns (the daemon's 5 s refresh makes that read), or every following frame re-reads the list
-/// and is dropped, and the lights go dark for as long as detection takes.
+/// OpenRGB deletes every controller at the clear and registers them again one at a time, and
+/// protocol 5 names a controller by its position, so a frame written meanwhile lands on whichever
+/// device holds that position at that moment. While the list is changing no frame is written to any
+/// OpenRGB device, and a read of the list is answered with the list held (never the empty or part
+/// list OpenRGB has meanwhile): dark lights for a few seconds are better than colours on the wrong
+/// device.
 #[tokio::test]
-async fn frames_keep_going_to_the_held_controllers_after_a_read_mid_detection() {
+async fn no_frame_is_written_and_the_held_list_stays_while_openrgbs_list_is_changing() {
     let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
     server.hold_detection(true);
     let quick = RescanTiming { first: Duration::from_millis(300), settle: Duration::from_millis(200), cap: Duration::from_millis(600) };
@@ -358,19 +364,127 @@ async fn frames_keep_going_to_the_held_controllers_after_a_read_mid_detection() 
 
     let failed = adapter.rescan_shared().await.expect_err("the detection never settles");
     assert_eq!(rescan_miss(&failed), Some(RescanMiss::Unsettled), "{failed:?}");
-    // The daemon's refresh reads the list: OpenRGB has none yet.
-    assert!(adapter.discover().await.expect("the refresh read").is_empty());
-    let reads = server.reads_during_detection();
+    // The daemon's refresh reads the list: OpenRGB has none yet, and the answer is the held list.
+    assert_eq!(adapter.discover().await.expect("the refresh read").len(), 2, "the refresh got a list that was mid-detection");
 
     let one = DeviceId("openrgb:one".into());
     let two = DeviceId("openrgb:two".into());
     for _ in 0..5 {
-        adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame for the held controller one");
-        adapter.write_frame(&two, &[Rgb8::WHITE; 8]).await.expect("a frame for the held controller two");
+        adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect_err("a frame for the held controller one was written");
+        adapter.write_frame(&two, &[Rgb8::WHITE; 8]).await.expect_err("a frame for the held controller two was written");
     }
-    until("the frames reached the server", || server.frames_to_unregistered() >= 10).await;
-    assert_eq!(server.reads_during_detection(), reads, "a frame read the list while OpenRGB was mid-detection");
+    assert_eq!(server.update_leds_writes(0) + server.update_leds_writes(1), 0, "a frame reached OpenRGB while its list was changing");
+    assert_eq!(server.frames_to_unregistered(), 0, "a frame was sent to an index OpenRGB had not registered");
     assert!(adapter.is_connected());
+}
+
+/// A detection that OpenRGB started by itself is already running when packet 140 goes out, and
+/// release_1.1 drops that packet without a word (`DetectionManager.cpp:1753-1756`). The list it had
+/// cleared is empty when the rescan reads it. The held list stays the answer: a wait that took "no
+/// change after packet 140" for "OpenRGB did not look" handed the empty list over, and every device
+/// was gone from the daemon.
+#[tokio::test]
+async fn an_ignored_packet_140_during_a_running_detection_keeps_the_held_list_when_the_list_is_empty() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    // The detection is in its first minute: the list is empty and stays so.
+    server.rescan_timing(Duration::from_secs(60), Duration::from_millis(10));
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+
+    server.start_detection();
+    let failed = adapter.rescan_shared().await.expect_err("the detection is still running");
+    assert_eq!(rescan_miss(&failed), Some(RescanMiss::Unsettled), "{failed:?}");
+    assert_eq!(server.rescan_dropped(), 1, "the fake must drop a 140 sent during a detection");
+    assert_eq!(adapter.discover().await.expect("discover").len(), 2, "the empty list replaced the held one");
+    adapter.write_frame(&DeviceId("openrgb:one".into()), &[Rgb8::WHITE; 8]).await.expect_err("a frame was written while the list was empty");
+    assert!(server.reads_during_detection() >= 1, "the list was never read, so the empty list was never offered");
+    assert!(adapter.is_connected());
+}
+
+/// A detection longer than the call's wait is not a failure: the call answers that detection is
+/// still running, the held list stays, and the list is applied by itself once it has settled. There
+/// is no cap on the hold.
+#[tokio::test]
+async fn a_detection_longer_than_the_wait_is_applied_when_it_settles() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    server.add_hidden_device(stick("two"));
+    // The list is empty for 1.5 s: well past the 1 s the call waits.
+    server.rescan_timing(Duration::from_millis(1500), Duration::from_millis(50));
+    let quick = RescanTiming { first: Duration::from_millis(300), settle: Duration::from_millis(200), cap: Duration::from_secs(1) };
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(quick);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 1);
+
+    let failed = adapter.rescan_shared().await.expect_err("detection is still running at the cap");
+    assert_eq!(rescan_miss(&failed), Some(RescanMiss::Unsettled), "{failed:?}");
+    assert_eq!(adapter.discover().await.expect("discover mid-detection").len(), 1, "the held list stays");
+
+    // The detection ends by itself, and the refresh that follows finds the new list.
+    let two = DeviceId("openrgb:two".into());
+    let found = tokio::time::timeout(Duration::from_secs(30), async {
+        loop {
+            let found = adapter.discover().await.expect("discover");
+            if found.len() == 2 {
+                return found;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the settled list was never applied");
+    assert_eq!(found.len(), 2);
+    adapter.write_frame(&two, &[Rgb8::WHITE; 8]).await.expect("a frame for the device the detection found");
+}
+
+/// Two identical sticks that register again in the other order swap indices, and protocol 5 names a
+/// controller by its position: a frame for stick a that went to a's old index would light stick b.
+/// While the list is unsettled no frame lands anywhere; once it has settled, the frames go to the
+/// indices the sticks have now.
+#[tokio::test]
+async fn two_identical_sticks_that_register_in_the_other_order_never_get_each_others_frames() {
+    fn twin(serial: &str) -> DeviceInfo {
+        DeviceInfo { name: "DDR5 stick".into(), ..stick(serial) }
+    }
+    let server = FakeOpenRgbServer::start(vec![twin("a"), twin("b")]).await.expect("fake server");
+    // Each stick registers again 100 ms after the one before: inside the 250 ms settle window.
+    server.rescan_timing(Duration::from_millis(100), Duration::from_millis(100));
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+    let b = DeviceId("openrgb:b".into());
+    let red = [Rgb8 { r: 255, g: 0, b: 0 }; 8];
+    let blue = [Rgb8 { r: 0, g: 0, b: 255 }; 8];
+    adapter.write_frame(&a, &red).await.expect("a frame for a");
+    until("a's frame landed", || !server.landings().is_empty()).await;
+    assert_eq!(server.landings()[0].serial, "a");
+
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    while !rescan.is_finished() {
+        // Every frame is tried: the unsettled list refuses it, and the settled list takes it.
+        let _ = adapter.write_frame(&a, &red).await;
+        let _ = adapter.write_frame(&b, &blue).await;
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    rescan.await.expect("the task ends").expect("the detection settled");
+    for landing in server.landings() {
+        let wanted = if landing.serial == "a" { red[0] } else { blue[0] };
+        assert_eq!(landing.color, wanted, "a frame meant for the other stick landed on {landing:?}");
+    }
+
+    // The sticks swapped indices for good: the frames go to where they are now.
+    adapter.discover().await.expect("discover after the rescan");
+    let before = server.landings().len();
+    adapter.write_frame(&a, &red).await.expect("a frame for a after the rescan");
+    adapter.write_frame(&b, &blue).await.expect("a frame for b after the rescan");
+    until("both frames landed", || server.landings().len() >= before + 2).await;
+    let landed = server.landings();
+    let (to_a, to_b) = (&landed[before], &landed[before + 1]);
+    assert_eq!((to_a.serial.as_str(), to_a.index, to_a.color), ("a", 1, red[0]), "{to_a:?}");
+    assert_eq!((to_b.serial.as_str(), to_b.index, to_b.color), ("b", 0, blue[0]), "{to_b:?}");
 }
 
 /// Once the detection is settled the list is the new one, even a shorter one: a device unplugged
@@ -391,14 +505,16 @@ async fn a_settled_shorter_list_replaces_the_one_frames_are_written_to() {
     assert!(matches!(gone, Err(AdapterError::UnknownDevice(_))), "{gone:?}");
 }
 
-/// A controller that registers again during the wait is a new object in OpenRGB, in its built-in
-/// mode: the next frame to it must say SET_CUSTOM_MODE, or its lights stay on the built-in effect
-/// until the wait is over. Frames flow all through the wait, none are re-reads of the list, and
-/// every one that names a registered controller lands.
+/// A controller that registers again is a new object in OpenRGB, in its built-in mode: once the
+/// list has settled, the first frame to it must say SET_CUSTOM_MODE, or its lights stay on the
+/// built-in effect. No frame is written during the wait (the list is changing), and every frame
+/// after it lands.
 #[tokio::test]
-async fn a_controller_that_registers_again_during_the_wait_gets_its_mode_and_its_frames() {
+async fn frames_resume_with_the_custom_mode_set_again_once_the_list_has_settled() {
     let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
-    server.rescan_timing(Duration::from_millis(300), Duration::from_millis(400));
+    // The list is empty for 300 ms, then a controller registers every 100 ms (inside the 250 ms
+    // settle window).
+    server.rescan_timing(Duration::from_millis(300), Duration::from_millis(100));
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
     adapter.discover().await.expect("first discover");
@@ -408,24 +524,19 @@ async fn a_controller_that_registers_again_during_the_wait_gets_its_mode_and_its
 
     let scanner = adapter.clone();
     let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
-    let mut sent = 0_u32;
+    let mut refused = 0_u32;
     while !rescan.is_finished() {
-        adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame during the wait");
-        sent += 1;
+        if adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.is_err() {
+            refused += 1;
+        }
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
-    let modes_when_the_wait_ended = server.custom_mode_writes(0);
-    rescan.await.expect("the task ends").expect("the detection settled");
-    assert!(sent > 10, "the loop did not run during the wait: {sent} frames");
-    assert_eq!(server.reads_during_detection(), 0, "a frame read the list while OpenRGB was mid-detection");
-    assert!(server.frames_to_unregistered() > 0, "no frame went to the controller while it was dead");
-    assert_eq!(
-        server.colors(0),
-        vec![Rgb8::WHITE; 8],
-        "the frames after the controller registered again did not land"
-    );
-    assert!(
-        modes_when_the_wait_ended >= 2,
-        "the controller that registered again was never put in custom mode during the wait: {modes_when_the_wait_ended}"
-    );
+    let settled = rescan.await.expect("the task ends");
+    settled.expect("the detection settled");
+    assert!(refused > 10, "the loop did not run during the wait: {refused} frames refused");
+    assert_eq!(server.frames_to_unregistered(), 0, "a frame was sent to a controller OpenRGB had not registered");
+
+    adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame after the list settled");
+    assert_eq!(server.wait_for_colors(0, &[Rgb8::WHITE; 8]).await, vec![Rgb8::WHITE; 8], "the frame after the wait did not land");
+    assert_eq!(server.custom_mode_writes(0), 2, "the controller that registered again was never put in custom mode");
 }
