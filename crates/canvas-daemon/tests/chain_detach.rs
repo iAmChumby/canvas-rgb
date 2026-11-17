@@ -119,6 +119,7 @@ fn rig_scenes(lights: &[Light]) -> ScenesFile {
                 plays: Plays::Off,
                 mode: GroupMode::FlowAcross,
                 brightness: 100,
+                sequence: None,
             }],
         }],
     }

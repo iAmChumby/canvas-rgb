@@ -146,6 +146,7 @@ fn group(id: &str, members: &[&str], effect: &str, props: Props) -> Group {
         plays: Plays::Effect { effect: effect.into(), props },
         mode: GroupMode::FlowAcross,
         brightness: 100,
+        sequence: None,
     }
 }
 

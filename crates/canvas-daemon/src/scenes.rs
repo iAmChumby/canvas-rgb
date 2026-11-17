@@ -60,6 +60,7 @@ pub fn everything_group(lights: &[Light]) -> Option<Group> {
         plays: Plays::Effect { effect: DEFAULT_EFFECT.into(), props: Props::new() },
         mode: GroupMode::FlowAcross,
         brightness: GROUP_BRIGHTNESS_MAX,
+        sequence: None,
     })
 }
 
@@ -2083,6 +2084,7 @@ pub(crate) mod tests {
             plays: Plays::Off,
             mode: GroupMode::FlowAcross,
             brightness: 100,
+            sequence: None,
         }
     }
 
@@ -2241,6 +2243,7 @@ pub(crate) mod tests {
             plays: Plays::Effect { effect: effect.into(), props: Default::default() },
             mode: GroupMode::FlowAcross,
             brightness: 100,
+            sequence: None,
         };
         // One group over the limit: SCENE_HTML_MAX HTML groups, a built-in one, then one more.
         let mut file = ScenesFile {

@@ -1969,6 +1969,7 @@ fn groups_with_ids(
             plays: group.plays.clone(),
             mode: group.mode,
             brightness: group.brightness,
+            sequence: None,
         });
     }
     out

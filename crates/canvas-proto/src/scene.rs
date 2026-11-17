@@ -251,6 +251,28 @@ pub struct Group {
     /// 0..=100, multiplied with the global brightness.
     #[serde(default = "default_brightness")]
     pub brightness: u8,
+    /// How a pattern runs through the members (#468). `None`: each light plays the whole pattern
+    /// on its own, as before. `Some`: one run through the members in `members` order, each light
+    /// first applying its own `first_led` and `reversed`, the pattern fitted once to the sum of
+    /// their LED counts in the chosen shape, and Spin carried across the joins. A canvas effect
+    /// ignores it (`mode` places a canvas picture).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub sequence: Option<SequenceShape>,
+}
+
+/// The shape a pattern's run through a group takes (#468, Luke's answer of 2026-11-16: the owner
+/// picks it). "Each light its own" is `Group::sequence` = `None`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum SequenceShape {
+    /// One big ring through every member: the last LED of the last member joins the first LED of
+    /// the first, so a gradient built on a ring wraps and Spin circles the whole run.
+    Ring,
+    /// One line: the run has two ends; a gradient does not wrap, and Spin chases off the end and
+    /// back in at the start.
+    Line,
 }
 
 /// One scene: named groups, applied in one go.
@@ -398,6 +420,7 @@ mod tests {
             plays: Plays::Off,
             mode: GroupMode::FlowAcross,
             brightness: 100,
+            sequence: None,
         }
     }
 

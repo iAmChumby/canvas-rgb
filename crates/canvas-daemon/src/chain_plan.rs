@@ -351,6 +351,7 @@ mod tests {
             plays: Plays::Off,
             mode: GroupMode::FlowAcross,
             brightness: 100,
+            sequence: None,
         }
     }
 
