@@ -662,6 +662,32 @@ that is already dead or is refused, and nothing can clear it until a restart.
   `tokio::sync::Mutex`). When adding a route that starts asynchronous work, take the token and the
   guard in the same statement.
 
+### `cause:cancelled-request`: a request that is given up on breaks the link that carried it
+
+OpenRGB answers in order and puts no request id in a reply, so a reply that arrives late would
+answer the next request. A request that is given up on therefore leaves the link unusable: it is
+broken and lost, and the supervisor reconnects. Every light pauses for that reconnect, and the
+work the request was carrying stops half way.
+
+- [#308](https://github.com/iAmChumby/canvas-rgb/issues/308): the zone resize route awaited
+  `set_zone_size` in the handler, so a client that went away in the middle of it cancelled a
+  request OpenRGB had already answered. Fixed in PR #456.
+- [#457](https://github.com/iAmChumby/canvas-rgb/issues/457): the same mistake in the chain routes:
+  `start_setup`, `commit_setup`, `cancel_setup` and `empty_setup` awaited `set_zone_size` in the
+  handler, so a client that left mid-step broke the link and left the setup half-recorded (the
+  record on disk, the hold in memory, the header in between).
+- **Class fix:** done (#308, #457). A route that talks to OpenRGB runs the whole step on a task of
+  its own and answers from its result, so a client that goes away cannot cancel the request:
+  `resize_the_zone` (`crates/canvas-daemon/src/api/devices.rs`), `read_the_colours`
+  (`crates/canvas-daemon/src/api/diag.rs`), and the four chain steps
+  (`crates/canvas-daemon/src/api/chains.rs`). A failure the client never received is logged. The
+  guard that keeps a setup's session open while its step runs (`SetupService`) owns the gate, so
+  the task can hold it.
+- **Sibling search:** every `adapter.lock()` in the daemon's API is now inside such a task. Left,
+  and why: the display adapter's own `disconnect` (`crates/canvas-daemon/src/api/displays.rs:143`)
+  is another protocol with no reply to misalign, and the first run's resize
+  (`crates/canvas-daemon/src/first_run.rs:383`) runs in the daemon's own task, not in a request.
+
 ### `cause:css-layout`: a pane's scroll rule and the phone fallback key on different widths
 
 On a desktop window `.content` is `overflow: hidden` (R1), so a column taller than the window needs its
