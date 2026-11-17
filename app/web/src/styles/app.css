@@ -3906,6 +3906,14 @@ button.chip:hover {
   grid-column: 3;
 }
 
+/* The LED-order notch and direction arrow (#468), beside the shape. */
+.rd-led-order {
+  display: block;
+  grid-column: 4;
+  width: 76px;
+  height: 36px;
+}
+
 .rd-light-turn {
   display: inline-flex;
   align-items: center;
@@ -3942,6 +3950,12 @@ button.chip:hover {
 
   .rd-shape {
     grid-column: 1;
+  }
+
+  .rd-led-order {
+    grid-column: 1 / -1;
+    width: 100%;
+    height: 38px;
   }
 
   .rd-light-turn {
@@ -4000,6 +4014,12 @@ button.chip:hover {
 
   .rd-shape {
     grid-column: 1;
+  }
+
+  .rd-led-order {
+    grid-column: 1 / -1;
+    width: 100%;
+    height: 38px;
   }
 
   .rd-light-turn {

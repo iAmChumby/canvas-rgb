@@ -69,6 +69,7 @@ fn light(id: &str, device_id: &str, zone_index: u32, arrangement: Arrangement) -
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 

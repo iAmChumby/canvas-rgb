@@ -143,6 +143,7 @@ fn whole_zone(device: &str, zone: u32) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 
@@ -576,36 +577,48 @@ async fn every_completed_flow_writes_one_record_per_header_when_the_used_header_
     walk_every_header("four-used-last", &[0, 2, 3, 1]).await;
 }
 
-/// Start writes the earlier length to `chain-restore.json` before the raise lands, raises the
-/// header to its maximum once, and answers both lengths.
+/// Start writes the earlier length to `chain-restore.json` before the raise, raises the header to
+/// its maximum once, and answers both lengths. The fake holds the raise's reply so the record's
+/// ordering is judged at the moment the header is about to be raised, not against a timer.
 #[tokio::test]
 async fn start_raises_to_the_zone_maximum_once_and_writes_the_restore_record_first() {
     let rig = rig("start", fake(EARLIER).await, true).await;
     assert!(connected(&rig).await, "the daemon never applied a device list");
     // The connect applied the saved sizes; every later count is measured from here.
     let before = rig.server.resize_count(0);
-    // A raise the fake holds back: while it is still landing the record must already be there.
-    rig.server.delay_resizes(1_500);
-
+    // Hold the fake's replies: the start's raise waits for a reply that never comes, so the daemon
+    // is parked at the point where the record must already be on disk. The wait is on the server's
+    // own held replies and resize count, a handshake with the raise (#411, #479), never a timer: a
+    // delayed resize does not park the start, because the adapter re-enumerates the list at once
+    // (fake.rs REQUEST_CONTROLLER_COUNT) and the delay only moves when the new size lands.
+    let held_before = rig.server.held_replies();
+    rig.server.hold_replies(true);
     let router = rig.router.clone();
     let path = setup_path(0);
     let pending =
         tokio::spawn(async move { router.oneshot(request("POST", &path, None)).await });
-    let record = wait_until(Duration::from_secs(30), || {
-        rig.home.join(CHAIN_RESTORE_FILE).exists()
-    })
-    .await;
-    assert!(record, "the restore record was never written");
-    assert_eq!(
-        rig.server.zone_leds(0, 0),
-        Some(EARLIER),
-        "the record is written before the raise lands"
+    assert!(
+        wait_until(Duration::from_secs(30), || {
+            rig.server.resize_count(0) > before && rig.server.held_replies() > held_before
+        })
+        .await,
+        "the start never sent its raise to OpenRGB, so the record's ordering cannot be judged"
+    );
+    // The daemon is parked at the raise: the restore record is already on disk and holds the
+    // earlier length. This is the ordering a crash in the middle of the raise depends on.
+    assert!(
+        rig.home.join(CHAIN_RESTORE_FILE).exists(),
+        "the restore record was not written before the raise"
     );
     assert_eq!(
         read_restore(&rig.home).map(|record| record.leds),
         Some(EARLIER),
         "the record holds the earlier length"
     );
+
+    // OpenRGB answers now: the start runs on to rediscover and its answer.
+    rig.server.hold_replies(false);
+    rig.server.release_replies();
 
     let response = tokio::time::timeout(Duration::from_secs(60), pending)
         .await
@@ -633,7 +646,7 @@ async fn start_raises_to_the_zone_maximum_once_and_writes_the_restore_record_fir
     assert_eq!(
         rig.server.resize_count(0),
         before + 1,
-        "one raise, and the delay did not add a second"
+        "one raise, and no second resize was sent"
     );
 }
 

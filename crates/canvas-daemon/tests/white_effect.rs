@@ -80,6 +80,7 @@ fn run_on_both(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::Effect>, 
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         })
         .collect();
     let members: Vec<String> = lights.iter().map(|l| l.id.clone()).collect();

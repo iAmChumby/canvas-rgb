@@ -16,6 +16,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
+import { LedOrderControl } from "@/components/LedOrderControl";
+import { directionPatch, effectiveFirstLed, identifyLed } from "@/lib/ledOrder";
 import { LeavePrompt } from "@/components/LeavePrompt";
 import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { useFocusTrap } from "@/components/useFocusTrap";
@@ -187,6 +189,54 @@ export function PatternEditor({
       }
     }
     editor.setShape(shape, gridOfZone(zone));
+  };
+
+  // The LED order of the light this pattern plays on (#468). The notch writes `first_led` and the
+  // arrow writes `reversed` through the same lights route as the shape. A set that lands identifies
+  // the physical LED on the real device, so the owner can see which one is LED 1. These are light
+  // properties, not pattern colours: they take effect at once and sit outside the pattern's colour
+  // undo history, which is all this editor's history holds.
+  // The light's own LED count is the run `first_led` counts in and the daemon checks it against.
+  // `referenceLight` only returns a light whose count equals the pattern's, so the two cannot differ
+  // while a light is found; the light's count is used so the notch never depends on the picture.
+  const lightLeds = light?.led_count ?? Math.max(1, editor.builtOn.led_count);
+  const reversed = light?.light.reversed ?? false;
+  const firstLed = effectiveFirstLed(light?.light.first_led, reversed, lightLeds);
+  // Identify addresses a LED of the zone; `first_led` counts inside the light's slice.
+  const identifyFirst = (led: number) => {
+    if (!light) return;
+    void api
+      .identify(light.light.device_id, {
+        zone: light.light.zone_index,
+        led: identifyLed(light.light.leds, led),
+        count: 1,
+        stop: false,
+      })
+      .catch(() => undefined);
+  };
+  const setFirstLed = async (led: number) => {
+    if (!light) return;
+    setShapeProblem(null);
+    try {
+      await api.lights.patch(light.light.id, { first_led: led });
+      await refreshLights();
+      identifyFirst(led);
+    } catch (error) {
+      setShapeProblem(messageOf(error));
+    }
+  };
+  const setReversed = async (next: boolean) => {
+    if (!light) return;
+    setShapeProblem(null);
+    try {
+      await api.lights.patch(
+        light.light.id,
+        directionPatch(next, light.light.first_led, reversed, lightLeds),
+      );
+      await refreshLights();
+    } catch (error) {
+      setShapeProblem(messageOf(error));
+    }
   };
 
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
@@ -402,6 +452,23 @@ export function PatternEditor({
           onBegin={editor.beginStroke}
           onStroke={editor.stroke}
           onEnd={editor.endStroke}
+          ledOrder={(dots, box) => (
+            <div className={s.ledOrderOverlay}>
+              <LedOrderControl
+                ledCount={lightLeds}
+                firstLed={firstLed}
+                reversed={reversed}
+                ring={editor.builtOn.arrangement === "ring"}
+                label={name}
+                width={Math.max(1, box.width)}
+                height={Math.max(1, box.height)}
+                dots={dots}
+                onFirstLed={(led) => void setFirstLed(led)}
+                onReversed={(next) => void setReversed(next)}
+                onIdentify={() => identifyFirst(firstLed)}
+              />
+            </div>
+          )}
           overlay={
             editor.tool === "gradient" && editor.gradient ? (
               <GradientStops
