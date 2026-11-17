@@ -44,6 +44,7 @@ import {
   type FrameDoc,
 } from "@/lib/patternFrames";
 import type { Shape } from "@/components/ShapePicker";
+import type { Arrangement } from "@/proto/Arrangement";
 import type { BuiltOn } from "@/proto/BuiltOn";
 import type { Frame } from "@/proto/Frame";
 import type { GridSize } from "@/proto/GridSize";
@@ -70,6 +71,17 @@ export interface GradientState {
 /** How many strokes the history holds. */
 export const HISTORY_DEPTH = 100;
 
+/**
+ * The light a shape change wrote, and the arrangement it was in before and after (#481). The light's
+ * arrangement lives on the light, not in the pattern, so undoing or redoing the pattern's shape means
+ * writing the light back too.
+ */
+export interface ShapeStep {
+  light: string;
+  from: Arrangement;
+  to: Arrangement;
+}
+
 /** The colour a pattern starts with when every LED of it is off: white, from the colour model. */
 const WHITE = hsvToHex({ h: 0, s: 0, v: 1 });
 
@@ -82,8 +94,9 @@ export interface PatternEditorState {
   motion: Motion;
   /** Sets the motion (Spin, or none). The draft goes out like a stroke. */
   setMotion(motion: Motion): void;
-  /** Lays the pattern out as another shape; a grid takes the cells the zone reports. */
-  setShape(shape: Shape, grid?: GridSize): void;
+  /** Lays the pattern out as another shape; a grid takes the cells the zone reports. `step` is the
+   *  light the shape change wrote, so undoing it writes the light back too (#481). */
+  setShape(shape: Shape, grid?: GridSize, step?: ShapeStep | null): void;
   /** The Gradient tool's stops and wrap, or null until the tool has been picked. */
   gradient: GradientState | null;
   selectStop(index: number): void;
@@ -144,7 +157,14 @@ export interface PatternEditorState {
 
 export function usePatternEditor(
   initial: Pattern,
-  opts: { onDraft(pattern: Pattern): void },
+  opts: {
+    onDraft(pattern: Pattern): void;
+    /**
+     * Writes a light's arrangement, for a shape change's undo or redo (#481). One that fails leaves
+     * the history where it was; the owner names the reason in its own row.
+     */
+    onShapeLight?(lightId: string, arrangement: Arrangement): Promise<void>;
+  },
 ): PatternEditorState {
   // The loaded document: the frame's colours padded to the device's LED count, so a pattern that
   // is missing colours still draws every LED.
@@ -196,6 +216,12 @@ export function usePatternEditor(
     draft.current = opts.onDraft;
   }, [opts.onDraft]);
 
+  /** The owner's writer for a shape change's light, kept current without re-making the history. */
+  const shapeLight = useRef(opts.onShapeLight);
+  useEffect(() => {
+    shapeLight.current = opts.onShapeLight;
+  }, [opts.onShapeLight]);
+
   const flush = useCallback(() => {
     frame.current = null;
     const next = pending.current;
@@ -204,10 +230,16 @@ export function usePatternEditor(
   }, []);
 
   /** Puts the document as it stands on the history, before a change to it (#481). */
-  const pushUndo = useCallback(() => {
+  const pushUndo = useCallback((shapeStep: ShapeStep | null = null) => {
     const next = [
       ...undoRef.current,
-      { doc: docRef.current, selected: selectedRef.current, builtOn: builtOnRef.current, motion: motionRef.current },
+      {
+        doc: docRef.current,
+        selected: selectedRef.current,
+        builtOn: builtOnRef.current,
+        motion: motionRef.current,
+        shapeStep,
+      },
     ];
     undoRef.current = next.length > HISTORY_DEPTH ? next.slice(next.length - HISTORY_DEPTH) : next;
     setUndoStack(undoRef.current);
@@ -410,10 +442,11 @@ export function usePatternEditor(
   }, []);
 
   const setShape = useCallback(
-    (shape: Shape, grid?: GridSize) => {
+    (shape: Shape, grid?: GridSize, step?: ShapeStep | null) => {
       const was = builtOnRef.current;
-      if (was.arrangement === shape && (shape !== "grid" || grid === undefined)) return;
-      pushUndo();
+      const light = step ?? null;
+      if (was.arrangement === shape && (shape !== "grid" || grid === undefined) && light === null) return;
+      pushUndo(light);
       const { grid: oldGrid, ...rest } = was;
       const cells = shape === "grid" ? (grid ?? oldGrid) : undefined;
       const next: BuiltOn = { ...rest, arrangement: shape, ...(cells ? { grid: cells } : {}) };
@@ -493,33 +526,74 @@ export function usePatternEditor(
     [applyDoc],
   );
 
+  /**
+   * Writes the light a shape change touched, back to `end`: on an undo that is the arrangement the
+   * step found, on a redo the one it made (#481). True when the history may move, which a failed
+   * write does not let it: the owner names the reason and the pattern keeps the shape it shows.
+   */
+  const writeShapeLight = useCallback(
+    async (step: ShapeStep, end: "from" | "to"): Promise<boolean> => {
+      const write = shapeLight.current;
+      if (!write) return true;
+      try {
+        await write(step.light, step[end]);
+        return true;
+      } catch {
+        return false;
+      }
+    },
+    [],
+  );
+
   const undo = useCallback(() => {
-    const previous = undoRef.current[undoRef.current.length - 1];
-    if (!previous) return;
-    undoRef.current = undoRef.current.slice(0, -1);
-    setUndoStack(undoRef.current);
-    redoRef.current = [
-      ...redoRef.current,
-      { doc: docRef.current, selected: selectedRef.current, builtOn: builtOnRef.current, motion: motionRef.current },
-    ];
-    setRedoStack(redoRef.current);
-    inStroke.current = false;
-    restore(previous);
-  }, [restore]);
+    void (async () => {
+      const previous = undoRef.current[undoRef.current.length - 1];
+      if (!previous) return;
+      if (previous.shapeStep && !(await writeShapeLight(previous.shapeStep, "from"))) return;
+      // Another change landed while the light was being written: this step is not the one to undo.
+      if (undoRef.current[undoRef.current.length - 1] !== previous) return;
+      undoRef.current = undoRef.current.slice(0, -1);
+      setUndoStack(undoRef.current);
+      redoRef.current = [
+        ...redoRef.current,
+        {
+          doc: docRef.current,
+          selected: selectedRef.current,
+          builtOn: builtOnRef.current,
+          motion: motionRef.current,
+          // The redo puts the light back to the arrangement this step made.
+          shapeStep: previous.shapeStep,
+        },
+      ];
+      setRedoStack(redoRef.current);
+      inStroke.current = false;
+      restore(previous);
+    })();
+  }, [restore, writeShapeLight]);
 
   const redo = useCallback(() => {
-    const next = redoRef.current[redoRef.current.length - 1];
-    if (!next) return;
-    redoRef.current = redoRef.current.slice(0, -1);
-    setRedoStack(redoRef.current);
-    undoRef.current = [
-      ...undoRef.current,
-      { doc: docRef.current, selected: selectedRef.current, builtOn: builtOnRef.current, motion: motionRef.current },
-    ];
-    setUndoStack(undoRef.current);
-    inStroke.current = false;
-    restore(next);
-  }, [restore]);
+    void (async () => {
+      const next = redoRef.current[redoRef.current.length - 1];
+      if (!next) return;
+      if (next.shapeStep && !(await writeShapeLight(next.shapeStep, "to"))) return;
+      if (redoRef.current[redoRef.current.length - 1] !== next) return;
+      redoRef.current = redoRef.current.slice(0, -1);
+      setRedoStack(redoRef.current);
+      undoRef.current = [
+        ...undoRef.current,
+        {
+          doc: docRef.current,
+          selected: selectedRef.current,
+          builtOn: builtOnRef.current,
+          motion: motionRef.current,
+          shapeStep: next.shapeStep,
+        },
+      ];
+      setUndoStack(undoRef.current);
+      inStroke.current = false;
+      restore(next);
+    })();
+  }, [restore, writeShapeLight]);
 
   // ---- frames (#468). Each change is one history entry and goes to the lights at once.
 
@@ -665,12 +739,14 @@ export function usePatternEditor(
   };
 }
 
-/** One entry of the history: the frames (and Loop), the shape, the motion and the selected frame. */
+/** One entry of the history: the frames (and Loop), the shape, the motion, the selected frame and,
+ *  for a shape change, the light it wrote (#481). */
 interface Snapshot {
   doc: FrameDoc;
   selected: number;
   builtOn: BuiltOn;
   motion: Motion;
+  shapeStep: ShapeStep | null;
 }
 
 /** Motion is a small JSON value; equality by value keeps a re-pick off the history. */

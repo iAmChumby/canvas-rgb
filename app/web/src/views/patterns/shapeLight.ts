@@ -33,6 +33,19 @@ export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, dev
   return referenceLights(builtOn, lights, devices)[0] ?? null;
 }
 
+/**
+ * The lights the header's chooser offers for a shape change (#481). The chooser says which light the
+ * shape change writes to, so it lists only lights already in the pattern's shape: a light of another
+ * arrangement would be a second shape change made from the chooser. When no light of this size is in
+ * the pattern's shape at all, every light of the size is offered, because then the shape picker's own
+ * change is what brings one into step.
+ */
+export function choosableLights(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView[] {
+  const fits = referenceLights(builtOn, lights, devices);
+  const same = fits.filter((view) => view.light.arrangement === builtOn.arrangement);
+  return same.length > 0 ? same : fits;
+}
+
 /** The zone a light is, from the devices the daemon lists. */
 export function zoneOf(view: LightView | null, devices: DeviceInfo[] | null): ZoneInfo | undefined {
   if (!view) return undefined;

@@ -23,7 +23,7 @@ vi.mock("@/lib/endpoints", () => ({ api }));
 
 import { gradientColours, seedStops } from "@/lib/gradient";
 import { spinColours } from "@/lib/spin";
-import { patchSnap } from "@/lib/store";
+import { getSnap, patchSnap } from "@/lib/store";
 import { PatternEditor } from "@/views/patterns/PatternEditor";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -228,6 +228,22 @@ describe("the shape picker in the editor's header", () => {
     expect(api.lights.patch).not.toHaveBeenCalledWith("fake:a#z0", { arrangement: "ring" });
   });
 
+  it("does not offer a light of another arrangement, since the chooser is not a second shape change (#481)", async () => {
+    const line = fanLight("strip");
+    const ring = { ...fanLight("ring"), light: { ...line.light, id: "fake:b#z0", arrangement: "ring" as const }, label: "Fan 2" };
+    patchSnap({ lights: [line, ring], devices: [fanDevice()] });
+    show(blank(8, "strip"));
+    await settle();
+    expect(screen.queryByRole("combobox", { name: "Which light the shape change writes to" })).toBeNull();
+    // The light of the pattern's shape is the one a shape change writes to.
+    api.lights.patch.mockResolvedValue({ ...line, light: { ...line.light, arrangement: "ring" } });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Ring" }));
+    });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { arrangement: "ring" });
+    expect(api.lights.patch).not.toHaveBeenCalledWith("fake:b#z0", { arrangement: "ring" });
+  });
+
   it("offers a grid only where the zone is one", async () => {
     patchSnap({ lights: [fanLight("strip")], devices: [fanDevice("linear")] });
     const first = show(blank(8, "strip"));
@@ -239,6 +255,69 @@ describe("the shape picker in the editor's header", () => {
     show(blank(8, "strip"));
     await settle();
     expect(screen.getByRole("radio", { name: "Grid" })).toBeTruthy();
+  });
+});
+
+describe("undoing a shape change", () => {
+  /** The arrangement the store holds for the light these tests write to. */
+  const stored = (): string | undefined => getSnap().lights?.find((l) => l.light.id === "fake:a#z0")?.light.arrangement;
+  /** Clicks a key and lets the light write, the refresh and the draft's frame settle. */
+  const click = async (role: "radio" | "button", name: string) => {
+    await act(async () => {
+      fireEvent.click(screen.getByRole(role, { name }));
+    });
+    await frames();
+  };
+  /** The light the daemon answers with on the next PATCH, and the list it then reports. */
+  const lightAs = (arrangement: "strip" | "ring") => {
+    api.lights.patch.mockResolvedValue({ ...fanLight(arrangement) });
+    api.lights.list.mockResolvedValue({ lights: [fanLight(arrangement)] });
+  };
+
+  it("writes the light back with the pattern, and writes it again on redo (#481)", async () => {
+    patchSnap({ lights: [fanLight("strip")], devices: [fanDevice()] });
+    lightAs("ring");
+    show(blank(8, "strip"));
+    await settle();
+
+    await click("radio", "Ring");
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { arrangement: "ring" });
+    expect(stored()).toBe("ring");
+
+    // Undo: the light goes back to the line it was, and the pattern's shape with it.
+    api.lights.patch.mockClear();
+    lightAs("strip");
+    await click("button", "Undo");
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { arrangement: "strip" });
+    expect(stored()).toBe("strip");
+    expect(screen.getByText("strip of 8")).toBeTruthy();
+
+    // Redo: the ring is written to the same light again.
+    api.lights.patch.mockClear();
+    lightAs("ring");
+    await click("button", "Redo");
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { arrangement: "ring" });
+    expect(stored()).toBe("ring");
+    expect(screen.getByText("ring of 8")).toBeTruthy();
+  });
+
+  it("leaves the shape and the history where they were when the light will not change (#481)", async () => {
+    patchSnap({ lights: [fanLight("strip")], devices: [fanDevice()] });
+    lightAs("ring");
+    show(blank(8, "strip"));
+    await settle();
+    await click("radio", "Ring");
+    expect(screen.getByText("ring of 8")).toBeTruthy();
+
+    api.lights.patch.mockRejectedValue(new Error("the light file could not be saved"));
+    await click("button", "Undo");
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { arrangement: "strip" });
+    // The editor keeps the ring it shows, because the light was not written; the step is still
+    // there to undo, and the row says why.
+    expect(screen.getByText("ring of 8")).toBeTruthy();
+    expect(screen.getByText("the light file could not be saved")).toBeTruthy();
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(false);
+    expect((screen.getByRole("button", { name: "Redo" }) as HTMLButtonElement).disabled).toBe(true);
   });
 });
 

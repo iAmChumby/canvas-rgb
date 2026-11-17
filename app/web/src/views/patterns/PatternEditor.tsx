@@ -35,8 +35,9 @@ import { FrameStrip } from "@/views/patterns/FrameStrip";
 import { GradientStops } from "@/views/patterns/GradientStops";
 import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
-import { gridOfZone, referenceLights, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
+import { gridOfZone, choosableLights, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
 import { usePatternEditor } from "@/views/patterns/usePatternEditor";
+import type { Arrangement } from "@/proto/Arrangement";
 import type { LightView } from "@/proto/LightView";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
@@ -75,6 +76,8 @@ export function PatternEditor({
   const heartbeat = useRef(HEARTBEAT_MS);
   const [daemonNote, setDaemonNote] = useState<string | null>(null);
   const [problem, setProblem] = useState<string | null>(null);
+  /** A shape change or its undo that did not reach the light: the pattern keeps the shape it shows. */
+  const [shapeProblem, setShapeProblem] = useState<string | null>(null);
   /** A save that did not land: the document on the lights is not the saved one. */
   const [saveProblem, setSaveProblem] = useState<string | null>(null);
   /** How many answers in a row said this editor's stroke is not on the lights. */
@@ -142,7 +145,24 @@ export function PatternEditor({
     },
     [send],
   );
-  const editor = usePatternEditor(pattern, { onDraft: draft });
+
+  /**
+   * Writes a light's arrangement through the lights route, for a shape change and for its undo or
+   * redo (#481). A failure is named in the note row and thrown, so an undo leaves its history step
+   * where it was instead of moving the pattern's shape away from the light's.
+   */
+  const writeShape = useCallback(async (lightId: string, arrangement: Arrangement) => {
+    setShapeProblem(null);
+    try {
+      await api.lights.patch(lightId, { arrangement });
+      await refreshLights();
+    } catch (error) {
+      setShapeProblem(messageOf(error));
+      throw error;
+    }
+  }, []);
+
+  const editor = usePatternEditor(pattern, { onDraft: draft, onShapeLight: writeShape });
 
   // The preview (#468): Play runs the whole document on the dots with the daemon's own maths
   // (`lib/patternPlay.ts`); stopped, the dots show the frame being painted. The lights always play the
@@ -164,28 +184,32 @@ export function PatternEditor({
       : "Nothing to play: add a frame and give the frames a hold";
 
   // The shape picker writes the arrangement of the light this pattern was built on (#468). When
-  // more than one connected light has this LED count, the owner picks which one it writes to
-  // (#481); the best match is the default, and nothing is patched until a shape is chosen.
+  // more than one light is in the pattern's shape, the owner picks which one it writes to (#481);
+  // a light of another arrangement is offered only when no light of this size matches the pattern's
+  // shape, where the shape change is what brings it into step. The best match is the default, and
+  // nothing is patched until a shape is chosen.
   const lights = useSnap((state) => state.lights);
   const devices = useSnap((state) => state.devices);
-  const matching = useMemo(() => referenceLights(editor.builtOn, lights, devices), [editor.builtOn, lights, devices]);
+  const choosable = useMemo(() => choosableLights(editor.builtOn, lights, devices), [editor.builtOn, lights, devices]);
   const [chosenId, setChosenId] = useState<string | null>(null);
-  const light = matching.find((l) => l.light.id === chosenId) ?? matching[0] ?? null;
+  const light = choosable.find((l) => l.light.id === chosenId) ?? choosable[0] ?? null;
   const zone = zoneOf(light, devices);
-  const [shapeProblem, setShapeProblem] = useState<string | null>(null);
   const chooseShape = async (shape: Shape) => {
     setShapeProblem(null);
-    if (light && light.light.arrangement !== shape) {
+    // The light keeps its own arrangement, so the step records both ends for the history (#481).
+    const step =
+      light && light.light.arrangement !== shape
+        ? { light: light.light.id, from: light.light.arrangement, to: shape }
+        : null;
+    if (step) {
       try {
-        await api.lights.patch(light.light.id, { arrangement: shape });
-        await refreshLights();
-      } catch (error) {
+        await writeShape(step.light, step.to);
+      } catch {
         // The light did not change, so neither does the pattern's shape: the header says why.
-        setShapeProblem(messageOf(error));
         return;
       }
     }
-    editor.setShape(shape, gridOfZone(zone));
+    editor.setShape(shape, gridOfZone(zone), step);
   };
 
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
@@ -352,11 +376,11 @@ export function PatternEditor({
           shapes={shapesOf(editor.builtOn, zone)}
           onChange={(shape) => void chooseShape(shape)}
         />
-        {matching.length > 1 && (
+        {choosable.length > 1 && (
           <Select
             label="Which light the shape change writes to"
             value={light?.light.id ?? ""}
-            options={matching.map((l) => ({ value: l.light.id, label: lightLabel(l, matching) }))}
+            options={choosable.map((l) => ({ value: l.light.id, label: lightLabel(l, choosable) }))}
             onChange={setChosenId}
           />
         )}

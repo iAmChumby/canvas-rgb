@@ -143,4 +143,45 @@ describe("the pattern editor's state", () => {
     act(() => result.current.undo());
     expect(result.current.motion).toEqual({ type: "none" });
   });
+
+  it("writes the light a shape change touched back on undo, and forward on redo (#481)", async () => {
+    const write = vi.fn(async () => {});
+    const { result } = renderHook(() =>
+      usePatternEditor(ring({ 0: RED }), { onDraft: () => {}, onShapeLight: write }),
+    );
+    act(() =>
+      result.current.setShape("strip", undefined, { light: "fake:a#z0", from: "ring", to: "strip" }),
+    );
+    expect(result.current.builtOn.arrangement).toBe("strip");
+    await act(async () => {
+      result.current.undo();
+      await Promise.resolve();
+    });
+    expect(write).toHaveBeenLastCalledWith("fake:a#z0", "ring");
+    expect(result.current.builtOn.arrangement).toBe("ring");
+    await act(async () => {
+      result.current.redo();
+      await Promise.resolve();
+    });
+    expect(write).toHaveBeenLastCalledWith("fake:a#z0", "strip");
+    expect(result.current.builtOn.arrangement).toBe("strip");
+  });
+
+  it("keeps the history step when the light will not change (#481)", async () => {
+    const write = vi.fn(async () => {});
+    const { result } = renderHook(() =>
+      usePatternEditor(ring({ 0: RED }), { onDraft: () => {}, onShapeLight: write }),
+    );
+    act(() =>
+      result.current.setShape("strip", undefined, { light: "fake:a#z0", from: "ring", to: "strip" }),
+    );
+    write.mockRejectedValueOnce(new Error("the light file could not be saved"));
+    await act(async () => {
+      result.current.undo();
+      await Promise.resolve();
+    });
+    expect(result.current.builtOn.arrangement).toBe("strip");
+    expect(result.current.canUndo).toBe(true);
+    expect(result.current.canRedo).toBe(false);
+  });
 });

@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { referenceLight, referenceLights, shapesOf } from "@/views/patterns/shapeLight";
+import { referenceLight, referenceLights, choosableLights, shapesOf } from "@/views/patterns/shapeLight";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LightView } from "@/proto/LightView";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
@@ -27,6 +27,17 @@ describe("the light a pattern's shape picker writes to", () => {
     const found = referenceLights({ led_count: 8, arrangement: "strip" }, lights);
     expect(found.map((l) => l.light.id)).toEqual(["first#z0", "second#z0"]);
     expect(found[0]?.light.id).toBe(referenceLight({ led_count: 8, arrangement: "strip" }, lights)?.light.id);
+  });
+
+  it("offers only lights already in the pattern's shape, and every light when none is (#481)", () => {
+    const mixed = [view("line", 8, "strip"), view("ring", 8, "ring")];
+    expect(choosableLights({ led_count: 8, arrangement: "strip" }, mixed).map((l) => l.light.id)).toEqual(["line#z0"]);
+    expect(choosableLights({ led_count: 8, arrangement: "ring" }, mixed).map((l) => l.light.id)).toEqual(["ring#z0"]);
+    // No light of the size is in the pattern's shape: the shape change is what brings one into step.
+    expect(choosableLights({ led_count: 8, arrangement: "grid" }, mixed).map((l) => l.light.id)).toEqual([
+      "line#z0",
+      "ring#z0",
+    ]);
   });
 
   it("is a matrix zone of the same cells for a grid pattern, never a line that happens to be 8 LEDs", () => {
