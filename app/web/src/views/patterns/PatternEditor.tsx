@@ -25,7 +25,7 @@ import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/li
 import { kindWords } from "@/lib/patternFit";
 import { spinOf } from "@/lib/spin";
 import { refreshLights, useSnap } from "@/lib/store";
-import { useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
+import { cameFromApp, useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
 import { DotCanvas } from "@/views/patterns/DotCanvas";
 import { GradientStops } from "@/views/patterns/GradientStops";
 import { MotionControl } from "@/views/patterns/MotionControl";
@@ -76,6 +76,9 @@ export function PatternEditor({
   const [leaving, setLeaving] = useState<LeaveReason | false>(false);
   /** A Save that will leave the editor: the guard's entry stays while it lands. */
   const pendingLeave = useRef(false);
+  /** True when this editor was opened from another page of the app: a Back past the guard's entry
+   *  and the editor's own lands there. A direct load has no page behind it. */
+  const openedInApp = useRef(cameFromApp());
   const promptRef = useRef<HTMLDivElement | null>(null);
   /** The control the prompt opened from: focus goes back there when it closes. */
   const opener = useRef<HTMLElement | null>(null);
@@ -186,11 +189,12 @@ export function PatternEditor({
   // The guard: the shell asks it before it changes page, the browser's Back lands on an entry
   // of the editor's own, and the browser is warned when the window closes. The editor asks
   // wherever it stands: on its own page and in the effects view's panel alike.
-  const { allowBack } = useLeaveGuard({
+  const { allowBack, dropSentinel } = useLeaveGuard({
     dirty: editor.dirty,
     sentinel: "canvasRgbPatternGuard",
     onAsk: (reason) => setLeaving(reason),
     isLeaving: () => pendingLeave.current,
+    strictEntry: true,
   });
 
   /**
@@ -220,21 +224,26 @@ export function PatternEditor({
   /**
    * Carries out the leave the prompt was asked about, as it was asked: a Back the guard caught is
    * not the same leave as the Cancel key pressed afterwards.
+   *
+   * The guard's entry is a copy of the editor's on top of it. Every leave but a Back from a page
+   * the app opened it from takes that entry back first and then closes or navigates from the
+   * editor's own entry, so no entry the browser can reach reopens the editor.
    */
   const goAfterLeave = (reason: LeaveReason) => {
     pendingLeave.current = true;
-    if (reason === "back") {
+    allowBack();
+    if (reason === "back" && openedInApp.current) {
       // Back goes past the guard's entry and past the page itself, one page in all.
-      allowBack();
       window.history.go(-2);
       return;
     }
-    // A rail link the shell held is the page change that goes now.
-    if (hasPendingNavigation()) {
-      continueNavigation();
+    // A rail link the shell held is the page change that goes now. A Back with no page of the
+    // app behind the editor closes onto the page the Cancel key goes to, not out of the document.
+    if (reason !== "back" && hasPendingNavigation()) {
+      dropSentinel(continueNavigation);
       return;
     }
-    onCancel?.();
+    dropSentinel(() => onCancel?.());
   };
 
   /** Keep editing: the prompt closes, the held page change is dropped, and the strokes stay. */

@@ -18,12 +18,29 @@ import { cancelNavigation, setNavigationGuard } from "@/lib/navigationGuard";
 /** Why the prompt opened: the Cancel key, an in-app page change, or the browser's Back. */
 export type LeaveReason = "close" | "navigation" | "back";
 
+/**
+ * True when an entry of this app sits behind the current one: the editor was opened from another
+ * page, so a Back past it lands in the app. False on a direct load or a reload of the first page,
+ * where a Back past it would leave the document. Read it when the editor opens, before the guard
+ * pushes its own entry.
+ *
+ * The Navigation API answers it where there is one (it lists only the same-origin entries, so a
+ * page opened from another site counts as a first page); elsewhere any earlier entry counts.
+ */
+export function cameFromApp(): boolean {
+  if (typeof window === "undefined") return false;
+  const navigation = (window as { navigation?: { canGoBack?: boolean } }).navigation;
+  if (typeof navigation?.canGoBack === "boolean") return navigation.canGoBack;
+  return window.history.length > 1;
+}
+
 export function useLeaveGuard({
   dirty,
   sentinel,
   onAsk,
   onDrop,
   isLeaving,
+  strictEntry = false,
 }: {
   /** True while the editor has work that leaving would lose. */
   dirty: boolean;
@@ -35,6 +52,13 @@ export function useLeaveGuard({
   onDrop?: () => void;
   /** True while a leave is under way: the guard's entry stays then. */
   isLeaving?: () => boolean;
+  /**
+   * The guard's entry never outlives the editor: a leave that is under way keeps it, so the leave
+   * can drop it with `dropSentinel` before it navigates, and an editor that unmounts with it still
+   * up (the panel's Save key closes the panel) takes it back. Off, the entry is forgotten when a
+   * leave starts and left where it is when the editor goes: the stack builder's own history.
+   */
+  strictEntry?: boolean;
 }): {
   /**
    * Lets the guard's own listener ignore the next history move: call it before a move the
@@ -52,10 +76,12 @@ export function useLeaveGuard({
   const ask = useRef(onAsk);
   const drop = useRef(onDrop);
   const leaving = useRef(isLeaving);
+  const strict = useRef(strictEntry);
   useEffect(() => {
     ask.current = onAsk;
     drop.current = onDrop;
     leaving.current = isLeaving;
+    strict.current = strictEntry;
   });
 
   /** The guard's entry is on the history. */
@@ -92,7 +118,7 @@ export function useLeaveGuard({
         if (leaving.current?.() ?? false) {
           // A leave that is under way navigates itself; taking the entry back first would move
           // the history one extra time.
-          pushed.current = false;
+          if (!strict.current) pushed.current = false;
         } else if (drop.current) {
           drop.current();
           pushed.current = false;
@@ -139,7 +165,14 @@ export function useLeaveGuard({
   useEffect(
     () => () => {
       setNavigationGuard(null);
-      if (!(leaving.current?.() ?? false)) cancelNavigation();
+      const going = leaving.current?.() ?? false;
+      if (!going) cancelNavigation();
+      // The editor goes with its entry still up and nobody leaving through it: the entry is taken
+      // back, or the history keeps a copy of the page that the first Back lands on.
+      if (strict.current && pushed.current && !going) {
+        pushed.current = false;
+        window.history.back();
+      }
     },
     [],
   );

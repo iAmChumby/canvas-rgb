@@ -74,7 +74,9 @@ export function PatternEditorPage() {
       pattern={pattern}
       note={note}
       onSave={save}
-      onCancel={() => router.push("/effects/")}
+      // Replace, not push: the editor's entry becomes the effects page, so one Back goes to where
+      // the person came from and never reopens a fresh editor.
+      onCancel={() => router.replace("/effects/")}
     />
   );
 }
