@@ -393,6 +393,110 @@ struct PaintBox {
     coverage: Coverage,
 }
 
+/// Where a layer paints, by its own strip read. The picture path (`composite_layer`) and the
+/// per-LED path (`collect_led_colours`) both go through this, so a layer maps its picture over the
+/// same area box on the strip as on the stage (#427 review). The whole-canvas case uses the
+/// target's own size, exactly as the picture path always did.
+fn paint_box(area: &OwnedArea, column: bool, width: f32, height: f32) -> PaintBox {
+    let dest = if area.whole_canvas {
+        [0.0, 0.0, width, height]
+    } else if column {
+        area.column_dest
+    } else {
+        area.dest
+    };
+    let paint = match &area.mask {
+        Some(mask) => {
+            if column { mask.column_extent().unwrap_or(dest) } else { mask.extent().unwrap_or(dest) }
+        }
+        None => dest,
+    };
+    let coverage = if column { Coverage::Column } else { Coverage::Cell };
+    PaintBox { dest, paint, coverage }
+}
+
+/// One layer's paint, resolved the way the compositor resolves it: the picture it draws, the
+/// pixels the area lets it paint, and the alpha the area's mask and the layer's own mask effect
+/// allow. Both the picture's `paint_area` and the per-LED scratch fill call `pixel_at`, so they
+/// cannot disagree about what a layer paints at any pixel (#427 review).
+struct LayerPaint<'a> {
+    box_: PaintBox,
+    area_mask: Option<&'a Mask>,
+    src: &'a Canvas,
+    layer_mask: Option<&'a MaskLayer>,
+    alpha: f32,
+}
+
+impl<'a> LayerPaint<'a> {
+    /// The integer pixel box to walk, clamped to `target`, or `None` when this paints nothing.
+    fn bounds(&self, target: &Canvas) -> Option<(u32, u32, u32, u32)> {
+        let dest = self.box_.dest;
+        let (dw, dh) = (dest[2] - dest[0], dest[3] - dest[1]);
+        if !dest.iter().all(|v| v.is_finite()) || dw <= 0.0 || dh <= 0.0 {
+            return None;
+        }
+        if self.src.width == 0 || self.src.height == 0 {
+            return None;
+        }
+        let paint = self.box_.paint;
+        let x0 = (paint[0].floor().max(0.0) as u32).min(target.width);
+        let y0 = (paint[1].floor().max(0.0) as u32).min(target.height);
+        let x1 = (paint[2].ceil().max(0.0) as u32).min(target.width);
+        let y1 = (paint[3].ceil().max(0.0) as u32).min(target.height);
+        if x1 <= x0 || y1 <= y0 {
+            return None;
+        }
+        Some((x0, y0, x1, y1))
+    }
+
+    /// The source pixel this layer contributes at `(x, y)` and how much of it shows, or `None`
+    /// where the area's mask keeps the layer out or the mask effect fully covers it.
+    fn pixel_at(&self, x: u32, y: u32) -> Option<([f32; 3], f32)> {
+        if let Some(mask) = self.area_mask {
+            if !self.box_.coverage.covers(mask, x, y) {
+                return None;
+            }
+        }
+        let [dx0, dy0, dx1, dy1] = self.box_.dest;
+        let (dw, dh) = (dx1 - dx0, dy1 - dy0);
+        // The layer's whole picture is mapped over the area's bounding box.
+        let sx = (((x as f32 + 0.5 - dx0) / dw) * self.src.width as f32).floor();
+        let sy = (((y as f32 + 0.5 - dy0) / dh) * self.src.height as f32).floor();
+        let sx = (sx.max(0.0) as u32).min(self.src.width - 1);
+        let sy = (sy.max(0.0) as u32).min(self.src.height - 1);
+        let source = self.src.get(sx, sy);
+        let alpha = match self.layer_mask {
+            Some(mask) => {
+                let pixel = mask.canvas.get(sx, sy);
+                self.alpha
+                    * masked_coverage(mask.values.source, pixel, mask.values.invert, mask.values.amount)
+            }
+            None => self.alpha,
+        };
+        if alpha <= 0.0 {
+            return None;
+        }
+        Some((source, alpha))
+    }
+}
+
+/// Builds one layer's paint from the compositor's own state. A mask that does not apply, or whose
+/// canvas no longer matches the picture, shapes nothing: the layer draws whole, as it does for the
+/// picture in `paint_area`.
+fn layer_paint<'a>(
+    layers: &'a [Layer],
+    index: usize,
+    area: &'a OwnedArea,
+    box_: PaintBox,
+    alpha: f32,
+) -> LayerPaint<'a> {
+    let layer = &layers[index];
+    let layer_mask = layer.mask.as_ref().filter(|mask| mask.applies()).filter(|mask| {
+        mask.canvas.width == layer.canvas.width && mask.canvas.height == layer.canvas.height
+    });
+    LayerPaint { box_, area_mask: area.mask.as_ref(), src: &layer.canvas, layer_mask, alpha }
+}
+
 /// Every device's and zone's mask, at one group, render scale and sampling mode.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct AreaMap {
@@ -973,9 +1077,15 @@ pub struct StackEffect {
     mixed_reads: bool,
     /// Scratch buffers for the per-LED path (#427), grown once and reused so the hot path
     /// allocates nothing. `led_acc` is the accumulator of blended reads, `led_read` one layer's
-    /// read of all the light's LEDs.
+    /// read of all the light's LEDs. `led_src` and `led_alpha` hold one layer's picture mapped
+    /// through the compositor's own paint path and the coverage its area and mask allow; they are
+    /// sampled per LED in that layer's own shape before the reads are blended in layer order
+    /// (#427 review).
     led_acc: Vec<[f32; 3]>,
     led_read: Vec<Rgb8>,
+    led_alpha_read: Vec<Rgb8>,
+    led_src: Canvas,
+    led_alpha: Canvas,
     /// True once the per-LED read panicked: it logs once and the strip falls back to sampling.
     led_panicked: bool,
 }
@@ -1149,6 +1259,9 @@ impl StackEffect {
             mixed_reads,
             led_acc: Vec::new(),
             led_read: Vec::new(),
+            led_alpha_read: Vec::new(),
+            led_src: Canvas::new(0, 0),
+            led_alpha: Canvas::new(0, 0),
             led_panicked: false,
             live,
             areas,
@@ -1255,6 +1368,14 @@ impl StackEffect {
                     mask.canvas = Canvas::new(width, height);
                 }
             }
+        }
+        // The per-LED path paints a layer into these the way the picture paints it, so they are
+        // the frame's size too. They grow here with the layer canvases and are reused afterwards.
+        if self.led_src.width != width || self.led_src.height != height {
+            self.led_src = Canvas::new(width, height);
+        }
+        if self.led_alpha.width != width || self.led_alpha.height != height {
+            self.led_alpha = Canvas::new(width, height);
         }
     }
 
@@ -1436,32 +1557,14 @@ impl StackEffect {
         values: &LiveLayer,
         target: &mut Canvas,
     ) {
-        let a = f32::from(values.opacity.min(100)) / 100.0;
-        if a <= 0.0 || !values.visible {
+        if values.opacity == 0 || !values.visible {
             return;
         }
         let column = self.read == StripRead::Column;
-        let dest = if area.whole_canvas {
-            [0.0, 0.0, target.width as f32, target.height as f32]
-        } else if column {
-            area.column_dest
-        } else {
-            area.dest
-        };
+        let box_ = paint_box(area, column, target.width as f32, target.height as f32);
         // A masked area paints every pixel its LEDs read, which for a ring can reach just past
-        // the rectangle the picture is mapped over (D95.2.3).
-        let paint = match &area.mask {
-            Some(mask) => {
-                if column {
-                    mask.column_extent().unwrap_or(dest)
-                } else {
-                    mask.extent().unwrap_or(dest)
-                }
-            }
-            None => dest,
-        };
-        let coverage = if column { Coverage::Column } else { Coverage::Cell };
-        self.paint_area(index, area, values, target, PaintBox { dest, paint, coverage });
+        // the rectangle the picture is mapped over (D95.2.3): that is `paint_box`'s paint box.
+        self.paint_area(index, area, values, target, box_);
         if column {
             if let Some(mask) = &area.mask {
                 // The lights that are not a strip read their cells, and the columns do not
@@ -1488,62 +1591,15 @@ impl StackEffect {
         target: &mut Canvas,
         box_: PaintBox,
     ) {
-        let layer = &self.layers[index];
         let a = f32::from(values.opacity.min(100)) / 100.0;
-        let dest = box_.dest;
-        let paint = box_.paint;
-        let coverage = box_.coverage;
-        if !dest.iter().all(|v| v.is_finite()) {
-            return;
-        }
-        let [dx0, dy0, dx1, dy1] = dest;
-        let (dw, dh) = (dx1 - dx0, dy1 - dy0);
-        if dw <= 0.0 || dh <= 0.0 {
-            return;
-        }
-        let x0 = (paint[0].floor().max(0.0) as u32).min(target.width);
-        let y0 = (paint[1].floor().max(0.0) as u32).min(target.height);
-        let x1 = (paint[2].ceil().max(0.0) as u32).min(target.width);
-        let y1 = (paint[3].ceil().max(0.0) as u32).min(target.height);
-        let src = &layer.canvas;
-        if src.width == 0 || src.height == 0 || x1 <= x0 || y1 <= y0 {
-            return;
-        }
-        // A mask that applies shapes this layer only (#256): its picture is mapped over the same
-        // box as the layer's, and its coverage multiplies the layer's alpha per pixel.
-        let mask = layer.mask.as_ref().filter(|mask| mask.applies()).filter(|mask| {
-            mask.canvas.width == src.width && mask.canvas.height == src.height
-        });
+        let paint = layer_paint(&self.layers, index, area, box_, a);
+        let Some((x0, y0, x1, y1)) = paint.bounds(target) else { return };
         for y in y0..y1 {
             for x in x0..x1 {
-                if let Some(area_mask) = &area.mask {
-                    if !coverage.covers(area_mask, x, y) {
-                        continue;
-                    }
+                if let Some((source, alpha)) = paint.pixel_at(x, y) {
+                    let i = (y as usize) * (target.width as usize) + x as usize;
+                    target.pixels[i] = blend_pixel(values.blend, target.pixels[i], source, alpha);
                 }
-                // The layer's whole picture is mapped over the area's bounding box.
-                let sx = (((x as f32 + 0.5 - dx0) / dw) * src.width as f32).floor();
-                let sy = (((y as f32 + 0.5 - dy0) / dh) * src.height as f32).floor();
-                let sx = (sx.max(0.0) as u32).min(src.width - 1);
-                let sy = (sy.max(0.0) as u32).min(src.height - 1);
-                let source = src.get(sx, sy);
-                let alpha = match mask {
-                    Some(mask) => {
-                        let pixel = mask.canvas.get(sx, sy);
-                        a * masked_coverage(
-                            mask.values.source,
-                            pixel,
-                            mask.values.invert,
-                            mask.values.amount,
-                        )
-                    }
-                    None => a,
-                };
-                if alpha <= 0.0 {
-                    continue;
-                }
-                let i = (y as usize) * (target.width as usize) + x as usize;
-                target.pixels[i] = blend_pixel(values.blend, target.pixels[i], source, alpha);
             }
         }
     }
@@ -1823,12 +1879,16 @@ impl StackEffect {
             ref layer_reads,
             ref mut led_acc,
             ref mut led_read,
+            ref mut led_alpha_read,
+            ref mut led_src,
+            ref mut led_alpha,
             ..
         } = *self;
         led_acc.clear();
         led_acc.resize(n, [0.0; 3]);
         out.clear();
         out.resize(n, Rgb8::BLACK);
+        let (w, h) = (led_src.width, led_src.height);
         for index in 0..layers.len() {
             let Some(entry) = resolved.get(index) else { continue };
             let values = &entry.values;
@@ -1839,46 +1899,47 @@ impl StackEffect {
                 continue;
             }
             let Some(area) = entry.area.as_ref() else { continue };
-            let canvas = &layers[index].canvas;
             let column = layer_reads[index] == StripRead::Column;
-            led_read.clear();
-            led_read.reserve(n);
-            // Reuse the engine's own sampling helpers: a column layer over the full height, a
-            // cell layer over its cell, each read out of that layer's own canvas.
+            let a = f32::from(values.opacity.min(100)) / 100.0;
+
+            // Paint this one layer exactly as the compositor paints it for the picture: the same
+            // area mapping, area mask, mask effect and opacity, through the same `pixel_at`. The
+            // scratch keeps the source and its coverage apart so the per-LED blend can apply the
+            // layer's own blend mode and mask coverage the way the picture's per-pixel blend does.
+            led_src.fill([0.0; 3]);
+            led_alpha.fill([0.0; 3]);
+            let paint = layer_paint(layers, index, area, paint_box(area, column, w as f32, h as f32), a);
+            if let Some((x0, y0, x1, y1)) = paint.bounds(led_src) {
+                for y in y0..y1 {
+                    for x in x0..x1 {
+                        if let Some((source, alpha)) = paint.pixel_at(x, y) {
+                            let i = (y as usize) * (w as usize) + x as usize;
+                            led_src.pixels[i] = source;
+                            led_alpha.pixels[i] = [alpha, alpha, alpha];
+                        }
+                    }
+                }
+            }
+
+            // Sample what the layer painted in its own shape: a column layer over the full
+            // height, a cell layer over its cell, exactly as the engine samples a picture.
             if column {
-                canvas_core::sampling::sample_led_columns(
-                    &canvas.pixels, canvas.width, canvas.height, leds, led_read,
-                );
+                canvas_core::sampling::sample_led_columns(&led_src.pixels, w, h, leds, led_read);
+                canvas_core::sampling::sample_led_columns(&led_alpha.pixels, w, h, leds, led_alpha_read);
             } else {
                 canvas_core::sampling::sample_leds(
-                    &canvas.pixels,
-                    canvas.width,
-                    canvas.height,
-                    leds,
-                    canvas_core::SCENE_SAMPLING,
-                    led_read,
+                    &led_src.pixels, w, h, leds, canvas_core::SCENE_SAMPLING, led_read,
+                );
+                canvas_core::sampling::sample_leds(
+                    &led_alpha.pixels, w, h, leds, canvas_core::SCENE_SAMPLING, led_alpha_read,
                 );
             }
-            let alpha = f32::from(values.opacity.min(100)) / 100.0;
             for i in 0..n {
                 if !leds[i].sampled {
                     continue;
                 }
-                // A layer kept to a device or a zone paints only the LEDs its area covers; a
-                // whole-canvas or rectangular area has no per-LED mask and paints them all.
-                if let Some(mask) = &area.mask {
-                    let x = leds[i].center_x.round().max(0.0) as u32;
-                    let y = leds[i].center_y.round().max(0.0) as u32;
-                    let covered = if column {
-                        mask.contains_column(x, y)
-                    } else {
-                        mask.contains(x, y)
-                    };
-                    if !covered {
-                        continue;
-                    }
-                }
                 let source = led_read[i].to_f32();
+                let alpha = f32::from(led_alpha_read[i].r) / 255.0;
                 led_acc[i] = blend_pixel(values.blend, led_acc[i], source, alpha);
             }
         }

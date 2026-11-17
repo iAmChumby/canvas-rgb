@@ -6003,3 +6003,273 @@ fn a_per_led_read_leaves_the_group_canvas_byte_identical() {
     let _ = led_path_colours(&mut effect, &plan, &lights, &canvas);
     assert_eq!(canvas.pixels, before, "the per-LED read must not patch the picture");
 }
+
+// ============================================================ #427 review fix: per-layer reads use
+// the compositor's own painting path
+
+/// A fake effect that paints one flat colour and answers a chosen strip read. A flat picture reads
+/// the same as a cell and as a column, so a mixed stack of two of them must light the strip exactly
+/// as the stage picture does, for every blend mode.
+struct Flat {
+    colour: [f32; 3],
+    read: StripRead,
+}
+
+impl Effect for Flat {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "flat".into(),
+            name: "Flat".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &Props) {}
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.fill(self.colour);
+    }
+    fn strip_read(&self) -> StripRead {
+        self.read
+    }
+}
+
+/// A leaf builder whose `id` names a flat colour and its strip read: `column` and `cell`.
+fn flat_leaves(column: [f32; 3], cell: [f32; 3]) -> LeafBuilder {
+    Arc::new(move |id: &str| {
+        let (colour, read) = if id == "column" { (column, StripRead::Column) } else { (cell, StripRead::Cell) };
+        Ok(Box::new(Flat { colour, read }) as Box<dyn Effect>)
+    })
+}
+
+/// Two devices so a layer kept to the second one cannot reach the first one's strip.
+fn two_devices() -> Vec<DeviceInfo> {
+    vec![
+        device("d", "d", vec![zone(0, "strip", ZoneKind::Linear, 8)]),
+        device("e", "e", vec![zone(0, "strip", ZoneKind::Linear, 8)]),
+    ]
+}
+
+/// The biggest absolute channel difference between two sets of LED colours.
+fn worst_delta(a: &[canvas_proto::Rgb8], b: &[canvas_proto::Rgb8]) -> i32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            [i32::from(x.r) - i32::from(y.r), i32::from(x.g) - i32::from(y.g), i32::from(x.b) - i32::from(y.b)]
+                .into_iter()
+                .map(i32::abs)
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// #427 review: a column layer kept to a Device or a Zone area lights its strip LEDs. Before the
+/// fix the per-LED area check rounded the LED centre to a pixel the area mask does not cover, so
+/// the layer was dropped and every LED read R 0 while the picture read R 5-250.
+#[test]
+fn review_427_a_column_layer_on_a_device_or_a_zone_area_lights_its_strip_leds() {
+    let devices = two_devices();
+    for area in [
+        LayerArea::Device { device: DeviceId("d".into()) },
+        LayerArea::Zone { device: DeviceId("d".into()), zone: 0 },
+    ] {
+        // Fire (column) on d, Rain (cell) on e: the strip of d sees only the flame, and the stack
+        // is mixed so the engine takes the per-LED path.
+        let mixed = stack(
+            "stack:Mixed",
+            vec![
+                with_area(layer("l1", "fire"), area.clone()),
+                with_area(layer("l2", "rain"), LayerArea::Device { device: DeviceId("e".into()) }),
+            ],
+        );
+        let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+        effect.init(&fire_props());
+        let (lights, plan) = stack::zone_group(&devices);
+        let mut canvas = group_canvas();
+        for _ in 0..120 {
+            effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        }
+        let got = led_path_colours(&mut effect, &plan, &lights, &canvas);
+        let got = &got[..8];
+
+        // Reference: the same Fire layer alone on the same area is a single-read stack, so the
+        // picture is mapped over the columns and the stage's column read is the ground truth.
+        let single = stack("stack:Single", vec![with_area(layer("l1", "fire"), area.clone())]);
+        let mut reference = stack_effect!(&single, real_leaves(), live_for(&single), areas_for(&devices));
+        reference.init(&fire_props());
+        let mut ref_canvas = group_canvas();
+        for _ in 0..120 {
+            reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+        }
+        let want = strip_colours(&devices, &ref_canvas, StripRead::Column);
+        let want = &want[..8];
+
+        let level = level_of(got);
+        let worst = worst_delta(got, want);
+        println!(
+            "#427 review {area:?}: per-LED level {level:.1}, picture level {:.1}, worst delta {worst}",
+            level_of(want)
+        );
+        assert!(level > 15.0, "{area:?}: the strip is lit: {level:.1}");
+        assert!(worst <= 3, "{area:?}: the per-LED read matches the picture's column read: {worst}");
+    }
+}
+
+/// #427 review: a Rect-area layer lights only the LEDs inside the rectangle, and reads the same
+/// picture as the stage. Before the fix a Rect area had no per-LED mask, so the layer painted every
+/// LED and its picture was not mapped into the rectangle box.
+#[test]
+fn review_427_a_rect_area_layer_lights_only_the_leds_inside_it_and_matches_the_stage() {
+    let devices = two_devices();
+    let (_lights, plan) = stack::zone_group(&devices);
+    let xs: Vec<f32> = plan.lights[0].leds.iter().map(|led| led.center_x).collect();
+    let min_x = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let cut = (min_x + max_x) / 2.0;
+    assert!(min_x < cut && cut < max_x, "the strip spans the cut: {min_x} .. {max_x}");
+    // A flat column layer kept to device e makes the stack mixed without reaching d's strip. The
+    // flat cell layer covers only the left half of d's strip, so only those LEDs may light.
+    let mixed = stack(
+        "stack:Rect",
+        vec![
+            with_area(layer("column", "column"), LayerArea::Device { device: DeviceId("e".into()) }),
+            with_area(
+                layer("cell", "cell"),
+                LayerArea::Rect { x: 0.0, y: 0.0, width: cut, height: 200.0 },
+            ),
+        ],
+    );
+    let mut effect = stack_effect!(
+        &mixed,
+        flat_leaves([0.2, 0.4, 0.6], [0.8, 0.3, 0.1]),
+        live_for(&mixed),
+        areas_for(&devices)
+    );
+    effect.init(&Props::new());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..3 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &all[..8];
+    let picture = strip_colours(&devices, &canvas, StripRead::Cell);
+    let want = &picture[..8];
+    let worst = worst_delta(got, want);
+    let level = level_of(got);
+    println!("#427 review rect: per-LED level {level:.1}, stage level {:.1}, worst delta {worst}", level_of(want));
+    assert_eq!(worst, 0, "the per-LED read is the stage's cell read: {worst}");
+    assert!(xs.iter().any(|x| *x < cut - 2.0), "some LEDs are inside the rect");
+    assert!(xs.iter().any(|x| *x > cut + 2.0), "some LEDs are outside the rect");
+    for (x, colour) in xs.iter().zip(got.iter()) {
+        if *x < cut - 2.0 {
+            assert!(level_of(std::slice::from_ref(colour)) > 20.0, "an LED inside the rect is lit: {colour:?}");
+        } else if *x > cut + 2.0 {
+            assert_eq!(*colour, canvas_proto::Rgb8::BLACK, "an LED outside the rect is dark: {colour:?}");
+        }
+    }
+}
+
+/// #427 review: a column layer whose mask effect paints black does not light the strip. Before the
+/// fix the layer's mask effect was ignored on the per-LED path, so the layer shone at full strength.
+#[test]
+fn review_427_a_column_layer_masked_fully_black_does_not_light_the_strip() {
+    let devices = two_devices();
+    let mut fire = layer("l1", "fire");
+    fire.mask = Some(a_mask("mask-black"));
+    let mixed = stack(
+        "stack:Masked",
+        vec![fire, with_area(layer("l2", "rain"), LayerArea::Device { device: DeviceId("e".into()) })],
+    );
+    let updates = Arc::new(AtomicU64::new(0));
+    let leaves: LeafBuilder = Arc::new(move |id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "fire" => Box::new(canvas_effects::fire::Fire::with_seed(372)),
+            "rain" => Box::new(canvas_effects::rain::Rain::with_seed(372)),
+            "mask-black" => Box::new(ColourEffect { colour: [0.0; 3], updates: Arc::clone(&updates), panics: false }),
+            other => return Err(format!("no effect with the id {other}")),
+        };
+        Ok(effect)
+    });
+    let mut effect = stack_effect!(&mixed, leaves, live_for(&mixed), areas_for(&devices));
+    effect.init(&fire_props());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let level = level_of(&all[..8]);
+    println!("#427 review black mask: the strip level is {level:.1}");
+    assert!(level < 1.0, "a fully masked column layer does not light the strip: {level:.1}");
+}
+
+/// #427 review: a whole-canvas Fire over Rain at full opacity reads exactly like Fire alone. A
+/// later layer at Normal 100 % replaces what is under it, so the mixed per-LED path must land on
+/// the same level the single Fire picture's column read gives.
+#[test]
+fn review_427_whole_canvas_fire_over_rain_reads_like_fire_alone() {
+    let devices = two_devices();
+    let mixed = stack("stack:Two", vec![layer("l1", "rain"), layer("l2", "fire")]);
+    let mut props = rain_props("l1");
+    props.insert("l2.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+    effect.init(&props);
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let mixed_level = level_of(&led_path_colours(&mut effect, &plan, &lights, &canvas));
+
+    let single = stack("stack:Fire", vec![layer("l1", "fire")]);
+    let mut reference = stack_effect!(&single, real_leaves(), live_for(&single), areas_for(&devices));
+    reference.init(&fire_props());
+    let mut ref_canvas = group_canvas();
+    for _ in 0..120 {
+        reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+    }
+    let alone_level = level_of(&strip_colours(&devices, &ref_canvas, StripRead::Column));
+    println!("#427 review whole canvas: fire over rain {mixed_level:.1}, fire alone {alone_level:.1}");
+    assert!(
+        (mixed_level - alone_level).abs() <= 2.0,
+        "full-opacity Fire over Rain reads like Fire alone: {mixed_level:.1} vs {alone_level:.1}"
+    );
+}
+
+/// #427 review: for whole-canvas layers every blend mode's per-LED read matches the stage picture's
+/// cell read with delta 0. Flat layers read identically as cells and columns, so this isolates the
+/// blend arithmetic from the read shape.
+#[test]
+fn review_427_whole_canvas_blend_modes_match_the_picture_cell_read() {
+    let devices = two_devices();
+    for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+        let mut top = layer("cell", "cell");
+        top.blend = mode;
+        let mixed = stack("stack:Blend", vec![layer("column", "column"), top]);
+        let mut effect = stack_effect!(
+            &mixed,
+            flat_leaves(
+                [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0],
+                [192.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0],
+            ),
+            live_for(&mixed),
+            areas_for(&devices)
+        );
+        effect.init(&Props::new());
+        let (lights, plan) = stack::zone_group(&devices);
+        let mut canvas = group_canvas();
+        for _ in 0..3 {
+            effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        }
+        let got = led_path_colours(&mut effect, &plan, &lights, &canvas);
+        let picture = strip_colours(&devices, &canvas, StripRead::Cell);
+        let worst = worst_delta(&got, &picture);
+        println!("#427 review blend {mode:?}: worst delta {worst}");
+        assert_eq!(worst, 0, "{mode:?}: the per-LED read matches the picture's cell read: {worst}");
+    }
+}
