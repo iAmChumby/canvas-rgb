@@ -18,6 +18,8 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { NameField } from "@/components/NameField";
+import { LedOrderControl } from "@/components/LedOrderControl";
+import { directionPatch, effectiveFirstLed, identifyLed } from "@/lib/ledOrder";
 import { Panel } from "@/components/Panel";
 import { ShapePicker, shapesFor } from "@/components/ShapePicker";
 import { Toggle } from "@/components/Toggle";
@@ -318,6 +320,21 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
     }
   };
 
+  // The first LED in force (a reversed light with none starts on its last LED), the way the lights
+  // read it. Identify addresses the zone, so the light's slice start is added to it.
+  const first = effectiveFirstLed(light.first_led, light.reversed, view.led_count);
+  const identifyFirst = (led: number) =>
+    void api
+      .identify(light.device_id, {
+        zone: light.zone_index,
+        led: identifyLed(light.leds, led),
+        count: 1,
+        stop: false,
+      })
+      .catch(() => undefined);
+  const turn = (next: boolean) =>
+    void patch(directionPatch(next, light.first_led, light.reversed, view.led_count)).catch(() => undefined);
+
   const commitName = () => {
     const next = name.trim();
     setEditing(false);
@@ -375,13 +392,30 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
         />
       </span>
 
+      <span className="rd-led-order" data-testid="light-led-order">
+        <LedOrderControl
+          ledCount={view.led_count}
+          firstLed={first}
+          reversed={light.reversed}
+          ring={light.arrangement === "ring"}
+          label={`LED order of ${view.label}`}
+          onFirstLed={(led) => {
+            void patch({ first_led: led })
+              .then(() => identifyFirst(led))
+              .catch(() => undefined);
+          }}
+          onReversed={turn}
+          onIdentify={() => identifyFirst(first)}
+        />
+      </span>
+
       <span className="rd-light-turn">
         <span className="mute">Runs the other way</span>
         <Toggle
           label="Runs the other way"
           checked={light.reversed}
           disabled={busy}
-          onChange={(next) => void patch({ reversed: next }).catch(() => undefined)}
+          onChange={turn}
         />
       </span>
       {error && <span className="error-line rd-light-error">{error}</span>}

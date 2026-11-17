@@ -195,6 +195,7 @@ fn light(device: &DeviceInfo) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 

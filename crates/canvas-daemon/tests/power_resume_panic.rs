@@ -68,6 +68,7 @@ fn run_on(
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     };
     engine.set_scene(
         vec![light.clone()],

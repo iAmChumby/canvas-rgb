@@ -366,3 +366,35 @@ describe("demo chain setup", () => {
     expect(zone?.led_count).toBe(48);
   });
 });
+
+describe("the demo's lights PATCH keeps the first LED as the daemon does (#468)", () => {
+  type LightsList = { lights: { light: { id: string; reversed?: boolean; first_led?: number | null } }[] };
+  async function freshDemo(): Promise<typeof import("@/lib/demo")> {
+    vi.resetModules();
+    window.history.replaceState({}, "", "/");
+    return import("@/lib/demo");
+  }
+  async function firstLight(demo: typeof import("@/lib/demo")) {
+    const list = (await demo.demoRequest("GET", "/api/v1/lights", undefined)) as LightsList;
+    const first = list.lights[0];
+    if (!first) throw new Error("the demo has no lights");
+    return first.light;
+  }
+
+  it("keeps a first LED of 0 on a reversed light, so LED 0 can start a reversed run", async () => {
+    const demo = await freshDemo();
+    const id = (await firstLight(demo)).id;
+    await demo.demoRequest("PATCH", `/api/v1/lights/${encodeURIComponent(id)}`, { reversed: true, first_led: 0 });
+    const light = await firstLight(demo);
+    expect(light.reversed).toBe(true);
+    expect(light.first_led).toBe(0);
+  });
+
+  it("clears a first LED of 0 on a forward light", async () => {
+    const demo = await freshDemo();
+    const id = (await firstLight(demo)).id;
+    await demo.demoRequest("PATCH", `/api/v1/lights/${encodeURIComponent(id)}`, { first_led: 2 });
+    await demo.demoRequest("PATCH", `/api/v1/lights/${encodeURIComponent(id)}`, { reversed: false, first_led: 0 });
+    expect((await firstLight(demo)).first_led ?? null).toBeNull();
+  });
+});

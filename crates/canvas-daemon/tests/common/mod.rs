@@ -524,6 +524,7 @@ pub fn a_scene(
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     };
     let lights = canvas_proto::scene::LightsFile {
         chains: Vec::new(),
