@@ -1913,9 +1913,19 @@ async fn commit_during_a_takeover_saves_and_lands_when_the_takeover_ends() {
     let setup = started(&rig, 0).await;
     assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
     // A takeover holds the lights, as the editor's draft does.
-    rig.app
-        .scene
-        .land_takeover(Held { groups: vec!["all".into()], takeover: vec!["all".into()] });
+    //
+    // It lands under the draft gate, the way every takeover lands (`draft.rs`: the draft, the
+    // greeting and the pattern edit all take `app.draft.gate()` before they land one). The gate
+    // is what keeps a takeover and a scene apply apart: a scene apply holds it across the whole
+    // apply (`scenes.rs`, `apply_for_devices`), and its end clears the takeover flag. A takeover
+    // that lands outside the gate can be lost by an apply that was already running, and the
+    // commit would then put the scene over the takeover it was asked to leave alone (#494).
+    {
+        let _gate = rig.app.draft.gate().lock().await;
+        rig.app
+            .scene
+            .land_takeover(Held { groups: vec!["all".into()], takeover: vec!["all".into()] });
+    }
 
     let answer = committed(&rig, 0, &setup.session, &seven_parts()).await;
 
@@ -1929,6 +1939,13 @@ async fn commit_during_a_takeover_saves_and_lands_when_the_takeover_ends() {
     assert!(
         !during.iter().any(|id| id == &part_id(1)),
         "the scene was not put over the takeover: {during:?}"
+    );
+    // The takeover is still the one on the lights: the commit ended the setup, not the takeover,
+    // and nothing may put the scene over it while it holds.
+    assert!(
+        !rig.app.scene.held().takeover.is_empty(),
+        "the takeover still holds the lights: {:?}",
+        rig.app.scene.held()
     );
 
     // The takeover ends the way the editor's own restore ends it: the active scene goes on.
