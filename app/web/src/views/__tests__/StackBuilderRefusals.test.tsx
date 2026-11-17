@@ -1,4 +1,5 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testing-library/react";
+import { plainEntry } from "@/test/historyGuard";
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { dismissNotifications, NotifyHost } from "@/components/Notify";
 import { api } from "@/lib/endpoints";
@@ -41,6 +42,7 @@ beforeAll(() => {
 });
 
 afterEach(() => {
+  plainEntry();
   cleanup();
   vi.restoreAllMocks();
   // A key on the stage that is refused also says so as a note (#257); the note outlives the

@@ -48,11 +48,43 @@ export function requestNavigation(go: Pending): boolean {
   return true;
 }
 
-/** The guard's prompt said Discard or Save: the page change it held may happen now. */
-export function continueNavigation(): void {
+/**
+ * The guard's prompt said Discard or Save: the page change it held may happen now.
+ *
+ * `replace` makes that change take the current entry instead of adding one. An editor that leaves
+ * through a rail link calls it from the editor's own entry, so the entry behind the new page is
+ * the one the person came from, and a Back never reopens a fresh editor.
+ */
+export function continueNavigation(options?: { replace?: boolean }): void {
   const go = pending;
   pending = null;
+  if (go && options?.replace) replaceNextPush();
   go?.();
+}
+
+/**
+ * Makes the next `pushState` a `replaceState`, once. The held page change is the shell's own
+ * `router.push`, which the editor cannot ask to replace, and Next makes the history change later,
+ * in the commit of the new page, so the change is caught where it lands. The catch lets go of the
+ * history after one push, a traversal or two seconds, whichever comes first, so a later page change
+ * is never altered.
+ */
+function replaceNextPush(): void {
+  if (typeof window === "undefined") return;
+  const history = window.history;
+  const original = history.pushState;
+  const replacingPush: History["pushState"] = (data, unused, url) => {
+    release();
+    history.replaceState(data, unused, url);
+  };
+  const timer = setTimeout(() => release(), 2000);
+  function release() {
+    clearTimeout(timer);
+    window.removeEventListener("popstate", release);
+    if (history.pushState === replacingPush) history.pushState = original;
+  }
+  window.addEventListener("popstate", release);
+  history.pushState = replacingPush;
 }
 
 /** The guard's prompt said Keep editing, or the editor went away unanswered: drop it. */

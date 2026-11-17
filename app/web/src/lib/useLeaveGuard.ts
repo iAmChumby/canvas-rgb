@@ -9,8 +9,10 @@
 //     leaving, and that entry is taken back when there is nothing left to lose,
 //   - the browser is warned when the window is closed.
 //
-// What the editor does with the answer is its own: the stack builder rewrites the URL of the
-// entry it lands on, and the pattern editor's Cancel goes to the effects page.
+// What the editor does with the answer is its own: the stack builder closes onto the effects page
+// by rewriting the URL of the entry it lands on, and the pattern editor's Cancel replaces its page
+// with the effects page. Both take the guard's entry back first (`strictEntry`) and leave nothing
+// that reopens the editor.
 
 import { useCallback, useEffect, useRef } from "react";
 import { cancelNavigation, setNavigationGuard } from "@/lib/navigationGuard";
@@ -58,7 +60,7 @@ export function useLeaveGuard({
    * The guard's entry never outlives the editor: a leave that is under way keeps it, so the leave
    * can drop it with `dropSentinel` before it navigates, and an editor that unmounts with it still
    * up (the panel's Save key closes the panel) takes it back. Off, the entry is forgotten when a
-   * leave starts and left where it is when the editor goes: the stack builder's own history.
+   * leave starts and left where it is when the editor goes: the history before #484.
    */
   strictEntry?: boolean;
 }): {
@@ -79,11 +81,13 @@ export function useLeaveGuard({
   const drop = useRef(onDrop);
   const leaving = useRef(isLeaving);
   const strict = useRef(strictEntry);
+  const key = useRef(sentinel);
   useEffect(() => {
     ask.current = onAsk;
     drop.current = onDrop;
     leaving.current = isLeaving;
     strict.current = strictEntry;
+    key.current = sentinel;
   });
 
   /** The guard's entry is on the history. */
@@ -170,10 +174,13 @@ export function useLeaveGuard({
       const going = leaving.current?.() ?? false;
       if (!going) cancelNavigation();
       // The editor goes with its entry still up and nobody leaving through it: the entry is taken
-      // back, or the history keeps a copy of the page that the first Back lands on.
+      // back, or the history keeps a copy of the page that the first Back lands on. Only while the
+      // guard's entry is the one the document is on: a page change that went past the guard (Next
+      // has pushed the new page's entry by now) is not undone by a Back.
       if (strict.current && pushed.current && !going) {
         pushed.current = false;
-        window.history.back();
+        const state = window.history.state as Record<string, unknown> | null;
+        if (state !== null && typeof state === "object" && key.current in state) window.history.back();
       }
     },
     [],

@@ -33,3 +33,12 @@ export async function waitForPatternGuard(): Promise<void> {
       throw new Error("pattern guard not installed yet");
   });
 }
+
+/**
+ * Makes the entry the document is on plain, with no guard state. An editor that unmounts with its
+ * guard's entry up takes that entry back with a Back (`strictEntry`), and a test's clean-up unmounts
+ * a dirty editor: the Back would reach the next test. Call it before the clean-up.
+ */
+export function plainEntry(): void {
+  window.history.replaceState({}, "", window.location.href);
+}
