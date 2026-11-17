@@ -178,6 +178,14 @@ pub struct Light {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub copies: Option<u32>,
+    /// Which of this light's LEDs is the first in its run (#468): the physical LED, counted in the
+    /// order the hardware wires them, that a pattern, a strip read and every effect treat as
+    /// position 0. `None` is 0, as every light before #468. Applied before `reversed`: the first
+    /// LED stays first, `reversed` sets which way the run goes from it. Must be below the light's
+    /// LED count; the daemon validates it on write.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_led: Option<u32>,
 }
 
 /// `lights.json`.
@@ -378,6 +386,7 @@ mod tests {
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         }
     }
 

@@ -123,6 +123,47 @@ describe("a light's row on Devices", () => {
     expect(within(card).getByRole("radio", { name: "Grid" })).toBeTruthy();
   });
 
+  it("identifies the zone's LED for the first LED of a light that starts past the zone's first", async () => {
+    // A placed slice: the light's LED 0 is the zone's LED 12, and first_led counts inside it.
+    const device: DeviceInfo = {
+      id: "fake:slice-1",
+      name: "Slice Strip",
+      vendor: "Fake",
+      kind: "other",
+      adapter: "fake",
+      adapter_index: 0,
+      serial: "slice-1",
+      location: "",
+      connected: true,
+      zones: [{ index: 0, name: "Strip", kind: { type: "linear" }, led_count: 24, min_leds: 1, max_leds: 24, resizable: false }],
+    };
+    const view: LightView = {
+      light: {
+        id: "fake:slice-1#z0",
+        device_id: device.id,
+        zone_index: 0,
+        leds: { start: 12, count: 12 },
+        arrangement: "strip",
+        reversed: false,
+        first_led: 3,
+      },
+      led_count: 12,
+      connected: true,
+      label: "Slice Strip · Strip",
+    };
+    patchSnap({ devices: [device], devicesTotal: 1, devicesError: null, lights: [view], chains: [], status: null, statusError: null });
+    const identify = vi.spyOn(api, "identify").mockResolvedValue({ ok: true } as never);
+    // A read-back still in flight from the test before must land on this light, not another.
+    vi.spyOn(api.lights, "list").mockResolvedValue({ lights: [view] });
+    render(<DevicesView />);
+    const card = await screen.findByTestId("device-card");
+    const button = within(card).getByTestId("led-order-identify");
+    await act(async () => {
+      fireEvent.click(button);
+    });
+    expect(identify).toHaveBeenCalledWith("fake:slice-1", { zone: 0, led: 15, count: 1, stop: false });
+  });
+
   it("sets ring and reversed through the lights route", async () => {
     window.history.replaceState({}, "", "/devices/");
     await act(async () => {
@@ -159,6 +200,6 @@ describe("a light's row on Devices", () => {
     await act(async () => {
       fireEvent.click(direction());
     });
-    await waitFor(() => expect(patch).toHaveBeenCalledWith("openrgb:strip-1#z0", { reversed: true }));
+    await waitFor(() => expect(patch).toHaveBeenCalledWith("openrgb:strip-1#z0", { reversed: true, first_led: 0 }));
   });
 });

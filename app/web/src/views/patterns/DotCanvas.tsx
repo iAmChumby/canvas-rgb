@@ -51,6 +51,7 @@ export function DotCanvas({
   spin,
   play,
   overlay,
+  ledOrder,
   label,
   onBegin,
   onStroke,
@@ -73,6 +74,12 @@ export function DotCanvas({
   play?: Pick<Pattern, "frames" | "playback"> | null;
   /** Drawn over the surface, in its box (the Gradient tool's handles). */
   overlay?: ReactNode;
+  /**
+   * The LED-order notch and direction arrow (#468), drawn over the surface with the same dots the
+   * LEDs use, so the notch lands on the physical LED it names. A render prop, because its geometry
+   * is this surface's own measured layout.
+   */
+  ledOrder?: (dots: Dot[], box: { width: number; height: number }) => ReactNode;
   /** What a screen reader hears for the device. */
   label: string;
   /** A press landed: the next change is one history entry. */
@@ -256,6 +263,7 @@ export function DotCanvas({
         onPointerCancel={up}
       />
       {overlay}
+      {ledOrder?.(dots, box)}
     </div>
   );
 }

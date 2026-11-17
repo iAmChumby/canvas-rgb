@@ -316,6 +316,7 @@ fn run_on_d0(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::traits::Eff
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     };
     engine.set_scene(
         vec![light.clone()],
@@ -449,6 +450,7 @@ fn strip_cells_and_band(bands: usize, index: usize) -> (Vec<(u32, u32)>, (u32, u
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     };
     let plan = canvas_core::arrangement::build_group_plan(
         std::slice::from_ref(&light.id),

@@ -143,6 +143,7 @@ fn whole_zone(device: &str, zone: u32) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 

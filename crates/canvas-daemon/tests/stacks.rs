@@ -5499,6 +5499,7 @@ fn strip_and_fan() -> (
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         },
         Light {
             id: zone_light_id(&devices[0].id, 1),
@@ -5510,6 +5511,7 @@ fn strip_and_fan() -> (
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         },
     ];
     let members: Vec<String> = lights.iter().map(|l| l.id.clone()).collect();

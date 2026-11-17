@@ -101,6 +101,9 @@ pub fn plan_commit(
             reversed: previous.map(|l| l.reversed).unwrap_or(false),
             kind: Some(part.kind),
             copies: copies[index],
+            // A set-up-again keeps the owner's first LED, as it keeps `reversed`, while it still
+            // fits the part (#468).
+            first_led: previous.and_then(|l| l.first_led).filter(|first| *first < part.leds),
         });
         start += part.leds;
     }
@@ -309,6 +312,7 @@ mod tests {
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         }
     }
 
@@ -331,6 +335,7 @@ mod tests {
             reversed,
             kind: Some(kind),
             copies: None,
+            first_led: None,
         }
     }
 
