@@ -381,6 +381,27 @@ line. Three mechanisms, and one bug the timing only exposed.
   out (`identify::SetupService`: every chain route that waits on the device holds one, and the idle
   clock restarts when it ends); a test for that changes the limit, never the wait, so the verdict
   stops depending on how fast the machine is.
+- [#479](https://github.com/iAmChumby/canvas-rgb/issues/479): `a_failed_rollback_keeps_both_records`
+  (`crates/canvas-daemon/tests/chains.rs`) failed 10 of 40 on main. The test held the commit at its
+  final resize with `delay_resizes(1_500)`, but a delayed resize only moves when the new size lands;
+  the adapter's re-enumerate after a resize is a plain count request the fake answers at once
+  (`crates/canvas-adapters/src/fake.rs`, `REQUEST_CONTROLLER_COUNT`; `openrgb.rs`, `set_zone_size`),
+  so the commit ran straight on and its rollback succeeded before the test damaged the snapshot.
+  Measured: 33 of 40 runs failed here at `chains.rs:1293`, and the answer named the successful
+  rollback ("the chain was not saved: ..."), not the failed one. Fixed by holding the fake's replies
+  (`hold_replies(true)`) and waiting on `held_replies()`, the handshake `chain_detach.rs` already
+  uses: the commit is parked before its store write and its rollback. 0 failures in 100 runs, and 0
+  in 40 runs of four copies at once. **Rule:** park the code by holding the reply it awaits; a hook
+  that only moves when a device state lands leaves the code free to run on.
+- [#483](https://github.com/iAmChumby/canvas-rgb/issues/483): "sets ring and reversed through the
+  lights route" (`app/web/src/views/__tests__/DevicesLights.test.tsx`) failed once in CI with a
+  10 s `waitFor`. After the Ring patch the row is busy until the patch and its read-back land, and
+  the shape picker and the direction switch are disabled meanwhile (`DevicesView.tsx`,
+  `LightControls`: `busy`). The test waited only for the patch call, which lands before the
+  read-back, then clicked the disabled switch, and React dropped the click. Measured: 3 of 50 runs
+  here, with `data-busy="true"` and `disabled="true"` at the click. Fixed by waiting for the switch
+  to be enabled before clicking it. 0 failures in 100 runs. **Rule:** wait for the control you are
+  about to click to be usable, not for an earlier side effect of the request.
 - [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
   another starter while one is loading, and lands both"
   (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the

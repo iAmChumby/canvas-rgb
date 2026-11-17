@@ -17,6 +17,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Chain tests: the failed-rollback test holds the daemon at its resize with the fake server's held replies instead of a 1.5 s delay, so it checks what it names on a busy runner too. (#479)
+- Devices: the lights test waits for a row's controls to become usable before flipping its direction switch, so a busy runner cannot drop the click. (#483)
 - Scenes: a group's list of effects and presets no longer runs through its picture band and the flow across / each its own switch. The band is the sheet's own header and the list scrolls in a pane under it, so no row is ever drawn in the band's pixels or cut by its edge, and a group's own effect picker no longer covers its mode switch when the window is short or narrow. On a narrow window a group row's mode switch now sits after the brightness fader, on the same line. (#469)
 - The editor's left rail no longer scrolls sideways: its tooltips reach over the page without adding a horizontal scrollbar, and the rail still scrolls up and down in a short window. (#467)
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
