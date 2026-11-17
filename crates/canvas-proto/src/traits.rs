@@ -301,6 +301,13 @@ pub trait DeviceAdapter: Send + Sync {
     async fn disconnect(&mut self) -> Result<(), AdapterError>;
     fn is_connected(&self) -> bool;
     async fn discover(&mut self) -> Result<Vec<DeviceInfo>, AdapterError>;
+    /// Asks the hardware side to look for devices again, so a device plugged in after the last
+    /// detection is found by the next [`discover`](Self::discover) (#290). The default says this
+    /// adapter cannot; the caller then reads the list as it stands. An implementation is bounded
+    /// by its own timeout and must not break the link when the hardware cannot be looked at.
+    async fn rescan(&mut self) -> Result<(), AdapterError> {
+        Err(AdapterError::Unsupported("this adapter cannot re-detect its devices"))
+    }
     /// Puts the device in direct/custom mode if needed and writes all LEDs.
     async fn write_frame(&mut self, device: &DeviceId, colors: &[Rgb8]) -> Result<(), AdapterError>;
     async fn set_zone_size(&mut self, device: &DeviceId, zone: u32, leds: u32) -> Result<(), AdapterError>;
