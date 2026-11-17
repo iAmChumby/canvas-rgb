@@ -145,6 +145,14 @@ async fn get(rig: &Rig, path: &str) -> (StatusCode, Vec<u8>) {
     (status, bytes.to_vec())
 }
 
+/// `get` for a task that owns its own router.
+async fn get_via(router: axum::Router, path: &str) -> (StatusCode, Vec<u8>) {
+    let response = router.oneshot(request(path)).await.expect("the router answers");
+    let status = response.status();
+    let bytes = axum::body::to_bytes(response.into_body(), usize::MAX).await.expect("the body reads");
+    (status, bytes.to_vec())
+}
+
 async fn ids(rig: &Rig, path: &str) -> Vec<String> {
     let (status, body) = get(rig, path).await;
     assert_eq!(status, StatusCode::OK, "{path}: {}", String::from_utf8_lossy(&body));
@@ -309,11 +317,14 @@ async fn a_frame_reaches_the_lights_while_a_rescan_holds_the_adapter() {
     // OpenRGB with detection off starts none, so its list is not changing and the frames flow; the
     // rescan goes straight to the re-read that holds the adapter.
     server.disable_detection(true);
+    // OpenRGB takes packet 140 and acknowledges it, then stalls: it is the re-read that goes unanswered. A
+    // server that stalls before the packet never acknowledges it, and the rescan then fails on the missing
+    // ACK (`a_rescan_the_server_never_acknowledges_fails_and_keeps_the_held_list`).
+    server.stall_after_the_rescan_packet(true);
     let rig = rig("stalled", server.port(), RESCAN_BUDGET).await;
     wait_for_link(&rig, LinkState::Connected).await;
     let sink = wait_for_sink(&rig, "openrgb:one").await;
 
-    server.stall_replies(true);
     let rescan = {
         let router = rig.router.clone();
         tokio::spawn(async move { router.oneshot(request("/api/v1/devices?rescan=1")).await.expect("the router answers").status() })
@@ -450,6 +461,9 @@ async fn a_detection_that_never_settles_keeps_the_held_list_and_the_lights() {
 #[tokio::test]
 async fn an_ignored_rescan_during_a_running_detection_keeps_the_daemons_list_and_sinks() {
     let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    // An older OpenRGB (protocol 5): the daemon's refresh reads the list mid-detection and the adapter
+    // answers with the one it holds. Protocol 6 reads nothing then (the test after this one).
+    server.server_protocol_version(5);
     // The detection is in its first minute: its list is empty, with no list change after the clear.
     server.rescan_timing(Duration::from_secs(60), Duration::from_millis(10));
     let rig = rig("ignored", server.port(), RESCAN_BUDGET).await;
@@ -471,6 +485,105 @@ async fn an_ignored_rescan_during_a_running_detection_keeps_the_daemons_list_and
     assert_eq!(rig.app.devices.read().await.len(), 2, "the refresh applied the empty list");
     assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "the refresh removed the frame sinks");
     assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
+
+/// #290, protocol 6: a packet 140 that arrives while OpenRGB's own detection runs is dropped by OpenRGB
+/// (`DetectionManager.cpp:1753-1756`), so it joins the running detection. The API answers the list the
+/// daemon holds at the call's bound (15 s), the daemon's list and sinks stay, and the list is not even
+/// read until 103, however long the detection takes: the new list is applied once, when it ends.
+#[tokio::test(start_paused = true)]
+async fn a_rescan_during_a_running_detection_joins_it_and_the_new_list_applies_after_103() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    server.add_hidden_device(stick("three"));
+    // A minute for three controllers.
+    server.rescan_timing(Duration::from_millis(100), Duration::from_secs(20));
+    let rig = rig_timed("joins", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:two").await;
+
+    server.start_detection();
+    until("OpenRGB announced the cleared list", || server.list_cleared()).await;
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:two"], "the held list answers");
+    assert_eq!(server.rescan_dropped(), 1, "OpenRGB must have dropped the packet 140 of a running detection");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "the rescan removed a frame sink");
+    for _ in 0..8 {
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        if server.list_cleared() {
+            assert_eq!(rig.app.devices.read().await.len(), 2, "the list changed while the detection ran");
+        }
+    }
+    tokio::time::timeout(Duration::from_secs(60), until_devices(&rig, 3))
+        .await
+        .expect("the list the detection ended with was never applied");
+    assert_eq!(server.reads_during_detection(), 0, "the list was read while OpenRGB was still detecting");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:three", "openrgb:two"]);
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
+
+/// #290 review 4: two controllers of one detection register further apart than the 2 s window the
+/// protocol 5 wait used. That wait took the quiet between them for the end and applied a part list
+/// (three devices to one, the frame sinks of the others removed). With 103 there is no window: the
+/// daemon's list and sinks stay whole through the detection and the answer is the whole new list.
+#[tokio::test(start_paused = true)]
+async fn a_gap_longer_than_two_seconds_between_registrations_applies_no_part_list() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    server.rescan_timing(Duration::from_millis(100), Duration::from_secs(3));
+    let rig = rig_timed("gap", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:three").await;
+
+    let rescan = {
+        let router = rig.router.clone();
+        tokio::spawn(async move { get_via(router, "/api/v1/devices?rescan=1").await })
+    };
+    let mut counts = Vec::new();
+    while !rescan.is_finished() {
+        counts.push((rig.app.devices.read().await.len(), sink_ids(&rig).len()));
+        tokio::time::sleep(Duration::from_millis(500)).await;
+    }
+    let (status, body) = rescan.await.expect("the request task ends");
+    assert_eq!(status, StatusCode::OK, "{}", String::from_utf8_lossy(&body));
+    let answered: DevicesResponse = serde_json::from_slice(&body).expect("a device list");
+    assert_eq!(answered.devices.len(), 3, "the answer was a part list");
+    assert!(counts.len() > 10, "the loop did not run during the detection: {counts:?}");
+    assert!(counts.iter().all(|&count| count == (3, 3)), "the daemon's list or frame sinks shrank mid-detection: {counts:?}");
+    assert_eq!(rig.app.devices.read().await.len(), 3);
+}
+
+/// #290, protocol 6: every device really gone. OpenRGB said the detection is over (103) and has no
+/// controller left: that list is the real one, and it is applied, sinks included. Without 103 an empty
+/// list could be a detection that has found nothing yet, and the protocol 5 path never applies one.
+#[tokio::test(start_paused = true)]
+async fn every_device_unplugged_applies_the_empty_list_once_openrgb_says_detection_is_over() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    server.rescan_timing(Duration::from_millis(100), Duration::from_secs(1));
+    let rig = rig_timed("all-gone", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:two").await;
+    server.unplug_device(1);
+    server.unplug_device(0);
+
+    assert!(ids(&rig, "/api/v1/devices?rescan=1").await.is_empty(), "the empty list after 103 was not the answer");
+    assert!(rig.app.devices.read().await.is_empty(), "the unplugged devices stayed in the daemon's list");
+    assert!(sink_ids(&rig).is_empty(), "the unplugged devices kept their frame sinks");
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
+
+/// A server that never acknowledges packet 140 (protocol 6) is not answering: the rescan fails with the
+/// API's error, and is not taken for a detection that is still running.
+#[tokio::test(start_paused = true)]
+async fn a_rescan_the_server_never_acknowledges_fails_and_keeps_the_held_list() {
+    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let rig = rig_timed("no-ack", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:one").await;
+    server.stall_replies(true);
+
+    let (status, body) = get(&rig, "/api/v1/devices?rescan=1").await;
+    assert_eq!(status, StatusCode::SERVICE_UNAVAILABLE, "{}", String::from_utf8_lossy(&body));
+    assert!(String::from_utf8_lossy(&body).contains("did not acknowledge"), "{}", String::from_utf8_lossy(&body));
+    assert_eq!(rig.app.devices.read().await.len(), 1, "the held list was replaced");
+    server.stall_replies(false);
 }
 
 /// Waits (on the paused clock) until the app holds `count` devices.

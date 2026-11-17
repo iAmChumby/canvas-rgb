@@ -32,11 +32,22 @@ const MAX_LEDS_PER_CONTROLLER: u64 = u16::MAX as u64;
 /// How long a request waits for its reply before the call fails.
 const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 
+/// How many times a protocol 6 read of the list is repeated when the list changes under it.
+const ENUMERATE_ATTEMPTS: u32 = 3;
+
 /// How a rescan waits for OpenRGB's detection to be over (#290).
 ///
-/// OpenRGB release_1.1 sends 101 and 103 only to a client that negotiated protocol 6 or later
-/// (`NetworkServer.cpp:4003-4006`, `:3949-3952`), and canvas-rgb negotiates 5. What a protocol 5
-/// client sees is `DEVICE_LIST_UPDATED` (100, ungated, `:4017`): once when the list is cleared
+/// **Protocol 6 and later** (OpenRGB release_1.1 and newer, what canvas-rgb negotiates with them) needs
+/// no window at all: the server says when detection starts (101) and when it is over (103)
+/// (`NetworkServer.cpp:4003-4015`, `:3949-3961`), names every controller by an id that is never
+/// reused (`:682-711`) and drops a packet for an id it no longer has (`:1495-1531`). While a detection
+/// runs the held list stays, a read of the list is answered with it, and frames keep going to the
+/// held ids (the server drops them; none can reach another device); the list read after 103 replaces
+/// the held one, shorter or longer. Only `cap` applies on that path, as the bound of one call. See
+/// [`OpenRgbAdapter::rescan_shared`].
+///
+/// **Protocol 5** (an older OpenRGB) is what the rest of this comment is about, and what `first` and
+/// `settle` are for. A protocol 5 client sees `DEVICE_LIST_UPDATED` (100, ungated, `:4017`): once when the list is cleared
 /// (`DetectionManager.cpp:1707`, then `ResourceManager.cpp:62-65` and `:972-1067`) and once as each
 /// controller registers again (`DetectionManager.cpp:491`). Nothing says detection is over, and a
 /// packet 140 sent while a detection runs is dropped without a word (`DetectionManager.cpp:1753-1756`).
@@ -54,18 +65,18 @@ const REPLY_TIMEOUT: Duration = Duration::from_secs(5);
 /// unplugged. There is no cap on that hold.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RescanTiming {
-    /// How long after packet 140 the first list change may take when OpenRGB's list was not
+    /// Protocol 5 only. How long after packet 140 the first list change may take when OpenRGB's list was not
     /// already changing. Detection starts by clearing the list, which is immediate, so a silence
     /// this long means detection is off or refused: the list was not touched. 1.5 s allows a busy
     /// server to take its time. It decides only what a rescan reports, never what is applied.
     pub first: Duration,
-    /// How long the list must have been quiet before a read of it is trusted as the settled list.
+    /// Protocol 5 only. How long the list must have been quiet before a read of it is trusted as the settled list.
     /// A longer gap between two controllers inside one detection only delays the answer: the
     /// next list change makes the list unsettled again, and the list that was cached stays
     /// cached meanwhile. Real timings are UNKNOWN until Luke's hardware check.
     pub settle: Duration,
-    /// The longest a rescan call waits for the list to settle before it answers that detection is
-    /// still running. This bounds the wait of one call, for the editor's request, and nothing else:
+    /// The longest a rescan call waits for the detection to be over (the list to settle, on protocol 5)
+    /// before it answers that detection is still running. This bounds the wait of one call, for the editor's request, and nothing else:
     /// the list stays unsettled past it, the cached list stays as it is, and the settled list is
     /// applied whenever it arrives (the daemon's 5 s refresh finds it). The editor waits 30 s for
     /// the whole API answer (`DEVICE_RESCAN_TIMEOUT_MS`): 15 s here + 5 s re-read + 5 s queue wait
@@ -85,8 +96,17 @@ const LINK_CHECK: Duration = Duration::from_millis(100);
 /// The error text of a rescan whose detection never began: no list change followed packet 140.
 pub const RESCAN_NOT_REDETECTED_MESSAGE: &str = "OpenRGB did not start detection";
 
+/// The error text of a rescan whose packet 140 OpenRGB never acknowledged (protocol 6): the server is not
+/// answering, which is a failure, and nothing is known about a detection.
+pub const RESCAN_NOT_ACKNOWLEDGED_MESSAGE: &str = "OpenRGB did not acknowledge the rescan";
+
 /// The error text of a rescan that gave up waiting while OpenRGB's detection was still running.
 pub const RESCAN_DETECT_TIMEOUT_MESSAGE: &str = "OpenRGB is still detecting devices";
+
+/// The error text of a request OpenRGB acknowledged without answering it: protocol 6 sends an ACK
+/// after every packet, and a request for a controller id the server no longer has gets nothing else
+/// (`NetworkServer.cpp:1495-1531`, `:3562-3580`).
+pub const CONTROLLER_ID_GONE_MESSAGE: &str = "OpenRGB no longer has that controller id";
 
 /// The error text of a frame that was not written because OpenRGB's list is changing.
 pub const LIST_UNSETTLED_MESSAGE: &str = "OpenRGB is re-detecting its devices; no frame is written until its list settles";
@@ -124,6 +144,10 @@ pub struct Redetected {
     pub settled_after: Duration,
     /// How many list changes (100) arrived after packet 140.
     pub list_changes: u32,
+    /// OpenRGB said so itself (101 and 103, protocol 6 and later): the detection is over, and a list
+    /// read now, empty or not, is the real one. Without it (protocol 5) the end was inferred from a
+    /// quiet list, and an empty list cannot be told from a detection that has found nothing yet.
+    pub by_events: bool,
 }
 
 /// How often `SET_CUSTOM_MODE` is sent again to a controller that is being streamed frames.
@@ -262,6 +286,20 @@ struct Session {
     settle_failed_at: Option<u64>,
     /// A settle read is running, so no second one starts.
     settling: bool,
+    /// Protocol 6: a detection is running (101 seen, 103 not yet; or 102 progress, which says one is
+    /// running that began before this connection).
+    detecting: bool,
+    /// Protocol 6: how many detections this session has seen start, and how many end.
+    detections_started: u64,
+    detections_completed: u64,
+    /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
+    /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
+    /// `DetectionManager.cpp:1776`), so a 101 for a packet 140 always arrives before its ACK.
+    rescan_acks: u64,
+    /// Protocol 6: for each (controller id, packet id) of a request sent, how many ACKs are still owed.
+    /// A reply comes before its ACK, so an ACK that finds its request still waiting says the server
+    /// answered with nothing: the controller id is gone.
+    owed_acks: HashMap<(u32, u32), u32>,
 }
 
 /// What a controller's resize is doing.
@@ -293,6 +331,11 @@ impl Default for Session {
             last_list_change: None,
             settle_failed_at: None,
             settling: false,
+            detecting: false,
+            detections_started: 0,
+            detections_completed: 0,
+            rescan_acks: 0,
+            owed_acks: HashMap::new(),
         }
     }
 }
@@ -300,7 +343,16 @@ impl Default for Session {
 struct Pending {
     device: u32,
     packet_id: u32,
-    reply: oneshot::Sender<Vec<u8>>,
+    reply: oneshot::Sender<Reply>,
+}
+
+/// What ends a request.
+enum Reply {
+    /// The server's answer.
+    Data(Vec<u8>),
+    /// The server acknowledged the request and answered nothing (protocol 6): the controller it names
+    /// is gone.
+    Refused,
 }
 
 /// The reply slot of one request, cleared however the request ends: a reply, an error, a
@@ -309,11 +361,19 @@ struct InFlight<'a> {
     link: &'a Link,
     /// The request went out, so the server may still answer it.
     sent: bool,
+    /// The (controller id, packet id) an ACK was counted as owed for.
+    owed: Option<(u32, u32)>,
 }
 
 impl Drop for InFlight<'_> {
     fn drop(&mut self) {
         let mut session = guard(&self.link.session);
+        if let (false, Some(key)) = (self.sent, self.owed) {
+            // The packet never went out, so no ACK is owed for it.
+            if let Some(count) = session.owed_acks.get_mut(&key) {
+                *count = count.saturating_sub(1);
+            }
+        }
         // A slot the reader already took means the reply arrived: nothing is owed.
         let unanswered = session.pending.take().is_some();
         if !self.sent || !unanswered || !session.connected {
@@ -397,7 +457,12 @@ impl Drop for Discovery<'_> {
 
 #[derive(Debug, Clone)]
 struct Controller {
+    /// The position in the server's list.
     index: u32,
+    /// What a packet for this controller names it by: its id on protocol 6 (a number the server never
+    /// reuses, so a packet for a controller that was re-detected reaches nobody), its position
+    /// before (`NetworkServer.cpp:1500-1512`).
+    addr: u32,
     wire: WireController,
 }
 
@@ -446,6 +511,8 @@ impl Link {
         if let Some(reader) = reader {
             reader.abort();
         }
+        // A rescan that is waiting looks at the link again.
+        self.list_changed.send_modify(|n| *n += 1);
     }
 
     fn reset_custom_mode(&self) {
@@ -559,7 +626,7 @@ impl OpenRgbAdapter {
             return Err(AdapterError::Protocol(format!(
                 "frame has {} colors but {device} has {led_count} LEDs", colors.len())));
         }
-        self.send_leds(controller.index, colors).await
+        self.send_leds(controller.addr, colors).await
     }
 
     /// Asks OpenRGB to look at the hardware again, then waits for its list to settle (#290), with no
@@ -586,11 +653,19 @@ impl OpenRgbAdapter {
     ///   of any length wipes nothing. The link stays up in every case.
     ///
     /// A protocol 4 server has no such packet and is refused as unsupported.
+    ///
+    /// **Protocol 6 and later** is event-driven and uses none of the above (see
+    /// [`rescan_by_events`](Self::rescan_by_events)): the wait ends on OpenRGB's own 103, no timer decides
+    /// what the adapter holds, and the list is read again by the next [`enumerate`](Self::enumerate).
     pub async fn rescan_shared(&self) -> Result<Redetected, AdapterError> {
         use tokio::time::{sleep_until, Instant};
         self.require_connected()?;
-        if self.protocol_version() < 5 {
+        let version = self.protocol_version();
+        if version < 5 {
             return Err(AdapterError::Unsupported("OpenRGB protocol 4 cannot re-detect devices"));
+        }
+        if version >= PROTOCOL_WITH_EVENTS {
+            return self.rescan_by_events().await;
         }
         let timing = self.rescan_timing;
         // Subscribe before writing and mark the current count seen, so only a change that arrives
@@ -612,7 +687,7 @@ impl OpenRgbAdapter {
                 if count != changes_at_start {
                     // A detection ran, or one already running went quiet, and its list is the one held.
                     let seen = u32::try_from(count - changes_at_start).unwrap_or(u32::MAX);
-                    return Ok(Redetected { settled_after: started.elapsed(), list_changes: seen });
+                    return Ok(Redetected { settled_after: started.elapsed(), list_changes: seen, by_events: false });
                 }
                 // Nothing came after packet 140: detection starts by clearing the list, at once.
                 if now >= started + timing.first {
@@ -643,6 +718,66 @@ impl OpenRgbAdapter {
                 }
                 // Also wakes to look at the link: the wait goes on.
                 () = sleep_until(wake.min(cap).min(Instant::now() + LINK_CHECK)) => {}
+            }
+        }
+    }
+
+    /// A rescan on protocol 6 and later: OpenRGB says when detection starts (101) and ends (103), so
+    /// nothing here is a guess (#290).
+    ///
+    /// Packet 140 goes out and the call waits for the server's ACK of it. The server handles the packet
+    /// on one thread, which sends the 101 it causes before the ACK, on the same socket
+    /// (`NetworkServer.cpp:1725-1730`, `DetectionManager.cpp:1753-1776`); so when the ACK arrives the
+    /// 101 is already counted, and one of three things is true:
+    ///
+    /// - a detection runs (this packet began it, or it was already running and dropped the packet,
+    ///   `DetectionManager.cpp:1753-1756`: the call joins the running one): wait for its 103, then `Ok`;
+    /// - a detection ran and ended meanwhile: `Ok` at once;
+    /// - none ran: the server refused or has detection off, [`RESCAN_NOT_REDETECTED_MESSAGE`], the list
+    ///   was never touched.
+    ///
+    /// `cap` only bounds the call: a detection still running at it answers
+    /// [`RESCAN_DETECT_TIMEOUT_MESSAGE`], and the held list stays whatever the detection takes. The
+    /// adapter's cached list is not touched here: a read ([`enumerate`](Self::enumerate)) answers with
+    /// the held list while the detection runs and reads the new one once it is over.
+    async fn rescan_by_events(&self) -> Result<Redetected, AdapterError> {
+        use tokio::time::{sleep_until, Instant};
+        let mut changes = self.link.list_changed.subscribe();
+        let _ = changes.borrow_and_update();
+        let started = Instant::now();
+        let cap = started + self.rescan_timing.cap;
+        let before = {
+            let session = guard(&self.link.session);
+            (session.detections_started, session.detections_completed, session.rescan_acks, session.list_changes)
+        };
+        self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
+        loop {
+            self.require_connected()?;
+            let (detecting, began, ended, acks, list_changes) = {
+                let session = guard(&self.link.session);
+                (session.detecting, session.detections_started, session.detections_completed, session.rescan_acks, session.list_changes)
+            };
+            if acks != before.2 {
+                if !detecting && began == before.0 && ended == before.1 {
+                    return Err(AdapterError::Protocol(RESCAN_NOT_REDETECTED_MESSAGE.into()));
+                }
+                if !detecting {
+                    let seen = u32::try_from(list_changes - before.3).unwrap_or(u32::MAX);
+                    return Ok(Redetected { settled_after: started.elapsed(), list_changes: seen, by_events: true });
+                }
+            }
+            tokio::select! {
+                changed = changes.changed() => {
+                    changed.map_err(|_| AdapterError::NotConnected)?;
+                }
+                () = sleep_until(cap) => {
+                    // A detection that runs past the bound is still running. A server that never
+                    // acknowledged the packet is not answering at all: that is a failure, not a detection.
+                    let acknowledged = guard(&self.link.session).rescan_acks != before.2;
+                    return Err(AdapterError::Protocol(
+                        if acknowledged { RESCAN_DETECT_TIMEOUT_MESSAGE } else { RESCAN_NOT_ACKNOWLEDGED_MESSAGE }.into(),
+                    ));
+                }
             }
         }
     }
@@ -815,8 +950,17 @@ impl OpenRgbAdapter {
         let _gate = self.link.request_gate.lock().await;
         let (reply, received) = oneshot::channel();
         // Declared after the gate, so it drops first: the slot is cleared while the gate is held.
-        let mut in_flight = InFlight { link: &self.link, sent: false };
-        guard(&self.link.session).pending = Some(Pending { device, packet_id, reply });
+        let mut in_flight = InFlight { link: &self.link, sent: false, owed: None };
+        {
+            let mut session = guard(&self.link.session);
+            session.pending = Some(Pending { device, packet_id, reply });
+            // Protocol 6 acknowledges every packet after answering it. Counted before the packet goes
+            // out, so the ACK cannot arrive first.
+            if session.protocol_version >= PROTOCOL_WITH_EVENTS {
+                *session.owed_acks.entry((device, packet_id)).or_insert(0) += 1;
+                in_flight.owed = Some((device, packet_id));
+            }
+        }
         // Checked after the reply slot is set: a reader that ended first has already cleared
         // the session, so the request fails here instead of waiting out the timeout.
         if !guard(&self.link.session).connected {
@@ -825,7 +969,9 @@ impl OpenRgbAdapter {
         self.send(device, packet_id, payload).await?;
         in_flight.sent = true;
         match tokio::time::timeout(REPLY_TIMEOUT, received).await {
-            Ok(Ok(reply)) => Ok(reply),
+            Ok(Ok(Reply::Data(reply))) => Ok(reply),
+            // Acknowledged and not answered: nothing is owed, the link is whole.
+            Ok(Ok(Reply::Refused)) => Err(AdapterError::Protocol(CONTROLLER_ID_GONE_MESSAGE.into())),
             Ok(Err(_)) => Err(AdapterError::NotConnected),
             Err(_) => {
                 // The reply never came: the link is unusable, and the supervisor reconnects.
@@ -850,6 +996,9 @@ impl OpenRgbAdapter {
     /// answers with it. A list read while it is still changing is not even requested.
     async fn enumerate(&self) -> Result<Vec<Controller>, AdapterError> {
         self.require_connected()?;
+        if self.protocol_version() >= PROTOCOL_WITH_EVENTS {
+            return self.enumerate_by_id().await;
+        }
         let settle = self.rescan_timing.settle;
         let changes_before = {
             let session = guard(&self.link.session);
@@ -880,7 +1029,7 @@ impl OpenRgbAdapter {
                 tracing::warn!(index, leds, "skipping an OpenRGB controller over the LED limit of {MAX_LEDS_PER_CONTROLLER}");
                 continue;
             }
-            controllers.push(Controller { index, wire });
+            controllers.push(Controller { index, addr: index, wire });
         }
         let mut session = guard(&self.link.session);
         if !session.connected {
@@ -924,6 +1073,107 @@ impl OpenRgbAdapter {
         }
         session.controllers = controllers.clone();
         Ok(controllers)
+    }
+
+    /// Re-enumerates every controller on protocol 6 and later (#290).
+    ///
+    /// The count reply carries the id of every controller, and a controller is asked for and written to
+    /// by that id (`NetworkServer.cpp:3585-3640`). Ids come from a counter that only rises, so an id never
+    /// names another device: a packet for a controller that a detection has since re-registered is dropped
+    /// by the server, never delivered somewhere else. That is what makes a read safe at any time, and
+    /// what the rules here rest on:
+    ///
+    /// - while a detection runs (101 seen, 103 not yet) and a list is held, nothing is read and the held
+    ///   list is the answer. With no list held (OpenRGB was still starting), the read is the list;
+    /// - a read during which a detection began is thrown away and the held list answers: it may hold
+    ///   controllers from before the clear and after it;
+    /// - a read during which the list changed with no detection (a device plugged in or removed) is read
+    ///   again, a few times at most: the ids it holds are valid, so the last read stands if it keeps
+    ///   changing;
+    /// - a read after 103 replaces the held list, shorter or longer, empty or not: OpenRGB said the
+    ///   detection is over, so an empty list is every device gone.
+    ///
+    /// No timer decides any of it.
+    async fn enumerate_by_id(&self) -> Result<Vec<Controller>, AdapterError> {
+        let mut gone = None;
+        for attempt in 1..=ENUMERATE_ATTEMPTS {
+            let (started_before, changes_before) = {
+                let session = guard(&self.link.session);
+                if session.detecting && !session.controllers.is_empty() {
+                    return Ok(session.controllers.clone());
+                }
+                (session.detections_started, session.list_changes)
+            };
+            guard(&self.link.session).discovering += 1;
+            let controllers = {
+                let _discovery = Discovery { link: &self.link };
+                self.read_controllers_by_id().await
+            };
+            let controllers = match controllers {
+                Ok(controllers) => controllers,
+                // An id went away between the count and its data: the list changed, read it again.
+                Err(AdapterError::Protocol(reason)) if reason == CONTROLLER_ID_GONE_MESSAGE => {
+                    gone = Some(AdapterError::Protocol(reason));
+                    continue;
+                }
+                Err(error) => return Err(error),
+            };
+            let mut session = guard(&self.link.session);
+            if !session.connected {
+                return Ok(controllers);
+            }
+            if session.detections_started != started_before || (session.detecting && !session.controllers.is_empty()) {
+                tracing::debug!(read = controllers.len(), held = session.controllers.len(), "a detection began while the list was read; keeping the list held");
+                return Ok(session.controllers.clone());
+            }
+            if session.list_changes != changes_before && attempt < ENUMERATE_ATTEMPTS {
+                continue;
+            }
+            // The controllers that are gone take their per-controller state with them; a controller
+            // that was registered again has a new id and no state, so its first frame sets the custom
+            // mode (it sits in its built-in mode).
+            let live: HashSet<u32> = controllers.iter().map(|controller| controller.addr).collect();
+            session.custom_mode.retain(|addr, _| live.contains(addr));
+            session.mode_sent.retain(|addr| live.contains(addr));
+            session.resizing.retain(|addr, _| live.contains(addr));
+            if session.controllers.len() != controllers.len() {
+                tracing::info!(held = session.controllers.len(), read = controllers.len(), "OpenRGB's list has another count of devices");
+            }
+            session.controllers = controllers.clone();
+            return Ok(controllers);
+        }
+        Err(gone.unwrap_or_else(|| AdapterError::Protocol("OpenRGB's controller list kept changing".into())))
+    }
+
+    /// One read of the controller list by id: the count with its ids, then every controller's data.
+    async fn read_controllers_by_id(&self) -> Result<Vec<Controller>, AdapterError> {
+        let version = self.protocol_version();
+        let count_reply = self.request(0, REQUEST_CONTROLLER_COUNT, &[]).await?;
+        let (count, ids) = decode_controller_count(&count_reply, version)?;
+        if count > MAX_CONTROLLERS {
+            return Err(AdapterError::Protocol(format!(
+                "OpenRGB reports {count} controllers; the limit is {MAX_CONTROLLERS}")));
+        }
+        let mut controllers = Vec::with_capacity(ids.len());
+        for (index, id) in ids.into_iter().enumerate() {
+            let payload = self.request(id, REQUEST_CONTROLLER_DATA, &self.data_request_payload()).await?;
+            let wire = WireController::decode(&payload, version)?;
+            let leds: u64 = wire.zones.iter().map(|zone| u64::from(zone.leds_count)).sum();
+            if leds > MAX_LEDS_PER_CONTROLLER {
+                tracing::warn!(id, leds, "skipping an OpenRGB controller over the LED limit of {MAX_LEDS_PER_CONTROLLER}");
+                continue;
+            }
+            controllers.push(Controller { index: index as u32, addr: id, wire });
+        }
+        Ok(controllers)
+    }
+
+    /// The payload of a `REQUEST_CONTROLLER_DATA`: the protocol version before 6 (the server answers in
+    /// the version it names), nothing after, because the server uses the one negotiated
+    /// (`NetworkServer.cpp:1105-1126`).
+    fn data_request_payload(&self) -> Vec<u8> {
+        let version = self.protocol_version();
+        if version >= PROTOCOL_WITH_EVENTS { Vec::new() } else { version.to_le_bytes().to_vec() }
     }
 
     /// The list read is the settled one: every controller was registered again, so each sits in its
@@ -1027,7 +1277,7 @@ impl OpenRgbAdapter {
         guard(&self.link.session)
             .controllers
             .iter()
-            .find(|controller| controller.index == index)
+            .find(|controller| controller.addr == index)
             .map(|controller| (controller.wire.name.clone(), controller.wire.location.clone()))
             .unwrap_or_default()
     }
@@ -1153,6 +1403,11 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.last_list_change = None;
             session.settle_failed_at = None;
             session.settling = false;
+            session.detecting = false;
+            session.detections_started = 0;
+            session.detections_completed = 0;
+            session.rescan_acks = 0;
+            session.owed_acks.clear();
             session.reader.take()
         };
         if let Some(reader) = reader {
@@ -1160,6 +1415,8 @@ impl DeviceAdapter for OpenRgbAdapter {
         }
         *self.link.writer.lock().await = None;
         self.link.broken.store(false, Ordering::SeqCst);
+        // A rescan that is waiting looks at the link again.
+        self.link.list_changed.send_modify(|n| *n += 1);
         Ok(())
     }
 
@@ -1194,15 +1451,15 @@ impl DeviceAdapter for OpenRgbAdapter {
         // The controller is being re-configured: a frame for it is skipped until the
         // re-enumerate lands, so no frame of the old zone size reaches OpenRGB in between,
         // and no frame stamps the mode back on after the resize cleared it.
-        self.begin_resize(controller.index);
+        self.begin_resize(controller.addr);
         // The guard ends the resize however it ends: a handler that was cancelled (the client
         // went away in the middle of the PATCH) must not leave the frames of this controller
         // skipped for the rest of the connection.
-        let _resize = ResizeGuard { link: &self.link, index: controller.index };
+        let _resize = ResizeGuard { link: &self.link, index: controller.addr };
         let resized = async {
-            self.send(controller.index, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
+            self.send(controller.addr, RESIZE_ZONE, &resize_zone_payload(zone, size)).await?;
             // The next frame to this controller must re-enter custom mode after OpenRGB reconfigures it.
-            guard(&self.link.session).custom_mode.remove(&controller.index);
+            guard(&self.link.session).custom_mode.remove(&controller.addr);
             // Ordered after the resize on the same socket, so the reply reflects the new size.
             self.enumerate().await?;
             Ok(())
@@ -1226,19 +1483,19 @@ impl DeviceAdapter for OpenRgbAdapter {
         let mut colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; total];
         let lit = controller.zone_offset(zone as usize) + led as usize;
         colors[lit] = Rgb8 { r: 255, g: 255, b: 255 };
-        self.send_leds(controller.index, &colors).await?;
+        self.send_leds(controller.addr, &colors).await?;
         // OpenRGB answers nothing to a frame, so what was sent is the whole record (#81).
         tracing::info!(
-            controller = controller.index, device = %device, zone, led, lit, leds = total,
+            controller = controller.addr, device = %device, zone, led, lit, leds = total,
             "identify sent to OpenRGB controller {} ({device}): LED {lit} of {total} white, the other {} black",
-            controller.index, total - 1
+            controller.addr, total - 1
         );
         Ok(())
     }
 
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
         let controller = self.controller(device).await?;
-        let payload = self.request(controller.index, REQUEST_CONTROLLER_DATA, &self.protocol_version().to_le_bytes()).await?;
+        let payload = self.request(controller.addr, REQUEST_CONTROLLER_DATA, &self.data_request_payload()).await?;
         Ok(WireController::decode(&payload, self.protocol_version())?.colors)
     }
 }
@@ -1253,56 +1510,179 @@ impl crate::resume::ResumeBehavior for OpenRgbAdapter {
     }
 }
 
+/// The scratch the reader throws packets it does not need into. Allocated once per connection.
+const DISCARD_CHUNK: usize = 4096;
+
+/// Reads and drops `left` bytes of a packet, in `scratch`-sized pieces: nothing is allocated for a
+/// packet the client does not use, however large.
+async fn discard(read: &mut OwnedReadHalf, mut left: usize, scratch: &mut [u8]) -> std::io::Result<()> {
+    while left > 0 {
+        let step = left.min(scratch.len());
+        read.read_exact(&mut scratch[..step]).await?;
+        left -= step;
+    }
+    Ok(())
+}
+
+/// The reader of one session. Every packet the server sends is one of:
+///
+/// - the reply to the request that is waiting (same controller and packet id): handed over;
+/// - 100 (device list updated), which every protocol sends: counted. On protocol 5 it makes the list
+///   unsettled (#290); on protocol 6 it only wakes a waiting rescan;
+/// - 101, 102 and 103 (protocol 6 and later): detection started, progressed, finished (#290);
+/// - an ACK (protocol 6, one after every packet the client sends, `NetworkServer.cpp:3562-3580`): its
+///   id is matched against what the client is owed, and an ACK of a request that has no reply says the
+///   controller id is gone;
+/// - anything else (the server's name, the echo of every frame to every client of protocol 6 and later,
+///   the sender too, `RGBController.cpp:2028-2050`): read and dropped through a fixed scratch, because
+///   a stream of frames at 60 per second per device would otherwise allocate a buffer for each echo.
+///
+/// Only the reader of the current session counts anything: a reader that was overtaken by a reconnect
+/// must not touch a session that started after it.
 async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
-    while let Ok((device, packet_id, payload)) = read_packet(&mut read).await {
-        // OpenRGB broadcasts these with no request id and no reply owed, so they can never
-        // complete a pending request (which carries a different packet id). 100 (device list
-        // updated) is the one packet a protocol 5 client gets about detection: every one makes the
-        // list unsettled (#290). 101 and 103 (protocol 6 and later only) are not used. Only the
-        // reader of the current session counts a change: a reader that was overtaken by a
-        // reconnect must not touch a session that started after it.
-        if packet_id == DEVICE_LIST_UPDATED {
-            {
-                let mut session = guard(&link.session);
-                if session.epoch != epoch {
-                    return;
-                }
-                session.list_changes += 1;
-                session.last_list_change = Some(tokio::time::Instant::now());
-                // A zone resize sends a protocol 5 client no list change (`RGBController.cpp:2271`,
-                // `NetworkServer.cpp:4175-4190`), so every one of these is a change of the list.
-                session.unsettled = true;
-            }
-            link.list_changed.send_modify(|n| *n += 1);
-            continue;
+    let mut scratch = vec![0_u8; DISCARD_CHUNK];
+    loop {
+        let mut header = [0; HEADER_LEN];
+        if read.read_exact(&mut header).await.is_err() {
+            break;
         }
-        if matches!(packet_id, DETECTION_STARTED | DETECTION_COMPLETE) {
-            continue;
+        let Ok((device, packet_id, size)) = decode_header(&header) else {
+            break;
+        };
+        // What this packet is for, decided under one lock; the bytes are read after it is released.
+        enum Next {
+            Overtaken,
+            Reply,
+            Drop,
+            Ack,
         }
-        let reply = {
+        let next = {
             let mut session = guard(&link.session);
             if session.epoch != epoch {
-                return;
+                Next::Overtaken
+            } else {
+                match packet_id {
+                    DEVICE_LIST_UPDATED => {
+                        session.list_changes += 1;
+                        session.last_list_change = Some(tokio::time::Instant::now());
+                        // A zone resize sends a protocol 5 client no list change (`RGBController.cpp:2271`,
+                        // `NetworkServer.cpp:4175-4190`), so every one of these is a change of the list.
+                        if session.protocol_version < PROTOCOL_WITH_EVENTS {
+                            session.unsettled = true;
+                        }
+                        Next::Drop
+                    }
+                    DETECTION_STARTED => {
+                        session.detecting = true;
+                        session.detections_started += 1;
+                        Next::Drop
+                    }
+                    DETECTION_PROGRESS_CHANGED => {
+                        // Progress says a detection is running. One that began before this connection
+                        // never sent this client a 101.
+                        if !session.detecting {
+                            session.detecting = true;
+                            session.detections_started += 1;
+                        }
+                        Next::Drop
+                    }
+                    DETECTION_COMPLETE => {
+                        session.detecting = false;
+                        session.detections_completed += 1;
+                        Next::Drop
+                    }
+                    ACK => Next::Ack,
+                    // The reply to the request that is waiting for it. A reply that arrives late
+                    // (the request was given up on) never gets here: an unanswered request loses
+                    // the link, and the reader is aborted with it.
+                    _ if session.pending.as_ref().is_some_and(|p| p.device == device && p.packet_id == packet_id) => Next::Reply,
+                    _ => Next::Drop,
+                }
             }
-            // The reply to the request that is waiting for it. A reply that arrives late
-            // (the request was given up on) never gets here: an unanswered request loses
-            // the link, and the reader is aborted with it.
-            session.pending.take_if(|p| p.device == device && p.packet_id == packet_id)
         };
-        if let Some(pending) = reply {
-            let _ = pending.reply.send(payload);
+        let read_on = match next {
+            Next::Overtaken => return,
+            Next::Reply => {
+                let mut payload = vec![0; size];
+                if read.read_exact(&mut payload).await.is_err() {
+                    break;
+                }
+                let waiting = {
+                    let mut session = guard(&link.session);
+                    if session.epoch != epoch {
+                        return;
+                    }
+                    session.pending.take_if(|p| p.device == device && p.packet_id == packet_id)
+                };
+                if let Some(pending) = waiting {
+                    let _ = pending.reply.send(Reply::Data(payload));
+                }
+                Ok(())
+            }
+            Next::Ack => match read_ack(&mut read, size, &mut scratch).await {
+                Ok(acked) => {
+                    note_ack(&link, epoch, device, acked);
+                    Ok(())
+                }
+                Err(error) => Err(error),
+            },
+            Next::Drop => discard(&mut read, size, &mut scratch).await,
+        };
+        if read_on.is_err() {
+            break;
+        }
+        // Everything that changes what a waiting rescan sees ends here, after the state is set.
+        if matches!(packet_id, DEVICE_LIST_UPDATED | DETECTION_STARTED | DETECTION_COMPLETE) {
+            link.list_changed.send_modify(|n| *n += 1);
         }
     }
     link.lose(epoch);
 }
 
-async fn read_packet(read: &mut OwnedReadHalf) -> Result<(u32, u32, Vec<u8>), AdapterError> {
-    let mut header = [0; HEADER_LEN];
-    read.read_exact(&mut header).await?;
-    let (device, packet_id, size) = decode_header(&header)?;
-    let mut payload = vec![0; size];
+/// Reads an ACK's payload and returns the id of the packet it acknowledges. A payload of another size
+/// is dropped and acknowledges nothing.
+async fn read_ack(read: &mut OwnedReadHalf, size: usize, scratch: &mut [u8]) -> std::io::Result<Option<u32>> {
+    if size != 8 {
+        discard(read, size, scratch).await?;
+        return Ok(None);
+    }
+    let mut payload = [0_u8; 8];
     read.read_exact(&mut payload).await?;
-    Ok((device, packet_id, payload))
+    Ok(Some(u32::from_le_bytes([payload[0], payload[1], payload[2], payload[3]])))
+}
+
+/// An ACK of packet `acked` for controller `device` arrived.
+fn note_ack(link: &Link, epoch: u64, device: u32, acked: Option<u32>) {
+    let Some(acked) = acked else { return };
+    let refused = {
+        let mut session = guard(&link.session);
+        if session.epoch != epoch {
+            return;
+        }
+        if device == 0 && acked == REQUEST_RESCAN_DEVICES {
+            session.rescan_acks += 1;
+        }
+        let key = (device, acked);
+        let mut last = false;
+        if let Some(owed) = session.owed_acks.get_mut(&key) {
+            *owed = owed.saturating_sub(1);
+            if *owed == 0 {
+                last = true;
+            }
+        }
+        if last {
+            session.owed_acks.remove(&key);
+        }
+        // A reply comes before its ACK. The last ACK owed for a request that is still waiting is its own:
+        // the server took the request and answered nothing.
+        if last { session.pending.take_if(|p| p.device == device && p.packet_id == acked) } else { None }
+    };
+    if let Some(pending) = refused {
+        let _ = pending.reply.send(Reply::Refused);
+    }
+    if device == 0 && acked == REQUEST_RESCAN_DEVICES {
+        link.list_changed.send_modify(|n| *n += 1);
+    }
 }
 
 /// Linear zones with a size range can be resized over the SDK (MSI JARGB headers, for example).

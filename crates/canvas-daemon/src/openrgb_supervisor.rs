@@ -317,7 +317,10 @@ pub enum Detected {
     /// OpenRGB was not asked, or could not be: the list is read as it stands.
     No,
     /// OpenRGB re-detected and its list went quiet; `settled_after` is how long, when known.
-    Yes { settled_after: Option<Duration> },
+    /// `by_events`: OpenRGB said the detection was over itself (103, protocol 6 and later), so a list
+    /// read now, empty or not, is the real one; without it an empty list cannot be told from a
+    /// detection that has found nothing yet.
+    Yes { settled_after: Option<Duration>, by_events: bool },
 }
 
 /// How the detection part of a rescan went.
@@ -369,10 +372,10 @@ async fn detect_on_lane(lane: &canvas_adapters::openrgb::OpenRgbAdapter) -> Dete
 /// A list is read only when it can be trusted. An adapter that cannot re-detect, or OpenRGB
 /// starting no detection, is logged and the list is read as it stands. A detection that is still
 /// running reads nothing and answers with the `held` list: OpenRGB's list is mid-detection and may
-/// be empty. A list that comes back empty while `held` has devices is not applied either: the
-/// OpenRGB adapter never hands one back (an empty list is a detection that has not found its first
-/// controller yet, and it cannot be told from every device gone), and this keeps an adapter that
-/// does from leaving the lights unmanaged. Any other failure keeps PR #289's contract: an error and
+/// be empty. A list that comes back empty while `held` has devices is not applied either, unless
+/// OpenRGB said itself that the detection is over (`by_events`, protocol 6 and later): without that, an
+/// empty list is a detection that has not found its first controller yet and cannot be told from every
+/// device gone, and this keeps the lights managed. With it, an empty list is every device gone. Any other failure keeps PR #289's contract: an error and
 /// the held list alone. With no connection the adapter connects first, so a rescan is also a retry
 /// of the link.
 pub async fn rescan_devices(
@@ -392,7 +395,7 @@ pub async fn rescan_devices(
     }
     if ask && adapter.is_connected() {
         match adapter.rescan().await {
-            Ok(()) => detected = Detected::Yes { settled_after: None },
+            Ok(()) => detected = Detected::Yes { settled_after: None, by_events: false },
             Err(error) => match rescan_miss(&error) {
                 Some(RescanMiss::NotRedetected) => {
                     tracing::info!(error = %error, "OpenRGB did not re-detect; reading the list as it stands");
@@ -413,8 +416,8 @@ pub async fn rescan_devices(
     } else {
         connect_and_prepare(adapter, zone_sizes).await?
     };
-    if let Detected::Yes { settled_after } = detected {
-        if devices.is_empty() && !held.is_empty() {
+    if let Detected::Yes { settled_after, by_events } = detected {
+        if devices.is_empty() && !held.is_empty() && !by_events {
             tracing::warn!(
                 held = held.len(),
                 "OpenRGB re-detected and reports no devices; keeping the list held (an empty list is not told from a detection that has not found its first controller)"
@@ -747,7 +750,10 @@ pub async fn supervise_with_lane<D, L>(
                                 Detection::Unsettled => (Ok(RescanReading { devices: held.clone(), kept_held: true }), false),
                                 other => {
                                     let detected = match other {
-                                        Detection::Redetected(done) => Detected::Yes { settled_after: Some(done.settled_after) },
+                                        Detection::Redetected(done) => Detected::Yes {
+                                            settled_after: Some(done.settled_after),
+                                            by_events: done.by_events,
+                                        },
                                         _ => Detected::No,
                                     };
                                     let ask = lane.is_none();
@@ -1042,7 +1048,7 @@ mod tests {
     #[test]
     fn a_re_detection_logs_what_was_observed() {
         let mut stub = Stub { rescan: || Ok(()), list: vec![device("a"), device("b")], rescans: 0, up: true };
-        let detected = Detected::Yes { settled_after: Some(Duration::from_millis(812)) };
+        let detected = Detected::Yes { settled_after: Some(Duration::from_millis(812)), by_events: false };
         let (result, text) = rescan_logged(&mut stub, &[device("a")], detected, false);
         assert_eq!(result.expect("a reading").devices.len(), 2);
         assert!(text.contains("OpenRGB re-detected: 2 devices, list settled after 812 ms"), "{text}");
@@ -1094,6 +1100,18 @@ mod tests {
         assert!(reading.kept_held, "an empty list from a rescan was applied");
         assert_eq!(reading.devices.len(), 1);
         assert!(text.contains("keeping the list held"), "{text}");
+    }
+
+    /// OpenRGB said the detection is over (103): an empty list is every device gone, and it is applied.
+    #[test]
+    fn an_empty_list_after_a_detection_openrgb_said_is_over_is_applied() {
+        let mut stub = Stub { rescan: || Ok(()), list: Vec::new(), rescans: 0, up: true };
+        let detected = Detected::Yes { settled_after: Some(Duration::from_millis(40)), by_events: true };
+        let (result, text) = rescan_logged(&mut stub, &[device("a")], detected, false);
+        let reading = result.expect("a reading");
+        assert!(!reading.kept_held, "the empty list after 103 was not applied");
+        assert!(reading.devices.is_empty());
+        assert!(text.contains("OpenRGB re-detected: 0 devices"), "{text}");
     }
 
     /// A list that shrank but is not empty, from a rescan that settled, is applied: a device that

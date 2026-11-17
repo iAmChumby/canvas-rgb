@@ -1,12 +1,14 @@
-//! #290: `DeviceAdapter::rescan` asks OpenRGB to look at the hardware again.
+//! #290: `DeviceAdapter::rescan` against an OpenRGB that speaks protocol 5, an older one.
 //!
-//! Packet 140 is client-only and gets no reply, so it goes out as a fire-and-forget write. The
-//! fake server models OpenRGB release_1.1: a protocol 5 client sees the list cleared and then
-//! re-registered as list changes (100) and no 101 or 103, which that release sends only to a
-//! protocol 6 client (`NetworkServer.cpp:4003-4006`, `:3949-3952`), and it drops a packet 140 that
-//! arrives while a detection is already running (`DetectionManager.cpp:1753-1756`). So the adapter
-//! does not guess when detection ends: a list that is changing is never applied, and a list that
-//! has settled (non-empty, quiet) is. Everything runs against the fake OpenRGB server on loopback:
+//! Every server in this file is a fake that negotiates 5 (`v5_server`): the shipped OpenRGB
+//! (release_1.1) speaks 6, and `openrgb_protocol6.rs` is about that. Packet 140 is client-only and
+//! gets no reply, so it goes out as a fire-and-forget write. The fake models what OpenRGB
+//! release_1.1 does to a protocol 5 client: the list is cleared and then re-registered as list
+//! changes (100) and no 101 or 103, which that release sends only to a protocol 6 client
+//! (`NetworkServer.cpp:4003-4006`, `:3949-3952`), and it drops a packet 140 that
+//! arrives while a detection is already running (`DetectionManager.cpp:1753-1756`). So on this
+//! protocol the adapter does not guess when detection ends: a list that is changing is never
+//! applied, and a list that has settled (non-empty, quiet) is. Everything runs against the fake OpenRGB server on loopback:
 //! no real hardware. Each wait is on state the assert reads; the long limit only ends a test that
 //! would hang.
 
@@ -14,12 +16,18 @@ use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::{rescan_miss, OpenRgbAdapter, RescanMiss, RescanTiming};
 use canvas_proto::{AdapterError, DeviceAdapter, DeviceId, DeviceInfo, DeviceKind, Rgb8, ZoneInfo, ZoneKind};
 use std::time::Duration;
-use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 /// Short windows so the tests run in a second or two. The fake's gap between two controllers
 /// registering is 10 ms by default, far inside `settle`.
 fn quick() -> RescanTiming {
     RescanTiming { first: Duration::from_millis(500), settle: Duration::from_millis(250), cap: Duration::from_secs(3) }
+}
+
+/// A fake OpenRGB that negotiates protocol 5.
+async fn v5_server(devices: Vec<DeviceInfo>) -> FakeOpenRgbServer {
+    let server = FakeOpenRgbServer::start(devices).await.expect("fake server");
+    server.server_protocol_version(5);
+    server
 }
 
 fn adapter(server: &FakeOpenRgbServer) -> OpenRgbAdapter {
@@ -65,7 +73,7 @@ async fn until(what: &str, mut ready: impl FnMut() -> bool) {
 /// server never sends, hit the 5 s timeout and drop the link; `send()` leaves it usable.
 #[tokio::test]
 async fn a_rescan_sends_packet_140_and_keeps_the_link_up() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
     adapter.discover().await.expect("first discover");
@@ -84,7 +92,7 @@ async fn a_rescan_sends_packet_140_and_keeps_the_link_up() {
 /// discover after the rescan makes OpenRGB re-detect it.
 #[tokio::test]
 async fn a_device_revealed_by_detection_is_found_by_the_next_discover() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.add_hidden_device(stick("two"));
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
@@ -103,7 +111,7 @@ async fn a_device_revealed_by_detection_is_found_by_the_next_discover() {
 /// burst out: ending on the first change would read the list while it is empty.
 #[tokio::test]
 async fn a_rescan_waits_out_the_burst_of_list_changes_and_the_list_is_whole() {
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one"), stick("two"), stick("three")]).await;
     // The list is empty for 120 ms, then a controller registers every 40 ms.
     server.rescan_timing(Duration::from_millis(120), Duration::from_millis(40));
     let mut adapter = adapter(&server);
@@ -121,47 +129,11 @@ async fn a_rescan_waits_out_the_burst_of_list_changes_and_the_list_is_whole() {
     assert_eq!(after.len(), 3, "the list was read while detection was still re-registering controllers");
 }
 
-/// A protocol 5 client sees no 101 and no 103 (release_1.1 sends them to protocol 6 and later
-/// only); a protocol 6 client sees 101 first and 103 last. The fake is what the rescan wait is
-/// proven against, so it has to say what the real server says.
-#[tokio::test]
-async fn the_fake_sends_detection_started_and_completed_only_to_protocol_6() {
-    async fn broadcast_ids(server: &FakeOpenRgbServer, version: u32) -> Vec<u32> {
-        let mut stream = tokio::net::TcpStream::connect(("127.0.0.1", server.port())).await.expect("connect");
-        let packet = |device: u32, id: u32, payload: &[u8]| {
-            let mut bytes = b"ORGB".to_vec();
-            for word in [device, id, payload.len() as u32] {
-                bytes.extend_from_slice(&word.to_le_bytes());
-            }
-            bytes.extend_from_slice(payload);
-            bytes
-        };
-        stream.write_all(&packet(0, 40, &version.to_le_bytes())).await.expect("handshake");
-        let mut header = [0_u8; 16];
-        stream.read_exact(&mut header).await.expect("the handshake reply");
-        let mut version_payload = [0_u8; 4];
-        stream.read_exact(&mut version_payload).await.expect("the handshake reply's version");
-        stream.write_all(&packet(0, 140, &[])).await.expect("rescan");
-        let mut ids = Vec::new();
-        // Read until the stream has been quiet for a while: the whole detection.
-        while let Ok(Ok(_)) = tokio::time::timeout(Duration::from_millis(400), stream.read_exact(&mut header)).await {
-            ids.push(u32::from_le_bytes([header[8], header[9], header[10], header[11]]));
-        }
-        ids
-    }
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
-    server.server_protocol_version(6);
-    let v5 = broadcast_ids(&server, 5).await;
-    assert_eq!(v5, [100, 100, 100], "a protocol 5 client: the list cleared, then one change per controller");
-    let v6 = broadcast_ids(&server, 6).await;
-    assert_eq!(v6, [101, 100, 100, 100, 103], "a protocol 6 client also gets 101 first and 103 last");
-}
-
 /// OpenRGB with detection off answers packet 140 with nothing: no list change follows. The rescan
 /// says so after the first window, and the list was not touched.
 #[tokio::test]
 async fn no_list_change_after_packet_140_means_detection_did_not_start() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.disable_detection(true);
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
@@ -181,7 +153,7 @@ async fn no_list_change_after_packet_140_means_detection_did_not_start() {
 /// read with the list it holds: an empty list is never the answer while the list is changing.
 #[tokio::test]
 async fn a_detection_that_never_settles_is_reported_at_the_cap_with_the_link_up() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.hold_detection(true);
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
@@ -203,7 +175,7 @@ async fn a_detection_that_never_settles_is_reported_at_the_cap_with_the_link_up(
 /// again sit in their built-in mode, so the next frame to each sends SET_CUSTOM_MODE first.
 #[tokio::test]
 async fn a_rescan_that_re_detected_makes_the_next_frame_set_the_custom_mode_again() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
     adapter.discover().await.expect("discover");
@@ -221,7 +193,7 @@ async fn a_rescan_that_re_detected_makes_the_next_frame_set_the_custom_mode_agai
 /// custom-mode cache alone: no frame sets the mode again for no reason.
 #[tokio::test]
 async fn a_rescan_that_re_detected_nothing_leaves_the_custom_mode_cache_alone() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.disable_detection(true);
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
@@ -240,7 +212,7 @@ async fn a_rescan_that_re_detected_nothing_leaves_the_custom_mode_cache_alone() 
 /// and nothing is written to the wire.
 #[tokio::test]
 async fn a_protocol_4_server_is_refused_no_rescan_packet() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.server_protocol_version(4);
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
@@ -255,7 +227,7 @@ async fn a_protocol_4_server_is_refused_no_rescan_packet() {
 /// waiting. The request must fail on its own timeout and drop the link, not be answered early.
 #[tokio::test]
 async fn a_detection_packet_is_not_taken_for_a_reply() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
     adapter.discover().await.expect("first discover fills the controller cache");
@@ -294,7 +266,7 @@ async fn a_detection_packet_is_not_taken_for_a_reply() {
 /// clear and the new device 400 ms after it.
 #[tokio::test]
 async fn a_rescan_at_the_production_windows_returns_the_whole_new_list() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.add_hidden_device(stick("two"));
     server.rescan_timing(Duration::from_millis(2500), Duration::from_millis(400));
     let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port());
@@ -318,7 +290,7 @@ async fn a_rescan_at_the_production_windows_returns_the_whole_new_list() {
 /// registered again, however long the list stays empty after the clear.
 #[tokio::test]
 async fn the_quiet_window_does_not_start_while_the_list_is_still_empty_after_the_clear() {
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one"), stick("two")]).await;
     // The list is empty for 1.2 s (four quiet windows), then each controller registers 100 ms on.
     server.rescan_timing(Duration::from_millis(1200), Duration::from_millis(100));
     let mut adapter = adapter(&server);
@@ -335,7 +307,7 @@ async fn the_quiet_window_does_not_start_while_the_list_is_still_empty_after_the
 /// list is what a detection that has not found its first controller yet looks like.
 #[tokio::test]
 async fn a_list_that_stays_empty_after_the_clear_is_unsettled_at_the_cap() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     // The first controller would register 20 s after the clear: past the 3 s cap.
     server.rescan_timing(Duration::from_secs(20), Duration::from_millis(10));
     let mut adapter = adapter(&server);
@@ -355,7 +327,7 @@ async fn a_list_that_stays_empty_after_the_clear_is_unsettled_at_the_cap() {
 /// device.
 #[tokio::test]
 async fn no_frame_is_written_and_the_held_list_stays_while_openrgbs_list_is_changing() {
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one"), stick("two")]).await;
     server.hold_detection(true);
     let quick = RescanTiming { first: Duration::from_millis(300), settle: Duration::from_millis(200), cap: Duration::from_millis(600) };
     let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(quick);
@@ -385,7 +357,7 @@ async fn no_frame_is_written_and_the_held_list_stays_while_openrgbs_list_is_chan
 /// was gone from the daemon.
 #[tokio::test]
 async fn an_ignored_packet_140_during_a_running_detection_keeps_the_held_list_when_the_list_is_empty() {
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one"), stick("two")]).await;
     // The detection is in its first minute: the list is empty and stays so.
     server.rescan_timing(Duration::from_secs(60), Duration::from_millis(10));
     let mut adapter = adapter(&server);
@@ -407,7 +379,7 @@ async fn an_ignored_packet_140_during_a_running_detection_keeps_the_held_list_wh
 /// is no cap on the hold.
 #[tokio::test]
 async fn a_detection_longer_than_the_wait_is_applied_when_it_settles() {
-    let server = FakeOpenRgbServer::start(vec![stick("one")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one")]).await;
     server.add_hidden_device(stick("two"));
     // The list is empty for 1.5 s: well past the 1 s the call waits.
     server.rescan_timing(Duration::from_millis(1500), Duration::from_millis(50));
@@ -446,7 +418,7 @@ async fn two_identical_sticks_that_register_in_the_other_order_never_get_each_ot
     fn twin(serial: &str) -> DeviceInfo {
         DeviceInfo { name: "DDR5 stick".into(), ..stick(serial) }
     }
-    let server = FakeOpenRgbServer::start(vec![twin("a"), twin("b")]).await.expect("fake server");
+    let server = v5_server(vec![twin("a"), twin("b")]).await;
     // Each stick registers again 100 ms after the one before: inside the 250 ms settle window.
     server.rescan_timing(Duration::from_millis(100), Duration::from_millis(100));
     server.rescan_order(vec![1, 0]);
@@ -491,7 +463,7 @@ async fn two_identical_sticks_that_register_in_the_other_order_never_get_each_ot
 /// between two rescans is gone, and the frames must not go on to its old index.
 #[tokio::test]
 async fn a_settled_shorter_list_replaces_the_one_frames_are_written_to() {
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one"), stick("two")]).await;
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
     assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
@@ -511,7 +483,7 @@ async fn a_settled_shorter_list_replaces_the_one_frames_are_written_to() {
 /// after it lands.
 #[tokio::test]
 async fn frames_resume_with_the_custom_mode_set_again_once_the_list_has_settled() {
-    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    let server = v5_server(vec![stick("one"), stick("two")]).await;
     // The list is empty for 300 ms, then a controller registers every 100 ms (inside the 250 ms
     // settle window).
     server.rescan_timing(Duration::from_millis(300), Duration::from_millis(100));
