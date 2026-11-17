@@ -131,6 +131,11 @@ export function Rail({ pathname }: { pathname: string }) {
       });
       link.style.setProperty("--tip-x", `${at.left}px`);
       link.style.setProperty("--tip-y", `${at.top}px`);
+      // #478: mark the label as placed only now. The CSS shows the ::after label on hover/focus
+      // only with this mark, so the fixed label is invisible at the window-corner fallback
+      // (`left: var(--tip-x, 0px)`) until its window coordinates are written. Both happen in this
+      // one task, so no painted frame shows the unplaced corner position.
+      link.dataset.tipPlaced = "true";
     };
     const showTip = new Map<HTMLElement, () => void>();
     for (const el of links) {
