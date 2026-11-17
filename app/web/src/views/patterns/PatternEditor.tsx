@@ -7,20 +7,29 @@
 // with its own epoch and a rising sequence, renews it on the heartbeat, and deletes it when the
 // editor goes away, which puts the active scene back. The editor never saves by itself: `onSave`
 // hands the whole document up, with every field it does not know still in it.
+//
+// The editor guards its page (#474), on a page of its own and in the effects view's panel alike:
+// strokes that are not saved are never dropped without asking, on the Cancel key, on a rail link,
+// on the panel's Back key on a phone, on the browser's Back and on a closed window. The prompt is
+// the stack builder's own, with the same words.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { LedOrderControl } from "@/components/LedOrderControl";
+import { LeavePrompt } from "@/components/LeavePrompt";
 import { ShapePicker, type Shape } from "@/components/ShapePicker";
+import { useFocusTrap } from "@/components/useFocusTrap";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
 import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
 import { isStill, timelineOf } from "@/lib/patternPlay";
 import { spinOf } from "@/lib/spin";
 import { refreshLights, useSnap } from "@/lib/store";
+import { cameFromApp, useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
 import { DotCanvas } from "@/views/patterns/DotCanvas";
 import { FrameStrip } from "@/views/patterns/FrameStrip";
 import { GradientStops } from "@/views/patterns/GradientStops";
@@ -31,12 +40,17 @@ import { usePatternEditor } from "@/views/patterns/usePatternEditor";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
 
+/** The `history.state` key of the editor's guard entry; `PATTERN_ENTRY_SPENT` marks one the editor left. */
+export const PATTERN_GUARD = "canvasRgbPatternGuard";
+export const PATTERN_ENTRY_SPENT = "spent";
 /** `PATTERN_ID_PREFIX` from the spine. */
 const PATTERN_ID_PREFIX = "pattern:";
 /** `DRAFT_HEARTBEAT` from the spine, for a daemon that has not answered yet. */
 const HEARTBEAT_MS = 5_000;
 /** Said when another window has taken the lights: this editor's strokes are not on them. */
 const SUPERSEDED = "another window has the lights now; this editor's strokes are not on them";
+/** What Tab reaches inside the prompt, in document order. */
+const FOCUSABLE = 'button:not([disabled]), [href], input:not([disabled]), select:not([disabled])';
 
 export function PatternEditor({
   pattern,
@@ -64,6 +78,18 @@ export function PatternEditor({
   const [saveProblem, setSaveProblem] = useState<string | null>(null);
   /** How many answers in a row said this editor's stroke is not on the lights. */
   const notApplied = useRef(0);
+  /** A save is in flight. */
+  const [saving, setSaving] = useState(false);
+  /** Why the prompt is open: the Cancel key, an in-app page change, or the browser's Back. */
+  const [leaving, setLeaving] = useState<LeaveReason | false>(false);
+  /** A Save that will leave the editor: the guard's entry stays while it lands. */
+  const pendingLeave = useRef(false);
+  /** True when this editor was opened from another page of the app: a Back past the guard's entry
+   *  and the editor's own lands there. A direct load has no page behind it. */
+  const openedInApp = useRef(cameFromApp());
+  const promptRef = useRef<HTMLDivElement | null>(null);
+  /** The control the prompt opened from: focus goes back there when it closes. */
+  const opener = useRef<HTMLElement | null>(null);
 
   /** Puts a stroke on the lights: the page's epoch and the next sequence. */
   const send = useCallback(
@@ -222,23 +248,128 @@ export function PatternEditor({
   const line = saveProblem ?? shapeProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
   const failed = saveProblem !== null || shapeProblem !== null || problem !== null;
 
+  // The guard: the shell asks it before it changes page, the browser's Back lands on an entry
+  // of the editor's own, and the browser is warned when the window closes. The editor asks
+  // wherever it stands: on its own page and in the effects view's panel alike.
+  const { allowBack, dropSentinel } = useLeaveGuard({
+    dirty: editor.dirty,
+    sentinel: PATTERN_GUARD,
+    onAsk: (reason) => setLeaving(reason),
+    isLeaving: () => pendingLeave.current,
+    strictEntry: true,
+  });
+
   /**
    * Hands the document up and clears the unsaved mark only once the save lands: a save that fails
    * says why in the row the editor's other notes use, and leaves the strokes and the mark as they
-   * are, so nothing painted is lost and Save can be pressed again.
+   * are, so nothing painted is lost and Save can be pressed again. `then` runs after a save that
+   * landed: the prompt's Save carries the leave out.
    */
-  const save = async () => {
+  const save = async (then?: () => void) => {
     if (!onSave) return;
+    setSaving(true);
+    let landed = false;
     try {
       await onSave(editor.pattern);
       setSaveProblem(null);
       editor.markSaved();
+      landed = true;
     } catch (error) {
+      // The save failed, so the editor is not leaving after all.
+      pendingLeave.current = false;
       setSaveProblem(messageOf(error));
     }
+    setSaving(false);
+    if (landed) then?.();
   };
 
+  /**
+   * Carries out the leave the prompt was asked about, as it was asked: a Back the guard caught is
+   * not the same leave as the Cancel key pressed afterwards.
+   *
+   * The guard's entry is a copy of the editor's on top of it. A leave takes it back first, then
+   * closes or navigates from the editor's own entry:
+   *   - a rail link's page change is a push, which drops the copy;
+   *   - a Cancel, or a Back with no page of the app behind, replaces the editor's entry with the
+   *     effects page, and the copy stays ahead of it (a browser cannot delete a forward entry);
+   *   - a Back with a page behind goes to that page, and both entries stay ahead of it: the copy,
+   *     and the editor's own, which is marked on the way past.
+   * Both leftovers carry the guard's state key, and `PatternEditorPage` opens no editor for an
+   * entry that has it: a Forward onto one lands on the effects page.
+   */
+  const goAfterLeave = (reason: LeaveReason) => {
+    pendingLeave.current = true;
+    allowBack();
+    if (reason === "back" && openedInApp.current) {
+      // Back goes past the guard's entry and past the page itself, one page in all. The editor's
+      // own entry stays ahead of the page the person lands on, so it is marked spent on the way.
+      dropSentinel(() => {
+        window.history.replaceState(
+          { ...(window.history.state ?? {}), [PATTERN_GUARD]: PATTERN_ENTRY_SPENT },
+          "",
+          window.location.href,
+        );
+        window.history.back();
+      });
+      return;
+    }
+    // A rail link the shell held is the page change that goes now. A Back with no page of the
+    // app behind the editor closes onto the page the Cancel key goes to, not out of the document.
+    if (reason !== "back" && hasPendingNavigation()) {
+      dropSentinel(continueNavigation);
+      return;
+    }
+    dropSentinel(() => onCancel?.());
+  };
+
+  /** Keep editing: the prompt closes, the held page change is dropped, and the strokes stay. */
+  const keepEditing = useCallback(() => {
+    setLeaving(false);
+    cancelNavigation();
+  }, []);
+
+  /** Discard: the strokes go, and the leave happens. */
+  const discardLeave = () => {
+    const reason = leaving || "close";
+    setLeaving(false);
+    goAfterLeave(reason);
+  };
+
+  /** Save: the pattern is saved, and the leave happens once the save has landed. */
+  const saveLeave = () => {
+    const reason = leaving || "close";
+    setLeaving(false);
+    pendingLeave.current = true;
+    void save(() => goAfterLeave(reason));
+  };
+
+  /** The Cancel key: with strokes to lose, it asks first. */
+  const cancel = () => {
+    if (editor.dirty) {
+      setLeaving("close");
+      return;
+    }
+    onCancel?.();
+  };
+
+  // The prompt takes focus when it opens, keeps Tab inside it, and gives the focus back when it
+  // closes.
+  useEffect(() => {
+    if (leaving) {
+      const active = document.activeElement;
+      opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+      promptRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
+      return;
+    }
+    const back = opener.current;
+    opener.current = null;
+    if (back?.isConnected) back.focus();
+  }, [leaving]);
+
+  useFocusTrap({ panelRef: promptRef, onEscape: keepEditing, capture: false, enabled: leaving !== false });
+
   return (
+    <>
     <section className={s.editor} aria-label={`${name}, a pattern`}>
       <header className={s.head}>
         <div className={s.who}>
@@ -264,13 +395,14 @@ export function PatternEditor({
         </div>
         <div className={s.headKeys}>
           {onCancel && (
-            <Button variant="ghost" icon={<X size={14} weight="bold" aria-hidden="true" />} onClick={onCancel}>
+            <Button variant="ghost" icon={<X size={14} weight="bold" aria-hidden="true" />} onClick={cancel}>
               Cancel
             </Button>
           )}
           {onSave && (
             <Button
               variant="primary"
+              busy={saving}
               icon={<FloppyDisk size={14} weight="bold" aria-hidden="true" />}
               onClick={() => void save()}
             >
@@ -367,6 +499,18 @@ export function PatternEditor({
         onRemoveStop={() => editor.gradient && editor.removeStop(editor.gradient.selected)}
       />
     </section>
+
+    {leaving && (
+      <LeavePrompt
+        promptRef={promptRef}
+        saveState={saving ? "saving" : "idle"}
+        subject="pattern"
+        onKeepEditing={keepEditing}
+        onDiscard={discardLeave}
+        onSave={saveLeave}
+      />
+    )}
+    </>
   );
 }
 

@@ -12,14 +12,12 @@ import {
   cancelNavigation,
   continueNavigation,
   hasPendingNavigation,
-  setNavigationGuard,
 } from "@/lib/navigationGuard";
+import { useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
 import { refreshAll } from "@/lib/store";
 import { layersForServer, stackNameProblem } from "@/views/effects/stackDraft";
 import { nameOf } from "@/views/effects/layerText";
 import type { Stack } from "@/proto/Stack";
-
-type LeaveReason = "back" | "navigation" | "close";
 
 const FOCUSABLE =
   'button:not([disabled]), [href], input:not([disabled]), select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
@@ -93,32 +91,11 @@ export function useSaveAndLeave({
   const pendingCode = useRef(false);
   /** A Save or Discard that will leave the builder: the guard entry is not popped separately. */
   const pendingLeave = useRef(false);
-  const allowBack = useRef(false);
-  const sentinelPushed = useRef(false);
   /** True when this builder was opened from another page, so there are two entries behind the
    *  prompt's own sentinel: the page and the guard. A direct load has none. */
   const openedInApp = useRef(
     typeof window !== "undefined" && window.history.state?.canvasRgbStack !== undefined,
   );
-
-  /** A direct load has no page behind the builder, and a save or a discard leaves the guard entry
-   *  on top of the builder's own. Land on that entry and rewrite it, so no entry the browser can
-   *  reach reopens the builder (D95.5.8). */
-  const closeDirect = () => {
-    pendingLeave.current = true;
-    allowBack.current = true;
-    if (!sentinelPushed.current) {
-      onClose();
-      return;
-    }
-    sentinelPushed.current = false;
-    const done = () => {
-      window.removeEventListener("popstate", done);
-      onClose();
-    };
-    window.addEventListener("popstate", done);
-    window.history.go(-1);
-  };
 
   /** The guard entry is a copy of the builder's. When the builder was saved under a new name, the
    *  entry behind it still reads the `new` sentinel: land on it and rewrite its URL (D95.5.1). */
@@ -137,12 +114,31 @@ export function useSaveAndLeave({
     window.history.back();
   };
 
+  // The guard itself: the shell asks it before it changes page, the browser's Back lands on an
+  // entry of the builder's own, and the browser is warned when the window closes (#474).
+  const { allowBack, dropSentinel } = useLeaveGuard({
+    dirty,
+    sentinel: "canvasRgbStackGuard",
+    onAsk: (reason) => setLeaving(reason),
+    onDrop: dropGuardEntry,
+    isLeaving: () => pendingLeave.current,
+  });
+
+  /** A direct load has no page behind the builder, and a save or a discard leaves the guard entry
+   *  on top of the builder's own. Land on that entry and rewrite it, so no entry the browser can
+   *  reach reopens the builder (D95.5.8). */
+  const closeDirect = () => {
+    pendingLeave.current = true;
+    allowBack();
+    dropSentinel(onClose);
+  };
+
   /** Carries out the way out the prompt was asked about, as it was asked: a Back the guard
    *  caught is not the same leave as the close key pressed afterwards. */
   const goAfterLeave = (reason: LeaveReason) => {
     pendingName.current = null;
     if (reason === "back") {
-      allowBack.current = true;
+      allowBack();
       pendingLeave.current = true;
       // Back goes past the guard entry and past the builder, one page in all. A direct load
       // has no page behind it, so the builder closes onto the effects page instead.
@@ -154,8 +150,8 @@ export function useSaveAndLeave({
       continueNavigation();
       return;
     }
-    if (sentinelPushed.current) closeDirect();
-    else onClose();
+    // The guard's own entry is on top of the builder's: land on the builder's entry and close.
+    closeDirect();
     if (pendingCode.current) {
       pendingCode.current = false;
       onWriteCode?.();
@@ -428,65 +424,11 @@ export function useSaveAndLeave({
     void save(() => goAfterLeave(reason));
   };
 
+  // The name of a saved stack is the entry the guard lands on: it is cleared once the guard's
+  // own entry has been taken back, which the guard's effect does before this one runs.
   useEffect(() => {
-    if (!dirty) {
-      setNavigationGuard(null);
-      if (sentinelPushed.current) {
-        sentinelPushed.current = false;
-        // A leave that is under way navigates itself; popping the guard first would move
-        // history one extra time.
-        if (!pendingLeave.current) dropGuardEntry();
-      }
-      pendingName.current = null;
-      return;
-    }
-    setNavigationGuard(() => {
-      setLeaving("navigation");
-      return false;
-    });
-    const onPop = () => {
-      if (allowBack.current) return;
-      window.history.pushState(
-        { ...(window.history.state ?? {}), canvasRgbStackGuard: true },
-        "",
-        window.location.href,
-      );
-      sentinelPushed.current = true;
-      setLeaving("back");
-    };
-    window.history.pushState(
-      { ...(window.history.state ?? {}), canvasRgbStackGuard: true },
-      "",
-      window.location.href,
-    );
-    sentinelPushed.current = true;
-    window.addEventListener("popstate", onPop);
-    return () => {
-      window.removeEventListener("popstate", onPop);
-      setNavigationGuard(null);
-    };
-    // The guard's own history and the leave helpers read refs and props; only a change to
-    // `dirty` registers or drops it.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+    if (!dirty) pendingName.current = null;
   }, [dirty]);
-
-  useEffect(() => {
-    if (!dirty) return;
-    const warn = (event: BeforeUnloadEvent) => {
-      event.preventDefault();
-      event.returnValue = "";
-    };
-    window.addEventListener("beforeunload", warn);
-    return () => window.removeEventListener("beforeunload", warn);
-  }, [dirty]);
-
-  useEffect(
-    () => () => {
-      setNavigationGuard(null);
-      cancelNavigation();
-    },
-    [],
-  );
 
   return {
     save,

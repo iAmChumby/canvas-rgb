@@ -17,10 +17,10 @@
 // itself at most once, ever. A window opened from the tray (a new webview, a new launch) finds
 // the header already answered and stays shut.
 //
-// A header that already has a size is never offered by itself: the flow's first step is finding
-// how long the header is, and a header the app has already sized does not need that. Those
-// headers are reached from the device row, from the notice for a new light, or from the panel
-// that stands on every page.
+// Every header with no chain record is offered by itself, sized or not. A saved size without a
+// record is unverified: the daemon may have re-applied it at start-up, so the flow still has to ask
+// what devices are on the header (#380, #470). A header that has a record (set up or empty) was
+// already answered and is never offered again: #380's "ask once" rule still holds for those.
 //
 // Escape leaves the header the flow is on. Leaving a header unfinished is the same as Later: the
 // owner said "not now".
@@ -51,8 +51,10 @@ function idOf(chain: ChainView): string {
 }
 
 /**
- * The headers a visit may show: the ones it has not shown yet and that are not set up, and that
- * the owner asked for (or that the app may offer by itself).
+ * The headers a visit may show: ones with no chain record that it has not shown yet, and that the
+ * owner asked for (or that the app may offer by itself). A header with a record (set up or empty)
+ * was already answered and is never offered again; a size on its own is not a record, so a sized
+ * header with no record is still offered (#380, #470).
  *
  * The header on screen is among them: it is not in `shownBefore` until the visit leaves it.
  *
@@ -70,15 +72,17 @@ function offerableFor(
   if (!status?.onboarding_complete || chainLaterThisLaunch()) return [];
   if (!chains) return [];
   return chains.filter((chain) => {
+    // A header with a record (set up or empty) was already answered: never offer it again (#380).
     if (chain.state !== "not_set_up") return false;
     if (shownBefore.includes(idOf(chain))) return false;
     // The header the owner named: that one, and nothing else.
     if (wanted !== null) return idOf(chain) === wanted;
     // The owner asked for the headers: every one that is not set up.
     if (asked) return true;
-    // The app offers a header by itself: only one it has not sized (the flow's first step
-    // is finding the length) and only one it has never offered.
-    return chain.leds === 0 && !offered.has(idOf(chain));
+    // The app offers a header by itself: every header with no record, sized or not, that it has
+    // never offered. A size without a record is unverified (a saved size re-applied at start-up),
+    // so the flow still has to ask what devices are on the header (#470).
+    return !offered.has(idOf(chain));
   });
 }
 

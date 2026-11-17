@@ -48,6 +48,7 @@ import { getSnap, refreshAll, retryEffects, useSnap } from "@/lib/store";
 import { PageActions, PageTitle } from "@/shell/PageHeader";
 import { Popover } from "@/components/Popover";
 import { fillDefaults, nextFreeName } from "@/lib/presetMatch";
+import { requestNavigation } from "@/lib/navigationGuard";
 import { stackLayerNames } from "@/lib/stackLayers";
 import { kindWords } from "@/lib/patternFit";
 import { appliedName, runningOf, setApplied, setShown } from "@/lib/runningPreset";
@@ -1569,8 +1570,9 @@ export function EffectsView() {
                   label="Back to the effects"
                   icon={<CaretLeft size={18} />}
                   onClick={() => {
-                    // A pattern page has its own keys: Back leaves it the way its Cancel does.
-                    if (patternStep) setPatternStep(null);
+                    // The pattern panel asks before its unsaved strokes are dropped, as a rail link does:
+                    // the editor registers a guard while it has strokes, and this goes through it.
+                    if (patternStep) requestNavigation(() => setPatternStep(null));
                     // The editor asks before unsaved work is left (D2.2).
                     else if (editing) editorRef.current?.requestLeave();
                     else if (newOpen) setNewOpen(false);

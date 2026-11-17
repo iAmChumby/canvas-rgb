@@ -85,6 +85,23 @@ fn board(first: u32) -> DeviceInfo {
     }
 }
 
+/// A board with four resizable ARGB headers, for the #470 walk of every path the UI offers.
+fn board_four() -> DeviceInfo {
+    let names = ["JAF", "JARGB 1", "JARGB 2", "JARGB 3"];
+    DeviceInfo {
+        id: DeviceId(BOARD.into()),
+        name: "MSI MPG B850 Mystic Light".into(),
+        vendor: "Fake".into(),
+        kind: DeviceKind::Motherboard,
+        adapter: "openrgb".into(),
+        adapter_index: 0,
+        serial: "mb".into(),
+        location: "usb".into(),
+        zones: names.iter().enumerate().map(|(i, name)| header(i as u32, name, 8)).collect(),
+        connected: true,
+    }
+}
+
 /// A second device that is not resizable, so it is not a chain.
 fn ram() -> DeviceInfo {
     DeviceInfo {
@@ -135,6 +152,16 @@ fn rig_lights() -> LightsFile {
     LightsFile {
         schema_version: LIGHTS_SCHEMA,
         lights: vec![whole_zone(BOARD, 0), whole_zone(BOARD, 1), whole_zone(RAM, 0)],
+        chains: Vec::new(),
+    }
+}
+
+/// The hardware map of the four-header board: a whole-zone light per header, no chain record. This
+/// is what first run and an OpenRGB size outside the flow leave behind (the "8 LEDs" state).
+fn four_lights() -> LightsFile {
+    LightsFile {
+        schema_version: LIGHTS_SCHEMA,
+        lights: (0..4).map(|zone| whole_zone(BOARD, zone)).collect(),
         chains: Vec::new(),
     }
 }
@@ -210,6 +237,25 @@ async fn rig(name: &str, server: FakeOpenRgbServer, saved: bool) -> Rig {
         };
         store.save_zones().expect("zones.json");
     }
+    build_rig(home, store, server).await
+}
+
+/// A four-header rig with all four headers saved at 8 LEDs, as OpenRGB left them.
+async fn rig_four(name: &str) -> Rig {
+    let home = temp_home(name);
+    let mut store = Store::at(&home);
+    store.config.first_run_done = true;
+    store.lights = four_lights();
+    store.scenes = rig_scenes(&store.lights.lights);
+    store.zones = ZonesFile {
+        schema_version: canvas_proto::config::ZONES_SCHEMA,
+        sizes: std::collections::BTreeMap::from([(
+            BOARD.to_string(),
+            (0..4).map(|zone| (zone, 8)).collect(),
+        )]),
+    };
+    store.save_zones().expect("zones.json");
+    let server = FakeOpenRgbServer::start(vec![board_four(), ram()]).await.expect("fake server");
     build_rig(home, store, server).await
 }
 
@@ -436,6 +482,99 @@ async fn list_marks_a_first_run_sized_header_as_not_set_up() {
         answer.chains.iter().all(|chain| chain.device_id.0 != RAM),
         "a zone that cannot be resized is not a chain"
     );
+}
+
+/// #470: walk every path the UI offers on a four-header board. The used header is answered with
+/// parts (a fan and a strip); the other three are marked empty. `order` is the order the owner
+/// answers them in, so the used header can be first or last. Each empty header is cancelled and
+/// resumed once, as "Later" then "Set up" does. A completed flow always leaves one chain record
+/// per header touched; only a cancel leaves none.
+async fn walk_every_header(name: &str, order: &[u32]) {
+    let rig = rig_four(name).await;
+    assert!(connected(&rig).await, "the daemon never applied a device list");
+    let used = 1;
+    for &zone in order {
+        if zone == used {
+            let parts = vec![
+                SetupPart {
+                    name: "Fan".into(),
+                    kind: ChainPartKind::Fan,
+                    leds: 8,
+                    copies: None,
+                },
+                SetupPart {
+                    name: "Strip".into(),
+                    kind: ChainPartKind::Strip,
+                    leds: 8,
+                    copies: None,
+                },
+            ];
+            let setup = started(&rig, zone).await;
+            assert!(
+                wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, zone) == Some(300)).await,
+                "the header was never raised"
+            );
+            let answer = committed(&rig, zone, &setup.session, &parts).await;
+            assert_eq!(answer.final_leds, 16);
+            assert_eq!(
+                chain_state(&rig, zone).await,
+                Some(ChainState::SetUp),
+                "the used header is set up with its parts"
+            );
+        } else {
+            // Cancel, then resume: neither a cancel nor a timeout writes a record, only the
+            // completed empty call does.
+            let first = started(&rig, zone).await;
+            let (status, _) = cancel(&rig, zone, &first.session).await;
+            assert_eq!(status, StatusCode::OK);
+            assert_eq!(chain_state(&rig, zone).await, None, "a cancelled setup writes no record");
+            let setup = started(&rig, zone).await;
+            let body = SetupEmpty { session: setup.session };
+            let (status, body) = send(
+                &rig,
+                "POST",
+                &empty_path(zone),
+                Some(&serde_json::to_string(&body).unwrap()),
+            )
+            .await;
+            assert_eq!(status, StatusCode::OK, "{body}");
+            assert_eq!(
+                chain_state(&rig, zone).await,
+                Some(ChainState::Empty),
+                "an emptied header has a record"
+            );
+        }
+        let answered = order.iter().position(|z| *z == zone).unwrap() + 1;
+        let records = { rig.app.store.read().await.lights.chains.len() };
+        assert_eq!(records, answered, "one record per header answered so far");
+        assert_eq!(
+            chain_state(&rig, used).await.is_some(),
+            order.iter().take(answered).any(|z| *z == used),
+            "the used header's record appears exactly when it is answered"
+        );
+    }
+
+    let answer = chains(&rig).await;
+    assert_eq!(answer.chains.len(), 4, "one view per resizable header");
+    for &zone in order {
+        let view = answer.chains.iter().find(|chain| chain.zone_index == zone).expect("a header view");
+        let expected = if zone == used { ChainSetupState::SetUp } else { ChainSetupState::Empty };
+        assert_eq!(view.state, expected, "zone {zone}");
+        if zone == used {
+            assert_eq!(view.leds, 16, "the used header ends at its parts' sum");
+            assert_eq!(view.parts.len(), 2, "the used header keeps its fan and strip parts");
+        }
+    }
+}
+
+#[tokio::test]
+async fn every_completed_flow_writes_one_record_per_header_when_the_used_header_is_first() {
+    walk_every_header("four-used-first", &[1, 0, 2, 3]).await;
+}
+
+#[tokio::test]
+async fn every_completed_flow_writes_one_record_per_header_when_the_used_header_is_last() {
+    walk_every_header("four-used-last", &[0, 2, 3, 1]).await;
 }
 
 /// Start writes the earlier length to `chain-restore.json` before the raise lands, raises the

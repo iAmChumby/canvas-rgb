@@ -3,9 +3,10 @@
 // The takeover is the part that offers a header by itself. What is checked here: a header is
 // offered at most once, ever; "Later", the close key and Escape are remembered per header, so a
 // window opened from the tray (a new webview, and so a new launch) does not offer it again; a
-// header that already has a size is never offered by itself; "Later" puts off every header the
-// visit has not shown yet; and a request is spent by the visit that serves it, so the setup does
-// not open by itself on a later visit.
+// header with a record (set up or empty) is never offered again, while a size without a record is
+// unverified and is offered; "Later" puts off every header the visit has not shown yet; and a
+// request is spent by the visit that serves it, so the setup does not open by itself on a later
+// visit.
 //
 // The daemon is the mocked chain routes, answered the way the other chain tests answer them, so
 // what is checked is the takeover against the store it reads and the flow it draws.
@@ -226,8 +227,8 @@ describe("the header setup the app offers by itself", () => {
     expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 1);
   });
 
-  it("a header that already has a size is never offered by itself", async () => {
-    await show([chain(1, "JARGB 1", "not_set_up", 8)]);
+  it("a header with a record is never offered again, sized or not", async () => {
+    await show([chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "empty", 8)]);
 
     expect(screen.queryByRole("region", SETUP)).toBeNull();
     expect(api.chains.start).not.toHaveBeenCalled();
@@ -330,8 +331,8 @@ describe("the header setup the app offers by itself", () => {
     await finish();
     first.unmount();
 
-    // The next visit: the request is spent, so the app asks for nothing. A header is offered by
-    // itself only if it has no size and has never been offered, and this one has a size.
+    // The next visit: the request is spent, so the app asks for nothing. The sized header was
+    // already marked offered when the first visit closed, so it is not offered again (#380).
     await show([chain(1, "JARGB 1", "set_up", 8), chain(2, "JARGB 2", "not_set_up", 8)]);
     expect(screen.queryByRole("region", SETUP)).toBeNull();
   });
@@ -376,9 +377,11 @@ describe("the header setup the app offers by itself", () => {
     expect(screen.queryByRole("region", SETUP)).toBeNull();
   });
 
-  // The owner can ask for the setup of a header the app would not offer. The request is spent by
-  // the visit that serves it, so the visit before this one asked for nothing.
-  it("the owner can ask for the setup of a header the app would not offer", async () => {
+  // The owner can ask again for a header the app already offered. A size is no longer a reason to
+  // skip a header without a record (#470), so the header is remembered as offered instead. The
+  // request is spent by the visit that serves it, so the visit before this one asked for nothing.
+  it("the owner can ask again for a header the app already offered", async () => {
+    markChainOffered(chainKey(DEVICE, 1));
     await show([chain(1, "JARGB 1", "not_set_up", 8)]);
     expect(screen.queryByRole("region", SETUP)).toBeNull();
 
