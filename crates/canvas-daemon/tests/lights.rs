@@ -180,6 +180,82 @@ fn views(body: &serde_json::Value) -> LightsResponse {
     serde_json::from_value(body.clone()).expect("the body is a LightsResponse")
 }
 
+/// #414: an old `lights.json` can hold a *named slice* light (id ending `p<n>`, with `leds` and
+/// a `name`) on a device the daemon never drives. The #393 start-up cleanup only removes whole-zone
+/// lights the owner never touched (`is_own_leftover` requires `name.is_none()` and
+/// `leds.is_none()`), so this light survives. The owner sees it in Scenes' add-devices list as
+/// "0 LEDs · not connected", can put it in a group (where it gives no light), and has no route or
+/// command to remove it. This test reproduces that state on the fakes and asserts the symptom.
+#[tokio::test]
+async fn an_old_lights_json_keeps_a_named_slice_light_on_an_undriven_device_with_no_way_to_remove_it()
+{
+    // OpenRGB's copy of the MonsGeek keyboard: `is_driven` drops it from discovery (#393).
+    let raw = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
+    let id = format!("{raw}#z0p1");
+    let home = TempHome::new();
+    // A named slice light (id ends p1, leds + name) on that undriven device.
+    let on_disk = lights_file(vec![light(&id, raw, 0, Some((0, 8)), Some("Old keyboard strip"))]);
+    std::fs::write(
+        home.path.join(canvas_proto::scene::LIGHTS_FILE),
+        serde_json::to_vec(&on_disk).expect("the lights file serialises"),
+    )
+    .expect("the lights file is written");
+    // The owner already put the slice into a group, where it gives no light.
+    let on_disk_scenes = serde_json::json!({
+        "schema_version": 1,
+        "active": "gaming",
+        "scenes": [{
+            "id": "gaming", "name": "Gaming", "rev": 1,
+            "groups": [{
+                "id": "g-old", "name": "Old keyboard", "members": [id],
+                "plays": { "type": "off" }, "mode": "flow_across", "brightness": 100
+            }]
+        }]
+    });
+    std::fs::write(
+        home.path.join(canvas_proto::scene::SCENES_FILE),
+        serde_json::to_vec(&on_disk_scenes).expect("the scenes file serialises"),
+    )
+    .expect("the scenes file is written");
+    // The daemon starts from those files: the #393 cleanup runs, but a named slice is the owner's.
+    let store = Store::load_from(&home.path);
+    assert!(
+        store.lights.lights.iter().any(|l| l.id == id),
+        "the named slice survives the start-up cleanup: it carries a name and leds"
+    );
+    assert!(
+        store.scenes.scenes[0].groups[0].members.contains(&id),
+        "the group the owner put the light in still holds it"
+    );
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let (router, _app, _home) = build_with(store, devices, home).await;
+
+    // What the owner sees from GET /lights: listed, no LEDs, not connected.
+    let (status, body) = get_lights(router.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let views = views(&body);
+    let view = views.lights.iter().find(|v| v.light.id == id).expect("the light is listed");
+    assert!(!view.connected, "the device the light names is not driven");
+    assert_eq!(view.led_count, 0, "no zone stands behind the slice");
+    assert_eq!(view.label, "Old keyboard strip", "the owner's name is what is shown");
+
+    // No route and no verb removes a light: {id} answers only GET/PATCH, so DELETE is 405. The id
+    // holds a space and `#`, both encoded as the editor's client would encode them.
+    let path = routes::LIGHT.replace(
+        "{id}",
+        &id.replace('#', "%23").replace(' ', "%20"),
+    );
+    let response = router
+        .oneshot(request("DELETE", &path))
+        .await
+        .expect("the router answers");
+    assert_eq!(
+        response.status(),
+        StatusCode::METHOD_NOT_ALLOWED,
+        "there is no way for the owner to remove this light"
+    );
+}
+
 #[tokio::test]
 async fn lights_lists_every_light_with_its_count_and_label() {
     let devices = vec![

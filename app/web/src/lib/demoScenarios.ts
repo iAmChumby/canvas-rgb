@@ -309,6 +309,12 @@ export const GROUPS_0 = "groups-0";
 export const GROUPS_20 = "groups-20";
 export const LONG_NAMES = "long-names";
 export const NEW_LIGHT = "new-light";
+/**
+ * `?state=unused-light`: a named slice light (id ending p1, with `leds` and a `name`) left by an
+ * older lights.json on the OpenRGB copy of the keyboard the daemon drives itself. No device
+ * answers for it, so it reads "0 LEDs · not connected" (#414).
+ */
+export const UNUSED_LIGHT = "unused-light";
 export const HEAVY = "heavy";
 /**
  * `?state=html-groups`: the Focus scene runs two HTML effects already, so a third one cannot go
@@ -430,6 +436,27 @@ export function applySceneScenarios(
       // The notice may not show: storage is not available here.
     }
     all.push(lamp);
+  }
+
+  if (has(UNUSED_LIGHT)) {
+    // OpenRGB's copy of the MonsGeek keyboard: is_driven drops it, so no device stands behind the
+    // slice and the daemon reports 0 LEDs. The owner's name is all that identifies it (#414).
+    const raw = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
+    const unused: LightView = {
+      light: {
+        id: `${raw}#z0p1`,
+        device_id: raw,
+        zone_index: 0,
+        leds: { start: 0, count: 8 },
+        name: "Old keyboard strip",
+        arrangement: "strip",
+        reversed: false,
+      },
+      led_count: 0,
+      connected: false,
+      label: "Old keyboard strip",
+    };
+    all.push(unused);
   }
   return { scenes, active, lights: all };
 }

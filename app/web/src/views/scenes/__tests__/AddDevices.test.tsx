@@ -13,6 +13,7 @@ vi.mock("@/lib/endpoints", () => ({ api }));
 import { DEMO_LIGHTS } from "@/lib/fixtures";
 import { AddDevices } from "@/views/scenes/AddDevices";
 import type { Scene } from "@/proto/Scene";
+import type { LightView } from "@/proto/LightView";
 import type { UseScene } from "@/views/scenes/useScene";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -183,6 +184,46 @@ describe("the devices you can add", () => {
     expect(api.lights.flash).not.toHaveBeenCalledWith({ lights: [a], stop: true });
     view.unmount();
     expect(api.lights.flash).toHaveBeenCalledWith({ lights: [a], stop: true });
+  });
+
+  it("a named slice light on an undriven device reads '0 LEDs · not connected' with no way to remove it (#414)", () => {
+    // The light an older lights.json can leave behind: a named slice (id ends p1) on the OpenRGB
+    // copy of the keyboard the daemon drives itself. No device answers for it, so it has 0 LEDs.
+    const raw = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
+    const unused: LightView = {
+      light: {
+        id: `${raw}#z0p1`,
+        device_id: raw,
+        zone_index: 0,
+        leds: { start: 0, count: 8 },
+        name: "Old keyboard strip",
+        arrangement: "strip",
+        reversed: false,
+      },
+      led_count: 0,
+      connected: false,
+      label: "Old keyboard strip",
+    };
+    const use = fake();
+    render(
+      <AddDevices
+        groupId="g-one"
+        lights={[...clone(DEMO_LIGHTS), unused]}
+        use={use}
+        onClose={() => {}}
+      />,
+    );
+    const pick = row(unused.light.id);
+    // The owner's name and the honest "0 LEDs · not connected" line are all there is.
+    expect(within(pick).getByText("Old keyboard strip")).toBeTruthy();
+    expect(within(pick).getByText("0 LEDs · not connected")).toBeTruthy();
+    // The row is a single pick button with no nested control: picking it moves the light into a
+    // group, where it gives no light. There is no Remove control anywhere in the list.
+    expect(pick.tagName).toBe("BUTTON");
+    expect(pick.querySelectorAll("button")).toHaveLength(0);
+    expect(document.querySelector("[data-testid='add-devices']")?.textContent).not.toMatch(
+      /remove/i,
+    );
   });
 
   it("moving the only light out of a group takes that group with it", () => {
