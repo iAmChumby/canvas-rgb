@@ -19,7 +19,7 @@ use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind}
 use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props, PropertySchema};
 use canvas_proto::stack::{BlendMode, LayerArea, LayerMask, MaskSource, Stack, StackLayer, STACKS_FILE};
-use canvas_proto::traits::{Canvas, Effect, Inputs, StripRead};
+use canvas_proto::traits::{Canvas, Effect, Inputs, LightLeds, StripRead};
 use common::{FakeAdapter, FakeEngine};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
@@ -5822,3 +5822,731 @@ fn a_layer_whose_strip_read_panics_is_faulted_and_the_stack_runs_the_rest() {
         "the faulted layer's picture is black"
     );
 }
+
+// ================================================================ #427: a mixed stack reads each layer its own way
+
+/// The colours a group's lights get through the engine's per-LED path (#427): ask the effect for
+/// each light as the engine does after `update`, and sample the canvas for a light it declines
+/// (a fan or a keyboard). This is the end-to-end path the daemon and core changes make.
+fn led_path_colours(
+    effect: &mut StackEffect,
+    plan: &canvas_core::arrangement::GroupPlan,
+    lights: &[canvas_proto::scene::Light],
+    canvas: &Canvas,
+) -> Vec<canvas_proto::Rgb8> {
+    let scale = canvas_core::SCENE_RENDER_SCALE;
+    let mut out = Vec::new();
+    for (samples, light) in plan.lights.iter().zip(lights.iter()) {
+        let scaled: Vec<canvas_core::geometry::LedSample> = samples
+            .leds
+            .iter()
+            .map(|sample| canvas_core::geometry::LedSample {
+                center_x: sample.center_x * scale,
+                center_y: sample.center_y * scale,
+                bounds: sample.bounds.map(|v| v * scale),
+                sampled: sample.sampled,
+            })
+            .collect();
+        let mut colours = Vec::new();
+        let answered = effect.led_colours(
+            LightLeds { id: &light.id, arrangement: light.arrangement, leds: &scaled },
+            &mut colours,
+        );
+        if !answered {
+            canvas_core::sampling::sample_leds(
+                &canvas.pixels,
+                canvas.width,
+                canvas.height,
+                &scaled,
+                canvas_core::SCENE_SAMPLING,
+                &mut colours,
+            );
+        }
+        out.extend(colours);
+    }
+    out
+}
+
+/// The mean level of a strip's colours, 0..255.
+fn level_of(colours: &[canvas_proto::Rgb8]) -> f64 {
+    if colours.is_empty() {
+        return 0.0;
+    }
+    colours
+        .iter()
+        .map(|c| (f64::from(c.r) + f64::from(c.g) + f64::from(c.b)) / 3.0)
+        .sum::<f64>()
+        / colours.len() as f64
+}
+
+/// #427: Fire over Rain at 100 % / Normal lights the strip, and reads it differently from the
+/// old single-cell read of the same picture. That read was dark (level 0.0); reading the Fire
+/// layer as a column and the Rain layer as a cell, then blending, is lit.
+#[test]
+fn fire_over_rain_lights_the_strip_and_differs_from_the_old_cell_read() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    // Rain at the bottom, Fire on top: the old mid-height cell was the cold gap above the flame.
+    let mixed = stack("stack:Two", vec![layer("l1", "rain"), layer("l2", "fire")]);
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+    let mut props = rain_props("l1");
+    props.insert("l2.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let per_led = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let old_cell = strip_colours(&devices, &canvas, StripRead::Cell);
+    let level = level_of(&per_led);
+    let old_level = level_of(&old_cell);
+    let worst = per_led
+        .iter()
+        .zip(old_cell.iter())
+        .map(|(a, b)| {
+            [i32::from(a.r) - i32::from(b.r), i32::from(a.g) - i32::from(b.g), i32::from(a.b) - i32::from(b.b)]
+                .into_iter()
+                .map(i32::abs)
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    println!(
+        "#427 fire over rain: per-LED level {level:.1}, old cell level {old_level:.1}, worst LED delta {worst}"
+    );
+    assert!(level > 15.0, "the strip is lit through the per-LED path: {level:.1}");
+    assert!(worst > 10, "the per-LED read differs from the old single-cell read: {worst}");
+}
+
+/// #427: the other order — Rain on top of Fire — still keeps the rain's motion above #372's bar
+/// of 30/255 on every LED, now through the per-LED path.
+#[test]
+fn rain_over_fire_keeps_the_rains_motion_through_the_per_led_path() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let mixed = stack("stack:Two", vec![layer("l1", "fire"), layer("l2", "rain")]);
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+    let mut props = rain_props("l2");
+    props.insert("l1.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    let mut trace = StripTrace::default();
+    for frame in 0..240 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        if frame >= 120 {
+            trace.push(&led_path_colours(&mut effect, &plan, &lights, &canvas));
+        }
+    }
+    let ranges = trace.ranges();
+    println!("#427 rain over fire per-LED: ranges {ranges:?}, level {:.1}", trace.level());
+    for (led, range) in ranges.iter().enumerate() {
+        assert!(*range >= 30, "LED {led} moved only {range}/255: {ranges:?}, the bar is 30");
+    }
+}
+
+/// #427: a fan in the same group as a mixed stack keeps exactly the colours it got before — the
+/// stack declines it, so the engine samples its cell from the unchanged canvas, byte for byte.
+#[test]
+fn a_fan_in_a_mixed_group_keeps_its_exact_colours() {
+    let (_, lights, plan) = strip_and_fan();
+    let areas = strip_and_fan_areas(&lights, &plan);
+    let mixed = stack("stack:Two", vec![layer("l1", "fire"), layer("l2", "rain")]);
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas);
+    let mut props = rain_props("l2");
+    props.insert("l1.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    // The fan's light is not a strip: the stack answers false for it.
+    let fan = &lights[1];
+    let scaled: Vec<canvas_core::geometry::LedSample> = plan.lights[1]
+        .leds
+        .iter()
+        .map(|s| canvas_core::geometry::LedSample {
+            center_x: s.center_x * canvas_core::SCENE_RENDER_SCALE,
+            center_y: s.center_y * canvas_core::SCENE_RENDER_SCALE,
+            bounds: s.bounds.map(|v| v * canvas_core::SCENE_RENDER_SCALE),
+            sampled: s.sampled,
+        })
+        .collect();
+    let mut fan_out = Vec::new();
+    let answered = effect.led_colours(
+        LightLeds { id: &fan.id, arrangement: fan.arrangement, leds: &scaled },
+        &mut fan_out,
+    );
+    assert!(!answered, "a fan is not a strip: the stack leaves its colours to the canvas");
+    let per_led = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let main = plan_colours(&plan, &lights, &canvas, StripRead::Cell);
+    assert_eq!(&per_led[8..16], &main[8..16], "the fan is byte-equal to the main path");
+}
+
+/// #427: the per-LED read never touches the group's picture — the stage canvas is byte-identical
+/// before and after it (Luke's decision 2).
+#[test]
+fn a_per_led_read_leaves_the_group_canvas_byte_identical() {
+    let devices = vec![device("d", "d", vec![zone(0, "z", ZoneKind::Linear, 8)])];
+    let mixed = stack("stack:Two", vec![layer("l1", "rain"), layer("l2", "fire")]);
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+    let mut props = rain_props("l1");
+    props.insert("l2.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    effect.init(&props);
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let before = canvas.pixels.clone();
+    assert!(before.iter().any(|p| *p != [0.0, 0.0, 0.0]), "the canvas holds the stack's picture");
+    let _ = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    assert_eq!(canvas.pixels, before, "the per-LED read must not patch the picture");
+}
+
+// ============================================================ #427 review fix: per-layer reads use
+// the compositor's own painting path
+
+/// A fake effect that paints one flat colour and answers a chosen strip read. A flat picture reads
+/// the same as a cell and as a column, so a mixed stack of two of them must light the strip exactly
+/// as the stage picture does, for every blend mode.
+struct Flat {
+    colour: [f32; 3],
+    read: StripRead,
+}
+
+impl Effect for Flat {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "flat".into(),
+            name: "Flat".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &Props) {}
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        canvas.fill(self.colour);
+    }
+    fn strip_read(&self) -> StripRead {
+        self.read
+    }
+}
+
+/// A leaf builder whose `id` names a flat colour and its strip read: `column` and `cell`.
+fn flat_leaves(column: [f32; 3], cell: [f32; 3]) -> LeafBuilder {
+    Arc::new(move |id: &str| {
+        let (colour, read) = if id == "column" { (column, StripRead::Column) } else { (cell, StripRead::Cell) };
+        Ok(Box::new(Flat { colour, read }) as Box<dyn Effect>)
+    })
+}
+
+/// Two devices so a layer kept to the second one cannot reach the first one's strip.
+fn two_devices() -> Vec<DeviceInfo> {
+    vec![
+        device("d", "d", vec![zone(0, "strip", ZoneKind::Linear, 8)]),
+        device("e", "e", vec![zone(0, "strip", ZoneKind::Linear, 8)]),
+    ]
+}
+
+/// The biggest absolute channel difference between two sets of LED colours.
+fn worst_delta(a: &[canvas_proto::Rgb8], b: &[canvas_proto::Rgb8]) -> i32 {
+    a.iter()
+        .zip(b.iter())
+        .map(|(x, y)| {
+            [i32::from(x.r) - i32::from(y.r), i32::from(x.g) - i32::from(y.g), i32::from(x.b) - i32::from(y.b)]
+                .into_iter()
+                .map(i32::abs)
+                .max()
+                .unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0)
+}
+
+/// #427 review: a column layer kept to a Device or a Zone area lights its strip LEDs. Before the
+/// fix the per-LED area check rounded the LED centre to a pixel the area mask does not cover, so
+/// the layer was dropped and every LED read R 0 while the picture read R 5-250.
+#[test]
+fn review_427_a_column_layer_on_a_device_or_a_zone_area_lights_its_strip_leds() {
+    let devices = two_devices();
+    for area in [
+        LayerArea::Device { device: DeviceId("d".into()) },
+        LayerArea::Zone { device: DeviceId("d".into()), zone: 0 },
+    ] {
+        // Fire (column) on d, Rain (cell) on e: the strip of d sees only the flame, and the stack
+        // is mixed so the engine takes the per-LED path.
+        let mixed = stack(
+            "stack:Mixed",
+            vec![
+                with_area(layer("l1", "fire"), area.clone()),
+                with_area(layer("l2", "rain"), LayerArea::Device { device: DeviceId("e".into()) }),
+            ],
+        );
+        let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+        effect.init(&fire_props());
+        let (lights, plan) = stack::zone_group(&devices);
+        let mut canvas = group_canvas();
+        for _ in 0..120 {
+            effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        }
+        let got = led_path_colours(&mut effect, &plan, &lights, &canvas);
+        let got = &got[..8];
+
+        // Reference: the same Fire layer alone on the same area is a single-read stack, so the
+        // picture is mapped over the columns and the stage's column read is the ground truth.
+        let single = stack("stack:Single", vec![with_area(layer("l1", "fire"), area.clone())]);
+        let mut reference = stack_effect!(&single, real_leaves(), live_for(&single), areas_for(&devices));
+        reference.init(&fire_props());
+        let mut ref_canvas = group_canvas();
+        for _ in 0..120 {
+            reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+        }
+        let want = strip_colours(&devices, &ref_canvas, StripRead::Column);
+        let want = &want[..8];
+
+        let level = level_of(got);
+        let worst = worst_delta(got, want);
+        println!(
+            "#427 review {area:?}: per-LED level {level:.1}, picture level {:.1}, worst delta {worst}",
+            level_of(want)
+        );
+        assert!(level > 15.0, "{area:?}: the strip is lit: {level:.1}");
+        assert!(worst <= 3, "{area:?}: the per-LED read matches the picture's column read: {worst}");
+    }
+}
+
+/// #427 review: a Rect-area layer lights only the LEDs inside the rectangle, and reads the same
+/// picture as the stage. Before the fix a Rect area had no per-LED mask, so the layer painted every
+/// LED and its picture was not mapped into the rectangle box.
+#[test]
+fn review_427_a_rect_area_layer_lights_only_the_leds_inside_it_and_matches_the_stage() {
+    let devices = two_devices();
+    let (_lights, plan) = stack::zone_group(&devices);
+    let xs: Vec<f32> = plan.lights[0].leds.iter().map(|led| led.center_x).collect();
+    let min_x = xs.iter().cloned().fold(f32::INFINITY, f32::min);
+    let max_x = xs.iter().cloned().fold(f32::NEG_INFINITY, f32::max);
+    let cut = (min_x + max_x) / 2.0;
+    assert!(min_x < cut && cut < max_x, "the strip spans the cut: {min_x} .. {max_x}");
+    // A flat column layer kept to device e makes the stack mixed without reaching d's strip. The
+    // flat cell layer covers only the left half of d's strip, so only those LEDs may light.
+    let mixed = stack(
+        "stack:Rect",
+        vec![
+            with_area(layer("column", "column"), LayerArea::Device { device: DeviceId("e".into()) }),
+            with_area(
+                layer("cell", "cell"),
+                LayerArea::Rect { x: 0.0, y: 0.0, width: cut, height: 200.0 },
+            ),
+        ],
+    );
+    let mut effect = stack_effect!(
+        &mixed,
+        flat_leaves([0.2, 0.4, 0.6], [0.8, 0.3, 0.1]),
+        live_for(&mixed),
+        areas_for(&devices)
+    );
+    effect.init(&Props::new());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..3 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &all[..8];
+    let picture = strip_colours(&devices, &canvas, StripRead::Cell);
+    let want = &picture[..8];
+    let worst = worst_delta(got, want);
+    let level = level_of(got);
+    println!("#427 review rect: per-LED level {level:.1}, stage level {:.1}, worst delta {worst}", level_of(want));
+    assert_eq!(worst, 0, "the per-LED read is the stage's cell read: {worst}");
+    assert!(xs.iter().any(|x| *x < cut - 2.0), "some LEDs are inside the rect");
+    assert!(xs.iter().any(|x| *x > cut + 2.0), "some LEDs are outside the rect");
+    for (x, colour) in xs.iter().zip(got.iter()) {
+        if *x < cut - 2.0 {
+            assert!(level_of(std::slice::from_ref(colour)) > 20.0, "an LED inside the rect is lit: {colour:?}");
+        } else if *x > cut + 2.0 {
+            assert_eq!(*colour, canvas_proto::Rgb8::BLACK, "an LED outside the rect is dark: {colour:?}");
+        }
+    }
+}
+
+/// #427 review: a column layer whose mask effect paints black does not light the strip. Before the
+/// fix the layer's mask effect was ignored on the per-LED path, so the layer shone at full strength.
+#[test]
+fn review_427_a_column_layer_masked_fully_black_does_not_light_the_strip() {
+    let devices = two_devices();
+    let mut fire = layer("l1", "fire");
+    fire.mask = Some(a_mask("mask-black"));
+    let mixed = stack(
+        "stack:Masked",
+        vec![fire, with_area(layer("l2", "rain"), LayerArea::Device { device: DeviceId("e".into()) })],
+    );
+    let updates = Arc::new(AtomicU64::new(0));
+    let leaves: LeafBuilder = Arc::new(move |id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "fire" => Box::new(canvas_effects::fire::Fire::with_seed(372)),
+            "rain" => Box::new(canvas_effects::rain::Rain::with_seed(372)),
+            "mask-black" => Box::new(ColourEffect { colour: [0.0; 3], updates: Arc::clone(&updates), panics: false }),
+            other => return Err(format!("no effect with the id {other}")),
+        };
+        Ok(effect)
+    });
+    let mut effect = stack_effect!(&mixed, leaves, live_for(&mixed), areas_for(&devices));
+    effect.init(&fire_props());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let level = level_of(&all[..8]);
+    println!("#427 review black mask: the strip level is {level:.1}");
+    assert!(level < 1.0, "a fully masked column layer does not light the strip: {level:.1}");
+}
+
+/// #427 review: a whole-canvas Fire over Rain at full opacity reads exactly like Fire alone. A
+/// later layer at Normal 100 % replaces what is under it, so the mixed per-LED path must land on
+/// the same level the single Fire picture's column read gives.
+#[test]
+fn review_427_whole_canvas_fire_over_rain_reads_like_fire_alone() {
+    let devices = two_devices();
+    let mixed = stack("stack:Two", vec![layer("l1", "rain"), layer("l2", "fire")]);
+    let mut props = rain_props("l1");
+    props.insert("l2.intensity".to_string(), canvas_proto::PropValue::Number(100.0));
+    let mut effect = stack_effect!(&mixed, real_leaves(), live_for(&mixed), areas_for(&devices));
+    effect.init(&props);
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..120 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let mixed_level = level_of(&led_path_colours(&mut effect, &plan, &lights, &canvas));
+
+    let single = stack("stack:Fire", vec![layer("l1", "fire")]);
+    let mut reference = stack_effect!(&single, real_leaves(), live_for(&single), areas_for(&devices));
+    reference.init(&fire_props());
+    let mut ref_canvas = group_canvas();
+    for _ in 0..120 {
+        reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+    }
+    let alone_level = level_of(&strip_colours(&devices, &ref_canvas, StripRead::Column));
+    println!("#427 review whole canvas: fire over rain {mixed_level:.1}, fire alone {alone_level:.1}");
+    assert!(
+        (mixed_level - alone_level).abs() <= 2.0,
+        "full-opacity Fire over Rain reads like Fire alone: {mixed_level:.1} vs {alone_level:.1}"
+    );
+}
+
+/// #427 review: for whole-canvas layers every blend mode's per-LED read matches the stage picture's
+/// cell read with delta 0. Flat layers read identically as cells and columns, so this isolates the
+/// blend arithmetic from the read shape.
+#[test]
+fn review_427_whole_canvas_blend_modes_match_the_picture_cell_read() {
+    let devices = two_devices();
+    for mode in [BlendMode::Normal, BlendMode::Add, BlendMode::Multiply, BlendMode::Screen] {
+        let mut top = layer("cell", "cell");
+        top.blend = mode;
+        let mixed = stack("stack:Blend", vec![layer("column", "column"), top]);
+        let mut effect = stack_effect!(
+            &mixed,
+            flat_leaves(
+                [64.0 / 255.0, 128.0 / 255.0, 192.0 / 255.0],
+                [192.0 / 255.0, 64.0 / 255.0, 128.0 / 255.0],
+            ),
+            live_for(&mixed),
+            areas_for(&devices)
+        );
+        effect.init(&Props::new());
+        let (lights, plan) = stack::zone_group(&devices);
+        let mut canvas = group_canvas();
+        for _ in 0..3 {
+            effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+        }
+        let got = led_path_colours(&mut effect, &plan, &lights, &canvas);
+        let picture = strip_colours(&devices, &canvas, StripRead::Cell);
+        let worst = worst_delta(&got, &picture);
+        println!("#427 review blend {mode:?}: worst delta {worst}");
+        assert_eq!(worst, 0, "{mode:?}: the per-LED read matches the picture's cell read: {worst}");
+    }
+}
+
+// ================================================== #427 fix pass 2: coverage that varies in space
+
+/// A picture that varies in space, used both as a layer and as its own mask. `Vertical` is white
+/// in the lower half; `Checker` alternates every pixel. A read of the composed picture then
+/// averages a source that is half white, which averaging source and coverage separately used to
+/// read as a quarter (#427 fix pass 2).
+#[derive(Clone, Copy)]
+enum Pattern {
+    Vertical,
+    Checker,
+}
+
+struct PatternEffect {
+    pattern: Pattern,
+    read: StripRead,
+}
+
+impl Effect for PatternEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "pattern".into(),
+            name: "Pattern".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &Props) {}
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                let on = match self.pattern {
+                    Pattern::Vertical => y >= canvas.height / 2,
+                    Pattern::Checker => (x + y) % 2 == 0,
+                };
+                canvas.set(x, y, if on { [1.0; 3] } else { [0.0; 3] });
+            }
+        }
+    }
+    fn strip_read(&self) -> StripRead {
+        self.read
+    }
+}
+
+/// The patterned pictures, plus flat cell/column layers on another device that only make a stack
+/// mixed (they never reach device d's strip).
+fn pattern_leaves() -> LeafBuilder {
+    Arc::new(|id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "pattern-v" => Box::new(PatternEffect { pattern: Pattern::Vertical, read: StripRead::Column }),
+            "pattern-c" => Box::new(PatternEffect { pattern: Pattern::Checker, read: StripRead::Cell }),
+            "cell" => Box::new(Flat { colour: [0.0; 3], read: StripRead::Cell }),
+            "column" => Box::new(Flat { colour: [0.0; 3], read: StripRead::Column }),
+            other => return Err(format!("no effect with the id {other}")),
+        };
+        Ok(effect)
+    })
+}
+
+/// #427 fix pass 2: a column layer whose mask covers only the lower half of the canvas, over a
+/// source that is white in the lower half, lights the strip with the stage's column read: the
+/// mean of source*coverage (128), not (mean source)*(mean coverage) (64). The reference is the
+/// same layer alone, whose single read makes the stage paint and read it as a column.
+#[test]
+fn review_427_a_partly_covering_mask_matches_the_stages_column_read() {
+    let devices = two_devices();
+    let mut patterned = layer("pattern-v", "pattern-v");
+    patterned.mask = Some(a_mask("pattern-v"));
+    let mixed = stack(
+        "stack:Mixed",
+        vec![
+            patterned.clone(),
+            with_area(layer("cell", "cell"), LayerArea::Device { device: DeviceId("e".into()) }),
+        ],
+    );
+    let mut effect = stack_effect!(&mixed, pattern_leaves(), live_for(&mixed), areas_for(&devices));
+    effect.init(&Props::new());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..3 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &all[..8];
+
+    let single = stack("stack:Single", vec![patterned]);
+    let mut reference = stack_effect!(&single, pattern_leaves(), live_for(&single), areas_for(&devices));
+    reference.init(&Props::new());
+    let mut ref_canvas = group_canvas();
+    for _ in 0..3 {
+        reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+    }
+    let want = &strip_colours(&devices, &ref_canvas, StripRead::Column)[..8];
+
+    let level = level_of(got);
+    let worst = worst_delta(got, want);
+    println!(
+        "#427 fix pass 2 partial mask: per-LED level {level:.1}, stage column level {:.1}, worst delta {worst}",
+        level_of(want)
+    );
+    assert!(
+        (level - 128.0).abs() <= 6.0,
+        "the strip reads the mean of source*coverage, not source times coverage: {level:.1}"
+    );
+    assert!(worst <= 6, "the per-LED read matches the stage's column read: {worst}");
+}
+
+/// #427 fix pass 2: a cell layer whose mask alternates every pixel inside one LED's cell still
+/// matches the stage's cell read. Both the picture and its mask are the same checkerboard, so the
+/// stage averages source*coverage (half white) inside the cell instead of averaging them apart
+/// (a quarter). A flat column layer on another device makes the stack mixed.
+#[test]
+fn review_427_a_mask_varying_inside_a_cell_matches_the_stages_cell_read() {
+    let devices = two_devices();
+    let mut patterned = layer("pattern-c", "pattern-c");
+    patterned.mask = Some(a_mask("pattern-c"));
+    let mixed = stack(
+        "stack:Mixed",
+        vec![
+            patterned.clone(),
+            with_area(layer("column", "column"), LayerArea::Device { device: DeviceId("e".into()) }),
+        ],
+    );
+    let mut effect = stack_effect!(&mixed, pattern_leaves(), live_for(&mixed), areas_for(&devices));
+    effect.init(&Props::new());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..3 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &all[..8];
+
+    let single = stack("stack:Single", vec![patterned]);
+    let mut reference = stack_effect!(&single, pattern_leaves(), live_for(&single), areas_for(&devices));
+    reference.init(&Props::new());
+    let mut ref_canvas = group_canvas();
+    for _ in 0..3 {
+        reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+    }
+    let want = &strip_colours(&devices, &ref_canvas, StripRead::Cell)[..8];
+
+    let level = level_of(got);
+    let worst = worst_delta(got, want);
+    println!(
+        "#427 fix pass 2 cell mask: per-LED level {level:.1}, stage cell level {:.1}, worst delta {worst}",
+        level_of(want)
+    );
+    assert!(
+        (level - 128.0).abs() <= 6.0,
+        "a mask varying inside the cell still reads the mean of source*coverage: {level:.1}"
+    );
+    assert_eq!(worst, 0, "the per-LED read matches the stage's cell read: {worst}");
+}
+
+/// A column layer whose update overruns: it keeps its green picture and is faulted after four
+/// trials, the way a slow HTML layer is (the clock is moved by hand, so no test waits).
+struct SlowColumn {
+    clock: ManualClock,
+    updates: Arc<AtomicU64>,
+}
+
+impl Effect for SlowColumn {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "slow-column".into(),
+            name: "Slow column".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &Props) {}
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        self.clock.advance_ms(20);
+        canvas.fill([0.0, 1.0, 0.0]);
+        self.updates.fetch_add(1, Ordering::SeqCst);
+    }
+    fn strip_read(&self) -> StripRead {
+        StripRead::Column
+    }
+}
+
+/// Four overrunning trials fault the layer; the clock is moved between holds.
+fn fault_four_trials(effect: &mut StackEffect, canvas: &mut Canvas, clock: &ManualClock) {
+    step(effect, canvas);
+    clock.advance_ms(251);
+    step(effect, canvas);
+    clock.advance_ms(501);
+    step(effect, canvas);
+    clock.advance_ms(1001);
+    step(effect, canvas);
+}
+
+/// #427 fix pass 2: the per-LED read skips nothing the stage still draws. `composite_layer`
+/// paints a faulted layer's last picture (only its update is skipped), so the strip must show it
+/// too. Before the fix the faulted layer was dropped from the per-LED read and device d's strip
+/// went black while the stage still showed green.
+#[test]
+fn review_427_a_faulted_layer_keeps_lighting_the_strip_like_the_stage() {
+    let devices = two_devices();
+    let clock = ManualClock::new();
+    let leaves = slow_column_leaves(&clock);
+    let mixed = stack(
+        "stack:Mixed",
+        vec![
+            layer("l1", "html:slow"),
+            with_area(layer("l2", "cell"), LayerArea::Device { device: DeviceId("e".into()) }),
+        ],
+    );
+    let mut effect = stack_effect!(&mixed, leaves, live_for(&mixed), areas_for(&devices))
+        .with_clock(clock.clock())
+        .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
+    effect.init(&Props::new());
+    let mut canvas = group_canvas();
+    fault_four_trials(&mut effect, &mut canvas, &clock);
+    assert_eq!(
+        effect.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted),
+        "the slow layer faulted"
+    );
+    step(&mut effect, &mut canvas);
+    let (lights, plan) = stack::zone_group(&devices);
+    let got = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &got[..8];
+
+    // The same layer alone is a single-read stack, so its stage column read is the ground truth
+    // for what a faulted column layer still shows.
+    let ref_clock = ManualClock::new();
+    let single = stack("stack:Single", vec![layer("l1", "html:slow")]);
+    let mut reference = stack_effect!(
+        &single,
+        slow_column_leaves(&ref_clock),
+        live_for(&single),
+        areas_for(&devices)
+    )
+    .with_clock(ref_clock.clock())
+    .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
+    reference.init(&Props::new());
+    let mut ref_canvas = group_canvas();
+    fault_four_trials(&mut reference, &mut ref_canvas, &ref_clock);
+    assert_eq!(
+        reference.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted),
+        "the reference layer faulted too"
+    );
+    let want = &strip_colours(&devices, &ref_canvas, StripRead::Column)[..8];
+
+    let level = level_of(got);
+    let worst = worst_delta(got, want);
+    println!(
+        "#427 fix pass 2 faulted layer: per-LED level {level:.1}, stage column level {:.1}, worst delta {worst}",
+        level_of(want)
+    );
+    assert!((level - 85.0).abs() <= 3.0, "a faulted layer keeps its green picture on the strip: {level:.1}");
+    assert_eq!(worst, 0, "a faulted layer's per-LED read matches the stage: {worst}");
+}
+
+/// A leaf builder for the faulted-layer test: the slow column layer plus a flat cell layer on
+/// another device that makes the stack mixed without reaching device d's strip.
+fn slow_column_leaves(clock: &ManualClock) -> LeafBuilder {
+    let clock = clock.clone();
+    Arc::new(move |id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "html:slow" => Box::new(SlowColumn { clock: clock.clone(), updates: Arc::new(AtomicU64::new(0)) }),
+            "cell" => Box::new(Flat { colour: [0.0; 3], read: StripRead::Cell }),
+            other => return Err(format!("no effect with the id {other}")),
+        };
+        Ok(effect)
+    })
+}
+

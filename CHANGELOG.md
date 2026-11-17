@@ -6,9 +6,14 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
+
 ### Fixed
 
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
+- Effects: the New effect menu's Stack, Pattern and Code keys show their name and full note inside the key, with the icon centred and no text crossing the border. (#466)
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
 - Setting up a header keeps the lights working when you close the window while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, and the setup finishes as a whole instead of being left half done. (#457)
 - Tray tests: the update suite no longer reads its verdict off the machine's clock, so a busy runner can no longer fail or hang it. (#242)
@@ -18,6 +23,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)
 - The "frame write failed" warning keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter still catches it. (#87)
 - Every daemon log line that moved out of the daemon's own program keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter catches all of them. (#446)
+- Scenes: a light strip playing a stack that mixes Fire or Audio Spectrum with another effect now shows every layer its own way, including layers kept to one device, zone or rectangle and layers shaped by a mask effect. (#427)
+- Scenes: on a strip playing a mixed stack, a layer whose own mask only partly covers it or fades across a light now reads as it does on the stage, and a slow layer that has faulted keeps lighting the strip with its last picture, as it does on the stage. (#427)
 - The site's hero glow no longer shows a faint line where it crosses the section edge, and a long sweep takes the same time at 30, 60 and 144 Hz. (#63)
 - Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
 - Installer notes: a failed start of canvas-rgb after an update is now named in the final note with what to do, and an uninstall that found no installation no longer claims it could not stop the service. (#77)
