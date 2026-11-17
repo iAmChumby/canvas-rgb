@@ -88,6 +88,17 @@ function zoneShape(z: ZoneInfo): string {
   return "single";
 }
 
+/** The count cell, in the same place on every row: a zone with no LEDs is "Not sized", never "0 LEDs". */
+function ZoneCount({ zone }: { zone: ZoneInfo }) {
+  if (zone.led_count === 0) return <span className="mute">Not sized</span>;
+  return (
+    <>
+      <AnimatedNumber value={zone.led_count} /> {zone.led_count === 1 ? "LED" : "LEDs"}
+      {zone.resizable && <span className="mute"> · {zone.min_leds}–{zone.max_leds}</span>}
+    </>
+  );
+}
+
 /**
  * The one detail that tells two devices apart when the daemon gives them the same name: the
  * address in their location. Two ENE DRAM sticks both answer to "ENE DRAM"; their SMBus
@@ -286,7 +297,7 @@ function WhiteBalanceSection({
  * whether it runs the other way. Every change goes straight to the lights route and the list is
  * read back, so two windows never disagree about a light.
  */
-function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
+function LightControls({ view }: { view: LightView }) {
   const light = view.light;
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(view.label);
@@ -314,9 +325,8 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
     void patch({ name: next || null }).catch(() => setName(view.label));
   };
 
-  // The hardware says whether a light can be a ring: only a line can be one.
-  const linear = zone.kind.type === "linear";
-
+  // Every light gets the same controls, whatever its zone's shape: a name, the strip or ring it
+  // is, and the way it runs. One light row differs from the next only in the device it belongs to.
   return (
     <div className="rd-light-row" data-busy={busy ? "true" : undefined}>
       <span className="mute rd-light-key">Light</span>
@@ -349,17 +359,15 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
           <span className="one-line">{view.label}</span>
         </Button>
       )}
-      {linear && (
-        <Segmented<"strip" | "ring">
-          label={`What ${view.label} is`}
-          value={light.arrangement === "ring" ? "ring" : "strip"}
-          options={[
-            { value: "strip", label: "Strip" },
-            { value: "ring", label: "Ring" },
-          ]}
-          onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
-        />
-      )}
+      <Segmented<"strip" | "ring">
+        label={`What ${view.label} is`}
+        value={light.arrangement === "ring" ? "ring" : "strip"}
+        options={[
+          { value: "strip", label: "Strip" },
+          { value: "ring", label: "Ring" },
+        ]}
+        onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
+      />
       <span className="rd-light-turn">
         <span className="mute">Runs the other way</span>
         <Toggle
@@ -557,7 +565,7 @@ export function DevicesView() {
           </Panel>
         }
       >
-        <div className="rd-dev-list">
+        <div className="rd-dev-list panel">
           {sorted.map((d) => {
             const Glyph = KIND_ICON[d.kind];
             const accent = ACCENTS[sorted.indexOf(d) % ACCENTS.length];
@@ -583,110 +591,133 @@ export function DevicesView() {
                 aria-label={d.name}
                 data-testid="device-card"
               >
-                <div className="rd-dev-row">
-                  <span className="device-kind" aria-hidden="true">
-                    <Glyph size={18} />
-                  </span>
-                  <span className="one-line rd-dev-name">
-                    {d.name}
-                    {sameName && tag ? ` ${tag}` : ""}
-                  </span>
-                  <span className="row-sub fig one-line rd-dev-sub" title={sub}>
-                    {sub}
-                  </span>
-                  {one && <ZoneStrip zone={one} />}
-                  {one && (
-                    <span className="zone-strip-count">
-                      {one.led_count === 0 ? (
-                        <span className="mute">Not sized</span>
-                      ) : (
-                        <>
-                          <AnimatedNumber value={one.led_count} /> {one.led_count === 1 ? "LED" : "LEDs"}
-                        </>
-                      )}
-                    </span>
-                  )}
-                  {(() => {
-                    const wbKnown = whiteBalances !== null;
-                    const wb = wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL;
-                    const open = wbOpen === d.id;
-                    return (
-                      <Button
-                        size="sm"
-                        className="wb-key"
-                        variant={open ? "primary" : "default"}
-                        aria-expanded={open}
-                        aria-label={`White balance for ${shownName}${wbKnown && !isNeutral(wb) ? " (set)" : ""}`}
-                        icon={
-                          <span
-                            className="wb-swatch"
-                            data-unknown={wbKnown ? undefined : wbError ? "failed" : "true"}
-                            style={wbKnown ? { backgroundColor: swatchOf(wb) } : undefined}
-                            aria-hidden="true"
-                          />
-                        }
-                        onClick={() => setWbOpen(open ? null : d.id)}
-                      >
-                        <span className="wb-key-text">Balance</span>
-                        <SlidersHorizontal size={14} className="wb-key-glyph" aria-hidden="true" />
-                      </Button>
-                    );
-                  })()}
-                  <span className={`state ${d.connected ? "" : "down-text"}`} style={{ "--tone": d.connected ? "var(--ok)" : "var(--down)" } as CSSProperties}>
-                    <span className="state-dot" aria-hidden="true" />
-                    {d.connected ? "connected" : "disconnected"}
-                  </span>
-                </div>
-
-                {one && chainOf(one.index) && <ChainRow chain={chainOf(one.index)!} />}
-
-                {one && !chainOf(one.index) && lightOf(one.index) && (
-                  <LightControls view={lightOf(one.index)!} zone={one} />
-                )}
-
-                {d.zones.length === 0 && (
-                  <div className="zone-empty rd-zone-empty">
-                    <EmptyState
-                      icon={<Memory size={20} />}
-                      title={`${d.name} reports no zones`}
-                      action={
-                        <Button size="sm" icon={<ArrowClockwise size={16} />} busy={retrying} onClick={() => void retryDevices()}>
-                          Try again
-                        </Button>
+                {(() => {
+                  // Every row on this page is built from the same seven columns: kind, name and
+                  // sub-line, LED bar, count, balance key, state and action. A header's own row
+                  // carries its state and its Set up key inline, so it is no longer drawn twice
+                  // (a zone row followed by a separate "ARGB header" row) as it was before #471.
+                  const wbKnown = whiteBalances !== null;
+                  const wb = wbDrafts[d.id] ?? whiteBalances?.devices[d.id] ?? NEUTRAL;
+                  const open = wbOpen === d.id;
+                  const chainOne = one ? chainOf(one.index) : null;
+                  const balance = (
+                    <Button
+                      size="sm"
+                      className="wb-key"
+                      variant={open ? "primary" : "default"}
+                      aria-expanded={open}
+                      aria-label={`White balance for ${shownName}${wbKnown && !isNeutral(wb) ? " (set)" : ""}`}
+                      icon={
+                        <span
+                          className="wb-swatch"
+                          data-unknown={wbKnown ? undefined : wbError ? "failed" : "true"}
+                          style={wbKnown ? { backgroundColor: swatchOf(wb) } : undefined}
+                          aria-hidden="true"
+                        />
                       }
+                      onClick={() => setWbOpen(open ? null : d.id)}
                     >
-                      OpenRGB lists this device but no zones for it yet. Try again once it is lit.
-                    </EmptyState>
-                  </div>
-                )}
-
-                {d.zones.length > 1 &&
-                  d.zones.map((z) => (
-                    <Fragment key={z.index}>
-                      <div className="rd-zone">
-                        <span className="zone-strip-name">
-                          <span className="one-line">{z.name}</span>
-                          <span className="mute one-line rd-zone-shape">{zoneShape(z)}</span>
+                      <span className="wb-key-text">Balance</span>
+                      <SlidersHorizontal size={14} className="wb-key-glyph" aria-hidden="true" />
+                    </Button>
+                  );
+                  const connected = (
+                    <span className={`state ${d.connected ? "" : "down-text"}`} style={{ "--tone": d.connected ? "var(--ok)" : "var(--down)" } as CSSProperties}>
+                      <span className="state-dot" aria-hidden="true" />
+                      {d.connected ? "connected" : "disconnected"}
+                    </span>
+                  );
+                  const deviceLead = (
+                    <>
+                      <span className="device-kind" aria-hidden="true">
+                        <Glyph size={18} />
+                      </span>
+                      <span className="rd-dev-who">
+                        <span className="one-line rd-dev-name">{shownName}</span>
+                        <span className="row-sub fig one-line rd-dev-sub" title={sub}>
+                          {sub}
+                          {chainOne ? " · connected" : ""}
                         </span>
-                        <ZoneStrip zone={z} />
+                      </span>
+                      {one ? <ZoneStrip zone={one} /> : <span aria-hidden="true" />}
+                      {one ? (
                         <span className="zone-strip-count">
-                          {z.led_count === 0 ? (
-                            <span className="mute">Not sized</span>
-                          ) : (
-                            <>
-                              <AnimatedNumber value={z.led_count} /> {z.led_count === 1 ? "LED" : "LEDs"}
-                              {z.resizable && <span className="mute"> · {z.min_leds}–{z.max_leds}</span>}
-                            </>
-                          )}
+                          <ZoneCount zone={one} />
                         </span>
-                      </div>
-                      {chainOf(z.index) ? (
-                        <ChainRow chain={chainOf(z.index)!} named={false} />
-                      ) : lightOf(z.index) ? (
-                        <LightControls view={lightOf(z.index)!} zone={z} />
-                      ) : null}
-                    </Fragment>
-                  ))}
+                      ) : (
+                        <span aria-hidden="true" />
+                      )}
+                      {balance}
+                    </>
+                  );
+                  const zoneLead = (z: ZoneInfo) => (
+                    <>
+                      <span className="device-kind" aria-hidden="true">
+                        <Plugs size={18} />
+                      </span>
+                      <span className="rd-dev-who">
+                        <span className="one-line rd-dev-name">{z.name}</span>
+                        <span className="mute one-line rd-dev-sub">ARGB header · {zoneShape(z)}</span>
+                      </span>
+                      <ZoneStrip zone={z} />
+                      <span className="zone-strip-count">
+                        <ZoneCount zone={z} />
+                      </span>
+                      <span aria-hidden="true" />
+                    </>
+                  );
+                  return (
+                    <>
+                      {one && chainOne ? (
+                        <ChainRow chain={chainOne} lead={deviceLead} />
+                      ) : (
+                        <div className="rd-dev-row">
+                          {deviceLead}
+                          {connected}
+                          <span aria-hidden="true" />
+                        </div>
+                      )}
+
+                      {one && !chainOne && lightOf(one.index) && (
+                        <LightControls view={lightOf(one.index)!} />
+                      )}
+
+                      {d.zones.length === 0 && (
+                        <div className="zone-empty rd-zone-empty">
+                          <EmptyState
+                            icon={<Memory size={20} />}
+                            title={`${d.name} reports no zones`}
+                            action={
+                              <Button size="sm" icon={<ArrowClockwise size={16} />} busy={retrying} onClick={() => void retryDevices()}>
+                                Try again
+                              </Button>
+                            }
+                          >
+                            OpenRGB lists this device but no zones for it yet. Try again once it is lit.
+                          </EmptyState>
+                        </div>
+                      )}
+
+                      {d.zones.length > 1 &&
+                        d.zones.map((z) => (
+                          <Fragment key={z.index}>
+                            {chainOf(z.index) ? (
+                              <ChainRow chain={chainOf(z.index)!} lead={zoneLead(z)} />
+                            ) : (
+                              <div className="rd-zone">
+                                {zoneLead(z)}
+                                {connected}
+                                <span aria-hidden="true" />
+                              </div>
+                            )}
+                            {!chainOf(z.index) && lightOf(z.index) && (
+                              <LightControls view={lightOf(z.index)!} />
+                            )}
+                          </Fragment>
+                        ))}
+                    </>
+                  );
+                })()}
 
                 {wbOpen === d.id && (
                   <WhiteBalanceSection

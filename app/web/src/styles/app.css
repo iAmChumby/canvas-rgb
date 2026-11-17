@@ -3675,7 +3675,8 @@ button.chip:hover {
 /* ---------- devices page ---------- */
 
 /* The list is the whole page: one row per device, and the list scrolls inside its own pane
-   when it is longer than the window (R1). */
+   when it is longer than the window (R1). The list is a surface, the same panel treatment the
+   other pages use, so no row sits on the bare dotted page (#471). */
 .rd-devices .load-frame[data-state="ready"] {
   display: flex;
   flex-direction: column;
@@ -3693,22 +3694,41 @@ button.chip:hover {
   column-gap: var(--s4);
 }
 
-/* One device, one row. */
+/* The shared surface: .panel supplies the fill, border and radius; the rows own their padding. */
+.rd-devices .rd-dev-list.panel {
+  padding: 0;
+}
+
+/* One device, one or more rows. The last one keeps the panel's bottom edge clear. */
 .rd-devices .rd-dev {
   break-inside: avoid;
   border-bottom: 1px solid var(--line);
 }
 
-.rd-devices .rd-dev-row {
-  display: flex;
+.rd-devices .rd-dev:last-child {
+  border-bottom: 0;
+}
+
+/* Every row uses the same columns: kind | name | LEDs | count | balance | state | action. */
+.rd-devices .rd-dev-row,
+.rd-devices .rd-zone {
+  display: grid;
+  grid-template-columns: var(--row-cols);
   align-items: center;
   gap: var(--s3);
   height: 44px;
   padding: 0 var(--s4);
 }
 
+.rd-devices .rd-dev-who {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  line-height: 1.25;
+}
+
 .rd-devices .rd-dev-name {
-  flex: 0 0 220px;
   min-width: 0;
   font-weight: 600;
 }
@@ -3716,24 +3736,20 @@ button.chip:hover {
 /* The sub-line is the kind, the vendor, the adapter and the address: it gives way to the drawing
    on a narrow row, and the whole line is its tooltip. */
 .rd-devices .rd-dev-sub {
-  flex: 0 1 300px;
-  min-width: 96px;
+  min-width: 0;
 }
 
-/* The drawing takes the room the row has left; the count and the state stay put. */
-.rd-devices .rd-dev-row .zone-strip-svg {
-  flex: 1 1 200px;
-  min-width: 64px;
+/* The drawing, the count and the state take the columns the grid gives them. */
+.rd-devices .zone-strip-svg {
+  min-width: 0;
 }
 
-.rd-devices .rd-dev-row .zone-strip-count {
-  flex: none;
-  min-width: 56px;
-  margin-left: auto;
+.rd-devices .zone-strip-count {
+  min-width: 0;
 }
 
 .rd-devices .rd-dev-row .state {
-  flex: none;
+  min-width: 0;
 }
 
 /* The word of a not-connected device is in the `down` tone. */
@@ -3837,39 +3853,20 @@ button.chip:hover {
   }
 }
 
-/* A device with several zones: a header row, then one indented row per zone. */
+/* A device with several zones: one row per header, aligned with every other row. */
 .rd-devices .rd-zone {
-  display: flex;
-  align-items: center;
-  gap: var(--s3);
-  height: 44px;
-  padding: 0 var(--s4) 0 calc(var(--s4) + var(--s8) + var(--s3));
   border-top: 1px solid var(--line);
 }
 
-.rd-devices .rd-zone .zone-strip-name {
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  flex: 0 0 116px;
-  min-width: 0;
-  line-height: 1.25;
-}
-
-/* The shape of the zone (linear, single, matrix) under its name, as the list showed it before. */
-.rd-devices .rd-zone .rd-zone-shape {
-  font-size: var(--t14);
-}
-
-/* A light's row: its name, strip or ring, and the other way round. It sits under the device
-   row or under the zone row the light belongs to, indented the same. */
+/* A light's row: name, shape and direction, on every light. The name starts where every other
+   row's name starts; the same three controls sit under each device that has a light (#471). */
 .rd-devices .rd-light-row {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: var(--s2) var(--s3);
   min-height: 40px;
-  padding: var(--s1) var(--s4) var(--s1) calc(var(--s4) + var(--s8) + var(--s3));
+  padding: var(--s1) var(--s4) var(--s1) calc(var(--s4) + 28px + var(--s3));
   border-top: 1px dashed var(--line);
 }
 
@@ -3895,10 +3892,6 @@ button.chip:hover {
 
 .rd-light-error {
   flex-basis: 100%;
-}
-
-.rd-devices .rd-dev-row + .rd-light-row {
-  padding-left: var(--s4);
 }
 
 /* A phone: the light's own row is two lines, not three. The device and zone above already say
@@ -3928,17 +3921,6 @@ button.chip:hover {
   border-top: 1px solid var(--line);
 }
 
-.rd-devices .rd-zone .zone-strip-svg {
-  flex: 1 1 200px;
-  min-width: 64px;
-}
-
-.rd-devices .rd-zone .zone-strip-count {
-  flex: none;
-  min-width: 56px;
-  margin-left: auto;
-}
-
 /* wide: two columns of the list, and a device never splits across them. */
 @container page (min-width: 1500px) {
   .rd-devices .rd-dev-list {
@@ -3956,11 +3938,12 @@ button.chip:hover {
 
 /* A narrow page: the row wraps to two lines, the name and its state on the first, the id, the
    drawing and the count on the second. The list keeps its own scroller: this container query also
-   fires on a desktop shell (a 721-752 px window), where `.content` is clipped, so handing the
+   fires on a desktop shell (a 721-800 px window), where `.content` is clipped, so handing the
    scroll back to the document here left the rows cut off (#89). The phone hand-back is below,
    keyed on the window. */
-@container page (max-width: 640px) {
-  .rd-devices .rd-dev-row {
+@container page (max-width: 760px) {
+  .rd-devices .rd-dev-row,
+  .rd-devices .rd-zone {
     display: flex;
     flex-wrap: wrap;
     align-items: center;
@@ -3970,101 +3953,62 @@ button.chip:hover {
     padding: var(--s1) var(--s4);
   }
 
-  .rd-devices .rd-dev-row .device-kind {
+  .rd-devices .device-kind {
     flex: 0 0 24px;
     order: 0;
     width: 24px;
     height: 24px;
   }
 
-  .rd-devices .rd-dev-row .rd-dev-name {
-    flex: 0 1 auto;
+  .rd-devices .rd-dev-who {
+    flex: 1 1 auto;
     order: 1;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: var(--s2);
   }
 
-  .rd-devices .rd-dev-row .state {
+  .rd-devices .rd-dev-row .state,
+  .rd-devices .rd-zone .state {
     flex: 0 0 100px;
     order: 2;
   }
 
   /* A small basis that grows: the line wraps by basis, so 150px pushed the Balance key (#50)
      onto a third line. */
-  .rd-devices .rd-dev-row .rd-dev-sub {
+  .rd-devices .rd-dev-sub {
     flex: 1 1 80px;
     min-width: 0;
     order: 3;
   }
 
-  .rd-devices .rd-dev-row .zone-strip-svg {
+  .rd-devices .zone-strip-svg {
     flex: 0 0 64px;
     order: 4;
     width: 64px;
     height: auto;
   }
 
-  .rd-devices .rd-dev-row .zone-strip-count {
-    flex: 0 0 59px;
+  .rd-devices .zone-strip-count {
+    flex: 0 1 auto;
+    min-width: 0;
     order: 5;
     margin-left: 0;
   }
 
   /* The Balance key (#50) ends the second line, after the count: its swatch alone, so it fits
      there (the key keeps its spoken name). */
-  .rd-devices .rd-dev-row .wb-key {
+  .rd-devices .wb-key {
     order: 7;
   }
 
-  .rd-devices .rd-dev-row .wb-key-text {
+  .rd-devices .wb-key-text {
     display: none;
   }
 
-  .rd-devices .rd-dev-row .wb-key-glyph {
+  .rd-devices .wb-key-glyph {
     display: inline-block;
-  }
-
-  .rd-devices .rd-zone {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) auto;
-    grid-template-areas:
-      "name count"
-      "drawing drawing";
-    align-items: center;
-    height: auto;
-    row-gap: var(--s1);
-    column-gap: var(--s2);
-    padding: var(--s1) var(--s4) var(--s1) var(--s6);
-  }
-
-  /* The zone's name and its shape stand on one line here: the row is two lines, not three. */
-  .rd-devices .rd-zone .zone-strip-name {
-    grid-area: name;
-    flex: none;
-    flex-direction: row;
-    align-items: baseline;
-    gap: var(--s2);
-  }
-
-  /* The zone's name keeps its whole width; the shape word has no room beside the count on a
-     phone, so it goes there (the drawing under the row shows the shape). */
-  .rd-devices .rd-zone .zone-strip-name > .one-line:first-child {
-    flex: none;
-  }
-
-  .rd-devices .rd-zone .rd-zone-shape {
-    display: none;
-  }
-
-  .rd-devices .rd-zone .zone-strip-svg {
-    grid-area: drawing;
-    flex: none;
-    width: 100%;
-    height: 16px;
-  }
-
-  .rd-devices .rd-zone .zone-strip-count {
-    grid-area: count;
-    justify-self: end;
-    margin-left: 0;
   }
 }
 

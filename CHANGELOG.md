@@ -10,6 +10,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 - Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
 
+### Changed
+
+- Devices is laid out like the other pages now: every list sits on a surface, an ARGB header is one row with its state and a secondary Set up key inline instead of a second row, and every light has the same shape and direction controls in the same columns. (#471)
+
 ### Fixed
 
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
