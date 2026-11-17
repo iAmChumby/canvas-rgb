@@ -505,6 +505,21 @@ line. Three mechanisms, and one bug the timing only exposed.
   one free for a connect, and nothing is asked to bind it later; the ones that keep their listener bound for
   the whole check (`crates/canvas-daemon/src/cli.rs`, both `peer.rs` copies, `tests/exit_lines.rs`,
   `tests/quit.rs`'s `free_port` for OpenRGB) hold the socket while they read it.
+- [#242](https://github.com/iAmChumby/canvas-rgb/issues/242): one full `cargo test -p canvas-rgb-tray`
+  run failed four update tests and hung on the service-report test. Four shapes, all in the tray's
+  own test code. A port was picked and given up (`app/src-tauri/src/api.rs:188`,
+  `app/src-tauri/src/update/tests.rs:654` and `:1678`), so another socket could answer for it: the
+  client then read a stranger's answer, or a read timeout, instead of a closed port. A test folder
+  was named after the process id and a counter (`app/src-tauri/src/update/tests.rs:62`), so a run
+  that was killed left its folder behind and the next run with the same process id and the same
+  counter took it again, with the earlier run's state file and report in it. A report was dated by
+  the machine's clock, and the tray reads a report only when it was written at or after the start
+  of the install it belongs to (`read_fresh_result`), so a clock that stepped back made the tray
+  ignore a report that was really this install's. And the download had no deadline of the test's
+  own, so a server that never answered held the run for the production's fifteen minutes. Fixed:
+  the port is held while the test runs (`closed_port`), the folder is emptied before it is used,
+  the report carries the time of the install it belongs to, and the tests set their own download
+  deadline (`Settings::download_timeout`). The guard below scans the tray's test code too.
 - **Class fix:** partial. Each test named below is fixed, and a guard stops new instances of two shapes; siblings remain open (listed below). The rule: a test never decides on how long
   something took. It waits for an event (`wait_until`, `findBy*`), counts (wake-ups, frames), injects the
   clock, sizes its work by a warm-up and the best of several samples, or is an `#[ignore]`d measurement.
@@ -567,7 +582,7 @@ line. Three mechanisms, and one bug the timing only exposed.
     ticker that paces the ticks and a clock that reads the ticks are two clocks, and the gap between
     them is the machine's speed.
 - **The guard:** `crates/canvas-svc/tests/timing_class.rs` (part of `cargo test --workspace`, so CI) scans
-  the test code under `crates/` (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
+  the test code under `crates/` and the tray's own test code (`app/src-tauri/src`, #242) (files in `tests/`, `tests.rs`, `*_tests.rs`, files that a `lib.rs` or
   `main.rs` declares as a `#[cfg(test)]` module such as `canvas-core/src/cpu.rs`, and a source file from
   its last `#[cfg(test)] mod`) and fails with `file:line` on (1) a measured duration compared with `<` or `<=`
   (`elapsed()`, `took`, `waited`, `.as_millis()` and similar), and (2) a `sleep(` followed within three
@@ -646,6 +661,32 @@ that is already dead or is refused, and nothing can clear it until a restart.
   the API's per-route guards are RAII already (`effect_writes`, `preview_slots`, the adapters'
   `tokio::sync::Mutex`). When adding a route that starts asynchronous work, take the token and the
   guard in the same statement.
+
+### `cause:cancelled-request`: a request that is given up on breaks the link that carried it
+
+OpenRGB answers in order and puts no request id in a reply, so a reply that arrives late would
+answer the next request. A request that is given up on therefore leaves the link unusable: it is
+broken and lost, and the supervisor reconnects. Every light pauses for that reconnect, and the
+work the request was carrying stops half way.
+
+- [#308](https://github.com/iAmChumby/canvas-rgb/issues/308): the zone resize route awaited
+  `set_zone_size` in the handler, so a client that went away in the middle of it cancelled a
+  request OpenRGB had already answered. Fixed in PR #456.
+- [#457](https://github.com/iAmChumby/canvas-rgb/issues/457): the same mistake in the chain routes:
+  `start_setup`, `commit_setup`, `cancel_setup` and `empty_setup` awaited `set_zone_size` in the
+  handler, so a client that left mid-step broke the link and left the setup half-recorded (the
+  record on disk, the hold in memory, the header in between).
+- **Class fix:** done (#308, #457). A route that talks to OpenRGB runs the whole step on a task of
+  its own and answers from its result, so a client that goes away cannot cancel the request:
+  `resize_the_zone` (`crates/canvas-daemon/src/api/devices.rs`), `read_the_colours`
+  (`crates/canvas-daemon/src/api/diag.rs`), and the four chain steps
+  (`crates/canvas-daemon/src/api/chains.rs`). A failure the client never received is logged. The
+  guard that keeps a setup's session open while its step runs (`SetupService`) owns the gate, so
+  the task can hold it.
+- **Sibling search:** every `adapter.lock()` in the daemon's API is now inside such a task. Left,
+  and why: the display adapter's own `disconnect` (`crates/canvas-daemon/src/api/displays.rs:143`)
+  is another protocol with no reply to misalign, and the first run's resize
+  (`crates/canvas-daemon/src/first_run.rs:383`) runs in the daemon's own task, not in a request.
 
 ### `cause:css-layout`: a pane's scroll rule and the phone fallback key on different widths
 

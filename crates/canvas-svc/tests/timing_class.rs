@@ -68,7 +68,6 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/src/logging.rs", "took < std::time::Duration::from_millis(1000)", "open: a 1 s ceiling on run_bounded giving up after its 250 ms limit; a runner stalled for 750 ms past the limit fails it"),
     ("canvas-daemon/src/user_effects.rs", "took < std::time::Duration::from_secs(5)", "hang guard: a 400 ms render budget against a 30 s frame budget; 5 s means the frame was not held to the budget"),
     ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_est)", "open, calibrated: the render is held to its budget plus one frame, where the frame is the best of three samples scaled to the effect (about 0.5 s). The slack is a constant once measured: a stall longer than it fails the test (#51)"),
-    ("canvas-daemon/tests/effects_import.rs", "elapsed.as_millis() < 8_000", "open: 8 s ceiling on two 2 s load budgets (the import's parse and the rescan's, #56)"),
     ("canvas-daemon/tests/scenes.rs", "start.elapsed() < Duration::from_secs(20)", "hang guard: a 20 s deadline on a poll loop for a brightness change that lands within one frame"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
     ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(started.elapsed() < Duration::from_secs(2), \"waited past the first window", "open: pins the rescan's 1.5 s first window (no list change means detection did not start); 0.5 s slack over the window it asserts, #290"),
@@ -113,6 +112,8 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-svc/src/openrgb_tests.rs", "sleep(between)", "open: a real sleep between two steps that run on synthetic clocks, to let the fake OpenRGB server see the first write; whether a stalled runner needs longer is not traced (UNKNOWN)"),
     ("canvas-svc/src/update_install_tests.rs", "sleep(Duration::from_millis(10))", "safe: the poll loop of a killed child, with a 10 s deadline that fails"),
     ("canvas-svc/src/update_install_tests.rs", "sleep(Duration::from_millis(300))", "safe: asserts a suspended setup has NOT run"),
+    ("app/src-tauri/src/gpui_editor.rs", "sleep(Duration::from_millis(100))", "safe: lets the clock move so a rewrite of the prefs file shows as a new mtime; a slower runner only widens the gap"),
+    ("app/src-tauri/src/gpui_editor.rs", "sleep(Duration::from_millis(20))", "safe: the poll loop that waits for the event, with a 20 s deadline that fails"),
 ];
 
 #[derive(Debug, PartialEq, Eq)]
@@ -304,6 +305,8 @@ fn scan_repo() -> (usize, Vec<Finding>, Used) {
     let root = repo_root();
     let mut files = Vec::new();
     collect(&root.join("crates"), &mut files);
+    // The tray's own test code (`app/src-tauri/src`): the same class, another area (#242).
+    collect(&root.join("app/src-tauri/src"), &mut files);
     let mut read = Vec::new();
     for path in &files {
         let rel = path

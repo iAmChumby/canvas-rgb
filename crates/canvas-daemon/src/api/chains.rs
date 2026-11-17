@@ -83,10 +83,41 @@ pub async fn list_chains(State(app): State<Arc<App>>) -> Json<ChainsResponse> {
 /// record is written before the raise, so a crash from here on is replayed at start; the raise
 /// itself goes in `App::zone_holds`, never in `zones.json`. A raise the device refuses deletes
 /// the record and the hold, ends the session and answers the device's own error.
+///
+/// The whole step runs on a task of its own (#457): a client that goes away in the middle of the
+/// raise must not cancel a request OpenRGB already answered. A cancelled request breaks the
+/// OpenRGB link (the reply may still come, and it would answer the next request), and every
+/// light would pause for one reconnect. The record, the hold and the rollback belong to that
+/// task as well, so a client that leaves leaves a whole setup behind and not a half-recorded one.
 pub async fn start_setup(
     State(app): State<Arc<App>>,
     Path((id, zone)): Path<(String, u32)>,
 ) -> ApiResult<Json<SetupStarted>> {
+    // The work runs on its own task: the client may go away while it runs, and the OpenRGB
+    // request must not be cancelled with it.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let for_the_work = Arc::clone(&app);
+    let work_id = id.clone();
+    tokio::spawn(async move {
+        let result = start_the_setup(&for_the_work, work_id.clone(), zone).await;
+        // A client that went away gets no answer; a failed setup must still be on record.
+        if let Err(Err(failure)) = reply.send(result) {
+            tracing::warn!(device = %work_id, zone, ?failure, "a chain setup failed after the client went away");
+        }
+    });
+    // The task answers, or it is gone.
+    let started = answer
+        .await
+        .map_err(|_| ApiFailure::internal("the chain setup task ended"))??;
+    Ok(Json(started))
+}
+
+/// The setup itself: the gate session, the restore record, the raise and the device list that
+/// follows it.
+///
+/// It runs on a task of its own, so a client that goes away does not cancel the raise and does
+/// not leave the setup half-recorded (#457).
+async fn start_the_setup(app: &Arc<App>, id: String, zone: u32) -> ApiResult<SetupStarted> {
     let device_id = DeviceId(id.clone());
     let device = app
         .device(&device_id)
@@ -115,7 +146,7 @@ pub async fn start_setup(
     if crate::chain_records::read_restore(&home).is_some()
         || crate::chain_records::read_intent(&home).is_some()
     {
-        replay_leftovers(&app).await;
+        replay_leftovers(app).await;
         if crate::chain_records::read_restore(&home).is_some()
             || crate::chain_records::read_intent(&home).is_some()
         {
@@ -146,7 +177,7 @@ pub async fn start_setup(
     // ends the setup and the ticker then finds nothing and stops, instead of the gate believing in
     // a ticker that never started (which would leave every later identify and flash dark).
     if start_ticker {
-        crate::identify::spawn_ticker(app.clone());
+        crate::identify::spawn_ticker(Arc::clone(app));
     }
     let record = RestoreRecord { device_id: device_id.clone(), zone_index: zone, leds: restore_to };
     // Before the raise: a crash after this point is a header the next start puts back.
@@ -174,9 +205,9 @@ pub async fn start_setup(
 
     // The list carries the raised length. The scene is deliberately not re-applied: the setup's
     // gate holds the lights dark, and the raised list would be a frame of the old scene.
-    if let Err(e) = rediscover(&app).await {
+    if let Err(e) = rediscover(app).await {
         tracing::warn!(device = %id, zone, error = %e.message, "the raised header's list could not be read; putting the length back");
-        let _ = finish_setup_locked(&app).await;
+        let _ = finish_setup_locked(app).await;
         return Err(e);
     }
 
@@ -184,7 +215,7 @@ pub async fn start_setup(
         device = %id, zone, restore_to, raised_to, session = %session,
         "a chain setup opened: the header is raised and held"
     );
-    Ok(Json(SetupStarted { session, restore_to, raised_to }))
+    Ok(SetupStarted { session, restore_to, raised_to })
 }
 
 /// `POST /api/v1/chains/{device}/{zone}/setup/light`: the runs to show now, also the heartbeat.
@@ -225,15 +256,52 @@ pub async fn light_setup(
 /// `DELETE /api/v1/chains/{device}/{zone}/setup`: ends the setup and puts the earlier length and
 /// the scene back. The body names the session; 409 when it is stale. A resize back that fails
 /// leaves the restore record on disk for the next start and answers the device's error.
+///
+/// The whole step runs on a task of its own (#457): the resize back is a request to OpenRGB, and
+/// a client that goes away in the middle of it must not cancel a request OpenRGB already
+/// answered. A cancelled request breaks the OpenRGB link (the reply may still come, and it would
+/// answer the next request), and every light would pause for one reconnect. The hold, the
+/// record and the rollback belong to that task as well, so a client that leaves leaves the
+/// header where the setup put it and not half way between the two lengths.
 pub async fn cancel_setup(
     State(app): State<Arc<App>>,
     Path((id, zone)): Path<(String, u32)>,
     Json(request): Json<SetupEmpty>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // The work runs on its own task: the client may go away while it runs, and the OpenRGB
+    // request must not be cancelled with it.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let for_the_work = Arc::clone(&app);
+    let work_id = id.clone();
+    tokio::spawn(async move {
+        let result = cancel_the_setup(&for_the_work, work_id.clone(), zone, request).await;
+        // A client that went away gets no answer; a failed cancel must still be on record.
+        if let Err(Err(failure)) = reply.send(result) {
+            tracing::warn!(device = %work_id, zone, ?failure, "a chain setup cancel failed after the client went away");
+        }
+    });
+    // The task answers, or it is gone.
+    let leds = answer
+        .await
+        .map_err(|_| ApiFailure::internal("the chain setup cancel task ended"))??;
+    Ok(Json(serde_json::json!({ "ok": true, "leds": leds })))
+}
+
+/// The cancel itself: the session ends, the header goes back to the earlier length, and the hold
+/// and the record go with it.
+///
+/// It runs on a task of its own, so a client that goes away does not cancel the resize back
+/// (#457).
+async fn cancel_the_setup(
+    app: &Arc<App>,
+    id: String,
+    zone: u32,
+    request: SetupEmpty,
+) -> ApiResult<serde_json::Value> {
     // The session is checked under the step lock: a commit that finished while this waited has
     // closed it, and its parts must stay.
     let _step = app.chain_setup.lock().await;
-    check_session(&app, &id, zone, &request.session).await?;
+    check_session(app, &id, zone, &request.session).await?;
     // The resize back waits on the device, so this request is served: the ticker must not end
     // the session and restore under it (#429).
     let Some(_served) = app.identify.serve_setup(&request.session) else {
@@ -241,8 +309,8 @@ pub async fn cancel_setup(
             "this chain setup session is not open any more; start it again",
         ));
     };
-    let leds = finish_setup_locked(&app).await?;
-    Ok(Json(serde_json::json!({ "ok": true, "leds": leds })))
+    let leds = finish_setup_locked(app).await?;
+    Ok(serde_json::json!({ "ok": true, "leds": leds }))
 }
 
 /// `POST /api/v1/chains/{device}/{zone}/setup/commit`: the parts, their groups and the header's
@@ -260,14 +328,50 @@ pub async fn cancel_setup(
 /// device's own error; a store write that fails after the resize puts memory, the three files and
 /// the header back the same way and answers 503. When that rollback fails too, both records stay
 /// and the next start replays them ([`replay_leftovers`]).
+///
+/// The whole step runs on a task of its own (#457): the commit's resize is a request to OpenRGB,
+/// and a client that goes away in the middle of it must not cancel a request OpenRGB already
+/// answered. A cancelled request breaks the OpenRGB link (the reply may still come, and it would
+/// answer the next request), and every light would pause for one reconnect. The snapshot, the
+/// intent record, the hold and the rollback belong to that task as well, so a client that leaves
+/// leaves a committed chain behind and not a half-written one.
 pub async fn commit_setup(
     State(app): State<Arc<App>>,
     Path((id, zone)): Path<(String, u32)>,
     Json(request): Json<SetupCommit>,
 ) -> ApiResult<Json<SetupCommitted>> {
+    // The work runs on its own task: the client may go away while it runs, and the OpenRGB
+    // request must not be cancelled with it.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let for_the_work = Arc::clone(&app);
+    let work_id = id.clone();
+    tokio::spawn(async move {
+        let result = commit_the_setup(&for_the_work, work_id.clone(), zone, request).await;
+        // A client that went away gets no answer; a failed commit must still be on record.
+        if let Err(Err(failure)) = reply.send(result) {
+            tracing::warn!(device = %work_id, zone, ?failure, "a chain commit failed after the client went away");
+        }
+    });
+    // The task answers, or it is gone.
+    let committed = answer
+        .await
+        .map_err(|_| ApiFailure::internal("the chain commit task ended"))??;
+    Ok(Json(committed))
+}
+
+/// The commit itself: the plan, the snapshot, the resize, the three files, and the cleanup.
+///
+/// It runs on a task of its own, so a client that goes away does not cancel the resize and does
+/// not leave the commit half-written (#457).
+async fn commit_the_setup(
+    app: &Arc<App>,
+    id: String,
+    zone: u32,
+    request: SetupCommit,
+) -> ApiResult<SetupCommitted> {
     let device_id = DeviceId(id.clone());
     let _step = app.chain_setup.lock().await;
-    check_session(&app, &id, zone, &request.session).await?;
+    check_session(app, &id, zone, &request.session).await?;
     // A commit waits on the device for a resize, and a refused one is five seconds of silence:
     // while this request is served the setup cannot time out, so the ticker never puts the
     // header back under the save, and the session is still open for a retry (#429).
@@ -432,7 +536,7 @@ pub async fn commit_setup(
     app.zones.write().await.entry(id.clone()).or_default().insert(zone, plan.final_leds);
     app.zone_holds.write().await.remove(&key);
 
-    if let Err(e) = rediscover(&app).await {
+    if let Err(e) = rediscover(app).await {
         // The files landed; the list catches up on the next refresh. Say so rather than fail a
         // commit the disk already holds.
         tracing::warn!(error = %e.message, "the committed header's list could not be read");
@@ -442,9 +546,9 @@ pub async fn commit_setup(
     }
     crate::chain_records::delete_intent(&home);
     crate::chain_records::delete_restore(&home);
-    crate::identify::restore(&app).await;
+    crate::identify::restore(app).await;
     if !app.scene.is_taken_over() {
-        crate::scenes::apply_with(&app, &lock, false).await;
+        crate::scenes::apply_with(app, &lock, false).await;
     }
 
     let lights = {
@@ -464,7 +568,7 @@ pub async fn commit_setup(
         device = %id, zone, parts = lights.len(), final_leds = plan.final_leds,
         "a chain was set up: the parts, their groups and the header's length landed together"
     );
-    Ok(Json(SetupCommitted { lights, final_leds: plan.final_leds }))
+    Ok(SetupCommitted { lights, final_leds: plan.final_leds })
 }
 
 /// `POST /api/v1/chains/{device}/{zone}/setup/empty`: nothing is plugged into this header.
@@ -473,13 +577,50 @@ pub async fn commit_setup(
 /// lights leave the hardware map and every group, and the chain is recorded empty. The header
 /// keeps its earlier length, is not a light, and the scene no longer names it, so it is driven
 /// black.
+///
+/// The whole step runs on a task of its own (#457): the resize back is a request to OpenRGB, and
+/// a client that goes away in the middle of it must not cancel a request OpenRGB already
+/// answered. A cancelled request breaks the OpenRGB link (the reply may still come, and it would
+/// answer the next request), and every light would pause for one reconnect. The hold, the
+/// record and the rollback belong to that task as well, so a client that leaves leaves the
+/// header where the setup put it and not half way between the two lengths.
 pub async fn empty_setup(
     State(app): State<Arc<App>>,
     Path((id, zone)): Path<(String, u32)>,
     Json(request): Json<SetupEmpty>,
 ) -> ApiResult<Json<serde_json::Value>> {
+    // The work runs on its own task: the client may go away while it runs, and the OpenRGB
+    // request must not be cancelled with it.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let for_the_work = Arc::clone(&app);
+    let work_id = id.clone();
+    tokio::spawn(async move {
+        let result = empty_the_setup(&for_the_work, work_id.clone(), zone, request).await;
+        // A client that went away gets no answer; a failed empty must still be on record.
+        if let Err(Err(failure)) = reply.send(result) {
+            tracing::warn!(device = %work_id, zone, ?failure, "an empty chain setup failed after the client went away");
+        }
+    });
+    // The task answers, or it is gone.
+    let leds = answer
+        .await
+        .map_err(|_| ApiFailure::internal("the empty chain setup task ended"))??;
+    Ok(Json(serde_json::json!({ "ok": true, "leds": leds })))
+}
+
+/// The empty header itself: the setup ends as a cancel does, and then the zone's lights leave
+/// the hardware map and every group.
+///
+/// It runs on a task of its own, so a client that goes away does not cancel the resize back
+/// (#457).
+async fn empty_the_setup(
+    app: &Arc<App>,
+    id: String,
+    zone: u32,
+    request: SetupEmpty,
+) -> ApiResult<serde_json::Value> {
     let _step = app.chain_setup.lock().await;
-    check_session(&app, &id, zone, &request.session).await?;
+    check_session(app, &id, zone, &request.session).await?;
     // The setup ends with a resize back that waits on the device: served, so the ticker cannot
     // end it and restore under this request (#429).
     let Some(_served) = app.identify.serve_setup(&request.session) else {
@@ -487,7 +628,7 @@ pub async fn empty_setup(
             "this chain setup session is not open any more; start it again",
         ));
     };
-    let leds = finish_setup_locked(&app).await?;
+    let leds = finish_setup_locked(app).await?;
     let device_id = DeviceId(id.clone());
     let plan = {
         let store = app.store.read().await;
@@ -499,9 +640,9 @@ pub async fn empty_setup(
             ApiFailure::service_unavailable(format!("the empty header was not saved: {e}"))
         })?;
     }
-    crate::scenes::apply_for_devices(&app).await;
+    crate::scenes::apply_for_devices(app).await;
     tracing::info!(device = %id, zone, "a chain is empty: its lights left the hardware map");
-    Ok(Json(serde_json::json!({ "ok": true, "leds": leds })))
+    Ok(serde_json::json!({ "ok": true, "leds": leds }))
 }
 
 /// The restore every end of a setup runs, but a commit: the session ends, the header goes back to
