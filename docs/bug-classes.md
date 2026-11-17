@@ -402,6 +402,25 @@ line. Three mechanisms, and one bug the timing only exposed.
   here, with `data-busy="true"` and `disabled="true"` at the click. Fixed by waiting for the switch
   to be enabled before clicking it. 0 failures in 100 runs. **Rule:** wait for the control you are
   about to click to be usable, not for an earlier side effect of the request.
+- [#494](https://github.com/iAmChumby/canvas-rgb/issues/494):
+  `commit_during_a_takeover_saves_and_lands_when_the_takeover_ends`
+  (`crates/canvas-daemon/tests/chains.rs`) failed with "the scene was not put over the takeover".
+  Measured here: 6 failures of 40 suite runs of origin/main (the test alone: 0 of 60; the flake
+  needs the suite's load, which is what stretched the window below). The test faked the takeover
+  with `land_takeover` directly, outside the draft gate every takeover lands under
+  (`crates/canvas-daemon/src/draft.rs`: the draft, the greeting and the pattern edit all take
+  `app.draft.gate()` first). A scene apply that was already running holds that gate
+  (`crates/canvas-daemon/src/scenes.rs`, `apply_for_devices`) and its end clears the takeover flag
+  (`set_held`, `takeover: []`), so a takeover that lands while an apply is in flight is forgotten:
+  the commit's guard (`crates/canvas-daemon/src/api/chains.rs`, `if !app.scene.is_taken_over()`)
+  then saw no takeover and put the committed scene over it. Traced in a failing run: the takeover
+  landed, an apply that had started 29 ms earlier ended and cleared the flag, and the commit
+  applied the parts. Every takeover lands under the gate, and every apply that can clear the flag
+  holds it except one: deleting an effect re-applies the scene with the gate free, a real product
+  race filed as [#500](https://github.com/iAmChumby/canvas-rgb/issues/500). Fixed by landing the fake takeover under the same gate, the
+  way the product lands one, and by asserting that the takeover still holds after the commit.
+  0 failures in 100 suite runs. **Rule:** a fake of a state the product takes a lock for takes the
+  same lock; a state set outside it can be lost by the work that lock keeps apart.
 - [#332](https://github.com/iAmChumby/canvas-rgb/issues/332): "the empty builder > queues a click on
   another starter while one is loading, and lands both"
   (`app/web/src/views/__tests__/StackBuilderStarters.test.tsx`) failed once in CI and passed on the
@@ -633,6 +652,12 @@ line. Three mechanisms, and one bug the timing only exposed.
     editor, `drag()` in `app/web/src/views/__tests__/StackBuilder.test.tsx` still fakes the clock after
     the builder's first send, so the baseline it measures from is a wall-clock reading; its assertions
     are loose enough that the gap has not moved them, and it is a shape, not a sighting.
+  - **The sibling of #494 (same shape, not fixed):**
+    `a_pattern_edit_waits_while_a_takeover_holds_the_group`
+    (`crates/canvas-daemon/tests/patterns.rs:991`) fakes its takeover with `land_takeover` outside
+    the draft gate, the way #494's did, and judges it right after the pattern edit (`:1002`): an
+    apply that is already running can clear the takeover, and the edit then puts the scene over the
+    group the takeover held. A shape, not a sighting: that test has not been seen to fail.
 - **The same mistake in another crate:** canvas-daemon has its own shared capture helper
   (`crates/canvas-daemon/src/test_logs.rs`) with the same shape as the service's: a thread-local
   subscriber installed with `with_default`. It carried the same hole (a callsite first reached on a thread
