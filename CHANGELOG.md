@@ -6,6 +6,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ## [Unreleased]
 
+### Added
+
+- Devices: the ROYUAN MonsGeek keyboard is driven key by key, live, so effects move across its keys. (#10)
+
 ### Fixed
 
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
