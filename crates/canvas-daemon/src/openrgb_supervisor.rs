@@ -336,6 +336,13 @@ enum Detection {
     Failed(String),
 }
 
+/// Whether the list the adapter reads on this connection may be a part of a detection: it joined one already
+/// running and no read after the detection's 103 has found the list final (protocol 6, see
+/// `OpenRgbAdapter::list_is_final`). `false` with no frame lane: nothing says otherwise.
+fn list_is_mid_detection(lane: Option<&canvas_adapters::openrgb::OpenRgbAdapter>) -> bool {
+    lane.is_some_and(|lane| lane.is_connected() && !lane.list_is_final())
+}
+
 /// Asks OpenRGB to re-detect on the frame lane and waits for its list to go quiet, holding no
 /// adapter lock (#290): the wait takes seconds, and the keyboard's frame writer and the API
 /// handlers wait on that lock.
@@ -664,9 +671,10 @@ pub async fn supervise_with_lane<D, L>(
     D: std::future::Future<Output = ()>,
     L: std::future::Future<Output = ()>,
 {
-    // The list the supervisor last applied: what a rescan that cannot be trusted answers with.
-    // Set on every connect, before any rescan reads it.
-    let mut held: Vec<DeviceInfo>;
+    // The list the supervisor last applied: what a rescan that cannot be trusted answers with, and what
+    // stays applied across a reconnect that lands in the middle of OpenRGB's detection (#290). It outlives
+    // the connection: a restart of OpenRGB must not replace it with a part of its detection.
+    let mut held: Vec<DeviceInfo> = Vec::new();
     let mut backoff = Backoff::new();
     // The rescans that ended the wait for the next attempt: that attempt answers them.
     let mut waiting: Vec<Rescan> = Vec::new();
@@ -697,6 +705,20 @@ pub async fn supervise_with_lane<D, L>(
         match result {
             Ok(devices) => {
                 tracing::info!(count = devices.len(), "connected to OpenRGB");
+                // A connection that joined a detection already running holds no list of its own and read a
+                // part of the detection's (protocol 6, `OpenRgbAdapter::list_is_final`): the list the daemon
+                // had stays applied until a read after the detection's 103. With no list held there is
+                // nothing to keep, and the read is what there is.
+                let devices = if list_is_mid_detection(lane.as_ref()) && !held.is_empty() {
+                    tracing::info!(
+                        read = devices.len(),
+                        held = held.len(),
+                        "OpenRGB is still detecting devices: keeping the list held; the list the detection ends with is applied when it is over"
+                    );
+                    held.clone()
+                } else {
+                    devices
+                };
                 if from_rescan {
                     tracing::info!(
                         "OpenRGB rescan: the link was down; connected and read the list, OpenRGB was not asked to re-detect"
@@ -799,7 +821,10 @@ pub async fn supervise_with_lane<D, L>(
                         break;
                     }
                     ticks += 1;
-                    if !ticks.is_multiple_of(10) {
+                    // A detection that ended while the list held is a part of it: read the final one now,
+                    // not at the next 5 s refresh.
+                    let end_unread = lane.as_ref().is_some_and(|lane| lane.detection_end_unread());
+                    if !ticks.is_multiple_of(10) && !end_unread {
                         continue;
                     }
                     let refreshed = {
@@ -810,6 +835,11 @@ pub async fn supervise_with_lane<D, L>(
                     // The adapter answers with the list it holds while OpenRGB's is still changing, so
                     // a list read mid-detection is never a different list here (#290).
                     match refreshed {
+                        // Mid-detection on a connection that joined it: what OpenRGB lists is a part, and
+                        // the list held stays until a read after the 103 (#290).
+                        Ok(devices) if list_is_mid_detection(lane.as_ref()) && !held.is_empty() => {
+                            tracing::debug!(read = devices.len(), held = held.len(), "OpenRGB is still detecting; keeping the list held");
+                        }
                         Ok(devices) if device_key(&devices) != last => {
                             tracing::info!(count = devices.len(), "the OpenRGB device list changed");
                             last = device_key(&devices);

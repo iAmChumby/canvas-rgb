@@ -398,3 +398,89 @@ async fn the_reader_stays_healthy_over_ten_thousand_frames_and_their_echoes() {
     assert_eq!(adapter.discover().await.expect("discover after the echoes").len(), 1);
     assert!(server.echoes_sent() >= 10_000, "the server never echoed the frames: it is not modelling protocol 6");
 }
+
+// ---- a connection that joins a detection that is already running
+
+/// A server whose detection is already running when the client connects: OpenRGB restarted, or the daemon
+/// reconnected mid-detection. The client never saw the 101, and release_1.1 signals progress per detector
+/// and not per controller (`DetectionManager.cpp:720`, `:747`, `:1009`; a registration is a 100 alone,
+/// `:491`), so all it may have seen of the detection is list changes. The first controller has registered,
+/// the other two will in 3 s and 6 s.
+async fn joined_mid_detection(gap: Duration) -> (FakeOpenRgbServer, OpenRgbAdapter) {
+    let server = server(vec![stick("one"), stick("two"), stick("three")]).await;
+    server.quiet_progress(true);
+    server.rescan_timing(Duration::from_millis(100), gap);
+    server.start_detection();
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    // Paused clock: the first registration is 100 ms into the detection.
+    tokio::time::sleep(Duration::from_millis(500)).await;
+    (server, adapter)
+}
+
+/// Review 6, gap 1: the held-list guard needs a held list, and a connection that joined holds none. Its
+/// first read is OpenRGB's part list (one controller of three). The adapter must not call that list final:
+/// the daemon holds its own list until the detection's 103 has been read, and only then is the list real.
+#[tokio::test(start_paused = true)]
+async fn a_connection_that_joined_a_running_detection_does_not_call_a_part_list_final() {
+    let (_server, mut adapter) = joined_mid_detection(Duration::from_secs(3)).await;
+
+    let part = adapter.discover().await.expect("a read mid-detection");
+    assert_eq!(part.len(), 1, "the read is OpenRGB's part list");
+    assert!(!adapter.list_is_final(), "a part list from a detection that joined mid-way was called final");
+    assert!(!adapter.detection_end_unread(), "no 103 has arrived");
+
+    until("the detection's 103 arrived", || adapter.detection_end_unread()).await;
+    assert!(!adapter.list_is_final(), "the list was called final before it was read after the 103");
+    let whole = adapter.discover().await.expect("a read after 103");
+    assert_eq!(whole.len(), 3, "the list after 103 is whole");
+    assert!(adapter.list_is_final(), "the list read after 103 was not final");
+    assert!(!adapter.detection_end_unread(), "the 103 was read and still counted as unread");
+}
+
+/// A connection to an OpenRGB that is not detecting has a final list from its first read, so the daemon's
+/// ordinary start is unchanged.
+#[tokio::test(start_paused = true)]
+async fn a_connection_to_a_quiet_openrgb_has_a_final_list_from_its_first_read() {
+    let server = server(vec![stick("one"), stick("two")]).await;
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("the first read").len(), 2);
+    assert!(adapter.list_is_final(), "a first read of a quiet OpenRGB is not final");
+}
+
+/// Review 6, gap 2: a client that joined mid-detection never saw the 101, so its packet 140 is dropped by
+/// the server (`DetectionManager.cpp:1753-1756`) and answered by an ACK alone. A detection IS running: the
+/// call waits for its 103 and then succeeds, as it does for a client that saw the 101.
+#[tokio::test(start_paused = true)]
+async fn a_packet_140_from_a_connection_that_joined_a_running_detection_waits_for_its_103() {
+    let (server, mut adapter) = joined_mid_detection(Duration::from_secs(3)).await;
+
+    let started = Instant::now();
+    adapter.rescan_shared().await.expect("the call joined the running detection and it ended");
+    assert_eq!(server.rescan_dropped(), 1, "OpenRGB dropped the packet 140: a detection was running");
+    assert!(
+        started.elapsed() >= Duration::from_secs(8),
+        "the call ended before the running detection's 103: {:?}",
+        started.elapsed()
+    );
+    assert_eq!(adapter.discover().await.expect("a read after 103").len(), 3);
+    assert!(adapter.list_is_final());
+}
+
+/// The same client, and a detection that outlasts the call's bound (15 s): the answer is "still running",
+/// the one a client that saw the 101 gets, never "did not start" while a detection runs. The link stays up.
+#[tokio::test(start_paused = true)]
+async fn a_packet_140_from_a_joined_connection_says_still_running_at_the_bound() {
+    let (_server, adapter) = joined_mid_detection(Duration::from_secs(20)).await;
+
+    let started = Instant::now();
+    let failed = adapter.rescan_shared().await.expect_err("the detection is still running at the bound");
+    assert_eq!(rescan_miss(&failed), Some(RescanMiss::Unsettled), "{failed:?}");
+    assert!(
+        started.elapsed() >= Duration::from_secs(15) && started.elapsed() < Duration::from_secs(16),
+        "the bound is 15 s: {:?}",
+        started.elapsed()
+    );
+    assert!(adapter.is_connected(), "the bound broke the link");
+}

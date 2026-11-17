@@ -107,6 +107,10 @@ struct FakeState {
     rescan_listed: Option<usize>,
     /// The detection that is re-registering controllers: one per server, whoever began it.
     rescan_run: Option<RescanRun>,
+    /// While set, a controller registering again sends clients a list change (100) and no progress (102):
+    /// release_1.1 signals progress per detector (`DetectionManager.cpp:720`, `:747`, `:965`, `:1009`,
+    /// `:1038`), not per registration (`:491`), so a client that joins mid-detection can see only 100s.
+    quiet_progress: bool,
     /// How many times the client asked for the controller count while a rescan was still
     /// re-registering controllers: reads of a list that is mid-detection (#290).
     reads_during_detection: u32,
@@ -362,6 +366,7 @@ impl FakeOpenRgbServer {
             rescan_gap: std::time::Duration::from_millis(10),
             rescan_listed: None,
             rescan_run: None,
+            quiet_progress: false,
             reads_during_detection: 0,
             frames_to_unregistered: 0,
             frames_to_stale_ids: 0,
@@ -460,6 +465,12 @@ impl FakeOpenRgbServer {
     /// indices.
     pub fn rescan_order(&self, order: Vec<usize>) {
         guard(&self.state).rescan_order = Some(order);
+    }
+
+    /// Registrations send no 102 (progress) from now on, only the 100 each one causes (see
+    /// `FakeState::quiet_progress`). The default sends both, as the earlier tests expect.
+    pub fn quiet_progress(&self, quiet: bool) {
+        guard(&self.state).quiet_progress = quiet;
     }
 
     /// Every frame that reached a controller, in order, with the device that received it.
@@ -977,9 +988,10 @@ fn step_rescan(state: &mut FakeState) {
     state.rescan_listed = Some(run.next + 1);
     state.rescan_run = Some(RescanRun { next: run.next + 1, due: tokio::time::Instant::now() + gap });
     let percent = (100 * (run.next + 1) / total.max(1)) as u32;
+    let progress = !state.quiet_progress;
     state.broadcast(|version| {
         let mut bytes = device_list_updated();
-        if version >= PROTOCOL_WITH_EVENTS {
+        if progress && version >= PROTOCOL_WITH_EVENTS {
             bytes.extend_from_slice(&detection_progress(percent));
         }
         bytes

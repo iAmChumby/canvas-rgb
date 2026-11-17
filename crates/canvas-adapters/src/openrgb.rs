@@ -292,6 +292,10 @@ struct Session {
     /// Protocol 6: how many detections this session has seen start, and how many end.
     detections_started: u64,
     detections_completed: u64,
+    /// Protocol 6: a read of the list on this connection found OpenRGB's final list: no detection was
+    /// running and either no list change was heard (a quiet OpenRGB) or a 103 was. False from the connect
+    /// until then; see [`OpenRgbAdapter::list_is_final`].
+    list_final: bool,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
     /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
     /// `DetectionManager.cpp:1776`), so a 101 for a packet 140 always arrives before its ACK.
@@ -300,6 +304,17 @@ struct Session {
     /// A reply comes before its ACK, so an ACK that finds its request still waiting says the server
     /// answered with nothing: the controller id is gone.
     owed_acks: HashMap<(u32, u32), u32>,
+}
+
+impl Session {
+    /// Protocol 6: this connection may be inside a detection it never saw start. It heard the list change
+    /// (100), no 103 has come since, and no read has found the list final: its packet 140 is dropped by a
+    /// running detection (`DetectionManager.cpp:1753-1756`) and answered by an ACK alone, which looks the
+    /// same as a server that started nothing. A connection that heard nothing, or that has read a final list,
+    /// has no reason to think so.
+    fn may_be_mid_detection(&self) -> bool {
+        self.detections_completed == 0 && self.list_changes > 0 && !self.list_final
+    }
 }
 
 /// What a controller's resize is doing.
@@ -334,6 +349,7 @@ impl Default for Session {
             detecting: false,
             detections_started: 0,
             detections_completed: 0,
+            list_final: false,
             rescan_acks: 0,
             owed_acks: HashMap::new(),
         }
@@ -575,6 +591,24 @@ impl OpenRgbAdapter {
         self
     }
 
+    /// Protocol 6 and later: whether the list this connection holds is OpenRGB's final one rather than a
+    /// part of a detection's (#290). A connection that joined a detection already running never saw its 101,
+    /// and release_1.1 signals progress per detector, not per controller (`DetectionManager.cpp:491`,
+    /// `:720`, `:1009`), so a list read mid-way looks like any other: it is a part list. This is `false`
+    /// from the connect until a read finds a quiet OpenRGB (no list change was heard, or a 103 was), and
+    /// the daemon holds the list it had until it is `true`. A hot plug before the first read looks the same
+    /// as a joined detection (a 100 and no 103) and holds the list until a 103 or an owner's rescan ends it.
+    pub fn list_is_final(&self) -> bool {
+        guard(&self.link.session).list_final
+    }
+
+    /// Protocol 6 and later: a detection ended (103) and no read of the list has followed it. The daemon
+    /// reads now, so the final list is applied without waiting for its 5 s refresh.
+    pub fn detection_end_unread(&self) -> bool {
+        let session = guard(&self.link.session);
+        !session.list_final && !session.detecting && session.detections_completed > 0
+    }
+
     /// How a rescan on this adapter waits for detection to settle.
     pub fn rescan_timing(&self) -> RescanTiming {
         self.rescan_timing
@@ -734,7 +768,10 @@ impl OpenRgbAdapter {
     ///   `DetectionManager.cpp:1753-1756`: the call joins the running one): wait for its 103, then `Ok`;
     /// - a detection ran and ended meanwhile: `Ok` at once;
     /// - none ran: the server refused or has detection off, [`RESCAN_NOT_REDETECTED_MESSAGE`], the list
-    ///   was never touched.
+    ///   was never touched. Except on a connection that may have joined a detection already running (it
+    ///   heard list changes, no 103, and has read no final list; see `Session::may_be_mid_detection`): it
+    ///   never saw the 101 that detection began with, the packet was dropped, and the ACK looks the same.
+    ///   That call waits for the 103 like the first case, and at `cap` answers "still running".
     ///
     /// `cap` only bounds the call: a detection still running at it answers
     /// [`RESCAN_DETECT_TIMEOUT_MESSAGE`], and the held list stays whatever the detection takes. The
@@ -753,15 +790,27 @@ impl OpenRgbAdapter {
         self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
         loop {
             self.require_connected()?;
-            let (detecting, began, ended, acks, list_changes) = {
+            let (detecting, began, ended, acks, list_changes, joined) = {
                 let session = guard(&self.link.session);
-                (session.detecting, session.detections_started, session.detections_completed, session.rescan_acks, session.list_changes)
+                (
+                    session.detecting,
+                    session.detections_started,
+                    session.detections_completed,
+                    session.rescan_acks,
+                    session.list_changes,
+                    session.may_be_mid_detection(),
+                )
             };
             if acks != before.2 {
-                if !detecting && began == before.0 && ended == before.1 {
+                // No 101 came for this packet. A connection that may have joined a running detection (it
+                // heard list changes and no 103) was answered by an ACK alone because OpenRGB dropped the
+                // packet: it waits for the 103 like one that saw the 101, up to the cap, and is told "still
+                // running" there. Any other connection is told nothing started.
+                let nothing_began = began == before.0 && ended == before.1;
+                if !detecting && nothing_began && !joined {
                     return Err(AdapterError::Protocol(RESCAN_NOT_REDETECTED_MESSAGE.into()));
                 }
-                if !detecting {
+                if !detecting && !(nothing_began && joined) {
                     let seen = u32::try_from(list_changes - before.3).unwrap_or(u32::MAX);
                     return Ok(Redetected { settled_after: started.elapsed(), list_changes: seen, by_events: true });
                 }
@@ -1097,12 +1146,12 @@ impl OpenRgbAdapter {
     async fn enumerate_by_id(&self) -> Result<Vec<Controller>, AdapterError> {
         let mut gone = None;
         for attempt in 1..=ENUMERATE_ATTEMPTS {
-            let (started_before, changes_before) = {
+            let (started_before, changes_before, completed_before) = {
                 let session = guard(&self.link.session);
                 if session.detecting && !session.controllers.is_empty() {
                     return Ok(session.controllers.clone());
                 }
-                (session.detections_started, session.list_changes)
+                (session.detections_started, session.list_changes, session.detections_completed)
             };
             guard(&self.link.session).discovering += 1;
             let controllers = {
@@ -1126,8 +1175,17 @@ impl OpenRgbAdapter {
                 tracing::debug!(read = controllers.len(), held = session.controllers.len(), "a detection began while the list was read; keeping the list held");
                 return Ok(session.controllers.clone());
             }
-            if session.list_changes != changes_before && attempt < ENUMERATE_ATTEMPTS {
+            if (session.list_changes != changes_before || session.detections_completed != completed_before)
+                && attempt < ENUMERATE_ATTEMPTS
+            {
                 continue;
+            }
+            // The list is final when no detection runs and OpenRGB was heard quiet (no list change on this
+            // connection) or said a detection was over (103). A connection that joined a running detection
+            // heard changes and no 103: what it reads is a part list, held by the adapter for its ids and
+            // never called final; the daemon holds its own list until a read after the 103 is (#290).
+            if !session.detecting && (session.list_changes == 0 || session.detections_completed > 0) {
+                session.list_final = true;
             }
             // The controllers that are gone take their per-controller state with them; a controller
             // that was registered again has a new id and no state, so its first frame sets the custom
@@ -1406,6 +1464,7 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.detecting = false;
             session.detections_started = 0;
             session.detections_completed = 0;
+            session.list_final = false;
             session.rescan_acks = 0;
             session.owed_acks.clear();
             session.reader.take()
