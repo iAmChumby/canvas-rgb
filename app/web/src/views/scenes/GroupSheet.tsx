@@ -95,7 +95,13 @@ export function Sheet({
           />
           <h2 className={s.sheetTitle}>{title}</h2>
         </header>
-        <div className={s.sheetBody}>{children}</div>
+        <div className={s.sheetBody}>
+          {/* The pane scrolls on its own, inside the sheet's body (#469): a sheet with a band
+              gives the band its own box, so the two never share one scroll area. */}
+          <div className={s.sheetScroll} data-testid="sheet-scroll">
+            {children}
+          </div>
+        </div>
       </section>
     </div>
   );
@@ -362,161 +368,165 @@ export function GroupSheet({ groupId, use, lights, onClose, initial }: GroupShee
         </header>
 
         <div className={s.sheetBody}>
-          {step === "name" && (
-            <div className={s.sheetStep}>
-              <div className={s.sheetRun}>
-                <LedRun lights={members} label={runLabel(group.name, members)} />
-              </div>
-              <p className={s.sheetLead}>What is this group called?</p>
-              <NameField
-                value={name}
-                label="The name of this group"
-                placeholder="Group name"
-                onChange={setName}
-                onEnter={() => {
-                  commitName(name);
-                  setStep("effect");
-                }}
-                onEscape={() => setStep("group")}
-              />
-              <Button
-                variant="primary"
-                size="sm"
-                className={s.sheetNext}
-                onClick={() => {
-                  commitName(name);
-                  setStep("effect");
-                }}
-              >
-                Next
-              </Button>
-            </div>
-          )}
-
-          {step === "effect" && (
-            <div className={s.sheetStep}>
-              <EffectPicker groupId={groupId} use={use} onClose={() => setStep("group")} />
-            </div>
-          )}
-
-          {step === "devices" && (
-            <div className={s.sheetStep}>
-              <AddDevices
-                groupId={groupId}
-                lights={lights}
-                use={use}
-                onClose={() => setStep("group")}
-                onEmptied={emptied}
-              />
-            </div>
-          )}
-
-          {step === "move" && (
-            <div className={s.sheetStep}>
-              <MoveStep
-                groupId={groupId}
-                copy={moveKind === "copy"}
-                use={use}
-                lights={lights}
-                onClose={onClose}
-              />
-            </div>
-          )}
-
+          {/* The band is the sheet's own header: the picture and the group's controls stay, and
+              the pane below scrolls on its own (#469). Nothing can be drawn in the band's pixels
+              then, so no list ever shares them with the mode switch. */}
           {step === "group" && (
-            <>
-              {/* The stage (#378): the picture the group itself draws, and the group's own
-                  controls beside it. The LED run stays under it, in the flow. */}
-              <GroupStage
-                group={group}
-                effectName={effectName}
-                failed={failed}
-                pattern={pattern}
-                saved={saved}
-                paused={paused}
-                away={away}
+            <GroupStage
+              group={group}
+              effectName={effectName}
+              failed={failed}
+              pattern={pattern}
+              saved={saved}
+              paused={paused}
+              away={away}
+            >
+              <Button
+                className={s.sheetEffect}
+                data-testid="sheet-effect"
+                icon={effectId ? <Sparkle size={16} /> : <Moon size={16} />}
+                onClick={() => setStep("effect")}
               >
+                <span className="one-line">{effectName}</span>
+                {pattern && <Chip>Pattern</Chip>}
+              </Button>
+              {!pattern && (
+                <Segmented<GroupMode>
+                  label="How this group's lights share the effect"
+                  value={group.mode}
+                  options={MODES}
+                  onChange={(mode) =>
+                    edit((draft) => {
+                      const g = draft.groups.find((x) => x.id === groupId);
+                      if (g) g.mode = mode;
+                    }, "Change how the lights share the effect")
+                  }
+                />
+              )}
+            </GroupStage>
+          )}
+          <div className={s.sheetScroll} data-testid="sheet-scroll">
+            {step === "name" && (
+              <div className={s.sheetStep}>
+                <div className={s.sheetRun}>
+                  <LedRun lights={members} label={runLabel(group.name, members)} />
+                </div>
+                <p className={s.sheetLead}>What is this group called?</p>
+                <NameField
+                  value={name}
+                  label="The name of this group"
+                  placeholder="Group name"
+                  onChange={setName}
+                  onEnter={() => {
+                    commitName(name);
+                    setStep("effect");
+                  }}
+                  onEscape={() => setStep("group")}
+                />
                 <Button
-                  className={s.sheetEffect}
-                  data-testid="sheet-effect"
-                  icon={effectId ? <Sparkle size={16} /> : <Moon size={16} />}
-                  onClick={() => setStep("effect")}
+                  variant="primary"
+                  size="sm"
+                  className={s.sheetNext}
+                  onClick={() => {
+                    commitName(name);
+                    setStep("effect");
+                  }}
                 >
-                  <span className="one-line">{effectName}</span>
-                  {pattern && <Chip>Pattern</Chip>}
+                  Next
                 </Button>
-                {!pattern && (
-                  <Segmented<GroupMode>
-                    label="How this group's lights share the effect"
-                    value={group.mode}
-                    options={MODES}
-                    onChange={(mode) =>
-                      edit((draft) => {
-                        const g = draft.groups.find((x) => x.id === groupId);
-                        if (g) g.mode = mode;
-                      }, "Change how the lights share the effect")
+              </div>
+            )}
+
+            {step === "effect" && (
+              <div className={s.sheetStep}>
+                <EffectPicker groupId={groupId} use={use} onClose={() => setStep("group")} />
+              </div>
+            )}
+
+            {step === "devices" && (
+              <div className={s.sheetStep}>
+                <AddDevices
+                  groupId={groupId}
+                  lights={lights}
+                  use={use}
+                  onClose={() => setStep("group")}
+                  onEmptied={emptied}
+                />
+              </div>
+            )}
+
+            {step === "move" && (
+              <div className={s.sheetStep}>
+                <MoveStep
+                  groupId={groupId}
+                  copy={moveKind === "copy"}
+                  use={use}
+                  lights={lights}
+                  onClose={onClose}
+                />
+              </div>
+            )}
+
+            {step === "group" && (
+              <>
+                <div className={s.sheetRun}>
+                  <LedRun lights={members} label={runLabel(group.name, members)} />
+                </div>
+
+                <div className={s.sheetFader}>
+                  <Slider
+                    label={`${group.name} brightness`}
+                    min={0}
+                    max={100}
+                    value={group.brightness}
+                    onChange={(n) => setBrightness(groupId, n)}
+                  />
+                  <span className={`${s.sheetPct} fig`}>{group.brightness}%</span>
+                </div>
+
+                {/* A pattern has no settings and no presets (0.16.0): only a canvas effect has them. */}
+                {effectId && effect && !pattern && (
+                  <section className={s.sheetBlock}>
+                    <h3 className={s.sheetBlockTitle}>The effect</h3>
+                    <PropertyControls
+                      schema={effect.schema}
+                      values={values}
+                      onChange={(key, value) => setProps(groupId, { [key]: value })}
+                    />
+                  </section>
+                )}
+
+                {effectId && effect && !pattern && (
+                  <Presets
+                    effectId={effectId}
+                    builtIn={effect.schema.presets}
+                    user={effect.user_presets}
+                    values={values}
+                    defs={effect.schema.properties}
+                    onApply={(preset) =>
+                      setProps(groupId, fillDefaults(effect.schema.properties, preset.props))
                     }
+                    onSaved={() => setReload((n) => n + 1)}
                   />
                 )}
-              </GroupStage>
 
-              <div className={s.sheetRun}>
-                <LedRun lights={members} label={runLabel(group.name, members)} />
-              </div>
-
-              <div className={s.sheetFader}>
-                <Slider
-                  label={`${group.name} brightness`}
-                  min={0}
-                  max={100}
-                  value={group.brightness}
-                  onChange={(n) => setBrightness(groupId, n)}
-                />
-                <span className={`${s.sheetPct} fig`}>{group.brightness}%</span>
-              </div>
-
-              {/* A pattern has no settings and no presets (0.16.0): only a canvas effect has them. */}
-              {effectId && effect && !pattern && (
                 <section className={s.sheetBlock}>
-                  <h3 className={s.sheetBlockTitle}>The effect</h3>
-                  <PropertyControls
-                    schema={effect.schema}
-                    values={values}
-                    onChange={(key, value) => setProps(groupId, { [key]: value })}
-                  />
+                  <div className={s.sheetBlockHead}>
+                    <h3 className={s.sheetBlockTitle}>The devices</h3>
+                    <Button
+                      size="sm"
+                      data-testid="sheet-add-devices"
+                      icon={<Plus size={14} />}
+                      onClick={() => setStep("devices")}
+                    >
+                      Add devices
+                    </Button>
+                  </div>
+                  <MemberList groupId={groupId} lights={lights} use={use} />
                 </section>
-              )}
-
-              {effectId && effect && !pattern && (
-                <Presets
-                  effectId={effectId}
-                  builtIn={effect.schema.presets}
-                  user={effect.user_presets}
-                  values={values}
-                  defs={effect.schema.properties}
-                  onApply={(preset) =>
-                    setProps(groupId, fillDefaults(effect.schema.properties, preset.props))
-                  }
-                  onSaved={() => setReload((n) => n + 1)}
-                />
-              )}
-
-              <section className={s.sheetBlock}>
-                <div className={s.sheetBlockHead}>
-                  <h3 className={s.sheetBlockTitle}>The devices</h3>
-                  <Button
-                    size="sm"
-                    data-testid="sheet-add-devices"
-                    icon={<Plus size={14} />}
-                    onClick={() => setStep("devices")}
-                  >
-                    Add devices
-                  </Button>
-                </div>
-                <MemberList groupId={groupId} lights={lights} use={use} />
-              </section>
-            </>
-          )}
+              </>
+            )}
+          </div>
         </div>
       </section>
     </div>
