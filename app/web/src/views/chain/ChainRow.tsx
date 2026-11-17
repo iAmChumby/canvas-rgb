@@ -173,6 +173,10 @@ export function ChainRow({ chain, lead, deviceState }: { chain: ChainView; lead?
   /** How many times a header shows its one run: 8 for Luke's splitter, 1 for a series. */
   const repeats = chain.parts.length === 1 ? (chain.parts[0]?.light.copies ?? 1) : 1;
   const leds = `${chain.leds} ${chain.leds === 1 ? "LED" : "LEDs"}`;
+  // A size without a chain record is unverified: the daemon may have re-applied a saved size at
+  // start-up. The count cell already shows the LEDs, so the state cell only names what is unknown,
+  // in short words that keep clear of the Set up key (#470).
+  const sizedWithoutRecord = state === "not_set_up" && chain.leds > 0;
   const words =
     state === "set_up"
       ? repeats > 1
@@ -180,7 +184,9 @@ export function ChainRow({ chain, lead, deviceState }: { chain: ChainView; lead?
         : `${count} ${count === 1 ? "device" : "devices"} · ${leds}`
       : state === "empty"
         ? "Empty"
-        : "Not set up";
+        : sizedWithoutRecord
+          ? "Not checked"
+          : "Not set up";
   const tone = state === "set_up" ? "ok" : state === "empty" ? "mute" : "warn";
   const key = state === "set_up" ? "Set up again" : "Set up";
 
