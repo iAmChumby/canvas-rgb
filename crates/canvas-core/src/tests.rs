@@ -444,8 +444,9 @@ mod scene {
         Pattern {
             id: "pattern:Test".into(),
             built_on: BuiltOn { led_count: leds, arrangement, grid: None },
-            frames: vec![PatternFrame { colors, hold: 0, extra: Default::default() }],
+            frames: vec![PatternFrame { colors, hold: 0, transition: None, extra: Default::default() }],
             motion: Motion::none(),
+            playback: None,
             extra: Default::default(),
         }
     }

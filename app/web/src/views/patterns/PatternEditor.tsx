@@ -1,18 +1,19 @@
 "use client";
 
-// The pattern editor: one device drawn large as its LEDs, the keys that paint it, the space kept
-// under it for a frame strip, and the draft that puts every stroke on the real lights.
+// The pattern editor: one device drawn large as its LEDs, the keys that paint it, the frame strip
+// under it (#468), and the draft that puts every stroke on the real lights.
 //
 // The draft is the effect editor's own (`PUT /effects/draft` with a `pattern`): the page opens it
 // with its own epoch and a rising sequence, renews it on the heartbeat, and deletes it when the
 // editor goes away, which puts the active scene back. The editor never saves by itself: `onSave`
 // hands the whole document up, with every field it does not know still in it.
 //
-// On a page of its own the editor guards that page (#474): strokes that are not saved are never
-// dropped without asking, on the Cancel key, on a rail link, on the browser's Back and on a
-// closed window. The prompt is the stack builder's own, with the same words.
+// The editor guards its page (#474), on a page of its own and in the effects view's panel alike:
+// strokes that are not saved are never dropped without asking, on the Cancel key, on a rail link,
+// on the panel's Back key on a phone, on the browser's Back and on a closed window. The prompt is
+// the stack builder's own, with the same words.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { LeavePrompt } from "@/components/LeavePrompt";
@@ -22,11 +23,14 @@ import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
+import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
+import { isStill, timelineOf } from "@/lib/patternPlay";
 import { spinOf } from "@/lib/spin";
 import { refreshLights, useSnap } from "@/lib/store";
 import { cameFromApp, useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
 import { DotCanvas } from "@/views/patterns/DotCanvas";
+import { FrameStrip } from "@/views/patterns/FrameStrip";
 import { GradientStops } from "@/views/patterns/GradientStops";
 import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
@@ -35,6 +39,9 @@ import { usePatternEditor } from "@/views/patterns/usePatternEditor";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
 
+/** The `history.state` key of the editor's guard entry; `PATTERN_ENTRY_SPENT` marks one the editor left. */
+export const PATTERN_GUARD = "canvasRgbPatternGuard";
+export const PATTERN_ENTRY_SPENT = "spent";
 /** `PATTERN_ID_PREFIX` from the spine. */
 const PATTERN_ID_PREFIX = "pattern:";
 /** `DRAFT_HEARTBEAT` from the spine, for a daemon that has not answered yet. */
@@ -135,6 +142,25 @@ export function PatternEditor({
   );
   const editor = usePatternEditor(pattern, { onDraft: draft });
 
+  // The preview (#468): Play runs the whole document on the dots with the daemon's own maths
+  // (`lib/patternPlay.ts`); stopped, the dots show the frame being painted. The lights always play the
+  // whole document, since that is what the draft carries.
+  const [playing, setPlaying] = useState(false);
+  const play = useMemo(
+    () => (playing ? { frames: editor.frames, playback: editor.loop ? undefined : { loop: false } } : null),
+    [playing, editor.frames, editor.loop],
+  );
+  const playable = useMemo(
+    () => !isStill(timelineOf({ frames: editor.frames, playback: editor.loop ? undefined : { loop: false } })),
+    [editor.frames, editor.loop],
+  );
+  const reduced = motionOffNow();
+  const cannotPlay = reduced
+    ? "Reduced motion is on: the preview stays on the selected frame"
+    : playable
+      ? null
+      : "Nothing to play: add a frame and give the frames a hold";
+
   // The shape picker writes the arrangement of the light this pattern was built on (#468).
   const lights = useSnap((state) => state.lights);
   const devices = useSnap((state) => state.devices);
@@ -191,7 +217,7 @@ export function PatternEditor({
   // wherever it stands: on its own page and in the effects view's panel alike.
   const { allowBack, dropSentinel } = useLeaveGuard({
     dirty: editor.dirty,
-    sentinel: "canvasRgbPatternGuard",
+    sentinel: PATTERN_GUARD,
     onAsk: (reason) => setLeaving(reason),
     isLeaving: () => pendingLeave.current,
     strictEntry: true,
@@ -225,16 +251,30 @@ export function PatternEditor({
    * Carries out the leave the prompt was asked about, as it was asked: a Back the guard caught is
    * not the same leave as the Cancel key pressed afterwards.
    *
-   * The guard's entry is a copy of the editor's on top of it. Every leave but a Back from a page
-   * the app opened it from takes that entry back first and then closes or navigates from the
-   * editor's own entry, so no entry the browser can reach reopens the editor.
+   * The guard's entry is a copy of the editor's on top of it. A leave takes it back first, then
+   * closes or navigates from the editor's own entry:
+   *   - a rail link's page change is a push, which drops the copy;
+   *   - a Cancel, or a Back with no page of the app behind, replaces the editor's entry with the
+   *     effects page, and the copy stays ahead of it (a browser cannot delete a forward entry);
+   *   - a Back with a page behind goes to that page, and both entries stay ahead of it: the copy,
+   *     and the editor's own, which is marked on the way past.
+   * Both leftovers carry the guard's state key, and `PatternEditorPage` opens no editor for an
+   * entry that has it: a Forward onto one lands on the effects page.
    */
   const goAfterLeave = (reason: LeaveReason) => {
     pendingLeave.current = true;
     allowBack();
     if (reason === "back" && openedInApp.current) {
-      // Back goes past the guard's entry and past the page itself, one page in all.
-      window.history.go(-2);
+      // Back goes past the guard's entry and past the page itself, one page in all. The editor's
+      // own entry stays ahead of the page the person lands on, so it is marked spent on the way.
+      dropSentinel(() => {
+        window.history.replaceState(
+          { ...(window.history.state ?? {}), [PATTERN_GUARD]: PATTERN_ENTRY_SPENT },
+          "",
+          window.location.href,
+        );
+        window.history.back();
+      });
       return;
     }
     // A rail link the shell held is the page change that goes now. A Back with no page of the
@@ -348,6 +388,7 @@ export function PatternEditor({
           builtOn={editor.builtOn}
           colours={editor.colours}
           spin={spinOf(editor.motion)}
+          play={play}
           label={`${name}, ${kindWords(editor.builtOn)}`}
           onBegin={editor.beginStroke}
           onStroke={editor.stroke}
@@ -369,8 +410,25 @@ export function PatternEditor({
 
       <MotionControl motion={editor.motion} onMotion={editor.setMotion} />
 
-      {/* Reserved: the frame strip comes in a later version. An empty recess, never a control. */}
-      <div className={s.frameStrip} aria-hidden="true" />
+      <FrameStrip
+        builtOn={editor.builtOn}
+        frames={editor.frames}
+        selected={editor.selected}
+        loop={editor.loop}
+        fps={editor.fps}
+        playing={playing && cannotPlay === null}
+        cannotPlay={cannotPlay}
+        onSelect={editor.selectFrame}
+        onAdd={editor.addFrame}
+        onDuplicate={editor.duplicateFrame}
+        onDelete={editor.deleteFrame}
+        onMove={editor.moveFrame}
+        onHold={editor.setHold}
+        onTransition={editor.setTransition}
+        onLoop={editor.setLoop}
+        onFps={editor.applyFps}
+        onPlay={() => setPlaying((on) => !on)}
+      />
 
       <PatternTools
         tool={editor.tool}

@@ -24,14 +24,16 @@ export type LeaveReason = "close" | "navigation" | "back";
  * where a Back past it would leave the document. Read it when the editor opens, before the guard
  * pushes its own entry.
  *
- * The Navigation API answers it where there is one (it lists only the same-origin entries, so a
- * page opened from another site counts as a first page); elsewhere any earlier entry counts.
+ * Only the Navigation API can say (it lists only the same-origin entries, so a page opened from
+ * another site counts as a first page). `history.length` cannot: it counts every entry of the tab,
+ * and is 2 on a fresh direct load of a page that has pushed one entry. A browser without the
+ * Navigation API is therefore taken to have opened the editor on its own, and the leave goes to the
+ * editor's host page instead of past it.
  */
 export function cameFromApp(): boolean {
   if (typeof window === "undefined") return false;
   const navigation = (window as { navigation?: { canGoBack?: boolean } }).navigation;
-  if (typeof navigation?.canGoBack === "boolean") return navigation.canGoBack;
-  return window.history.length > 1;
+  return navigation?.canGoBack === true;
 }
 
 export function useLeaveGuard({
