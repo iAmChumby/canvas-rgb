@@ -1700,3 +1700,238 @@ async fn a_hold_or_a_transition_past_the_caps_is_a_422() {
     assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
     assert!(answer.to_string().contains("frame 2's transition"), "{answer}");
 }
+
+// ---------------------------------------------------------------- #468 phase 4: sequences
+
+/// Two fans of 8 (rings) and a strip of 10, as the three fake devices of a sequence.
+const FAN1: &str = "fake:a";
+const FAN2: &str = "fake:b";
+const STRIP: &str = "fake:c";
+const RUN: &str = "pattern:Run";
+
+/// A pattern built on a ring of 26 (8 + 8 + 10), one distinct colour per LED, none off.
+fn run_pattern(motion: Motion) -> Pattern {
+    let colors: Vec<Rgb8> = (0..26).map(|i| Rgb8::new(10 * i as u8 + 5, 0, 7)).collect();
+    Pattern {
+        id: RUN.into(),
+        built_on: BuiltOn { led_count: 26, arrangement: Arrangement::Ring, grid: None },
+        frames: vec![Frame { colors, hold: 0, transition: None, extra: serde_json::Map::new() }],
+        motion,
+        playback: None,
+        extra: serde_json::Map::new(),
+    }
+}
+
+/// The fake rig of the sequence: both fans, the strip, and one group `run` playing [`RUN`] on
+/// them in `members` order with `sequence`, saved in scene `main`.
+async fn sequence_rig(
+    motion: Motion,
+    sequence: Option<canvas_proto::scene::SequenceShape>,
+    members: [&str; 3],
+) -> Rig {
+    let mut run = group("run", &[], RUN, Props::new());
+    run.members = members.iter().map(|id| format!("{id}#z0")).collect();
+    run.sequence = sequence;
+    rig_full(
+        vec![run_pattern(motion)],
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene { id: "main".into(), name: "Main".into(), rev: 1, groups: vec![run] }],
+        },
+        vec![device_of(FAN1, 8), device_of(FAN2, 8), device_of(STRIP, 10)],
+        vec![
+            light_of(FAN1, Arrangement::Ring),
+            light_of(FAN2, Arrangement::Ring),
+            light_of(STRIP, Arrangement::Strip),
+        ],
+    )
+    .await
+}
+
+/// Saves scene `main` again after `change`, through the scene API, at the revision it holds.
+async fn put_main(rig: &Rig, change: impl FnOnce(&mut Scene)) {
+    let mut scene = rig.app.store.read().await.scenes.scenes[0].clone();
+    let rev = scene.rev;
+    change(&mut scene);
+    let body = serde_json::to_value(canvas_proto::api::ScenePut { scene, expected_rev: rev, dry_run: false }).unwrap();
+    let (status, answer) = send(rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+}
+
+/// Waits (real time) until the three fake devices' newest frames are exactly `fan1`, `fan2` and
+/// `strip`.
+async fn shows_three(rig: &Rig, fan1: &[Rgb8], fan2: &[Rgb8], strip: &[Rgb8], what: &str) {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(20) {
+        let same = |id: &str, want: &[Rgb8]| rig.sinks[id].last().is_some_and(|f| f == want);
+        if same(FAN1, fan1) && same(FAN2, fan2) && same(STRIP, strip) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let last = |id: &str| rig.sinks[id].last().map(|f| f[..3.min(f.len())].to_vec());
+    panic!("{what}: never showed it; last frames start {:?} / {:?} / {:?}", last(FAN1), last(FAN2), last(STRIP));
+}
+
+/// The sequence through the scene API, on the fakes: the run follows the members' order, a reorder
+/// through the API reorders the run, and Each light (no sequence) plays the whole pattern on each.
+#[tokio::test]
+async fn a_sequence_group_runs_through_its_lights_and_follows_the_scene_api() {
+    use canvas_proto::scene::SequenceShape;
+    let rig = sequence_rig(Motion::none(), Some(SequenceShape::Ring), [FAN1, FAN2, STRIP]).await;
+    let run = run_pattern(Motion::none()).frames[0].colors.clone();
+    shows_three(&rig, &run[0..8], &run[8..16], &run[16..26], "fan 1, fan 2, strip").await;
+
+    // Reorder the members through the API: the strip first, then fan 2, then fan 1.
+    put_main(&rig, |scene| {
+        scene.groups[0].members = vec![format!("{STRIP}#z0"), format!("{FAN2}#z0"), format!("{FAN1}#z0")];
+    })
+    .await;
+    shows_three(&rig, &run[18..26], &run[10..18], &run[0..10], "strip, fan 2, fan 1").await;
+
+    // Each light again: every light fits the whole ring of 26 to itself.
+    put_main(&rig, |scene| scene.groups[0].sequence = None).await;
+    let built = run_pattern(Motion::none()).built_on;
+    let own = |leds: u32, arrangement| canvas_core::pattern_fit::fit_colors(&run, &built, leds, arrangement);
+    shows_three(
+        &rig,
+        &own(8, Arrangement::Ring),
+        &own(8, Arrangement::Ring),
+        &own(10, Arrangement::Strip),
+        "each light its own",
+    )
+    .await;
+}
+
+/// One shared log of every frame the three devices are handed, in the order they arrive.
+#[derive(Default)]
+struct Tape {
+    frames: Mutex<Vec<(usize, Vec<Rgb8>)>>,
+}
+
+struct TapeSink {
+    device: usize,
+    tape: Arc<Tape>,
+}
+
+impl FrameSink for TapeSink {
+    fn submit(&self, colors: Vec<Rgb8>) {
+        self.tape.frames.lock().unwrap_or_else(|e| e.into_inner()).push((self.device, colors));
+    }
+}
+
+/// The recorded run: a lit LED at the last LED of fan 1 spins into fan 2's first LED. The fake
+/// devices' frames are logged together, grouped into ticks (one frame of each device), and the
+/// brightest LED of the three joined in `members` order is followed for a whole lap.
+///
+/// Run with `--nocapture` to read the recorded run (every 12th tick).
+#[tokio::test]
+async fn a_spinning_sequence_carries_the_colour_from_fan_one_to_fan_two() {
+    use canvas_proto::scene::SequenceShape;
+    // One lit LED at run position 7 (the last LED of fan 1); 0.25 laps a second over 26 LEDs.
+    let mut lit = run_pattern(Motion::spin(0.25));
+    lit.frames[0].colors = (0..26).map(|i| if i == 7 { rgb(RED) } else { Rgb8::BLACK }).collect();
+    let rig = {
+        let mut run = group("run", &[], RUN, Props::new());
+        run.members = [FAN1, FAN2, STRIP].iter().map(|id| format!("{id}#z0")).collect();
+        run.sequence = Some(SequenceShape::Ring);
+        rig_full(
+            vec![lit],
+            ScenesFile {
+                schema_version: SCENES_SCHEMA,
+                active: "main".into(),
+                scenes: vec![Scene { id: "main".into(), name: "Main".into(), rev: 1, groups: vec![run] }],
+            },
+            vec![device_of(FAN1, 8), device_of(FAN2, 8), device_of(STRIP, 10)],
+            vec![
+                light_of(FAN1, Arrangement::Ring),
+                light_of(FAN2, Arrangement::Ring),
+                light_of(STRIP, Arrangement::Strip),
+            ],
+        )
+        .await
+    };
+    // Log the frames from here on, one tape for the three devices.
+    let tape = Arc::new(Tape::default());
+    for (device, id) in [FAN1, FAN2, STRIP].iter().enumerate() {
+        rig.app.engine.add_sink(DeviceId((*id).into()), Arc::new(TapeSink { device, tape: Arc::clone(&tape) }));
+    }
+    let ticks = || -> Vec<Vec<Rgb8>> {
+        let log = tape.frames.lock().unwrap_or_else(|e| e.into_inner());
+        let mut slots: [Option<Vec<Rgb8>>; 3] = [None, None, None];
+        let mut out = Vec::new();
+        for (device, frame) in log.iter() {
+            slots[*device] = Some(frame.clone());
+            if slots.iter().all(Option::is_some) {
+                out.push(slots.iter_mut().flat_map(|s| s.take().unwrap()).collect());
+            }
+        }
+        out
+    };
+    // The peak of the joined run: the LED with the most red.
+    let at = |tick: &Vec<Rgb8>| tick.iter().enumerate().max_by_key(|(_, c)| c.r).map(|(i, _)| i).unwrap_or(0);
+    // A lap is 26 steps; wait for the condition (the peak back on LED 7 after going round).
+    wait_until(|| {
+        let t = ticks();
+        t.iter().any(|x| at(x) == 20) && t.len() > 40 && t.iter().skip(40).any(|x| at(x) == 7)
+    })
+    .await;
+    let ticks = ticks();
+    assert!(ticks.iter().all(|t| t.len() == 26), "a tick is 8 + 8 + 10 LEDs");
+    println!("recorded run: {} ticks, fan1+fan2+strip joined (26 LEDs), spin 0.25 laps/s, red LED starts at 7", ticks.len());
+    // Follow the peak from the first time it is on LED 7: it only moves forward, by at most one LED a tick.
+    let start = ticks.iter().position(|t| at(t) == 7).expect("the lit LED starts at the end of fan 1");
+    let mut crossed_at = None;
+    let mut visited = std::collections::BTreeSet::new();
+    for (n, pair) in ticks[start..].windows(2).enumerate() {
+        let (was, now) = (at(&pair[0]), at(&pair[1]));
+        let step = (now + 26 - was) % 26;
+        assert!(step <= 1, "the lit LED jumped from run position {was} to {now}");
+        if was == 7 && now == 8 {
+            crossed_at = Some(n);
+        }
+        visited.insert(now);
+    }
+    for (n, tick) in ticks[start..].iter().enumerate().filter(|(n, _)| n % 12 == 0) {
+        let lit = |r: std::ops::Range<usize>| tick[r].iter().map(|c| if c.r > 150 { '#' } else if c.r > 0 { '+' } else { '.' }).collect::<String>();
+        println!("tick {n:3}  fan1 {}  fan2 {}  strip {}", lit(0..8), lit(8..16), lit(16..26));
+    }
+    let crossed = crossed_at.expect("the colour crossed from fan 1's last LED to fan 2's first");
+    println!("crossing: tick {crossed}, run position 7 (fan 1 LED 7) -> 8 (fan 2 LED 0)");
+    assert!(visited.contains(&8) && visited.contains(&16), "it goes on into fan 2 and the strip: {visited:?}");
+}
+
+/// The fit the editor's sentence reports for a sequence group is the fit of the whole run.
+#[tokio::test]
+async fn a_sequence_group_reports_the_fit_of_the_whole_run() {
+    use canvas_proto::scene::SequenceShape;
+    let rig = sequence_rig(Motion::none(), None, [FAN1, FAN2, STRIP]).await;
+    let ids = [format!("{FAN1}#z0"), format!("{FAN2}#z0"), format!("{STRIP}#z0")];
+    let want = |fits: Vec<FitKind>| -> Vec<LightFit> {
+        ids.iter().zip(fits).map(|(light, fit)| LightFit { light: light.clone(), fit }).collect()
+    };
+    // Each light its own: the ring of 26 is stretched onto each fan and is another shape for the strip.
+    assert_eq!(
+        group_fits(&rig).await["run"],
+        want(vec![FitKind::Stretched, FitKind::Stretched, FitKind::OtherShape]),
+        "no sequence"
+    );
+    // One ring of 8 + 8 + 10 = 26 on a pattern built on a ring of 26: it fits exactly, on every light.
+    put_main(&rig, |s| s.groups[0].sequence = Some(SequenceShape::Ring)).await;
+    assert_eq!(group_fits(&rig).await["run"], want(vec![FitKind::Exact; 3]), "one ring");
+    // One line: the ring becomes a line, another shape, on every light.
+    put_main(&rig, |s| s.groups[0].sequence = Some(SequenceShape::Line)).await;
+    assert_eq!(group_fits(&rig).await["run"], want(vec![FitKind::OtherShape; 3]), "one line");
+    // Two fans only: the run is 8 + 8 = 16 LEDs, a ring of 16 from a pattern of 26.
+    put_main(&rig, |s| {
+        s.groups[0].sequence = Some(SequenceShape::Ring);
+        s.groups[0].members.pop();
+    })
+    .await;
+    assert_eq!(
+        group_fits(&rig).await["run"],
+        want(vec![FitKind::Stretched, FitKind::Stretched, FitKind::Stretched])[..2].to_vec(),
+        "a ring of 16"
+    );
+}

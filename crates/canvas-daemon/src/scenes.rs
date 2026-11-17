@@ -1502,14 +1502,19 @@ async fn build_one(build: &EffectBuilder, group: &str) -> Result<Box<dyn Effect>
 }
 
 /// Whether `old` and `new` are the same scene with its groups in another order: the same group
-/// ids, each with the same members and mode. The order of the list is display order only (#384),
-/// so a reorder is not a change of shape.
+/// ids, each with the same members, mode and sequence. The order of the list is display order only
+/// (#384), so a reorder is not a change of shape. A group's `sequence` is part of its shape (#468):
+/// the engine fits a pattern to the run it makes, so a change of it must reach the engine.
 fn same_shape(old: &Scene, new: &Scene) -> bool {
     old.groups.len() == new.groups.len()
-        && new
-            .groups
-            .iter()
-            .all(|after| old.groups.iter().any(|before| before.id == after.id && before.members == after.members && before.mode == after.mode))
+        && new.groups.iter().all(|after| {
+            old.groups.iter().any(|before| {
+                before.id == after.id
+                    && before.members == after.members
+                    && before.mode == after.mode
+                    && before.sequence == after.sequence
+            })
+        })
 }
 
 /// Whether the engine holds exactly `scene_groups`, whatever order each list is in. Group order is
@@ -1726,6 +1731,9 @@ pub async fn pattern_changed(app: &Arc<App>, id: &str) {
 /// A light with no LEDs is left out: its device is not connected, or its zone reports none, so
 /// the engine plays nothing there. It is neither exact nor flagged, and the picker's count is of
 /// the lights the pattern lands on.
+///
+/// A group with a `sequence` (#468) fits the pattern once to all its lights' LEDs joined end to
+/// end, so every light reports the fit of that whole run, not of its own LED count.
 fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]) -> Vec<LightFit> {
     let Plays::Effect { effect, .. } = &group.plays else {
         return Vec::new();
@@ -1736,26 +1744,34 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
     let Some(pattern) = app.patterns.get(effect) else {
         return Vec::new();
     };
-    group
+    // The members that have LEDs, in the group's order, with their counts.
+    let placed: Vec<(&LightId, &Light, u32)> = group
         .members
         .iter()
         .filter_map(|member| {
-            let Some(light) = lights.iter().find(|light| &light.id == member) else {
-                // A member the daemon does not hold has no LEDs to play on.
-                return None;
-            };
+            // A member the daemon does not hold has no LEDs to play on.
+            let light = lights.iter().find(|light| &light.id == member)?;
             let led_count = canvas_core::arrangement::light_led_count(light, devices);
-            if led_count == 0 {
-                return None;
-            }
-            Some(LightFit {
-                light: member.clone(),
-                fit: canvas_proto::pattern::fit_kind(
-                    &pattern.built_on,
-                    led_count,
-                    light.arrangement,
-                ),
-            })
+            (led_count > 0).then_some((member, light, led_count))
+        })
+        .collect();
+    // A sequence (#468): the pattern is fitted once to every member's LEDs joined end to end, as
+    // one ring or one line, so every member reports the fit of that whole run.
+    let run = group.sequence.map(|shape| {
+        let total: u32 = placed.iter().map(|(_, _, count)| *count).sum();
+        let arrangement = match shape {
+            canvas_proto::scene::SequenceShape::Ring => canvas_proto::scene::Arrangement::Ring,
+            canvas_proto::scene::SequenceShape::Line => canvas_proto::scene::Arrangement::Strip,
+        };
+        canvas_proto::pattern::fit_kind(&pattern.built_on, total, arrangement)
+    });
+    placed
+        .into_iter()
+        .map(|(member, light, led_count)| LightFit {
+            light: member.clone(),
+            fit: run.unwrap_or_else(|| {
+                canvas_proto::pattern::fit_kind(&pattern.built_on, led_count, light.arrangement)
+            }),
         })
         .collect()
 }
