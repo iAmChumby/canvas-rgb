@@ -273,6 +273,18 @@ impl FakeState {
     }
 }
 
+/// One thing that happened to a controller, in the order the server saw it (#499). A test judges
+/// what a device was sent from this order, never from counts read at some moment.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeviceEvent {
+    /// The controller registered again during a detection: a new object, in its built-in mode.
+    Registered,
+    /// `SET_CUSTOM_MODE` reached it.
+    SetCustomMode,
+    /// `UPDATE_LEDS` reached it.
+    UpdateLeds,
+}
+
 struct FakeDevice {
     info: DeviceInfo,
     /// The id of this controller on protocol 6; new each time the controller registers.
@@ -281,13 +293,16 @@ struct FakeDevice {
     initial_zone_leds: Vec<u32>,
     colors: Vec<Rgb8>,
     custom_mode_writes: u32,
+    /// What happened to this controller, in order. Kept across a registering again, with a
+    /// [`DeviceEvent::Registered`] marking where the new object begins.
+    events: Vec<DeviceEvent>,
 }
 
 impl FakeDevice {
     fn new(info: DeviceInfo) -> Self {
         let colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; info.led_count() as usize];
         let initial_zone_leds = info.zones.iter().map(|zone| zone.led_count).collect();
-        Self { info, id: 0, initial_zone_leds, colors, custom_mode_writes: 0 }
+        Self { info, id: 0, initial_zone_leds, colors, custom_mode_writes: 0, events: Vec::new() }
     }
 }
 
@@ -662,6 +677,38 @@ impl FakeOpenRgbServer {
         guard(&self.state).devices.get(index as usize).map_or(0, |device| device.custom_mode_writes)
     }
 
+    /// What controller `index` was sent since it registered again for the last time, in the order the
+    /// server saw it: everything it was sent, if it never registered again (#499). A device that
+    /// registered again is a new object in its built-in mode, so this is the list a test reads to ask
+    /// what that new object was told first.
+    pub fn events_since_registered(&self, index: u32) -> Vec<DeviceEvent> {
+        let state = guard(&self.state);
+        let Some(device) = state.devices.get(index as usize) else { return Vec::new() };
+        let from = device.events.iter().rposition(|event| *event == DeviceEvent::Registered).map_or(0, |at| at + 1);
+        device.events[from..].to_vec()
+    }
+
+    /// Waits until [`events_since_registered`](Self::events_since_registered) for controller `index`
+    /// satisfies `ready`, then returns it. Like [`wait_for_colors`](Self::wait_for_colors) it is woken
+    /// by the writes that change a controller, never by a clock; the cap only ends a wait that cannot
+    /// be met, and the caller's assert on what is returned then says why.
+    pub async fn wait_for_events(&self, index: u32, ready: impl Fn(&[DeviceEvent]) -> bool) -> Vec<DeviceEvent> {
+        let mut changed = self.writes.subscribe();
+        tokio::time::timeout(COLOR_WAIT_CAP, async {
+            loop {
+                let events = self.events_since_registered(index);
+                if ready(&events) {
+                    return events;
+                }
+                if changed.changed().await.is_err() {
+                    return self.events_since_registered(index);
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| self.events_since_registered(index))
+    }
+
     /// How many `RESIZE_ZONE` packets the controller received. Every request counts, including
     /// one the server refuses (see [`fail_resizes`](Self::fail_resizes)) and one still waiting
     /// out its delay (see [`delay_resizes`](Self::delay_resizes)).
@@ -705,6 +752,7 @@ impl FakeOpenRgbServer {
                 }
                 device.colors = vec![Rgb8 { r: 0, g: 0, b: 0 }; device.info.led_count() as usize];
                 device.custom_mode_writes = 0;
+                device.events.clear();
             }
         }
         // The colours were reset: a test waiting on them sees the new (black) values.
@@ -991,6 +1039,7 @@ fn step_rescan(state: &mut FakeState) {
     let at = state.rescan_order.as_ref().and_then(|order| order.get(run.next).copied()).unwrap_or(run.next);
     if let Some(device) = state.devices.get_mut(at) {
         device.id = state.next_id;
+        device.events.push(DeviceEvent::Registered);
         state.next_id += 1;
     }
     state.rescan_listed = Some(run.next + 1);
@@ -1126,6 +1175,7 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
             let version = state.version_of(connection);
             if let Some(at) = state.target(version, device) {
                 state.devices[at].custom_mode_writes += 1;
+                state.devices[at].events.push(DeviceEvent::SetCustomMode);
             }
             Vec::new()
         }
@@ -1141,6 +1191,7 @@ fn handle(state: &Mutex<FakeState>, connection: u64, device: u32, packet_id: u32
                 for (slot, color) in state.devices[at].colors.iter_mut().zip(colors) {
                     *slot = color;
                 }
+                state.devices[at].events.push(DeviceEvent::UpdateLeds);
                 state.landings.extend(landing);
                 // Every client of protocol 6 and later hears of it, the sender too.
                 let echo = leds_update(&state.devices[at]);
