@@ -53,16 +53,20 @@ function bandHeight(modeRow: number): number {
   return Math.ceil(Math.max(column, side)) + tokenPx("--s3") * 2;
 }
 
-describe("the stage's band and the sheet's scroll padding (#378)", () => {
-  it("the band and the scroll padding read the same number", () => {
+describe("the stage's band and the sheet's pane (#378, #469)", () => {
+  it("the band and the pane are two boxes, and only the pane scrolls", () => {
     expect(blockOf(css, ".stage")).toMatch(/min-height: var\(--stage-h\)/);
-    expect(blockOf(css, ".sheetBody")).toMatch(/scroll-padding-top: var\(--stage-h\)/);
-    // The number is declared once, on the body the band sits in.
-    expect(blockOf(css, ".sheetBody")).toMatch(/--stage-h: \d+px/);
+    // The box that holds the band and the pane does not scroll (#469), so nothing in the pane
+    // can be drawn in the band's pixels ...
+    expect(blockOf(css, ".sheetBody")).toMatch(/overflow: hidden/);
+    expect(blockOf(css, ".sheetBody")).not.toMatch(/overflow-y: auto/);
+    // ... and the pane inside it does.
+    expect(blockOf(css, ".sheetScroll")).toMatch(/overflow-y: auto/);
   });
 
-  it("no guessed number is left in the scroll padding", () => {
-    expect(css).not.toMatch(/scroll-padding-top: \d+px/);
+  it("nothing is pinned over the pane, so there is no scroll padding to keep in step", () => {
+    expect(blockOf(css, ".stage")).not.toMatch(/position: sticky/);
+    expect(css).not.toMatch(/scroll-padding-top/);
   });
 
   it("the band's height is the arithmetic of the band's own rules", () => {

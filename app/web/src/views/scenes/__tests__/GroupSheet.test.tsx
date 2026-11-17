@@ -534,3 +534,37 @@ describe("the open group", () => {
     );
   });
 });
+
+// #469: a group's list and its "flow across / each its own" switch were drawn in one scroll area,
+// so a row could sit in the switch's pixels and be cut by the band's edge. jsdom has no layout, so
+// this checks the structure that makes the overlap impossible: the band (the picture and the
+// switch) is the sheet's own header, and everything that can scroll - the effect's presets and
+// settings, the devices - is in the pane below it.
+describe("the band and the sheet's pane are two boxes (#469)", () => {
+  it("no list shares a box with the mode switch", async () => {
+    open();
+    await screen.findByRole("dialog");
+    const sheet = screen.getByTestId("group-sheet");
+    const pane = sheet.querySelector('[data-testid="sheet-scroll"]');
+    expect(pane, "the sheet's own scrolling pane").not.toBeNull();
+    const stage = screen.getByTestId("group-stage");
+    const mode = screen.getByRole("radiogroup", { name: MODE_LABEL });
+    const presets = screen.getByRole("group", { name: "The presets of this effect" });
+    const devices = screen.getByRole("heading", { name: "The devices" });
+    // The band is above the pane, never inside it: a row in the pane cannot reach the switch.
+    expect(pane?.contains(stage)).toBe(false);
+    expect(pane?.contains(mode)).toBe(false);
+    // The list is in the pane, so it scrolls there and is cut by nothing but its own pane.
+    expect(pane?.contains(presets)).toBe(true);
+    expect(pane?.contains(devices)).toBe(true);
+  });
+
+  it("the effect step keeps the list in the same pane", async () => {
+    open();
+    await screen.findByRole("dialog");
+    fireEvent.click(screen.getByTestId("sheet-effect"));
+    const picker = await screen.findByTestId("effect-picker");
+    const pane = screen.getByTestId("group-sheet").querySelector('[data-testid="sheet-scroll"]');
+    expect(pane?.contains(picker)).toBe(true);
+  });
+});
