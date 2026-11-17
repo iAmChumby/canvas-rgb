@@ -438,15 +438,50 @@ async fn a_connection_that_joined_a_running_detection_does_not_call_a_part_list_
     assert!(!adapter.detection_end_unread(), "the 103 was read and still counted as unread");
 }
 
-/// A connection to an OpenRGB that is not detecting has a final list from its first read, so the daemon's
-/// ordinary start is unchanged.
+/// Review 6 (fix first): release_1.1 sends a new client no detection state (`NetworkServer.cpp:886` is a
+/// broadcast; the server starts before detection, `ResourceManager.cpp:1362` then `:1377`), so a connection
+/// that heard nothing cannot tell a quiet OpenRGB from one that is mid-detection. Its first read is NOT final,
+/// and neither is one after a restart: the daemon's rule decides what to apply, and a list is final only
+/// after a 103.
 #[tokio::test(start_paused = true)]
-async fn a_connection_to_a_quiet_openrgb_has_a_final_list_from_its_first_read() {
+async fn a_first_read_that_heard_nothing_is_not_final_and_a_103_makes_the_list_final() {
     let server = server(vec![stick("one"), stick("two")]).await;
+    server.rescan_timing(Duration::from_millis(100), Duration::from_millis(100));
     let mut adapter = adapter(&server);
     adapter.connect().await.expect("connect");
     assert_eq!(adapter.discover().await.expect("the first read").len(), 2);
-    assert!(adapter.list_is_final(), "a first read of a quiet OpenRGB is not final");
+    assert!(!adapter.list_is_final(), "a read that heard nothing was called final: a join may be mid-detection");
+    assert!(!adapter.detection_end_unread(), "no 103 has arrived");
+    assert_eq!(adapter.detection_signals(), 0);
+
+    adapter.rescan_shared().await.expect("a rescan on a quiet server");
+    assert!(adapter.detection_signals() >= 1, "the 101 of the rescan was not counted");
+    assert!(adapter.detection_end_unread(), "the 103 was not noticed");
+    assert!(!adapter.list_is_final(), "the list was called final before it was read after the 103");
+    assert_eq!(adapter.discover().await.expect("a read after 103").len(), 2);
+    assert!(adapter.list_is_final(), "the list read after 103 was not final");
+    assert!(!adapter.detection_end_unread());
+}
+
+/// A hot plug is a 100 with no 101 before it and no 103 after it: the final list is final no longer, and the
+/// read after it is not final either. The daemon's quiet period, not a 103, is what ends the doubt.
+#[tokio::test(start_paused = true)]
+async fn a_hot_plug_after_a_final_list_makes_it_not_final_and_no_103_follows() {
+    let server = server(vec![stick("one"), stick("two")]).await;
+    server.rescan_timing(Duration::from_millis(100), Duration::from_millis(100));
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    adapter.rescan_shared().await.expect("a rescan");
+    adapter.discover().await.expect("a read after 103");
+    assert!(adapter.list_is_final());
+
+    server.unplug_device(1);
+    server.list_changed();
+    until("the hot plug's 100 arrived", || !adapter.list_is_final()).await;
+    assert!(!adapter.detection_end_unread(), "a 100 alone was taken for a detection that ended");
+    assert_eq!(adapter.discover().await.expect("a read after the hot plug").len(), 1, "the unplug was read");
+    assert!(!adapter.list_is_final(), "a read after a hot plug with no 103 was called final");
+    assert!(!adapter.detection_end_unread(), "the hot plug left a read owed for ever");
 }
 
 /// Review 6, gap 2: a client that joined mid-detection never saw the 101, so its packet 140 is dropped by

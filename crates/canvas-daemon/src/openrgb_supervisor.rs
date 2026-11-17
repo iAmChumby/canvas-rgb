@@ -336,11 +336,104 @@ enum Detection {
     Failed(String),
 }
 
-/// Whether the list the adapter reads on this connection may be a part of a detection: it joined one already
-/// running and no read after the detection's 103 has found the list final (protocol 6, see
-/// `OpenRgbAdapter::list_is_final`). `false` with no frame lane: nothing says otherwise.
-fn list_is_mid_detection(lane: Option<&canvas_adapters::openrgb::OpenRgbAdapter>) -> bool {
-    lane.is_some_and(|lane| lane.is_connected() && !lane.list_is_final())
+/// How long a list that lacks a device the daemon holds must stay the same, with no detection heard, before the
+/// daemon believes the device is gone (#290).
+///
+/// release_1.1 sends a client that connects nothing of a detection already running (`NetworkServer.cpp:886` is a
+/// broadcast; the server starts before detection, `ResourceManager.cpp:1362` then `:1377`), and no protocol query
+/// says whether one is. A first read right after the connect, or a read during a detection the client missed,
+/// can be empty or a part list, so a list that drops a device is not believed on sight. A 103, or the owner's
+/// own rescan, settles it at once. This bound is for what neither says: a hot-plug removal (a 100, no 103). It
+/// bounds how long an unplug can stay hidden; it does not guard against a wipe (a wipe is stopped by the rule
+/// that nothing missing is believed without a 103 or a rescan, and by an empty list never being believed
+/// here). A wrong value only delays showing an unplug: 30 s is longer than the detections seen (the
+/// 15 s a rescan waits for one) and short enough that an unplugged stick leaves the list within the minute.
+pub const UNPLUG_QUIET: Duration = Duration::from_secs(30);
+
+/// What the frame lane knows of the list it last read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListView {
+    /// A read after a 103 found the list, and no list change was heard since (`OpenRgbAdapter::list_is_final`).
+    final_list: bool,
+    /// The 101 and 102 heard on this connection (`OpenRgbAdapter::detection_signals`).
+    signals: u64,
+}
+
+/// The lane's view of its list. With no lane, or no link, nothing says the list is part of a detection, so
+/// it is final.
+fn list_view(lane: Option<&canvas_adapters::openrgb::OpenRgbAdapter>) -> ListView {
+    match lane {
+        Some(lane) if lane.is_connected() => ListView { final_list: lane.list_is_final(), signals: lane.detection_signals() },
+        _ => ListView { final_list: true, signals: 0 },
+    }
+}
+
+/// What to do with a list the supervisor has just read.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Apply,
+    /// Keep the list held: the read dropped a device it cannot be told was unplugged.
+    Keep,
+}
+
+/// A list that drops devices, and since when it has stayed the same.
+struct Seen {
+    key: Vec<(String, bool, Vec<u32>)>,
+    since: tokio::time::Instant,
+    signals: u64,
+}
+
+/// The rule for what the daemon applies from OpenRGB's list, asymmetric because the client cannot know whether
+/// a detection is running (see [`UNPLUG_QUIET`]):
+///
+/// 1. a list that keeps every held device applies at once, final or not (growing is always safe);
+/// 2. a list that drops a held device applies only when OpenRGB's list is final (a 103 was heard and no list
+///    change since), when it is the answer to the owner's own rescan, or when the same list has been read
+///    for [`UNPLUG_QUIET`] with no 101 or 102 heard in that time;
+/// 3. an empty list replaces a held one only by the first two of those, never by waiting.
+///
+/// With nothing held, anything applies.
+#[derive(Default)]
+struct Shrinks {
+    seen: Option<Seen>,
+}
+
+impl Shrinks {
+    /// A new connection counts its own 101 and 102 from zero: what was seen on the last one means nothing.
+    fn reset(&mut self) {
+        self.seen = None;
+    }
+
+    /// `by_rescan`: `read` is what the owner's rescan returned after OpenRGB said its detection was over.
+    fn judge(
+        &mut self,
+        held: &[DeviceInfo],
+        read: &[DeviceInfo],
+        list: ListView,
+        by_rescan: bool,
+        now: tokio::time::Instant,
+    ) -> Verdict {
+        let drops_a_device = held.iter().any(|kept| !read.iter().any(|device| device.id == kept.id));
+        if !drops_a_device || list.final_list || by_rescan {
+            self.seen = None;
+            return Verdict::Apply;
+        }
+        if read.is_empty() {
+            self.seen = None;
+            return Verdict::Keep;
+        }
+        let key = device_key(read);
+        match &self.seen {
+            Some(seen) if seen.key == key && seen.signals == list.signals => {
+                if now.duration_since(seen.since) >= UNPLUG_QUIET {
+                    self.seen = None;
+                    return Verdict::Apply;
+                }
+            }
+            _ => self.seen = Some(Seen { key, since: now, signals: list.signals }),
+        }
+        Verdict::Keep
+    }
 }
 
 /// Asks OpenRGB to re-detect on the frame lane and waits for its list to go quiet, holding no
@@ -675,6 +768,7 @@ pub async fn supervise_with_lane<D, L>(
     // stays applied across a reconnect that lands in the middle of OpenRGB's detection (#290). It outlives
     // the connection: a restart of OpenRGB must not replace it with a part of its detection.
     let mut held: Vec<DeviceInfo> = Vec::new();
+    let mut shrinks = Shrinks::default();
     let mut backoff = Backoff::new();
     // The rescans that ended the wait for the next attempt: that attempt answers them.
     let mut waiting: Vec<Rescan> = Vec::new();
@@ -705,19 +799,21 @@ pub async fn supervise_with_lane<D, L>(
         match result {
             Ok(devices) => {
                 tracing::info!(count = devices.len(), "connected to OpenRGB");
-                // A connection that joined a detection already running holds no list of its own and read a
-                // part of the detection's (protocol 6, `OpenRgbAdapter::list_is_final`): the list the daemon
-                // had stays applied until a read after the detection's 103. With no list held there is
-                // nothing to keep, and the read is what there is.
-                let devices = if list_is_mid_detection(lane.as_ref()) && !held.is_empty() {
-                    tracing::info!(
-                        read = devices.len(),
-                        held = held.len(),
-                        "OpenRGB is still detecting devices: keeping the list held; the list the detection ends with is applied when it is over"
-                    );
-                    held.clone()
-                } else {
-                    devices
+                // A connection hears nothing of a detection already running, so its first read may be empty or
+                // a part of the detection's (`Shrinks`): a list that adds devices applies, one that drops a held
+                // device waits for a 103, the owner's rescan or the quiet period. With no list held, the read is
+                // what there is.
+                shrinks.reset();
+                let devices = match shrinks.judge(&held, &devices, list_view(lane.as_ref()), false, tokio::time::Instant::now()) {
+                    Verdict::Keep => {
+                        tracing::info!(
+                            read = devices.len(),
+                            held = held.len(),
+                            "OpenRGB's list lacks devices the daemon holds and nothing says it is final: keeping the list held"
+                        );
+                        held.clone()
+                    }
+                    Verdict::Apply => devices,
                 };
                 if from_rescan {
                     tracing::info!(
@@ -766,6 +862,8 @@ pub async fn supervise_with_lane<D, L>(
                                     Detection::NotAsked
                                 }
                             };
+                            // OpenRGB re-detected for this rescan: the list read now is its own result.
+                            let by_rescan = matches!(detection, Detection::Redetected(_));
                             let (result, cut) = match detection {
                                 Detection::Failed(error) => (Err(error), false),
                                 // Mid-detection: read nothing, answer with the list held.
@@ -798,6 +896,17 @@ pub async fn supervise_with_lane<D, L>(
                             }
                             let result = match result {
                                 Ok(reading) => {
+                                    // A read that was not the result of OpenRGB's own re-detection (it did not
+                                    // start one, or none could be asked) is judged like any other.
+                                    let reading = if reading.kept_held {
+                                        reading
+                                    } else {
+                                        let now = tokio::time::Instant::now();
+                                        match shrinks.judge(&held, &reading.devices, list_view(lane.as_ref()), by_rescan, now) {
+                                            Verdict::Apply => reading,
+                                            Verdict::Keep => RescanReading { devices: held.clone(), kept_held: true },
+                                        }
+                                    };
                                     if !reading.kept_held {
                                         last = device_key(&reading.devices);
                                         held = reading.devices.clone();
@@ -835,18 +944,23 @@ pub async fn supervise_with_lane<D, L>(
                     // The adapter answers with the list it holds while OpenRGB's is still changing, so
                     // a list read mid-detection is never a different list here (#290).
                     match refreshed {
-                        // Mid-detection on a connection that joined it: what OpenRGB lists is a part, and
-                        // the list held stays until a read after the 103 (#290).
-                        Ok(devices) if list_is_mid_detection(lane.as_ref()) && !held.is_empty() => {
-                            tracing::debug!(read = devices.len(), held = held.len(), "OpenRGB is still detecting; keeping the list held");
+                        Ok(devices) => {
+                            let now = tokio::time::Instant::now();
+                            match shrinks.judge(&held, &devices, list_view(lane.as_ref()), false, now) {
+                                // A list that drops a device nothing says is gone: what OpenRGB lists may be a
+                                // part of a detection, and the list held stays (#290).
+                                Verdict::Keep => {
+                                    tracing::debug!(read = devices.len(), held = held.len(), "OpenRGB's list lacks held devices and is not final; keeping the list held");
+                                }
+                                Verdict::Apply if device_key(&devices) != last => {
+                                    tracing::info!(count = devices.len(), "the OpenRGB device list changed");
+                                    last = device_key(&devices);
+                                    held = devices.clone();
+                                    on_devices(devices).await;
+                                }
+                                Verdict::Apply => {}
+                            }
                         }
-                        Ok(devices) if device_key(&devices) != last => {
-                            tracing::info!(count = devices.len(), "the OpenRGB device list changed");
-                            last = device_key(&devices);
-                            held = devices.clone();
-                            on_devices(devices).await;
-                        }
-                        Ok(_) => {}
                         Err(e) => tracing::debug!(error = %e, "could not re-read the OpenRGB devices"),
                     }
                 }

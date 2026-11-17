@@ -473,6 +473,14 @@ impl FakeOpenRgbServer {
         guard(&self.state).quiet_progress = quiet;
     }
 
+    /// OpenRGB tells every client its device list changed (100) with no detection around it: a device plugged
+    /// in or removed (`NetworkServer.cpp:391-392`). No 101 comes before it and no 103 after it. Pair it with
+    /// [`announce`](Self::announce) (a plug) or [`unplug_device`](Self::unplug_device) (a removal).
+    pub fn list_changed(&self) {
+        guard(&self.state).broadcast(|_| device_list_updated());
+        self.kick.send_modify(|n| *n += 1);
+    }
+
     /// Every frame that reached a controller, in order, with the device that received it.
     pub fn landings(&self) -> Vec<Landing> {
         guard(&self.state).landings.clone()

@@ -12,7 +12,7 @@ use axum::http::{Request, StatusCode};
 use canvas_adapters::fake::FakeOpenRgbServer;
 use canvas_adapters::openrgb::{OpenRgbAdapter, RescanTiming};
 use canvas_daemon::api;
-use canvas_daemon::openrgb_supervisor::RESCAN_BUDGET;
+use canvas_daemon::openrgb_supervisor::{RESCAN_BUDGET, UNPLUG_QUIET};
 use canvas_daemon::state::App;
 use canvas_proto::api::{DevicesResponse, LinkState};
 use canvas_proto::device::{DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
@@ -633,6 +633,133 @@ async fn a_rescan_after_a_reconnect_into_a_running_detection_joins_its_103() {
     assert_eq!(server.rescan_dropped(), 1, "OpenRGB must have dropped the packet 140 of a running detection");
     assert_eq!(rig.app.devices.read().await.len(), 4);
     assert_eq!(sink_ids(&rig), ["openrgb:four", "openrgb:one", "openrgb:three", "openrgb:two"]);
+}
+
+/// #290 review 6 (fix first): release_1.1 sends a client that connects nothing of a detection already running
+/// (`NetworkServer.cpp:886` is a broadcast; the server starts before detection, `ResourceManager.cpp:1362` then
+/// `:1377`). After OpenRGB restarts, the daemon's first read comes a few ms after the connect and hears nothing:
+/// the list is empty (a 6 s clear) and no list change was heard. That was called final and applied: devices and
+/// frame sinks went (3, 3) to (0, 0) for about ten seconds. A list that drops devices needs a 103, the owner's
+/// rescan or the quiet period; the final list, with the fourth device, applies after the 103.
+#[tokio::test(start_paused = true)]
+async fn a_restart_with_a_six_second_clear_never_drops_below_the_held_list_and_the_final_list_applies_after_103() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    server.add_hidden_device(stick("four"));
+    server.quiet_progress(true);
+    server.rescan_timing(Duration::from_secs(6), Duration::from_secs(2));
+    let rig = rig_timed("restart-six-second-clear", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:three").await;
+
+    server.restart().await;
+    server.start_detection();
+    let mut seen = Vec::new();
+    for _ in 0..60 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        seen.push((rig.app.devices.read().await.len(), sink_ids(&rig).len()));
+    }
+    assert!(
+        seen.iter().all(|&(devices, sinks)| devices == sinks && (devices == 3 || devices == 4)),
+        "the daemon's list or frame sinks dropped below the held list while OpenRGB detected: {seen:?}"
+    );
+    assert!(seen.windows(2).all(|pair| pair[0].0 <= pair[1].0), "the list went back down: {seen:?}");
+    assert_eq!(*seen.last().expect("samples"), (4, 4), "the list the detection ended with was never applied: {seen:?}");
+    assert_eq!(sink_ids(&rig), ["openrgb:four", "openrgb:one", "openrgb:three", "openrgb:two"]);
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
+
+/// #290 review 6: the daemon joins before the first controller has registered, so its first read is empty with
+/// nothing heard. The held list stays, and an empty list is never believed by waiting: 45 s later, with the
+/// clear still running (60 s), the daemon still holds its three devices and their sinks.
+#[tokio::test(start_paused = true)]
+async fn a_join_before_the_first_registration_keeps_the_held_list_however_long_the_clear_lasts() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    server.quiet_progress(true);
+    server.rescan_timing(Duration::from_secs(60), Duration::from_secs(1));
+    let rig = rig_timed("join-before-first", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:three").await;
+
+    server.restart().await;
+    server.start_detection();
+    let mut seen = Vec::new();
+    for _ in 0..90 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        seen.push((rig.app.devices.read().await.len(), sink_ids(&rig).len()));
+    }
+    assert!(server.controller_ids().is_empty(), "the clear was over, so the empty first read proved nothing");
+    assert!(seen.iter().all(|&count| count == (3, 3)), "an empty list from a join replaced the held list: {seen:?}");
+    assert_eq!(*rig.app.openrgb.read().await, LinkState::Connected);
+}
+
+/// #290 review 6: a device really unplugged while OpenRGB is quiet is a 100 and nothing more (no 101 before it,
+/// no 103 after it), so the list is never final. The daemon still removes the device, after the quiet period
+/// (`UNPLUG_QUIET`) with the same list read and no detection heard: not at the first read, and not never.
+#[tokio::test(start_paused = true)]
+async fn a_hot_plug_unplug_with_no_103_is_applied_after_the_quiet_period() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    let rig = rig_timed("hot-unplug", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:three").await;
+
+    server.unplug_device(2);
+    server.list_changed();
+    // One sample every virtual 500 ms, until the device is gone.
+    let mut samples = Vec::new();
+    while samples.len() < 180 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let devices = rig.app.devices.read().await.len();
+        samples.push((devices, sink_ids(&rig).len()));
+        if devices == 2 {
+            break;
+        }
+    }
+    let quiet_samples = (UNPLUG_QUIET.as_millis() / 500) as usize;
+    assert_eq!(*samples.last().expect("samples"), (2, 2), "the unplugged device was never removed: a missing 103 froze the list");
+    assert!(
+        samples.len() >= quiet_samples,
+        "the unplug was applied after {} samples, before the quiet period of {quiet_samples}: {samples:?}",
+        samples.len()
+    );
+    assert!(samples[..samples.len() - 1].iter().all(|&count| count == (3, 3)), "the list was in between: {samples:?}");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "the removed device kept its frame sink");
+}
+
+/// #290 review 6: a device plugged in is a list that keeps everything held and adds one, and that applies at the
+/// next read, final or not.
+#[tokio::test(start_paused = true)]
+async fn a_hot_plug_that_adds_a_device_is_applied_at_once() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two")]).await.expect("fake server");
+    let rig = rig_timed("hot-plug", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:two").await;
+
+    server.announce(stick("three"));
+    server.list_changed();
+    // The supervisor reads every 5 s: the device is there within two reads (14 samples of 500 ms).
+    let mut samples = Vec::new();
+    while samples.len() < 14 && samples.last() != Some(&3) {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        samples.push(rig.app.devices.read().await.len());
+    }
+    assert_eq!(samples.last(), Some(&3), "a device that was added waited for the quiet period: {samples:?}");
+    wait_for_sink(&rig, "openrgb:three").await;
+}
+
+/// #290 review 6: the owner presses rescan and OpenRGB finds fewer devices. That is the rescan's own result
+/// (it said its detection is over): applied at once, devices and sinks, with no quiet period.
+#[tokio::test(start_paused = true)]
+async fn an_owner_rescan_that_finds_fewer_devices_applies_its_result() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    server.rescan_timing(Duration::from_millis(100), Duration::from_secs(1));
+    let rig = rig_timed("rescan-fewer", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:three").await;
+    server.unplug_device(1);
+
+    assert_eq!(ids(&rig, "/api/v1/devices?rescan=1").await, ["openrgb:one", "openrgb:three"], "the rescan's own list answers");
+    assert_eq!(rig.app.devices.read().await.len(), 2, "the rescan's list was not applied");
+    assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:three"], "the unplugged device kept its frame sink");
 }
 
 /// A server that never acknowledges packet 140 (protocol 6) is not answering: the rescan fails with the

@@ -293,9 +293,22 @@ struct Session {
     detections_started: u64,
     detections_completed: u64,
     /// Protocol 6: a read of the list on this connection found OpenRGB's final list: no detection was
-    /// running and either no list change was heard (a quiet OpenRGB) or a 103 was. False from the connect
-    /// until then; see [`OpenRgbAdapter::list_is_final`].
+    /// running, a 103 had been heard and no list change since it. False from the connect until then, and a
+    /// quiet OpenRGB that has said nothing is not final either (a join may be mid-detection: release_1.1
+    /// sends a new client no detection state, `NetworkServer.cpp:886` is a broadcast); see
+    /// [`OpenRgbAdapter::list_is_final`].
     list_final: bool,
+    /// Protocol 6: the `list_changes` count when the last 103 arrived. A 100 after it is a hot plug: the
+    /// list changed again and no 103 will say it is over.
+    list_changes_at_103: u64,
+    /// Protocol 6: a 103 arrived and no read of the list has followed it.
+    end_unread: bool,
+    /// Protocol 6: a read of the list found no detection running and no list change heard on this
+    /// connection. Only the rescan's "did not start" answer uses it (`may_be_mid_detection`).
+    quiet_read: bool,
+    /// Protocol 6: how many 101 and 102 this connection has heard. Neither is heard of a detection that
+    /// began before the connect and sends no progress; a count that grew says a detection is running.
+    detection_signals: u64,
     /// Protocol 6: how many ACKs of packet 140 this session has seen. The server sends the ACK after
     /// the packet is handled, on the same thread and socket as the 101 it caused (`NetworkServer.cpp:1725-1730`,
     /// `DetectionManager.cpp:1776`), so a 101 for a packet 140 always arrives before its ACK.
@@ -308,12 +321,12 @@ struct Session {
 
 impl Session {
     /// Protocol 6: this connection may be inside a detection it never saw start. It heard the list change
-    /// (100), no 103 has come since, and no read has found the list final: its packet 140 is dropped by a
+    /// (100), no 103 has come since, and no read found OpenRGB quiet: its packet 140 is dropped by a
     /// running detection (`DetectionManager.cpp:1753-1756`) and answered by an ACK alone, which looks the
     /// same as a server that started nothing. A connection that heard nothing, or that has read a final list,
     /// has no reason to think so.
     fn may_be_mid_detection(&self) -> bool {
-        self.detections_completed == 0 && self.list_changes > 0 && !self.list_final
+        self.detections_completed == 0 && self.list_changes > 0 && !self.quiet_read
     }
 }
 
@@ -350,6 +363,10 @@ impl Default for Session {
             detections_started: 0,
             detections_completed: 0,
             list_final: false,
+            list_changes_at_103: 0,
+            end_unread: false,
+            quiet_read: false,
+            detection_signals: 0,
             rescan_acks: 0,
             owed_acks: HashMap::new(),
         }
@@ -591,22 +608,38 @@ impl OpenRgbAdapter {
         self
     }
 
-    /// Protocol 6 and later: whether the list this connection holds is OpenRGB's final one rather than a
-    /// part of a detection's (#290). A connection that joined a detection already running never saw its 101,
-    /// and release_1.1 signals progress per detector, not per controller (`DetectionManager.cpp:491`,
-    /// `:720`, `:1009`), so a list read mid-way looks like any other: it is a part list. This is `false`
-    /// from the connect until a read finds a quiet OpenRGB (no list change was heard, or a 103 was), and
-    /// the daemon holds the list it had until it is `true`. A hot plug before the first read looks the same
-    /// as a joined detection (a 100 and no 103) and holds the list until a 103 or an owner's rescan ends it.
+    /// Whether the list this connection reads is OpenRGB's final one rather than a part of a detection's
+    /// (#290). Protocol 6 and later only; an older OpenRGB has no events, so there is nothing to wait for
+    /// and this is `true`.
+    ///
+    /// release_1.1 sends a client that connects no detection state (`NetworkServer.cpp:886` is a broadcast
+    /// to the clients there at the time; the server starts before detection, `ResourceManager.cpp:1362`
+    /// then `:1377`), and signals progress per detector, not per controller (`DetectionManager.cpp:491`,
+    /// `:720`, `:1009`). A connection that heard nothing therefore cannot tell a quiet OpenRGB from one
+    /// that is mid-detection, and its first read may be empty or a part list. So the list is final only when
+    /// a read after a 103 found no detection running and no list change has been heard since that 103. It is
+    /// `false` from the connect until then, and again after a hot plug (a 100 with no 103 after it).
+    ///
+    /// The daemon's rule rests on this and does not wait for it: a list that adds devices applies at once, one
+    /// that drops a device applies when this is `true`, when the owner's rescan returned it, or after a quiet
+    /// period (`UNPLUG_QUIET` in the daemon's supervisor), so a missing 103 never freezes the list.
     pub fn list_is_final(&self) -> bool {
-        guard(&self.link.session).list_final
+        let session = guard(&self.link.session);
+        session.protocol_version < PROTOCOL_WITH_EVENTS
+            || (session.list_final && !session.detecting && session.list_changes == session.list_changes_at_103)
     }
 
     /// Protocol 6 and later: a detection ended (103) and no read of the list has followed it. The daemon
     /// reads now, so the final list is applied without waiting for its 5 s refresh.
     pub fn detection_end_unread(&self) -> bool {
         let session = guard(&self.link.session);
-        !session.list_final && !session.detecting && session.detections_completed > 0
+        session.end_unread && !session.detecting
+    }
+
+    /// Protocol 6 and later: how many detection starts (101) and progress reports (102) this connection has
+    /// heard. A count that did not move between two reads says no detection began or progressed between them.
+    pub fn detection_signals(&self) -> u64 {
+        guard(&self.link.session).detection_signals
     }
 
     /// How a rescan on this adapter waits for detection to settle.
@@ -1180,12 +1213,14 @@ impl OpenRgbAdapter {
             {
                 continue;
             }
-            // The list is final when no detection runs and OpenRGB was heard quiet (no list change on this
-            // connection) or said a detection was over (103). A connection that joined a running detection
-            // heard changes and no 103: what it reads is a part list, held by the adapter for its ids and
-            // never called final; the daemon holds its own list until a read after the 103 is (#290).
-            if !session.detecting && (session.list_changes == 0 || session.detections_completed > 0) {
-                session.list_final = true;
+            // The list is final when no detection runs, a 103 was heard and no list change since it. A
+            // connection that heard nothing may have joined a running detection (release_1.1 tells a new client
+            // nothing of it): what it reads may be a part list, held by the adapter for its ids and never called
+            // final; the daemon's own rule decides what to apply (#290).
+            if !session.detecting {
+                session.end_unread = false;
+                session.quiet_read |= session.list_changes == 0;
+                session.list_final = session.detections_completed > 0 && session.list_changes == session.list_changes_at_103;
             }
             // The controllers that are gone take their per-controller state with them; a controller
             // that was registered again has a new id and no state, so its first frame sets the custom
@@ -1465,6 +1500,10 @@ impl DeviceAdapter for OpenRgbAdapter {
             session.detections_started = 0;
             session.detections_completed = 0;
             session.list_final = false;
+            session.list_changes_at_103 = 0;
+            session.end_unread = false;
+            session.quiet_read = false;
+            session.detection_signals = 0;
             session.rescan_acks = 0;
             session.owed_acks.clear();
             session.reader.take()
@@ -1634,20 +1673,27 @@ async fn read_loop(mut read: OwnedReadHalf, link: Arc<Link>, epoch: u64) {
                     DETECTION_STARTED => {
                         session.detecting = true;
                         session.detections_started += 1;
+                        session.detection_signals += 1;
+                        session.list_final = false;
                         Next::Drop
                     }
                     DETECTION_PROGRESS_CHANGED => {
+                        session.detection_signals += 1;
                         // Progress says a detection is running. One that began before this connection
                         // never sent this client a 101.
                         if !session.detecting {
                             session.detecting = true;
                             session.detections_started += 1;
+                            session.list_final = false;
                         }
                         Next::Drop
                     }
                     DETECTION_COMPLETE => {
                         session.detecting = false;
                         session.detections_completed += 1;
+                        session.list_changes_at_103 = session.list_changes;
+                        session.list_final = false;
+                        session.end_unread = true;
                         Next::Drop
                     }
                     ACK => Next::Ack,
