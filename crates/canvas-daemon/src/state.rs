@@ -105,6 +105,10 @@ pub const FANS_LOCK_PIPE_LIMIT: std::time::Duration = std::time::Duration::from_
 /// The daemon's runtime has **two** workers (`crates/canvas-daemon/src/main.rs`), so two
 /// such waits take the whole API down while the port keeps listening: the editor says
 /// "the daemon did not answer" and the capture's poll of `/api/v1/settings` times out.
+///
+/// The bound runs from the start of the call into the engine, not from the moment a
+/// request joins it: a request that joins a call that is already in flight waits for
+/// what is left of it, and never longer.
 pub const ENGINE_CALL_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// What a route says when the render engine has never answered (#241).
@@ -128,25 +132,225 @@ pub const ENGINE_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_
 /// the engine's numbers are a lock and a few numbers, so the cost is small.
 pub const ENGINE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Asks the render engine something without holding a runtime worker while it waits.
+/// What one call into the engine is doing.
+#[derive(Debug, Clone)]
+enum FlightState<T> {
+    /// The call is still running.
+    Running,
+    /// The engine answered.
+    Answered(T),
+    /// The call gave up: it panicked, so there is no answer.
+    GaveUp,
+}
+
+/// One call into the engine, and the answer it will give.
+#[derive(Clone)]
+struct Flight<T> {
+    /// The flight's number. It tells a flight from the one that took its place.
+    id: u64,
+    /// When the flight started. The bound runs from here, so a request that joins a
+    /// flight late waits for less of it.
+    started: std::time::Instant,
+    /// The answer, and the ones waiting for it.
+    state: tokio::sync::watch::Receiver<FlightState<T>>,
+    /// The sender the answer goes through.
+    sender: tokio::sync::watch::Sender<FlightState<T>>,
+}
+
+/// The one call into the engine of one kind that may be in flight at a time (#241).
 ///
-/// The call runs on the blocking pool and is bounded by [`ENGINE_CALL_LIMIT`]. `None`
-/// when the engine did not answer in time: the caller answers with what it already
-/// knew, and the API keeps serving (#241).
-pub async fn engine_call<T, F>(engine: Arc<dyn Engine>, call: F) -> Option<T>
+/// The engine's handle is a `std::sync::Mutex` the render thread takes as well, so a
+/// call into the engine holds a thread for as long as the engine takes to answer. The
+/// timeout around the call gives the route its answer back, but it does not take the
+/// thread back: the call stays inside the engine, and ten status requests left ten
+/// threads inside the engine.
+///
+/// One flight at a time per kind is the bound. A request that arrives while a call is
+/// outstanding joins that call instead of starting one of its own, and waits for its
+/// answer. The number of threads inside the engine is one per kind, however many
+/// requests arrive.
+///
+/// The call runs outside every runtime: on the watcher's own thread when the watcher
+/// asks, and on a thread of its own when a route asks. A runtime that goes away does
+/// not take the call with it, and the daemon's exit does not wait for it.
+pub struct EngineGate<T> {
+    inner: Mutex<GateInner<T>>,
+}
+
+struct GateInner<T> {
+    /// The next flight's number.
+    next: u64,
+    /// The flight that is in flight, if there is one.
+    flight: Option<Flight<T>>,
+}
+
+impl<T: Clone + Send + Sync + 'static> EngineGate<T> {
+    /// A gate with no flight in it.
+    fn new() -> Self {
+        Self { inner: Mutex::new(GateInner { next: 0, flight: None }) }
+    }
+
+    /// The flight in flight, or a new one to make.
+    fn take_flight(&self) -> (Flight<T>, bool) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        match inner.flight.clone() {
+            // A call is already in flight: this one joins it.
+            Some(flight) => (flight, false),
+            None => {
+                let (sender, state) = tokio::sync::watch::channel(FlightState::Running);
+                let flight = Flight {
+                    id: inner.next,
+                    started: std::time::Instant::now(),
+                    state,
+                    sender,
+                };
+                inner.next += 1;
+                inner.flight = Some(flight.clone());
+                (flight, true)
+            }
+        }
+    }
+
+    /// Takes the flight out of the gate, when it is the one that has just finished.
+    fn finish(&self, id: u64) {
+        let mut inner = self.inner.lock().unwrap_or_else(|e| e.into_inner());
+        if inner.flight.as_ref().is_some_and(|f| f.id == id) {
+            inner.flight = None;
+        }
+    }
+
+    /// Asks the engine, or joins the call that is already in flight.
+    ///
+    /// The call runs on a thread of its own, so a runtime worker is never held while
+    /// the engine's lock is waited for, and the call is not tied to the runtime that
+    /// asked for it. `limit` is how long the caller waits for the answer: the bound
+    /// runs from the flight's start, so a request that joins a flight late waits for
+    /// less of it.
+    ///
+    /// `None` when the engine did not answer in time.
+    async fn run<F>(
+        self: &Arc<Self>,
+        engine: Arc<dyn Engine>,
+        call: F,
+        limit: std::time::Duration,
+    ) -> Option<T>
+    where
+        F: FnOnce(&dyn Engine) -> T + Send + 'static,
+    {
+        let (flight, ours) = self.take_flight();
+        if ours {
+            let sender = flight.sender.clone();
+            let gate = Arc::clone(self);
+            let id = flight.id;
+            let started = std::thread::Builder::new()
+                .name("canvas-rgb-engine-call".into())
+                .spawn(move || {
+                    let value = call_the_engine(call, &engine);
+                    let state = match value {
+                        Some(value) => FlightState::Answered(value),
+                        // The call panicked: the waiters are let go.
+                        None => FlightState::GaveUp,
+                    };
+                    let _ = sender.send_replace(state);
+                    // The flight is over: the next request starts a new one.
+                    gate.finish(id);
+                });
+            if started.is_err() {
+                // The thread could not start: the flight is over and gave nothing.
+                let _ = flight.sender.send_replace(FlightState::GaveUp);
+                self.finish(flight.id);
+            }
+        }
+        let mut state = flight.state.clone();
+        loop {
+            let answered = match &*state.borrow() {
+                FlightState::Answered(value) => Some(value.clone()),
+                FlightState::GaveUp => return None,
+                FlightState::Running => None,
+            };
+            if let Some(value) = answered {
+                return Some(value);
+            }
+            let left = limit.saturating_sub(flight.started.elapsed());
+            if left.is_zero() {
+                return None;
+            }
+            match tokio::time::timeout(left, state.changed()).await {
+                Ok(Ok(())) => continue,
+                // The flight is over and gave nothing.
+                Ok(Err(_)) => return None,
+                // The bound ran out.
+                Err(_) => return None,
+            }
+        }
+    }
+
+    /// Asks the engine on this thread, or leaves the one call of this kind alone.
+    ///
+    /// The daemon's watcher thread uses this: it is an ordinary OS thread, and the
+    /// engine's lock is waited for there, outside every runtime. `None` when a call of
+    /// this kind is already in flight: that call's answer is kept by the caller that
+    /// made it, and a second call would put a second thread inside the engine.
+    fn run_here<F>(&self, engine: Arc<dyn Engine>, call: F) -> Option<T>
+    where
+        F: FnOnce(&dyn Engine) -> T + Send + 'static,
+    {
+        let (flight, ours) = self.take_flight();
+        if !ours {
+            return None;
+        }
+        let value = call_the_engine(call, &engine);
+        let state = match &value {
+            Some(value) => FlightState::Answered(value.clone()),
+            // The call panicked: the waiters are let go.
+            None => FlightState::GaveUp,
+        };
+        let _ = flight.sender.send_replace(state);
+        self.finish(flight.id);
+        value
+    }
+}
+
+/// Calls the engine, and keeps the answer.
+///
+/// `None` when the call panicked: a panic in the engine must not take the waiters with
+/// it, and the flight has to end so the next request starts a new call.
+fn call_the_engine<T, F>(call: F, engine: &Arc<dyn Engine>) -> Option<T>
 where
     T: Send + 'static,
     F: FnOnce(&dyn Engine) -> T + Send + 'static,
 {
-    match tokio::time::timeout(
-        ENGINE_CALL_LIMIT,
-        tokio::task::spawn_blocking(move || call(engine.as_ref())),
-    )
-    .await
-    {
-        Ok(Ok(value)) => Some(value),
-        // The call panicked, or the engine did not answer in time.
-        Ok(Err(_)) | Err(_) => None,
+    std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| call(engine.as_ref()))).ok()
+}
+
+/// The daemon's copy of one engine value, and the one call of that kind that may be
+/// in flight at a time (#241).
+pub struct EngineSlot<T> {
+    /// The last value the engine gave, and when it gave it.
+    cache: Mutex<EngineCache<T>>,
+    /// The one call of this kind that may be in flight.
+    gate: Arc<EngineGate<T>>,
+}
+
+impl<T: Clone + Send + Sync + 'static> EngineSlot<T> {
+    /// A slot with no value in it.
+    fn new() -> Self {
+        Self { cache: Mutex::new(EngineCache::new()), gate: Arc::new(EngineGate::new()) }
+    }
+
+    /// The last value the engine gave.
+    fn known(&self) -> Option<T> {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).value.clone()
+    }
+
+    /// Keeps `value` and the time it came.
+    fn set(&self, value: T) {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).set(value);
+    }
+
+    /// Whether the copy is younger than `max_age`.
+    fn is_fresh(&self, max_age: std::time::Duration) -> bool {
+        self.cache.lock().unwrap_or_else(|e| e.into_inner()).fresh(max_age).is_some()
     }
 }
 
@@ -199,12 +403,14 @@ impl Drop for EngineWatch {
 /// Keeps the engine's numbers and its group states fresh, so a route never waits for the
 /// render thread.
 ///
-/// One thread per value asks the engine every [`ENGINE_POLL_INTERVAL`] and keeps the
-/// last answer with the time it came. The engine's lock is the render thread's: a route
-/// that asked for the numbers on a runtime worker would wait for the render thread
-/// there, and the daemon's runtime has two workers (#241). The watchers are ordinary OS
-/// threads, not tasks on the blocking pool, so a render thread that never hands the lock
-/// over costs one thread and not one per request.
+/// One thread per kind asks the engine every [`ENGINE_POLL_INTERVAL`] and keeps the last
+/// answer with the time it came. The engine's lock is the render thread's: a route that asked
+/// for the numbers on a runtime worker would wait for the render thread there, and the
+/// daemon's runtime has two workers (#241). The watchers are ordinary OS threads, not tasks
+/// on the blocking pool, and they ask the engine through the same gate the routes use: there
+/// is one call into the engine at a time for each kind, so a render thread that never hands
+/// the lock over costs one thread for that kind and not one per request. A watcher whose
+/// poll finds a call of its kind already in flight leaves that call alone (#241 review).
 ///
 /// The daemon's quit flag does **not** stop the watchers: a quit that could not reach
 /// the main task puts the flag back to zero and the daemon keeps running
@@ -234,8 +440,11 @@ pub fn watch_engine(app: Arc<App>) -> EngineWatch {
 /// Asks the engine for its numbers and keeps the answer, until the guard is dropped.
 fn watch_numbers(app: Arc<App>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
-        let stats = app.engine.stats();
-        app.engine_stats_cache.lock().unwrap_or_else(|e| e.into_inner()).set(stats);
+        // The one call of this kind: the watcher asks the engine on its own thread, and
+        // a call that is already in flight is left to the caller that made it.
+        if let Some(stats) = app.poll_engine_stats() {
+            app.engine_stats.set(stats);
+        }
         std::thread::sleep(ENGINE_POLL_INTERVAL);
     }
 }
@@ -243,8 +452,9 @@ fn watch_numbers(app: Arc<App>, stop: Arc<AtomicBool>) {
 /// Asks the engine for its group states and keeps the answer, until the guard is dropped.
 fn watch_groups(app: Arc<App>, stop: Arc<AtomicBool>) {
     while !stop.load(Ordering::SeqCst) {
-        let groups = app.engine.group_states();
-        app.engine_groups_cache.lock().unwrap_or_else(|e| e.into_inner()).set(groups);
+        if let Some(groups) = app.poll_engine_group_states() {
+            app.engine_groups.set(groups);
+        }
         std::thread::sleep(ENGINE_POLL_INTERVAL);
     }
 }
@@ -260,9 +470,9 @@ pub struct App {
     pub engine: Arc<dyn Engine>,
     /// The engine's last numbers, kept by [`watch_engine`] so a route never waits for the
     /// render thread (#241).
-    engine_stats_cache: Mutex<EngineCache<RenderStats>>,
+    engine_stats: EngineSlot<RenderStats>,
     /// The engine's last group states, kept the same way (#241).
-    engine_groups_cache: Mutex<EngineCache<Vec<GroupState>>>,
+    engine_groups: EngineSlot<Vec<GroupState>>,
     /// How old the daemon's copy of the engine's numbers may be before a route asks the
     /// engine itself (#241). The daemon keeps [`ENGINE_CACHE_MAX_AGE`]; a test shortens
     /// it.
@@ -483,8 +693,8 @@ impl App {
             rescan_requests,
             rescan_inbox: Mutex::new(Some(rescan_inbox)),
             rescan_budget: crate::openrgb_supervisor::RESCAN_BUDGET,
-            engine_stats_cache: Mutex::new(EngineCache::new()),
-            engine_groups_cache: Mutex::new(EngineCache::new()),
+            engine_stats: EngineSlot::new(),
+            engine_groups: EngineSlot::new(),
             engine_cache_max_age: Mutex::new(ENGINE_CACHE_MAX_AGE),
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::with_home(Vec::new(), home.clone()),
@@ -637,7 +847,7 @@ impl App {
     /// `None` when the engine has never answered: the caller must not answer with
     /// zeros that look like a measurement.
     pub async fn engine_stats(&self) -> Option<RenderStats> {
-        self.engine_value(&self.engine_stats_cache, |engine| engine.stats()).await
+        self.engine_value(&self.engine_stats, |engine| engine.stats()).await
     }
 
     /// The engine's group states, kept the same way ([`App::engine_stats`]).
@@ -645,34 +855,47 @@ impl App {
     /// `None` when the engine has never answered: an empty list would say that no
     /// group failed, and a group can fail (#241).
     pub async fn engine_group_states(&self) -> Option<Vec<GroupState>> {
-        self.engine_value(&self.engine_groups_cache, |engine| engine.group_states()).await
+        self.engine_value(&self.engine_groups, |engine| engine.group_states()).await
     }
 
-    /// The engine's value for `cache`, without waiting for the render thread.
+    /// The engine's numbers, asked of the engine on this thread.
+    ///
+    /// The daemon's watcher thread uses this: it wants the engine's own numbers, not
+    /// the copy the routes read. It is the one call of its kind, so the engine is asked
+    /// once at a time however many callers there are (#241).
+    ///
+    /// `None` when a call of this kind is already in flight: that call's answer is
+    /// kept by the caller that made it.
+    fn poll_engine_stats(&self) -> Option<RenderStats> {
+        self.engine_stats.gate.run_here(Arc::clone(&self.engine), |engine| engine.stats())
+    }
+
+    /// The engine's group states, asked of the engine on this thread
+    /// ([`App::poll_engine_stats`]).
+    fn poll_engine_group_states(&self) -> Option<Vec<GroupState>> {
+        self.engine_groups.gate.run_here(Arc::clone(&self.engine), |engine| engine.group_states())
+    }
+
+    /// The engine's value for `slot`, without waiting for the render thread.
     ///
     /// A copy younger than [`App::engine_cache_max_age`] is the answer. An older one is
     /// asked of the engine, bounded by [`ENGINE_CALL_LIMIT`]: the answer may be late,
     /// but it is the engine's own. When the engine does not answer, the last value it
     /// gave is the answer (it is true as of the time it gave it), and `None` when the
     /// engine has never answered at all.
-    async fn engine_value<T, F>(&self, cache: &Mutex<EngineCache<T>>, call: F) -> Option<T>
+    async fn engine_value<T, F>(&self, slot: &EngineSlot<T>, call: F) -> Option<T>
     where
-        T: Clone + Send + 'static,
+        T: Clone + Send + Sync + 'static,
         F: FnOnce(&dyn Engine) -> T + Send + 'static,
     {
-        let known = cache.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
+        let known = slot.known();
         let max_age = *self.engine_cache_max_age.lock().unwrap_or_else(|e| e.into_inner());
-        let fresh = cache
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-            .fresh(max_age)
-            .is_some();
-        if fresh {
+        if slot.is_fresh(max_age) {
             return known;
         }
-        match engine_call(Arc::clone(&self.engine), call).await {
+        match slot.gate.run(Arc::clone(&self.engine), call, ENGINE_CALL_LIMIT).await {
             Some(value) => {
-                cache.lock().unwrap_or_else(|e| e.into_inner()).set(value.clone());
+                slot.set(value.clone());
                 Some(value)
             }
             // The engine did not answer in time: the route answers with the numbers it

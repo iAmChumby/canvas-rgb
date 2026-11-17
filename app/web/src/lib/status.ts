@@ -3,6 +3,7 @@
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { LinkState } from "@/proto/LinkState";
 import type { Status } from "@/proto/Status";
+import type { DaemonFault } from "@/lib/errors";
 
 /**
  * What the app knows about itself, in plain words, in one place.
@@ -43,13 +44,23 @@ function linkTone(state: LinkState | "online" | "offline"): Tone {
 /**
  * The three links the app has: the daemon it talks to, the OpenRGB bridge and the fan
  * service. Each one is named, so "connecting" always says which link is still coming up.
+ *
+ * The daemon that answered and said its render engine is not answering (#241) is
+ * online: it is the engine that is not answering, and the link says so.
  */
-export function links(status: Status | null, offline: boolean): Link[] {
+export function links(status: Status | null, fault: DaemonFault | null): Link[] {
+  const daemon = status
+    ? "online"
+    : fault === "engine"
+      ? "online"
+      : fault === "down"
+        ? "offline"
+        : "connecting";
   return [
     {
       name: "The daemon",
-      state: status ? "online" : offline ? "offline" : "connecting",
-      tone: linkTone(status ? "online" : offline ? "offline" : "connecting"),
+      state: daemon,
+      tone: linkTone(daemon),
     },
     {
       name: "OpenRGB",
@@ -82,9 +93,19 @@ export const NO_FAULTS: SceneFaults = { dark: 0, unread: false };
  * coming up. The words are short on purpose: the strip has one line, and a phone has one
  * line's worth of room.
  */
-export function problems(status: Status | null, offline: boolean, scenes: SceneFaults = NO_FAULTS): Problem[] {
+export function problems(
+  status: Status | null,
+  fault: DaemonFault | null,
+  scenes: SceneFaults = NO_FAULTS,
+): Problem[] {
   const out: Problem[] = [];
-  if (offline) {
+  if (fault === "engine") {
+    // The daemon is up and its render engine is not answering (#241): it is the engine
+    // that is not answering, and not the daemon.
+    out.push({ tone: "warn", text: "Engine not answering", short: "Engine" });
+    return out;
+  }
+  if (fault === "down" && !status) {
     out.push({ tone: "down", text: "Daemon offline", short: "Daemon" });
     return out;
   }

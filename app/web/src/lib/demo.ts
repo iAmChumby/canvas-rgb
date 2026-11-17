@@ -4,7 +4,7 @@
 // can be seen. `?state=conflict|service-down|first-run|html` changes what the status reports.
 //
 // The scenarios in `@/lib/demoScenarios` are wired in here too, so the editor's own states can
-// be seen in a plain browser: `?state=daemon-down|openrgb-down|device-empty|slow|
+// be seen in a plain browser: `?state=daemon-down|engine-down|openrgb-down|device-empty|slow|
 // save-error|handback:<header id>|chains|chain-error|chain-start-error`.
 
 import { ApiFailure } from "@/lib/errors";
@@ -24,6 +24,7 @@ import {
   conflictClearsMs,
   daemonDown,
   emptyArea,
+  engineDown,
   failsArea,
   holdMs,
   slowRead,
@@ -1839,8 +1840,9 @@ export async function demoRequest(method: string, path: string, body: unknown): 
   // Yield once, as a network call would, so callers see the same async behaviour. The `slow`
   // scenario makes every answer take long enough for the editor's skeletons to show.
   await new Promise((resolve) => setTimeout(resolve, answerDelayMs()));
-  // The daemon does not answer at all.
-  if (daemonDown()) fail(503, "service_unavailable", "canvas-rgb is not answering");
+  // The daemon does not answer at all: the call fails, as a call to a daemon that is not
+  // running fails.
+  if (daemonDown()) fail(0, "unreachable", "canvas-rgb did not answer. It may be stopped, or the browser was not allowed to read its reply.");
   // Every write is refused.
   if (method !== "GET" && saveError()) fail(500, "internal", "could not save the effects: access is denied (os error 5)");
 
@@ -1877,7 +1879,12 @@ export async function demoRequest(method: string, path: string, body: unknown): 
       if (area === "effects") return { effects: [], active: null, failed: [] };
     }
   }
-  if (head === "status") return method === "GET" ? statusNow() : bad();
+  // The daemon is up and its render engine is not answering (#241): the status route is
+  // the one that says so, the way the daemon does.
+  if (head === "status") {
+    if (engineDown()) fail(503, "service_unavailable", "the render engine is not answering");
+    return method === "GET" ? statusNow() : bad();
+  }
 
   if (head === "output") {
     const out = () => ({ power: s.settings.power, brightness: s.settings.brightness, warmth: s.settings.warmth });

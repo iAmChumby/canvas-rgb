@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- The API keeps answering when the render engine is slow to reply: the daemon keeps the engine's numbers fresh and the status and scenes pages read them, and they say the engine is not answering when it is not. (#241)
+- The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
 - Setting up a header keeps the lights working when you close the window while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, and the setup finishes as a whole instead of being left half done. (#457)
 - Tray tests: the update suite no longer reads its verdict off the machine's clock, so a busy runner can no longer fail or hang it. (#242)

@@ -1757,26 +1757,46 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
 /// render thread while the caller holds the store's lock (#241). A daemon whose engine has never
 /// answered says so: an empty list would say that no group failed, and a group can fail.
 pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> crate::api::ApiResult<Vec<GroupState>> {
-    let built = app.scene.failures();
-    // The engine's own states come from the daemon's watcher thread, so this never waits
-    // for the render thread while the caller holds the store's lock (#241).
     let running = app
         .engine_group_states()
         .await
         .ok_or_else(|| crate::api::ApiFailure::service_unavailable(crate::state::ENGINE_NOT_ANSWERING))?;
+    Ok(group_states_of(app, scene, lights, Some(&running)).await)
+}
+
+/// The group states a route that has already written answers with (#241).
+///
+/// The write landed; only the read that follows it may be impossible, and a 503 then says the
+/// write failed when it did not. The answer is the state the daemon knows: the engine's last
+/// answer when there is one, and the scene's own groups when there is not. The daemon says
+/// nothing about the groups the engine never told it about.
+pub async fn group_states_known(app: &App, scene: &Scene, lights: &[Light]) -> Vec<GroupState> {
+    let running = app.engine_group_states().await;
+    group_states_of(app, scene, lights, running.as_deref()).await
+}
+
+/// The group states of `scene`, with the engine's own states when they are known.
+async fn group_states_of(
+    app: &App,
+    scene: &Scene,
+    lights: &[Light],
+    running: Option<&[GroupState]>,
+) -> Vec<GroupState> {
+    let built = app.scene.failures();
     let devices = app.devices.read().await.clone();
-    Ok(scene
+    scene
         .groups
         .iter()
         .map(|g| GroupState {
             fits: group_fits(app, g, lights, &devices),
             id: g.id.clone(),
-            failed: built
-                .get(&g.id)
-                .cloned()
-                .or_else(|| running.iter().find(|s| s.id == g.id).and_then(|s| s.failed.clone())),
+            failed: built.get(&g.id).cloned().or_else(|| {
+                running
+                    .and_then(|states| states.iter().find(|s| s.id == g.id))
+                    .and_then(|s| s.failed.clone())
+            }),
         })
-        .collect())
+        .collect()
 }
 
 /// How many HTML runtimes `scene` starts, in scene order (#370): one for an `html:` group, and one

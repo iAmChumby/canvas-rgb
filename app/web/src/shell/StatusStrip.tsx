@@ -58,6 +58,7 @@ export function StatusStrip({
 }) {
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
+  const statusFault = useSnap((s) => s.statusFault);
   const effects = useSnap((s) => s.effects);
   const scenesAnswer = useSnap((s) => s.scenes);
   const scenesError = useSnap((s) => s.scenesError);
@@ -99,7 +100,7 @@ export function StatusStrip({
     }),
     [scenesAnswer, scenesError],
   );
-  const list = problems(status, offline, faults);
+  const list = problems(status, statusFault, faults);
   const tone: Tone = list[0]?.tone ?? "ok";
   // On a phone the row has room for the link's name, not for the whole sentence. The full
   // words are the button's own label, so nothing is lost.
@@ -108,10 +109,17 @@ export function StatusStrip({
   const markText = list[0] ? (phone ? (list[0].short ?? list[0].text) : list[0].text) : ALL_GOOD;
   // The swatch's own name, for the widths where the effect's name is dropped from the row.
   // Before the daemon has answered there is nothing to name: the row says why, never a bare dash.
-  const nowName = status ? now.name : offline ? "Offline" : "Connecting";
+  // The daemon that is up with its engine not answering (#241) is not offline: its engine is.
+  const nowName = status
+    ? now.name
+    : statusFault === "engine"
+      ? "Engine down"
+      : offline
+        ? "Offline"
+        : "Connecting";
   const swatchLabel = nowName === "—" ? "Nothing is running" : nowName;
   // Each link and what it is doing: the panel shows them all, one after another.
-  const linkList = links(status, offline);
+  const linkList = links(status, statusFault);
 
   const togglePower = async () => {
     if (!status) return;

@@ -56,6 +56,14 @@ const ANSWER_LIMIT: Duration = Duration::from_secs(3);
 /// [`ANSWER_LIMIT`], so a route that waits for it never answers inside the limit.
 const ENGINE_WAIT: Duration = Duration::from_secs(12);
 
+/// How long the engine takes to answer when the test says it is stuck and the test waits
+/// for it to come back.
+///
+/// It is longer than the route's own bound on the engine
+/// ([`canvas_daemon::state::ENGINE_CALL_LIMIT`], 500 ms), so the route gives up on it,
+/// and short enough for the test to wait it out.
+const ENGINE_STUCK: Duration = Duration::from_secs(2);
+
 /// The group the test's one scene holds.
 const GROUP: &str = "left";
 
@@ -67,10 +75,6 @@ const GROUP: &str = "left";
 struct FakeEngine {
     /// How long every answer takes.
     delay: Mutex<Duration>,
-    /// How long an answer takes when a **route** asks for it. The watcher asks on its
-    /// own thread and is never slow; a route that asks has to wait, and a route that
-    /// answers in less than this never asked.
-    slow_for_routes: Mutex<Duration>,
     /// The numbers it answers with.
     numbers: Mutex<RenderStats>,
     /// The group states it answers with.
@@ -79,28 +83,71 @@ struct FakeEngine {
     asked_stats: AtomicUsize,
     /// How many times it was asked for its group states.
     asked_groups: AtomicUsize,
+    /// How many callers are inside the engine at once, for the numbers.
+    stats_inside: Inside,
+    /// How many callers are inside the engine at once, for the group states.
+    groups_inside: Inside,
+}
+
+/// How many callers are inside the engine at once, for one kind of value.
+///
+/// A call that is stuck inside the engine holds a thread for as long as it is stuck, and
+/// the number of those threads must not grow with the number of requests (#241).
+#[derive(Default)]
+struct Inside {
+    /// How many callers are inside the engine at once.
+    now: AtomicUsize,
+    /// The most callers that were inside the engine at once.
+    max: AtomicUsize,
+}
+
+impl Inside {
+    /// Counts one caller inside the engine, and keeps the highest count.
+    fn enter(&self) -> InsideGuard<'_> {
+        let now = self.now.fetch_add(1, Ordering::SeqCst) + 1;
+        let mut max = self.max.load(Ordering::SeqCst);
+        while now > max {
+            match self.max.compare_exchange(max, now, Ordering::SeqCst, Ordering::SeqCst) {
+                Ok(_) => break,
+                Err(current) => max = current,
+            }
+        }
+        InsideGuard { inside: self }
+    }
+
+    /// The most callers that were inside the engine at once.
+    fn max(&self) -> usize {
+        self.max.load(Ordering::SeqCst)
+    }
+}
+
+/// One caller inside the engine. It counts itself in, and out again when the call ends.
+struct InsideGuard<'a> {
+    inside: &'a Inside,
+}
+
+impl Drop for InsideGuard<'_> {
+    fn drop(&mut self) {
+        self.inside.now.fetch_sub(1, Ordering::SeqCst);
+    }
 }
 
 impl FakeEngine {
     fn new() -> Arc<Self> {
         Arc::new(Self {
             delay: Mutex::new(Duration::from_millis(0)),
-            slow_for_routes: Mutex::new(Duration::from_millis(0)),
             numbers: Mutex::new(RenderStats::default()),
             states: Mutex::new(Vec::new()),
             asked_stats: AtomicUsize::new(0),
             asked_groups: AtomicUsize::new(0),
+            stats_inside: Inside::default(),
+            groups_inside: Inside::default(),
         })
     }
 
     /// How long every answer takes from now on.
     fn set_delay(&self, delay: Duration) {
         *self.delay.lock().unwrap_or_else(|e| e.into_inner()) = delay;
-    }
-
-    /// How long an answer takes when a route asks for it.
-    fn set_slow_for_routes(&self, slow: Duration) {
-        *self.slow_for_routes.lock().unwrap_or_else(|e| e.into_inner()) = slow;
     }
 
     /// The numbers the engine answers with from now on.
@@ -123,22 +170,22 @@ impl FakeEngine {
         self.asked_groups.load(Ordering::SeqCst)
     }
 
-    /// Waits the delay the test set. Everybody waits the delay; a **route** waits the
-    /// delay the test gave it for routes on top of it.
+    /// The most callers that were inside the engine at once, for the numbers.
+    fn max_inside_stats(&self) -> usize {
+        self.stats_inside.max()
+    }
+
+    /// The most callers that were inside the engine at once, for the group states.
+    fn max_inside_groups(&self) -> usize {
+        self.groups_inside.max()
+    }
+
+    /// Waits the delay the test set. Every caller waits it: a watcher and a route ask
+    /// the engine the same way, and the engine is what is slow.
     fn wait(&self) {
         let delay = *self.delay.lock().unwrap_or_else(|e| e.into_inner());
         if !delay.is_zero() {
             std::thread::sleep(delay);
-        }
-        let from_watcher = std::thread::current()
-            .name()
-            .is_some_and(|name| name.starts_with("canvas-rgb-engine-"));
-        if from_watcher {
-            return;
-        }
-        let slow = *self.slow_for_routes.lock().unwrap_or_else(|e| e.into_inner());
-        if !slow.is_zero() {
-            std::thread::sleep(slow);
         }
     }
 }
@@ -158,6 +205,7 @@ impl Engine for FakeEngine {
     /// The numbers a render thread that is slow to answer gives.
     fn stats(&self) -> RenderStats {
         self.asked_stats.fetch_add(1, Ordering::SeqCst);
+        let _inside = self.stats_inside.enter();
         self.wait();
         self.numbers.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -182,6 +230,7 @@ impl Engine for FakeEngine {
     /// The group states a render thread that is slow to answer gives.
     fn group_states(&self) -> Vec<GroupState> {
         self.asked_groups.fetch_add(1, Ordering::SeqCst);
+        let _inside = self.groups_inside.enter();
         self.wait();
         self.states.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
@@ -276,6 +325,18 @@ fn request_with(method: &str, path: &str) -> Request<Body> {
         .expect("the request builds")
 }
 
+/// A request with the token, a method of its own and a JSON body.
+fn request_json(method: &str, path: &str, body: &str) -> Request<Body> {
+    Request::builder()
+        .method(method)
+        .uri(path)
+        .header("host", "127.0.0.1:9430")
+        .header("authorization", format!("Bearer {TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(body.to_string()))
+        .expect("the request builds")
+}
+
 /// What a route answered.
 struct Answer {
     status: StatusCode,
@@ -327,6 +388,41 @@ fn ask_with(router: axum::Router, request: Request<Body>) -> Option<Answer> {
         let _ = tx.send(answer);
     });
     rx.recv_timeout(ANSWER_LIMIT).ok().flatten()
+}
+
+/// Asks the route `count` times at once and waits for every answer.
+///
+/// The requests share one runtime with the daemon's two workers
+/// (`crates/canvas-daemon/src/main.rs`), so they are the daemon's own shape: many
+/// requests at once on two workers.
+fn ask_many(router: axum::Router, count: usize, path: &str) -> Vec<Answer> {
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
+        .enable_all()
+        .build()
+        .expect("the runtime is built");
+    let mut tasks = Vec::new();
+    for _ in 0..count {
+        let router = router.clone();
+        let path = path.to_string();
+        tasks.push(runtime.spawn(async move {
+            let started = Instant::now();
+            let response = router.oneshot(request(&path)).await.expect("the route answers");
+            let status = response.status();
+            let body = axum::body::to_bytes(response.into_body(), 4 * 1024 * 1024)
+                .await
+                .expect("the body is read")
+                .to_vec();
+            Answer { status, body, took: started.elapsed() }
+        }));
+    }
+    runtime.block_on(async {
+        let mut answers = Vec::new();
+        for task in tasks {
+            answers.push(task.await.expect("the request finishes"));
+        }
+        answers
+    })
 }
 
 /// Waits until the engine has been asked for its numbers `count` times, so a test knows
@@ -525,8 +621,6 @@ fn the_routes_answer_from_the_cache_within_a_second_of_an_engine_change() {
     // onto the engine while it is measured. The bound itself is proved by
     // `the_status_route_asks_the_engine_again_once_its_copy_is_old`.
     set_max_age(&rig.app, Duration::from_secs(60));
-    // A route that asks the engine waits three seconds for the answer.
-    rig.engine.set_slow_for_routes(Duration::from_secs(3));
     rig.engine.set_numbers(RenderStats { fps_measured: 42.0, ..RenderStats::default() });
     let watch = canvas_daemon::state::watch_engine(Arc::clone(&rig.app));
     wait_for_stats_asks(&rig.engine, 1);
@@ -659,4 +753,100 @@ fn the_settings_route_answers_while_a_scenes_request_is_stuck() {
     );
     let _ = stuck.join();
     let _ = writer.join();
+}
+
+/// The requests must not each leave a thread inside the engine (#241 review).
+///
+/// The timeout around the call into the engine gives the route its answer back, but it
+/// does not take the thread back: the call stays inside the engine. Ten status requests
+/// therefore left ten threads inside the engine, and the daemon's thread count grew
+/// with the number of requests.
+///
+/// One call at a time per kind is the bound: a request that arrives while a call is
+/// outstanding joins that call instead of starting one of its own, and waits for its
+/// answer. Fifty requests leave one caller inside the engine, and the daemon's own
+/// watcher shares that one call.
+#[test]
+fn fifty_requests_leave_one_caller_inside_the_engine() {
+    let rig = build();
+    // The engine does not answer inside the route's bound.
+    rig.engine.set_delay(ENGINE_STUCK);
+    // The daemon's own watcher is running, as it is in the daemon.
+    let _watch = canvas_daemon::state::watch_engine(Arc::clone(&rig.app));
+    // Fifty status requests at once.
+    let answers = ask_many(rig.router.clone(), 50, "/api/v1/status");
+    assert_eq!(answers.len(), 50);
+    for answer in &answers {
+        assert_eq!(
+            answer.status,
+            StatusCode::SERVICE_UNAVAILABLE,
+            "the body: {}",
+            answer.text()
+        );
+    }
+    assert_eq!(
+        rig.engine.max_inside_stats(),
+        1,
+        "the requests left a caller inside the engine each: the engine is asked once at a time"
+    );
+    assert_eq!(
+        rig.engine.max_inside_groups(),
+        1,
+        "the requests left a caller inside the engine each: the engine is asked once at a time"
+    );
+}
+
+/// The routes must come back when the engine answers again (#241 review).
+///
+/// The call that is stuck inside the engine holds the one call of its kind. When the
+/// engine answers, that call ends, the flight is over, and the next request starts a
+/// new one: the routes are not stuck behind the call that failed.
+#[test]
+fn the_routes_recover_when_the_engine_answers_again() {
+    let rig = build();
+    rig.engine.set_numbers(RenderStats { fps_measured: 42.0, ..RenderStats::default() });
+    // The engine does not answer inside the route's bound.
+    rig.engine.set_delay(ENGINE_STUCK);
+    let answer = ask(rig.router.clone(), "/api/v1/status")
+        .expect("the status route never answered: it waited for the render engine");
+    assert_eq!(answer.status, StatusCode::SERVICE_UNAVAILABLE, "the body: {}", answer.text());
+    // The engine answers again.
+    rig.engine.set_delay(Duration::from_millis(0));
+    // The stuck call ends, and the next request starts a new one.
+    let deadline = Instant::now() + Duration::from_secs(10);
+    let mut recovered = false;
+    while Instant::now() < deadline {
+        let answer = ask(rig.router.clone(), "/api/v1/status").expect("the status route answered");
+        if answer.status == StatusCode::OK {
+            let status: Status = answer.json();
+            assert_eq!(status.fps_measured, 42.0, "the numbers are the ones the engine gave");
+            recovered = true;
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(recovered, "the routes did not come back when the engine answered again");
+}
+
+/// A write that landed must not be reported as a failure because the read that follows
+/// it could not be made (#241 review).
+///
+/// The write is on disk and the engine has been told; only the read of the group states
+/// that follows it cannot be made. A 503 there says the write failed when it did not,
+/// and the editor throws the change away.
+#[test]
+fn a_write_that_landed_answers_success_when_the_engine_does_not_answer() {
+    let rig = build();
+    // The engine does not answer inside the route's bound.
+    rig.engine.set_delay(ENGINE_STUCK);
+    let answer = ask_with(
+        rig.router.clone(),
+        request_json("PUT", "/api/v1/scenes/active", r#"{"id":"main"}"#),
+    )
+    .expect("the scenes route never answered");
+    assert_eq!(answer.status, StatusCode::OK, "the body: {}", answer.text());
+    let scenes: ScenesResponse = answer.json();
+    assert_eq!(scenes.active, "main", "the scene that was set is the active one");
+    assert_eq!(scenes.scenes.len(), 1, "the scene is there");
+    assert_eq!(scenes.group_states.len(), 1, "the group is in the answer");
 }
