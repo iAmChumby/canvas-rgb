@@ -584,7 +584,7 @@ impl OpenRgbAdapter {
         let outcome: Result<(), AdapterError> = async {
             self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
             let cap = started + timing.cap;
-            Ok(loop {
+            loop {
                 // The instant the wait ends if nothing more arrives: the first change is overdue;
                 // or a controller is back and the list has been quiet for the settle window; or,
                 // with the list still empty after the clear, the cap.
@@ -622,7 +622,8 @@ impl OpenRgbAdapter {
                         }
                     }
                 }
-            })
+            }
+            Ok(())
         }
         .await;
         // The hold set above lasts until the cap plus `DETECTION_DISTRUST`, which is what a wait that
