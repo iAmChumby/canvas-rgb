@@ -14,9 +14,11 @@ import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { motionOffNow } from "@/lib/motion";
 import type { Lab } from "@/lib/oklab";
+import { evalPattern, frameLabs, timelineOf } from "@/lib/patternPlay";
 import { labsOf, spinColours } from "@/lib/spin";
 import { dotAt, dotsBetween, layoutDots, type Dot } from "@/views/patterns/dotLayout";
 import type { BuiltOn } from "@/proto/BuiltOn";
+import type { Pattern } from "@/proto/Pattern";
 import type { Rgb8 } from "@/proto/Rgb8";
 import s from "@/views/patterns/patterns.module.css";
 
@@ -47,6 +49,7 @@ export function DotCanvas({
   builtOn,
   colours,
   spin,
+  play,
   overlay,
   label,
   onBegin,
@@ -61,6 +64,13 @@ export function DotCanvas({
    * while a press is down, so the dot under the pointer is the LED that is painted.
    */
   spin?: number | null;
+  /**
+   * The whole document, played (#468): the frames in time, fades in OKLab, then the spin of the
+   * blended picture, drawn with the daemon's own maths (`lib/patternPlay.ts`) from a clock that
+   * starts when it is set. Null shows `colours`, the frame being painted. It stands still under
+   * reduced motion and while a press is down, as the spin does.
+   */
+  play?: Pick<Pattern, "frames" | "playback"> | null;
   /** Drawn over the surface, in its box (the Gradient tool's handles). */
   overlay?: ReactNode;
   /** What a screen reader hears for the device. */
@@ -123,6 +133,16 @@ export function DotCanvas({
   }, []);
 
   const labs = useMemo<Lab[] | null>(() => (spin ? labsOf(colours) : null), [colours, spin]);
+  // The played document's timeline and OKLab values, made once per change to its frames.
+  const played = useMemo(
+    () => (play ? { timeline: timelineOf(play), labs: frameLabs(play.frames) } : null),
+    [play],
+  );
+  // A new run of the preview starts from the top.
+  const playing = play !== null && play !== undefined;
+  useEffect(() => {
+    started.current = null;
+  }, [playing]);
 
   useEffect(() => {
     const canvas = ref.current;
@@ -166,17 +186,20 @@ export function DotCanvas({
     draw(colours);
     // A spinning pattern is redrawn every animation frame from its own clock. Reduced motion draws
     // the picture where it stands, and so does a press (see `held`).
-    if (!spin || motionOffNow() || typeof requestAnimationFrame !== "function") return;
+    if ((!spin && !played) || motionOffNow() || typeof requestAnimationFrame !== "function") return;
     let raf = 0;
     const tick = (now: number) => {
       started.current ??= now;
-      draw(held.current ? colours : spinColours(colours, spin, (now - started.current) / 1000, labs ?? undefined));
+      const ms = now - started.current;
+      if (held.current) draw(colours);
+      else if (played && play) draw(evalPattern(play, ms, spin ?? null, played.timeline, played.labs));
+      else if (spin) draw(spinColours(colours, spin, ms / 1000, labs ?? undefined));
       raf = requestAnimationFrame(tick);
     };
     raf = requestAnimationFrame(tick);
     return () => cancelAnimationFrame(raf);
     // `dots` carries the box; `theme` re-reads the tokens when it changes.
-  }, [dots, colours, theme, spin, labs]);
+  }, [dots, colours, theme, spin, labs, played, play]);
 
   /** The pointer's place in the surface, and the dots of the box it is in. */
   const place = (event: ReactPointerEvent<HTMLCanvasElement>): { x: number; y: number; dots: Dot[] } => {
