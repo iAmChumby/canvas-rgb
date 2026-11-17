@@ -31,7 +31,7 @@ use canvas_proto::color::Rgb8;
 use canvas_proto::device::{DeviceId, DeviceInfo};
 use canvas_proto::layout::SamplingMode;
 use canvas_proto::props::{InputNeeds, Props};
-use canvas_proto::scene::{Arrangement, GroupMode, Light, LightId, SCENE_FADE_MS};
+use canvas_proto::scene::{Arrangement, GroupMode, Light, LightId, SequenceShape, SCENE_FADE_MS};
 use canvas_proto::traits::{
     AudioSpectrum, Canvas, Effect, InputSource, Inputs, LightFrame, LightLeds, ScreenFrame,
     StripRead,
@@ -75,6 +75,10 @@ pub(crate) struct GroupSlot {
     pub id: String,
     pub members: Vec<LightId>,
     pub mode: GroupMode,
+    /// How a pattern runs through the members (#468): `None` plays the whole pattern on each
+    /// light, `Some` fits it once to the members' LEDs joined end to end. Read when the plans are
+    /// rebuilt.
+    pub sequence: Option<SequenceShape>,
     /// 0..=100.
     pub brightness: u8,
     /// `None`: the group is dark (set to Off), or the render thread has the effect for the
@@ -154,7 +158,7 @@ pub(crate) struct GroupWork {
 pub(crate) struct Rebuild {
     lights: Vec<Light>,
     devices: Vec<DeviceInfo>,
-    groups: Vec<(Vec<LightId>, GroupMode)>,
+    groups: Vec<(Vec<LightId>, GroupMode, Option<SequenceShape>)>,
 }
 
 /// Everything the render thread takes from the scene for one frame.
@@ -180,7 +184,7 @@ impl SceneState {
         let rebuild = (self.generation != seen_generation).then(|| Rebuild {
             lights: self.lights.clone(),
             devices: devices.to_vec(),
-            groups: self.groups.iter().map(|g| (g.members.clone(), g.mode)).collect(),
+            groups: self.groups.iter().map(|g| (g.members.clone(), g.mode, g.sequence)).collect(),
         });
         works.clear();
         for (index, g) in self.groups.iter_mut().enumerate() {
@@ -275,6 +279,18 @@ struct RunGroup {
     /// position order (no `reversed` yet), turned every tick from the effect's clock. `None` for
     /// every pattern that does not spin, which keeps today's zero per-tick work.
     spin: Option<SpinPlay>,
+    /// How a pattern runs through the plan's lights (#468). `None`: each light plays the whole
+    /// pattern on its own. `Some`: one run through every light, in plan order.
+    sequence: Option<SequenceShape>,
+    /// Whether the fitted pattern is one run of every light's LEDs end to end (a sequence at play
+    /// with a pattern): then `spin` and `frames` each hold ONE source of the run's length and
+    /// `fitted` holds its slices, one per light.
+    run: bool,
+    /// Where each light of the plan starts in the run, in `plan.lights` order (the running sum of
+    /// the lights' LED counts). Empty unless `sequence` is set.
+    run_starts: Vec<usize>,
+    /// The turned or blended run of this tick, kept so a tick allocates nothing.
+    run_colors: Vec<Rgb8>,
     /// A pattern with more than one frame and a cycle of more than 0 ms (#468): every frame fitted
     /// to every light once, and the timeline that says which shows. `None` for a pattern that
     /// stands still, which keeps today's zero per-tick work.
@@ -339,6 +355,7 @@ impl RunGroup {
         }
         self.spin = None;
         self.frames = None;
+        self.run = false;
         let Some(pattern) = effect.and_then(|e| e.as_pattern()) else {
             // A canvas effect, or no effect: nothing is fitted.
             self.fitted.clear();
@@ -358,6 +375,10 @@ impl RunGroup {
         // once here; a still one (one frame, or no time in the cycle) is exactly today's.
         let timeline = Timeline::of(pattern);
         let playing_frames = !timeline.is_still();
+        if let Some(shape) = self.sequence {
+            self.fit_run(pattern, shape, spin, timeline, playing_frames);
+            return;
+        }
         let mut sources = Vec::new();
         let mut frame_sets: Vec<Vec<SpinSource>> = Vec::new();
         let fitted: Vec<Vec<Rgb8>> = self
@@ -389,6 +410,49 @@ impl RunGroup {
             blended: frame_sets.iter().map(|_| SpinSource::new(Vec::new())).collect(),
             frames: frame_sets,
         });
+    }
+
+    /// A sequence (#468): every frame is fitted ONCE to the sum of the lights' LED counts, as one
+    /// ring or one line, so a gradient wraps (or not) and Spin turns the whole run. `fitted` keeps
+    /// the first frame's slice for each light (position order, before the light's own LED order),
+    /// which is all a still pattern ever reads. A spin or a set of frames keeps one source of the
+    /// run's length; each tick turns or blends the run and `run_group` cuts it per light.
+    fn fit_run(
+        &mut self,
+        pattern: &canvas_proto::pattern::Pattern,
+        shape: SequenceShape,
+        spin: Option<f32>,
+        timeline: Timeline,
+        playing_frames: bool,
+    ) {
+        let total: usize = self.shapes.iter().map(|(leds, _)| *leds as usize).sum();
+        let arrangement = match shape {
+            SequenceShape::Ring => Arrangement::Ring,
+            SequenceShape::Line => Arrangement::Strip,
+        };
+        let fit = |colors: &[Rgb8]| fit_colors(colors, &pattern.built_on, total as u32, arrangement);
+        let run = fit(&pattern.frames[0].colors);
+        self.fitted = self
+            .run_starts
+            .iter()
+            .zip(&self.shapes)
+            .map(|(start, (leds, _))| run[*start..*start + *leds as usize].to_vec())
+            .collect();
+        self.run = true;
+        self.spin = spin.filter(|_| !playing_frames).map(|speed| SpinPlay {
+            turns_per_s: f64::from(speed),
+            sources: vec![SpinSource::new(run.clone())],
+        });
+        if playing_frames {
+            let set: Vec<SpinSource> =
+                pattern.frames.iter().map(|f| SpinSource::new(fit(&f.colors))).collect();
+            self.spin = spin.map(|speed| SpinPlay { turns_per_s: f64::from(speed), sources: Vec::new() });
+            self.frames = Some(FramePlay {
+                timeline,
+                frames: vec![set],
+                blended: vec![SpinSource::new(Vec::new())],
+            });
+        }
     }
 }
 
@@ -625,7 +689,7 @@ impl SceneRunner {
         self.groups = rebuild
             .groups
             .iter()
-            .map(|(members, mode)| {
+            .map(|(members, mode, sequence)| {
                 let mut plan = build_group_plan(members, *mode, &rebuild.lights, &rebuild.devices);
                 scale_plan(&mut plan, SCENE_RENDER_SCALE);
                 let colors =
@@ -643,6 +707,16 @@ impl SceneRunner {
                     reversed.push(light.is_some_and(|l| l.reversed));
                     first_led.push(light.and_then(|l| l.first_led));
                 }
+                // Where each light starts in a sequence's run: a light with no LEDs is not in the
+                // plan, so it takes no place in the run (#468).
+                let mut run_starts = Vec::new();
+                if sequence.is_some() {
+                    let mut start = 0usize;
+                    for (leds, _) in &shapes {
+                        run_starts.push(start);
+                        start += *leds as usize;
+                    }
+                }
                 RunGroup {
                     canvas: Canvas::with_scale(SCENE_RENDER_SCALE),
                     plan,
@@ -652,6 +726,10 @@ impl SceneRunner {
                     first_led,
                     fitted: Vec::new(),
                     spin: None,
+                    sequence: *sequence,
+                    run: false,
+                    run_starts,
+                    run_colors: Vec::new(),
                     frames: None,
                     #[cfg(test)]
                     spun: 0,
@@ -924,6 +1002,33 @@ fn run_group(
         .as_ref()
         .filter(|_| live && is_pattern)
         .map(|play| play.timeline.at(secs * 1000.0));
+    // A sequence (#468): the whole run (every light's LEDs end to end) is blended or turned ONCE
+    // per tick into `run_colors`, and each light below takes its slice of it. A still run reads
+    // `fitted`, which already holds each light's slice, so it does no per-tick work.
+    let run_ready = group.run && live && is_pattern && {
+        let RunGroup { frames, spin, run_colors, .. } = &mut *group;
+        let played = match (beat, frames.as_mut()) {
+            (Some(beat), Some(play)) => play_frames(play, 0, beat, spin_clock, run_colors),
+            _ => match spin_clock
+                .and_then(|(turns, t)| spin.as_ref().and_then(|s| s.sources.first()).map(|src| (turns, t, src)))
+            {
+                Some((turns, t, source)) => {
+                    source.at(turns, t, run_colors);
+                    true
+                }
+                None => false,
+            },
+        };
+        #[cfg(test)]
+        if played {
+            if group.frames.is_some() {
+                group.framed += 1;
+            } else {
+                group.spun += 1;
+            }
+        }
+        played
+    };
     for (index, (light, out)) in
         group.plan.lights.iter().zip(group.colors.iter_mut()).enumerate()
     {
@@ -931,6 +1036,20 @@ fn run_group(
             Some(fitted) if live && !fitted.is_empty() => {
                 let reversed = group.reversed.get(index).copied().unwrap_or(false);
                 let first_led = group.first_led.get(index).copied().flatten();
+                if group.run {
+                    // This light's slice of the run, in position order; its own LED order next.
+                    out.clear();
+                    if run_ready {
+                        let start = group.run_starts.get(index).copied().unwrap_or(0);
+                        let end = (start + fitted.len()).min(group.run_colors.len());
+                        out.extend_from_slice(group.run_colors.get(start..end).unwrap_or(&[]));
+                    } else {
+                        out.extend_from_slice(fitted);
+                    }
+                    apply_led_order(out, first_led, reversed);
+                    scale_light(out, factor);
+                    continue;
+                }
                 let framed = match (beat, group.frames.as_mut()) {
                     (Some(beat), Some(play)) => play_frames(play, index, beat, spin_clock, out),
                     _ => false,
@@ -1127,6 +1246,7 @@ mod tests {
                 id: "g".into(),
                 members: group_members.iter().map(|m| m.to_string()).collect(),
                 mode: GroupMode::FlowAcross,
+                sequence: None,
                 brightness: 100,
                 effect: None,
                 needs: InputNeeds::default(),
@@ -3393,6 +3513,304 @@ mod tests {
     }
     // spin-tests-end
 
+    // ---------------------------------------------------------------- sequence (#468 phase 4)
+    // sequence-tests-begin
+
+    /// Two fans of 8 (rings) and a strip of 10: the design's table row 4.
+    fn seq_lights() -> Vec<Light> {
+        vec![ring("f1"), ring("f2"), light("s")]
+    }
+
+    fn seq_devices() -> Vec<DeviceInfo> {
+        vec![strip_device("f1", 8), strip_device("f2", 8), strip_device("s", 10)]
+    }
+
+    const SEQ_ORDER: [&str; 3] = ["f1#z0", "f2#z0", "s#z0"];
+
+    /// The three devices' frames after one tick of `pattern` that has been playing for `ms`, as
+    /// `(f1, f2, s)`, in a group of `members` with `sequence`.
+    fn run_sequence(
+        members: &[&str],
+        lights: Vec<Light>,
+        sequence: Option<SequenceShape>,
+        pattern: Pattern,
+        ms: u64,
+    ) -> (Vec<Rgb8>, Vec<Rgb8>, Vec<Rgb8>) {
+        let mut scene = state_playing(members, lights, Some(Box::new(PatternTestEffect::new(pattern))), 100);
+        scene.groups[0].sequence = sequence;
+        scene.groups[0].started = Instant::now() - Duration::from_millis(ms);
+        let mut runner = SceneRunner::new();
+        let devices = seq_devices();
+        frame(&mut scene, &mut runner, &devices);
+        (take(&mut runner, "f1", 8), take(&mut runner, "f2", 8), take(&mut runner, "s", 10))
+    }
+
+    /// Where each member sits in the run, by LED index: `(f1, f2, s)` slices of `run` for `order`.
+    fn slices_of(run: &[Rgb8], order: &[&str]) -> (Vec<Rgb8>, Vec<Rgb8>, Vec<Rgb8>) {
+        let mut at = 0;
+        let mut out = std::collections::HashMap::new();
+        for id in order {
+            let len = if id.starts_with('s') { 10 } else { 8 };
+            out.insert(*id, run[at..at + len].to_vec());
+            at += len;
+        }
+        (out["f1#z0"].clone(), out["f2#z0"].clone(), out["s#z0"].clone())
+    }
+
+    /// The run is the members' LEDs end to end, in `members` order: with a pattern built on 26 the
+    /// run is an exact copy, so each light shows its own slice, and a reordered group reorders it.
+    #[test]
+    fn a_sequence_runs_through_the_members_in_order() {
+        let run = ramp(26);
+        for shape in [SequenceShape::Ring, SequenceShape::Line] {
+            let (f1, f2, s) = run_sequence(
+                &SEQ_ORDER,
+                seq_lights(),
+                Some(shape),
+                pattern_on(26, Arrangement::Ring, run.clone()),
+                0,
+            );
+            let want = slices_of(&run, &SEQ_ORDER);
+            assert_eq!((f1, f2, s), want, "{shape:?}: fan 1, fan 2, then the strip");
+            // Reordered: the strip first, then fan 2, then fan 1.
+            let order = ["s#z0", "f2#z0", "f1#z0"];
+            let got = run_sequence(&order, seq_lights(), Some(shape), pattern_on(26, Arrangement::Ring, run.clone()), 0);
+            assert_eq!(got, slices_of(&run, &order), "{shape:?}: the run reordered with the members");
+        }
+    }
+
+    /// The pattern is fitted ONCE to N = 8 + 8 + 10 as a ring or as a line: a pattern built on 13
+    /// stretches to 26 across the lights, not to each light.
+    #[test]
+    fn a_sequence_fits_the_pattern_once_to_the_sum_of_the_leds() {
+        let built = ramp(13);
+        let on = BuiltOn { led_count: 13, arrangement: Arrangement::Ring, grid: None };
+        for (shape, arrangement) in
+            [(SequenceShape::Ring, Arrangement::Ring), (SequenceShape::Line, Arrangement::Strip)]
+        {
+            let want_run = fit_colors(&built, &on, 26, arrangement);
+            let got = run_sequence(
+                &SEQ_ORDER,
+                seq_lights(),
+                Some(shape),
+                pattern_on(13, Arrangement::Ring, built.clone()),
+                0,
+            );
+            assert_eq!(got, slices_of(&want_run, &SEQ_ORDER), "{shape:?} over 26 LEDs");
+        }
+        // A ring stretch and a line stretch of 13 to 26 differ, so the two shapes are two fits.
+        assert_ne!(
+            fit_colors(&built, &on, 26, Arrangement::Ring),
+            fit_colors(&built, &on, 26, Arrangement::Strip)
+        );
+    }
+
+    /// Each light applies its OWN `first_led` and `reversed` to its slice of the run.
+    #[test]
+    fn each_member_applies_its_own_first_led_and_reversed() {
+        let run = ramp(26);
+        let mut lights = seq_lights();
+        lights[0].reversed = true; // fan 1: reversed, no first LED
+        lights[1].first_led = Some(3); // fan 2: LED 3 first, forward
+        lights[2].first_led = Some(2); // the strip: LED 2 first and reversed
+        lights[2].reversed = true;
+        let got = run_sequence(
+            &SEQ_ORDER,
+            lights.clone(),
+            Some(SequenceShape::Ring),
+            pattern_on(26, Arrangement::Ring, run.clone()),
+            0,
+        );
+        let (mut f1, mut f2, mut s) = slices_of(&run, &SEQ_ORDER);
+        apply_led_order(&mut f1, None, true);
+        apply_led_order(&mut f2, Some(3), false);
+        apply_led_order(&mut s, Some(2), true);
+        assert_eq!(got, (f1.clone(), f2, s), "each light's own order, after the run is cut");
+        // The reversed fan literally shows its slice backwards: LED 0 reads position 7.
+        assert_eq!(got.0[0], run[7]);
+        assert_eq!(got.0[7], run[0]);
+    }
+
+    /// One LED of a lit run at `position`, black elsewhere, in a ring of 26.
+    fn lit_at(position: usize) -> Vec<Rgb8> {
+        let mut v = vec![Rgb8::BLACK; 26];
+        v[position] = RED;
+        v
+    }
+
+    /// The (light, LED) that shows red in a frame of three devices, or a note of what lit.
+    fn lit_led(frames: &(Vec<Rgb8>, Vec<Rgb8>, Vec<Rgb8>)) -> Option<(&'static str, usize)> {
+        let mut found = Vec::new();
+        for (name, f) in [("f1", &frames.0), ("f2", &frames.1), ("s", &frames.2)] {
+            for (i, c) in f.iter().enumerate() {
+                if c.r > 200 {
+                    found.push((name, i));
+                }
+            }
+        }
+        (found.len() == 1).then(|| found[0])
+    }
+
+    /// Spin turns the whole run: a lit LED at the last position of fan 1 is on fan 2's first LED one
+    /// LED of turn later, and the same across fan 2 to the strip, and off the strip's end back to
+    /// fan 1's first LED (a ring wraps; so does a line: it chases off the end and back in).
+    #[test]
+    fn spin_crosses_each_join_of_the_run() {
+        // One LED of 26 a second: 1/26 turns a second.
+        let one_led_a_second = 1.0 / 26.0;
+        for shape in [SequenceShape::Ring, SequenceShape::Line] {
+            for (from, now_at) in [
+                (7usize, ("f2", 0usize)),
+                (15, ("s", 0)),
+                (25, ("f1", 0)),
+                (3, ("f1", 4)),
+            ] {
+                let mk = || {
+                    let mut p = pattern_on(26, Arrangement::Ring, lit_at(from));
+                    p.motion = Motion::spin(one_led_a_second);
+                    p
+                };
+                let before = run_sequence(&SEQ_ORDER, seq_lights(), Some(shape), mk(), 0);
+                let was = match from {
+                    0..=7 => ("f1", from),
+                    8..=15 => ("f2", from - 8),
+                    _ => ("s", from - 16),
+                };
+                assert_eq!(lit_led(&before), Some(was), "{shape:?}: the lit LED at tick 0");
+                // 1 s on: the colour has moved one LED along the run, across the join.
+                let after = run_sequence(&SEQ_ORDER, seq_lights(), Some(shape), mk(), 1000);
+                assert_eq!(lit_led(&after), Some(now_at), "{shape:?}: from run position {from}");
+            }
+        }
+    }
+
+    /// Frames blend across the whole run (one blend of N LEDs), then the run is cut per light.
+    #[test]
+    fn frames_blend_over_the_run() {
+        use canvas_proto::pattern::Easing::Linear;
+        let a = ramp(26);
+        let mut b = a.clone();
+        b.reverse();
+        let frames = vec![
+            PatternFrame { colors: a.clone(), hold: LONG, transition: fade_of(LONG, Linear), extra: Default::default() },
+            PatternFrame { colors: b.clone(), hold: LONG, transition: None, extra: Default::default() },
+        ];
+        let at_mid = run_sequence(
+            &SEQ_ORDER,
+            seq_lights(),
+            Some(SequenceShape::Line),
+            pattern_with(frames.clone(), 26, Arrangement::Strip),
+            150_000,
+        );
+        let mid: Vec<Rgb8> = (0..26).map(|i| crate::pattern_spin::mix(a[i], b[i], 0.5)).collect();
+        let want = slices_of(&mid, &SEQ_ORDER);
+        near(&at_mid.0, &want.0, 1);
+        near(&at_mid.1, &want.1, 1);
+        near(&at_mid.2, &want.2, 1);
+        // During the hold, the run is frame 0 exactly.
+        let held = run_sequence(&SEQ_ORDER, seq_lights(), Some(SequenceShape::Line), pattern_with(frames, 26, Arrangement::Strip), 50_000);
+        assert_eq!(held, slices_of(&a, &SEQ_ORDER));
+    }
+
+    /// `None` is today's: every light fits the whole pattern to itself, in its own arrangement.
+    #[test]
+    fn no_sequence_fits_each_light_on_its_own() {
+        let built = ramp(13);
+        let on = BuiltOn { led_count: 13, arrangement: Arrangement::Ring, grid: None };
+        let (f1, f2, s) =
+            run_sequence(&SEQ_ORDER, seq_lights(), None, pattern_on(13, Arrangement::Ring, built.clone()), 0);
+        assert_eq!(f1, fit_colors(&built, &on, 8, Arrangement::Ring));
+        assert_eq!(f2, fit_colors(&built, &on, 8, Arrangement::Ring));
+        assert_eq!(s, fit_colors(&built, &on, 10, Arrangement::Strip));
+    }
+
+    /// A canvas effect ignores `sequence`: the frames are the same with and without it.
+    #[test]
+    fn a_canvas_effect_ignores_the_sequence() {
+        let play = |sequence| {
+            let mut scene = state_playing(&SEQ_ORDER, seq_lights(), Some(Box::new(HorizontalRamp)), 100);
+            scene.groups[0].sequence = sequence;
+            let mut runner = SceneRunner::new();
+            let devices = seq_devices();
+            frame(&mut scene, &mut runner, &devices);
+            (take(&mut runner, "f1", 8), take(&mut runner, "f2", 8), take(&mut runner, "s", 10))
+        };
+        let plain = play(None);
+        assert_eq!(play(Some(SequenceShape::Ring)), plain);
+        assert_eq!(play(Some(SequenceShape::Line)), plain);
+        assert!(plain.0.iter().any(|c| *c != Rgb8::BLACK), "the canvas effect drew something");
+    }
+
+    /// A member with no LEDs (its device is not there) takes no place in the run, and no panic.
+    #[test]
+    fn a_member_without_leds_is_skipped_in_the_run() {
+        let run = ramp(16);
+        let mut scene = state_playing(
+            &["f1#z0", "ghost#z0", "f2#z0"],
+            vec![ring("f1"), ring("ghost"), ring("f2")],
+            Some(Box::new(PatternTestEffect::new(pattern_on(16, Arrangement::Ring, run.clone())))),
+            100,
+        );
+        scene.groups[0].sequence = Some(SequenceShape::Ring);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device("f1", 8), strip_device("f2", 8)];
+        frame(&mut scene, &mut runner, &devices);
+        assert_eq!(take(&mut runner, "f1", 8), run[0..8].to_vec());
+        assert_eq!(take(&mut runner, "f2", 8), run[8..16].to_vec(), "fan 2 follows fan 1: N is 16");
+    }
+
+    /// A still sequence keeps today's zero per-tick work, and fits once.
+    #[test]
+    fn a_still_sequence_does_no_per_tick_work_and_fits_once() {
+        let mut scene = state_playing(
+            &SEQ_ORDER,
+            seq_lights(),
+            Some(Box::new(PatternTestEffect::new(pattern_on(26, Arrangement::Ring, ramp(26))))),
+            100,
+        );
+        scene.groups[0].sequence = Some(SequenceShape::Ring);
+        scene.groups[0].started = Instant::now() - Duration::from_secs(9);
+        let mut runner = SceneRunner::new();
+        let devices = seq_devices();
+        for _ in 0..10 {
+            frame(&mut scene, &mut runner, &devices);
+        }
+        let g = &runner.groups[0];
+        assert_eq!((g.spun, g.framed, g.fits, g.spin.is_some(), g.frames.is_some()), (0, 0, 1, false, false));
+        // A spinning run turns once per tick, not once per light.
+        let mut p = pattern_on(26, Arrangement::Ring, ramp(26));
+        p.motion = Motion::spin(0.25);
+        let mut scene = state_playing(&SEQ_ORDER, seq_lights(), Some(Box::new(PatternTestEffect::new(p))), 100);
+        scene.groups[0].sequence = Some(SequenceShape::Ring);
+        let mut runner = SceneRunner::new();
+        for _ in 0..10 {
+            frame(&mut scene, &mut runner, &devices);
+        }
+        assert_eq!((runner.groups[0].spun, runner.groups[0].fits), (10, 1), "one turn a tick for three lights");
+    }
+
+    /// The recorded run: one LED lit at the 7th LED of fan 1, spinning round the run one LED a
+    /// second, one frame dumped per second from the fake devices. It prints the three devices as
+    /// rows (`#` lit, `.` dark) so the crossing from fan 1 to fan 2 can be read, and asserts the
+    /// path: fan 1 LED 6, LED 7, then fan 2 LED 0, 1, 2.
+    #[test]
+    fn a_recorded_run_crosses_from_fan_one_to_fan_two() {
+        let one_led_a_second = 1.0 / 26.0;
+        let mut path = Vec::new();
+        println!("sequence run, ring of 8 + 8 + 10, spin 1 LED a second, one frame a second:");
+        for second in 0..5u64 {
+            let mut p = pattern_on(26, Arrangement::Ring, lit_at(6));
+            p.motion = Motion::spin(one_led_a_second);
+            let frames = run_sequence(&SEQ_ORDER, seq_lights(), Some(SequenceShape::Ring), p, second * 1000);
+            let row = |f: &[Rgb8]| f.iter().map(|c| if c.r > 200 { '#' } else { '.' }).collect::<String>();
+            println!("t={second}s  fan1 {}  fan2 {}  strip {}", row(&frames.0), row(&frames.1), row(&frames.2));
+            path.push(lit_led(&frames).expect("exactly one lit LED"));
+        }
+        assert_eq!(path, [("f1", 6), ("f1", 7), ("f2", 0), ("f2", 1), ("f2", 2)]);
+    }
+
+    // sequence-tests-end
+
     // ---------------------------------------------------------------- frames (#468)
     // frames-tests-begin
 
@@ -3698,6 +4116,7 @@ mod group_preview_tests {
                 id: id.into(),
                 members: vec!["d1#z0".into()],
                 mode: GroupMode::FlowAcross,
+                sequence: None,
                 brightness,
                 effect,
                 needs: InputNeeds::default(),

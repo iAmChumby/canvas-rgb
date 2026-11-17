@@ -533,6 +533,74 @@ describe("the open group", () => {
       "true",
     );
   });
+
+  // #468 phase 4: how a pattern runs through the group's lights.
+  describe("the shape of a pattern's run", () => {
+    const SHAPE_LABEL = "How this pattern runs through the group's lights";
+    /** What the last whole-scene write carried for `g-one`'s sequence. */
+    const lastSequence = () => {
+      const body = api.scenes.put.mock.calls.at(-1)?.[1] as { scene: Scene };
+      return body.scene.groups.find((g) => g.id === "g-one")?.sequence;
+    };
+
+    it("a pattern group offers Each light, One ring and One line, and starts on Each light", async () => {
+      serve(patternAnswer([]));
+      open("g-one");
+      const shape = await screen.findByRole("radiogroup", { name: SHAPE_LABEL });
+      const names = within(shape).getAllByRole("radio").map((r) => r.textContent);
+      expect(names).toEqual(["Each light", "One ring", "One line"]);
+      expect(within(shape).getByRole("radio", { name: "Each light" }).getAttribute("aria-checked")).toBe("true");
+    });
+
+    it("picking One ring then One line is saved as the group's sequence, and Each light takes it away", async () => {
+      serve(patternAnswer([]));
+      open("g-one");
+      const shape = await screen.findByRole("radiogroup", { name: SHAPE_LABEL });
+      fireEvent.click(within(shape).getByRole("radio", { name: "One ring" }));
+      await waitFor(() => expect(lastSequence()).toBe("ring"));
+      fireEvent.click(within(shape).getByRole("radio", { name: "One line" }));
+      await waitFor(() => expect(lastSequence()).toBe("line"));
+      expect(within(shape).getByRole("radio", { name: "One line" }).getAttribute("aria-checked")).toBe("true");
+      fireEvent.click(within(shape).getByRole("radio", { name: "Each light" }));
+      await waitFor(() => expect(api.scenes.put.mock.calls.length).toBeGreaterThan(2));
+      // `None` is the absence of the field, as the daemon writes it.
+      expect(lastSequence()).toBeUndefined();
+      const body = api.scenes.put.mock.calls.at(-1)?.[1] as { scene: Scene };
+      expect("sequence" in (body.scene.groups.find((g) => g.id === "g-one") ?? {})).toBe(false);
+    });
+
+    it("shows the sequence the group already has, and a canvas effect has no shape control", async () => {
+      const answered = patternAnswer([]);
+      const first = answered.scenes[0]?.groups[0];
+      if (first) first.sequence = "ring";
+      serve(answered);
+      open("g-one");
+      const shape = await screen.findByRole("radiogroup", { name: SHAPE_LABEL });
+      expect(within(shape).getByRole("radio", { name: "One ring" }).getAttribute("aria-checked")).toBe("true");
+      cleanup();
+      serve(answer());
+      open("g-two");
+      await screen.findByRole("radiogroup", { name: MODE_LABEL });
+      expect(screen.queryByRole("radiogroup", { name: SHAPE_LABEL })).toBeNull();
+    });
+
+    it("the members reorder from the keyboard, and the run follows that order", async () => {
+      serve(patternAnswer([]));
+      open("g-one");
+      await screen.findByRole("radiogroup", { name: SHAPE_LABEL });
+      const grips = () => [...document.querySelectorAll<HTMLElement>("[data-member] button")].filter((b) =>
+        (b.getAttribute("aria-label") ?? "").startsWith("Move "),
+      );
+      fireEvent.keyDown(grips()[0] as HTMLElement, { key: "ArrowDown" });
+      await waitFor(() => expect(api.scenes.put).toHaveBeenCalled());
+      const body = api.scenes.put.mock.calls.at(-1)?.[1] as { scene: Scene };
+      expect(body.scene.groups.find((g) => g.id === "g-one")?.members).toEqual([
+        SECOND?.light.id,
+        FIRST?.light.id,
+        THIRD?.light.id,
+      ]);
+    });
+  });
 });
 
 // #469: a group's list and its "flow across / each its own" switch were drawn in one scroll area,
