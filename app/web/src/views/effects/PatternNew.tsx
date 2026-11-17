@@ -11,7 +11,8 @@
 // two things the library owns: the name, and what happens when the name is refused (a name
 // another pattern has is the store's own conflict, and the editor shows that sentence in its row).
 //
-// Leaving without saving asks nothing: the work is the owner's to keep or drop, and the draft the
+// Leaving without saving asks: the editor guards itself (#474), so the Cancel key, a rail link,
+// the browser's Back and a closed window all ask before the strokes are dropped. The draft the
 // editor opened ends when it goes.
 
 import { useState } from "react";
