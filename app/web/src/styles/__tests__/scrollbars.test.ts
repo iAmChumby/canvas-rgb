@@ -125,6 +125,7 @@ const SCROLL_PANES = [
   ".sheetBody",
   ".chainStage",
   ".takeover",
+  ".frameScroll",
 ];
 
 /**

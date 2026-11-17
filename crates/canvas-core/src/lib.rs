@@ -17,6 +17,7 @@ mod engine;
 pub mod effect_guard;
 pub mod geometry;
 pub mod pattern_fit;
+pub mod pattern_play;
 pub mod pattern_spin;
 pub mod sampling;
 pub(crate) mod scene_engine;

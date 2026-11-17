@@ -136,6 +136,9 @@
   flex: 1 1 auto;
   min-height: 120px;
   display: grid;
+  /* One track the size of the stage, never the size of the drawing in it: the canvas's own pixel size
+     must not hold the stage open when the window gets shorter (the frame strip took height from it). */
+  grid-template: minmax(0, 1fr) / minmax(0, 1fr);
   place-items: center;
   padding: var(--s3);
   border: 1px solid var(--line);
@@ -155,6 +158,9 @@
 }
 
 .surface {
+  /* Out of the flow: its pixel buffer never sets the height of the box it is drawn in. */
+  position: absolute;
+  inset: 0;
   display: block;
   width: 100%;
   height: 100%;
@@ -163,25 +169,305 @@
   cursor: crosshair;
 }
 
-/* ---------- the reserved row: the frame strip's place, an empty recess ---------- */
+/* ---------- the frame strip (#468): the frames, the way each passes to the next, and the timing ---------- */
 
 .frameStrip {
   position: relative;
   flex: 0 0 auto;
-  height: 32px;
+  min-height: 84px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+  padding: 6px var(--s3);
   border: 1px solid var(--line);
   border-radius: var(--r-md);
   background: var(--sunk);
   box-shadow: var(--well);
 }
 
-.frameStrip::after {
-  content: "";
+/* The frames scroll sideways inside their own box; the keys and the timing stay where they are. */
+.frameScroll {
+  flex: 1 1 280px;
+  min-width: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scroll-snap-type: x proximity;
+  /* Frames that run past the edge fade out instead of being cut mid-key; the track's end padding
+     keeps the last connector clear of the fade once the strip is scrolled to the end. */
+  mask-image: linear-gradient(90deg, #000 calc(100% - 20px), transparent);
+}
+
+.frameTrack {
+  position: relative;
+  display: flex;
+  align-items: flex-start;
+  width: max-content;
+  padding: 4px 22px 2px 2px;
+}
+
+.frameCol {
+  flex: none;
+  width: 62px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  scroll-snap-align: center;
+}
+
+/* A frame is a flat key: its own box, a lit rim when it is the one being painted. */
+.frameKey {
+  position: relative;
+  width: 62px;
+  height: 48px;
+  padding: 3px;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--line);
+  border-radius: var(--r-sm);
+  background: var(--panel, transparent);
+  color: var(--dim);
+  cursor: pointer;
+  touch-action: pan-x;
+  user-select: none;
+  transition:
+    border-color var(--dur-fast, 120ms) var(--ease),
+    background-color var(--dur-fast, 120ms) var(--ease);
+}
+
+.frameKey:hover {
+  background: var(--hover);
+}
+
+.frameKey[aria-pressed="true"] {
+  border-color: var(--live);
+  background: var(--live-soft);
+}
+
+/* The key that is lifted stays where it was, dimmed: the copy follows the pointer. */
+.frameKey[data-lifted="true"] {
+  opacity: 0.4;
+}
+
+.frameKey:focus-visible,
+.connectorKey:focus-visible {
+  outline: 2px solid var(--focus, var(--live));
+  outline-offset: 2px;
+}
+
+.thumb {
+  display: block;
+  pointer-events: none;
+}
+
+.thumbOff {
+  fill: var(--led-off);
+}
+
+.frameNo {
   position: absolute;
-  inset: 7px 12px;
-  border: 1px dashed var(--line-2);
-  border-radius: 4px;
+  top: 2px;
+  left: 4px;
+  font-family: var(--fm);
+  font-size: 10px;
+  line-height: 1;
+  color: var(--mute);
+  font-variant-numeric: tabular-nums;
+  pointer-events: none;
+}
+
+.frameHold {
+  font-family: var(--fm);
+  font-size: 12px;
+  line-height: 14px;
+  color: var(--mute);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+/* The connector sits level with the middle of the thumbnails, its word under it. */
+.connector {
+  flex: none;
+  width: 54px;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 3px;
+  padding-top: 10px;
+}
+
+.connectorKey {
+  width: 44px;
+  height: 28px;
+  display: grid;
+  place-items: center;
+  padding: 0;
+  border: 1px solid transparent;
+  border-radius: var(--r-sm);
+  background: transparent;
+  color: var(--mute);
+  cursor: pointer;
+  transition:
+    color var(--dur-fast, 120ms) var(--ease),
+    background-color var(--dur-fast, 120ms) var(--ease),
+    border-color var(--dur-fast, 120ms) var(--ease);
+}
+
+.connectorKey:hover {
+  background: var(--hover);
+  color: var(--ink);
+}
+
+/* A fade is the lit kind: the ramp carries the live colour, a cut stays muted. */
+.connectorKey[data-kind="fade"] {
+  color: var(--live);
+}
+
+.connectorKey[data-open="true"] {
+  border-color: var(--live);
+}
+
+.connectorKey[data-live="false"] {
   opacity: 0.5;
+}
+
+.connectorLine {
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+}
+
+.connectorWord {
+  font-family: var(--fm);
+  font-size: 11px;
+  line-height: 12px;
+  color: var(--mute);
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+
+/* The gap the lifted frame would land in. */
+.frameMarker {
+  position: absolute;
+  top: 2px;
+  height: 52px;
+  width: 2px;
+  border-radius: 1px;
+  background: var(--live);
+  pointer-events: none;
+}
+
+/* The copy that follows the pointer, drawn over the page: the strip scrolls and would clip it. */
+.frameCopy {
+  position: fixed;
+  z-index: 1000;
+  display: grid;
+  place-items: center;
+  border: 1px solid var(--live);
+  border-radius: var(--r-sm);
+  background: var(--live-soft);
+  color: var(--ink);
+  font-family: var(--fm);
+  font-size: var(--t14);
+  pointer-events: none;
+}
+
+.frameKeys {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.frameTiming {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+/* Wide enough for the longest reading ("600000 ms"), so a figure never resizes the row. */
+.frameField {
+  min-width: 108px;
+}
+
+/* ---------- a connector's panel ---------- */
+
+.transition {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 288px;
+  padding: var(--s3);
+}
+
+.transitionTitle {
+  margin: 0;
+  font-family: var(--fm);
+  font-size: var(--t14);
+  color: var(--mute);
+}
+
+.transitionRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--s2);
+  color: var(--dim);
+  font-size: var(--t14);
+  transition: opacity var(--dur, 180ms) var(--ease);
+}
+
+/* The pace has four words: its label sits over them, so they never wrap onto a second line. */
+.transitionRow[data-stack="true"] {
+  flex-direction: column;
+  align-items: stretch;
+  gap: 6px;
+}
+
+/* Cut has no duration or pace: the fields keep their room, dimmed, so choosing Fade moves nothing. */
+.transitionRow[data-off="true"] {
+  opacity: 0.45;
+}
+
+/* A phone: the frames take the strip's full width and the keys and the timing share the row under
+   them, so the strip is two rows and the device keeps its room. */
+@media (max-width: 720px) {
+  .frameStrip {
+    padding: 6px 8px;
+    gap: 4px 8px;
+  }
+
+  .frameScroll {
+    flex: 1 1 100%;
+  }
+
+  .frameKeys {
+    gap: 2px;
+  }
+
+  .frameTiming {
+    gap: 6px;
+    margin-left: auto;
+  }
+
+  .frameField {
+    min-width: 0;
+  }
+
+  .frameField :global(.num) {
+    width: 64px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .frameKey,
+  .connectorKey,
+  .transitionRow {
+    transition: none;
+  }
 }
 
 /* ---------- the keys ---------- */
@@ -225,6 +511,14 @@
 
 /* A narrow window: the name has its own line, so it is never squeezed to an ellipsis beside the
    keys. The note row and the device below keep every pixel they had. */
+/* Where the app's rail becomes the bottom bar (720 px) the page scrolls instead of filling the window,
+   so the device keeps a size a thumb can paint on. */
+@media (max-width: 720px) {
+  .stage {
+    min-height: 220px;
+  }
+}
+
 @media (max-width: 640px) {
   .who {
     flex: 1 1 100%;

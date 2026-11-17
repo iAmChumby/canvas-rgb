@@ -9,6 +9,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Added
 
 - Patterns: pick the shape a light is in (Line, Ring, or Grid where it is one) on its Devices row or in the pattern editor, paint a Gradient round the ring with Wrap so the end meets the start, and turn on Spin to make the pattern turn along its LEDs at the same speed on any fan; colours blend in OKLab, so red to blue passes through purple. (#468)
+- Patterns: a pattern can have several frames that play in order on the lights. Each frame holds for as long as you set, and the connector between two frames is a Cut or a Fade (how long it takes and its pace, in perceptual colour); the last connector loops back to frame 1 or stops. The frame strip adds, copies, deletes and reorders frames (by keys or by dragging), undo covers all of it, an fps control sets every frame's hold at once, and Play previews the pattern in the editor with the same maths the lights use. A pattern with one frame plays as before. (#468)
 - Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
 
 ### Fixed

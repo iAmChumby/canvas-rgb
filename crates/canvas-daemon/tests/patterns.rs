@@ -1454,8 +1454,8 @@ async fn shows_something(sink: &Rec) {
     wait_until(|| sink.last().is_some_and(|f| f.len() == LEDS as usize && f.iter().any(|c| c.r > 100))).await;
 }
 
-/// A 0.16.0 pattern file (two frames, a motion this version does not know) loads and plays its first
-/// frame, still, as it did before Spin existed.
+/// A 0.16.0 pattern file (two frames, which 0.16.0 wrote with a hold of 0, and a motion this version
+/// does not know) loads and plays its first frame, still, as it did before Spin and frames existed.
 #[tokio::test]
 async fn a_0_16_0_pattern_file_plays_as_it_did() {
     let colours = |lit: &str| -> Vec<String> {
@@ -1467,8 +1467,8 @@ async fn a_0_16_0_pattern_file_plays_as_it_did() {
             "id": INTAKE,
             "built_on": {"led_count": LEDS, "arrangement": "ring"},
             "frames": [
-                {"colors": colours("#c80000"), "hold": 250},
-                {"colors": colours("#0000c8"), "hold": 250}
+                {"colors": colours("#c80000"), "hold": 0},
+                {"colors": colours("#0000c8"), "hold": 0}
             ],
             "motion": {"type": "rotate", "speed": 2}
         }]
@@ -1520,4 +1520,178 @@ async fn a_spinning_draft_turns_on_the_lights() {
         frames.iter().filter(|f| f.iter().any(|c| c.r > 60)).map(|f| peak(f).0).collect();
     // 0.5 laps a second on 12 LEDs is 6 LEDs a second: well over four positions in 1.5 s.
     assert!(peaks.len() >= 5, "the lit LED stood at {peaks:?}");
+}
+
+
+// ---------------------------------------------------------------- Frames (#468)
+
+fn solid_frame(colour: Rgb8, hold: u32, transition: Option<canvas_proto::pattern::Transition>) -> Frame {
+    Frame { colors: vec![colour; LEDS as usize], hold, transition, extra: serde_json::Map::new() }
+}
+
+fn fade(ms: u32) -> Option<canvas_proto::pattern::Transition> {
+    Some(canvas_proto::pattern::Transition {
+        kind: canvas_proto::pattern::TransitionKind::Fade,
+        ms,
+        easing: canvas_proto::pattern::Easing::Linear,
+    })
+}
+
+/// Red holds 250 ms, fades into blue over 250 ms, blue holds 250 ms and cuts back to red.
+fn red_fade_blue() -> Pattern {
+    let mut p = pattern("Intake");
+    p.frames = vec![solid_frame(rgb(RED), 250, fade(250)), solid_frame(rgb(BLUE), 250, None)];
+    p
+}
+
+/// What a frame of the fake device shows, in one word.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Red,
+    Blue,
+    Between,
+    Other,
+}
+
+fn phase_of(frame: &[Rgb8]) -> Phase {
+    let Some(first) = frame.first() else { return Phase::Other };
+    if frame.iter().any(|c| c != first) {
+        return Phase::Other;
+    }
+    if *first == rgb(RED) {
+        Phase::Red
+    } else if *first == rgb(BLUE) {
+        Phase::Blue
+    } else if first.r > 0 && first.b > 0 {
+        Phase::Between
+    } else {
+        Phase::Other
+    }
+}
+
+/// The phases of `frames`, each run once: 11 red frames, 7 between, 9 blue come out `[Red, Between, Blue]`.
+fn runs(frames: &[Vec<Rgb8>]) -> Vec<Phase> {
+    let mut out: Vec<Phase> = Vec::new();
+    for f in frames {
+        let p = phase_of(f);
+        if out.last() != Some(&p) {
+            out.push(p);
+        }
+    }
+    out
+}
+
+const BLUE: (u8, u8, u8) = (0, 0, 255);
+
+/// The daemon path, on the fakes: a scene plays a pattern of two frames and the fake device receives
+/// red, then every step of the fade (the OKLab blend, red channel falling and blue rising), then
+/// blue, then red again as the loop comes round: the frames in order, with the fade between them.
+///
+/// Run with `--nocapture` to read the recorded run.
+#[tokio::test]
+async fn a_frames_pattern_sends_the_fake_device_its_frames_in_order_with_the_fade_between() {
+    let rig = rig_with_patterns(vec![red_fade_blue()], scenes_file()).await;
+    shows(&rig.b, rgb(RED), "the first frame").await;
+    let from = rig.b.seen();
+    // Wait for the condition, not a clock: until a whole cycle has come round (red, the fade, blue, red).
+    wait_until(|| runs(&rig.b.since(from)).len() >= 4).await;
+    let frames = rig.b.since(from);
+    let sequence = runs(&frames);
+    println!("recorded run: {} frames, phases {sequence:?}", frames.len());
+    let mut fading: Vec<&Vec<Rgb8>> = frames.iter().filter(|f| phase_of(f) == Phase::Between).collect();
+    for f in &fading {
+        println!("  between: {} (LED 0)", f[0]);
+    }
+    assert_eq!(
+        &sequence[..4],
+        &[Phase::Red, Phase::Between, Phase::Blue, Phase::Red],
+        "red, the fade, blue, then the cut back to red: {sequence:?}"
+    );
+    assert!(fading.len() >= 3, "the fade is more than one step: {} frames", fading.len());
+    // The fade runs one way: red falls and blue rises.
+    let first = fading.remove(0)[0];
+    let last = fading.pop().map(|f| f[0]).unwrap_or(first);
+    assert!(first.r > last.r && first.b < last.b, "the fade went from {first} to {last}");
+}
+
+/// A pattern file with two frames that hold and no transition (what 0.16.0 could write, and a
+/// phase 1 file) cuts: the device alternates the two colours with nothing between them.
+#[tokio::test]
+async fn frames_with_no_transition_cut() {
+    let mut p = pattern("Intake");
+    p.frames = vec![solid_frame(rgb(RED), 150, None), solid_frame(rgb(BLUE), 150, None)];
+    let rig = rig_with_patterns(vec![p], scenes_file()).await;
+    shows(&rig.b, rgb(RED), "the first frame").await;
+    let from = rig.b.seen();
+    wait_until(|| runs(&rig.b.since(from)).len() >= 4).await;
+    let sequence = runs(&rig.b.since(from));
+    assert_eq!(&sequence[..4], &[Phase::Red, Phase::Blue, Phase::Red, Phase::Blue], "{sequence:?}");
+}
+
+/// Without Loop the pattern stops on its last frame and stays there.
+#[tokio::test]
+async fn a_pattern_that_does_not_loop_stays_on_its_last_frame() {
+    let mut p = red_fade_blue();
+    p.playback = Some(canvas_proto::pattern::Playback { looping: false });
+    let rig = rig_with_patterns(vec![p], scenes_file()).await;
+    shows(&rig.b, rgb(BLUE), "the last frame").await;
+    let from = rig.b.seen();
+    // Enough frames after it to have seen a loop come round, if there were one (a hold is 250 ms).
+    wait_until(|| rig.b.since(from).len() > 60).await;
+    for frame in rig.b.since(from) {
+        assert_eq!(phase_of(&frame), Phase::Blue, "stays on blue: {frame:?}");
+    }
+}
+
+/// The editor's own path: a draft carries the whole document, frames and transitions, and the fake
+/// lights it plays on go through them.
+#[tokio::test]
+async fn a_frames_draft_plays_the_whole_document_on_the_lights() {
+    let rig = draft_rig(Vec::new()).await;
+    let (status, answer) = put_pattern_draft(&rig, &red_fade_blue(), EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let a = sink(&rig, A);
+    wait_until(|| a.last().is_some_and(|f| phase_of(&f) == Phase::Red)).await;
+    let from = a.seen();
+    wait_until(|| runs(&a.since(from)).len() >= 4).await;
+    let sequence = runs(&a.since(from));
+    assert_eq!(&sequence[..4], &[Phase::Red, Phase::Between, Phase::Blue, Phase::Red], "{sequence:?}");
+}
+
+/// Save keeps the frames, their transitions and Loop, and reads them back exactly.
+#[tokio::test]
+async fn a_frames_pattern_saves_and_reads_back_whole() {
+    let rig = rig().await;
+    let mut p = red_fade_blue();
+    p.frames[1].transition = Some(canvas_proto::pattern::Transition {
+        kind: canvas_proto::pattern::TransitionKind::Fade,
+        ms: 900,
+        easing: canvas_proto::pattern::Easing::EaseInOut,
+    });
+    p.playback = Some(canvas_proto::pattern::Playback { looping: false });
+    p.id = "pattern:Fade".into();
+    let (status, answer) = send(&rig, "PUT", &pattern_path("pattern:Fade"), Some(serde_json::to_value(&p).unwrap())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (status, answer) = send(&rig, "GET", &pattern_path("pattern:Fade"), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(saved(&answer), p, "{answer}");
+    assert_eq!(answer["frames"][1]["transition"]["easing"], "ease_in_out", "{answer}");
+    assert_eq!(answer["playback"]["loop"], false, "{answer}");
+}
+
+/// Save refuses a hold or a transition past the spine's caps, naming the frame.
+#[tokio::test]
+async fn a_hold_or_a_transition_past_the_caps_is_a_422() {
+    let rig = rig().await;
+    let mut p = red_fade_blue();
+    p.id = "pattern:Long".into();
+    p.frames[0].hold = canvas_proto::pattern::PATTERN_HOLD_MS_MAX + 1;
+    let (status, answer) = send(&rig, "PUT", &pattern_path("pattern:Long"), Some(serde_json::to_value(&p).unwrap())).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(answer.to_string().contains("frame 1 holds"), "{answer}");
+    p.frames[0].hold = 100;
+    p.frames[1].transition = fade(canvas_proto::pattern::TRANSITION_MS_MAX + 1);
+    let (status, answer) = send(&rig, "PUT", &pattern_path("pattern:Long"), Some(serde_json::to_value(&p).unwrap())).await;
+    assert_eq!(status, StatusCode::UNPROCESSABLE_ENTITY, "{answer}");
+    assert!(answer.to_string().contains("frame 2's transition"), "{answer}");
 }

@@ -1,24 +1,27 @@
 "use client";
 
-// The pattern editor: one device drawn large as its LEDs, the keys that paint it, the space kept
-// under it for a frame strip, and the draft that puts every stroke on the real lights.
+// The pattern editor: one device drawn large as its LEDs, the keys that paint it, the frame strip
+// under it (#468), and the draft that puts every stroke on the real lights.
 //
 // The draft is the effect editor's own (`PUT /effects/draft` with a `pattern`): the page opens it
 // with its own epoch and a rising sequence, renews it on the heartbeat, and deletes it when the
 // editor goes away, which puts the active scene back. The editor never saves by itself: `onSave`
 // hands the whole document up, with every field it does not know still in it.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
+import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
+import { isStill, timelineOf } from "@/lib/patternPlay";
 import { spinOf } from "@/lib/spin";
 import { refreshLights, useSnap } from "@/lib/store";
 import { DotCanvas } from "@/views/patterns/DotCanvas";
+import { FrameStrip } from "@/views/patterns/FrameStrip";
 import { GradientStops } from "@/views/patterns/GradientStops";
 import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
@@ -112,6 +115,25 @@ export function PatternEditor({
     [send],
   );
   const editor = usePatternEditor(pattern, { onDraft: draft });
+
+  // The preview (#468): Play runs the whole document on the dots with the daemon's own maths
+  // (`lib/patternPlay.ts`); stopped, the dots show the frame being painted. The lights always play the
+  // whole document, since that is what the draft carries.
+  const [playing, setPlaying] = useState(false);
+  const play = useMemo(
+    () => (playing ? { frames: editor.frames, playback: editor.loop ? undefined : { loop: false } } : null),
+    [playing, editor.frames, editor.loop],
+  );
+  const playable = useMemo(
+    () => !isStill(timelineOf({ frames: editor.frames, playback: editor.loop ? undefined : { loop: false } })),
+    [editor.frames, editor.loop],
+  );
+  const reduced = motionOffNow();
+  const cannotPlay = reduced
+    ? "Reduced motion is on: the preview stays on the selected frame"
+    : playable
+      ? null
+      : "Nothing to play: add a frame and give the frames a hold";
 
   // The shape picker writes the arrangement of the light this pattern was built on (#468).
   const lights = useSnap((state) => state.lights);
@@ -234,6 +256,7 @@ export function PatternEditor({
           builtOn={editor.builtOn}
           colours={editor.colours}
           spin={spinOf(editor.motion)}
+          play={play}
           label={`${name}, ${kindWords(editor.builtOn)}`}
           onBegin={editor.beginStroke}
           onStroke={editor.stroke}
@@ -255,8 +278,25 @@ export function PatternEditor({
 
       <MotionControl motion={editor.motion} onMotion={editor.setMotion} />
 
-      {/* Reserved: the frame strip comes in a later version. An empty recess, never a control. */}
-      <div className={s.frameStrip} aria-hidden="true" />
+      <FrameStrip
+        builtOn={editor.builtOn}
+        frames={editor.frames}
+        selected={editor.selected}
+        loop={editor.loop}
+        fps={editor.fps}
+        playing={playing && cannotPlay === null}
+        cannotPlay={cannotPlay}
+        onSelect={editor.selectFrame}
+        onAdd={editor.addFrame}
+        onDuplicate={editor.duplicateFrame}
+        onDelete={editor.deleteFrame}
+        onMove={editor.moveFrame}
+        onHold={editor.setHold}
+        onTransition={editor.setTransition}
+        onLoop={editor.setLoop}
+        onFps={editor.applyFps}
+        onPlay={() => setPlaying((on) => !on)}
+      />
 
       <PatternTools
         tool={editor.tool}

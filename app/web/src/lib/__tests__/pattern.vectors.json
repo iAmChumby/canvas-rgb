@@ -1,0 +1,1277 @@
+{
+  "about": "Golden vectors for frames in time (#468): the easings and which colours a pattern shows at a moment. Rust (crates/canvas-core/src/pattern_play.rs) and TypeScript (app/web/src/lib/patternPlay.ts) both read this file. The 'expect' fields of the hold, cut and still cases are written by hand; the fades are what the Rust makes (OKLab, see spin.vectors.json). Rewrite them after a deliberate change by running `cargo test -p canvas-core --test pattern_vectors` with the environment variable CANVAS_WRITE_VECTORS=1.",
+  "cases": [
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 99.5
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 299.9
+        },
+        {
+          "expect": [
+            "#0000ff",
+            "#ffffff"
+          ],
+          "t": 300
+        },
+        {
+          "expect": [
+            "#0000ff",
+            "#ffffff"
+          ],
+          "t": 399.9
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 400
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 450
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 1350
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 1000000000.5
+        }
+      ],
+      "name": "hold and cut, looping",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 100
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 200
+          },
+          {
+            "colors": [
+              "#0000ff",
+              "#ffffff"
+            ],
+            "hold": 100
+          }
+        ],
+        "id": "pattern:hold-cut",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#ed7300",
+            "#000022"
+          ],
+          "t": 125
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 150
+        },
+        {
+          "expect": [
+            "#a0d500",
+            "#0000ae"
+          ],
+          "t": 175
+        },
+        {
+          "expect": [
+            "#16fe00",
+            "#0000fd"
+          ],
+          "t": 199.5
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 200
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 299.9
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 300
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 450
+        }
+      ],
+      "name": "fade linear into a cut frame",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 100,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 100
+            }
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 100
+          }
+        ],
+        "id": "pattern:fade-linear",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 200
+        },
+        {
+          "expect": [
+            "#84e500",
+            "#0000cc"
+          ],
+          "t": 225
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#f55a00",
+            "#00000c"
+          ],
+          "t": 275
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 299.999
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 300
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 300.001
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 550
+        }
+      ],
+      "name": "last frame fades into the first (the seam)",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 100
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 100,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 100
+            }
+          }
+        ],
+        "id": "pattern:fade-seam",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#f94700",
+            "#000003"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#ed7300",
+            "#000022"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 500
+        },
+        {
+          "expect": [
+            "#a0d500",
+            "#0000ae"
+          ],
+          "t": 750
+        },
+        {
+          "expect": [
+            "#6cef00",
+            "#0000de"
+          ],
+          "t": 900
+        },
+        {
+          "expect": [
+            "#05ff00",
+            "#0000ff"
+          ],
+          "t": 999
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 1000
+        }
+      ],
+      "name": "easing linear",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 0,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 1000
+            }
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 1000
+          }
+        ],
+        "id": "pattern:ease-linear",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#fe1200",
+            "#000000"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#fb3800",
+            "#000001"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#ed7300",
+            "#000022"
+          ],
+          "t": 500
+        },
+        {
+          "expect": [
+            "#c7b400",
+            "#000075"
+          ],
+          "t": 750
+        },
+        {
+          "expect": [
+            "#8fe000",
+            "#0000c1"
+          ],
+          "t": 900
+        },
+        {
+          "expect": [
+            "#0aff00",
+            "#0000fe"
+          ],
+          "t": 999
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 1000
+        }
+      ],
+      "name": "easing ease_in",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 0,
+            "transition": {
+              "easing": "ease_in",
+              "kind": "fade",
+              "ms": 1000
+            }
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 1000
+          }
+        ],
+        "id": "pattern:ease-ease_in",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#f26400",
+            "#000014"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#d99c00",
+            "#000052"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#a0d500",
+            "#0000ae"
+          ],
+          "t": 500
+        },
+        {
+          "expect": [
+            "#57f500",
+            "#0000ea"
+          ],
+          "t": 750
+        },
+        {
+          "expect": [
+            "#21fd00",
+            "#0000fc"
+          ],
+          "t": 900
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 999
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 1000
+        }
+      ],
+      "name": "easing ease_out",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 0,
+            "transition": {
+              "easing": "ease_out",
+              "kind": "fade",
+              "ms": 1000
+            }
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 1000
+          }
+        ],
+        "id": "pattern:ease-ease_out",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#fd2300",
+            "#000000"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#f55a00",
+            "#00000c"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 500
+        },
+        {
+          "expect": [
+            "#84e500",
+            "#0000cc"
+          ],
+          "t": 750
+        },
+        {
+          "expect": [
+            "#3bfa00",
+            "#0000f6"
+          ],
+          "t": 900
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 999
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 1000
+        }
+      ],
+      "name": "easing ease_in_out",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 0,
+            "transition": {
+              "easing": "ease_in_out",
+              "kind": "fade",
+              "ms": 1000
+            }
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 1000
+          }
+        ],
+        "id": "pattern:ease-ease_in_out",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 99
+        },
+        {
+          "expect": [
+            "#d0a800",
+            "#000063"
+          ],
+          "t": 150
+        },
+        {
+          "expect": [
+            "#21fd00",
+            "#0000fc"
+          ],
+          "t": 199
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 200
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 299.9
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 300
+        },
+        {
+          "expect": [
+            "#00ff00",
+            "#0000ff"
+          ],
+          "t": 1000000.0
+        }
+      ],
+      "name": "not looping stops on the last frame",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 100,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 100
+            }
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 100,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 100
+            }
+          }
+        ],
+        "id": "pattern:no-loop",
+        "motion": {
+          "type": "none"
+        },
+        "playback": {
+          "loop": false
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 250
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 500
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 777
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 1000000000.0
+        }
+      ],
+      "name": "one frame is still, however long its hold and fade",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 500,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 500
+            }
+          }
+        ],
+        "id": "pattern:one",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 1
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 1000000.0
+        }
+      ],
+      "name": "frames that take no time are still on frame 0",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 0
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 0,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 0
+            }
+          }
+        ],
+        "id": "pattern:no-time",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 99
+        },
+        {
+          "expect": [
+            "#0000ff",
+            "#ffffff"
+          ],
+          "t": 100
+        },
+        {
+          "expect": [
+            "#0000ff",
+            "#ffffff"
+          ],
+          "t": 199
+        },
+        {
+          "expect": [
+            "#ff0000",
+            "#000000"
+          ],
+          "t": 200
+        }
+      ],
+      "name": "a frame with no time is skipped",
+      "pattern": {
+        "built_on": {
+          "arrangement": "strip",
+          "led_count": 2
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000"
+            ],
+            "hold": 100
+          },
+          {
+            "colors": [
+              "#00ff00",
+              "#0000ff"
+            ],
+            "hold": 0
+          },
+          {
+            "colors": [
+              "#0000ff",
+              "#ffffff"
+            ],
+            "hold": 100
+          }
+        ],
+        "id": "pattern:skip",
+        "motion": {
+          "type": "none"
+        }
+      }
+    },
+    {
+      "at": [
+        {
+          "expect": [
+            "#ff0000",
+            "#000000",
+            "#000000",
+            "#000000"
+          ],
+          "t": 0
+        },
+        {
+          "expect": [
+            "#630000",
+            "#630000",
+            "#000000",
+            "#000000"
+          ],
+          "t": 500
+        },
+        {
+          "expect": [
+            "#000000",
+            "#ff0000",
+            "#000000",
+            "#000000"
+          ],
+          "t": 1000
+        },
+        {
+          "expect": [
+            "#000000",
+            "#331b3c",
+            "#331b3c",
+            "#000000"
+          ],
+          "t": 1500
+        },
+        {
+          "expect": [
+            "#000000",
+            "#040319",
+            "#342d8e",
+            "#000000"
+          ],
+          "t": 1750
+        },
+        {
+          "expect": [
+            "#000000",
+            "#000000",
+            "#0000ff",
+            "#000000"
+          ],
+          "t": 2000
+        },
+        {
+          "expect": [
+            "#000000",
+            "#000000",
+            "#000048",
+            "#000080"
+          ],
+          "t": 2600
+        },
+        {
+          "expect": [
+            "#000000",
+            "#000000",
+            "#000000",
+            "#ff0000"
+          ],
+          "t": 3000
+        },
+        {
+          "expect": [
+            "#bd2d3d",
+            "#050000",
+            "#000000",
+            "#000000"
+          ],
+          "t": 4125
+        }
+      ],
+      "name": "spin turns the blended frame, not the frames",
+      "pattern": {
+        "built_on": {
+          "arrangement": "ring",
+          "led_count": 4
+        },
+        "frames": [
+          {
+            "colors": [
+              "#ff0000",
+              "#000000",
+              "#000000",
+              "#000000"
+            ],
+            "hold": 1000,
+            "transition": {
+              "easing": "linear",
+              "kind": "fade",
+              "ms": 1000
+            }
+          },
+          {
+            "colors": [
+              "#0000ff",
+              "#000000",
+              "#000000",
+              "#000000"
+            ],
+            "hold": 1000
+          }
+        ],
+        "id": "pattern:spin-fade",
+        "motion": {
+          "turns_per_s": 0.25,
+          "type": "spin"
+        }
+      }
+    }
+  ],
+  "ease": [
+    {
+      "easing": "linear",
+      "expect": 0.0,
+      "u": 0
+    },
+    {
+      "easing": "linear",
+      "expect": 0.1,
+      "u": 0.1
+    },
+    {
+      "easing": "linear",
+      "expect": 0.25,
+      "u": 0.25
+    },
+    {
+      "easing": "linear",
+      "expect": 0.5,
+      "u": 0.5
+    },
+    {
+      "easing": "linear",
+      "expect": 0.75,
+      "u": 0.75
+    },
+    {
+      "easing": "linear",
+      "expect": 0.9,
+      "u": 0.9
+    },
+    {
+      "easing": "linear",
+      "expect": 1.0,
+      "u": 1
+    },
+    {
+      "easing": "linear",
+      "expect": 0.0,
+      "u": -1
+    },
+    {
+      "easing": "linear",
+      "expect": 1.0,
+      "u": 2
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.0,
+      "u": 0
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.010000000000000002,
+      "u": 0.1
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.0625,
+      "u": 0.25
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.25,
+      "u": 0.5
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.5625,
+      "u": 0.75
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.81,
+      "u": 0.9
+    },
+    {
+      "easing": "ease_in",
+      "expect": 1.0,
+      "u": 1
+    },
+    {
+      "easing": "ease_in",
+      "expect": 0.0,
+      "u": -1
+    },
+    {
+      "easing": "ease_in",
+      "expect": 1.0,
+      "u": 2
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.0,
+      "u": 0
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.18999999999999995,
+      "u": 0.1
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.4375,
+      "u": 0.25
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.75,
+      "u": 0.5
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.9375,
+      "u": 0.75
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.99,
+      "u": 0.9
+    },
+    {
+      "easing": "ease_out",
+      "expect": 1.0,
+      "u": 1
+    },
+    {
+      "easing": "ease_out",
+      "expect": 0.0,
+      "u": -1
+    },
+    {
+      "easing": "ease_out",
+      "expect": 1.0,
+      "u": 2
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.0,
+      "u": 0
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.028000000000000004,
+      "u": 0.1
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.15625,
+      "u": 0.25
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.5,
+      "u": 0.5
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.84375,
+      "u": 0.75
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.972,
+      "u": 0.9
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 1.0,
+      "u": 1
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 0.0,
+      "u": -1
+    },
+    {
+      "easing": "ease_in_out",
+      "expect": 1.0,
+      "u": 2
+    }
+  ]
+}
