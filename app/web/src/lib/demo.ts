@@ -8,6 +8,7 @@
 // save-error|handback:<header id>|chains|chain-error|chain-start-error`.
 
 import { ApiFailure } from "@/lib/errors";
+import { driven } from "@/lib/drive";
 import { demoThumbnail, thumbnailBytes } from "@/lib/thumb-demo";
 import {
   answerDelayMs,
@@ -1207,14 +1208,6 @@ function unpluggedLights(lights: LightView[]): LightView[] {
   return lights.map((view) =>
     view.led_count === 8 && view.light.arrangement === "strip" ? { ...view, connected: false } : view,
   );
-}
-
-// The daemon's drive rule (crates/canvas-adapters/src/drive.rs), mirrored so the demo refuses to
-// delete a light on a device the daemon drives just as the daemon does (#414).
-const NOT_DRIVEN_DEVICES = ["VID_3151&PID_4015"];
-function driven(deviceId: string): boolean {
-  const upper = deviceId.toUpperCase();
-  return !NOT_DRIVEN_DEVICES.some((path) => upper.includes(path));
 }
 
 function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {

@@ -208,6 +208,41 @@ fn delete_request(id: &str) -> Request<Body> {
     )
 }
 
+/// A `PUT` of a whole scene, with the token and a JSON body.
+fn put_scene_request(id: &str, put: &canvas_proto::api::ScenePut) -> Request<Body> {
+    request_with_body(
+        "PUT",
+        &routes::SCENE.replace("{id}", id),
+        &serde_json::to_string(put).expect("the scene put serialises"),
+    )
+}
+
+/// A home holding two leftover lights in one group, loaded the way the daemon starts. Deleting
+/// `id` leaves `stays` in the group, so the scene that comes back is still valid to PUT (#497).
+async fn build_delete_pair() -> (axum::Router, Arc<App>, TempHome, String) {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let stays = format!("{UNDRIVEN}#z0p2");
+    let home = TempHome::new();
+    let on_disk = lights_file(vec![
+        light(&id, UNDRIVEN, 0, Some((0, 8)), Some("Old strip")),
+        light(&stays, UNDRIVEN, 0, Some((8, 8)), Some("Other strip")),
+    ]);
+    std::fs::write(
+        home.path.join(canvas_proto::scene::LIGHTS_FILE),
+        serde_json::to_vec(&on_disk).expect("the lights file serialises"),
+    )
+    .expect("the lights file is written");
+    std::fs::write(
+        home.path.join(canvas_proto::scene::SCENES_FILE),
+        serde_json::to_vec(&scenes_with("g-shared", "Two strips", &[&id, &stays]))
+            .expect("the scenes file serialises"),
+    )
+    .expect("the scenes file is written");
+    let store = Store::load_from(&home.path);
+    let (router, app, home) = build_with(store, Vec::new(), home).await;
+    (router, app, home, id)
+}
+
 /// #414 regression: an old `lights.json` can hold a *named slice* light (id ending `p<n>`, with
 /// `leds` and a `name`) on a device the daemon never drives. The #393 start-up cleanup only removes
 /// whole-zone lights the owner never touched, so this light survives. The owner sees it in Scenes'
@@ -311,6 +346,99 @@ async fn deleting_one_light_keeps_another_member_of_its_group() {
     assert_eq!(group.id, "g-shared", "the group stayed");
     assert_eq!(group.members, vec![other_id.clone()], "its other member stayed");
     assert!(store.lights.lights.iter().any(|l| l.id == other_id));
+}
+
+/// #497: the delete is a server-side scene write, so it moves the scene's rev like every other
+/// one. A PUT that still holds the rev from before the delete is refused with 409, even though its
+/// scene is valid by the time it arrives. On code that left `rev` alone the PUT succeeded (200).
+#[tokio::test]
+async fn a_scene_put_naming_the_rev_from_before_the_delete_is_a_409() {
+    let (router, app, _home, id) = build_delete_pair().await;
+    assert_eq!(app.store.read().await.scenes.scenes[0].rev, 1, "the rev before the delete");
+
+    let response = router.clone().oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.store.read().await.scenes.scenes[0].rev, 2, "the delete moved the rev it changed");
+
+    // The scene as it is now is valid (the group kept its other member). Only the rev is stale.
+    let after = app.store.read().await.scenes.scenes[0].clone();
+    let put = canvas_proto::api::ScenePut { scene: after, expected_rev: 1, dry_run: false };
+    let response = router.oneshot(put_scene_request("gaming", &put)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::CONFLICT, "a PUT with the old rev is stale");
+    let error: ApiError =
+        serde_json::from_value(json(response).await).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::CONFLICT);
+}
+
+/// #497: park a scene PUT between its validation and its write (through a test seam). The PUT
+/// validated while the light was still there and holds the scene order; the delete must not slip
+/// in and let the PUT write that light back after it is gone. On the code without the scene gate
+/// the delete lands first and the PUT resurrects the light in `scenes.json` — this test fails
+/// there. On the fixed code the delete waits for the scene order and follows the PUT, so the
+/// light is gone and the rev moved twice.
+#[tokio::test]
+async fn a_scene_put_parked_before_its_write_cannot_resurrect_a_deleted_light() {
+    let (router, app, home, id) = build_delete_pair().await;
+    let before = app.store.read().await.scenes.scenes[0].clone();
+    assert_eq!(before.rev, 1);
+
+    let seam: Arc<canvas_daemon::api::scenes::ScenePutSeam> = Arc::new(Default::default());
+    app.set_scene_put_seam(seam.clone());
+
+    // The PUT validates against the light (still there) and parks before its write, holding the
+    // scene order. It is spawned so the delete can be started while it waits at the seam.
+    let put = {
+        let router = router.clone();
+        let put = canvas_proto::api::ScenePut {
+            scene: before,
+            expected_rev: 1,
+            dry_run: false,
+        };
+        tokio::spawn(async move {
+            router.oneshot(put_scene_request("gaming", &put)).await.expect("the router answers")
+        })
+    };
+    seam.wait_until_reached().await;
+
+    // Start the delete while the PUT is parked. On the fixed code it waits for the scene order the
+    // PUT holds, so the light stays in the store; on code without the gate it lands now. Give each
+    // spawned task a bounded number of yields to reach its blocking point — no clock is read.
+    let delete = {
+        let router = router.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            router.oneshot(delete_request(&id)).await.expect("the router answers")
+        })
+    };
+    for _ in 0..256 {
+        tokio::task::yield_now().await;
+        let still = app.store.read().await.scenes.scenes.iter().any(|sc| {
+            sc.groups.iter().any(|g| g.members.contains(&id))
+        });
+        if !still {
+            break; // the delete landed first (the code under test)
+        }
+    }
+
+    seam.go();
+    let put_response = put.await.expect("the PUT task finished");
+    let delete_response = delete.await.expect("the delete task finished");
+    assert_eq!(put_response.status(), StatusCode::OK, "the PUT validated while the light was there");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    // The PUT landed, then the delete followed it: the light is gone from both memory and the
+    // saved file, and the rev moved for the PUT and again for the delete.
+    let saved: canvas_proto::scene::ScenesFile = serde_json::from_str(
+        &std::fs::read_to_string(home.path.join(canvas_proto::scene::SCENES_FILE)).unwrap(),
+    )
+    .expect("scenes.json is a scenes file");
+    assert!(
+        saved.scenes.iter().all(|sc| sc.groups.iter().all(|g| !g.members.contains(&id))),
+        "the deleted light is not written back into scenes.json"
+    );
+    let scene = app.store.read().await.scenes.scenes[0].clone();
+    assert!(!scene.groups.iter().any(|g| g.members.contains(&id)));
+    assert_eq!(scene.rev, 3, "the PUT and the delete each moved the rev once");
 }
 
 #[tokio::test]
@@ -641,6 +769,7 @@ async fn the_lights_routes_need_the_token() {
     for (method, path) in [
         ("GET", routes::LIGHTS.to_string()),
         ("PATCH", light_path("fake:mb#z0")),
+        ("DELETE", light_path("fake:mb#z0")),
     ] {
         let response = router
             .clone()
@@ -672,6 +801,7 @@ async fn the_lights_routes_refuse_a_foreign_origin_and_a_foreign_host() {
     for (method, path) in [
         ("GET", routes::LIGHTS.to_string()),
         ("PATCH", light_path("fake:mb#z0")),
+        ("DELETE", light_path("fake:mb#z0")),
     ] {
         // A browser from another site is refused.
         let response = router

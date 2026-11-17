@@ -214,6 +214,13 @@ pub async fn delete_light(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
 ) -> ApiResult<Json<LightDeleted>> {
+    // The scene order, then the draft gate, then the store: the order every route that writes a
+    // scene takes (api/scenes.rs, api/chains.rs). The scene order is held across the whole write
+    // below, so a scene PUT that validated against this light cannot write it back after it is
+    // gone (#497). This is the same lock the apply at the end uses, so it is taken once here.
+    let lock = app.scene.lock().await;
+    let _gate = app.draft.gate().lock().await;
+
     let (removed, emptied) = {
         let mut store = app.store.write().await;
         let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
@@ -242,9 +249,11 @@ pub async fn delete_light(
         // below drops it, as it drops any other empty group.
         let mut emptied: Vec<EmptiedGroup> = Vec::new();
         for scene in &mut store.scenes.scenes {
+            let mut changed = false;
             for group in &mut scene.groups {
                 if group.members.iter().any(|member| member == &id) {
                     group.members.retain(|member| member != &id);
+                    changed = true;
                     if group.members.is_empty() {
                         emptied.push(EmptiedGroup {
                             scene_id: scene.id.clone(),
@@ -253,6 +262,11 @@ pub async fn delete_light(
                         });
                     }
                 }
+            }
+            // Every server-side scene write moves the rev, so a PUT still holding the old one is
+            // refused as stale (409) instead of writing over this change (#497).
+            if changed {
+                scene.rev += 1;
             }
         }
         // Clone the lights: both fields are reached through the write guard's DerefMut, so a
@@ -283,13 +297,10 @@ pub async fn delete_light(
     };
 
     // The scene changed, so it is replanned and published the way a patch that changes the
-    // arrangement is: the editor sees the light gone and its groups repaired.
-    {
-        let lock = app.scene.lock().await;
-        let _gate = app.draft.gate().lock().await;
-        if !app.scene.is_taken_over() {
-            crate::scenes::apply_with(&app, &lock, false).await;
-        }
+    // arrangement is: the editor sees the light gone and its groups repaired. The scene order is
+    // already held from before the store write; it is reused here, not taken again (#497).
+    if !app.scene.is_taken_over() {
+        crate::scenes::apply_with(&app, &lock, false).await;
     }
     app.scene.notify();
 

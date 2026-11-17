@@ -589,6 +589,9 @@ pub struct App {
     ///
     /// `None` in the daemon.
     import_seam: Mutex<Option<Arc<crate::api::settings::ImportSeam>>>,
+    /// A seam in a scene PUT, for the tests (#497): the PUT stops between validation and the
+    /// write so a test can put a light delete in that gap. `None` in the daemon.
+    scene_put_seam: Mutex<Option<Arc<crate::api::scenes::ScenePutSeam>>>,
     /// The input source the lights' engine was last given. An engine made later (the stack
     /// preview) starts from the same one (D95.4.4).
     pub input_source: Mutex<Option<Arc<dyn canvas_proto::traits::InputSource>>>,
@@ -704,6 +707,7 @@ impl App {
             transient: Default::default(),
             draft: Default::default(),
             import_seam: Mutex::new(None),
+            scene_put_seam: Mutex::new(None),
             input_source: Mutex::new(None),
             preview_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
             draft_slots: Arc::new(tokio::sync::Semaphore::new(crate::api::editor::PREVIEW_CONCURRENT)),
@@ -786,6 +790,17 @@ impl App {
     /// The seam in the config import, if a test set one.
     pub fn import_seam(&self) -> Option<Arc<crate::api::settings::ImportSeam>> {
         self.import_seam.lock().unwrap_or_else(|e| e.into_inner()).clone()
+    }
+
+    /// Sets the seam in a scene PUT (tests only). The PUT stops between validation and the write
+    /// until the seam lets it go. The daemon never sets one.
+    pub fn set_scene_put_seam(&self, seam: Arc<crate::api::scenes::ScenePutSeam>) {
+        *self.scene_put_seam.lock().unwrap_or_else(|e| e.into_inner()) = Some(seam);
+    }
+
+    /// The seam in a scene PUT, if a test set one.
+    pub fn scene_put_seam(&self) -> Option<Arc<crate::api::scenes::ScenePutSeam>> {
+        self.scene_put_seam.lock().unwrap_or_else(|e| e.into_inner()).clone()
     }
 
     /// The input source reaches both engines at the same call sites. The daemon's startup

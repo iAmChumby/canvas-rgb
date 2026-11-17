@@ -15,6 +15,7 @@ import { api } from "@/lib/endpoints";
 import { Button, IconButton } from "@/components/Button";
 import { notify } from "@/components/Notify";
 import { messageOf } from "@/lib/errors";
+import { driven } from "@/lib/drive";
 import { refreshLights, refreshScenes } from "@/lib/store";
 import { shownWords } from "@/views/chain/limits";
 import { moveLight } from "@/views/scenes/groupEdit";
@@ -162,7 +163,10 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked, onEmptied 
             <span className={s.addWhere}>{where}</span>
           </button>
         </div>
-        {!light.connected && (
+        {/* The daemon deletes only lights on a device it never drives. A driven device that is
+            just unplugged shows as not connected but its light cannot be removed (409), so no
+            Remove is offered for it (#497). */}
+        {!light.connected && !driven(light.light.device_id) && (
           <IconButton
             label={`Remove ${light.label}`}
             icon={<Trash size={16} />}

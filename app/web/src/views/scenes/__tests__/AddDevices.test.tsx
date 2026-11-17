@@ -16,6 +16,7 @@ vi.mock("@/lib/store", () => ({ refreshLights, refreshScenes }));
 vi.mock("@/components/Notify", () => ({ notify }));
 
 import { DEMO_LIGHTS } from "@/lib/fixtures";
+import { driven } from "@/lib/drive";
 import { AddDevices } from "@/views/scenes/AddDevices";
 import type { Scene } from "@/proto/Scene";
 import type { LightView } from "@/proto/LightView";
@@ -241,7 +242,7 @@ describe("the devices you can add", () => {
     expect(removeAction).toBeTruthy();
     const all = [...clone(DEMO_LIGHTS), unused];
     expect(screen.getAllByRole("button", { name: /^Remove / }).length).toBe(
-      all.filter((l) => !l.connected).length,
+      all.filter((l) => !l.connected && !driven(l.light.device_id)).length,
     );
 
     // Pressing it asks first: nothing is deleted until the inline confirm's Remove is pressed.
@@ -265,6 +266,41 @@ describe("the devices you can add", () => {
     expect(note).toContain("Old keyboard strip was removed.");
     expect(note).toContain("left empty and removed too");
     expect(note).not.toMatch(/undo/i);
+  });
+
+  it("a light on a driven device that is only unplugged has no Remove action (#497)", () => {
+    // ENE DRAM is a device the daemon drives. A stick taken out of the machine reads as "not
+    // connected", but the daemon refuses to delete its light with 409, so the editor must not
+    // offer a Remove that cannot work. The light view carries the device id, so no spine change
+    // is needed to tell the two cases apart.
+    const unplugged: LightView = {
+      light: {
+        id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75#z0",
+        device_id: "openrgb:I2C: PawnIO SMBus PIIX4 0, address 0x75",
+        zone_index: 0,
+        arrangement: "strip",
+        reversed: false,
+      },
+      led_count: 0,
+      connected: false,
+      label: "ENE DRAM · DRAM",
+    };
+    const use = fake();
+    render(
+      <AddDevices
+        groupId="g-one"
+        lights={[...clone(DEMO_LIGHTS), unplugged]}
+        use={use}
+        onClose={() => {}}
+      />,
+    );
+    // The row is still there and honest about being disconnected — just no Remove for it.
+    expect(within(row(unplugged.light.id)).getByText(/not connected/)).toBeTruthy();
+    expect(screen.queryByLabelText(`Remove ${unplugged.label}`)).toBeNull();
+    const all = [...clone(DEMO_LIGHTS), unplugged];
+    expect(screen.queryAllByRole("button", { name: /^Remove / }).length).toBe(
+      all.filter((l) => !l.connected && !driven(l.light.device_id)).length,
+    );
   });
 
   it("moving the only light out of a group takes that group with it", () => {
