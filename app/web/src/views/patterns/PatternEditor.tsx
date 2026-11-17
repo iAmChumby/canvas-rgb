@@ -11,12 +11,18 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
+import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { kindWords } from "@/lib/patternFit";
+import { spinOf } from "@/lib/spin";
+import { refreshLights, useSnap } from "@/lib/store";
 import { DotCanvas } from "@/views/patterns/DotCanvas";
+import { GradientStops } from "@/views/patterns/GradientStops";
+import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
+import { gridOfZone, referenceLight, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
 import { usePatternEditor } from "@/views/patterns/usePatternEditor";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
@@ -107,6 +113,27 @@ export function PatternEditor({
   );
   const editor = usePatternEditor(pattern, { onDraft: draft });
 
+  // The shape picker writes the arrangement of the light this pattern was built on (#468).
+  const lights = useSnap((state) => state.lights);
+  const devices = useSnap((state) => state.devices);
+  const light = referenceLight(editor.builtOn, lights, devices);
+  const zone = zoneOf(light, devices);
+  const [shapeProblem, setShapeProblem] = useState<string | null>(null);
+  const chooseShape = async (shape: Shape) => {
+    setShapeProblem(null);
+    if (light && light.light.arrangement !== shape) {
+      try {
+        await api.lights.patch(light.light.id, { arrangement: shape });
+        await refreshLights();
+      } catch (error) {
+        // The light did not change, so neither does the pattern's shape: the header says why.
+        setShapeProblem(messageOf(error));
+        return;
+      }
+    }
+    editor.setShape(shape, gridOfZone(zone));
+  };
+
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
   // of the current document every `heartbeat_ms`, which is what keeps the lease alive while the
   // owner looks at the device.
@@ -132,10 +159,10 @@ export function PatternEditor({
   }, [epoch, send]);
 
   const name = pattern.id.startsWith(PATTERN_ID_PREFIX) ? pattern.id.slice(PATTERN_ID_PREFIX.length) : pattern.id;
-  const leds = pattern.built_on.led_count;
+  const leds = editor.builtOn.led_count;
   const lit = editor.colours.filter((colour) => (parseHex(colour) ?? BLACK_HEX) !== BLACK_HEX).length;
-  const line = saveProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
-  const failed = saveProblem !== null || problem !== null;
+  const line = saveProblem ?? shapeProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
+  const failed = saveProblem !== null || shapeProblem !== null || problem !== null;
 
   /**
    * Hands the document up and clears the unsaved mark only once the save lands: a save that fails
@@ -158,8 +185,14 @@ export function PatternEditor({
       <header className={s.head}>
         <div className={s.who}>
           <h2 className={s.name}>{name}</h2>
-          <span className={s.kind}>{kindWords(pattern.built_on)}</span>
+          <span className={s.kind}>{kindWords(editor.builtOn)}</span>
         </div>
+        <ShapePicker
+          label={`What ${light ? light.label : name} is`}
+          value={editor.builtOn.arrangement}
+          shapes={shapesOf(editor.builtOn, zone)}
+          onChange={(shape) => void chooseShape(shape)}
+        />
         <div className={s.tally}>
           {/* As wide as the total's digits, so the count never resizes its own box. */}
           <span className={s.figure} style={{ minWidth: `${String(leds).length}ch` }}>
@@ -198,14 +231,29 @@ export function PatternEditor({
 
       <div className={s.stage}>
         <DotCanvas
-          builtOn={pattern.built_on}
+          builtOn={editor.builtOn}
           colours={editor.colours}
-          label={`${name}, ${kindWords(pattern.built_on)}`}
+          spin={spinOf(editor.motion)}
+          label={`${name}, ${kindWords(editor.builtOn)}`}
           onBegin={editor.beginStroke}
           onStroke={editor.stroke}
           onEnd={editor.endStroke}
+          overlay={
+            editor.tool === "gradient" && editor.gradient ? (
+              <GradientStops
+                builtOn={editor.builtOn}
+                state={editor.gradient}
+                onSelect={editor.selectStop}
+                onMove={editor.moveStop}
+                onBegin={editor.beginStopDrag}
+                onEnd={editor.endStopDrag}
+              />
+            ) : null
+          }
         />
       </div>
+
+      <MotionControl motion={editor.motion} onMotion={editor.setMotion} />
 
       {/* Reserved: the frame strip comes in a later version. An empty recess, never a control. */}
       <div className={s.frameStrip} aria-hidden="true" />
@@ -215,11 +263,15 @@ export function PatternEditor({
         colour={editor.colour}
         canUndo={editor.canUndo}
         canRedo={editor.canRedo}
+        gradient={editor.gradient}
         onTool={editor.setTool}
         onColour={editor.setColour}
         onFillAll={editor.fillAll}
         onUndo={editor.undo}
         onRedo={editor.redo}
+        onWrap={editor.setWrap}
+        onAddStop={editor.addStop}
+        onRemoveStop={() => editor.gradient && editor.removeStop(editor.gradient.selected)}
       />
     </section>
   );

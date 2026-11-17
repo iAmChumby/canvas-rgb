@@ -9,13 +9,17 @@ import {
   ArrowCounterClockwise,
   Eraser,
   Eyedropper,
+  Gradient,
+  Minus,
   PaintBrush,
   PaintBucket,
+  Plus,
 } from "@phosphor-icons/react";
 import { ColorField } from "@/components/ColorField";
 import { IconButton } from "@/components/Button";
 import { Chip } from "@/components/Chip";
-import type { Tool } from "@/views/patterns/usePatternEditor";
+import { MAX_STOPS, MIN_STOPS } from "@/lib/gradient";
+import type { GradientState, Tool } from "@/views/patterns/usePatternEditor";
 import s from "@/views/patterns/patterns.module.css";
 
 export function PatternTools({
@@ -23,22 +27,33 @@ export function PatternTools({
   colour,
   canUndo,
   canRedo,
+  gradient,
   onTool,
   onColour,
   onFillAll,
   onUndo,
   onRedo,
+  onWrap,
+  onAddStop,
+  onRemoveStop,
 }: {
   tool: Tool;
   colour: string;
   canUndo: boolean;
   canRedo: boolean;
+  /** The Gradient tool's stops, once it has been picked. */
+  gradient: GradientState | null;
   onTool: (tool: Tool) => void;
   onColour: (colour: string) => void;
   onFillAll: () => void;
   onUndo: () => void;
   onRedo: () => void;
+  onWrap: (wrap: boolean) => void;
+  onAddStop: () => void;
+  onRemoveStop: () => void;
 }) {
+  const stops = gradient?.stops.length ?? 0;
+  const live = tool === "gradient" && gradient !== null;
   return (
     <div className={s.tools}>
       <div className={s.toolKeys} role="group" aria-label="Tools">
@@ -61,6 +76,28 @@ export function PatternTools({
         >
           Fill all
         </Chip>
+        <Chip icon={<Gradient size={14} weight="bold" aria-hidden="true" />} pressed={tool === "gradient"} onClick={() => onTool("gradient")}>
+          Gradient
+        </Chip>
+      </div>
+      {/* The Gradient tool's own keys keep their room when the tool is not in the hand (dimmed,
+          never removed), so picking it moves nothing. */}
+      <div className={s.gradientKeys} role="group" aria-label="Gradient" data-live={live ? "true" : "false"}>
+        <Chip pressed={live && gradient.wrap} disabled={!live} onClick={() => gradient && onWrap(!gradient.wrap)} title="The last stop meets the first across the seam">
+          Wrap
+        </Chip>
+        <IconButton
+          label="Add stop"
+          icon={<Plus size={16} weight="bold" aria-hidden="true" />}
+          disabled={!live || stops >= MAX_STOPS}
+          onClick={onAddStop}
+        />
+        <IconButton
+          label="Remove stop"
+          icon={<Minus size={16} weight="bold" aria-hidden="true" />}
+          disabled={!live || stops <= MIN_STOPS}
+          onClick={onRemoveStop}
+        />
       </div>
       <div className={s.historyKeys}>
         <IconButton
@@ -76,7 +113,11 @@ export function PatternTools({
           onClick={onRedo}
         />
       </div>
-      <ColorField value={colour} label="Colour" onChange={onColour} />
+      <ColorField
+        value={colour}
+        label={live ? `Stop ${(gradient?.selected ?? 0) + 1} colour` : "Colour"}
+        onChange={onColour}
+      />
     </div>
   );
 }

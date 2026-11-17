@@ -8,7 +8,7 @@
  *   who | LEDs | effect | mode | fader
  * Narrow: two lines.
  *   who | LEDs
- *   effect | mode | fader
+ *   effect | fader | mode
  */
 
 .page {
@@ -506,9 +506,25 @@
   .controls {
     display: grid;
     grid-column: 1 / -1;
-    grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr);
+    /* The mode cell is last, past the brightness fader (#469): the effect key's picker panel is
+       wide at a narrow width, and a panel that opens towards the middle reaches the columns
+       beside the key but never the far edge. */
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
     align-items: center;
     column-gap: var(--s4);
+  }
+
+  /* The children are effect, mode, fader in the document; pin them so the mode is the last
+     cell and the fader the middle one, all on one line (grid-row 1: placing the fader in an
+     earlier column than the mode would otherwise start a second row). */
+  .controls .fader {
+    grid-column: 2;
+    grid-row: 1;
+  }
+
+  .controls .mode {
+    grid-column: 3;
+    grid-row: 1;
   }
 
   .dark {
@@ -539,7 +555,7 @@
   }
 
   .controls {
-    grid-template-columns: minmax(0, 1fr) auto 124px;
+    grid-template-columns: minmax(0, 1fr) 110px auto;
     column-gap: var(--s3);
   }
 
@@ -745,16 +761,14 @@
   font: 600 var(--t16) / 1.2 var(--fu);
 }
 
-/* The body scrolls: the sheet is as tall as the window, whatever the group holds. It never
-   scrolls sideways: a tooltip beside a key at the right edge would widen it, and the browser
-   would then scroll the content out of view when that key takes the focus.
-   The scroll padding is the stage's height (#378): a control that takes the focus is never
-   hidden under the pinned stage. Both rules read one number, so the padding cannot drift away
-   from the band it covers.
-   The band's height is the taller of the picture column (the picture 100 + the gap 4 + the
-   caption 17.5 = 121.5) and the side (the effect row 32 + the gap 12 + the mode row + the gap
-   8 + the note 35), plus the band's own padding (2 x 12 = 24): 145.5 on a wide window, and
-   171 on a phone, where the mode control's segments take two rows (60 instead of 32). */
+/* The body fills the sheet: it is as tall as the window, whatever the group holds. It is a flex
+   column that does not scroll (#469): the band is its own box at the top and the pane below it
+   scrolls on its own, so nothing in the pane can be drawn in the band's pixels and there is no
+   pinned stage to keep a scroll padding in step with.
+   The two custom properties name the band's height and its mode row's height; the band's rules
+   read them, so the box is the same size for an effect group and a pattern group and nothing
+   moves when the state changes. The mode row is taller on a phone, where the segments take two
+   rows, and the band with it. */
 .sheetBody {
   /* The stage's height: the band is the same height for an effect group and a pattern group. */
   --stage-h: 146px;
@@ -762,10 +776,24 @@
   --stage-mode-h: 32px;
   flex: 1 1 auto;
   min-height: 0;
+  display: flex;
+  flex-direction: column;
+  /* The band and the pane below it are two boxes, never one scroll area (#469). A control in the
+     pane can then never be drawn in the band's pixels - not beside its edge, not under it, and
+     whatever the paint order - and the band's edge never cuts a row in half. This box itself
+     does not scroll: the pane inside it does. */
+  overflow: hidden;
+}
+
+/* The sheet's own pane: everything under the band scrolls here, and nowhere else. */
+.sheetScroll {
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+  padding: var(--s4);
   overflow-x: hidden;
   overflow-y: auto;
-  padding: var(--s4);
-  scroll-padding-top: var(--stage-h);
 }
 
 .sheetStep {
@@ -873,21 +901,18 @@
 
 /* ---------- the stage: the picture the group itself draws (#378) ---------- */
 
-/* The stage is pinned to the top of the sheet's body: the picture and the group's own
-   controls stay, and the controls below scroll under it. The negative margin takes the
-   sheet's own padding, so the band reaches the sheet's edges and no scrolled control shows
-   beside it. The box is the same size in every state, so nothing moves when the state
-   changes, and the same size for an effect group and a pattern group: the band's height is
-   the number the scroll padding reads. */
+/* The band: the picture the group draws and the group's own controls, above the sheet's pane.
+   It is not pinned over the scrolling content (#469): it is a box of the sheet's body and the
+   pane below it scrolls on its own, so no control is ever drawn in the band's pixels and the
+   band's edge never cuts a row. The box is the same size in every state, so nothing moves when
+   the state changes, and the same size for an effect group and a pattern group. */
 .stage {
-  position: sticky;
-  top: 0;
-  z-index: 1;
+  flex: 0 0 auto;
   display: flex;
   align-items: flex-start;
   gap: var(--s3);
-  margin: calc(-1 * var(--s4)) calc(-1 * var(--s4)) var(--s4);
-  padding: var(--s3);
+  margin: 0;
+  padding: var(--s3) var(--s4);
   min-height: var(--stage-h);
   background: var(--sunk);
   border-bottom: 1px solid var(--line);
@@ -1260,6 +1285,16 @@
   max-width: min(380px, calc(100vw - 16px));
 }
 
+/* Below 900 the panel opens next to the effect key, so it is kept narrow enough to stop short
+   of the mode cell at the row's far edge (#469). The panel is in a portal at the document root,
+   so this is a window rule, not the page's container query. */
+@media (max-width: 900px) {
+  .pickerPopover {
+    width: min(360px, calc(100vw - 60px));
+    max-width: min(360px, calc(100vw - 60px));
+  }
+}
+
 /* ---------- the devices in a group ---------- */
 
 .members {
@@ -1503,16 +1538,20 @@
   }
 
   .sheetBody {
-    padding: var(--s3);
     /* On a phone the mode control's segments take two rows (26 x 2 + the gap 2 + the padding 4
        + the border 2 = 60), so the mode row is taller and the band with it. */
     --stage-h: 171px;
     --stage-mode-h: 60px;
   }
 
-  /* The stage's band takes the sheet's own padding, which is smaller on a phone (#378). */
+  /* The band and the pane below it take the sheet's own padding, which is smaller on a phone
+     (#378). */
   .stage {
-    margin: calc(-1 * var(--s3)) calc(-1 * var(--s3)) var(--s3);
+    padding: var(--s3);
+  }
+
+  .sheetScroll {
+    padding: var(--s3);
   }
 
   .sheetRun {

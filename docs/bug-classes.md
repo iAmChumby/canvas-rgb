@@ -931,6 +931,24 @@ scroll, so the content was clipped and unreachable.
   job — it comes from the headless scan over every page's controls, which is the check to re-run
   after a control is added.
 
+- A sixth mechanism, same cause: a pinned header and the content it is pinned over share one
+  scroll area, so a row can be drawn in the header's pixels and cut by its edge.
+  [#469](https://github.com/iAmChumby/canvas-rgb/issues/469): the open group's picture band was
+  `position: sticky` inside the sheet's own scrolling body, so its preset chips scrolled under it.
+  Measured on origin/main in headless Chromium at the six editor sizes in both themes: a chip's box
+  shared up to 2560 px2 with the flow across / each its own switch (1024x768), a 16 px strip on a
+  desktop and 12 px on a phone of the scrolled content was drawn above the band's top edge, and a
+  row of chips was cut by the band's edge ("Candy Cane" at 1024x768).
+- **Class fix, sixth mechanism:** done (#469). The rule: a band that stays put is its own box, and
+  the content under it scrolls in a pane of its own. A sticky element over the very scroller its
+  content travels in is the mistake, because nothing then keeps the two boxes apart. The band is the
+  sheet's header and the pane `.sheetScroll` is under it
+  (`app/web/src/views/scenes/GroupSheet.tsx`), and the overlap, the strip above the band and the cut
+  rows all measure 0 at every size in both themes. The check is
+  `.build/screens/469/measure-469.mjs` (in the main checkout): it sweeps the sheet's scroll from top
+  to bottom with a list long enough to pass the band, and fails on an overlap, a strip above the
+  band or a clipped box.
+
 ### `cause:control-loop`: a closed loop that winds up on the signal it is meant to hold
 
 A loop that integrates while its input is on one side of a line has no reason to stop: a

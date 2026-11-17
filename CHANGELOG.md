@@ -8,11 +8,13 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Patterns: pick the shape a light is in (Line, Ring, or Grid where it is one) on its Devices row or in the pattern editor, paint a Gradient round the ring with Wrap so the end meets the start, and turn on Spin to make the pattern turn along its LEDs at the same speed on any fan; colours blend in OKLab, so red to blue passes through purple. (#468)
 - Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
 
 ### Fixed
 
 - Devices: Rescan now asks OpenRGB to detect hardware again, and ends on OpenRGB's own "detection finished" signal (OpenRGB 1.1 and newer, the version canvas-rgb ships). While a detection runs, however long it takes, the daemon keeps its device list; the new list, shorter or longer, applies once when the detection ends, and a rescan answers with the list held when the detection is still running after 15 s. If every OpenRGB device is unplugged, the empty list applies when the detection ends. With an older OpenRGB (protocol 5) the lights pause during a detection, the list applies once it has stopped changing for 2 s, and an empty list is not applied until OpenRGB restarts. Checked against a fake OpenRGB only; a real-hardware check is still to do. (#290)
+- Scenes: a group's list of effects and presets no longer runs through its picture band and the flow across / each its own switch. The band is the sheet's own header and the list scrolls in a pane under it, so no row is ever drawn in the band's pixels or cut by its edge, and a group's own effect picker no longer covers its mode switch when the window is short or narrow. On a narrow window a group row's mode switch now sits after the brightness fader, on the same line. (#469)
 - The editor's left rail no longer scrolls sideways: its tooltips reach over the page without adding a horizontal scrollbar, and the rail still scrolls up and down in a short window. (#467)
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
 - Effects: the New effect menu's Stack, Pattern and Code keys show their name and full note inside the key, with the icon centred and no text crossing the border. (#466)

@@ -33,6 +33,57 @@ export function panelOriginSide(
   return anchorCentre < viewportW / 2 ? "left" : "right";
 }
 
+/** The rectangle of the control a panel hangs from. */
+export type AnchorRect = { left: number; right: number; top: number; bottom: number; width: number };
+
+/** Where a panel goes: its left and top, the most height it may take, and whether it grew up. */
+export type PanelPlacement = { left: number; top: number; maxHeight: number; up: boolean };
+
+/**
+ * Place a panel in the window.
+ *
+ * By default a panel that does not fit below its anchor is clamped back inside the window, which
+ * can bring it up over the anchor's own row. A panel that must stay clear of that row
+ * (`keepClear`) is capped instead to the room on one side of the anchor and scrolls inside that
+ * room: it hangs below the anchor when there is room there, flips above when there is not, and
+ * its near edge always stops a gap short of the anchor. Its height never exceeds the content, so
+ * a short menu keeps its old size. Only below MIN_H on both sides can no useful panel fit; then
+ * the smallest panel stays inside the window.
+ */
+export function placePanel(
+  a: AnchorRect,
+  vw: number,
+  vh: number,
+  contentHeight: number,
+  width: number,
+  keepClear: boolean,
+): PanelPlacement {
+  // Sideways: the panel's right edge sits on the anchor's right edge, pulled inside the window.
+  const left =
+    width >= vw - EDGE * 2
+      ? EDGE
+      : Math.max(EDGE, Math.min(a.right - width, vw - width - EDGE));
+
+  const below = a.bottom + GAP;
+  const above = a.top - GAP - contentHeight;
+  const up = contentHeight > 0 && below + contentHeight > vh - EDGE && above >= EDGE;
+  const top = up ? above : Math.max(EDGE, Math.min(below, vh - EDGE - contentHeight));
+  const maxHeight = Math.max(MIN_H, vh - EDGE * 2);
+  if (!keepClear) return { left, top, maxHeight, up };
+
+  const roomBelow = vh - EDGE - below;
+  const roomAbove = a.top - GAP - EDGE;
+  if (roomBelow >= MIN_H || roomBelow >= roomAbove) {
+    const h = Math.max(MIN_H, Math.min(contentHeight || roomBelow, roomBelow));
+    return { left, top: below, maxHeight: h, up: false };
+  }
+  if (roomAbove >= MIN_H) {
+    const h = Math.max(MIN_H, Math.min(contentHeight || roomAbove, roomAbove));
+    return { left, top: a.top - GAP - h, maxHeight: h, up: true };
+  }
+  return { left, top: Math.max(EDGE, Math.min(below, vh - EDGE - MIN_H)), maxHeight: MIN_H, up: false };
+}
+
 /**
  * A panel that hangs under a control.
  *
@@ -52,6 +103,7 @@ export function Popover({
   children,
   className,
   label,
+  keepClearOfAnchor = false,
 }: {
   /** The control it hangs under. */
   anchor: React.RefObject<HTMLElement | null>;
@@ -60,6 +112,8 @@ export function Popover({
   children: ReactNode;
   className?: string;
   label?: string;
+  /** Keep the panel clear of the anchor's own row, scrolling inside the room beside it. */
+  keepClearOfAnchor?: boolean;
 }) {
   const panelRef = useRef<HTMLDivElement>(null);
   const id = useId();
@@ -124,20 +178,14 @@ export function Popover({
       // The content's own height, not the height the window allows: the panel may be shorter
       // than its content because it scrolls, and the flip is decided by the content.
       const height = panel.scrollHeight || panel.offsetHeight || 0;
-
-      // Sideways: the panel's right edge sits on the anchor's right edge, so it opens towards
-      // the middle of the window, and it is then pulled back inside the window.
-      const left =
-        width >= vw - EDGE * 2
-          ? EDGE
-          : Math.max(EDGE, Math.min(r.right - width, vw - width - EDGE));
-
-      // Up or down: under the control when the whole panel fits there, above it when it does
-      // not and there is room above, and inside the window either way.
-      const below = r.bottom + GAP;
-      const above = r.top - GAP - height;
-      const up = height > 0 && below + height > vh - EDGE && above >= EDGE;
-      const top = up ? above : Math.max(EDGE, Math.min(below, vh - EDGE - height));
+      const { left, top, maxHeight, up } = placePanel(
+        { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width },
+        vw,
+        vh,
+        height,
+        width,
+        keepClearOfAnchor,
+      );
 
       // The origin (issue #187, rule 1): the panel corner nearest the anchor.
       // The panel hangs from the anchor's right edge (pulled inside the window
@@ -149,7 +197,7 @@ export function Popover({
       setStyle({
         left: `${Math.round(left)}px`,
         top: `${Math.round(top)}px`,
-        maxHeight: `${Math.max(MIN_H, vh - EDGE * 2)}px`,
+        maxHeight: `${Math.round(maxHeight)}px`,
         transformOrigin: `${up ? "bottom" : "top"} ${side}`,
       });
     };
@@ -165,7 +213,7 @@ export function Popover({
       window.removeEventListener("resize", place);
       window.removeEventListener("scroll", place, true);
     };
-  }, [open, anchor]);
+  }, [open, anchor, keepClearOfAnchor]);
 
   // Escape closes it, and so does a click anywhere else.
   useEffect(() => {
