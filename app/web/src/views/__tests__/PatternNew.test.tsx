@@ -103,9 +103,38 @@ describe("a new pattern", () => {
     // The name is the next free "Pattern n", in a field and in the head above the device.
     expect(nameField().value).toMatch(/^Pattern \d+$/);
     expect(screen.getByRole("heading", { name: nameField().value })).toBeTruthy();
-    // Leaving asks nothing: the work is the owner's to keep.
+    // Nothing to lose: the Cancel key closes the panel at once.
     fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
     expect(screen.queryByLabelText(/, a pattern$/)).toBeNull();
+  });
+
+  it("the Cancel key asks before it drops unsaved strokes, and Discard closes the panel", async () => {
+    const editor = await editorOn();
+    fireEvent.click(within(editor).getByRole("button", { name: "Fill all" }));
+    expect(await screen.findByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+    // The panel is still open: the strokes are the editor's.
+    expect(screen.getByLabelText(/, a pattern$/)).toBeTruthy();
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Discard" }));
+    await waitFor(() => expect(screen.queryByLabelText(/, a pattern$/)).toBeNull());
+  });
+
+  it("Keep editing keeps the strokes and the panel", async () => {
+    const editor = await editorOn();
+    fireEvent.click(within(editor).getByRole("button", { name: "Fill all" }));
+    expect(await screen.findByText("Unsaved changes")).toBeTruthy();
+
+    fireEvent.click(within(editor).getByRole("button", { name: "Cancel" }));
+    const dialog = await screen.findByRole("alertdialog", { name: "Unsaved changes" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Keep editing" }));
+
+    expect(screen.queryByRole("alertdialog", { name: "Unsaved changes" })).toBeNull();
+    // The panel is open and the strokes are still in it.
+    expect(screen.getByLabelText(/, a pattern$/)).toBeTruthy();
+    expect(screen.getByText("Unsaved changes")).toBeTruthy();
   });
 
   it("Save puts the whole document and the tile appears", async () => {

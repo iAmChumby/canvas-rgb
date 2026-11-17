@@ -19,7 +19,7 @@ import { BLACK_HEX, hsvToHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
 import { refreshPatterns } from "@/lib/store";
-import { PatternEditor } from "@/views/patterns/PatternEditor";
+import { PATTERN_GUARD, PatternEditor } from "@/views/patterns/PatternEditor";
 import type { Arrangement } from "@/proto/Arrangement";
 import type { Frame } from "@/proto/Frame";
 import type { Pattern } from "@/proto/Pattern";
@@ -40,7 +40,21 @@ export function PatternEditorPage() {
   const [note, setNote] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
+  // An entry the editor's guard made, or one the editor left, opens no editor: the guard's copy of
+  // this page stays ahead of the history after a leave (a browser cannot delete it), and a Forward
+  // onto it lands here. It goes to the effects page, which is where the leave went. Read once, as
+  // the page opens: the entry the page opened on.
+  const [spent] = useState(() => {
+    if (typeof window === "undefined") return false;
+    const state = window.history.state as Record<string, unknown> | null;
+    return state !== null && typeof state === "object" && PATTERN_GUARD in state;
+  });
   useEffect(() => {
+    if (spent) router.replace("/effects/");
+  }, [spent, router]);
+
+  useEffect(() => {
+    if (spent) return;
     let cancelled = false;
     void (async () => {
       const query = new URLSearchParams(window.location.search);
@@ -56,7 +70,7 @@ export function PatternEditorPage() {
     return () => {
       cancelled = true;
     };
-  }, []);
+  }, [spent]);
 
   // The save's promise goes to the editor, which shows a failure beside its Save key and keeps
   // the strokes: the page never replaces the editor with an error line.
@@ -77,7 +91,9 @@ export function PatternEditorPage() {
       pattern={pattern}
       note={note}
       onSave={save}
-      onCancel={() => router.push("/effects/")}
+      // Replace, not push: the editor's entry becomes the effects page, so one Back goes to where
+      // the person came from and never reopens a fresh editor.
+      onCancel={() => router.replace("/effects/")}
     />
   );
 }

@@ -31,11 +31,11 @@ import {
   ChooseEffectPopover,
   DragGhost,
   DragHint,
-  LeavePrompt,
   LiveRegion,
   MaskPickerPopover,
   NameStackDialog,
 } from "@/views/effects/StackOverlays";
+import { LeavePrompt } from "@/components/LeavePrompt";
 import { StackAreaPicker } from "@/views/effects/StackAreaPicker";
 import { closePopover } from "@/views/effects/popoverFocus";
 import { nameOf } from "@/views/effects/layerText";
