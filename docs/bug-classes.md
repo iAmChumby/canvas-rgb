@@ -635,27 +635,41 @@ happens on a thread the rest of the daemon needs.
   the store's read lock (`crates/canvas-daemon/src/api/scenes.rs`, `response`), and the
   store's lock is a fair one: one writer queued behind that reader stopped every other
   reader, so `/api/v1/settings` timed out too.
+  What is measured: an engine that does not answer takes the API down that way. What is
+  **not** established: that this is the hang the capture saw — the capture never
+  reproduced it on `main` (the report's own UNKNOWN), so the cause of that hang stays
+  open and this fix only removes one way the API can stop answering.
   Fixed: the daemon's own watcher threads keep the engine's numbers and its group states
-  (one thread each, asking once a second), and the routes read those; a route that has to
-  ask the engine itself does it on the blocking pool with a bound (`state.rs`,
-  `engine_call`). The store's lock is given back before the engine is asked.
-  Regression test: `crates/canvas-daemon/tests/engine_calls.rs` — three tests with an
-  engine that answers far too late.
+  (one thread each, asking every 250 ms), and the routes read those. The copy says when
+  it was filled, and a copy older than three seconds is asked of the engine again, so a
+  watcher that stops does not freeze the numbers. The watchers ignore the daemon's quit
+  flag: a quit that could not reach the main task puts the flag back to zero
+  (`crates/canvas-daemon/src/api/status.rs`), and a watcher that stopped there would
+  freeze the numbers for the rest of the daemon's life. A route that has to ask the
+  engine itself does it on the blocking pool with a bound (`state.rs`, `engine_call`) and
+  answers with what it already knew; when the engine has never answered, the route says
+  so (a 503, "the render engine is not answering") instead of zeros or an empty group
+  list, which look like a measurement and like a group that is fine. The store's lock is
+  given back before the engine is asked.
+  Regression test: `crates/canvas-daemon/tests/engine_calls.rs` — eight tests with an
+  engine that answers far too late, with the watchers running, and with the store's
+  writer queued behind a stuck scenes request.
 - **Class fix:** not yet (one bug). The read paths are fixed; the write paths are the
   siblings below, and they are one-off writes rather than the every-second polls the
   report is about.
   - **Sibling search (not fixed):** every other call the daemon makes into the render
     engine from an async path takes the same lock on a runtime worker:
     `crates/canvas-daemon/src/api/settings.rs:36-38` (`set_fps`, `set_brightness`,
-    `set_warmth`), `crates/canvas-daemon/src/api/output.rs:44,47,92,95` (`set_brightness`,
-    `set_warmth`, `set_power`, `write_solid`), `crates/canvas-daemon/src/api/status.rs:26`
-    (`write_solid` on quit), `crates/canvas-daemon/src/state.rs:426-428`
-    (`set_input_source`), and `crates/canvas-daemon/src/scenes.rs:1174,1211,1213,1315-1316,
-    1394-1395` (the takeover and the pattern paths). A write that reaches one of them
-    waits for the render thread the same way; it is one request, not a poll every
-    second. The takeover paths are left alone on purpose: a takeover that is not applied
-    leaves the lights on the old effect, so a bounded wait there needs its own answer
-    (a refusal the caller can see), not a silent skip.
+    `set_warmth`), `crates/canvas-daemon/src/api/output.rs:44,47,93,94,98`
+    (`set_brightness`, `set_warmth`, `write_solid`, `set_power`),
+    `crates/canvas-daemon/src/api/status.rs:33` (`write_solid` on quit),
+    `crates/canvas-daemon/src/state.rs:588` (`set_input_source`), and
+    `crates/canvas-daemon/src/scenes.rs:684,832,1175,1212,1317,1368,1396` (the takeover
+    and the pattern paths). A write that reaches one of them waits for the render thread
+    the same way; it is one request, not a poll every second. The takeover paths are left
+    alone on purpose: a takeover that is not applied leaves the lights on the old effect,
+    so a bounded wait there needs its own answer (a refusal the caller can see), not a
+    silent skip.
 
 ### `cause:state-token`: a state token taken before an await and given back only on the happy path
 

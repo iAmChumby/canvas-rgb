@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- The daemon keeps answering while its render loop is busy: the status and the scene pages no longer wait for the render thread, so the editor never sees "the daemon did not answer" and the port keeps serving. (#241)
+- The API keeps answering when the render engine is slow to reply: the daemon keeps the engine's numbers fresh and the status and scenes pages read them, and they say the engine is not answering when it is not. (#241)
 - Devices rows and Peripherals switches stay inside desktop windows from 721px up: the device list scrolls in its pane and the mouse's Access switches wrap to their own line when they stop fitting. (#89)
 - Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)
 - `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)

@@ -88,7 +88,10 @@ fn save_failure(store: &crate::storage::Store, error: std::io::Error) -> ApiFail
 }
 
 /// The whole answer of the list, the set and the delete routes.
-async fn response(app: &App) -> ScenesResponse {
+///
+/// A daemon whose render engine has never answered says so (a 503): an empty group
+/// list would say that no group failed, and a group can fail (#241).
+async fn response(app: &App) -> ApiResult<ScenesResponse> {
     let (active, scenes, lights) = {
         let store = app.store.read().await;
         (
@@ -100,8 +103,8 @@ async fn response(app: &App) -> ScenesResponse {
     // The store's lock is given back before the groups are asked for: a reader that
     // holds it across that wait blocks every writer, and through them every other
     // reader (#241).
-    let group_states = scenes::group_states(app, &active, &lights).await;
-    ScenesResponse { active: active.id.clone(), scenes, group_states }
+    let group_states = scenes::group_states(app, &active, &lights).await?;
+    Ok(ScenesResponse { active: active.id.clone(), scenes, group_states })
 }
 
 /// Replaces the scene with `new`'s id and saves. On a failed save the old scene is back and the
@@ -163,8 +166,8 @@ async fn is_active(app: &App, id: &str) -> bool {
 }
 
 /// `GET /api/v1/scenes`.
-pub async fn list_scenes(State(app): State<Arc<App>>) -> Json<ScenesResponse> {
-    Json(response(&app).await)
+pub async fn list_scenes(State(app): State<Arc<App>>) -> ApiResult<Json<ScenesResponse>> {
+    Ok(Json(response(&app).await?))
 }
 
 /// What `POST /api/v1/scenes` and `PUT /api/v1/scenes/{id}` answer: the scene a write saved, or,
@@ -471,7 +474,7 @@ pub async fn put_scenes(
     }
     let reorder = write.order.filter(|order| *order != ids);
     if planned.is_empty() && reorder.is_none() {
-        return Ok(Json(response(&app).await));
+        return Ok(Json(response(&app).await?));
     }
 
     // One save for the lot; a failed save puts everything back.
@@ -501,7 +504,7 @@ pub async fn put_scenes(
     if let Some((old, new)) = planned.iter().find(|(_, new)| new.id == active) {
         tell_engine(&app, &lock, old, new).await;
     }
-    Ok(Json(response(&app).await))
+    Ok(Json(response(&app).await?))
 }
 
 /// The caps and the schema fit a props patch applies, for every group of a whole scene. A stack
@@ -553,7 +556,7 @@ pub async fn delete_scene(
         let _replace = crate::draft::hold_for_replace(&app).await;
         scenes::apply_with(&app, &lock, true).await;
     }
-    Ok(Json(response(&app).await))
+    Ok(Json(response(&app).await?))
 }
 
 /// `PUT /api/v1/scenes/active`.
@@ -581,7 +584,7 @@ pub async fn put_active(
     }
     let _replace = crate::draft::hold_for_replace(&app).await;
     scenes::apply_with(&app, &lock, true).await;
-    Ok(Json(response(&app).await))
+    Ok(Json(response(&app).await?))
 }
 
 /// Finds the group index of `group` in `scene`, or a 404.

@@ -107,6 +107,27 @@ pub const FANS_LOCK_PIPE_LIMIT: std::time::Duration = std::time::Duration::from_
 /// "the daemon did not answer" and the capture's poll of `/api/v1/settings` times out.
 pub const ENGINE_CALL_LIMIT: std::time::Duration = std::time::Duration::from_millis(500);
 
+/// What a route says when the render engine has never answered (#241).
+///
+/// The daemon does not make a number up: zeros look like a measurement, and a group
+/// list that is empty looks like a group that is fine.
+pub const ENGINE_NOT_ANSWERING: &str = "the render engine is not answering";
+
+/// How old the daemon's copy of the engine's numbers may be before a route asks the
+/// engine itself (#241).
+///
+/// The daemon's watcher threads keep the copy fresh. A watcher that stops (a quit that
+/// was cancelled, a render thread that never hands the lock over) leaves the copy to
+/// age, and a route that reads an aged copy asks the engine: the answer may be late,
+/// but it is the engine's own.
+pub const ENGINE_CACHE_MAX_AGE: std::time::Duration = std::time::Duration::from_secs(3);
+
+/// How often the daemon's watcher threads ask the engine (#241).
+///
+/// Four times a second: a change on the engine shows in the API within a second, and
+/// the engine's numbers are a lock and a few numbers, so the cost is small.
+pub const ENGINE_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(250);
+
 /// Asks the render engine something without holding a runtime worker while it waits.
 ///
 /// The call runs on the blocking pool and is bounded by [`ENGINE_CALL_LIMIT`]. `None`
@@ -129,67 +150,103 @@ where
     }
 }
 
-/// A value the daemon keeps from the render engine, and whether it has asked for it.
-#[derive(Debug, Clone, Default)]
-struct Cached<T> {
-    /// Whether the daemon has asked the engine at all. Once it has, a route never asks
-    /// again: the render thread may never hand the lock over, and every ask would cost
-    /// a thread of the blocking pool.
-    asked: bool,
+/// What the daemon last heard from the render engine, and when it heard it.
+///
+/// The value is `None` until the engine has answered once. A route that has no value
+/// must not answer with a made-up one (#241).
+#[derive(Debug)]
+struct EngineCache<T> {
     /// The last value the engine gave.
-    value: T,
+    value: Option<T>,
+    /// When the engine gave it.
+    filled_at: Option<std::time::Instant>,
 }
 
-/// Keeps the engine's numbers fresh, so a route never waits for the render thread.
+impl<T> EngineCache<T> {
+    fn new() -> Self {
+        Self { value: None, filled_at: None }
+    }
+
+    /// Keeps `value` and the time it came.
+    fn set(&mut self, value: T) {
+        self.value = Some(value);
+        self.filled_at = Some(std::time::Instant::now());
+    }
+
+    /// The value, if it is younger than `max_age`.
+    fn fresh(&self, max_age: std::time::Duration) -> Option<&T> {
+        let filled_at = self.filled_at?;
+        if filled_at.elapsed() > max_age {
+            return None;
+        }
+        self.value.as_ref()
+    }
+}
+
+/// The threads that keep the daemon's copy of the engine's numbers fresh.
 ///
-/// One thread per value asks the engine once a second and keeps the last answer. The
-/// engine's lock is the render thread's: a route that asked for the numbers on a
-/// runtime worker would wait for the render thread there, and the daemon's runtime has
-/// two workers (#241). The watchers are ordinary OS threads, not tasks on the blocking
-/// pool, so a render thread that never hands the lock over costs one thread and not one
-/// per request.
-pub fn watch_engine(app: Arc<App>) {
+/// Dropping it asks them to stop. The daemon holds it for as long as it runs.
+pub struct EngineWatch {
+    stop: Arc<AtomicBool>,
+}
+
+impl Drop for EngineWatch {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+    }
+}
+
+/// Keeps the engine's numbers and its group states fresh, so a route never waits for the
+/// render thread.
+///
+/// One thread per value asks the engine every [`ENGINE_POLL_INTERVAL`] and keeps the
+/// last answer with the time it came. The engine's lock is the render thread's: a route
+/// that asked for the numbers on a runtime worker would wait for the render thread
+/// there, and the daemon's runtime has two workers (#241). The watchers are ordinary OS
+/// threads, not tasks on the blocking pool, so a render thread that never hands the lock
+/// over costs one thread and not one per request.
+///
+/// The daemon's quit flag does **not** stop the watchers: a quit that could not reach
+/// the main task puts the flag back to zero and the daemon keeps running
+/// (`crates/canvas-daemon/src/api/status.rs`), and a watcher that stopped there would
+/// freeze the numbers for the rest of the daemon's life.
+pub fn watch_engine(app: Arc<App>) -> EngineWatch {
+    let stop = Arc::new(AtomicBool::new(false));
     let for_stats = Arc::clone(&app);
-    std::thread::Builder::new()
+    let stats_stop = Arc::clone(&stop);
+    if let Err(error) = std::thread::Builder::new()
         .name("canvas-rgb-engine-stats".into())
-        .spawn(move || {
-            loop {
-                if for_stats.shutting_down.load(Ordering::SeqCst) != 0 {
-                    return;
-                }
-                // The flag goes up before the ask: a render thread that never hands the
-                // lock over must not make every route ask for itself.
-                for_stats.engine_stats.lock().unwrap_or_else(|e| e.into_inner()).asked = true;
-                let stats = for_stats.engine.stats();
-                let mut cache = for_stats.engine_stats.lock().unwrap_or_else(|e| e.into_inner());
-                cache.value = stats;
-                drop(cache);
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        })
-        .ok();
+        .spawn(move || watch_numbers(for_stats, stats_stop))
+    {
+        tracing::error!(error = %error, "the watcher for the engine's numbers did not start");
+    }
     let for_groups = Arc::clone(&app);
-    std::thread::Builder::new()
+    let groups_stop = Arc::clone(&stop);
+    if let Err(error) = std::thread::Builder::new()
         .name("canvas-rgb-engine-groups".into())
-        .spawn(move || {
-            loop {
-                if for_groups.shutting_down.load(Ordering::SeqCst) != 0 {
-                    return;
-                }
-                for_groups
-                    .engine_groups
-                    .lock()
-                    .unwrap_or_else(|e| e.into_inner())
-                    .asked = true;
-                let groups = for_groups.engine.group_states();
-                let mut cache =
-                    for_groups.engine_groups.lock().unwrap_or_else(|e| e.into_inner());
-                cache.value = groups;
-                drop(cache);
-                std::thread::sleep(std::time::Duration::from_secs(1));
-            }
-        })
-        .ok();
+        .spawn(move || watch_groups(for_groups, groups_stop))
+    {
+        tracing::error!(error = %error, "the watcher for the engine's group states did not start");
+    }
+    EngineWatch { stop }
+}
+
+/// Asks the engine for its numbers and keeps the answer, until the guard is dropped.
+fn watch_numbers(app: Arc<App>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
+        let stats = app.engine.stats();
+        app.engine_stats_cache.lock().unwrap_or_else(|e| e.into_inner()).set(stats);
+        std::thread::sleep(ENGINE_POLL_INTERVAL);
+    }
+}
+
+/// Asks the engine for its group states and keeps the answer, until the guard is dropped.
+fn watch_groups(app: Arc<App>, stop: Arc<AtomicBool>) {
+    while !stop.load(Ordering::SeqCst) {
+        let groups = app.engine.group_states();
+        app.engine_groups_cache.lock().unwrap_or_else(|e| e.into_inner()).set(groups);
+        std::thread::sleep(ENGINE_POLL_INTERVAL);
+    }
 }
 
 /// The state every handler sees.
@@ -203,9 +260,13 @@ pub struct App {
     pub engine: Arc<dyn Engine>,
     /// The engine's last numbers, kept by [`watch_engine`] so a route never waits for the
     /// render thread (#241).
-    engine_stats: Mutex<Cached<RenderStats>>,
+    engine_stats_cache: Mutex<EngineCache<RenderStats>>,
     /// The engine's last group states, kept the same way (#241).
-    engine_groups: Mutex<Cached<Vec<GroupState>>>,
+    engine_groups_cache: Mutex<EngineCache<Vec<GroupState>>>,
+    /// How old the daemon's copy of the engine's numbers may be before a route asks the
+    /// engine itself (#241). The daemon keeps [`ENGINE_CACHE_MAX_AGE`]; a test shortens
+    /// it.
+    pub engine_cache_max_age: Mutex<std::time::Duration>,
     /// The OpenRGB adapter. Behind an async mutex: the SDK client is not `Sync` on its
     /// own, and the API handlers await it.
     pub adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
@@ -421,8 +482,9 @@ impl App {
             rescan_requests,
             rescan_inbox: Mutex::new(Some(rescan_inbox)),
             rescan_budget: crate::openrgb_supervisor::RESCAN_BUDGET,
-            engine_stats: Mutex::new(Cached::default()),
-            engine_groups: Mutex::new(Cached::default()),
+            engine_stats_cache: Mutex::new(EngineCache::new()),
+            engine_groups_cache: Mutex::new(EngineCache::new()),
+            engine_cache_max_age: Mutex::new(ENGINE_CACHE_MAX_AGE),
             displays: crate::displays::DisplayHub::new(display_adapter),
             peripherals: crate::peripherals::PeripheralHub::with_home(Vec::new(), home.clone()),
             home,
@@ -565,52 +627,65 @@ impl App {
 
     /// The engine's numbers, without waiting for the render thread.
     ///
-    /// The numbers come from the daemon's watcher thread ([`watch_engine`]), which asks the
-    /// engine once a second. A route asks the engine itself only when the watcher has not
-    /// answered yet, and that ask is bounded: the engine's lock is the render thread's,
-    /// and the daemon's runtime has two workers (#241).
-    pub async fn engine_stats(&self) -> RenderStats {
-        {
-            let cache = self.engine_stats.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.asked {
-                return cache.value.clone();
-            }
-        }
-        match engine_call(Arc::clone(&self.engine), |engine| engine.stats()).await {
-            Some(stats) => {
-                let mut cache = self.engine_stats.lock().unwrap_or_else(|e| e.into_inner());
-                cache.asked = true;
-                cache.value = stats.clone();
-                stats
-            }
-            // The engine did not answer in time: the route answers with the numbers it
-            // has, and the API keeps serving.
-            None => RenderStats::default(),
-        }
+    /// The numbers come from the daemon's watcher threads ([`watch_engine`]), which ask
+    /// the engine every [`ENGINE_POLL_INTERVAL`]. A copy younger than
+    /// [`App::engine_cache_max_age`] is answered as it is; an older one is asked of the
+    /// engine itself, on the blocking pool and with a bound, so a watcher that stopped
+    /// does not freeze the numbers (#241).
+    ///
+    /// `None` when the engine has never answered: the caller must not answer with
+    /// zeros that look like a measurement.
+    pub async fn engine_stats(&self) -> Option<RenderStats> {
+        self.engine_value(&self.engine_stats_cache, |engine| engine.stats()).await
     }
 
     /// The engine's group states, kept the same way ([`App::engine_stats`]).
-    pub async fn engine_group_states(&self) -> Vec<GroupState> {
-        {
-            let cache = self.engine_groups.lock().unwrap_or_else(|e| e.into_inner());
-            if cache.asked {
-                return cache.value.clone();
-            }
+    ///
+    /// `None` when the engine has never answered: an empty list would say that no
+    /// group failed, and a group can fail (#241).
+    pub async fn engine_group_states(&self) -> Option<Vec<GroupState>> {
+        self.engine_value(&self.engine_groups_cache, |engine| engine.group_states()).await
+    }
+
+    /// The engine's value for `cache`, without waiting for the render thread.
+    ///
+    /// A copy younger than [`App::engine_cache_max_age`] is the answer. An older one is
+    /// asked of the engine, bounded by [`ENGINE_CALL_LIMIT`]: the answer may be late,
+    /// but it is the engine's own. When the engine does not answer, the last value it
+    /// gave is the answer (it is true as of the time it gave it), and `None` when the
+    /// engine has never answered at all.
+    async fn engine_value<T, F>(&self, cache: &Mutex<EngineCache<T>>, call: F) -> Option<T>
+    where
+        T: Clone + Send + 'static,
+        F: FnOnce(&dyn Engine) -> T + Send + 'static,
+    {
+        let known = cache.lock().unwrap_or_else(|e| e.into_inner()).value.clone();
+        let max_age = *self.engine_cache_max_age.lock().unwrap_or_else(|e| e.into_inner());
+        let fresh = cache
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .fresh(max_age)
+            .is_some();
+        if fresh {
+            return known;
         }
-        match engine_call(Arc::clone(&self.engine), |engine| engine.group_states()).await {
-            Some(groups) => {
-                let mut cache = self.engine_groups.lock().unwrap_or_else(|e| e.into_inner());
-                cache.asked = true;
-                cache.value = groups.clone();
-                groups
+        match engine_call(Arc::clone(&self.engine), call).await {
+            Some(value) => {
+                cache.lock().unwrap_or_else(|e| e.into_inner()).set(value.clone());
+                Some(value)
             }
-            None => Vec::new(),
+            // The engine did not answer in time: the route answers with the numbers it
+            // has, and the API keeps serving.
+            None => known,
         }
     }
 
     /// The status snapshot the API and the CLI read.
-    pub async fn status(&self) -> Status {
-        let stats = self.engine_stats().await;
+    ///
+    /// `None` when the render engine has never answered: the caller says so instead of
+    /// answering zeros that look like a measurement (#241).
+    pub async fn status(&self) -> Option<Status> {
+        let stats = self.engine_stats().await?;
         let store = self.store.read().await;
         let power = store.config.settings.power;
         let brightness = store.config.settings.brightness;
@@ -634,7 +709,7 @@ impl App {
         let conflicts = self.conflicts.read().await.clone();
         drop(store);
         let down = self.service_down_ms.load(Ordering::SeqCst);
-        Status {
+        Some(Status {
             version: self.version.clone(),
             power,
             brightness,
@@ -657,7 +732,7 @@ impl App {
             conflicts,
             show_zone_panel,
             onboarding_complete,
-        }
+        })
     }
 
     /// The fan profile names the service knows about.

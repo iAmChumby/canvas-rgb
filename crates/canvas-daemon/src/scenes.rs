@@ -1752,13 +1752,20 @@ fn group_fits(app: &App, group: &Group, lights: &[Light], devices: &[DeviceInfo]
 ///
 /// A group that plays a pattern carries the fit of each of its member lights, worked out from
 /// `lights` and the devices as they are now: nothing is cached, so a resize shows at the next read.
-pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> Vec<GroupState> {
+///
+/// The engine's own states come from the daemon's watcher threads, so this never waits for the
+/// render thread while the caller holds the store's lock (#241). A daemon whose engine has never
+/// answered says so: an empty list would say that no group failed, and a group can fail.
+pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> crate::api::ApiResult<Vec<GroupState>> {
     let built = app.scene.failures();
     // The engine's own states come from the daemon's watcher thread, so this never waits
     // for the render thread while the caller holds the store's lock (#241).
-    let running = app.engine_group_states().await;
+    let running = app
+        .engine_group_states()
+        .await
+        .ok_or_else(|| crate::api::ApiFailure::service_unavailable(crate::state::ENGINE_NOT_ANSWERING))?;
     let devices = app.devices.read().await.clone();
-    scene
+    Ok(scene
         .groups
         .iter()
         .map(|g| GroupState {
@@ -1769,7 +1776,7 @@ pub async fn group_states(app: &App, scene: &Scene, lights: &[Light]) -> Vec<Gro
                 .cloned()
                 .or_else(|| running.iter().find(|s| s.id == g.id).and_then(|s| s.failed.clone())),
         })
-        .collect()
+        .collect())
 }
 
 /// How many HTML runtimes `scene` starts, in scene order (#370): one for an `html:` group, and one
