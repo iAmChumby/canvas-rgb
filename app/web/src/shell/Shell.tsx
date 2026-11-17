@@ -16,6 +16,7 @@ import { applyMotion, applyTheme, nextTheme, readMotion, readTheme } from "@/she
 import { NotifyHost, notify } from "@/components/Notify";
 import { CommandPalette, type Command } from "@/components/CommandPalette";
 import { DaemonDown } from "@/components/DaemonDown";
+import { EngineDown } from "@/components/EngineDown";
 import { RailResizeHandle } from "@/components/RailResizeHandle";
 import { links, playingLine } from "@/lib/status";
 import { sceneCommands } from "@/shell/commands";
@@ -41,6 +42,7 @@ function Frame({ children }: { children: ReactNode }) {
   const router = useRouter();
   const status = useSnap((s) => s.status);
   const statusError = useSnap((s) => s.statusError);
+  const statusFault = useSnap((s) => s.statusFault);
   const effects = useSnap((s) => s.effects);
   const scenes = useSnap((s) => s.scenes);
   /** The onboarding has the whole window: the rail, the strip and the banners are hidden. */
@@ -143,7 +145,7 @@ function Frame({ children }: { children: ReactNode }) {
     const list: Command[] = [];
     // The status comes first: the palette says what is going on before it offers anything to
     // do. The lines are read, not run; only the last one is an action.
-    const linkList = links(status, status === null && statusError !== null);
+    const linkList = links(status, statusFault);
     list.push({
       id: "status-now",
       group: "Status",
@@ -214,7 +216,7 @@ function Frame({ children }: { children: ReactNode }) {
       });
     }
     return list;
-  }, [router, status, statusError, effects, scenes, togglePower, runEffect, runScene]);
+  }, [router, status, statusError, statusFault, effects, scenes, togglePower, runEffect, runScene]);
 
   // A phone opens the palette with what is going on, the pages, the lights and the effects
   // you would switch to. The palette shows this list below the phone breakpoint; a desktop
@@ -277,12 +279,23 @@ function Frame({ children }: { children: ReactNode }) {
             would pull the lane up under the status strip. */}
         <NotifyHost />
         <main className="content">
+          {/* canvas-rgb is up and its render engine is not answering (#241): the daemon's
+              own words are shown, and starting it again would not help. */}
           {daemonDown ? (
-            <DaemonDown
-              onRetry={retryDaemon}
-              lastTryAt={statusRetry().lastTryAt}
-              nextTryInMs={statusRetry().nextTryInMs}
-            />
+            statusFault === "engine" ? (
+              <EngineDown
+                onRetry={retryDaemon}
+                lastTryAt={statusRetry().lastTryAt}
+                nextTryInMs={statusRetry().nextTryInMs}
+                message={statusError}
+              />
+            ) : (
+              <DaemonDown
+                onRetry={retryDaemon}
+                lastTryAt={statusRetry().lastTryAt}
+                nextTryInMs={statusRetry().nextTryInMs}
+              />
+            )
           ) : !answered ? null : (
             <>
               {!takeover && <StandingNotices />}
