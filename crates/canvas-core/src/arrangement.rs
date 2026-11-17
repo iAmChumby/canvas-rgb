@@ -495,6 +495,7 @@ mod tests {
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         }
     }
 

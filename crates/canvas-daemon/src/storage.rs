@@ -2210,6 +2210,7 @@ power = "running"
                     reversed: true,
                     kind: None,
                     copies: None,
+                    first_led: None,
                 },
                 Light {
                     id: "openrgb:board#z0p2".into(),
@@ -2221,6 +2222,7 @@ power = "running"
                     reversed: false,
                     kind: None,
                     copies: None,
+                    first_led: None,
                 },
             ],
         };

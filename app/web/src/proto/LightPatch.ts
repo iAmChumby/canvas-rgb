@@ -10,4 +10,9 @@ export type LightPatch = { name?: string | null, arrangement?: Arrangement, reve
  * What the part is. Setting it sets `arrangement` from it; setting `arrangement` alone
  * leaves `kind` as it was.
  */
-kind?: ChainPartKind, };
+kind?: ChainPartKind, 
+/**
+ * Which LED is first (#468), see [`crate::scene::Light::first_led`]. 0 resets it. Must be
+ * below the light's LED count.
+ */
+first_led?: number, };

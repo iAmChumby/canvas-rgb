@@ -160,6 +160,7 @@ fn light(
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 

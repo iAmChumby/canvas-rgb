@@ -141,6 +141,7 @@ fn light_of(device: &str, arrangement: Arrangement) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 

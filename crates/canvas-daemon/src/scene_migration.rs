@@ -141,6 +141,7 @@ pub fn migrate(layouts: Option<&LayoutsFile>, devices: &[DeviceInfo]) -> (Lights
             reversed: placed.reversed,
             kind: None,
             copies: None,
+            first_led: None,
         });
     }
 

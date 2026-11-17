@@ -128,6 +128,7 @@ fn light(device: &str) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 

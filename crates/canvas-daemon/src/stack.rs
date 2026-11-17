@@ -2192,6 +2192,7 @@ pub fn zone_group(
                     reversed: false,
                     kind: None,
                     copies: None,
+                    first_led: None,
                 })
         })
         .collect();
@@ -2382,6 +2383,7 @@ mod tests {
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         }
     }
 

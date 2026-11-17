@@ -80,6 +80,7 @@ fn one_light() -> (Vec<Light>, Vec<DeviceInfo>, EngineGroup) {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     };
     let device = DeviceInfo {
         id: device_id,

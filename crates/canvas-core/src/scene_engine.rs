@@ -1119,6 +1119,7 @@ mod tests {
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         }
     }
 
@@ -3533,6 +3534,7 @@ mod group_preview_tests {
             reversed: false,
             kind: None,
             copies: None,
+            first_led: None,
         }
     }
 

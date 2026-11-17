@@ -98,6 +98,7 @@ fn fan_light_of(role: &Role, number: usize) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 
