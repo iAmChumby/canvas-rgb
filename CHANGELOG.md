@@ -13,7 +13,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Changed
 
-- Devices is laid out like the other pages now: every list sits on a surface, an ARGB header is one row with its state and a secondary Set up key inline instead of a second row, and every light has the same shape and direction controls in the same columns. (#471)
+- Devices is laid out like the other pages now: every list sits on a surface, an ARGB header is one row with its state, the device's real connection state and a secondary Set up key inline instead of a second row, and each light's name, shape and direction line up in the same columns; a one-LED light shows no shape switch and a grid shows its grid shape. (#471)
 
 ### Fixed
 

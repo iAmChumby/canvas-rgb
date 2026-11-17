@@ -160,10 +160,11 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
 
 /**
  * One resizable ARGB header's row. The state words carry the meaning (never set up, empty, or its
- * devices); the dot agrees. The key is the only thing that opens a setup session. `named` is false
- * where the header's own strip sits right above the row and already carries its name.
+ * devices); the dot agrees. The key is the only thing that opens a setup session. `deviceState` is
+ * the device's real connection state (from `DeviceInfo.connected`) so a header the daemon still
+ * lists for an unplugged board reads "disconnected", the same way every other device row does.
  */
-export function ChainRow({ chain, named = true, lead }: { chain: ChainView; named?: boolean; lead?: ReactNode }) {
+export function ChainRow({ chain, lead, deviceState }: { chain: ChainView; lead?: ReactNode; deviceState?: ReactNode }) {
   const [open, setOpen] = useState(false);
   /** One callback for the overlay's life: Escape's listener depends on it and must not re-subscribe. */
   const close = useCallback(() => setOpen(false), []);
@@ -198,8 +199,11 @@ export function ChainRow({ chain, named = true, lead }: { chain: ChainView; name
         {lead}
         {!lead && <span className={s.kicker}>ARGB header</span>}
         {/* Under a zone's own strip the name is already on the page: it is said once. */}
-        {!lead && named && <span className={s.zone}>{chain.zone_name}</span>}
-        <StateDot tone={tone}>{words}</StateDot>
+        {!lead && <span className={s.zone}>{chain.zone_name}</span>}
+        <span className={s.stateCell}>
+          <StateDot tone={tone}>{words}</StateDot>
+          {deviceState}
+        </span>
         <span className={s.key}>
           <Button
             size="sm"

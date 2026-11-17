@@ -243,6 +243,30 @@ describe("a header's row on Devices", () => {
     expect(within(jarTwo).getByRole("button", { name: /^Set up again/ })).toBeTruthy();
   });
 
+  it("a disconnected board's header row reads disconnected, not a hard-coded connected", async () => {
+    // The daemon lists chains for devices that are not connected, so the row must say so from
+    // DeviceInfo.connected instead of appending a literal " · connected" to the sub-line.
+    const offline = { ...BOARD, connected: false };
+    const chains = [chain(0, "JAF", "not_set_up", [], 0)];
+    api.chains.list.mockResolvedValue({ chains });
+    patchSnap({
+      devices: [offline],
+      devicesTotal: 1,
+      devicesError: null,
+      lights: [],
+      lightsError: null,
+      chains,
+      chainsError: null,
+      status: null,
+      statusError: null,
+    });
+    render(<DevicesView />);
+    await flush();
+    const row = rowOf("JAF");
+    expect(row.textContent).toContain("disconnected");
+    expect(row.textContent).not.toContain(" · connected");
+  });
+
   it("Set up again starts the flow for that header", async () => {
     await showDevices([chain(2, "JARGB 2", "set_up", [FAN_ONE, FAN_TWO], 96)]);
 

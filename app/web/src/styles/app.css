@@ -3862,16 +3862,25 @@ button.chip:hover {
   border-top: 1px solid var(--line);
 }
 
-/* A light's row: name, shape and direction, on every light. The name starts where every other
-   row's name starts; the same three controls sit under each device that has a light (#471). */
+/* A light's row uses the same seven columns as the device and header rows (#471 fix pass): the
+   label and name in the name column, the shape in the LED column (an empty cell for a one-LED
+   light), the direction at the right. Each starts at one x on every row. */
 .rd-devices .rd-light-row {
-  display: flex;
-  flex-wrap: wrap;
+  display: grid;
+  grid-template-columns: var(--row-cols);
   align-items: center;
-  gap: var(--s2) var(--s3);
-  min-height: 40px;
-  padding: var(--s1) var(--s4) var(--s1) calc(var(--s4) + 28px + var(--s3));
+  gap: var(--s3);
+  height: 44px;
+  padding: 0 var(--s4);
   border-top: 1px dashed var(--line);
+}
+
+.rd-light-who {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  grid-column: 2;
+  min-width: 0;
 }
 
 .rd-light-key {
@@ -3880,53 +3889,76 @@ button.chip:hover {
 }
 
 .rd-devices .rd-light-name {
+  flex: 1 1 auto;
   min-width: 0;
-  max-width: 34ch;
   justify-content: flex-start;
   text-align: left;
-}
-
-.rd-light-turn {
-  display: inline-flex;
-  align-items: center;
-  gap: var(--s2);
-  margin-left: auto;
-  font-size: var(--t14);
-}
-
-.rd-light-error {
-  flex-basis: 100%;
 }
 
 /* The shape picker's icons are for a wide row; a phone keeps the words so the shape and the
    way round still share one line. */
 .rd-shape {
   display: inline-flex;
+  grid-column: 3;
 }
 
-.rd-devices .rd-dev-row + .rd-light-row {
-  padding-left: var(--s4);
+.rd-light-turn {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--s2);
+  grid-column: 6 / 8;
+  justify-self: end;
+  font-size: var(--t14);
 }
 
-/* A phone: the light's own row is two lines, not three. The device and zone above already say
-   which light this is, so the "Light" word goes and the name takes the first line; the shape and
-   the way round share the second. */
-@media (max-width: 720px) {
+.rd-light-error {
+  grid-column: 1 / -1;
+}
+
+/* A narrow page box (a phone, or a desktop shell with a clipped page): the light's own row is two
+   lines, not three. The device and zone above already say which light this is, so the "Light" word
+   goes and the name takes the first line; the shape and the way round share the second. This is the
+   same page-container threshold the device rows use, so the shape keeps its word labels and never
+   stacks into a tall pill that crosses its neighbours (#471 fix pass). */
+@container page (max-width: 760px) {
   .rd-devices .rd-light-row {
-    padding-left: var(--s4);
+    grid-template-columns: 1fr auto;
+    height: auto;
+    padding: var(--s1) var(--s4);
+    row-gap: var(--s2);
   }
 
   .rd-devices .rd-light-key {
     display: none;
   }
 
-  .rd-light-name {
-    flex: 1 1 100%;
-    max-width: none;
+  .rd-light-who {
+    grid-column: 1 / -1;
+  }
+
+  .rd-shape {
+    grid-column: 1;
   }
 
   .rd-light-turn {
-    margin-left: 0;
+    grid-column: 2;
+  }
+
+  .rd-light-error {
+    grid-column: 1 / -1;
+  }
+
+  .rd-shape .seg-item svg {
+    display: none;
+  }
+}
+
+/* A page box under 1000px leaves the LED column too narrow for the shape control's icons and full
+   padding. Keep it on one line in a compact form instead of wrapping its two choices into a tall
+   pill that crosses the row above and below. */
+@container page (max-width: 1000px) {
+  .rd-shape .seg-item {
+    padding: 0 6px;
   }
 
   .rd-shape .seg-item svg {
@@ -3943,6 +3975,35 @@ button.chip:hover {
 @container page (min-width: 1500px) {
   .rd-devices .rd-dev-list {
     columns: 2 560px;
+  }
+
+  /* With two columns the LED column is too narrow for the shape control. Give the light row the
+     same two-line layout as a narrow page so the shape keeps its word labels on one line. */
+  .rd-devices .rd-light-row {
+    grid-template-columns: 1fr auto;
+    height: auto;
+    padding: var(--s1) var(--s4);
+    row-gap: var(--s2);
+  }
+
+  .rd-devices .rd-light-key {
+    display: none;
+  }
+
+  .rd-light-who {
+    grid-column: 1 / -1;
+  }
+
+  .rd-shape {
+    grid-column: 1;
+  }
+
+  .rd-light-turn {
+    grid-column: 2;
+  }
+
+  .rd-light-error {
+    grid-column: 1 / -1;
   }
 }
 

@@ -330,37 +330,41 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
   const shapes = shapesFor(zone.kind.type);
 
   return (
-    <div className="rd-light-row" data-busy={busy ? "true" : undefined}>
-      <span className="mute rd-light-key">Light</span>
-      {editing ? (
-        <NameField
-          value={name}
-          label={`Name for ${view.label}`}
-          maxLength={40}
-          disabled={busy}
-          onChange={setName}
-          onEnter={commitName}
-          onEscape={() => {
-            setName(view.label);
-            setEditing(false);
-          }}
-        />
-      ) : (
-        <Button
-          variant="ghost"
-          size="sm"
-          className="rd-light-name"
-          aria-label={`Rename ${view.label}`}
-          disabled={busy}
-          onClick={() => {
-            setName(view.label);
-            setEditing(true);
-          }}
-        >
-          <PencilSimple size={13} aria-hidden="true" />
-          <span className="one-line">{view.label}</span>
-        </Button>
-      )}
+    <div className="rd-light-row" data-testid="light-row" data-busy={busy ? "true" : undefined}>
+      {/* The label and the name share the name column; the shape (or an empty cell for a one-LED
+          light) and the direction sit in their own columns, so they start at one x on every row. */}
+      <span className="rd-light-who">
+        <span className="mute rd-light-key">Light</span>
+        {editing ? (
+          <NameField
+            value={name}
+            label={`Name for ${view.label}`}
+            maxLength={40}
+            disabled={busy}
+            onChange={setName}
+            onEnter={commitName}
+            onEscape={() => {
+              setName(view.label);
+              setEditing(false);
+            }}
+          />
+        ) : (
+          <Button
+            variant="ghost"
+            size="sm"
+            className="rd-light-name"
+            aria-label={`Rename ${view.label}`}
+            disabled={busy}
+            onClick={() => {
+              setName(view.label);
+              setEditing(true);
+            }}
+          >
+            <PencilSimple size={13} aria-hidden="true" />
+            <span className="one-line">{view.label}</span>
+          </Button>
+        )}
+      </span>
       <span className="rd-shape" data-testid="light-shape">
         <ShapePicker
           label={`What ${view.label} is`}
@@ -639,7 +643,6 @@ export function DevicesView() {
                         <span className="one-line rd-dev-name">{shownName}</span>
                         <span className="row-sub fig one-line rd-dev-sub" title={sub}>
                           {sub}
-                          {chainOne ? " · connected" : ""}
                         </span>
                       </span>
                       {one ? <ZoneStrip zone={one} /> : <span aria-hidden="true" />}
@@ -672,7 +675,7 @@ export function DevicesView() {
                   return (
                     <>
                       {one && chainOne ? (
-                        <ChainRow chain={chainOne} lead={deviceLead} />
+                        <ChainRow chain={chainOne} lead={deviceLead} deviceState={connected} />
                       ) : (
                         <div className="rd-dev-row">
                           {deviceLead}
@@ -705,7 +708,7 @@ export function DevicesView() {
                         d.zones.map((z) => (
                           <Fragment key={z.index}>
                             {chainOf(z.index) ? (
-                              <ChainRow chain={chainOf(z.index)!} lead={zoneLead(z)} />
+                              <ChainRow chain={chainOf(z.index)!} lead={zoneLead(z)} deviceState={connected} />
                             ) : (
                               <div className="rd-zone">
                                 {zoneLead(z)}

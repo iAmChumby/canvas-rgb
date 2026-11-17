@@ -86,6 +86,16 @@
   white-space: nowrap;
 }
 
+/* The header's setup state and the device's real connection state share one column, stacked: a
+   header the daemon lists for an unplugged board still reads "disconnected" on its own row. */
+.stateCell {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  min-width: 0;
+}
+
 /* The key keeps the right edge of the row and never moves: it holds its own width. */
 .key {
   display: flex;
@@ -203,6 +213,17 @@
     gap: var(--s2) var(--s3);
   }
 
+  /* app.css gives the name, strip and count positive `order` values for the narrow *device* row.
+     The chain row is flex here too, so give its state and key the matching places: the zone name
+     first, then its state, then the key — the same reading order as the device rows and the DOM. */
+  .stateCell {
+    order: 2;
+  }
+
+  .key {
+    order: 7;
+  }
+
   .partTurn {
     margin-left: 0;
   }
@@ -214,13 +235,22 @@
 }
 
 /* A desktop shell can have a page box this narrow while the window is over 720 px: the row must
-   wrap there too, or the state and the key are clipped (#89). */
+   wrap there too, or the state and the key are clipped (#89). The order keeps the zone name ahead
+   of the state and the key, as on the device rows and in the DOM. */
 @container page (max-width: 760px) {
   .gridHead {
     display: flex;
     flex-wrap: wrap;
     height: auto;
     gap: var(--s2) var(--s3);
+  }
+
+  .stateCell {
+    order: 2;
+  }
+
+  .key {
+    order: 7;
   }
 }
 
