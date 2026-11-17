@@ -1,0 +1,69 @@
+/* The LED-order view (#468): flat, token-coloured, no glass or glow. The notch and arrow read in
+   both themes; only the handle takes pointer events so a drag on the run still paints the device. */
+
+.view {
+  display: block;
+  overflow: visible;
+  pointer-events: none;
+}
+
+.led {
+  fill: var(--led-off, var(--dot));
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.notch {
+  fill: var(--a1);
+  stroke: var(--on-accent);
+  stroke-width: 0.75;
+}
+
+.arrow {
+  stroke: var(--a1);
+  stroke-width: 2;
+  fill: var(--a1);
+  stroke-linecap: round;
+}
+
+.handle {
+  fill: transparent;
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+}
+
+.handle:active {
+  cursor: grabbing;
+}
+
+.handle:focus-visible {
+  outline: 2px solid var(--a1);
+  outline-offset: 1px;
+}
+
+.key {
+  pointer-events: auto;
+  cursor: pointer;
+}
+
+.keyBg {
+  fill: var(--raised);
+  stroke: var(--line-2);
+  stroke-width: 1;
+}
+
+.keyInk {
+  stroke: var(--a1);
+  stroke-width: 1.5;
+  fill: none;
+}
+
+.key:hover .keyBg {
+  fill: var(--hover);
+}
+
+.key:focus-visible {
+  outline: 2px solid var(--a1);
+  outline-offset: 1px;
+}

@@ -1,0 +1,171 @@
+import { act, cleanup, fireEvent, render, screen } from "@testing-library/react";
+import { afterEach, beforeAll, beforeEach, describe, expect, it, vi } from "vitest";
+import type { DeviceInfo } from "@/proto/DeviceInfo";
+import type { DraftStatus } from "@/proto/DraftStatus";
+import type { LightView } from "@/proto/LightView";
+import type { Pattern } from "@/proto/Pattern";
+
+// #468 phase 3: the notch and direction arrow in the pattern editor's ring view. They write the
+// light's LED order through the lights PATCH and identify the physical LED on the real device.
+
+const { api } = vi.hoisted(() => ({
+  api: {
+    putPatternDraft: vi.fn(),
+    deleteDraft: vi.fn(),
+    lights: { patch: vi.fn(), list: vi.fn() },
+    identify: vi.fn(),
+  },
+}));
+
+vi.mock("@/lib/endpoints", () => ({ api }));
+
+import { patchSnap } from "@/lib/store";
+import { layoutDots } from "@/views/patterns/dotLayout";
+import { PatternEditor } from "@/views/patterns/PatternEditor";
+
+(globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
+
+const OFF = "#000000";
+const BOX = 400;
+
+beforeAll(() => {
+  if (!("PointerEvent" in window)) {
+    class PE extends MouseEvent {
+      pointerId: number;
+      constructor(type: string, init: PointerEventInit = {}) {
+        super(type, init);
+        this.pointerId = init.pointerId ?? 1;
+      }
+    }
+    (window as unknown as { PointerEvent: unknown }).PointerEvent = PE;
+  }
+  const captured = new Set<number>();
+  Element.prototype.setPointerCapture = (id: number) => void captured.add(id);
+  Element.prototype.releasePointerCapture = (id: number) => void captured.delete(id);
+  Element.prototype.hasPointerCapture = (id: number) => captured.has(id);
+  globalThis.ResizeObserver = class {
+    observe(): void {}
+    unobserve(): void {}
+    disconnect(): void {}
+  } as unknown as typeof ResizeObserver;
+  HTMLCanvasElement.prototype.getContext = (() => ({
+    setTransform() {}, clearRect() {}, beginPath() {}, arc() {}, stroke() {}, fill() {},
+    fillStyle: "", strokeStyle: "", lineWidth: 1,
+  })) as unknown as typeof HTMLCanvasElement.prototype.getContext;
+  Element.prototype.getBoundingClientRect = () =>
+    ({ left: 0, top: 0, width: BOX, height: BOX, right: BOX, bottom: BOX, x: 0, y: 0, toJSON() {} }) as DOMRect;
+  window.matchMedia = (() => ({
+    matches: false, media: "", addEventListener() {}, removeEventListener() {},
+  })) as unknown as typeof window.matchMedia;
+  vi.stubGlobal("requestAnimationFrame", () => 1);
+  vi.stubGlobal("cancelAnimationFrame", () => undefined);
+});
+
+beforeEach(() => {
+  api.putPatternDraft.mockReset().mockResolvedValue({
+    active: true, props: {}, lease_remaining_ms: 15_000, heartbeat_ms: 5_000, lease_ms: 15_000,
+  } as DraftStatus);
+  api.deleteDraft.mockReset().mockResolvedValue({ active: false });
+  api.lights.patch.mockReset();
+  api.lights.list.mockReset();
+  api.identify.mockReset().mockResolvedValue({ ok: true });
+  patchSnap({ lights: null, devices: null });
+});
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+  patchSnap({ lights: null, devices: null });
+});
+
+function blank(leds = 8): Pattern {
+  return {
+    id: "pattern:Fan",
+    built_on: { led_count: leds, arrangement: "ring" },
+    frames: [{ colors: Array.from({ length: leds }, () => OFF), hold: 0 }],
+    motion: { type: "none" },
+  };
+}
+
+function light(first_led?: number, reversed = false): LightView {
+  return {
+    light: {
+      id: "fake:a#z0", device_id: "fake:a", zone_index: 0, arrangement: "ring", reversed, first_led,
+    } as LightView["light"],
+    led_count: 8,
+    connected: true,
+    label: "Fan 1",
+  };
+}
+
+function device(): DeviceInfo {
+  return {
+    id: "fake:a",
+    name: "Fan",
+    zones: [{
+      index: 0, name: "zone0", kind: { type: "linear" }, led_count: 8,
+      min_leds: 8, max_leds: 8, resizable: false,
+    }],
+    connected: true,
+  } as unknown as DeviceInfo;
+}
+
+function show(first_led?: number, reversed = false) {
+  const view = light(first_led, reversed);
+  patchSnap({ lights: [view], devices: [device()] });
+  api.lights.patch.mockResolvedValue(view);
+  api.lights.list.mockResolvedValue({ lights: [view] });
+  render(<PatternEditor pattern={blank()} onSave={vi.fn()} onCancel={vi.fn()} />);
+}
+
+const settle = () => act(async () => {});
+
+describe("the LED-order notch in the pattern editor", () => {
+  it("moves the first LED with the arrow keys and identifies it on the real device", async () => {
+    show(0);
+    await settle();
+    const notch = screen.getByTestId("first-led-notch");
+    expect(notch.getAttribute("aria-valuenow")).toBe("1");
+
+    await act(async () => { fireEvent.keyDown(notch, { key: "ArrowRight" }); });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { first_led: 1 });
+    expect(api.identify).toHaveBeenCalledWith("fake:a", {
+      zone: 0, led: 1, count: 1, stop: false,
+    });
+
+    await act(async () => { fireEvent.keyDown(notch, { key: "Home" }); });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { first_led: 0 });
+    expect(api.identify).toHaveBeenLastCalledWith("fake:a", {
+      zone: 0, led: 0, count: 1, stop: false,
+    });
+  });
+
+  it("drags the notch to the LED under the pointer", async () => {
+    show(0);
+    await settle();
+    const notch = screen.getByTestId("first-led-notch");
+    const target = layoutDots(blank().built_on, BOX, BOX)[5]!;
+    await act(async () => {
+      fireEvent.pointerDown(notch, { pointerId: 1 });
+      fireEvent.pointerMove(notch, { pointerId: 1, clientX: target.x, clientY: target.y });
+      fireEvent.pointerUp(notch, { pointerId: 1 });
+    });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { first_led: 5 });
+  });
+
+  it("toggles the run direction through the lights PATCH", async () => {
+    show(0, false);
+    await settle();
+    await act(async () => { fireEvent.click(screen.getByTestId("led-order-direction")); });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { reversed: true });
+  });
+
+  it("shows the marked LED and the current direction on the view", async () => {
+    show(3, true);
+    await settle();
+    const view = screen.getByTestId("led-order");
+    expect(view.getAttribute("data-first-led")).toBe("3");
+    expect(view.getAttribute("data-reversed")).toBe("true");
+    expect(screen.getByTestId("first-led-notch").getAttribute("aria-valuenow")).toBe("4");
+  });
+});

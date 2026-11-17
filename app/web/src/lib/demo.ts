@@ -1224,6 +1224,10 @@ function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown)
     }
     if (patch.arrangement) view.light.arrangement = patch.arrangement;
     if (typeof patch.reversed === "boolean") view.light.reversed = patch.reversed;
+    // 0 resets to None, as the daemon's lights PATCH does (#468).
+    if (typeof patch.first_led === "number") {
+      view.light.first_led = patch.first_led === 0 ? undefined : patch.first_led;
+    }
     return view;
   }
   return fail(404, "not_found", `no route ${method} /${seg.join("/")}`);

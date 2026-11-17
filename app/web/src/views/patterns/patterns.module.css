@@ -169,6 +169,16 @@
   cursor: crosshair;
 }
 
+/* The LED-order notch and arrow (#468) share the surface's box and its dot geometry. Only the
+   notch and the two keys take pointer events; a press anywhere else still paints the device. */
+.ledOrderOverlay {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  pointer-events: none;
+}
+
 /* ---------- the frame strip (#468): the frames, the way each passes to the next, and the timing ---------- */
 
 .frameStrip {

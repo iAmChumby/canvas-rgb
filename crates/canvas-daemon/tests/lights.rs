@@ -285,6 +285,102 @@ async fn light_patch_renames_clears_and_sets_ring_and_reversed() {
 }
 
 #[tokio::test]
+async fn light_patch_sets_and_resets_first_led_and_round_trips_it() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, home) = build(lights, devices).await;
+
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"first_led":3}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let view: LightView = serde_json::from_value(body.clone()).expect("the body is a LightView");
+    assert_eq!(view.light.first_led, Some(3), "{body}");
+
+    // lights.json carries it, so a restart keeps the owner's first LED.
+    let saved: LightsFile =
+        serde_json::from_str(&std::fs::read_to_string(home.path.join("lights.json")).unwrap())
+            .expect("lights.json is a lights file");
+    assert_eq!(saved.lights[0].first_led, Some(3));
+    assert_eq!(app.store.read().await.lights.lights[0].first_led, Some(3));
+
+    // 0 resets it to None, on disk too.
+    let response = router
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"first_led":0}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.store.read().await.lights.lights[0].first_led, None);
+    let saved: LightsFile =
+        serde_json::from_str(&std::fs::read_to_string(home.path.join("lights.json")).unwrap())
+            .expect("lights.json is a lights file");
+    assert_eq!(saved.lights[0].first_led, None, "0 is stored as None");
+}
+
+#[tokio::test]
+async fn light_patch_refuses_a_first_led_at_or_past_the_led_count() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 8)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, _home) = build(lights, devices).await;
+
+    for bad in [8u32, 9, 100] {
+        let body = serde_json::json!({ "first_led": bad }).to_string();
+        let response = router
+            .clone()
+            .oneshot(request_with_body("PATCH", &light_path("fake:mb#z0"), &body))
+            .await
+            .expect("the router answers");
+        assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY, "{body}");
+        let json = json(response).await;
+        let error: ApiError = serde_json::from_value(json.clone()).expect("the body is an ApiError");
+        assert_eq!(error.error, canvas_proto::api::error_codes::VALIDATION);
+        assert!(
+            error.message.contains("first LED must be below"),
+            "a plain message about the limit: {json}"
+        );
+        assert_eq!(app.store.read().await.lights.lights[0].first_led, None, "nothing was saved");
+    }
+}
+
+#[tokio::test]
+async fn a_light_whose_zone_shrank_shows_no_first_led() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 8)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, _home) = build(lights, devices).await;
+    let response = router
+        .clone()
+        .oneshot(request_with_body(
+            "PATCH",
+            &light_path("fake:mb#z0"),
+            r#"{"first_led":5}"#,
+        ))
+        .await
+        .expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    // The zone reports fewer LEDs than the stored first LED. The view drops it (the editor shows
+    // no notch) while the stored value is left alone, so growing the zone back restores it.
+    *app.devices.write().await = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 4)])];
+    let (status, body) = get_lights(router).await;
+    assert_eq!(status, StatusCode::OK);
+    let answer = views(&body);
+    assert_eq!(answer.lights[0].led_count, 4);
+    assert_eq!(answer.lights[0].light.first_led, None, "the shrunk light has no first LED: {body}");
+    assert_eq!(app.store.read().await.lights.lights[0].first_led, Some(5), "still stored");
+}
+
+#[tokio::test]
 async fn light_patch_refuses_an_empty_or_too_long_name() {
     let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
     let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);

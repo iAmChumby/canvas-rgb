@@ -14,7 +14,9 @@
 //! Inside a slot the light's own arrangement decides (the owner's choice on the Devices
 //! page): a strip runs left to right at mid-height, a ring is the largest circle that fits
 //! the slot, a grid fills the slot with the zone's own matrix map, and a single LED reads
-//! the slot's centre. `reversed` flips the LED order inside the light.
+//! the slot's centre. The light's `first_led` picks which physical LED is position 0 and
+//! `reversed` sets the run's direction; both are applied by [`apply_led_order`], the helper the
+//! pattern path uses too (#468).
 //!
 //! Nothing here runs per frame: the plan is built when the scene or the hardware changes,
 //! and the engine samples it every frame.
@@ -259,6 +261,28 @@ fn slot_for(mode: GroupMode, before: u64, count: u64, total: u64) -> Slot {
     }
 }
 
+/// Puts a light's LED order into the device's frame: the owner's `first_led` becomes position 0,
+/// then `reversed` flips the run (#468, phase 3).
+///
+/// The vector is indexed by physical LED: entry `i` is what LED `i` of the device reads (a
+/// [`LedSample`] on the canvas path, an [`Rgb8`](canvas_proto::color::Rgb8) on the pattern path).
+/// A `first_led` of `f` means physical LED `f` is position 0, so the vector is rotated right by
+/// `f`. `None`, an explicit 0, and a first LED at or past the light's current count (a zone that
+/// shrank) all leave the rotation out, so a light wired the old way is byte-identical to before
+/// #468. The flip comes after the rotation, so the two paths agree on which LED is first.
+pub fn apply_led_order<T>(leds: &mut [T], first_led: Option<u32>, reversed: bool) {
+    if let Some(first) = first_led {
+        let n = leds.len();
+        // A first LED that no longer fits is dropped, not wrapped: the run starts at LED 0.
+        if first != 0 && (first as usize) < n {
+            leds.rotate_right(first as usize);
+        }
+    }
+    if reversed {
+        leds.reverse();
+    }
+}
+
 /// The samples of one light's LEDs inside its slot.
 fn build_light_leds(
     light: &Light,
@@ -276,10 +300,10 @@ fn build_light_leds(
         Arrangement::Ring => ring_samples(slot, n),
         Arrangement::Grid => grid_samples(light, count, slot, devices),
     };
-    // `reversed` flips the LED order inside the light: LED 0 takes the last place.
-    if light.reversed {
-        leds.reverse();
-    }
+    // `first_led` picks the physical LED that is position 0, then `reversed` flips the run. Both
+    // this path and the pattern path go through the same helper so they agree on which LED is
+    // first (#468).
+    apply_led_order(&mut leds, light.first_led, light.reversed);
     leds
 }
 

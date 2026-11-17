@@ -18,6 +18,7 @@ import type { Icon } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { NameField } from "@/components/NameField";
+import { LedOrderControl } from "@/components/LedOrderControl";
 import { Panel } from "@/components/Panel";
 import { ShapePicker, shapesFor } from "@/components/ShapePicker";
 import { Toggle } from "@/components/Toggle";
@@ -372,6 +373,23 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
           shapes={shapes}
           disabled={busy}
           onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
+        />
+      </span>
+
+      <span className="rd-led-order" data-testid="light-led-order">
+        <LedOrderControl
+          ledCount={view.led_count}
+          firstLed={light.first_led ?? 0}
+          reversed={light.reversed}
+          ring={light.arrangement === "ring"}
+          label={`LED order of ${view.label}`}
+          onFirstLed={(led) => void patch({ first_led: led }).catch(() => undefined)}
+          onReversed={(next) => void patch({ reversed: next }).catch(() => undefined)}
+          onIdentify={() =>
+            void api
+              .identify(light.device_id, { zone: light.zone_index, led: light.first_led ?? 0, count: 1, stop: false })
+              .catch(() => undefined)
+          }
         />
       </span>
 

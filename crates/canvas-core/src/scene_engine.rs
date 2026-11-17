@@ -41,7 +41,7 @@ use tracing::warn;
 use crate::pattern_play::{self, Beat, Timeline};
 use crate::pattern_spin::SpinSource;
 
-use crate::arrangement::{build_group_plan, GroupPlan};
+use crate::arrangement::{apply_led_order, build_group_plan, GroupPlan};
 use crate::engine::{guarded_call, panic_text, report_effect_panic};
 use crate::pattern_fit::fit_colors;
 use crate::sampling;
@@ -263,11 +263,13 @@ struct RunGroup {
     /// The LED count and arrangement of each light of the plan, in `plan.lights` order: what a
     /// pattern is fitted to.
     shapes: Vec<(u32, Arrangement)>,
-    /// Whether each light of the plan is `reversed`, in `plan.lights` order. A pattern is stored
-    /// in position order, so a reversed light's fitted colours are flipped.
+    /// Whether each light of the plan is `reversed`, in `plan.lights` order. Applied after the
+    /// light's `first_led`, so the two paths agree on which LED is first (#468).
     reversed: Vec<bool>,
-    /// The fitted colours of each light of the plan, in the device's LED order and before the
-    /// group's brightness. Filled when a pattern is fitted; empty for a canvas effect.
+    /// Which physical LED of each light of the plan is position 0, in `plan.lights` order (#468).
+    first_led: Vec<Option<u32>>,
+    /// The fitted colours of each light of the plan, in position order and before its LED order
+    /// and the group's brightness. Filled when a pattern is fitted; empty for a canvas effect.
     fitted: Vec<Vec<Rgb8>>,
     /// A spinning pattern (#468): its speed and, per light of the plan, the fitted colours in
     /// position order (no `reversed` yet), turned every tick from the effect's clock. `None` for
@@ -328,8 +330,8 @@ enum Drawn {
 
 impl RunGroup {
     /// Fits the group's pattern to every light of its plan: once per change, never per frame.
-    /// `fitted` ends in the device's LED order (each light's own `reversed` applied) and before
-    /// the group's brightness.
+    /// `fitted` stays in position order; the light's `first_led` and `reversed` are applied by
+    /// [`apply_led_order`] once at play time, after any spin or fade, before the group's brightness.
     fn fit_group(&mut self, effect: Option<&dyn Effect>) {
         #[cfg(test)]
         {
@@ -361,9 +363,8 @@ impl RunGroup {
         let fitted: Vec<Vec<Rgb8>> = self
             .shapes
             .iter()
-            .enumerate()
-            .map(|(index, (leds, arrangement))| {
-                let mut colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
+            .map(|(leds, arrangement)| {
+                let colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
                 if playing_frames {
                     frame_sets.push(
                         pattern
@@ -375,11 +376,9 @@ impl RunGroup {
                 } else if spin.is_some() {
                     sources.push(SpinSource::new(colors.clone()));
                 }
-                // The pattern is stored in position order; a reversed light's frame runs the
-                // other way, so its fitted colours are flipped once, here.
-                if self.reversed.get(index).copied().unwrap_or(false) {
-                    colors.reverse();
-                }
+                // Fitted colours stay in position order. `first_led` and `reversed` are applied
+                // once at play time by `run_group`, after the spin or fade, through the same
+                // helper the canvas path uses (#468).
                 colors
             })
             .collect();
@@ -634,6 +633,7 @@ impl SceneRunner {
                 // What a pattern is fitted to, read from the lights the plan was built from.
                 let mut shapes = Vec::with_capacity(plan.lights.len());
                 let mut reversed = Vec::with_capacity(plan.lights.len());
+                let mut first_led = Vec::with_capacity(plan.lights.len());
                 for samples in &plan.lights {
                     let light = rebuild.lights.iter().find(|l| l.id == samples.light);
                     shapes.push((
@@ -641,6 +641,7 @@ impl SceneRunner {
                         light.map(|l| l.arrangement).unwrap_or(Arrangement::Strip),
                     ));
                     reversed.push(light.is_some_and(|l| l.reversed));
+                    first_led.push(light.and_then(|l| l.first_led));
                 }
                 RunGroup {
                     canvas: Canvas::with_scale(SCENE_RENDER_SCALE),
@@ -648,6 +649,7 @@ impl SceneRunner {
                     colors,
                     shapes,
                     reversed,
+                    first_led,
                     fitted: Vec::new(),
                     spin: None,
                     frames: None,
@@ -928,8 +930,9 @@ fn run_group(
         match group.fitted.get(index).map(Vec::as_slice) {
             Some(fitted) if live && !fitted.is_empty() => {
                 let reversed = group.reversed.get(index).copied().unwrap_or(false);
+                let first_led = group.first_led.get(index).copied().flatten();
                 let framed = match (beat, group.frames.as_mut()) {
-                    (Some(beat), Some(play)) => play_frames(play, index, beat, spin_clock, reversed, out),
+                    (Some(beat), Some(play)) => play_frames(play, index, beat, spin_clock, out),
                     _ => false,
                 };
                 if framed {
@@ -937,26 +940,25 @@ fn run_group(
                     {
                         group.framed += 1;
                     }
-                    scale_light(out, factor);
-                    continue;
-                }
-                let spun = spin_clock
-                    .and_then(|clock| group.spin.as_ref().map(|spin| (clock, &spin.sources)))
-                    .and_then(|((turns, t), sources)| sources.get(index).map(|s| (turns, t, s)));
-                if let Some((turns, t, source)) = spun {
-                    // Turn in position order, then the light's own direction, then brightness.
-                    source.at(turns, t, out);
-                    if reversed {
-                        out.reverse();
-                    }
-                    #[cfg(test)]
-                    {
-                        group.spun += 1;
-                    }
                 } else {
-                    out.clear();
-                    out.extend_from_slice(fitted);
+                    let spun = spin_clock
+                        .and_then(|clock| group.spin.as_ref().map(|spin| (clock, &spin.sources)))
+                        .and_then(|((turns, t), sources)| sources.get(index).map(|s| (turns, t, s)));
+                    if let Some((turns, t, source)) = spun {
+                        // Turn in position order; the light's LED order comes after.
+                        source.at(turns, t, out);
+                        #[cfg(test)]
+                        {
+                            group.spun += 1;
+                        }
+                    } else {
+                        out.clear();
+                        out.extend_from_slice(fitted);
+                    }
                 }
+                // The one place the pattern path applies a light's LED order, after fit, spin and
+                // frames and before brightness (#468). The canvas path uses the same helper.
+                apply_led_order(out, first_led, reversed);
                 scale_light(out, factor);
             }
             _ if live => {
@@ -1029,28 +1031,22 @@ fn run_group(
 }
 
 /// One light of a pattern of several frames (#468): the frame the beat names, or the blend of two,
-/// then the spin of it, then the light's own direction. Returns false when the light has no frames
-/// fitted (the caller then plays the first frame as a still one). Allocation-free once the buffers
-/// have grown.
+/// then the spin of it, all in position order. The light's `first_led` and `reversed` are applied
+/// by the caller through [`apply_led_order`], after this returns. Returns false when the light has
+/// no frames fitted (the caller then plays the first frame as a still one). Allocation-free once
+/// the buffers have grown.
 fn play_frames(
     play: &mut FramePlay,
     index: usize,
     beat: Beat,
     spin: Option<(f64, f64)>,
-    reversed: bool,
     out: &mut Vec<Rgb8>,
 ) -> bool {
     let FramePlay { frames, blended, .. } = play;
     let (Some(set), Some(scratch)) = (frames.get(index), blended.get_mut(index)) else {
         return false;
     };
-    if !pattern_play::render(set, scratch, beat, spin, out) {
-        return false;
-    }
-    if reversed {
-        out.reverse();
-    }
-    true
+    pattern_play::render(set, scratch, beat, spin, out)
 }
 
 /// Multiplies every colour of one light by the group's brightness (`factor` is 0.0..=1.0).
@@ -1425,6 +1421,118 @@ mod tests {
         assert_eq!(flipped[0], Rgb8::BLACK);
         assert!(plain[1..].iter().all(|c| *c == Rgb8::BLACK));
         assert!(flipped[..11].iter().all(|c| *c == Rgb8::BLACK));
+    }
+
+    // ---------------------------------------------------------- first LED (#468, phase 3)
+
+    /// The LED run rotated right by `k`: physical LED `k` takes what LED 0 had.
+    fn rotated_run<T: Clone>(source: &[T], k: usize) -> Vec<T> {
+        let mut out = source.to_vec();
+        if !out.is_empty() {
+            let by = k % out.len();
+            out.rotate_right(by);
+        }
+        out
+    }
+
+    /// The class test over both paths (#468): a pattern and a canvas effect on a light whose
+    /// first LED is physical LED `FIRST` must agree on which LED is position 0. Each path is
+    /// measured with and without `first_led`; both must move their position-0 colour to `FIRST`.
+    #[test]
+    fn a_pattern_and_a_canvas_effect_agree_which_led_is_first() {
+        const FIRST: u32 = 3;
+        const N: u32 = 8;
+        let device = strip_device("d1", N);
+
+        // The pattern path, with and without a first LED.
+        let mut first = light("d1");
+        first.first_led = Some(FIRST);
+        let effect = PatternTestEffect::new(pattern_on(N, Arrangement::Strip, ramp(N as usize)));
+        let mut scene = state_playing(&["d1#z0"], vec![first], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, std::slice::from_ref(&device));
+        let pattern_first = take(&mut runner, "d1", N);
+
+        let effect = PatternTestEffect::new(pattern_on(N, Arrangement::Strip, ramp(N as usize)));
+        let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, std::slice::from_ref(&device));
+        let pattern_plain = take(&mut runner, "d1", N);
+
+        // The canvas/effect sampling path, with and without a first LED.
+        let mut first = light("d1");
+        first.first_led = Some(FIRST);
+        let mut scene = state_playing(&["d1#z0"], vec![first], Some(Box::new(HorizontalRamp)), 100);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, std::slice::from_ref(&device));
+        let canvas_first = take(&mut runner, "d1", N);
+
+        let mut scene =
+            state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(HorizontalRamp)), 100);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, &[device]);
+        let canvas_plain = take(&mut runner, "d1", N);
+
+        // Both paths rotate the same way, and both put position 0 on physical LED FIRST.
+        assert_eq!(pattern_first, rotated_run(&pattern_plain, FIRST as usize), "pattern path: {pattern_first:?}");
+        assert_eq!(canvas_first, rotated_run(&canvas_plain, FIRST as usize), "canvas path: {canvas_first:?}");
+        assert_eq!(pattern_first[FIRST as usize], pattern_plain[0], "pattern LED 1 moved");
+        assert_eq!(canvas_first[FIRST as usize], canvas_plain[0], "canvas LED 1 moved");
+        assert_ne!(pattern_plain[0], pattern_plain[FIRST as usize], "a ramp tells the LEDs apart");
+    }
+
+    /// `first_led` `None` leaves the byte stream exactly as it was before #468: a plain pattern
+    /// copies its frame, and `reversed` still flips the whole run.
+    #[test]
+    fn first_led_none_is_byte_identical_to_the_plain_run() {
+        let source = ramp(8);
+        let run = |first: Option<u32>, reversed: bool| {
+            let mut light = light("d1");
+            light.first_led = first;
+            light.reversed = reversed;
+            let effect = PatternTestEffect::new(pattern_on(8, Arrangement::Strip, source.clone()));
+            let mut scene = state_playing(&["d1#z0"], vec![light], Some(Box::new(effect)), 100);
+            let mut runner = SceneRunner::new();
+            frame(&mut scene, &mut runner, &[strip_device("d1", 8)]);
+            take(&mut runner, "d1", 8)
+        };
+        assert_eq!(run(None, false), source, "None is the plain frame");
+        let mut flipped = source.clone();
+        flipped.reverse();
+        assert_eq!(run(None, true), flipped, "None keeps the old full reversal");
+        assert_eq!(run(Some(0), false), source, "an explicit 0 is the same as None");
+    }
+
+    /// `first_led` is applied before `reversed`: the run is rotated to physical LED 3, then
+    /// flipped, which puts position 0 at `7 - 3 = 4` for a ring of eight.
+    #[test]
+    fn reversed_is_applied_after_the_first_led() {
+        let source = ramp(8);
+        let mut light = light("d1");
+        light.first_led = Some(3);
+        light.reversed = true;
+        let effect = PatternTestEffect::new(pattern_on(8, Arrangement::Strip, source.clone()));
+        let mut scene = state_playing(&["d1#z0"], vec![light], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, &[strip_device("d1", 8)]);
+        let got = take(&mut runner, "d1", 8);
+        let mut expected = rotated_run(&source, 3);
+        expected.reverse();
+        assert_eq!(got, expected, "first LED then reversed: {got:?}");
+    }
+
+    /// A first LED at or past the light's LED count no longer fits, so it is dropped: the run
+    /// plays from LED 0 instead of wrapping back into the middle (#468).
+    #[test]
+    fn a_first_led_past_the_light_is_dropped() {
+        let source = ramp(8);
+        let mut light = light("d1");
+        light.first_led = Some(12);
+        let effect = PatternTestEffect::new(pattern_on(8, Arrangement::Strip, source.clone()));
+        let mut scene = state_playing(&["d1#z0"], vec![light], Some(Box::new(effect)), 100);
+        let mut runner = SceneRunner::new();
+        frame(&mut scene, &mut runner, &[strip_device("d1", 8)]);
+        assert_eq!(take(&mut runner, "d1", 8), source, "an out-of-range first LED plays plain");
     }
 
     /// A frame built for the old LED count of a zone is never handed to a sink that expects the

@@ -11,6 +11,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
+import { LedOrderControl } from "@/components/LedOrderControl";
 import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
@@ -156,6 +157,41 @@ export function PatternEditor({
     editor.setShape(shape, gridOfZone(zone));
   };
 
+  // The LED order of the light this pattern plays on (#468). The notch writes `first_led` and the
+  // arrow writes `reversed` through the same lights route as the shape. A set that lands identifies
+  // the physical LED on the real device, so the owner can see which one is LED 1. These are light
+  // properties, not pattern colours: they take effect at once and sit outside the pattern's colour
+  // undo history, which is all this editor's history holds.
+  const firstLed = light?.light.first_led ?? 0;
+  const reversed = light?.light.reversed ?? false;
+  const identifyFirst = (led: number) => {
+    if (!light) return;
+    void api
+      .identify(light.light.device_id, { zone: light.light.zone_index, led, count: 1, stop: false })
+      .catch(() => undefined);
+  };
+  const setFirstLed = async (led: number) => {
+    if (!light) return;
+    setShapeProblem(null);
+    try {
+      await api.lights.patch(light.light.id, { first_led: led });
+      await refreshLights();
+      identifyFirst(led);
+    } catch (error) {
+      setShapeProblem(messageOf(error));
+    }
+  };
+  const setReversed = async (next: boolean) => {
+    if (!light) return;
+    setShapeProblem(null);
+    try {
+      await api.lights.patch(light.light.id, { reversed: next });
+      await refreshLights();
+    } catch (error) {
+      setShapeProblem(messageOf(error));
+    }
+  };
+
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
   // of the current document every `heartbeat_ms`, which is what keeps the lease alive while the
   // owner looks at the device.
@@ -261,6 +297,23 @@ export function PatternEditor({
           onBegin={editor.beginStroke}
           onStroke={editor.stroke}
           onEnd={editor.endStroke}
+          ledOrder={(dots, box) => (
+            <div className={s.ledOrderOverlay}>
+              <LedOrderControl
+                ledCount={Math.max(1, dots.length)}
+                firstLed={firstLed}
+                reversed={reversed}
+                ring={editor.builtOn.arrangement === "ring"}
+                label={name}
+                width={Math.max(1, box.width)}
+                height={Math.max(1, box.height)}
+                dots={dots}
+                onFirstLed={(led) => void setFirstLed(led)}
+                onReversed={(next) => void setReversed(next)}
+                onIdentify={() => identifyFirst(firstLed)}
+              />
+            </div>
+          )}
           overlay={
             editor.tool === "gradient" && editor.gradient ? (
               <GradientStops
