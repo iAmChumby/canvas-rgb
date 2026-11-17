@@ -568,6 +568,16 @@ line. Three mechanisms, and one bug the timing only exposed.
     panic on any thread but the main one still goes through the queue. The hook's logic is tested with a
     stuck queue and an injected writer (`exit_log::the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`);
     the production writer it is installed with at startup has no test that fails on the old hook (open).
+  - #72: `a_panicking_helper_lets_the_caller_write_the_fallback` (`crates/canvas-daemon/src/logging.rs`)
+    rode a 50 ms window: the helper's panic had to finish inside it, or the caller read "the helper owns
+    the line" and skipped the fallback, and the line was lost. Measured: with `RUST_BACKTRACE=1` the
+    panic's backtrace capture takes about 170 ms, and the test failed 100 of 100 runs (the daemon's own
+    lib suite running in parallel); without it, 200 of 200 passed, so the window, not the code, decided
+    the verdict. Fixed: the wait is the helper's thread ending, an event and not a clock
+    (`logging::write_once_waiting`), and the test also writes the fallback line and counts it in the log.
+    The production path is unchanged: `write_once_within` still waits at most its 250 ms limit. The rule
+    this adds: a test that waits on a helper thread waits for the thread to end, not for a window to
+    pass.
   - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
     reason first; the service tests share one log buffer (`crates/canvas-svc/src/test_logs.rs`; its
     `captured()` runs one capture at a time); the kill test asserts the full announcement for the pid on
