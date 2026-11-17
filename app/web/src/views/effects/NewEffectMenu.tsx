@@ -56,7 +56,7 @@ export function NewEffectMenu({
   );
 
   return (
-    <Popover anchor={anchor} open={open} onClose={onClose} label="New effect">
+    <Popover className={s.menuPopover} anchor={anchor} open={open} onClose={onClose} label="New effect">
       <div className={s.menu}>
         {key("Stack", "Effects layered and blended", StackSimple, onStack)}
         {key("Pattern", "A colour for every LED of one device", CirclesFour, onPattern)}
