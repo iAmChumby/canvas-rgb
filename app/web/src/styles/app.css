@@ -3897,6 +3897,12 @@ button.chip:hover {
   flex-basis: 100%;
 }
 
+/* The shape picker's icons are for a wide row; a phone keeps the words so the shape and the
+   way round still share one line. */
+.rd-shape {
+  display: inline-flex;
+}
+
 .rd-devices .rd-dev-row + .rd-light-row {
   padding-left: var(--s4);
 }
@@ -3920,6 +3926,10 @@ button.chip:hover {
 
   .rd-light-turn {
     margin-left: 0;
+  }
+
+  .rd-shape .seg-item svg {
+    display: none;
   }
 }
 

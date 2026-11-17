@@ -16,6 +16,8 @@ tracing.workspace = true
 # cycle and the traits are the same ones.
 canvas-effects.workspace = true
 canvas-html.workspace = true
+# The golden vectors the editor shares are JSON (#468); already in the workspace and the lockfile.
+serde_json.workspace = true
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_Media", "Win32_System_Threading"] }

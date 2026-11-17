@@ -18,7 +18,12 @@ const { api, refreshPatterns } = vi.hoisted(() => ({
 }));
 
 vi.mock("@/lib/endpoints", () => ({ api }));
-vi.mock("@/lib/store", () => ({ refreshPatterns }));
+// The editor reads the lights it can write a shape to (#468); this page test has none.
+vi.mock("@/lib/store", () => ({
+  refreshPatterns,
+  refreshLights: vi.fn(),
+  useSnap: (pick: (state: { lights: null; devices: null }) => unknown) => pick({ lights: null, devices: null }),
+}));
 vi.mock("next/navigation", () => ({ useRouter: () => ({ push: vi.fn() }) }));
 
 import { PatternEditorPage } from "@/views/patterns/PatternEditorPage";

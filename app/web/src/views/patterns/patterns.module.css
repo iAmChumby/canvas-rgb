@@ -145,12 +145,19 @@
   overflow: hidden;
 }
 
-.surface {
-  display: block;
+/* The surface and whatever is laid over it (the Gradient tool's handles) share one box. */
+.surfaceBox {
+  position: relative;
   width: 100%;
   height: 100%;
   /* Past this the ring has nothing left to gain: a 980 px fan is already the whole desk. */
   max-width: 980px;
+}
+
+.surface {
+  display: block;
+  width: 100%;
+  height: 100%;
   /* A drag on the device paints; it never scrolls the page or selects text. */
   touch-action: none;
   cursor: crosshair;
@@ -233,4 +240,134 @@
   margin: auto;
   color: var(--mute);
   font-size: var(--t14);
+}
+
+/* ---------- the shape picker sits in the head beside the kind ---------- */
+
+.head :global(.seg) {
+  flex: none;
+}
+
+/* ---------- Spin: the motion row ---------- */
+
+.motion {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: var(--s2) var(--s3);
+}
+
+.motionKey {
+  flex: none;
+  font-size: var(--t14);
+  color: var(--mute);
+}
+
+.motionSpeed {
+  flex: 1 1 260px;
+  min-width: 0;
+  max-width: 460px;
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+  color: var(--dim);
+  transition: opacity var(--dur, 180ms) var(--ease);
+}
+
+/* Spin is off: the slider keeps its room and is dimmed, so turning it on moves nothing. */
+.motionSpeed[data-off="true"] {
+  opacity: 0.45;
+}
+
+.motionSlider {
+  flex: 1 1 auto;
+  min-width: 80px;
+}
+
+/* Sized for the widest reading ("-5.00"), so dragging never resizes the row. */
+.motionFigure {
+  flex: none;
+  min-width: 5ch;
+  text-align: right;
+  font-family: var(--fm);
+  font-size: var(--t14);
+  color: var(--ink);
+  font-variant-numeric: tabular-nums;
+}
+
+.motionUnit {
+  flex: none;
+  font-family: var(--fm);
+  font-size: var(--t14);
+  color: var(--mute);
+}
+
+/* ---------- the Gradient tool ---------- */
+
+.gradientKeys {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  transition: opacity var(--dur, 180ms) var(--ease);
+}
+
+.gradientKeys[data-live="false"] {
+  opacity: 0.5;
+}
+
+/* The handles are laid over the surface's own box and never block a press on it. */
+.stops {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.stop {
+  position: absolute;
+  width: 16px;
+  height: 16px;
+  padding: 0;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  cursor: grab;
+  touch-action: none;
+  border: 2px solid var(--knob-ring);
+  border-radius: 3px;
+  background: var(--stop);
+  /* A dark rim outside the light one, so the key reads on any colour it holds. */
+  box-shadow: 0 0 0 1px var(--knob-edge);
+  transition: transform var(--dur-fast, 120ms) var(--ease);
+}
+
+.stop:active {
+  cursor: grabbing;
+}
+
+.stop[data-selected="true"] {
+  transform: translate(-50%, -50%) scale(1.25);
+  box-shadow:
+    0 0 0 1px var(--knob-edge),
+    0 0 0 3px var(--a1);
+}
+
+.stop:focus-visible {
+  outline: 2px solid var(--a1);
+  outline-offset: 3px;
+}
+
+/* A hairline at the top of the ring: where the last stop meets the first. */
+.seam {
+  position: absolute;
+  width: 1px;
+  height: 12px;
+  background: var(--line-2);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .stop,
+  .motionSpeed,
+  .gradientKeys {
+    transition: none;
+  }
 }

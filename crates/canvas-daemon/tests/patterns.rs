@@ -1379,3 +1379,135 @@ async fn a_draft_with_no_field_says_what_it_needs() {
 
 
 
+
+// ---------------------------------------------------------------- Spin (#468)
+
+/// The LED with the most red in a frame, and the frame's lit LEDs.
+fn peak(frame: &[Rgb8]) -> (usize, usize) {
+    let at = frame.iter().enumerate().max_by_key(|(_, c)| c.r).map(|(i, _)| i).unwrap_or(0);
+    (at, frame.iter().filter(|c| **c != Rgb8::BLACK).count())
+}
+
+/// A ring of twelve with one red LED, spinning at `turns` laps a second.
+fn spinning_pattern(turns: f32) -> Pattern {
+    let mut pattern = pattern("Intake");
+    pattern.motion = Motion::spin(turns);
+    pattern
+}
+
+/// The daemon path, on the fakes: a pattern with Spin is saved, a scene plays it, and the fake
+/// device receives frames whose lit LED travels round the ring over four seconds: a whole lap at
+/// 0.25 laps a second, one LED about every third of a second, with the parts between LEDs blended.
+///
+/// Run with `--nocapture` to read the recorded run (every 15th frame).
+#[tokio::test]
+async fn a_spinning_pattern_sends_the_fake_device_rotating_frames_over_four_seconds() {
+    let rig = rig_with_patterns(vec![spinning_pattern(0.25)], scenes_file()).await;
+    shows_something(&rig.b).await;
+    let from = rig.b.seen();
+    tokio::time::sleep(Duration::from_secs(4)).await;
+    let frames = rig.b.since(from);
+    assert!(frames.len() > 60, "a 30 fps engine sent {} frames in 4 s", frames.len());
+    println!("recorded run: {} frames in 4 s, fake:b (a ring of {LEDS}), spin 0.25 laps/s", frames.len());
+    let mut last: Option<usize> = None;
+    let mut seen = std::collections::BTreeSet::new();
+    let mut blended = 0;
+    let mut steps = 0;
+    for (n, frame) in frames.iter().enumerate() {
+        assert_eq!(frame.len(), LEDS as usize);
+        if n % 15 == 0 {
+            let lit: Vec<String> =
+                frame.iter().enumerate().filter(|(_, c)| **c != Rgb8::BLACK).map(|(i, c)| format!("{i}:{c}")).collect();
+            println!("frame {n:3}  peak LED {:2}  lit {}", peak(frame).0, lit.join(" "));
+        }
+        let (at, lit) = peak(frame);
+        if lit > 1 {
+            blended += 1;
+        }
+        // The peak only ever moves forward round the ring, by at most one LED between frames.
+        if let Some(was) = last {
+            let step = (at + LEDS as usize - was) % LEDS as usize;
+            assert!(step <= 1, "the lit LED jumped from {was} to {at}");
+            steps += step;
+        }
+        seen.insert(at);
+        last = Some(at);
+    }
+    assert!(seen.len() >= 11, "a lap visits every LED: saw {seen:?}");
+    assert!(blended > 10, "between two LEDs the light is shared: {blended} frames");
+    // 0.25 laps a second for four seconds is one lap, 12 LEDs, give or take the frames either end.
+    assert!((10..=14).contains(&steps), "{steps} LED steps in four seconds");
+}
+
+/// The first frame with something lit on `sink`: the scene has started and faded in.
+async fn shows_something(sink: &Rec) {
+    wait_until(|| sink.last().is_some_and(|f| f.len() == LEDS as usize && f.iter().any(|c| c.r > 100))).await;
+}
+
+/// A 0.16.0 pattern file (two frames, a motion this version does not know) loads and plays its first
+/// frame, still, as it did before Spin existed.
+#[tokio::test]
+async fn a_0_16_0_pattern_file_plays_as_it_did() {
+    let colours = |lit: &str| -> Vec<String> {
+        (0..LEDS).map(|i| if i == 0 { lit.to_string() } else { "#000000".to_string() }).collect()
+    };
+    let text = serde_json::json!({
+        "schema_version": 1,
+        "patterns": [{
+            "id": INTAKE,
+            "built_on": {"led_count": LEDS, "arrangement": "ring"},
+            "frames": [
+                {"colors": colours("#c80000"), "hold": 250},
+                {"colors": colours("#0000c8"), "hold": 250}
+            ],
+            "motion": {"type": "rotate", "speed": 2}
+        }]
+    })
+    .to_string();
+    let file: canvas_proto::pattern::PatternsFile = serde_json::from_str(&text).expect("a 0.16.0 file loads");
+    let pattern = file.patterns[0].clone();
+    assert_eq!(pattern.motion.as_spin(), None);
+    let rig = rig_with_patterns(vec![pattern], scenes_file()).await;
+    shows_marked(&rig.b, LEDS as usize, 0, rgb(RED), "the 0.16.0 pattern").await;
+    let from = rig.b.seen();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let frames = rig.b.since(from);
+    assert!(frames.len() > 20, "{} frames", frames.len());
+    let want = rig.b.last().expect("a frame");
+    for frame in &frames {
+        assert_eq!(frame, &want, "a pattern with an unknown motion stays as its first frame");
+    }
+}
+
+/// A spinning pattern saves and reads back with its motion intact: the route keeps `Motion::spin`.
+#[tokio::test]
+async fn a_spin_pattern_saves_and_reads_back() {
+    let rig = rig().await;
+    let mut spinning = pattern("Fan");
+    spinning.motion = Motion::spin(-0.5);
+    let (status, answer) =
+        send(&rig, "PUT", &pattern_path("pattern:Fan"), Some(serde_json::to_value(&spinning).unwrap())).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let (status, answer) = send(&rig, "GET", &pattern_path("pattern:Fan"), None).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    assert_eq!(saved(&answer).motion.as_spin(), Some(-0.5), "{answer}");
+    assert_eq!(answer["motion"]["type"], "spin", "{answer}");
+}
+
+/// The editor's own path: a draft with a spinning pattern turns on the fake lights it plays on.
+#[tokio::test]
+async fn a_spinning_draft_turns_on_the_lights() {
+    let rig = draft_rig(Vec::new()).await;
+    let spinning = spinning_pattern(0.5);
+    let (status, answer) = put_pattern_draft(&rig, &spinning, EPOCH, 1).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let a = sink(&rig, A);
+    wait_until(|| a.last().is_some_and(|f| f.len() == LEDS as usize && f.iter().any(|c| c.r > 100))).await;
+    let from = a.seen();
+    tokio::time::sleep(Duration::from_millis(1500)).await;
+    let frames = a.since(from);
+    let peaks: std::collections::BTreeSet<usize> =
+        frames.iter().filter(|f| f.iter().any(|c| c.r > 60)).map(|f| peak(f).0).collect();
+    // 0.5 laps a second on 12 LEDs is 6 LEDs a second: well over four positions in 1.5 s.
+    assert!(peaks.len() >= 5, "the lit LED stood at {peaks:?}");
+}
