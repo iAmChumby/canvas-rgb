@@ -33,6 +33,46 @@ const RESERVED_SCENE_ID: &str = "active";
 /// mistake (or an attack on the lookup below), so it is refused before any light is looked up.
 pub const FLASH_LIGHTS_MAX: usize = 256;
 
+/// A seam in a scene PUT, for the tests (#497).
+///
+/// The PUT stops here, after it has validated the new scene against the lights and before it
+/// writes, so a test can put a light delete in that gap and see which one wins. The daemon never
+/// sets one: [`crate::state::App::set_scene_put_seam`] is how a test does.
+#[derive(Clone, Default)]
+pub struct ScenePutSeam {
+    /// The PUT is at the seam.
+    reached: Arc<tokio::sync::Notify>,
+    /// The test lets the PUT go on.
+    go: Arc<tokio::sync::Notify>,
+}
+
+impl ScenePutSeam {
+    /// A seam nobody watches yet.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Says the PUT is at the seam.
+    pub fn reached(&self) {
+        self.reached.notify_one();
+    }
+
+    /// Waits until the PUT is at the seam.
+    pub async fn wait_until_reached(&self) {
+        self.reached.notified().await;
+    }
+
+    /// Lets the PUT go on.
+    pub fn go(&self) {
+        self.go.notify_one();
+    }
+
+    /// Waits until the test lets the PUT go on.
+    pub async fn wait_for_go(&self) {
+        self.go.notified().await;
+    }
+}
+
 /// A route's failure: the API's usual error, or a `409` that carries what is stale as it is now.
 pub enum SceneFailure {
     Api(ApiFailure),
@@ -338,6 +378,12 @@ pub async fn put_scene(
             return Err(save_failure(&store, e).into());
         }
         return Ok(SceneAnswer::DryRun(SceneDryRun { saved: false, scene: new }));
+    }
+    // A test can park the PUT here, between validation and the write (#497). No seam is set in
+    // the daemon, so this is a no-op in production.
+    if let Some(seam) = app.scene_put_seam() {
+        seam.reached();
+        seam.wait_for_go().await;
     }
     replace_saved(&app, new.clone()).await?;
     if is_active(&app, &id).await {

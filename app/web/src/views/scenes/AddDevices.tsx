@@ -9,8 +9,14 @@
 // The list is a step of the open group, not a popover over it: the lights are many, and a step
 // has room for all of them and for the headings that say where they are now.
 
-import { useCallback, useEffect, useRef } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { Trash } from "@phosphor-icons/react";
 import { api } from "@/lib/endpoints";
+import { Button, IconButton } from "@/components/Button";
+import { notify } from "@/components/Notify";
+import { messageOf } from "@/lib/errors";
+import { driven } from "@/lib/drive";
+import { refreshLights, refreshScenes } from "@/lib/store";
 import { shownWords } from "@/views/chain/limits";
 import { moveLight } from "@/views/scenes/groupEdit";
 import type { LightView } from "@/proto/LightView";
@@ -74,6 +80,37 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked, onEmptied 
     flash(id, true);
   }, []);
 
+  /** The light whose removal is waiting for an inline confirm. */
+  const [confirming, setConfirming] = useState<string | null>(null);
+  /** The light whose delete request is in flight. */
+  const [removing, setRemoving] = useState<string | null>(null);
+
+  /**
+   * Removes a light the daemon never drives (#414). The daemon takes a snapshot before it writes,
+   * but the editor has no restore action, so the note says what happened and never promises an Undo.
+   */
+  const removeLight = useCallback(async (light: LightView) => {
+    setRemoving(light.light.id);
+    try {
+      const answer = await api.lights.remove(light.light.id);
+      await Promise.all([refreshLights(), refreshScenes()]);
+      let text = `${light.label} was removed.`;
+      const emptied = answer.emptied_groups;
+      const [only] = emptied;
+      if (only && emptied.length === 1) {
+        text += ` The group ${only.name} was left empty and removed too.`;
+      } else if (emptied.length > 1) {
+        text += ` The groups ${emptied.map((g) => g.name).join(", ")} were left empty and removed too.`;
+      }
+      notify(text);
+      setConfirming(null);
+    } catch (e) {
+      notify(`The light could not be removed: ${messageOf(e)}`, "down");
+    } finally {
+      setRemoving(null);
+    }
+  }, []);
+
   /** The light goes into this group; the group it was in lets it go, and goes if it is left empty. */
   const take = useCallback(
     (id: string) => {
@@ -102,27 +139,65 @@ export function AddDevices({ groupId, lights, use, onClose, onPicked, onEmptied 
 
   const row = (light: LightView, where: string, mineRow: boolean) => (
     <li className={s.addRow} key={light.light.id} data-mine={mineRow ? "true" : undefined}>
-      <button
-        type="button"
-        className={s.addPick}
-        data-light={light.light.id}
-        disabled={mineRow}
-        onPointerEnter={() => onEnter(light.light.id)}
-        onPointerLeave={() => onLeave(light.light.id)}
-        onFocus={() => onEnter(light.light.id)}
-        onBlur={() => onLeave(light.light.id)}
-        onClick={() => take(light.light.id)}
-      >
-        <span className={s.addName}>
-          <span className="one-line">{light.label}</span>
-          <span className={`${s.addMeta} fig`}>
-            {light.led_count} {light.led_count === 1 ? "LED" : "LEDs"}
-            {shownWords(light) ? ` · ${shownWords(light)}` : ""}
-            {light.connected ? "" : " · not connected"}
+      <div className={s.addRowLine}>
+        <div className={s.addPickWrap}>
+          <button
+            type="button"
+            className={s.addPick}
+            data-light={light.light.id}
+            disabled={mineRow}
+            onPointerEnter={() => onEnter(light.light.id)}
+            onPointerLeave={() => onLeave(light.light.id)}
+            onFocus={() => onEnter(light.light.id)}
+            onBlur={() => onLeave(light.light.id)}
+            onClick={() => take(light.light.id)}
+          >
+            <span className={s.addName}>
+              <span className="one-line">{light.label}</span>
+              <span className={`${s.addMeta} fig`}>
+                {light.led_count} {light.led_count === 1 ? "LED" : "LEDs"}
+                {shownWords(light) ? ` · ${shownWords(light)}` : ""}
+                {light.connected ? "" : " · not connected"}
+              </span>
+            </span>
+            <span className={s.addWhere}>{where}</span>
+          </button>
+        </div>
+        {/* The daemon deletes only lights on a device it never drives. A driven device that is
+            just unplugged shows as not connected but its light cannot be removed (409), so no
+            Remove is offered for it (#497). */}
+        {!light.connected && !driven(light.light.device_id) && (
+          <IconButton
+            label={`Remove ${light.label}`}
+            icon={<Trash size={16} />}
+            size="sm"
+            className={s.addRemove}
+            busy={removing === light.light.id}
+            onClick={() => setConfirming(light.light.id)}
+          />
+        )}
+      </div>
+      {confirming === light.light.id && (
+        <div className="confirm slide-in" role="alert" data-testid="remove-confirm">
+          <span>
+            Remove <span className="fig">{light.label}</span>? It leaves every group and the lights
+            list.
           </span>
-        </span>
-        <span className={s.addWhere}>{where}</span>
-      </button>
+          <div className={s.confirmActions}>
+            <Button
+              size="sm"
+              variant="danger"
+              busy={removing === light.light.id}
+              onClick={() => void removeLight(light)}
+            >
+              Remove
+            </Button>
+            <Button size="sm" variant="ghost" onClick={() => setConfirming(null)}>
+              Cancel
+            </Button>
+          </div>
+        </div>
+      )}
     </li>
   );
 

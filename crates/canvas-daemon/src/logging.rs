@@ -47,15 +47,21 @@ pub fn close() {
 /// bound on `WorkerGuard::drop` is about 1.1 s, which is too long for the quit watchdog.
 pub const FLUSH_LIMIT: std::time::Duration = std::time::Duration::from_millis(250);
 
-/// Runs `work` on a helper thread and waits at most `limit` for it. Returns whether it finished.
-/// A stuck `work` is left behind on its thread; the caller is about to end the process.
-pub fn run_bounded(limit: std::time::Duration, work: impl FnOnce() + Send + 'static) -> bool {
+/// Starts `work` on a helper thread and hands back the channel that says how it ended: the sender
+/// is dropped when the thread ends, so a receiver sees a disconnect when the work panicked.
+fn start_helper(work: impl FnOnce() + Send + 'static) -> std::sync::mpsc::Receiver<()> {
     let (done, finished) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         work();
         let _ = done.send(());
     });
-    finished.recv_timeout(limit).is_ok()
+    finished
+}
+
+/// Runs `work` on a helper thread and waits at most `limit` for it. Returns whether it finished.
+/// A stuck `work` is left behind on its thread; the caller is about to end the process.
+pub fn run_bounded(limit: std::time::Duration, work: impl FnOnce() + Send + 'static) -> bool {
+    start_helper(work).recv_timeout(limit).is_ok()
 }
 
 /// [`close`], but it gives up after [`FLUSH_LIMIT`]. Returns whether the log drained in time.
@@ -157,30 +163,42 @@ impl Drop for ResetOnPanic {
 /// ONCE. Returns `true` when the line is in the file, or the helper has begun writing it and may
 /// still finish after the limit (the caller must not write it again: a late append plus a second
 /// copy would be a duplicate). Returns `false` when the caller must write the line itself: the
-/// write failed, or the helper had not begun when the limit passed (it then never will).
+/// write failed, the helper panicked and put the line back, or the helper had not begun when the
+/// limit passed (it then never will).
 ///
 /// So a stalled disk can still lose the line, but it is never in the file twice.
 pub fn write_once_within(
     limit: std::time::Duration,
     write: impl FnOnce() -> std::io::Result<()> + Send + 'static,
 ) -> bool {
+    write_once_waiting(|finished| finished.recv_timeout(limit).is_ok(), write)
+}
+
+/// The write at the heart of [`write_once_within`]. `wait` starts the helper on its own thread and
+/// says whether the helper finished its body: production waits at most its limit for it, and a
+/// test waits for the helper's thread to end, so that the machine's speed never decides the
+/// verdict (class `cause:timing-test`, #72).
+fn write_once_waiting(
+    wait: impl FnOnce(std::sync::mpsc::Receiver<()>) -> bool,
+    write: impl FnOnce() -> std::io::Result<()> + Send + 'static,
+) -> bool {
     use std::sync::atomic::{AtomicBool, AtomicU8, Ordering::SeqCst};
     let state = std::sync::Arc::new(AtomicU8::new(WRITE_PENDING));
     let wrote = std::sync::Arc::new(AtomicBool::new(false));
     let (helper_state, helper_wrote) = (std::sync::Arc::clone(&state), std::sync::Arc::clone(&wrote));
-    let finished = run_bounded(limit, move || {
+    let finished = start_helper(move || {
         if helper_state.compare_exchange(WRITE_PENDING, WRITE_STARTED, SeqCst, SeqCst).is_err() {
             return;
         }
         let _reset = ResetOnPanic(std::sync::Arc::clone(&helper_state));
         helper_wrote.store(write().is_ok(), SeqCst);
     });
-    if finished {
+    if wait(finished) {
         wrote.load(SeqCst)
     } else {
-        // Past the limit: if the helper has not begun, take the write back (it will skip it);
-        // if it has begun (or it panicked and put it back), the caller owns the line when the
-        // take-back succeeds.
+        // The helper is not going to finish on its own: it panicked, or the limit passed. If the
+        // line is back (the panic guard put it back, or the helper never began), take the write
+        // back (it will skip it); if it has begun, it owns the line.
         state.compare_exchange(WRITE_PENDING, WRITE_TAKEN_BACK, SeqCst, SeqCst).is_err()
     }
 }
@@ -516,14 +534,31 @@ mod tests {
     /// #36 follow-up (#72): a helper that panics must not leave the state STARTED. If it does,
     /// `write_once_within` reports "the helper owns the line" and the caller skips the fallback,
     /// so the line is lost. The panic guard puts the state back so the caller takes the write back.
+    ///
+    /// The wait is the helper's own end, not a clock: how long the panic takes (a backtrace
+    /// capture alone takes longer than the old 50 ms window) must not decide the verdict (class
+    /// `cause:timing-test`).
     #[test]
     fn a_panicking_helper_lets_the_caller_write_the_fallback() {
-        let caller_owns_line = write_once_within(std::time::Duration::from_millis(50), || {
-            panic!("the direct write panicked");
-        });
+        let dir = temp_dir("panic-fallback");
+        let path = dir.join("panic.log");
+        // The helper's thread ends when it panics: the caller waits for that, not for a window.
+        let helper_owns_the_line = write_once_waiting(
+            |finished| finished.recv().is_ok(),
+            || panic!("the direct write panicked"),
+        );
         assert!(
-            !caller_owns_line,
+            !helper_owns_the_line,
             "a panicked helper wrote nothing: the caller must be told to write the fallback"
+        );
+        // The caller's fallback, as the panic hook has it: the caller writes the line itself.
+        append_line(&path, "the daemon panicked").unwrap();
+        let text = std::fs::read_to_string(&path).unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(
+            text.matches("the daemon panicked").count(),
+            1,
+            "the line is in the log exactly once: {text}"
         );
     }
 
