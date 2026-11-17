@@ -109,6 +109,7 @@ fn one_light() -> (Vec<Light>, Vec<DeviceInfo>, EngineGroup) {
         brightness: 100,
         effect: None,
         props: Props::new(),
+        sequence: None,
     };
     (vec![light], vec![device], group)
 }

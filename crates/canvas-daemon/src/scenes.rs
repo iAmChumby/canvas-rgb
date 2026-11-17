@@ -670,6 +670,7 @@ fn build_and_set(app: &App, lights: &[Light], devices: &[DeviceInfo], scene: &Sc
             id: group.id.clone(),
             members: group.members.clone(),
             mode: group.mode,
+            sequence: group.sequence,
             brightness: group.brightness,
             effect,
             props,
@@ -822,6 +823,7 @@ async fn apply_body(app: &Arc<App>, fade: bool) {
                     id: group.id.clone(),
                     members: group.members.clone(),
                     mode: group.mode,
+                    sequence: group.sequence,
                     brightness: group.brightness,
                     effect: None,
                     props: match &group.plays {
@@ -855,6 +857,8 @@ pub struct GroupRun {
     pub members: Vec<LightId>,
     /// How the group's members share the canvas.
     pub mode: GroupMode,
+    /// How a pattern runs through the members (#468 phase 4).
+    pub sequence: Option<canvas_proto::scene::SequenceShape>,
     /// Every light the daemon knows.
     pub lights: Vec<Light>,
     /// The devices the daemon sees.
@@ -868,6 +872,7 @@ impl GroupRun {
             id: self.id.clone(),
             members: self.members.clone(),
             mode: self.mode,
+            sequence: self.sequence,
             brightness: GROUP_BRIGHTNESS_MAX,
             effect,
             props: props.clone(),
@@ -889,6 +894,7 @@ pub async fn group_run(app: &App, id: &str) -> Option<GroupRun> {
         id: group.id,
         members: group.members,
         mode: group.mode,
+        sequence: group.sequence,
         lights,
         devices,
     })
@@ -903,6 +909,7 @@ pub async fn every_light_run(app: &App) -> GroupRun {
         id: TAKEOVER_GROUP.to_string(),
         members: lights.iter().map(|l| l.id.clone()).collect(),
         mode: GroupMode::FlowAcross,
+        sequence: None,
         lights,
         devices,
     }
@@ -1167,6 +1174,7 @@ pub async fn apply_takeover(
             id: TAKEOVER_GROUP.to_string(),
             members: lights.iter().map(|l| l.id.clone()).collect(),
             mode: GroupMode::FlowAcross,
+            sequence: None,
             brightness: GROUP_BRIGHTNESS_MAX,
             effect: Some(made),
             props: props.clone(),
@@ -1307,6 +1315,7 @@ fn build_and_set_with(
             id: group.id.clone(),
             members: group.members.clone(),
             mode: group.mode,
+            sequence: group.sequence,
             brightness: group.brightness,
             effect,
             props: group_props,
@@ -1432,6 +1441,7 @@ fn build_pattern_takeover(
             id: canvas_proto::pattern::PATTERN_EDIT_GROUP.to_string(),
             members: lit.to_vec(),
             mode: GroupMode::FlowAcross,
+            sequence: None,
             brightness: GROUP_BRIGHTNESS_MAX,
             effect: Some(Box::new(crate::pattern_effect::PatternEffect::new(pattern.clone()))),
             props: Props::new(),
@@ -1470,6 +1480,7 @@ fn build_pattern_takeover(
             id: group.id.clone(),
             members,
             mode: group.mode,
+            sequence: group.sequence,
             brightness: dim(group.brightness),
             effect,
             props,

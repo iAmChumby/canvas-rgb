@@ -183,6 +183,8 @@ pub struct EngineGroup {
     pub brightness: u8,
     pub effect: Option<Box<dyn Effect>>,
     pub props: Props,
+    /// How a pattern runs through the members (#468 phase 4), as [`crate::scene::Group::sequence`].
+    pub sequence: Option<crate::scene::SequenceShape>,
 }
 
 /// How a group of the running scene is doing. `failed` carries the text of a panic in its

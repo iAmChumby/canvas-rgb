@@ -80,6 +80,7 @@ fn run_on(
             brightness: 100,
             effect: Some(effect),
             props: props.clone(),
+            sequence: None,
         }],
         false,
     );
