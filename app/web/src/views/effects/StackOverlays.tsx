@@ -1,8 +1,9 @@
 "use client";
 
-// The builder's overlays (#257 phase 4), moved out of StackBuilder.tsx: the unsaved-changes
-// prompt, the name prompt, the two effect popovers, the drag ghost with its hint, and the live
-// region. Their markup and classes are unchanged.
+// The builder's overlays (#257 phase 4), moved out of StackBuilder.tsx: the name prompt, the two
+// effect popovers, the drag ghost with its hint, and the live region. Their markup and classes
+// are unchanged. The unsaved-changes prompt is shared with the pattern editor and lives in
+// `components/LeavePrompt.tsx`.
 
 import { useMemo, type KeyboardEvent as ReactKeyboardEvent, type RefObject } from "react";
 import { DotsSixVertical, X } from "@phosphor-icons/react";
@@ -17,50 +18,6 @@ import { isHtmlEffect } from "@/views/effects/stackDraft";
 import type { EffectSummary } from "@/proto/EffectSummary";
 import type { StackLayer } from "@/proto/StackLayer";
 import type { DragState } from "@/lib/dragSession";
-
-export function LeavePrompt({
-  promptRef,
-  saveState,
-  onKeepEditing,
-  onDiscard,
-  onSave,
-}: {
-  promptRef: RefObject<HTMLDivElement | null>;
-  saveState: "idle" | "saving";
-  onKeepEditing: () => void;
-  onDiscard: () => void;
-  onSave: () => void;
-}) {
-  return (
-    <div className="rd-scrim" role="presentation">
-      <div
-        className="rd-picker rd-confirm"
-        role="alertdialog"
-        aria-modal="true"
-        aria-label="Unsaved changes"
-        ref={promptRef}
-      >
-        <div className="rd-picker-head">
-          <div>
-            <h2>Save your changes?</h2>
-            <p>The stack has changes that are not saved. Leaving now loses them.</p>
-          </div>
-        </div>
-        <div className="rd-picker-foot">
-          <Button size="sm" variant="ghost" onClick={onKeepEditing}>
-            Keep editing
-          </Button>
-          <Button size="sm" variant="danger" disabled={saveState === "saving"} onClick={onDiscard}>
-            Discard
-          </Button>
-          <Button size="sm" variant="primary" busy={saveState === "saving"} onClick={onSave}>
-            Save
-          </Button>
-        </div>
-      </div>
-    </div>
-  );
-}
 
 export function NameStackDialog({
   nameDraft,

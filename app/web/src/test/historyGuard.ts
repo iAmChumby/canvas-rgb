@@ -25,3 +25,11 @@ export async function waitForEditorGuard(): Promise<void> {
       throw new Error("editor guard not installed yet");
   });
 }
+
+/** Waits until the pattern editor's history guard is installed. */
+export async function waitForPatternGuard(): Promise<void> {
+  await waitFor(() => {
+    if (window.history.state?.canvasRgbPatternGuard !== true)
+      throw new Error("pattern guard not installed yet");
+  });
+}

@@ -18,6 +18,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Patterns: the pattern editor asks before it throws unsaved strokes away, on the Cancel key, on a rail link, on the phone sheet's Back key, on the browser's Back and (in a browser) when the page closes, both in the effects view and on its own page: Save keeps the strokes, Discard drops them, Keep editing stays; after Discard or Save, one Back goes to the page you came from (to the effects page when the browser cannot say there was one), and a Forward onto the editor's old history entries opens the effects page instead of an editor. (#474)
 - Light setup now offers an ARGB header that has a size but was never set up (once, and "Later" is remembered), so the devices on it get checked instead of the header being skipped; on Devices such a header reads "Not checked" instead of "Not set up". (#470)
 - The icon rail's hover label stays invisible until it has been placed beside its icon, so it can never show at the window's corner. (#478)
 - Scenes: a group's list of effects and presets no longer runs through its picture band and the flow across / each its own switch. The band is the sheet's own header and the list scrolls in a pane under it, so no row is ever drawn in the band's pixels or cut by its edge, and a group's own effect picker no longer covers its mode switch when the window is short or narrow. On a narrow window a group row's mode switch now sits after the brightness fader, on the same line. (#469)
