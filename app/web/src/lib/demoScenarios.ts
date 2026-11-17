@@ -39,6 +39,13 @@ export const HANDBACK_REASON = "the daemon's safety handback: the chip was too h
 
 /** The scenario tokens this file understands, next to the demo's own ones. */
 export const DAEMON_DOWN = "daemon-down";
+/**
+ * `?state=engine-down`: the daemon is up and its render engine is not answering (#241).
+ *
+ * The status route answers 503 with the daemon's own words, the way the daemon does,
+ * and every other route answers as it always does: the daemon is running.
+ */
+export const ENGINE_DOWN = "engine-down";
 export const OPENRGB_DOWN = "openrgb-down";
 export const DEVICE_EMPTY = "device-empty";
 export const SLOW = "slow";
@@ -74,6 +81,11 @@ function has(name: string): boolean {
 /** The daemon does not answer at all: the editor cannot reach it. */
 export function daemonDown(): boolean {
   return has(DAEMON_DOWN);
+}
+
+/** The daemon is up and its render engine is not answering (#241). */
+export function engineDown(): boolean {
+  return has(ENGINE_DOWN);
 }
 
 /** The daemon is up, OpenRGB is not connected. */

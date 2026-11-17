@@ -73,6 +73,7 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(started.elapsed() < Duration::from_secs(2), \"waited past the first window", "open: pins the rescan's 1.5 s first window (no list change means detection did not start); 0.5 s slack over the window it asserts, #290"),
     ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(took >= Duration::from_secs(3) && took < Duration::from_secs(5)", "open: pins the 3 s detection cap set for this test: the call must return at the cap, not before and not long after; 2 s slack, #290"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),
+    ("canvas-daemon/tests/engine_calls.rs", "answer.took < Duration::from_millis(250)", "the property: the settings route must answer well inside the route's own 500 ms bound on the render engine, or a reader that holds the store's lock across the engine wait shows up (that way it waits about 390 ms)"),
     ("canvas-html/tests/effects.rs", "started.elapsed().as_millis() <= 2_000", "hang guard: a frame after a runaway loop must not be stuck as well; 2 s"),
     ("canvas-html/tests/effects.rs", "elapsed.as_millis() < 30 * canvas_html::FRAME_BUDGET_MS as u128", "hang guard: 30 frames against 30 frame budgets of the engine"),
 ];
@@ -106,6 +107,9 @@ const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/tests/api.rs", "from_millis(70)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/api.rs", "from_millis(250)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
     ("canvas-daemon/tests/api.rs", "from_millis(300)", "open: onboarding timer on a compressed time scale (transient.rs); listed sibling"),
+    ("canvas-daemon/tests/engine_calls.rs", "sleep(Duration::from_millis(150))", "safe: the sleep lets the daemon's copy of the engine's numbers go stale (that copy's bound is 50 ms); the route answers with the copy either way, and a slower runner only ages it more"),
+    ("canvas-daemon/tests/engine_calls.rs", "sleep(Duration::from_millis(20))", "safe: the poll loops that wait for the watcher to ask the engine and for the route to show the engine's change, each with a deadline that fails the test"),
+    ("canvas-daemon/tests/engine_calls.rs", "sleep(Duration::from_millis(100))", "safe: the sleep lets the writer reach the store's lock behind the stuck scenes request; the route's own answer is what the test measures, and a slower runner only delays that"),
     ("canvas-daemon/tests/exit_lines.rs", "sleep(Duration::from_millis(100))", "safe: the poll loop of a child exit, with a 20 s deadline that panics"),
     ("canvas-daemon/tests/wave1.rs", "sleep(std::time::Duration::from_secs(2))", "open: 2 s for an engine to park, then asserts it parked; a state reached in about 100 ms"),
     ("canvas-svc/src/openrgb_tests.rs", "sleep(Duration::from_millis(200))", "safe: the poll loop breaks when the boot color is written"),

@@ -7683,6 +7683,10 @@ button.chip:hover {
   background: var(--down);
 }
 
+.rail-status-dot[data-tone="warn"] {
+  background: var(--warn);
+}
+
 .rail-status-dot[data-tone="work"] {
   background: var(--work);
 }

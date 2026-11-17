@@ -218,6 +218,27 @@ describe("the store's answers", () => {
     await refreshScenes();
     expect(api.scenes.list).toHaveBeenCalledTimes(2);
   });
+
+  it("tells the daemon that is up from the daemon that is gone", async () => {
+    // The daemon is up and its render engine is not answering (#241): a 503 with the
+    // daemon's own words.
+    api.status.mockRejectedValue(
+      new ApiFailure(503, "service_unavailable", "the render engine is not answering"),
+    );
+    await refreshStatus();
+    expect(getSnap().statusFault).toBe("engine");
+    expect(getSnap().statusError).toBe("the render engine is not answering");
+
+    // The daemon is not there at all: the call never reached it.
+    api.status.mockRejectedValue(new ApiFailure(0, "unreachable", "canvas-rgb did not answer"));
+    await refreshStatus();
+    expect(getSnap().statusFault).toBe("down");
+
+    // A read that works says so.
+    api.status.mockResolvedValue(STATUS);
+    await refreshStatus();
+    expect(getSnap().statusFault).toBeNull();
+  });
 });
 
 /**
