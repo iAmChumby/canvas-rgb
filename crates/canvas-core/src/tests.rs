@@ -294,6 +294,7 @@ fn a_consumer_that_arrives_between_the_park_decision_and_the_wait_is_not_slept_t
                 Arc::new(AtomicBool::new(false)),
             ))),
             props: Props::new(),
+            sequence: None,
         }],
         false,
     );
@@ -421,6 +422,7 @@ mod scene {
             brightness: 100,
             effect,
             props: Props::new(),
+            sequence: None,
         }
     }
 

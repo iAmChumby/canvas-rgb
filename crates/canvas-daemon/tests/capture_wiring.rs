@@ -328,6 +328,7 @@ fn run_on_d0(engine: &Arc<dyn Engine>, effect: Box<dyn canvas_proto::traits::Eff
             brightness: 100,
             effect: Some(effect),
             props: props.clone(),
+            sequence: None,
         }],
         false,
     );

@@ -1957,6 +1957,7 @@ power = "running"
             plays: canvas_proto::scene::Plays::Off,
             mode: canvas_proto::scene::GroupMode::FlowAcross,
             brightness: 100,
+            sequence: None,
         }
     }
 
@@ -2027,6 +2028,7 @@ power = "running"
                         plays: Plays::Off,
                         mode: GroupMode::EachItsOwn,
                         brightness: 60,
+                        sequence: None,
                     },
                     Group {
                         id: "exhaust".into(),
@@ -2035,6 +2037,7 @@ power = "running"
                         plays: Plays::Effect { effect: "aurora".into(), props: Default::default() },
                         mode: GroupMode::FlowAcross,
                         brightness: 100,
+                        sequence: None,
                     },
                 ],
             }],

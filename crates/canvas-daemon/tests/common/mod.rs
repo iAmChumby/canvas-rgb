@@ -548,6 +548,7 @@ pub fn a_scene(
                 },
                 mode: canvas_proto::scene::GroupMode::FlowAcross,
                 brightness: 100,
+                sequence: None,
             }],
         }],
     };
