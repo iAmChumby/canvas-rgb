@@ -168,9 +168,14 @@ export function Slider({
     else if (e.key === "End") next = quantise(max);
     if (next === null) return;
     e.preventDefault();
-    onBegin?.();
+    // A held key's repeats ride on the first press's history entry; only the first keydown opens
+    // the gate, and the keyup closes it (#491).
+    if (!e.repeat) onBegin?.();
     onChange(next);
     onCommit?.(next);
+  };
+
+  const onKeyUp = () => {
     onEnd?.();
   };
 
@@ -198,6 +203,7 @@ export function Slider({
       onPointerCancel={onPointerCancel}
       onLostPointerCapture={onPointerCancel}
       onKeyDown={onKeyDown}
+      onKeyUp={onKeyUp}
     >
       <div className="slider-track" />
       {floor !== undefined && <div className="slider-floor" />}

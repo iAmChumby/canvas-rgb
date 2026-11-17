@@ -215,8 +215,10 @@ export function usePatternEditor(
   const gradientRef = useRef<GradientState | null>(null);
   /** True between a stop's first move and its release: one history entry. */
   const inStopDrag = useRef(false);
-  /** True between a motion slider's press and its release: one history entry for the whole drag (#491). */
+  /** True between a motion slider's press and its release: many changes make one entry (#491). */
   const inMotionDrag = useRef(false);
+  /** True once the first change of the open gesture has pushed its entry (#491). */
+  const motionPushed = useRef(false);
   /** Undo and redo share one lane, in press order: N presses undo N steps (#491). */
   const historyPending = useRef<Array<() => void>>([]);
   const historyBusy = useRef(false);
@@ -227,6 +229,8 @@ export function usePatternEditor(
   const draft = useRef(opts.onDraft);
   const pending = useRef<Pattern | null>(null);
   const frame = useRef<number | null>(null);
+  /** False after unmount: an async undo or shape write must not queue a draft for a closed editor. */
+  const mounted = useRef(true);
 
   useEffect(() => {
     draft.current = opts.onDraft;
@@ -288,6 +292,9 @@ export function usePatternEditor(
   /** Queues the document for the lights: at most one request per animation frame, the newest wins. */
   const schedule = useCallback(
     (next: Pattern) => {
+      // An undo's light write can land after the editor is gone. Nothing may reach the lights from
+      // a closed editor: its draft was deleted on unmount and a later PUT would revive it (#491).
+      if (!mounted.current) return;
       pending.current = next;
       if (frame.current !== null) return;
       if (typeof requestAnimationFrame !== "function") {
@@ -326,10 +333,15 @@ export function usePatternEditor(
   const setMotion = useCallback(
     (next: Motion) => {
       if (sameMotion(motionRef.current, next)) return;
-      // One drag of the slider is many 0.05 steps but one history entry (#491). A press opens the
-      // gate; a key press on its own still makes one entry, since no gate was opened for it.
-      if (!inMotionDrag.current) {
-        inMotionDrag.current = true;
+      // Inside a bracketed gesture (a slider drag or one key-down sequence) the first change pushes
+      // one entry and the rest ride on it. A change with no bracket — the Spin/Off segmented control
+      // — is discrete and pushes exactly one entry of its own (#491).
+      if (inMotionDrag.current) {
+        if (!motionPushed.current) {
+          motionPushed.current = true;
+          pushUndo();
+        }
+      } else {
         pushUndo();
       }
       motionRef.current = next;
@@ -340,10 +352,12 @@ export function usePatternEditor(
   );
 
   const beginMotionDrag = useCallback(() => {
-    inMotionDrag.current = false;
+    inMotionDrag.current = true;
+    motionPushed.current = false;
   }, []);
   const endMotionDrag = useCallback(() => {
     inMotionDrag.current = false;
+    motionPushed.current = false;
   }, []);
 
   const setGradient = useCallback((next: GradientState | null) => {
@@ -373,9 +387,11 @@ export function usePatternEditor(
     [commit, pushUndo, setGradient],
   );
 
-  // A queued frame is dropped with the editor: its draft is the draft's `DELETE`.
+  // A queued frame is dropped with the editor: its draft is the draft's `DELETE`. Mark the hook gone
+  // first, so an async write that lands after this cleanup cannot schedule a new frame (#491).
   useEffect(
     () => () => {
+      mounted.current = false;
       if (frame.current !== null) {
         if (typeof cancelAnimationFrame === "function") cancelAnimationFrame(frame.current);
         frame.current = null;
@@ -416,7 +432,7 @@ export function usePatternEditor(
       setGradient(seeded);
       if (!painted) applyGradient(seeded, "new");
     },
-    [applyGradient],
+    [applyGradient, setGradient],
   );
 
   const selectStop = useCallback(
@@ -702,11 +718,6 @@ export function usePatternEditor(
         done();
         return;
       }
-      // Check before the write as well: an earlier queued press may have moved past this step.
-      if (undoRef.current[undoRef.current.length - 1] !== previous) {
-        done();
-        return;
-      }
       const step = previous.shapeStep;
       if (!step) {
         finishUndo(previous);
@@ -734,10 +745,6 @@ export function usePatternEditor(
     enqueueHistory((done) => {
       const next = redoRef.current[redoRef.current.length - 1];
       if (!next) {
-        done();
-        return;
-      }
-      if (redoRef.current[redoRef.current.length - 1] !== next) {
         done();
         return;
       }

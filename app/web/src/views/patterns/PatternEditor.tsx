@@ -100,6 +100,9 @@ export function PatternEditor({
   /** Puts a stroke on the lights: the page's epoch and the next sequence. */
   const send = useCallback(
     async (document: Pattern) => {
+      // An in-flight undo or shape write can land after the editor closed and its draft was deleted.
+      // Never PUT again from an editor that is gone: the daemon would put the pattern back (#491).
+      if (!alive.current) return;
       seq.current += 1;
       const at = seq.current;
       /**
@@ -236,6 +239,9 @@ export function PatternEditor({
         return;
       }
     }
+    // The shape PATCH can land after the editor closed. Do not change the pattern, or schedule a
+    // draft, from an editor that is gone (#491).
+    if (!alive.current) return;
     editor.setShape(shape, gridOfZone(zone), step);
   };
 

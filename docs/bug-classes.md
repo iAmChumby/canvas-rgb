@@ -335,6 +335,19 @@ second on the status poll, so the effect tears down and starts again before it c
   send. Tests in `crates/canvas-daemon/tests/api.rs` (`issue295_*`). Rule: a writer that replaces a whole
   config asks the owner for its current copy, never its own cache, never a file the owner guards, and
   never the defaults.
+- [#481](https://github.com/iAmChumby/canvas-rgb/issues/481): an editor closed while an undo's light
+  write was in flight put its pattern back on the lights. The hook cancelled its queued frame on
+  unmount, but the write landed afterwards and `finishUndo → restore → applyDoc → schedule` queued a
+  new one; `send` checked `alive` only after the PUT, so a draft was revived for up to `DRAFT_LEASE`
+  (15 s) after the unmount's DELETE (`app/web/src/views/patterns/usePatternEditor.ts`,
+  `app/web/src/views/patterns/PatternEditor.tsx`). The shape picker's PATCH had the same window.
+  Fix: the hook marks itself unmounted in its cleanup and refuses to schedule after that; `send`
+  checks `alive` before the PUT and `chooseShape` checks it after its PATCH. Regression tests:
+  `app/web/src/views/patterns/__tests__/PatternUndo491.test.ts` "P5: unmounting during the undo's light
+  write sends no draft afterwards" and `PatternSpin.test.tsx` "closing the editor during a pending undo
+  write sends no draft after the DELETE (#491)". Rule: an async continuation of an editor action checks
+  that its owner still exists before it sends anything; a request guard checked only on the answer is
+  checked on the send too.
 
 ### `cause:timing-test`: a test whose verdict depends on how long the machine takes
 

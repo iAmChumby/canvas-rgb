@@ -452,6 +452,110 @@ describe("the Spin control", () => {
     expect((onSave.mock.calls[0]![0] as Pattern).motion).toEqual(rotate);
   });
 
+  it("the Off after a Spin is its own history entry: Spin, Off, Undo -> Spin (#491)", async () => {
+    show(blank(12, "ring"));
+    await settle();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Spin" }));
+    });
+    await frames();
+    expect(draft().motion).toEqual({ type: "spin", turns_per_s: 0.25 });
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(false);
+
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Off" }));
+    });
+    await frames();
+    expect(draft().motion).toEqual({ type: "none" });
+
+    // One press puts the spin back; the next press takes it away again.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    await frames();
+    expect(draft().motion).toEqual({ type: "spin", turns_per_s: 0.25 });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    await frames();
+    expect(draft().motion).toEqual({ type: "none" });
+  });
+
+  it("closing the editor during a pending undo write sends no draft after the DELETE (#491)", async () => {
+    patchSnap({ lights: [fanLight("strip")], devices: [fanDevice()] });
+    api.lights.patch.mockResolvedValue({ ...fanLight("ring") });
+    api.lights.list.mockResolvedValue({ lights: [fanLight("ring")] });
+    const view = show(blank(8, "strip"));
+    await settle();
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Ring" }));
+    });
+    await frames();
+    expect(screen.getByText("ring of 8")).toBeTruthy();
+
+    // Hold the undo's light PATCH. The owner then closes the editor, which deletes the draft.
+    let land: () => void = () => {};
+    api.lights.patch.mockReset().mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          land = () => resolve({ ...fanLight("strip") });
+        }),
+    );
+    api.lights.list.mockResolvedValue({ lights: [fanLight("strip")] });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    view.unmount();
+    await settle();
+    expect(api.deleteDraft).toHaveBeenCalled();
+    api.putPatternDraft.mockClear();
+
+    // The write lands after the editor is gone: nothing may go back on the lights.
+    await act(async () => {
+      land();
+      for (let i = 0; i < 20; i++) await Promise.resolve();
+    });
+    await frames();
+    expect(api.putPatternDraft).not.toHaveBeenCalled();
+  });
+
+  it("a held arrow key is one history entry, not one per repeat (#491)", async () => {
+    const started = { type: "spin", turns_per_s: 0.25 } as Pattern["motion"];
+    show(blank(12, "ring", started));
+    await settle();
+    const slider = screen.getByRole("slider", { name: "Spin speed, turns per second" });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Fill all" }));
+    });
+    await frames();
+    const filled = draft().frames[0]!.colors;
+
+    await act(async () => {
+      fireEvent.keyDown(slider, { key: "ArrowUp" });
+    });
+    for (let k = 0; k < 95; k++) {
+      await act(async () => {
+        fireEvent.keyDown(slider, { key: "ArrowUp", repeat: true });
+      });
+    }
+    await act(async () => {
+      fireEvent.keyUp(slider, { key: "ArrowUp" });
+    });
+    await frames();
+
+    // One press undoes the whole held key, and the fill is still undoable behind it.
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    await frames();
+    expect(draft().motion).toEqual(started);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    });
+    await frames();
+    expect(draft().frames[0]!.colors).not.toEqual(filled);
+  });
+
   it("undoes one drag of the spin slider in one press, not one tick at a time (#491)", async () => {
     const started = { type: "spin", turns_per_s: 0.25 } as Pattern["motion"];
     show(blank(12, "ring", started));

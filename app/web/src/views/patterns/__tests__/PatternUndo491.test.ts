@@ -49,8 +49,11 @@ function editor(pattern: Pattern = ring()) {
   return renderHook(() => usePatternEditor(pattern, { onDraft: () => {} }));
 }
 
-/** The serialised history queue runs on microtasks; let every queued step finish. */
+/** The serialised history queue runs on microtasks; let every queued step and frame finish. */
 async function drain(): Promise<void> {
+  for (let i = 0; i < 20; i++) await Promise.resolve();
+  const queued = frames.splice(0, frames.length);
+  for (const cb of queued) cb(0);
   for (let i = 0; i < 20; i++) await Promise.resolve();
 }
 
@@ -216,6 +219,33 @@ describe("the pattern editor's undo window (#491)", () => {
     expect(result.current.canRedo).toBe(true);
     act(() => result.current.stroke([1]));
     expect(result.current.canRedo).toBe(false);
+  });
+
+  it("P5: unmounting during the undo's light write sends no draft afterwards", async () => {
+    let land: () => void = () => {};
+    const draft = vi.fn();
+    const write = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          land = resolve;
+        }),
+    );
+    const { result, unmount } = renderHook(() =>
+      usePatternEditor(ring({ 0: RED }), { onDraft: draft, onShapeLight: write }),
+    );
+    act(() =>
+      result.current.setShape("strip", undefined, { light: "L", from: "ring", to: "strip" }),
+    );
+    act(() => {
+      result.current.undo();
+    });
+    unmount();
+    expect(draft).not.toHaveBeenCalled();
+    await act(async () => {
+      land();
+      await drain();
+    });
+    expect(draft).not.toHaveBeenCalled();
   });
 
   it("F: three shape changes and three undos keep the light and the pattern in step", async () => {
