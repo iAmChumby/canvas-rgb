@@ -1562,7 +1562,10 @@ fn phase_of(frame: &[Rgb8]) -> Phase {
         Phase::Red
     } else if *first == rgb(BLUE) {
         Phase::Blue
-    } else if first.r > 0 && first.b > 0 {
+    } else if *first != Rgb8::BLACK {
+        // Any one colour on every LED that is neither end is a step of the fade. (Near blue the
+        // OKLab blend rounds red to 0 before blue reaches 255, so `r > 0 && b > 0` misread the last
+        // fade steps as something else: CI saw [Red, Between, Other, Blue].)
         Phase::Between
     } else {
         Phase::Other
