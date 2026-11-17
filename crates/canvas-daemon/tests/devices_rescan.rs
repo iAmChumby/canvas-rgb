@@ -725,6 +725,45 @@ async fn a_hot_plug_unplug_with_no_103_is_applied_after_the_quiet_period() {
     assert_eq!(sink_ids(&rig), ["openrgb:one", "openrgb:two"], "the removed device kept its frame sink");
 }
 
+/// #290 review 7: a protocol-5 OpenRGB hears no detection events, so a shrink waits for the quiet period there
+/// too. A detection with a gap between registrations must never show the daemon a part list (before the fix:
+/// devices and sinks went 3 -> 1 -> 2); the removal still applies after the quiet period.
+#[tokio::test(start_paused = true)]
+async fn a_protocol_5_unplug_waits_for_the_quiet_period_and_never_shows_a_part_list() {
+    let server = FakeOpenRgbServer::start(vec![stick("one"), stick("two"), stick("three")]).await.expect("fake server");
+    server.server_protocol_version(5);
+    let rig = rig_timed("v5-unplug", server.port(), RESCAN_BUDGET, RescanTiming::default()).await;
+    wait_for_link(&rig, LinkState::Connected).await;
+    wait_for_sink(&rig, "openrgb:three").await;
+
+    // Two devices vanish for a while (a detection's gap on a protocol-5 link looks like this), one comes back.
+    server.unplug_device(2);
+    server.unplug_device(1);
+    server.list_changed();
+    let mut samples = Vec::new();
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        samples.push((rig.app.devices.read().await.len(), sink_ids(&rig).len()));
+    }
+    assert!(samples.iter().all(|&s| s == (3, 3)), "a protocol-5 part list reached the daemon: {samples:?}");
+    server.announce(stick("two"));
+    server.list_changed();
+    // The list settles at one, two: the missing three goes after the quiet period, never earlier.
+    let quiet_samples = (UNPLUG_QUIET.as_millis() / 500) as usize;
+    let mut after = Vec::new();
+    while after.len() < 180 {
+        tokio::time::sleep(Duration::from_millis(500)).await;
+        let devices = rig.app.devices.read().await.len();
+        after.push((devices, sink_ids(&rig).len()));
+        if devices == 2 {
+            break;
+        }
+    }
+    assert_eq!(*after.last().expect("samples"), (2, 2), "the unplug was never applied on protocol 5: {after:?}");
+    assert!(after.len() >= quiet_samples - 1, "applied before the quiet period: {after:?}");
+    assert!(after[..after.len() - 1].iter().all(|&s| s == (3, 3)), "the list was in between: {after:?}");
+}
+
 /// #290 review 6: a device plugged in is a list that keeps everything held and adds one, and that applies at the
 /// next read, final or not.
 #[tokio::test(start_paused = true)]

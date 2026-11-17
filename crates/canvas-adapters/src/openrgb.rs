@@ -625,8 +625,13 @@ impl OpenRgbAdapter {
     /// period (`UNPLUG_QUIET` in the daemon's supervisor), so a missing 103 never freezes the list.
     pub fn list_is_final(&self) -> bool {
         let session = guard(&self.link.session);
-        session.protocol_version < PROTOCOL_WITH_EVENTS
-            || (session.list_final && !session.detecting && session.list_changes == session.list_changes_at_103)
+        // Protocol 5 hears no detection events, so its list is never final by an event: a shrink there
+        // waits for the owner's rescan or the daemon's quiet period, like a protocol-6 hot plug (#290
+        // review 7: calling it final let a detection gap shrink the daemon's list 3 -> 1 -> 2).
+        session.protocol_version >= PROTOCOL_WITH_EVENTS
+            && session.list_final
+            && !session.detecting
+            && session.list_changes == session.list_changes_at_103
     }
 
     /// Protocol 6 and later: a detection ended (103) and no read of the list has followed it. The daemon
