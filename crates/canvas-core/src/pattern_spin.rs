@@ -75,7 +75,7 @@ pub fn mix(from: Rgb8, to: Rgb8, t: f64) -> Rgb8 {
 }
 
 /// [`mix`] with both colours' OKLab already known: the per-tick path converts each colour once.
-fn mix_lab(from: Rgb8, from_lab: [f64; 3], to: Rgb8, to_lab: [f64; 3], t: f64) -> Rgb8 {
+pub(crate) fn mix_lab(from: Rgb8, from_lab: [f64; 3], to: Rgb8, to_lab: [f64; 3], t: f64) -> Rgb8 {
     let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
     // The ends and two alike colours are exact: no round trip through OKLab to lose a level on.
     if from == to || t <= 0.0 {
@@ -120,6 +120,37 @@ impl SpinSource {
     pub fn new(rgb: Vec<Rgb8>) -> Self {
         let lab = rgb.iter().map(|c| to_oklab(*c)).collect();
         Self { rgb, lab }
+    }
+
+    /// The colours, in position order.
+    pub fn rgb(&self) -> &[Rgb8] {
+        &self.rgb
+    }
+
+    /// Becomes the OKLab blend of `a` into `b` at `t` (0 is `a`, 1 is `b`), LED by LED, reusing
+    /// this source's buffers: the per-tick path of a fading pattern, which never allocates once the
+    /// buffers have grown. The result's OKLab values are the blend itself, not converted back from
+    /// the 8-bit colours, so a spin of it blends the neighbours of the true colours. Each LED is
+    /// exactly [`mix`] of the two colours.
+    pub fn blend_from(&mut self, a: &SpinSource, b: &SpinSource, t: f64) {
+        let t = if t.is_finite() { t.clamp(0.0, 1.0) } else { 0.0 };
+        self.rgb.clear();
+        self.lab.clear();
+        for i in 0..a.rgb.len().min(b.rgb.len()) {
+            let (from, to) = (a.rgb[i], b.rgb[i]);
+            if from == to || t <= 0.0 {
+                self.rgb.push(from);
+                self.lab.push(a.lab[i]);
+            } else if t >= 1.0 {
+                self.rgb.push(to);
+                self.lab.push(b.lab[i]);
+            } else {
+                let (f, g) = (a.lab[i], b.lab[i]);
+                let lab = [f[0] + (g[0] - f[0]) * t, f[1] + (g[1] - f[1]) * t, f[2] + (g[2] - f[2]) * t];
+                self.rgb.push(from_oklab(lab));
+                self.lab.push(lab);
+            }
+        }
     }
 
     /// How many LEDs the source has.

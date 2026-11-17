@@ -215,6 +215,7 @@ mod tests {
             },
             frames: Vec::new(),
             motion: canvas_proto::pattern::Motion::none(),
+            playback: None,
             extra: serde_json::Map::new(),
         }
     }

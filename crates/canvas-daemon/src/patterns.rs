@@ -351,8 +351,9 @@ mod tests {
         Pattern {
             id: format!("pattern:{name}"),
             built_on: BuiltOn { led_count: 12, arrangement: Arrangement::Ring, grid: None },
-            frames: vec![Frame { colors, hold: 0, extra: serde_json::Map::new() }],
+            frames: vec![Frame { colors, hold: 0, transition: None, extra: serde_json::Map::new() }],
             motion: Motion::none(),
+            playback: None,
             extra: serde_json::Map::new(),
         }
     }
