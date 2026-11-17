@@ -298,6 +298,10 @@ async fn daemon_main(fakes: bool) -> Exit {
     spawn_user_effects_watch(app.clone());
     canvas_daemon::draft::spawn_sweeper(app.clone());
     canvas_daemon::api::audio::spawn_sweeper(app.clone());
+    // The engine's numbers are kept fresh by the daemon's own threads, so a route never
+    // waits for the render thread on a runtime worker (#241). The guard keeps them
+    // running for as long as the daemon runs.
+    let _engine_watch = canvas_daemon::state::watch_engine(app.clone());
 
     // The API. Fakes mode binds the spine's test port, never the config port.
     let api_port = if fakes {

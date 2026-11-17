@@ -5,7 +5,7 @@
 
 import { useSyncExternalStore } from "react";
 import { api } from "@/lib/endpoints";
-import { ApiFailure, messageOf } from "@/lib/errors";
+import { ApiFailure, daemonFault, messageOf, type DaemonFault } from "@/lib/errors";
 import { canUpdate, getUpdateState, onStateChanged, onUpdateState } from "@/lib/host";
 import { setDemoUpdateListener } from "@/lib/demoUpdate";
 import type { Status } from "@/proto/Status";
@@ -73,6 +73,12 @@ export function statusRetry(): { lastTryAt: number; nextTryInMs: number } {
 export interface Snap {
   status: Status | null;
   statusError: string | null;
+  /**
+   * Why the last status read failed: canvas-rgb not answering at all, or canvas-rgb
+   * answering and saying its render engine is not answering (#241). `null` when the
+   * last read worked. The page says the one it is, and shows the daemon's own words.
+   */
+  statusFault: DaemonFault | null;
   fans: FansStatus | null;
   fansError: string | null;
   devices: DeviceInfo[] | null;
@@ -113,6 +119,7 @@ export interface Snap {
 let snap: Snap = {
   status: null,
   statusError: null,
+  statusFault: null,
   fans: null,
   fansError: null,
   devices: null,
@@ -255,7 +262,7 @@ export async function refreshStatus(n?: number): Promise<void> {
     const status = await api.status();
     if (!isNewest("status", req)) return;
     markAnswered("status", req);
-    patchSnap({ status, statusError: null });
+    patchSnap({ status, statusError: null, statusFault: null });
     // A read that answers after a failed one is a daemon that came back. A rebuilt dev daemon keeps
     // its version, so the version alone would leave it dark until a Try again.
     const cameBack = statusFailures > 0;
@@ -279,7 +286,11 @@ export async function refreshStatus(n?: number): Promise<void> {
     statusFailures += 1;
     // The last status is old after the second miss in a row (about DOWN_RETRY_MS later). Clearing it
     // is what lets the strip and the daemon-down page say the daemon is gone.
-    patchSnap(statusFailures >= 2 ? { status: null, statusError: messageOf(e) } : { statusError: messageOf(e) });
+    patchSnap(
+      statusFailures >= 2
+        ? { status: null, statusError: messageOf(e), statusFault: daemonFault(e) }
+        : { statusError: messageOf(e), statusFault: daemonFault(e) },
+    );
     lastStatusFailureAt = Date.now();
   }
 }

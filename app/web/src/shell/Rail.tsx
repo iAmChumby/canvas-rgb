@@ -64,7 +64,7 @@ export function Rail({ pathname }: { pathname: string }) {
   const [marker, setMarker] = useState<MarkerBox | null>(null);
   const values = useRailData();
   const status = useSnap((s) => s.status);
-  const statusError = useSnap((s) => s.statusError);
+  const statusFault = useSnap((s) => s.statusFault);
 
   useLayoutEffect(() => {
     const nav = navRef.current;
@@ -160,8 +160,22 @@ export function Rail({ pathname }: { pathname: string }) {
     : undefined;
 
   // The engine's own line: the daemon's word, and the rate it is running at.
-  const engine = status ? "engine" : statusError ? "offline" : "connecting";
-  const engineTone = status ? "ok" : statusError ? "down" : "work";
+  // The daemon that answered and said its render engine is not answering (#241) is up:
+  // its engine is the part that is not answering.
+  const engine = status
+    ? "engine"
+    : statusFault === "engine"
+      ? "engine down"
+      : statusFault === "down"
+        ? "offline"
+        : "connecting";
+  const engineTone = status
+    ? "ok"
+    : statusFault === "engine"
+      ? "warn"
+      : statusFault === "down"
+        ? "down"
+        : "work";
   const fps = status ? Math.round(status.fps_measured) : null;
 
   return (

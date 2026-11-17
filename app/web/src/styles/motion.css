@@ -290,6 +290,17 @@
   font-size: var(--t15);
 }
 
+/* The daemon's own words (#241): the message it sent, in a note of its own. The wash is
+   the warning one, so the line reads as something canvas-rgb said and not as a heading. */
+.state-page-message {
+  color: var(--ink);
+  font-size: var(--t15);
+  padding: var(--s2) var(--s3);
+  border-radius: var(--r-sm);
+  border-left: 2px solid var(--warn);
+  background: var(--warn-wash);
+}
+
 .state-page-keeps {
   display: flex;
   flex-direction: column;

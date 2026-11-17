@@ -8,16 +8,25 @@
 
 /* ---------- the menu: three keys under the New effect key ---------- */
 
+/* Wide enough for the longest note on a desktop; the phone keeps a viewport's width. The
+   popover itself is widened below so the menu is not squeezed inside its 320px default. */
 .menu {
   display: flex;
   flex-direction: column;
   gap: 6px;
-  width: 264px;
+  width: min(344px, calc(100vw - 48px));
 }
 
-.menuKey {
-  width: 100%;
+/* `size="sm"` fixes every Button at 28px, which cannot hold a name and a note. This one key
+   gets its own height: the `:global(.btn.btn-sm)` selector raises the specificity above the
+   shared `.btn-sm` rule, so no other caller of Button changes. The icon stays centred by the
+   flex alignment the button already has. */
+.menuKey:global(.btn.btn-sm) {
+  height: auto;
+  min-height: 56px;
+  align-items: center;
   justify-content: flex-start;
+  width: 100%;
   gap: 10px;
   padding: 9px 10px;
   text-align: left;
@@ -35,14 +44,19 @@
   font-weight: 600;
 }
 
-/* The one line under each key's name: what that choice makes. */
+/* The popover's default 320px cap would squeeze the menu; this one panel may use the width
+   a phone leaves (8px at each edge), without changing any other popover. */
+.menuPopover:global(.popover) {
+  max-width: min(374px, calc(100vw - 16px));
+}
+
+/* The one sentence under each key's name: what that choice makes. It wraps in the room the
+   key's own height gives it, so no note is cut to an ellipsis. */
 .menuNote {
   font-family: var(--fm);
   font-size: var(--t14);
   color: var(--mute);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
+  white-space: normal;
 }
 
 /* ---------- the tile: a pattern drawn as its own dots ---------- */

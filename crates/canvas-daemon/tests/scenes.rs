@@ -3028,7 +3028,12 @@ async fn status_lists_each_active_effect_once_and_only_from_the_active_scene() {
     let rig = rig_with(scenes).await;
     let effects = |rig: &Rig| {
         let app = Arc::clone(&rig.app);
-        async move { app.status().await.active_effects }
+        async move {
+            app.status()
+                .await
+                .expect("the render engine answered")
+                .active_effects
+        }
     };
     // Two groups play solid and the other scene plays gradient: one entry, no gradient.
     assert_eq!(effects(&rig).await, vec!["solid".to_string()]);

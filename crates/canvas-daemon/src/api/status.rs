@@ -2,15 +2,22 @@
 
 use axum::extract::State;
 use axum::response::{IntoResponse, Response};
-use canvas_proto::api::{routes, Status};
+use canvas_proto::api::routes;
 use canvas_proto::config::OnQuit;
 use std::sync::Arc;
 
 use crate::state::App;
 
 /// `GET /api/v1/status`. The only route that needs no token.
-pub async fn status(State(app): State<Arc<App>>) -> axum::Json<Status> {
-    axum::Json(app.status().await)
+///
+/// A daemon whose render engine has never answered says so (a 503) instead of
+/// answering zeros that look like a measurement (#241).
+pub async fn status(State(app): State<Arc<App>>) -> Response {
+    match app.status().await {
+        Some(status) => axum::Json(status).into_response(),
+        None => crate::api::ApiFailure::service_unavailable(crate::state::ENGINE_NOT_ANSWERING)
+            .into_response(),
+    }
 }
 
 /// `POST /api/v1/quit`.
