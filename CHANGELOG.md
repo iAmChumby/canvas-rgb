@@ -11,6 +11,10 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - Patterns: pick the shape a light is in (Line, Ring, or Grid where it is one) on its Devices row or in the pattern editor, paint a Gradient round the ring with Wrap so the end meets the start, and turn on Spin to make the pattern turn along its LEDs at the same speed on any fan; colours blend in OKLab, so red to blue passes through purple. (#468)
 - Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
 
+### Changed
+
+- Devices is laid out like the other pages now: every list sits on a surface, an ARGB header is one row with its state, the device's real connection state and a secondary Set up key inline instead of a second row, and each light's name, shape and direction line up in the same columns; a one-LED light shows no shape switch and a grid shows its grid shape. (#471)
+
 ### Fixed
 
 - Devices: Rescan now asks OpenRGB to detect hardware again, and ends on OpenRGB's own "detection finished" signal (OpenRGB 1.1 and newer, the version canvas-rgb ships). While a detection runs, however long it takes, the daemon keeps its device list; the new list, shorter or longer, applies once when the detection ends, and a rescan answers with the list held when the detection is still running after 15 s. If every OpenRGB device is unplugged, the empty list applies when the detection ends. With an older OpenRGB (protocol 5) the lights pause during a detection, the list applies once it has stopped changing for 2 s, and an empty list is not applied until OpenRGB restarts. Checked against a fake OpenRGB only; a real-hardware check is still to do. (#290)
