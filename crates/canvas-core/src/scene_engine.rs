@@ -38,6 +38,7 @@ use canvas_proto::traits::{
 };
 use tracing::warn;
 
+use crate::pattern_play::{self, Beat, Timeline};
 use crate::pattern_spin::SpinSource;
 
 use crate::arrangement::{build_group_plan, GroupPlan};
@@ -272,9 +273,19 @@ struct RunGroup {
     /// position order (no `reversed` yet), turned every tick from the effect's clock. `None` for
     /// every pattern that does not spin, which keeps today's zero per-tick work.
     spin: Option<SpinPlay>,
+    /// A pattern with more than one frame and a cycle of more than 0 ms (#468): every frame fitted
+    /// to every light once, and the timeline that says which shows. `None` for a pattern that
+    /// stands still, which keeps today's zero per-tick work.
+    frames: Option<FramePlay>,
     /// How many lights have been turned this run. Tests only: a static pattern leaves it at 0.
     #[cfg(test)]
     spun: u64,
+    /// How many lights have had a frame chosen or blended this run. Tests only.
+    #[cfg(test)]
+    framed: u64,
+    /// How many times the pattern was fitted to the lights this run. Tests only: once per change.
+    #[cfg(test)]
+    fits: u64,
     /// The effect generation the canvas was last cleared for.
     seen_effect_generation: u64,
     /// What the group drew last frame, for the group preview (#378). Written by
@@ -290,6 +301,16 @@ struct SpinPlay {
     turns_per_s: f64,
     /// One per light of the plan, in `plan.lights` order, in position order.
     sources: Vec<SpinSource>,
+}
+
+/// A pattern of several frames at play (#468).
+struct FramePlay {
+    timeline: Timeline,
+    /// Per light of the plan, in `plan.lights` order: every frame of the pattern fitted to the
+    /// light, in position order (no `reversed` yet; that is applied after the blend and the turn).
+    frames: Vec<Vec<SpinSource>>,
+    /// Per light: the blended frame a fade turns into, kept so a tick allocates nothing.
+    blended: Vec<SpinSource>,
 }
 
 /// What a group put on its canvas in the last frame: the choice the group preview needs to
@@ -310,7 +331,12 @@ impl RunGroup {
     /// `fitted` ends in the device's LED order (each light's own `reversed` applied) and before
     /// the group's brightness.
     fn fit_group(&mut self, effect: Option<&dyn Effect>) {
+        #[cfg(test)]
+        {
+            self.fits += 1;
+        }
         self.spin = None;
+        self.frames = None;
         let Some(pattern) = effect.and_then(|e| e.as_pattern()) else {
             // A canvas effect, or no effect: nothing is fitted.
             self.fitted.clear();
@@ -326,14 +352,27 @@ impl RunGroup {
         // Spin (#468): the colours are kept in position order for the per-tick turn, which then
         // applies `reversed`. A speed of 0, a missing one and a bad one play as no motion.
         let spin = pattern.motion.as_spin().filter(|speed| *speed != 0.0);
+        // Frames (#468): a pattern that plays through its frames keeps every one of them, fitted
+        // once here; a still one (one frame, or no time in the cycle) is exactly today's.
+        let timeline = Timeline::of(pattern);
+        let playing_frames = !timeline.is_still();
         let mut sources = Vec::new();
+        let mut frame_sets: Vec<Vec<SpinSource>> = Vec::new();
         let fitted: Vec<Vec<Rgb8>> = self
             .shapes
             .iter()
             .enumerate()
             .map(|(index, (leds, arrangement))| {
                 let mut colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
-                if spin.is_some() {
+                if playing_frames {
+                    frame_sets.push(
+                        pattern
+                            .frames
+                            .iter()
+                            .map(|f| SpinSource::new(fit_colors(&f.colors, &pattern.built_on, *leds, *arrangement)))
+                            .collect(),
+                    );
+                } else if spin.is_some() {
                     sources.push(SpinSource::new(colors.clone()));
                 }
                 // The pattern is stored in position order; a reversed light's frame runs the
@@ -346,6 +385,11 @@ impl RunGroup {
             .collect();
         self.fitted = fitted;
         self.spin = spin.map(|speed| SpinPlay { turns_per_s: f64::from(speed), sources });
+        self.frames = playing_frames.then(|| FramePlay {
+            timeline,
+            blended: frame_sets.iter().map(|_| SpinSource::new(Vec::new())).collect(),
+            frames: frame_sets,
+        });
     }
 }
 
@@ -606,8 +650,13 @@ impl SceneRunner {
                     reversed,
                     fitted: Vec::new(),
                     spin: None,
+                    frames: None,
                     #[cfg(test)]
                     spun: 0,
+                    #[cfg(test)]
+                    framed: 0,
+                    #[cfg(test)]
+                    fits: 0,
                     seen_effect_generation: u64::MAX,
                     drawn: Drawn::Black,
                     factor: 1.0,
@@ -861,24 +910,43 @@ fn run_group(
     } else {
         Drawn::Canvas
     };
-    // A spinning pattern is turned from the effect's clock; every other pattern never reads it.
-    let spin_clock = group
-        .spin
+    // The effect's clock: a spinning pattern is turned from it and a pattern of several frames
+    // picks its frame from it; every other pattern never reads it.
+    // A still pattern, a canvas effect and a group that is not live never read the clock here.
+    let clocked = live && is_pattern && (group.spin.is_some() || group.frames.is_some());
+    let secs = if clocked { work.started.elapsed().as_secs_f64() } else { 0.0 };
+    let spin_clock = group.spin.as_ref().filter(|_| live && is_pattern).map(|spin| (spin.turns_per_s, secs));
+    // Which frame shows, or which two blend, is the same for every light of the group.
+    let beat = group
+        .frames
         .as_ref()
         .filter(|_| live && is_pattern)
-        .map(|spin| (spin.turns_per_s, work.started.elapsed().as_secs_f64()));
+        .map(|play| play.timeline.at(secs * 1000.0));
     for (index, (light, out)) in
         group.plan.lights.iter().zip(group.colors.iter_mut()).enumerate()
     {
         match group.fitted.get(index).map(Vec::as_slice) {
             Some(fitted) if live && !fitted.is_empty() => {
+                let reversed = group.reversed.get(index).copied().unwrap_or(false);
+                let framed = match (beat, group.frames.as_mut()) {
+                    (Some(beat), Some(play)) => play_frames(play, index, beat, spin_clock, reversed, out),
+                    _ => false,
+                };
+                if framed {
+                    #[cfg(test)]
+                    {
+                        group.framed += 1;
+                    }
+                    scale_light(out, factor);
+                    continue;
+                }
                 let spun = spin_clock
                     .and_then(|clock| group.spin.as_ref().map(|spin| (clock, &spin.sources)))
                     .and_then(|((turns, t), sources)| sources.get(index).map(|s| (turns, t, s)));
                 if let Some((turns, t, source)) = spun {
                     // Turn in position order, then the light's own direction, then brightness.
                     source.at(turns, t, out);
-                    if group.reversed.get(index).copied().unwrap_or(false) {
+                    if reversed {
                         out.reverse();
                     }
                     #[cfg(test)]
@@ -958,6 +1026,31 @@ fn run_group(
         },
         panicked,
     )
+}
+
+/// One light of a pattern of several frames (#468): the frame the beat names, or the blend of two,
+/// then the spin of it, then the light's own direction. Returns false when the light has no frames
+/// fitted (the caller then plays the first frame as a still one). Allocation-free once the buffers
+/// have grown.
+fn play_frames(
+    play: &mut FramePlay,
+    index: usize,
+    beat: Beat,
+    spin: Option<(f64, f64)>,
+    reversed: bool,
+    out: &mut Vec<Rgb8>,
+) -> bool {
+    let FramePlay { frames, blended, .. } = play;
+    let (Some(set), Some(scratch)) = (frames.get(index), blended.get_mut(index)) else {
+        return false;
+    };
+    if !pattern_play::render(set, scratch, beat, spin, out) {
+        return false;
+    }
+    if reversed {
+        out.reverse();
+    }
+    true
 }
 
 /// Multiplies every colour of one light by the group's brightness (`factor` is 0.0..=1.0).
@@ -1104,7 +1197,7 @@ mod tests {
 
     /// A pattern of one frame, built on `leds` LEDs of `arrangement`.
     fn pattern_on(leds: u32, arrangement: Arrangement, colors: Vec<Rgb8>) -> Pattern {
-        pattern_with(vec![PatternFrame { colors, hold: 0, extra: Default::default() }], leds, arrangement)
+        pattern_with(vec![PatternFrame { colors, hold: 0, transition: None, extra: Default::default() }], leds, arrangement)
     }
 
     fn pattern_with(frames: Vec<PatternFrame>, leds: u32, arrangement: Arrangement) -> Pattern {
@@ -1113,6 +1206,7 @@ mod tests {
             built_on: BuiltOn { led_count: leds, arrangement, grid: None },
             frames,
             motion: Motion::none(),
+            playback: None,
             extra: Default::default(),
         }
     }
@@ -1284,14 +1378,14 @@ mod tests {
     }
 
     #[test]
-    fn a_two_frame_pattern_plays_its_first_frame() {
+    fn a_two_frame_pattern_with_no_time_in_it_plays_its_first_frame() {
         let first = ramp(12);
         let mut second = vec![BLUE; 12];
         second[0] = GREEN;
         let pattern = pattern_with(
             vec![
-                PatternFrame { colors: first.clone(), hold: 250, extra: Default::default() },
-                PatternFrame { colors: second, hold: 250, extra: Default::default() },
+                PatternFrame { colors: first.clone(), hold: 0, transition: None, extra: Default::default() },
+                PatternFrame { colors: second, hold: 0, transition: None, extra: Default::default() },
             ],
             12,
             Arrangement::Strip,
@@ -1303,7 +1397,7 @@ mod tests {
         for _ in 0..5 {
             frame(&mut scene, &mut runner, &devices);
             let frame = take(&mut runner, "d1", 12);
-            assert_eq!(frame, first, "0.16.0 plays frame 0");
+            assert_eq!(frame, first, "a pattern whose frames take no time stays on frame 0");
         }
     }
 
@@ -3120,8 +3214,8 @@ mod tests {
         }
     }
 
-    /// A pattern from a 0.16.0 file (two frames and a motion this version does not know,
-    /// `rotate`) plays exactly the fitted colours of its first frame, at any time, as it did before
+    /// A pattern from a 0.16.0 file (two frames that hold 0, which 0.16.0 wrote as "unused", and a
+    /// motion this version does not know, `rotate`) plays exactly the fitted colours of its first frame, at any time, as it did before
     /// Spin existed. The daemon's `a_0_16_0_pattern_file_plays_as_it_did` loads the file itself.
     #[test]
     fn a_pattern_with_an_unknown_motion_plays_its_first_frame_unchanged() {
@@ -3129,8 +3223,8 @@ mod tests {
         let second = vec![BLUE, Rgb8::new(255, 255, 255), Rgb8::BLACK, Rgb8::new(255, 0, 255)];
         let mut pattern = pattern_with(
             vec![
-                PatternFrame { colors: first.clone(), hold: 250, extra: Default::default() },
-                PatternFrame { colors: second, hold: 250, extra: Default::default() },
+                PatternFrame { colors: first.clone(), hold: 0, transition: None, extra: Default::default() },
+                PatternFrame { colors: second, hold: 0, transition: None, extra: Default::default() },
             ],
             4,
             Arrangement::Ring,
@@ -3182,6 +3276,215 @@ mod tests {
         assert_eq!(run(spinning(8, Arrangement::Ring, ramp(8), 0.25)), (10, true));
     }
     // spin-tests-end
+
+    // ---------------------------------------------------------------- frames (#468)
+    // frames-tests-begin
+
+    const LONG: u32 = 100_000;
+
+    fn fade_of(ms: u32, easing: canvas_proto::pattern::Easing) -> Option<canvas_proto::pattern::Transition> {
+        Some(canvas_proto::pattern::Transition { kind: canvas_proto::pattern::TransitionKind::Fade, ms, easing })
+    }
+
+    fn solid(leds: usize, colour: Rgb8, hold: u32, transition: Option<canvas_proto::pattern::Transition>) -> PatternFrame {
+        PatternFrame { colors: vec![colour; leds], hold, transition, extra: Default::default() }
+    }
+
+    /// Plays a frames pattern on one ring of 8, `ms` into its clock. The spans are 100 s, so the
+    /// few milliseconds a real clock adds change no colour by a level.
+    fn framed_at(ms: u64, frames: Vec<PatternFrame>, looping: bool) -> Vec<Rgb8> {
+        let mut pattern = pattern_with(frames, 8, Arrangement::Ring);
+        if !looping {
+            pattern.playback = Some(canvas_proto::pattern::Playback { looping: false });
+        }
+        played_for(ms, 8, ring("d1"), PatternTestEffect::new(pattern), 100)
+    }
+
+    fn abc() -> Vec<PatternFrame> {
+        vec![solid(8, RED, LONG, None), solid(8, GREEN, LONG, None), solid(8, BLUE, LONG, None)]
+    }
+
+    /// Each frame holds its colour for its hold and the next replaces it at the end (a cut).
+    #[test]
+    fn frames_hold_and_cut_in_order_and_the_loop_comes_round() {
+        for (ms, want) in [
+            (50_000u64, RED),
+            (150_000, GREEN),
+            (250_000, BLUE),
+            (350_000, RED), // looped: 300 s is one pass
+            (450_000, GREEN),
+        ] {
+            assert_eq!(framed_at(ms, abc(), true), vec![want; 8], "at {ms} ms");
+        }
+    }
+
+    /// Without Loop the last frame stays for ever.
+    #[test]
+    fn a_pattern_that_does_not_loop_stops_on_its_last_frame() {
+        assert_eq!(framed_at(150_000, abc(), false), vec![GREEN; 8]);
+        for ms in [300_500u64, 9_000_000, 90_000_000_000] {
+            assert_eq!(framed_at(ms, abc(), false), vec![BLUE; 8], "at {ms} ms");
+        }
+    }
+
+    /// A fade blends in OKLab: red into blue is the OKLab midpoint, never the RGB average.
+    #[test]
+    fn a_fade_midpoint_is_the_oklab_mix() {
+        let frames = vec![
+            solid(8, RED, LONG, fade_of(LONG, canvas_proto::pattern::Easing::Linear)),
+            solid(8, BLUE, LONG, None),
+        ];
+        // Frame 0 holds to 100 s, then fades for 100 s: 150 s is halfway.
+        let frame = framed_at(150_000, frames.clone(), true);
+        near(&frame, &[crate::pattern_spin::mix(RED, BLUE, 0.5); 8], 1);
+        assert_ne!(frame[0], Rgb8::new(128, 0, 128), "an RGB average would be (128, 0, 128)");
+        // A quarter in; and the hold before the fade shows the frame solid.
+        near(&framed_at(125_000, frames.clone(), true), &[crate::pattern_spin::mix(RED, BLUE, 0.25); 8], 1);
+        assert_eq!(framed_at(60_000, frames.clone(), true), vec![RED; 8]);
+        // After the fade, frame 1 holds solid, then the loop cuts to frame 0 (it has no fade out).
+        assert_eq!(framed_at(250_000, frames, true), vec![BLUE; 8]);
+    }
+
+    /// Each easing paces the same fade differently: at the halfway point of the time, ease-in is a
+    /// quarter of the way and ease-out three quarters.
+    #[test]
+    fn each_easing_paces_a_fade() {
+        use canvas_proto::pattern::Easing::*;
+        for (easing, u) in [(Linear, 0.5), (EaseIn, 0.25), (EaseOut, 0.75), (EaseInOut, 0.5)] {
+            let frames = vec![solid(8, RED, LONG, fade_of(LONG, easing)), solid(8, BLUE, LONG, None)];
+            near(&framed_at(150_000, frames, true), &[crate::pattern_spin::mix(RED, BLUE, u); 8], 1);
+        }
+    }
+
+    /// The last frame fades back into the first when the pattern loops, and the cycle's end is frame
+    /// 0: no jump across the seam.
+    #[test]
+    fn the_last_frame_fades_into_the_first_and_the_loop_has_no_seam() {
+        use canvas_proto::pattern::Easing::Linear;
+        let frames = vec![
+            solid(8, RED, LONG, None),
+            solid(8, BLUE, LONG, fade_of(LONG, Linear)), // 100 s hold, then 100 s back to red
+        ];
+        let cycle = 300_000u64;
+        near(&framed_at(250_000, frames.clone(), true), &[crate::pattern_spin::mix(BLUE, RED, 0.5); 8], 1);
+        // A few ms (the real clock) either side of the seam: both are red to within a level.
+        near(&framed_at(cycle - 5, frames.clone(), true), &[RED; 8], 1);
+        near(&framed_at(cycle + 5, frames.clone(), true), &[RED; 8], 1);
+        // Not looping, that last fade is not played: the pattern ends holding blue.
+        assert_eq!(framed_at(250_000, frames, false), vec![BLUE; 8]);
+    }
+
+    /// Spin turns the blended frame (after the blend), and `reversed` flips it after that.
+    #[test]
+    fn spin_rotates_the_blended_frame_and_reversed_comes_last() {
+        use canvas_proto::pattern::Easing::Linear;
+        let lit = |c: Rgb8| {
+            let mut v = vec![Rgb8::BLACK; 8];
+            v[0] = c;
+            v
+        };
+        let frames = vec![
+            PatternFrame { colors: lit(RED), hold: LONG, transition: fade_of(LONG, Linear), extra: Default::default() },
+            PatternFrame { colors: lit(BLUE), hold: LONG, transition: None, extra: Default::default() },
+        ];
+        // 150 s in: the lit LED is the red-blue midpoint. A quarter lap by then (0.25 / 150 turns a
+        // second) is two LEDs of eight, so the lit LED is at 2; the clock's few ms move it a
+        // thousandth of an LED.
+        let mk = || {
+            let mut p = pattern_with(frames.clone(), 8, Arrangement::Ring);
+            p.motion = Motion::spin(0.25 / 150.0);
+            PatternTestEffect::new(p)
+        };
+        let plain = played_for(150_000, 8, shaped("d1", Arrangement::Ring, false), mk(), 100);
+        let mid = crate::pattern_spin::mix(RED, BLUE, 0.5);
+        let mut want = vec![Rgb8::BLACK; 8];
+        want[2] = mid;
+        near(&plain, &want, 1);
+        let flipped = played_for(150_000, 8, shaped("d1", Arrangement::Ring, true), mk(), 100);
+        let mut want = vec![Rgb8::BLACK; 8];
+        want[5] = mid;
+        near(&flipped, &want, 1);
+    }
+
+    /// A light's own `reversed` applies to a frame that is held and one that is fading.
+    #[test]
+    fn reversed_applies_to_every_frame() {
+        use canvas_proto::pattern::Easing::Linear;
+        let ramp8: Vec<Rgb8> = (0..8).map(|i| Rgb8::new(20 + 30 * i as u8, 0, 0)).collect();
+        let mut flat = ramp8.clone();
+        flat.reverse();
+        let flat_copy = flat.clone();
+        let frames = vec![
+            PatternFrame { colors: ramp8.clone(), hold: LONG, transition: fade_of(LONG, Linear), extra: Default::default() },
+            PatternFrame { colors: flat, hold: LONG, transition: None, extra: Default::default() },
+        ];
+        let play = |ms: u64, reversed: bool| {
+            played_for(
+                ms,
+                8,
+                shaped("d1", Arrangement::Ring, reversed),
+                PatternTestEffect::new(pattern_with(frames.clone(), 8, Arrangement::Ring)),
+                100,
+            )
+        };
+        let held = play(50_000, true);
+        let mut want = ramp8.clone();
+        want.reverse();
+        assert_eq!(held, want);
+        let fading_plain = play(150_000, false);
+        let blend: Vec<Rgb8> = (0..8).map(|i| crate::pattern_spin::mix(ramp8[i], flat_copy[i], 0.5)).collect();
+        near(&fading_plain, &blend, 1);
+        let mut fading_flipped = play(150_000, true);
+        fading_flipped.reverse();
+        near(&fading_flipped, &blend, 1);
+    }
+
+    /// One frame, or frames that take no time, play still: no per-tick work and no frame set. A
+    /// pattern of frames does its work every tick, and fits every frame once per change.
+    #[test]
+    fn only_a_pattern_that_plays_does_per_tick_work_and_fitting_happens_once() {
+        let run = |pattern: Pattern| {
+            let effect = PatternTestEffect::new(pattern);
+            let mut scene = state_playing(&["d1#z0"], vec![ring("d1")], Some(Box::new(effect)), 100);
+            scene.groups[0].started = Instant::now() - Duration::from_secs(9);
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8)];
+            for _ in 0..10 {
+                frame(&mut scene, &mut runner, &devices);
+            }
+            let g = &runner.groups[0];
+            (g.framed, g.frames.is_some(), g.fits)
+        };
+        assert_eq!(run(pattern_on(8, Arrangement::Ring, ramp(8))), (0, false, 1), "one frame");
+        let no_time = pattern_with(vec![solid(8, RED, 0, None), solid(8, BLUE, 0, None)], 8, Arrangement::Ring);
+        assert_eq!(run(no_time), (0, false, 1), "frames that take no time");
+        let playing = pattern_with(abc(), 8, Arrangement::Ring);
+        assert_eq!(run(playing), (10, true, 1), "frames play every tick and are fitted once for ten ticks");
+    }
+
+    /// A frame is fitted to each light's own shape, like frame 0 always was: a ring pattern of 8
+    /// on a light of 4 stretches every frame.
+    #[test]
+    fn every_frame_is_fitted_to_the_light() {
+        let mut a = vec![Rgb8::BLACK; 8];
+        a[0] = RED;
+        let mut b = vec![Rgb8::BLACK; 8];
+        b[0] = BLUE;
+        let pattern = pattern_with(
+            vec![
+                PatternFrame { colors: a, hold: LONG, transition: None, extra: Default::default() },
+                PatternFrame { colors: b, hold: LONG, transition: None, extra: Default::default() },
+            ],
+            8,
+            Arrangement::Ring,
+        );
+        let first = played_for(50_000, 4, shaped("d1", Arrangement::Ring, false), PatternTestEffect::new(pattern.clone()), 100);
+        let second = played_for(150_000, 4, shaped("d1", Arrangement::Ring, false), PatternTestEffect::new(pattern), 100);
+        assert_eq!(first[0], RED);
+        assert_eq!(second[0], BLUE);
+        assert_eq!(first.len(), 4);
+    }
+    // frames-tests-end
 }
 
 /// The group preview's runner side (#378).
@@ -3427,8 +3730,9 @@ mod group_preview_tests {
         let pattern = Pattern {
             id: "pattern:Test".into(),
             built_on: BuiltOn { led_count: 4, arrangement: Arrangement::Strip, grid: None },
-            frames: vec![PatternFrame { colors: vec![RED; 4], hold: 0, extra: Default::default() }],
+            frames: vec![PatternFrame { colors: vec![RED; 4], hold: 0, transition: None, extra: Default::default() }],
             motion: Motion::none(),
+            playback: None,
             extra: Default::default(),
         };
         let mut scene = scene_of("g", Some(Box::new(Dots(pattern))), 100);

@@ -6,6 +6,8 @@
 //   /patterns/?state=patterns         (demo) the first seeded pattern
 //   /patterns/?built=strip:300        a device of that kind, all off, for looking at the layout
 //   /patterns/?built=grid:5x4&painted=6   the same, with the first LEDs painted
+//   /patterns/?built=ring:12&frames=4     the same with that many frames, each its own colours, the
+//                                         transitions between them mixed (cut, fades at each pace)
 //   /patterns/?note=1                 the daemon's "no device of this kind is connected" sentence
 //
 // The `built` form is how the editor is looked at on a device the library does not hold yet: it
@@ -19,6 +21,7 @@ import { messageOf } from "@/lib/errors";
 import { refreshPatterns } from "@/lib/store";
 import { PatternEditor } from "@/views/patterns/PatternEditor";
 import type { Arrangement } from "@/proto/Arrangement";
+import type { Frame } from "@/proto/Frame";
 import type { Pattern } from "@/proto/Pattern";
 import type { Rgb8 } from "@/proto/Rgb8";
 import s from "@/views/patterns/patterns.module.css";
@@ -83,7 +86,7 @@ export function PatternEditorPage() {
 async function openPattern(query: URLSearchParams): Promise<Pattern> {
   const built = query.get("built");
   if (built !== null && built.length > 0) {
-    return preview(built, Number(query.get("painted") ?? "0"));
+    return preview(built, Number(query.get("painted") ?? "0"), Number(query.get("frames") ?? "1"));
   }
   const id = query.get("id");
   if (id !== null && id.length > 0) return api.pattern(id);
@@ -94,7 +97,7 @@ async function openPattern(query: URLSearchParams): Promise<Pattern> {
 }
 
 /** `ring:12`, `strip:300`, `grid:5x4`, `single:1`: a pattern on that device, all off, then painted. */
-function preview(built: string, painted: number): Pattern {
+function preview(built: string, painted: number, frameCount = 1): Pattern {
   const [shape, size] = built.split(":");
   const arrangement: Arrangement =
     shape === "ring" || shape === "grid" || shape === "single" ? shape : "strip";
@@ -104,10 +107,26 @@ function preview(built: string, painted: number): Pattern {
     i < painted ? (PAINT[i % PAINT.length] ?? BLACK_HEX) : BLACK_HEX,
   );
   const name = `Preview ${built.replace(/[^-A-Za-z0-9 ._]/g, " ").trim()}`;
+  const count = Number.isFinite(frameCount) ? Math.min(16, Math.max(1, Math.floor(frameCount))) : 1;
+  // One frame is the plain device. More are for looking at the strip: every LED lit, each frame its own
+  // run of colours, holds of 300 to 500 ms and the transitions mixed (a fade, a cut, an eased fade, a
+  // fade at each pace in turn) with the last one looping back.
+  const frames: Frame[] =
+    count === 1
+      ? [{ colors: colours, hold: 0 }]
+      : Array.from({ length: count }, (_, f): Frame => ({
+          colors: Array.from({ length: ledCount }, (_, i): Rgb8 =>
+            i < (painted > 0 ? painted : ledCount) ? (PAINT[(i + 2 * f) % PAINT.length] ?? BLACK_HEX) : BLACK_HEX,
+          ),
+          hold: [500, 300, 500, 400][f % 4] ?? 500,
+          ...(f % 4 === 1
+            ? {}
+            : { transition: { kind: "fade", ms: [400, 0, 600, 300][f % 4] ?? 400, easing: (["linear", "linear", "ease_in_out", "ease_out"] as const)[f % 4] ?? "linear" } }),
+        }));
   return {
     id: `pattern:${name}`,
     built_on: { led_count: ledCount, arrangement, ...(grid ? { grid } : {}) },
-    frames: [{ colors: colours, hold: 0 }],
+    frames,
     motion: { type: "none" },
   };
 }
