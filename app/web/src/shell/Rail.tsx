@@ -9,6 +9,7 @@ import { BrandMark, Wordmark } from "@/components/BrandMark";
 import { useSnap } from "@/lib/store";
 import { useRailData, type RailValues } from "@/shell/RailData";
 import { hasNavigationGuard, requestNavigation } from "@/lib/navigationGuard";
+import { boundsOf, placeTooltip } from "@/lib/tooltipPlacement";
 import { RailDeck } from "@/shell/RailDeck";
 
 export interface NavItem {
@@ -106,8 +107,45 @@ export function Rail({ pathname }: { pathname: string }) {
     measure();
     const ro = new ResizeObserver(measure);
     ro.observe(nav);
-    for (const el of Array.from(nav.querySelectorAll(".rail-link"))) ro.observe(el);
-    return () => ro.disconnect();
+    const links = Array.from(nav.querySelectorAll<HTMLElement>(".rail-link"));
+    for (const el of links) ro.observe(el);
+
+    // The icon rail keeps each link's name as a ::after label instead of drawing the label.
+    // That label is fixed to the window, so it stays out of the rail's scroll box (#467); put
+    // its window coordinates on the link when it is about to show, on hover or focus.
+    const placeTip = (link: HTMLElement) => {
+      const s = getComputedStyle(link, "::after");
+      const width = Number.parseFloat(s.width);
+      const height = Number.parseFloat(s.height);
+      if (!Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) return;
+      const at = placeTooltip({
+        trigger: link.getBoundingClientRect(),
+        bubble: { width, height },
+        bounds: boundsOf({
+          width: document.documentElement.clientWidth,
+          height: document.documentElement.clientHeight,
+        }),
+        side: "right",
+        align: "center",
+        gap: 10,
+      });
+      link.style.setProperty("--tip-x", `${at.left}px`);
+      link.style.setProperty("--tip-y", `${at.top}px`);
+    };
+    const showTip = new Map<HTMLElement, () => void>();
+    for (const el of links) {
+      const on = () => placeTip(el);
+      showTip.set(el, on);
+      el.addEventListener("pointerenter", on);
+      el.addEventListener("focus", on);
+    }
+    return () => {
+      ro.disconnect();
+      for (const [el, on] of showTip) {
+        el.removeEventListener("pointerenter", on);
+        el.removeEventListener("focus", on);
+      }
+    };
   }, [pathname]);
 
   const markerStyle = marker

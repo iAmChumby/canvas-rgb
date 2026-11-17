@@ -839,23 +839,29 @@ const MEASURE_TIP = ({ index, slack }) => {
   if (r.bottom > vh + slack) hits.push({ kind: "window-bottom", el: name(b), text, over: round(r.bottom - vh) });
   if (r.top < -slack) hits.push({ kind: "window-top", el: name(b), text, over: round(-r.top) });
   // An ancestor that clips the bubble cuts its words off even where the window has room.
-  for (let a = b.parentElement; a && a !== document.body; a = a.parentElement) {
-    const cs = getComputedStyle(a);
-    if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
-    const ar = a.getBoundingClientRect();
-    const cuts = [];
-    if (cs.overflowX !== "visible") {
-      if (r.right > ar.right + slack) cuts.push(["right", r.right - ar.right]);
-      if (r.left < ar.left - slack) cuts.push(["left", ar.left - r.left]);
-    }
-    if (cs.overflowY !== "visible") {
-      if (r.bottom > ar.bottom + slack) cuts.push(["bottom", r.bottom - ar.bottom]);
-      if (r.top < ar.top - slack) cuts.push(["top", ar.top - r.top]);
-    }
-    if (cuts.length) {
-      const worst = cuts.sort((x, y) => y[1] - x[1])[0];
-      hits.push({ kind: "clipped", el: name(b), clipper: name(a), edge: worst[0], over: round(worst[1]), text });
-      break;
+  // A fixed bubble is positioned against the window, so an ancestor's overflow does not clip it
+  // (CSS Positioned Layout: only a transform, filter or contain on the ancestor would). The
+  // rail's bubbles are fixed so they reach over the page (#467); the window checks above are
+  // the ones that apply to them.
+  if (getComputedStyle(b).position !== "fixed") {
+    for (let a = b.parentElement; a && a !== document.body; a = a.parentElement) {
+      const cs = getComputedStyle(a);
+      if (cs.overflowX === "visible" && cs.overflowY === "visible") continue;
+      const ar = a.getBoundingClientRect();
+      const cuts = [];
+      if (cs.overflowX !== "visible") {
+        if (r.right > ar.right + slack) cuts.push(["right", r.right - ar.right]);
+        if (r.left < ar.left - slack) cuts.push(["left", ar.left - r.left]);
+      }
+      if (cs.overflowY !== "visible") {
+        if (r.bottom > ar.bottom + slack) cuts.push(["bottom", r.bottom - ar.bottom]);
+        if (r.top < ar.top - slack) cuts.push(["top", ar.top - r.top]);
+      }
+      if (cuts.length) {
+        const worst = cuts.sort((x, y) => y[1] - x[1])[0];
+        hits.push({ kind: "clipped", el: name(b), clipper: name(a), edge: worst[0], over: round(worst[1]), text });
+        break;
+      }
     }
   }
   return { opacity: Number(getComputedStyle(b).opacity), hits, text };

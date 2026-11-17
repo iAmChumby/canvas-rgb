@@ -554,6 +554,7 @@ dependencies = [
  "canvas-effects",
  "canvas-html",
  "canvas-proto",
+ "serde_json",
  "tracing",
  "windows-sys 0.61.2",
 ]

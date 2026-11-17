@@ -38,6 +38,8 @@ use canvas_proto::traits::{
 };
 use tracing::warn;
 
+use crate::pattern_spin::SpinSource;
+
 use crate::arrangement::{build_group_plan, GroupPlan};
 use crate::engine::{guarded_call, panic_text, report_effect_panic};
 use crate::pattern_fit::fit_colors;
@@ -266,6 +268,13 @@ struct RunGroup {
     /// The fitted colours of each light of the plan, in the device's LED order and before the
     /// group's brightness. Filled when a pattern is fitted; empty for a canvas effect.
     fitted: Vec<Vec<Rgb8>>,
+    /// A spinning pattern (#468): its speed and, per light of the plan, the fitted colours in
+    /// position order (no `reversed` yet), turned every tick from the effect's clock. `None` for
+    /// every pattern that does not spin, which keeps today's zero per-tick work.
+    spin: Option<SpinPlay>,
+    /// How many lights have been turned this run. Tests only: a static pattern leaves it at 0.
+    #[cfg(test)]
+    spun: u64,
     /// The effect generation the canvas was last cleared for.
     seen_effect_generation: u64,
     /// What the group drew last frame, for the group preview (#378). Written by
@@ -273,6 +282,14 @@ struct RunGroup {
     drawn: Drawn,
     /// The group's brightness as of last frame, 0.0..=1.0: the factor the LEDs got.
     factor: f32,
+}
+
+/// A spinning pattern's per-light sources and its speed (#468).
+struct SpinPlay {
+    /// Laps a second; never 0 (a pattern that does not turn is not a `SpinPlay`).
+    turns_per_s: f64,
+    /// One per light of the plan, in `plan.lights` order, in position order.
+    sources: Vec<SpinSource>,
 }
 
 /// What a group put on its canvas in the last frame: the choice the group preview needs to
@@ -293,6 +310,7 @@ impl RunGroup {
     /// `fitted` ends in the device's LED order (each light's own `reversed` applied) and before
     /// the group's brightness.
     fn fit_group(&mut self, effect: Option<&dyn Effect>) {
+        self.spin = None;
         let Some(pattern) = effect.and_then(|e| e.as_pattern()) else {
             // A canvas effect, or no effect: nothing is fitted.
             self.fitted.clear();
@@ -305,12 +323,19 @@ impl RunGroup {
             return;
         };
         let source = &frame.colors;
+        // Spin (#468): the colours are kept in position order for the per-tick turn, which then
+        // applies `reversed`. A speed of 0, a missing one and a bad one play as no motion.
+        let spin = pattern.motion.as_spin().filter(|speed| *speed != 0.0);
+        let mut sources = Vec::new();
         let fitted: Vec<Vec<Rgb8>> = self
             .shapes
             .iter()
             .enumerate()
             .map(|(index, (leds, arrangement))| {
                 let mut colors = fit_colors(source, &pattern.built_on, *leds, *arrangement);
+                if spin.is_some() {
+                    sources.push(SpinSource::new(colors.clone()));
+                }
                 // The pattern is stored in position order; a reversed light's frame runs the
                 // other way, so its fitted colours are flipped once, here.
                 if self.reversed.get(index).copied().unwrap_or(false) {
@@ -320,6 +345,7 @@ impl RunGroup {
             })
             .collect();
         self.fitted = fitted;
+        self.spin = spin.map(|speed| SpinPlay { turns_per_s: f64::from(speed), sources });
     }
 }
 
@@ -579,6 +605,9 @@ impl SceneRunner {
                     shapes,
                     reversed,
                     fitted: Vec::new(),
+                    spin: None,
+                    #[cfg(test)]
+                    spun: 0,
                     seen_effect_generation: u64::MAX,
                     drawn: Drawn::Black,
                     factor: 1.0,
@@ -832,13 +861,34 @@ fn run_group(
     } else {
         Drawn::Canvas
     };
+    // A spinning pattern is turned from the effect's clock; every other pattern never reads it.
+    let spin_clock = group
+        .spin
+        .as_ref()
+        .filter(|_| live && is_pattern)
+        .map(|spin| (spin.turns_per_s, work.started.elapsed().as_secs_f64()));
     for (index, (light, out)) in
         group.plan.lights.iter().zip(group.colors.iter_mut()).enumerate()
     {
         match group.fitted.get(index).map(Vec::as_slice) {
             Some(fitted) if live && !fitted.is_empty() => {
-                out.clear();
-                out.extend_from_slice(fitted);
+                let spun = spin_clock
+                    .and_then(|clock| group.spin.as_ref().map(|spin| (clock, &spin.sources)))
+                    .and_then(|((turns, t), sources)| sources.get(index).map(|s| (turns, t, s)));
+                if let Some((turns, t, source)) = spun {
+                    // Turn in position order, then the light's own direction, then brightness.
+                    source.at(turns, t, out);
+                    if group.reversed.get(index).copied().unwrap_or(false) {
+                        out.reverse();
+                    }
+                    #[cfg(test)]
+                    {
+                        group.spun += 1;
+                    }
+                } else {
+                    out.clear();
+                    out.extend_from_slice(fitted);
+                }
                 scale_light(out, factor);
             }
             _ if live => {
@@ -2942,6 +2992,196 @@ mod tests {
             );
         }
     }
+
+    // ---------------------------------------------------------------- spin (#468)
+    // spin-tests-begin
+
+    /// A pattern as the 0.17.0 editor saves a spinning one: a frame, and `Motion::spin`.
+    fn spinning(leds: u32, arrangement: Arrangement, colors: Vec<Rgb8>, turns: f32) -> Pattern {
+        let mut pattern = pattern_on(leds, arrangement, colors);
+        pattern.motion = Motion::spin(turns);
+        pattern
+    }
+
+    /// One light of `leds` LEDs in `arrangement` (`ring()` and `light()` are 8-bit shapes of zone 0).
+    fn shaped(id: &str, arrangement: Arrangement, reversed: bool) -> Light {
+        let mut l = light(id);
+        l.arrangement = arrangement;
+        l.reversed = reversed;
+        l
+    }
+
+    /// Plays `effect` on one light `leds` long that has been playing for `ms`, and takes its frame.
+    fn played_for(
+        ms: u64,
+        leds: u32,
+        light: Light,
+        effect: PatternTestEffect,
+        brightness: u8,
+    ) -> Vec<Rgb8> {
+        let id = light.device_id.0.clone();
+        let mut scene = state_playing(&[&light.id.clone()], vec![light], Some(Box::new(effect)), brightness);
+        scene.groups[0].started = Instant::now() - Duration::from_millis(ms);
+        let mut runner = SceneRunner::new();
+        let devices = vec![strip_device(&id, leds)];
+        frame(&mut scene, &mut runner, &devices);
+        take(&mut runner, &id, leds)
+    }
+
+    /// Each channel within `slack` levels: the clock is real, so a frame is a hair past `ms`.
+    fn near(got: &[Rgb8], want: &[Rgb8], slack: u8) {
+        assert_eq!(got.len(), want.len(), "{got:?} vs {want:?}");
+        for (i, (g, w)) in got.iter().zip(want).enumerate() {
+            let close = |a: u8, b: u8| a.abs_diff(b) <= slack;
+            assert!(
+                close(g.r, w.r) && close(g.g, w.g) && close(g.b, w.b),
+                "LED {i}: got {g:?}, wanted {w:?} (±{slack}); frame {got:?}, wanted {want:?}"
+            );
+        }
+    }
+
+    fn rotated(source: &[Rgb8], by: usize) -> Vec<Rgb8> {
+        let m = source.len();
+        (0..m).map(|i| source[(i + m - by % m) % m]).collect()
+    }
+
+    /// The headline: a ring of 8 at 0.25 turns a second moves 2 LEDs every second.
+    #[test]
+    fn a_ring_of_eight_at_a_quarter_turn_a_second_shifts_two_leds_a_second() {
+        let source: Vec<Rgb8> = (0..8).map(|i| Rgb8::new(20 + 25 * i as u8, 5, 9)).collect();
+        for (ms, shift) in [(0u64, 0usize), (1000, 2), (2000, 4), (3000, 6), (4000, 0), (500, 1)] {
+            let effect =
+                PatternTestEffect::new(spinning(8, Arrangement::Ring, source.clone(), 0.25));
+            let frame = played_for(ms, 8, ring("d1"), effect, 100);
+            near(&frame, &rotated(&source, shift), 2);
+        }
+    }
+
+    /// A line wraps too: its end feeds its start.
+    #[test]
+    fn a_line_wraps_as_a_ring_does() {
+        let source: Vec<Rgb8> = (0..8).map(|i| Rgb8::new(20 + 25 * i as u8, 5, 9)).collect();
+        let effect = PatternTestEffect::new(spinning(8, Arrangement::Strip, source.clone(), 0.25));
+        let frame = played_for(1000, 8, light("d1"), effect, 100);
+        near(&frame, &rotated(&source, 2), 2);
+        assert_eq!(frame[0], source[6], "the last colours came round to the start");
+    }
+
+    /// Between two LEDs the colour is the OKLab blend of the neighbours, not an RGB average.
+    #[test]
+    fn a_fraction_of_a_step_blends_the_neighbours_in_oklab() {
+        let mut source = vec![BLUE; 8];
+        source[0] = RED;
+        // 0.25 turns a second for 125 ms on 8 LEDs: a quarter of an LED.
+        let effect = PatternTestEffect::new(spinning(8, Arrangement::Ring, source.clone(), 0.25));
+        let frame = played_for(125, 8, ring("d1"), effect, 100);
+        // LED 0 reads LED 0 and the one behind it; LED 1 reads LED 1 (blue) and LED 0 (red).
+        let quarter = crate::pattern_spin::mix(BLUE, RED, 0.25);
+        near(&frame[1..2], &[quarter], 3);
+        assert_ne!(frame[1], Rgb8::new(64, 0, 191), "an RGB average would be (64, 0, 191)");
+        // Half an LED: the exact OKLab midpoint of red and blue.
+        let effect = PatternTestEffect::new(spinning(8, Arrangement::Ring, source.clone(), 0.25));
+        let frame = played_for(250, 8, ring("d1"), effect, 100);
+        near(&frame[1..2], &[crate::pattern_spin::mix(BLUE, RED, 0.5)], 3);
+    }
+
+    /// The light's own `reversed` is applied after the turn, and brightness after that.
+    #[test]
+    fn reversed_and_brightness_come_after_the_turn() {
+        let source: Vec<Rgb8> = (0..8).map(|i| Rgb8::new(40 + 25 * i as u8, 0, 0)).collect();
+        let mk = || PatternTestEffect::new(spinning(8, Arrangement::Ring, source.clone(), 0.25));
+        let plain = played_for(1000, 8, shaped("d1", Arrangement::Ring, false), mk(), 100);
+        let flipped = played_for(1000, 8, shaped("d1", Arrangement::Ring, true), mk(), 100);
+        assert_ne!(plain, source, "the picture has turned");
+        // Turn first, flip after: the flipped light shows the turned picture backwards.
+        let mut want = plain.clone();
+        want.reverse();
+        near(&flipped, &want, 2);
+        // Flip first, turn after would turn it the other way round: that is not what plays.
+        let mut backwards = source.clone();
+        backwards.reverse();
+        assert_ne!(flipped, rotated(&backwards, 2), "a flipped light spins the way it is flipped");
+        let dim = played_for(1000, 8, shaped("d1", Arrangement::Ring, false), mk(), 50);
+        for (d, p) in dim.iter().zip(&plain) {
+            assert!(d.r.abs_diff(p.r / 2) <= 3, "{d:?} is half of {p:?}");
+        }
+    }
+
+    /// The speed is in laps: a ring of 8 and a ring of 40 are both a quarter round after a second.
+    #[test]
+    fn the_speed_is_the_same_on_any_led_count() {
+        for leds in [8u32, 40, 12, 100] {
+            let source: Vec<Rgb8> =
+                (0..leds).map(|i| Rgb8::new((i % 200) as u8 + 30, (i / 200) as u8, 3)).collect();
+            let effect =
+                PatternTestEffect::new(spinning(leds, Arrangement::Ring, source.clone(), 0.25));
+            let frame = played_for(1000, leds, ring("d1"), effect, 100);
+            near(&frame[(leds / 4) as usize..][..1], &source[..1], 2);
+        }
+    }
+
+    /// A pattern from a 0.16.0 file (two frames and a motion this version does not know,
+    /// `rotate`) plays exactly the fitted colours of its first frame, at any time, as it did before
+    /// Spin existed. The daemon's `a_0_16_0_pattern_file_plays_as_it_did` loads the file itself.
+    #[test]
+    fn a_pattern_with_an_unknown_motion_plays_its_first_frame_unchanged() {
+        let first = vec![RED, GREEN, BLUE, Rgb8::new(255, 255, 255)];
+        let second = vec![BLUE, Rgb8::new(255, 255, 255), Rgb8::BLACK, Rgb8::new(255, 0, 255)];
+        let mut pattern = pattern_with(
+            vec![
+                PatternFrame { colors: first.clone(), hold: 250, extra: Default::default() },
+                PatternFrame { colors: second, hold: 250, extra: Default::default() },
+            ],
+            4,
+            Arrangement::Ring,
+        );
+        pattern.motion = Motion { kind: "rotate".into(), params: Default::default() };
+        assert_eq!(pattern.motion.as_spin(), None);
+        for ms in [0u64, 400, 2500, 90_000] {
+            let frame = played_for(ms, 4, ring("d1"), PatternTestEffect::new(pattern.clone()), 100);
+            assert_eq!(frame, first, "at {ms} ms");
+        }
+        // The light's direction still flips it, as it did.
+        let frame = played_for(
+            900,
+            4,
+            shaped("d1", Arrangement::Ring, true),
+            PatternTestEffect::new(pattern),
+            100,
+        );
+        let mut flipped = first;
+        flipped.reverse();
+        assert_eq!(frame, flipped);
+    }
+
+    /// A speed of zero is no motion: it plays as the static frame.
+    #[test]
+    fn a_spin_of_zero_plays_as_no_motion() {
+        let source = ramp(8);
+        let effect = PatternTestEffect::new(spinning(8, Arrangement::Ring, source.clone(), 0.0));
+        assert_eq!(played_for(1234, 8, ring("d1"), effect, 100), source);
+    }
+
+    /// A pattern with no motion turns nothing per tick, however long it has played; a spinning
+    /// one turns its light every tick.
+    #[test]
+    fn a_static_pattern_does_no_per_tick_work() {
+        let run = |pattern: Pattern| {
+            let effect = PatternTestEffect::new(pattern);
+            let mut scene = state_playing(&["d1#z0"], vec![ring("d1")], Some(Box::new(effect)), 100);
+            scene.groups[0].started = Instant::now() - Duration::from_secs(9);
+            let mut runner = SceneRunner::new();
+            let devices = vec![strip_device("d1", 8)];
+            for _ in 0..10 {
+                frame(&mut scene, &mut runner, &devices);
+            }
+            assert!(runner.groups[0].colors[0].len() == 8);
+            (runner.groups[0].spun, runner.groups[0].spin.is_some())
+        };
+        assert_eq!(run(pattern_on(8, Arrangement::Ring, ramp(8))), (0, false));
+        assert_eq!(run(spinning(8, Arrangement::Ring, ramp(8), 0.25)), (10, true));
+    }
+    // spin-tests-end
 }
 
 /// The group preview's runner side (#378).
