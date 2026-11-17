@@ -5,6 +5,8 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from "@testi
 import { afterEach, beforeAll, describe, expect, it, vi } from "vitest";
 import { api } from "@/lib/endpoints";
 import { patchSnap, refreshAll } from "@/lib/store";
+import type { DeviceInfo } from "@/proto/DeviceInfo";
+import type { LightView } from "@/proto/LightView";
 import { DevicesView } from "@/views/DevicesView";
 
 (globalThis as { IS_REACT_ACT_ENVIRONMENT?: boolean }).IS_REACT_ACT_ENVIRONMENT = true;
@@ -50,6 +52,75 @@ describe("a light's row on Devices", () => {
     expect(screen.getAllByText("Not sized").length).toBeGreaterThan(0);
     expect(document.body.textContent).not.toMatch(/\b0 LEDs\b/);
     expect(document.body.textContent).not.toMatch(/\b0–240\b/);
+  });
+
+  it("a one-LED light offers no shape switch at all", async () => {
+    // The mic, keyboard and mouse each have one LED: a strip/ring switch would let the owner
+    // persist a Ring arrangement a light of one LED cannot have.
+    window.history.replaceState({}, "", "/devices/");
+    await act(async () => {
+      await refreshAll();
+    });
+    render(<DevicesView />);
+    const cards = await screen.findAllByTestId("device-card");
+    for (const name of ["HyperX Quadcast S", "ROYUAN MonsGeek Keyboard", "Logitech G Pro X Superlight"]) {
+      const card = cards.find((c) => c.getAttribute("aria-label") === name);
+      expect(card).toBeTruthy();
+      expect(within(card as HTMLElement).queryByRole("radio")).toBeNull();
+      expect(within(card as HTMLElement).queryByText("Strip")).toBeNull();
+    }
+  });
+
+  it("a grid light shows its own grid shape, not a plain strip/ring switch", async () => {
+    const device: DeviceInfo = {
+      id: "fake:matrix-1",
+      name: "Grid Pad",
+      vendor: "Fake",
+      kind: "other",
+      adapter: "fake",
+      adapter_index: 0,
+      serial: "matrix-1",
+      location: "",
+      connected: true,
+      zones: [
+        {
+          index: 0,
+          name: "Matrix",
+          kind: { type: "matrix", width: 2, height: 2, map: [0, 1, 2, 3] },
+          led_count: 4,
+          min_leds: 4,
+          max_leds: 4,
+          resizable: false,
+        },
+      ],
+    };
+    const light: LightView = {
+      light: {
+        id: "fake:matrix-1#z0",
+        device_id: device.id,
+        zone_index: 0,
+        leds: { start: 0, count: 4 },
+        name: "Matrix",
+        arrangement: "grid",
+        reversed: false,
+      },
+      led_count: 4,
+      connected: true,
+      label: "Grid Pad · Matrix",
+    };
+    patchSnap({
+      devices: [device],
+      devicesTotal: 1,
+      devicesError: null,
+      lights: [light],
+      chains: [],
+      status: null,
+      statusError: null,
+    });
+    render(<DevicesView />);
+    const card = await screen.findByTestId("device-card");
+    expect(within(card).queryByText("Strip")).toBeNull();
+    expect(within(card).getByRole("radio", { name: "Grid" })).toBeTruthy();
   });
 
   it("sets ring and reversed through the lights route", async () => {

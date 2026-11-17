@@ -13,7 +13,7 @@
 // and has no second device to edit. Those edits go straight to `PATCH /api/v1/lights/{id}` and read
 // both lists back; the flow is not run for them.
 
-import { useCallback, useEffect, useState, type CSSProperties } from "react";
+import { useCallback, useEffect, useState, type CSSProperties, type ReactNode } from "react";
 import { createPortal } from "react-dom";
 import { PencilSimple } from "@phosphor-icons/react";
 
@@ -160,10 +160,11 @@ function PartRow({ view, index }: { view: LightView; index: number }) {
 
 /**
  * One resizable ARGB header's row. The state words carry the meaning (never set up, empty, or its
- * devices); the dot agrees. The key is the only thing that opens a setup session. `named` is false
- * where the header's own strip sits right above the row and already carries its name.
+ * devices); the dot agrees. The key is the only thing that opens a setup session. `deviceState` is
+ * the device's real connection state (from `DeviceInfo.connected`) so a header the daemon still
+ * lists for an unplugged board reads "disconnected", the same way every other device row does.
  */
-export function ChainRow({ chain, named = true }: { chain: ChainView; named?: boolean }) {
+export function ChainRow({ chain, lead, deviceState }: { chain: ChainView; lead?: ReactNode; deviceState?: ReactNode }) {
   const [open, setOpen] = useState(false);
   /** One callback for the overlay's life: Escape's listener depends on it and must not re-subscribe. */
   const close = useCallback(() => setOpen(false), []);
@@ -185,21 +186,28 @@ export function ChainRow({ chain, named = true }: { chain: ChainView; named?: bo
 
   return (
     <div
-      className={s.row}
+      className={lead ? `${s.row} ${s.rowFlat}` : s.row}
       role="group"
       aria-label={`${chain.device_name} ${chain.zone_name}`}
       data-testid="chain-row"
       data-state={state}
     >
-      <div className={s.head}>
-        <span className={s.kicker}>ARGB header</span>
+      <div className={lead ? `${s.head} ${s.gridHead}` : s.head}>
+        {/* Devices passes the header's own identity, LED bar and count so this is one row, not a
+            zone row followed by a second "ARGB header" row (#471). The state and the key stay here:
+            the key is a row action, so it carries the secondary weight the other pages use. */}
+        {lead}
+        {!lead && <span className={s.kicker}>ARGB header</span>}
         {/* Under a zone's own strip the name is already on the page: it is said once. */}
-        {named && <span className={s.zone}>{chain.zone_name}</span>}
-        <StateDot tone={tone}>{words}</StateDot>
+        {!lead && <span className={s.zone}>{chain.zone_name}</span>}
+        <span className={s.stateCell}>
+          <StateDot tone={tone}>{words}</StateDot>
+          {deviceState}
+        </span>
         <span className={s.key}>
           <Button
             size="sm"
-            variant={state === "set_up" ? "default" : "primary"}
+            variant="default"
             aria-expanded={open}
             aria-label={`${key} ${chain.zone_name}`}
             onClick={() => setOpen((v) => !v)}

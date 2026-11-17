@@ -27,6 +27,10 @@
   --dot: rgba(255, 255, 255, 0.15);
   --scrim: rgba(0, 0, 0, 0.6);
 
+  /* Devices list rows: one column set for every row (device, header and light), so the LED bar,
+     the count, the state and the action sit in the same place on each one (#471). */
+  --row-cols: 28px minmax(140px, 210px) minmax(100px, 1fr) 110px 104px minmax(110px, 140px) 96px;
+
   /* the angle dial's ring: a plain line-2 ring reads dim against the dark panel, so the dial's
      ring takes a touch more of the white there; the needle (--ink) stays the strongest element */
   --dial-ring: rgba(255, 255, 255, 0.22);
