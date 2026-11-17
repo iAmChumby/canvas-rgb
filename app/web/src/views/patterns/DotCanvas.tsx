@@ -9,9 +9,12 @@
 // dot under the pointer is the dot that changes colour. The canvas is repainted when the colours,
 // the box or the theme change, and never otherwise; it never re-renders React while painting.
 
-import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type PointerEvent as ReactPointerEvent, type ReactNode } from "react";
 import { cancelPress, refuseDragStart } from "@/lib/pressDrag";
 import { BLACK_HEX, parseHex } from "@/lib/color";
+import { motionOffNow } from "@/lib/motion";
+import type { Lab } from "@/lib/oklab";
+import { labsOf, spinColours } from "@/lib/spin";
 import { dotAt, dotsBetween, layoutDots, type Dot } from "@/views/patterns/dotLayout";
 import type { BuiltOn } from "@/proto/BuiltOn";
 import type { Rgb8 } from "@/proto/Rgb8";
@@ -43,6 +46,8 @@ function inkOf(colour: Rgb8 | undefined): string | null {
 export function DotCanvas({
   builtOn,
   colours,
+  spin,
+  overlay,
   label,
   onBegin,
   onStroke,
@@ -50,6 +55,14 @@ export function DotCanvas({
 }: {
   builtOn: BuiltOn;
   colours: Rgb8[];
+  /**
+   * Laps a second the picture turns at (#468), drawn with the daemon's own maths (`lib/spin.ts`)
+   * from a clock that starts when the surface mounts. It stands still under reduced motion, and
+   * while a press is down, so the dot under the pointer is the LED that is painted.
+   */
+  spin?: number | null;
+  /** Drawn over the surface, in its box (the Gradient tool's handles). */
+  overlay?: ReactNode;
   /** What a screen reader hears for the device. */
   label: string;
   /** A press landed: the next change is one history entry. */
@@ -63,6 +76,9 @@ export function DotCanvas({
   const [theme, setTheme] = useState(0);
   /** Where the pointer was at the last event, in surface pixels. */
   const last = useRef<{ x: number; y: number } | null>(null);
+  /** True while a press is down: a spinning picture holds still so the dot hit is the LED painted. */
+  const held = useRef(false);
+  const started = useRef<number | null>(null);
 
   const dots = useMemo(() => layoutDots(builtOn, box.width, box.height), [builtOn, box.width, box.height]);
 
@@ -106,6 +122,8 @@ export function DotCanvas({
     };
   }, []);
 
+  const labs = useMemo<Lab[] | null>(() => (spin ? labsOf(colours) : null), [colours, spin]);
+
   useEffect(() => {
     const canvas = ref.current;
     if (!canvas) return;
@@ -122,29 +140,43 @@ export function DotCanvas({
       canvas.width = pixelsW;
       canvas.height = pixelsH;
     }
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    ctx.clearRect(0, 0, width, height);
     const inks = readInks(canvas);
-    for (const dot of dots) {
-      const ink = inkOf(colours[dot.index]);
-      ctx.beginPath();
-      ctx.arc(dot.x, dot.y, Math.max(0.5, dot.r - 0.5), 0, Math.PI * 2);
-      if (ink !== null) {
-        ctx.fillStyle = ink;
-        ctx.fill();
-      } else {
-        // An unlit LED is a socket: a dim dot, with an edge once it is big enough to show one.
-        ctx.fillStyle = inks.off;
-        ctx.fill();
-        if (dot.r >= 5) {
-          ctx.strokeStyle = inks.line;
-          ctx.lineWidth = 1;
-          ctx.stroke();
+    const draw = (shown: Rgb8[]) => {
+      ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+      ctx.clearRect(0, 0, width, height);
+      for (const dot of dots) {
+        const ink = inkOf(shown[dot.index]);
+        ctx.beginPath();
+        ctx.arc(dot.x, dot.y, Math.max(0.5, dot.r - 0.5), 0, Math.PI * 2);
+        if (ink !== null) {
+          ctx.fillStyle = ink;
+          ctx.fill();
+        } else {
+          // An unlit LED is a socket: a dim dot, with an edge once it is big enough to show one.
+          ctx.fillStyle = inks.off;
+          ctx.fill();
+          if (dot.r >= 5) {
+            ctx.strokeStyle = inks.line;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+          }
         }
       }
-    }
+    };
+    draw(colours);
+    // A spinning pattern is redrawn every animation frame from its own clock. Reduced motion draws
+    // the picture where it stands, and so does a press (see `held`).
+    if (!spin || motionOffNow() || typeof requestAnimationFrame !== "function") return;
+    let raf = 0;
+    const tick = (now: number) => {
+      started.current ??= now;
+      draw(held.current ? colours : spinColours(colours, spin, (now - started.current) / 1000, labs ?? undefined));
+      raf = requestAnimationFrame(tick);
+    };
+    raf = requestAnimationFrame(tick);
+    return () => cancelAnimationFrame(raf);
     // `dots` carries the box; `theme` re-reads the tokens when it changes.
-  }, [dots, colours, theme]);
+  }, [dots, colours, theme, spin, labs]);
 
   /** The pointer's place in the surface, and the dots of the box it is in. */
   const place = (event: ReactPointerEvent<HTMLCanvasElement>): { x: number; y: number; dots: Dot[] } => {
@@ -162,6 +194,7 @@ export function DotCanvas({
     event.currentTarget.setPointerCapture?.(event.pointerId);
     const at = place(event);
     last.current = { x: at.x, y: at.y };
+    held.current = true;
     onBegin();
     const index = dotAt(at.dots, at.x, at.y);
     if (index !== null) onStroke([index]);
@@ -179,23 +212,27 @@ export function DotCanvas({
   const up = (event: ReactPointerEvent<HTMLCanvasElement>) => {
     if (last.current !== null) onEnd();
     last.current = null;
+    held.current = false;
     if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
       event.currentTarget.releasePointerCapture(event.pointerId);
     }
   };
 
   return (
-    <canvas
-      ref={ref}
-      className={s.surface}
-      role="img"
-      aria-label={label}
-      draggable={false}
-      onDragStart={refuseDragStart}
-      onPointerDown={down}
-      onPointerMove={move}
-      onPointerUp={up}
-      onPointerCancel={up}
-    />
+    <div className={s.surfaceBox}>
+      <canvas
+        ref={ref}
+        className={s.surface}
+        role="img"
+        aria-label={label}
+        draggable={false}
+        onDragStart={refuseDragStart}
+        onPointerDown={down}
+        onPointerMove={move}
+        onPointerUp={up}
+        onPointerCancel={up}
+      />
+      {overlay}
+    </div>
   );
 }
