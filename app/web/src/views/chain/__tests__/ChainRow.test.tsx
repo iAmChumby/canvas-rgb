@@ -386,6 +386,25 @@ describe("a header's row on Devices", () => {
     expect(rowOf("JARGB 1").textContent).toContain("Nothing is plugged into this ARGB header.");
   });
 
+  it("a header sized outside the flow says its length is not set up as parts", async () => {
+    // A header the app/OpenRGB sized but that has no chain record (#470): the daemon reports it
+    // not set up with its whole-zone light as the one part. The row must say the 8 LEDs are not
+    // a confirmed chain of parts, not leave a bare "Not set up" beside the "8 LEDs" zone strip.
+    await showDevices([chain(1, "JARGB 1", "not_set_up", [], 8)]);
+
+    const row = rowOf("JARGB 1");
+    expect(row.textContent).toContain("8 LEDs, not set up as parts");
+    expect(row.textContent).not.toContain("Not set up");
+    expect(within(row).getByRole("button", { name: /^Set up/ })).toBeTruthy();
+  });
+
+  it("a header with no size still says simply not set up", async () => {
+    await showDevices([chain(0, "JAF", "not_set_up", [], 0)]);
+    const row = rowOf("JAF");
+    expect(row.textContent).toContain("Not set up");
+    expect(row.textContent).not.toContain("not set up as parts");
+  });
+
   it("a set up header lists every part with its own controls", async () => {
     await showDevices([chain(2, "JARGB 2", "set_up", [FAN_ONE, FAN_TWO], 96)]);
 
