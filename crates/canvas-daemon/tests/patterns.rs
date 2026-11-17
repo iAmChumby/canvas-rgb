@@ -174,8 +174,9 @@ fn pattern(name: &str) -> Pattern {
     Pattern {
         id: format!("pattern:{name}"),
         built_on: BuiltOn { led_count: LEDS, arrangement: Arrangement::Ring, grid: None },
-        frames: vec![Frame { colors, hold: 0, extra: serde_json::Map::new() }],
+        frames: vec![Frame { colors, hold: 0, transition: None, extra: serde_json::Map::new() }],
         motion: Motion::none(),
+        playback: None,
         extra: serde_json::Map::new(),
     }
 }
@@ -906,8 +907,9 @@ fn pattern_with(name: &str, leds: u32, lit: Rgb8) -> Pattern {
     Pattern {
         id: format!("pattern:{name}"),
         built_on: BuiltOn { led_count: leds, arrangement: Arrangement::Ring, grid: None },
-        frames: vec![Frame { colors, hold: 0, extra: serde_json::Map::new() }],
+        frames: vec![Frame { colors, hold: 0, transition: None, extra: serde_json::Map::new() }],
         motion: Motion::none(),
+        playback: None,
         extra: serde_json::Map::new(),
     }
 }

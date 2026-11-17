@@ -1104,7 +1104,7 @@ mod tests {
 
     /// A pattern of one frame, built on `leds` LEDs of `arrangement`.
     fn pattern_on(leds: u32, arrangement: Arrangement, colors: Vec<Rgb8>) -> Pattern {
-        pattern_with(vec![PatternFrame { colors, hold: 0, extra: Default::default() }], leds, arrangement)
+        pattern_with(vec![PatternFrame { colors, hold: 0, transition: None, extra: Default::default() }], leds, arrangement)
     }
 
     fn pattern_with(frames: Vec<PatternFrame>, leds: u32, arrangement: Arrangement) -> Pattern {
@@ -1113,6 +1113,7 @@ mod tests {
             built_on: BuiltOn { led_count: leds, arrangement, grid: None },
             frames,
             motion: Motion::none(),
+            playback: None,
             extra: Default::default(),
         }
     }
@@ -1290,8 +1291,8 @@ mod tests {
         second[0] = GREEN;
         let pattern = pattern_with(
             vec![
-                PatternFrame { colors: first.clone(), hold: 250, extra: Default::default() },
-                PatternFrame { colors: second, hold: 250, extra: Default::default() },
+                PatternFrame { colors: first.clone(), hold: 250, transition: None, extra: Default::default() },
+                PatternFrame { colors: second, hold: 250, transition: None, extra: Default::default() },
             ],
             12,
             Arrangement::Strip,
@@ -3129,8 +3130,8 @@ mod tests {
         let second = vec![BLUE, Rgb8::new(255, 255, 255), Rgb8::BLACK, Rgb8::new(255, 0, 255)];
         let mut pattern = pattern_with(
             vec![
-                PatternFrame { colors: first.clone(), hold: 250, extra: Default::default() },
-                PatternFrame { colors: second, hold: 250, extra: Default::default() },
+                PatternFrame { colors: first.clone(), hold: 250, transition: None, extra: Default::default() },
+                PatternFrame { colors: second, hold: 250, transition: None, extra: Default::default() },
             ],
             4,
             Arrangement::Ring,
@@ -3427,8 +3428,9 @@ mod group_preview_tests {
         let pattern = Pattern {
             id: "pattern:Test".into(),
             built_on: BuiltOn { led_count: 4, arrangement: Arrangement::Strip, grid: None },
-            frames: vec![PatternFrame { colors: vec![RED; 4], hold: 0, extra: Default::default() }],
+            frames: vec![PatternFrame { colors: vec![RED; 4], hold: 0, transition: None, extra: Default::default() }],
             motion: Motion::none(),
+            playback: None,
             extra: Default::default(),
         };
         let mut scene = scene_of("g", Some(Box::new(Dots(pattern))), 100);

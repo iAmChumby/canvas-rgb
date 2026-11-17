@@ -87,9 +87,10 @@ mod tests {
             frames: vec![Frame {
                 colors: vec![Rgb8::BLACK; 12],
                 hold: 0,
-                extra: serde_json::Map::new(),
+                transition: None, extra: serde_json::Map::new(),
             }],
             motion: Motion::none(),
+            playback: None,
             extra: serde_json::Map::new(),
         }
     }

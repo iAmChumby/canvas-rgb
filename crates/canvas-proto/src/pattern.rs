@@ -32,6 +32,92 @@ pub const SPIN_TURNS_MAX: f32 = 5.0;
 
 /// A new pattern's spin speed when the owner turns Spin on: one lap every 4 seconds (#468).
 pub const SPIN_TURNS_DEFAULT: f32 = 0.25;
+
+/// The longest one frame may hold, in milliseconds (#468): ten minutes.
+pub const PATTERN_HOLD_MS_MAX: u32 = 600_000;
+
+/// The longest a transition between two frames may take, in milliseconds (#468).
+pub const TRANSITION_MS_MAX: u32 = 60_000;
+
+/// How a frame passes to the next (#468). An unknown kind reads as a cut.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum TransitionKind {
+    /// The next frame replaces this one at the end of its hold.
+    #[default]
+    Cut,
+    /// The colours blend (OKLab) from this frame into the next over the transition's `ms`.
+    Fade,
+}
+
+/// The pace of a fade (#468), as After Effects' keyframe interpolation names them. An unknown
+/// easing reads as linear.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, TS)]
+#[ts(export)]
+#[serde(rename_all = "snake_case")]
+pub enum Easing {
+    #[default]
+    Linear,
+    EaseInOut,
+    EaseIn,
+    EaseOut,
+}
+
+// A later version may add kinds and easings: an unknown word reads as the default (cut, linear)
+// instead of failing the whole patterns file.
+impl<'de> Deserialize<'de> for TransitionKind {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "fade" => TransitionKind::Fade,
+            _ => TransitionKind::Cut,
+        })
+    }
+}
+
+impl<'de> Deserialize<'de> for Easing {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        Ok(match String::deserialize(d)?.as_str() {
+            "ease_in_out" => Easing::EaseInOut,
+            "ease_in" => Easing::EaseIn,
+            "ease_out" => Easing::EaseOut,
+            _ => Easing::Linear,
+        })
+    }
+}
+
+/// How a frame passes to the NEXT one (#468); for the last frame of a looping pattern, the next is
+/// the first. `ms` is the time the passage takes, after the frame's `hold`; a cut ignores it.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Transition {
+    pub kind: TransitionKind,
+    #[serde(default)]
+    pub ms: u32,
+    #[serde(default)]
+    pub easing: Easing,
+}
+
+/// How a pattern with more than one frame plays (#468). `None` on the pattern means loop. A pattern
+/// whose [`Pattern::cycle_ms`] is 0 shows its first frame, still.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct Playback {
+    /// After the last frame, go back to the first (through the last frame's transition). When false,
+    /// the last frame stays.
+    #[serde(rename = "loop", default = "yes")]
+    pub looping: bool,
+}
+
+fn yes() -> bool {
+    true
+}
+
+impl Default for Playback {
+    fn default() -> Self {
+        Self { looping: true }
+    }
+}
 /// The lit group of the editor's takeover.
 pub const PATTERN_EDIT_GROUP: &str = "pattern-edit";
 /// How bright the other lights are while the editor is open, in percent.
@@ -65,6 +151,10 @@ pub struct Frame {
     /// Milliseconds this frame holds. Unused in 0.16.0, which writes 0.
     #[serde(default)]
     pub hold: u32,
+    /// How this frame passes to the next (#468). `None` is a cut, as every 0.16.0 frame reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub transition: Option<Transition>,
     /// Fields a later version wrote. Kept as they are.
     #[serde(flatten)]
     #[ts(skip)]
@@ -131,6 +221,10 @@ pub struct Pattern {
     pub frames: Vec<Frame>,
     #[serde(default = "Motion::none")]
     pub motion: Motion,
+    /// How the frames play (#468). `None` loops.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub playback: Option<Playback>,
     /// Fields a later version wrote. Kept as they are.
     #[serde(flatten)]
     #[ts(skip)]
@@ -138,6 +232,28 @@ pub struct Pattern {
 }
 
 impl Pattern {
+    /// Whether the frames loop (#468): true unless `playback` says otherwise.
+    pub fn looping(&self) -> bool {
+        self.playback.is_none_or(|p| p.looping)
+    }
+
+    /// One pass through the frames in milliseconds (#468): every hold, plus every fade's `ms`. The
+    /// last frame's fade counts only when the pattern loops (it fades into the first). A cut takes no
+    /// time. Saturates rather than overflowing.
+    pub fn cycle_ms(&self) -> u64 {
+        let n = self.frames.len();
+        self.frames
+            .iter()
+            .enumerate()
+            .map(|(i, f)| {
+                let fade = match f.transition {
+                    Some(Transition { kind: TransitionKind::Fade, ms, .. }) if i + 1 < n || self.looping() => ms,
+                    _ => 0,
+                };
+                u64::from(f.hold) + u64::from(fade)
+            })
+            .fold(0u64, u64::saturating_add)
+    }
     /// The id without its prefix.
     pub fn name(&self) -> &str {
         self.id.strip_prefix(PATTERN_ID_PREFIX).unwrap_or(&self.id)
@@ -184,6 +300,10 @@ pub enum PatternError {
     LedCount { count: u32 },
     /// A frame's colours do not match `built_on.led_count`.
     FrameLength { frame: usize, found: usize, expected: usize },
+    /// A frame holds longer than [`PATTERN_HOLD_MS_MAX`].
+    HoldTooLong { frame: usize, ms: u32 },
+    /// A frame's transition takes longer than [`TRANSITION_MS_MAX`].
+    TransitionTooLong { frame: usize, ms: u32 },
 }
 
 impl std::fmt::Display for PatternError {
@@ -204,6 +324,16 @@ impl std::fmt::Display for PatternError {
             PatternError::FrameLength { frame, found, expected } => write!(
                 f,
                 "frame {} has {found} colours; the device it was built on has {expected} LEDs",
+                frame + 1
+            ),
+            PatternError::HoldTooLong { frame, ms } => write!(
+                f,
+                "frame {} holds {ms} ms; a frame holds at most {PATTERN_HOLD_MS_MAX} ms",
+                frame + 1
+            ),
+            PatternError::TransitionTooLong { frame, ms } => write!(
+                f,
+                "frame {}'s transition takes {ms} ms; a transition takes at most {TRANSITION_MS_MAX} ms",
                 frame + 1
             ),
         }
@@ -242,6 +372,14 @@ pub fn validate_pattern(p: &Pattern) -> Result<(), PatternError> {
                 found: frame.colors.len(),
                 expected: count as usize,
             });
+        }
+        if frame.hold > PATTERN_HOLD_MS_MAX {
+            return Err(PatternError::HoldTooLong { frame: i, ms: frame.hold });
+        }
+        if let Some(t) = frame.transition {
+            if t.ms > TRANSITION_MS_MAX {
+                return Err(PatternError::TransitionTooLong { frame: i, ms: t.ms });
+            }
         }
     }
     Ok(())
@@ -297,10 +435,12 @@ mod tests {
                 .map(|_| Frame {
                     colors: vec![Rgb8 { r: 255, g: 0, b: 0 }; leds as usize],
                     hold: 0,
+                    transition: None,
                     extra: serde_json::Map::new(),
                 })
                 .collect(),
             motion: Motion::none(),
+            playback: None,
             extra: serde_json::Map::new(),
         }
     }
@@ -423,5 +563,73 @@ mod tests {
         let too_fast: Motion = serde_json::from_str(r#"{"type":"spin","turns_per_s":6.0}"#).unwrap();
         assert_eq!(too_fast.as_spin(), None);
         assert_eq!(Motion::none().as_spin(), None);
+    }
+
+    #[test]
+    fn a_0_16_0_frame_reads_as_a_cut_and_a_pattern_loops() {
+        let frame: Frame = serde_json::from_str(r#"{"colors":[],"hold":0}"#).unwrap();
+        assert_eq!(frame.transition, None);
+        let json = serde_json::to_string(&frame).unwrap();
+        assert!(!json.contains("transition"), "a cut frame writes as 0.16.0 did: {json}");
+        let p = pattern_with_frames(vec![(250, None), (250, None)], None);
+        assert!(p.looping());
+        assert_eq!(p.cycle_ms(), 500);
+    }
+
+    #[test]
+    fn transitions_and_playback_round_trip_and_unknown_kinds_read_safe() {
+        let t = Transition { kind: TransitionKind::Fade, ms: 400, easing: Easing::EaseInOut };
+        let json = serde_json::to_string(&t).unwrap();
+        assert_eq!(json, r#"{"kind":"fade","ms":400,"easing":"ease_in_out"}"#);
+        assert_eq!(serde_json::from_str::<Transition>(&json).unwrap(), t);
+        let odd: Transition = serde_json::from_str(r#"{"kind":"wipe","ms":5,"easing":"bounce"}"#).unwrap();
+        assert_eq!((odd.kind, odd.easing), (TransitionKind::Cut, Easing::Linear));
+        let pb: Playback = serde_json::from_str(r#"{"loop":false}"#).unwrap();
+        assert!(!pb.looping);
+        assert_eq!(serde_json::to_string(&Playback::default()).unwrap(), r#"{"loop":true}"#);
+    }
+
+    #[test]
+    fn the_cycle_counts_the_last_fade_only_when_looping() {
+        let fade = |ms| Some(Transition { kind: TransitionKind::Fade, ms, easing: Easing::Linear });
+        let mut p = pattern_with_frames(vec![(100, fade(50)), (200, fade(70))], None);
+        assert_eq!(p.cycle_ms(), 100 + 50 + 200 + 70);
+        p.playback = Some(Playback { looping: false });
+        assert_eq!(p.cycle_ms(), 100 + 50 + 200);
+        let cut = Some(Transition { kind: TransitionKind::Cut, ms: 999, easing: Easing::Linear });
+        assert_eq!(pattern_with_frames(vec![(10, cut), (10, None)], None).cycle_ms(), 20);
+    }
+
+    #[test]
+    fn validate_caps_holds_and_transitions() {
+        let fade = |ms| Some(Transition { kind: TransitionKind::Fade, ms, easing: Easing::Linear });
+        assert_eq!(validate_pattern(&pattern_with_frames(vec![(PATTERN_HOLD_MS_MAX, None)], None)), Ok(()));
+        assert_eq!(
+            validate_pattern(&pattern_with_frames(vec![(PATTERN_HOLD_MS_MAX + 1, None)], None)),
+            Err(PatternError::HoldTooLong { frame: 0, ms: PATTERN_HOLD_MS_MAX + 1 })
+        );
+        assert_eq!(
+            validate_pattern(&pattern_with_frames(vec![(0, fade(TRANSITION_MS_MAX + 1)), (0, None)], None)),
+            Err(PatternError::TransitionTooLong { frame: 0, ms: TRANSITION_MS_MAX + 1 })
+        );
+        // Frames that take no time are valid (a 0.16.0-era file may hold them): the cycle is 0 and
+        // the engine shows the first frame, still, as 0.16.0 did.
+        let timeless = pattern_with_frames(vec![(0, None), (0, None)], None);
+        assert_eq!(validate_pattern(&timeless), Ok(()));
+        assert_eq!(timeless.cycle_ms(), 0);
+    }
+
+    fn pattern_with_frames(frames: Vec<(u32, Option<Transition>)>, playback: Option<Playback>) -> Pattern {
+        Pattern {
+            id: "pattern:Frames".into(),
+            built_on: BuiltOn { led_count: 1, arrangement: Arrangement::Single, grid: None },
+            frames: frames
+                .into_iter()
+                .map(|(hold, transition)| Frame { colors: vec![Rgb8::BLACK], hold, transition, extra: Default::default() })
+                .collect(),
+            motion: Motion::none(),
+            playback,
+            extra: Default::default(),
+        }
     }
 }

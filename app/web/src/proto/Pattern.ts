@@ -2,6 +2,7 @@
 import type { BuiltOn } from "./BuiltOn";
 import type { Frame } from "./Frame";
 import type { Motion } from "./Motion";
+import type { Playback } from "./Playback";
 
 /**
  * One pattern.
@@ -10,4 +11,8 @@ export type Pattern = {
 /**
  * [`PATTERN_ID_PREFIX`] + the name. A save never renames.
  */
-id: string, built_on: BuiltOn, frames: Array<Frame>, motion: Motion, };
+id: string, built_on: BuiltOn, frames: Array<Frame>, motion: Motion, 
+/**
+ * How the frames play (#468). `None` loops.
+ */
+playback?: Playback, };
