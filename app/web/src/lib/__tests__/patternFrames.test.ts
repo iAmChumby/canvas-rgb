@@ -29,9 +29,12 @@ describe("editing the frames of a pattern", () => {
     expect(made.doc.frames[1]).toEqual({ colors: ["#000000", "#000000"], hold: 100 });
   });
 
-  it("gives a new frame half a second when the frame beside it holds none", () => {
+  it("gives a new frame half a second when the frame beside it holds none, and that frame too", () => {
     const made = addFrame({ frames: [frame("#ff0000", 0)] }, 0)!;
     expect(made.doc.frames[1]!.hold).toBe(500);
+    // The still frame would otherwise never show: the lights would play only the new blank frame.
+    expect(made.doc.frames[0]!.hold).toBe(500);
+    expect(made.doc.frames[0]!.colors).toEqual(["#ff0000", "#ff0000"]);
   });
 
   it("duplicates a frame with its hold, its transition and any field it carries", () => {

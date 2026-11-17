@@ -44,7 +44,12 @@ export function addFrame(doc: FrameDoc, at: number): { doc: FrameDoc; selected: 
   const here = doc.frames[at];
   const colors = (here?.colors ?? []).map(() => BLACK_HEX);
   const fresh: Frame = { colors, hold: here?.hold ? here.hold : NEW_HOLD_MS };
-  const frames = [...doc.frames.slice(0, at + 1), fresh, ...doc.frames.slice(at + 1)];
+  // A frame that holds 0 ms is never shown once a second frame exists (a still pattern, and every
+  // 0.16.0 pattern, holds 0): it takes the same half second, in the same edit, so the first Add on a
+  // still pattern plays both frames instead of only the new blank one.
+  const kept = here && here.hold === 0 ? { ...here, hold: NEW_HOLD_MS } : here;
+  const before = kept ? [...doc.frames.slice(0, at), kept] : doc.frames.slice(0, at + 1);
+  const frames = [...before, fresh, ...doc.frames.slice(at + 1)];
   return { doc: { ...doc, frames }, selected: at + 1 };
 }
 
