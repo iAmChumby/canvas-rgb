@@ -66,7 +66,11 @@ describe("the stage's band and the sheet's pane (#378, #469)", () => {
 
   it("nothing is pinned over the pane, so there is no scroll padding to keep in step", () => {
     expect(blockOf(css, ".stage")).not.toMatch(/position: sticky/);
-    expect(css).not.toMatch(/scroll-padding-top/);
+    // Only the sheet's own rules matter here: another area may pin a header and pad its scroll.
+    const sheetRules = [".sheet", ".sheetHead", ".sheetBody", ".sheetScroll", ".stage"]
+      .map((selector) => blockOf(css, selector) + blockOf(phone, selector))
+      .join("\n");
+    expect(sheetRules).not.toMatch(/scroll-padding-top/);
   });
 
   it("the band's height is the arithmetic of the band's own rules", () => {

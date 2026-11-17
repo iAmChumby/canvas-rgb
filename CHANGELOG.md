@@ -12,7 +12,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Scenes: a group's list of effects and presets no longer runs through its picture band and the flow across / each its own switch. The band is the sheet's own header and the list scrolls in a pane under it, so no row is ever drawn in the band's pixels or cut by its edge. (#469)
+- Scenes: a group's list of effects and presets no longer runs through its picture band and the flow across / each its own switch. The band is the sheet's own header and the list scrolls in a pane under it, so no row is ever drawn in the band's pixels or cut by its edge, and a group's own effect picker no longer covers its mode switch when the window is short or narrow. (#469)
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
 - Effects: the New effect menu's Stack, Pattern and Code keys show their name and full note inside the key, with the icon centred and no text crossing the border. (#466)
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)

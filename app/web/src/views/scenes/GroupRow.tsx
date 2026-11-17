@@ -212,6 +212,9 @@ export function GroupRow({
         onClose={() => setPicking(false)}
         label={`What ${group.name} plays`}
         className={s.pickerPopover}
+        // The picker is tall: without this it is clamped back over the anchor's row, covering
+        // the mode cell on a short or narrow window (#469).
+        keepClearOfAnchor
       >
         <div className={s.pickerHead}>
           <span className={s.pickerHeadText}>What this group plays</span>
