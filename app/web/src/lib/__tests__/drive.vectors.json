@@ -1,0 +1,105 @@
+{
+  "note": "The Rust drive rule's verdicts for the fixed device ids. Printed by crates/canvas-adapters/examples/drive_vectors.rs; tools/drive-vectors.ps1 writes this file. The editor's TypeScript rule (app/web/src/lib/drive.ts) is checked against it.",
+  "cases": [
+    {
+      "name": "the full keyboard HID path",
+      "id": "openrgb:HID: \\\\?\\HID#VID_3151&PID_4015&MI_02#9&298b2e71&0&0000#{4d1e55b2}",
+      "driven": false
+    },
+    {
+      "name": "the same path in lower case",
+      "id": "openrgb:HID: \\\\?\\hid#vid_3151&pid_4015&mi_02#9&298b2e71&0&0000#{4d1e55b2}",
+      "driven": false
+    },
+    {
+      "name": "mixed case vendor and product",
+      "id": "OpenRGB:HID: \\\\?\\Hid#Vid_3151&PiD_4015&MI_02",
+      "driven": false
+    },
+    {
+      "name": "the matched pattern on its own",
+      "id": "VID_3151&PID_4015",
+      "driven": false
+    },
+    {
+      "name": "the pattern at the start of the id",
+      "id": "VID_3151&PID_4015 and more",
+      "driven": false
+    },
+    {
+      "name": "the pattern at the end of the id",
+      "id": "prefix VID_3151&PID_4015",
+      "driven": false
+    },
+    {
+      "name": "the pattern twice in the id",
+      "id": "VID_3151&PID_4015 and VID_3151&PID_4015",
+      "driven": false
+    },
+    {
+      "name": "the pattern before a longer product code",
+      "id": "VID_3151&PID_40150",
+      "driven": false
+    },
+    {
+      "name": "an empty id",
+      "id": "",
+      "driven": true
+    },
+    {
+      "name": "the microphone HID path",
+      "id": "openrgb:HID: \\\\?\\HID#VID_03F0&PID_028C&MI_00#a&eb32b1c",
+      "driven": true
+    },
+    {
+      "name": "the native royuan id",
+      "id": "royuan:3151:4015",
+      "driven": true
+    },
+    {
+      "name": "the vendor part alone",
+      "id": "VID_3151",
+      "driven": true
+    },
+    {
+      "name": "the product part alone",
+      "id": "PID_4015",
+      "driven": true
+    },
+    {
+      "name": "a different vendor",
+      "id": "VID_3152&PID_4015",
+      "driven": true
+    },
+    {
+      "name": "a different product",
+      "id": "VID_3151&PID_4016",
+      "driven": true
+    },
+    {
+      "name": "a space instead of the separator",
+      "id": "VID_3151 PID_4015",
+      "driven": true
+    },
+    {
+      "name": "no separator",
+      "id": "VID_3151PID_4015",
+      "driven": true
+    },
+    {
+      "name": "a doubled separator",
+      "id": "VID_3151&&PID_4015",
+      "driven": true
+    },
+    {
+      "name": "the parts in the other order",
+      "id": "PID_4015&VID_3151",
+      "driven": true
+    },
+    {
+      "name": "a dotless i that Unicode uppercasing folds to I",
+      "id": "vıd_3151&pıd_4015",
+      "driven": true
+    }
+  ]
+}
