@@ -5440,8 +5440,12 @@ button.chip:hover {
     transition: opacity var(--dur-fast) var(--ease);
   }
 
-  .rail-link:hover::after,
-  .rail-link:focus-visible::after {
+  /* #478: the label is fixed at window coordinates that Rail.tsx writes on hover/focus. Without
+     the mark it would sit at the `0px` corner (the var fallback) for a frame before placement; it
+     stays invisible until the script has placed it. Pointer enter and focus write the coordinates
+     and the mark in the same task, so the first shown frame is already at the placed spot. */
+  .rail-link[data-tip-placed="true"]:hover::after,
+  .rail-link[data-tip-placed="true"]:focus-visible::after {
     opacity: 1;
   }
 }
@@ -7589,8 +7593,14 @@ button.chip:hover {
   box-shadow: 0 var(--skirt-h) 0 var(--skirt);
 }
 
-/* The transport's tooltips open inwards, so they stay over the rail and never reach over the
-   page. */
+/* The transport's tooltips prefer the rail's side, but since #467 the bubbles are `position:
+   fixed` and placed in window coordinates, so they are free to reach over the page (up to 332.8 px
+   on the old build). They no longer sit in the rail's scroll box, so their spill cannot give it a
+   sideways scrollbar. The `left: 0` / `right: 0` below are only the CSS fallback: a bubble is at
+   opacity 0 until Tooltip.tsx places it on hover, and the script overwrites both offsets with
+   window coordinates before the first shown frame, so these never anchor a visible bubble to the
+   window edge. `--tip-align` is the part that still matters: it asks the script for start/end
+   alignment. */
 .rail-deck-transport .tip:first-child .tip-bubble {
   --tip-align: start;
   left: 0;

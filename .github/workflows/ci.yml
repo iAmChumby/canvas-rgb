@@ -191,6 +191,12 @@ jobs:
         timeout-minutes: 5
         run: node tools/nav-check.mjs
 
+      # The rail never scrolls sideways (#467, #478): its tooltips and labels are measured against
+      # the rail box at every size, in the same real browser.
+      - name: Check the rail
+        timeout-minutes: 5
+        run: node tools/rail-check.mjs
+
   editor-tests:
     # The editor's own tests (vitest, jsdom), split into three shards that run side by side: one
     # job ran them in about eight minutes, which made it the second longest job of the run. Every
