@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { LedOrderControl } from "@/components/LedOrderControl";
+import { directionPatch, effectiveFirstLed, identifyLed } from "@/lib/ledOrder";
 import { LeavePrompt } from "@/components/LeavePrompt";
 import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { useFocusTrap } from "@/components/useFocusTrap";
@@ -188,12 +189,22 @@ export function PatternEditor({
   // the physical LED on the real device, so the owner can see which one is LED 1. These are light
   // properties, not pattern colours: they take effect at once and sit outside the pattern's colour
   // undo history, which is all this editor's history holds.
-  const firstLed = light?.light.first_led ?? 0;
+  // The light's own LED count is the run `first_led` counts in and the daemon checks it against.
+  // `referenceLight` only returns a light whose count equals the pattern's, so the two cannot differ
+  // while a light is found; the light's count is used so the notch never depends on the picture.
+  const lightLeds = light?.led_count ?? Math.max(1, editor.builtOn.led_count);
   const reversed = light?.light.reversed ?? false;
+  const firstLed = effectiveFirstLed(light?.light.first_led, reversed, lightLeds);
+  // Identify addresses a LED of the zone; `first_led` counts inside the light's slice.
   const identifyFirst = (led: number) => {
     if (!light) return;
     void api
-      .identify(light.light.device_id, { zone: light.light.zone_index, led, count: 1, stop: false })
+      .identify(light.light.device_id, {
+        zone: light.light.zone_index,
+        led: identifyLed(light.light.leds, led),
+        count: 1,
+        stop: false,
+      })
       .catch(() => undefined);
   };
   const setFirstLed = async (led: number) => {
@@ -211,7 +222,10 @@ export function PatternEditor({
     if (!light) return;
     setShapeProblem(null);
     try {
-      await api.lights.patch(light.light.id, { reversed: next });
+      await api.lights.patch(
+        light.light.id,
+        directionPatch(next, light.light.first_led, reversed, lightLeds),
+      );
       await refreshLights();
     } catch (error) {
       setShapeProblem(messageOf(error));
@@ -432,7 +446,7 @@ export function PatternEditor({
           ledOrder={(dots, box) => (
             <div className={s.ledOrderOverlay}>
               <LedOrderControl
-                ledCount={Math.max(1, dots.length)}
+                ledCount={lightLeds}
                 firstLed={firstLed}
                 reversed={reversed}
                 ring={editor.builtOn.arrangement === "ring"}

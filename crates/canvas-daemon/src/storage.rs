@@ -360,7 +360,7 @@ fn is_own_leftover(light: &Light) -> bool {
 /// True when the owner has not changed the light: every owner field is at its default.
 ///
 /// The fields the owner can change are the ones the patch route takes (`api/lights.rs`:
-/// `name`, `arrangement` and `reversed`) and the `kind` its patch type carries. The app
+/// `name`, `arrangement`, `reversed` and `first_led`) and the `kind` its patch type carries. The app
 /// sets `leds` on a light of its own (a chain part, a placed slice) and never sets
 /// `copies` at all, so a light that carries either was not left as the app made it.
 fn is_untouched(light: &Light) -> bool {
@@ -368,6 +368,8 @@ fn is_untouched(light: &Light) -> bool {
         && light.leds.is_none()
         && light.kind.is_none()
         && !light.reversed
+        // An owner-chosen first LED is a change; a stored 0 is LED 0, the way every light began.
+        && matches!(light.first_led, None | Some(0))
         && light.copies.is_none()
         && light.arrangement == LEFTOVER_ARRANGEMENT
 }
@@ -2682,7 +2684,7 @@ power = "running"
     /// neither file is rewritten (#393).
     ///
     /// Every owner field, one at a time: the rename, a slice, a kind, the direction, another
-    /// arrangement and a copy count. A light that carries any of them is the owner's.
+    /// arrangement, a copy count and a first LED. A light that carries any of them is the owner's.
     #[test]
     fn a_light_the_owner_touched_is_kept_and_no_file_is_rewritten() {
         type Touch = Box<dyn Fn(&mut Light)>;
@@ -2699,6 +2701,7 @@ power = "running"
             ("reversed", Box::new(|l: &mut Light| l.reversed = true)),
             ("arrangement", Box::new(|l: &mut Light| l.arrangement = Arrangement::Ring)),
             ("copies", Box::new(|l: &mut Light| l.copies = Some(2))),
+            ("first_led", Box::new(|l: &mut Light| l.first_led = Some(3))),
         ];
         for (what, change) in cases {
             let (dir, orphan_id, lights_before, scenes_before, _kept) =

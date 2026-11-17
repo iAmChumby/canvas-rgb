@@ -39,3 +39,65 @@ export function nearestLed(dots: Dot[], x: number, y: number): number | null {
   }
   return best;
 }
+
+/**
+ * The physical LED that is position 0 now. A first LED the owner set (and that still fits the
+ * light) is it. With none, a forward run starts on LED 0 and a reversed one on the last LED: the
+ * flip every reversed light made before #468, so the notch is drawn where the lights really start.
+ */
+export function effectiveFirstLed(
+  firstLed: number | null | undefined,
+  reversed: boolean,
+  count: number,
+): number {
+  if (count <= 0) return 0;
+  if (firstLed != null && firstLed >= 0 && firstLed < count) return firstLed;
+  return reversed ? count - 1 : 0;
+}
+
+/**
+ * The patch that turns a light round. The first LED stays first and `reversed` sets the way the
+ * run goes from it, so the first LED in force is sent with the flag: without it a light with no
+ * first LED would jump from LED 0 to its last LED, or back, as the direction changed.
+ */
+export function directionPatch(
+  next: boolean,
+  firstLed: number | null | undefined,
+  reversed: boolean,
+  count: number,
+): { reversed: boolean; first_led: number } {
+  return { reversed: next, first_led: effectiveFirstLed(firstLed, reversed, count) };
+}
+
+/**
+ * The LED the identify route flashes for a light's first LED. Identify addresses a LED of the
+ * zone (`Run.led`, `crates/canvas-daemon/src/identify.rs`), but `first_led` counts inside the
+ * light, which for a chain part or a placed slice starts at `leds.start` of the zone. Position 0
+ * is the first LED in either direction, so `reversed` changes nothing here.
+ */
+export function identifyLed(slice: { start: number } | null | undefined, firstLed: number): number {
+  return (slice?.start ?? 0) + firstLed;
+}
+
+/**
+ * Where a pointer is in the SVG's own coordinates. The view is `viewBox` w x h inside a box of any
+ * shape, and SVG's default `preserveAspectRatio` (xMidYMid meet) scales it uniformly and centres
+ * it, so a box that is not the view's shape leaves bands the picture does not cover. A straight
+ * px-to-viewBox ratio ignores those bands and picks the wrong LED.
+ */
+export function clientToView(
+  rect: { left: number; top: number; width: number; height: number },
+  w: number,
+  h: number,
+  clientX: number,
+  clientY: number,
+): { x: number; y: number } {
+  if (rect.width <= 0 || rect.height <= 0 || w <= 0 || h <= 0) return { x: 0, y: 0 };
+  const scale = Math.min(rect.width / w, rect.height / h);
+  const offsetX = (rect.width - w * scale) / 2;
+  const offsetY = (rect.height - h * scale) / 2;
+  return {
+    x: (clientX - rect.left - offsetX) / scale,
+    y: (clientY - rect.top - offsetY) / scale,
+  };
+}

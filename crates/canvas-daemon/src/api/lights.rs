@@ -82,7 +82,8 @@ fn label(light: &Light, device: Option<&DeviceInfo>, zone: Option<&ZoneInfo>) ->
 ///
 /// `name` left out is unchanged, `name: null` clears it, a string renames the light (trimmed; an
 /// empty or over-long one is a 422). `arrangement` and `reversed` are set when given. `first_led`
-/// is set when given: `0` clears it (LED 0 starts the run, as before #468), and a value at or past
+/// is set when given: `0` clears it (LED 0 starts the run, as before #468) unless the light runs
+/// back, where a stored 0 keeps LED 0 first and a missing one means the old flip; a value at or past
 /// the light's current LED count is a 422. The change is saved before it is answered, so a refused
 /// save changes nothing and answers 503. A patch that changes nothing is answered without writing
 /// the file.
@@ -108,9 +109,13 @@ pub async fn patch_light(
         // A first LED is a physical LED of this light, so it must fit the count the device has
         // now. 0 resets it to None. Validate before any field is changed so a refused patch
         // leaves memory and lights.json as they were (#468).
+        // A first LED of 0 clears it, unless the light runs back: a reversed light with no first
+        // LED plays the old full flip (position 0 on its last LED), so LED 0 as the first LED of a
+        // reversed run has to be stored (#468).
+        let reversed_after = patch.reversed.unwrap_or(store.lights.lights[index].reversed);
         let first_led = match patch.first_led {
             None => None,
-            Some(0) => Some(None),
+            Some(0) if !reversed_after => Some(None),
             Some(first) => {
                 let current = &store.lights.lights[index];
                 let count = devices

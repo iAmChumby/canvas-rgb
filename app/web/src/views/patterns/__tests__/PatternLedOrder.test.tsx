@@ -87,10 +87,10 @@ function blank(leds = 8): Pattern {
   };
 }
 
-function light(first_led?: number, reversed = false): LightView {
+function light(first_led?: number, reversed = false, leds?: { start: number; count: number }): LightView {
   return {
     light: {
-      id: "fake:a#z0", device_id: "fake:a", zone_index: 0, arrangement: "ring", reversed, first_led,
+      id: "fake:a#z0", device_id: "fake:a", zone_index: 0, arrangement: "ring", reversed, first_led, leds,
     } as LightView["light"],
     led_count: 8,
     connected: true,
@@ -110,8 +110,8 @@ function device(): DeviceInfo {
   } as unknown as DeviceInfo;
 }
 
-function show(first_led?: number, reversed = false) {
-  const view = light(first_led, reversed);
+function show(first_led?: number, reversed = false, leds?: { start: number; count: number }) {
+  const view = light(first_led, reversed, leds);
   patchSnap({ lights: [view], devices: [device()] });
   api.lights.patch.mockResolvedValue(view);
   api.lights.list.mockResolvedValue({ lights: [view] });
@@ -157,7 +157,7 @@ describe("the LED-order notch in the pattern editor", () => {
     show(0, false);
     await settle();
     await act(async () => { fireEvent.click(screen.getByTestId("led-order-direction")); });
-    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { reversed: true });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { reversed: true, first_led: 0 });
   });
 
   it("shows the marked LED and the current direction on the view", async () => {
@@ -167,5 +167,52 @@ describe("the LED-order notch in the pattern editor", () => {
     expect(view.getAttribute("data-first-led")).toBe("3");
     expect(view.getAttribute("data-reversed")).toBe("true");
     expect(screen.getByTestId("first-led-notch").getAttribute("aria-valuenow")).toBe("4");
+  });
+
+  it("sends the first LED with the direction, so the first LED stays first as it turns", async () => {
+    // A reversed light with no first LED starts on its last LED (the old full flip); turning it
+    // forward keeps that LED first instead of jumping to LED 0.
+    show(undefined, true);
+    await settle();
+    expect(screen.getByTestId("first-led-notch").getAttribute("aria-valuenow")).toBe("8");
+    await act(async () => { fireEvent.click(screen.getByTestId("led-order-direction")); });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { reversed: false, first_led: 7 });
+  });
+
+  it("identifies the zone's LED, not the slice's, on a part that starts past the zone's first LED", async () => {
+    // A chain part: its LEDs 0..7 are the zone's LEDs 12..19, and `first_led` counts inside the part.
+    show(0, false, { start: 12, count: 8 });
+    await settle();
+    await act(async () => { fireEvent.keyDown(screen.getByTestId("first-led-notch"), { key: "ArrowRight" }); });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { first_led: 1 });
+    expect(api.identify).toHaveBeenLastCalledWith("fake:a", {
+      zone: 0, led: 13, count: 1, stop: false,
+    });
+    await act(async () => { fireEvent.click(screen.getByTestId("led-order-identify")); });
+    expect(api.identify).toHaveBeenLastCalledWith("fake:a", {
+      zone: 0, led: 12, count: 1, stop: false,
+    });
+  });
+
+  it("writes and identifies once for a drag across several LEDs, at the LED it settles on", async () => {
+    show(0);
+    await settle();
+    const notch = screen.getByTestId("first-led-notch");
+    const dots = layoutDots(blank().built_on, BOX, BOX);
+    await act(async () => {
+      fireEvent.pointerDown(notch, { pointerId: 1 });
+      for (const i of [1, 2, 3, 4, 5]) {
+        fireEvent.pointerMove(notch, { pointerId: 1, clientX: dots[i]!.x, clientY: dots[i]!.y });
+      }
+    });
+    // The notch follows the pointer while it is down, and nothing is written yet.
+    expect(screen.getByTestId("led-order").getAttribute("data-first-led")).toBe("5");
+    expect(api.lights.patch).not.toHaveBeenCalled();
+    await act(async () => {
+      fireEvent.pointerUp(notch, { pointerId: 1 });
+    });
+    expect(api.lights.patch).toHaveBeenCalledTimes(1);
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:a#z0", { first_led: 5 });
+    expect(api.identify).toHaveBeenCalledTimes(1);
   });
 });

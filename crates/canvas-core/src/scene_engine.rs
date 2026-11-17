@@ -1425,60 +1425,56 @@ mod tests {
 
     // ---------------------------------------------------------- first LED (#468, phase 3)
 
-    /// The LED run rotated right by `k`: physical LED `k` takes what LED 0 had.
-    fn rotated_run<T: Clone>(source: &[T], k: usize) -> Vec<T> {
-        let mut out = source.to_vec();
-        if !out.is_empty() {
-            let by = k % out.len();
-            out.rotate_right(by);
-        }
-        out
-    }
-
-    /// The class test over both paths (#468): a pattern and a canvas effect on a light whose
-    /// first LED is physical LED `FIRST` must agree on which LED is position 0. Each path is
-    /// measured with and without `first_led`; both must move their position-0 colour to `FIRST`.
+    /// The class test over both paths and both directions (#468): a pattern and a canvas effect on
+    /// a light whose first LED is physical LED `FIRST` must agree on which LED is position 0 and
+    /// which LED holds position `p`. Forward, position `p` is on LED `FIRST + p`; reversed, on
+    /// LED `FIRST - p` (wrapping): the first LED stays first and `reversed` sets the way from it.
     #[test]
     fn a_pattern_and_a_canvas_effect_agree_which_led_is_first() {
-        const FIRST: u32 = 3;
+        const FIRST: usize = 3;
         const N: u32 = 8;
+        let n = N as usize;
         let device = strip_device("d1", N);
+        let pattern = |first: Option<u32>, reversed: bool| {
+            let mut light = light("d1");
+            light.first_led = first;
+            light.reversed = reversed;
+            let effect =
+                PatternTestEffect::new(pattern_on(N, Arrangement::Strip, ramp(N as usize)));
+            let mut scene = state_playing(&["d1#z0"], vec![light], Some(Box::new(effect)), 100);
+            let mut runner = SceneRunner::new();
+            frame(&mut scene, &mut runner, std::slice::from_ref(&device));
+            take(&mut runner, "d1", N)
+        };
+        let canvas = |first: Option<u32>, reversed: bool| {
+            let mut light = light("d1");
+            light.first_led = first;
+            light.reversed = reversed;
+            let mut scene =
+                state_playing(&["d1#z0"], vec![light], Some(Box::new(HorizontalRamp)), 100);
+            let mut runner = SceneRunner::new();
+            frame(&mut scene, &mut runner, std::slice::from_ref(&device));
+            take(&mut runner, "d1", N)
+        };
+        let pattern_plain = pattern(None, false);
+        let canvas_plain = canvas(None, false);
+        assert_ne!(pattern_plain[0], pattern_plain[FIRST], "a ramp tells the LEDs apart");
 
-        // The pattern path, with and without a first LED.
-        let mut first = light("d1");
-        first.first_led = Some(FIRST);
-        let effect = PatternTestEffect::new(pattern_on(N, Arrangement::Strip, ramp(N as usize)));
-        let mut scene = state_playing(&["d1#z0"], vec![first], Some(Box::new(effect)), 100);
-        let mut runner = SceneRunner::new();
-        frame(&mut scene, &mut runner, std::slice::from_ref(&device));
-        let pattern_first = take(&mut runner, "d1", N);
-
-        let effect = PatternTestEffect::new(pattern_on(N, Arrangement::Strip, ramp(N as usize)));
-        let mut scene = state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(effect)), 100);
-        let mut runner = SceneRunner::new();
-        frame(&mut scene, &mut runner, std::slice::from_ref(&device));
-        let pattern_plain = take(&mut runner, "d1", N);
-
-        // The canvas/effect sampling path, with and without a first LED.
-        let mut first = light("d1");
-        first.first_led = Some(FIRST);
-        let mut scene = state_playing(&["d1#z0"], vec![first], Some(Box::new(HorizontalRamp)), 100);
-        let mut runner = SceneRunner::new();
-        frame(&mut scene, &mut runner, std::slice::from_ref(&device));
-        let canvas_first = take(&mut runner, "d1", N);
-
-        let mut scene =
-            state_playing(&["d1#z0"], vec![light("d1")], Some(Box::new(HorizontalRamp)), 100);
-        let mut runner = SceneRunner::new();
-        frame(&mut scene, &mut runner, &[device]);
-        let canvas_plain = take(&mut runner, "d1", N);
-
-        // Both paths rotate the same way, and both put position 0 on physical LED FIRST.
-        assert_eq!(pattern_first, rotated_run(&pattern_plain, FIRST as usize), "pattern path: {pattern_first:?}");
-        assert_eq!(canvas_first, rotated_run(&canvas_plain, FIRST as usize), "canvas path: {canvas_first:?}");
-        assert_eq!(pattern_first[FIRST as usize], pattern_plain[0], "pattern LED 1 moved");
-        assert_eq!(canvas_first[FIRST as usize], canvas_plain[0], "canvas LED 1 moved");
-        assert_ne!(pattern_plain[0], pattern_plain[FIRST as usize], "a ramp tells the LEDs apart");
+        for reversed in [false, true] {
+            let pattern_first = pattern(Some(FIRST as u32), reversed);
+            let canvas_first = canvas(Some(FIRST as u32), reversed);
+            for p in 0..n {
+                let led = if reversed { (FIRST + n - p) % n } else { (FIRST + p) % n };
+                assert_eq!(
+                    pattern_first[led], pattern_plain[p],
+                    "pattern path, reversed={reversed}: position {p} is on LED {led}: {pattern_first:?}"
+                );
+                assert_eq!(
+                    canvas_first[led], canvas_plain[p],
+                    "canvas path, reversed={reversed}: position {p} is on LED {led}: {canvas_first:?}"
+                );
+            }
+        }
     }
 
     /// `first_led` `None` leaves the byte stream exactly as it was before #468: a plain pattern
@@ -1503,22 +1499,33 @@ mod tests {
         assert_eq!(run(Some(0), false), source, "an explicit 0 is the same as None");
     }
 
-    /// `first_led` is applied before `reversed`: the run is rotated to physical LED 3, then
-    /// flipped, which puts position 0 at `7 - 3 = 4` for a ring of eight.
+    /// The first LED stays first in both directions (#468): physical LED 3 is position 0 whether
+    /// the run goes forward (positions 0..7 on LEDs 3,4,5,6,7,0,1,2) or back (on LEDs 3,2,1,0,7,6,5,4).
     #[test]
-    fn reversed_is_applied_after_the_first_led() {
+    fn reversed_runs_back_from_the_first_led() {
         let source = ramp(8);
-        let mut light = light("d1");
-        light.first_led = Some(3);
-        light.reversed = true;
-        let effect = PatternTestEffect::new(pattern_on(8, Arrangement::Strip, source.clone()));
-        let mut scene = state_playing(&["d1#z0"], vec![light], Some(Box::new(effect)), 100);
-        let mut runner = SceneRunner::new();
-        frame(&mut scene, &mut runner, &[strip_device("d1", 8)]);
-        let got = take(&mut runner, "d1", 8);
-        let mut expected = rotated_run(&source, 3);
-        expected.reverse();
-        assert_eq!(got, expected, "first LED then reversed: {got:?}");
+        let run = |first: Option<u32>, reversed: bool| {
+            let mut light = light("d1");
+            light.first_led = first;
+            light.reversed = reversed;
+            let effect = PatternTestEffect::new(pattern_on(8, Arrangement::Strip, source.clone()));
+            let mut scene = state_playing(&["d1#z0"], vec![light], Some(Box::new(effect)), 100);
+            let mut runner = SceneRunner::new();
+            frame(&mut scene, &mut runner, &[strip_device("d1", 8)]);
+            take(&mut runner, "d1", 8)
+        };
+        // The colour on physical LED `led` is position `p` of the run; position 0 sits on LED 3.
+        let back = run(Some(3), true);
+        let forward = run(Some(3), false);
+        assert_eq!(back[3], source[0], "reversed: LED 3 is position 0: {back:?}");
+        assert_eq!(forward[3], source[0], "forward: LED 3 is position 0: {forward:?}");
+        // Position p sits on LED (3 - p) mod 8 going back.
+        let wanted: Vec<_> = [3usize, 2, 1, 0, 7, 6, 5, 4].iter().map(|led| back[*led]).collect();
+        assert_eq!(wanted, source, "positions 0..8 of the reversed run read the pattern in order");
+        // An explicit first LED of 0 on a reversed light starts at LED 0 and runs back from it.
+        let zero = run(Some(0), true);
+        assert_eq!(zero[0], source[0], "LED 0 first, running back: {zero:?}");
+        assert_eq!(zero[7], source[1], "and LED 7 second: {zero:?}");
     }
 
     /// A first LED at or past the light's LED count no longer fits, so it is dropped: the run

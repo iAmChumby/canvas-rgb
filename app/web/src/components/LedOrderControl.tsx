@@ -3,11 +3,13 @@
 // The LED-order view (#468, phase 3): the run drawn as a ring or a line, a notch on the physical
 // LED that is position 0, and an arrow for the direction. The notch is a slider: drag it to another
 // LED, or focus it and use the arrow keys (one LED a press) and Home (back to LED 0). The arrow
-// toggles the direction and the crosshair identifies the first LED on the real device.
+// toggles the direction and the crosshair identifies the first LED on the real device. A drag moves
+// the notch under the pointer as it goes but writes once, when it settles on release: every LED
+// crossed on the way would otherwise be a lights PATCH and a four-second identify flash.
 
-import { useRef, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
+import { useRef, useState, type KeyboardEvent as ReactKeyboardEvent, type PointerEvent as ReactPointerEvent } from "react";
 import { cancelPress } from "@/lib/pressDrag";
-import { nearestLed, notchDot, stepFirstLed } from "@/lib/ledOrder";
+import { clientToView, nearestLed, notchDot, stepFirstLed } from "@/lib/ledOrder";
 import type { Dot } from "@/views/patterns/dotLayout";
 import s from "@/components/LedOrderControl.module.css";
 
@@ -102,20 +104,39 @@ export function LedOrderControl({
   const w = width ?? (ring ? 132 : 220);
   const h = height ?? (ring ? 132 : 44);
   const placed = dots && dots.length > 0 ? dots : miniDots(ledCount, ring, w, h);
-  const dot = notchDot(placed, firstLed);
+  // The LED the notch is being dragged to, until the pointer lets go.
+  const [dragged, setDragged] = useState<number | null>(null);
+  // The same value for the release handler, which can run before the render that follows a move.
+  const draggedTo = useRef<number | null>(null);
+  const drag = (led: number | null) => {
+    draggedTo.current = led;
+    setDragged(led);
+  };
+  const shown = dragged ?? firstLed;
+  const dot = notchDot(placed, shown);
   const marker = dot ? markerOf(dot, placed, reversed, ring) : null;
 
+  // The pointer in the SVG's own coordinates, through the letterbox the viewBox leaves in a box of
+  // another shape (the Devices row is 76 x 36 around a 132 x 132 ring).
   const local = (event: ReactPointerEvent<SVGCircleElement>) => {
     const rect = svg.current?.getBoundingClientRect();
-    return rect
-      ? { x: ((event.clientX - rect.left) / rect.width) * w, y: ((event.clientY - rect.top) / rect.height) * h }
-      : { x: 0, y: 0 };
+    return rect ? clientToView(rect, w, h, event.clientX, event.clientY) : { x: 0, y: 0 };
   };
 
   const move = (event: ReactPointerEvent<SVGCircleElement>) => {
     if (!event.currentTarget.hasPointerCapture?.(event.pointerId) || !svg.current) return;
     const at = local(event);
     const next = nearestLed(placed, at.x, at.y);
+    // A dot the light does not have (a view drawn for more LEDs than the light) is not a target.
+    if (next !== null && next < ledCount) drag(next);
+  };
+
+  const settle = (event: ReactPointerEvent<SVGCircleElement>) => {
+    if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+      event.currentTarget.releasePointerCapture(event.pointerId);
+    }
+    const next = draggedTo.current;
+    drag(null);
     if (next !== null && next !== firstLed) onFirstLed(next);
   };
 
@@ -141,9 +162,9 @@ export function LedOrderControl({
       width="100%"
       height="100%"
       role="group"
-      aria-label={`${label}: LED 1 is ${firstLed + 1}, running ${reversed ? "backwards" : "forwards"}`}
+      aria-label={`${label}: LED 1 is ${shown + 1}, running ${reversed ? "backwards" : "forwards"}`}
       data-testid="led-order"
-      data-first-led={firstLed}
+      data-first-led={shown}
       data-reversed={reversed ? "true" : "false"}
     >
       {!dots &&
@@ -179,18 +200,15 @@ export function LedOrderControl({
             aria-label={`${label}: first LED`}
             aria-valuemin={1}
             aria-valuemax={ledCount}
-            aria-valuenow={firstLed + 1}
+            aria-valuenow={shown + 1}
             data-testid="first-led-notch"
             onPointerDown={(event) => {
               cancelPress(event, { focus: true });
               event.currentTarget.setPointerCapture?.(event.pointerId);
             }}
             onPointerMove={move}
-            onPointerUp={(event) => {
-              if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
-                event.currentTarget.releasePointerCapture(event.pointerId);
-              }
-            }}
+            onPointerUp={settle}
+            onPointerCancel={() => drag(null)}
             onKeyDown={key}
           />
           {onReversed && (

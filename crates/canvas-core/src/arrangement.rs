@@ -261,25 +261,34 @@ fn slot_for(mode: GroupMode, before: u64, count: u64, total: u64) -> Slot {
     }
 }
 
-/// Puts a light's LED order into the device's frame: the owner's `first_led` becomes position 0,
-/// then `reversed` flips the run (#468, phase 3).
+/// Puts a light's LED order into the device's frame: the owner's `first_led` is position 0, and
+/// `reversed` sets which way the run goes from it (#468, phase 3).
 ///
 /// The vector is indexed by physical LED: entry `i` is what LED `i` of the device reads (a
 /// [`LedSample`] on the canvas path, an [`Rgb8`](canvas_proto::color::Rgb8) on the pattern path).
-/// A `first_led` of `f` means physical LED `f` is position 0, so the vector is rotated right by
-/// `f`. `None`, an explicit 0, and a first LED at or past the light's current count (a zone that
-/// shrank) all leave the rotation out, so a light wired the old way is byte-identical to before
-/// #468. The flip comes after the rotation, so the two paths agree on which LED is first.
+/// With a first LED `f` (below the light's count), position `p` lands on LED `f + p` going
+/// forward and on LED `f - p` going back, both wrapping: physical LED `f` is position 0 in both
+/// directions. Forward that is a rotation right by `f`; back it is the reversed run rotated right
+/// by `f + 1`.
+///
+/// No first LED (`None`, or one at or past the light's count, which a zone that shrank leaves
+/// behind) means the run was never anchored: it plays plain, or as one full flip when `reversed`.
+/// That is what every light did before #468, so a light wired the old way is byte-identical. An
+/// explicit first LED of 0 is anchored, so `reversed` keeps LED 0 first (see the daemon's PATCH,
+/// which keeps a stored 0 on a reversed light).
 pub fn apply_led_order<T>(leds: &mut [T], first_led: Option<u32>, reversed: bool) {
-    if let Some(first) = first_led {
-        let n = leds.len();
-        // A first LED that no longer fits is dropped, not wrapped: the run starts at LED 0.
-        if first != 0 && (first as usize) < n {
-            leds.rotate_right(first as usize);
+    let n = leds.len();
+    // A first LED that no longer fits is dropped, not wrapped.
+    let first = first_led.map(|f| f as usize).filter(|f| *f < n);
+    match (first, reversed) {
+        (None, false) => {}
+        (None, true) => leds.reverse(),
+        (Some(0), false) => {}
+        (Some(f), false) => leds.rotate_right(f),
+        (Some(f), true) => {
+            leds.reverse();
+            leds.rotate_right((f + 1) % n);
         }
-    }
-    if reversed {
-        leds.reverse();
     }
 }
 
@@ -300,9 +309,9 @@ fn build_light_leds(
         Arrangement::Ring => ring_samples(slot, n),
         Arrangement::Grid => grid_samples(light, count, slot, devices),
     };
-    // `first_led` picks the physical LED that is position 0, then `reversed` flips the run. Both
-    // this path and the pattern path go through the same helper so they agree on which LED is
-    // first (#468).
+    // `first_led` is the physical LED that is position 0 and `reversed` sets the way the run goes
+    // from it. Both this path and the pattern path go through the same helper so they agree on
+    // which LED is first (#468).
     apply_led_order(&mut leds, light.first_led, light.reversed);
     leds
 }

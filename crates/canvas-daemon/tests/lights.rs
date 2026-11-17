@@ -328,6 +328,43 @@ async fn light_patch_sets_and_resets_first_led_and_round_trips_it() {
     assert_eq!(saved.lights[0].first_led, None, "0 is stored as None");
 }
 
+/// A reversed light with no first LED plays the old full flip, so LED 0 as the first LED of a
+/// reversed run has to survive the PATCH as a stored 0 (#468). Without it the owner could never
+/// put the first LED back on LED 0 of a reversed light.
+#[tokio::test]
+async fn light_patch_keeps_a_first_led_of_zero_on_a_reversed_light() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, _home) = build(lights, devices).await;
+    let patch = |body: &'static str| {
+        let router = router.clone();
+        async move {
+            let response = router
+                .oneshot(request_with_body("PATCH", &light_path("fake:mb#z0"), body))
+                .await
+                .expect("the router answers");
+            assert_eq!(response.status(), StatusCode::OK);
+        }
+    };
+
+    // Reversed and anchored on LED 0 in one patch: stored as 0, not dropped.
+    patch(r#"{"reversed":true,"first_led":0}"#).await;
+    let stored = app.store.read().await.lights.lights[0].clone();
+    assert!(stored.reversed);
+    assert_eq!(stored.first_led, Some(0), "LED 0 stays first on a reversed light");
+
+    // The same on a light that is already reversed.
+    patch(r#"{"first_led":3}"#).await;
+    patch(r#"{"first_led":0}"#).await;
+    assert_eq!(app.store.read().await.lights.lights[0].first_led, Some(0));
+
+    // Back to forward with 0: nothing to store, as before #468.
+    patch(r#"{"reversed":false,"first_led":0}"#).await;
+    let stored = app.store.read().await.lights.lights[0].clone();
+    assert!(!stored.reversed);
+    assert_eq!(stored.first_led, None);
+}
+
 #[tokio::test]
 async fn light_patch_refuses_a_first_led_at_or_past_the_led_count() {
     let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 8)])];
