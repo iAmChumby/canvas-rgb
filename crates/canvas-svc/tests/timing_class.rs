@@ -60,6 +60,9 @@ const ACCESSORS: &[&str] = &[".as_millis()", ".as_secs_f64()", ".as_secs_f32()",
 /// "the property" (the bound is what the test is about), and "open" (a real sibling of the class,
 /// listed in docs/bug-classes.md and not yet fixed; deleting its entry is the fix's last step).
 const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
+    ("canvas-adapters/tests/openrgb_protocol6.rs", "started.elapsed() >= Duration::from_secs(15)", "safe: tokio's paused clock (start_paused) moves to the call's 15 s bound exactly and no further; the bound is the property under test (the call's bound only), #290"),
+    ("canvas-adapters/tests/openrgb_protocol6.rs", "started.elapsed() < Duration::from_millis(100)", "safe: tokio's paused clock (start_paused) moves only when every task waits; the rescan ends on the ACK with no timer, so no virtual time passes, and protocol 5's 1.5 s window would fail it, #290"),
+    ("canvas-adapters/tests/openrgb_protocol6.rs", "started.elapsed() < Duration::from_secs(1)", "safe: tokio's paused clock (start_paused); the ACK refuses the request at once, and the 5 s reply timeout it replaces would fail it, #290"),
     ("canvas-core/src/timer.rs", "elapsed < Duration::from_millis(120)", "open: 120 ms ceiling on three frames at 100 fps (30 ms of scheduled sleeps); a stalled runner overshoots it"),
     ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(100)", "open: 100 ms ceiling on a catch-up that should cost nothing"),
     ("canvas-core/src/timer.rs", "start.elapsed() < Duration::from_millis(60)", "open: 60 ms ceiling after a reset; about 43 ms of slack over one 16.7 ms frame"),
@@ -70,6 +73,8 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
     ("canvas-daemon/src/user_effects.rs", "took < budget + std::time::Duration::from_secs_f64(frame_est)", "open, calibrated: the render is held to its budget plus one frame, where the frame is the best of three samples scaled to the effect (about 0.5 s). The slack is a constant once measured: a stall longer than it fails the test (#51)"),
     ("canvas-daemon/tests/scenes.rs", "start.elapsed() < Duration::from_secs(20)", "hang guard: a 20 s deadline on a poll loop for a brightness change that lands within one frame"),
     ("canvas-daemon/tests/quit.rs", "started.elapsed() < Duration::from_secs(15)", "open: a child process must serve its API within 15 s on a loaded runner"),
+    ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(started.elapsed() < Duration::from_secs(2), \"waited past the first window", "open: pins the rescan's 1.5 s first window (no list change means detection did not start); 0.5 s slack over the window it asserts, #290"),
+    ("canvas-adapters/tests/openrgb_rescan.rs", "assert!(took >= Duration::from_secs(3) && took < Duration::from_secs(5)", "open: pins the 3 s detection cap set for this test: the call must return at the cap, not before and not long after; 2 s slack, #290"),
     ("canvas-daemon/tests/quit.rs", "took <= EXIT_DEADLINE", "the property: the daemon's own exit deadline"),
     ("canvas-daemon/tests/engine_calls.rs", "answer.took < Duration::from_millis(250)", "the property: the settings route must answer well inside the route's own 500 ms bound on the render engine, or a reader that holds the store's lock across the engine wait shows up (that way it waits about 390 ms)"),
     ("canvas-html/tests/effects.rs", "started.elapsed().as_millis() <= 2_000", "hang guard: a frame after a runaway loop must not be stuck as well; 2 s"),
@@ -83,6 +88,12 @@ const BOUND_ALLOWED: &[(&str, &str, &str)] = &[
 /// inside a loop that polls to a deadline. "open" means the sleep stands in for a state the code is
 /// expected to reach in time, which a stalled runner can miss: a real sibling, not yet fixed.
 const SLEEP_ASSERT_ALLOWED: &[(&str, &str, &str)] = &[
+    ("canvas-adapters/tests/openrgb_protocol6.rs", "sleep(Duration::from_millis(500))", "safe: tokio's paused clock (start_paused); the sleep is the sampling step of a loop that reads the list every virtual 500 ms during a detection, and the assert reads every sample, #290"),
+    ("canvas-adapters/tests/openrgb_protocol6.rs", "sleep(Duration::from_secs(1))", "safe: tokio's paused clock (start_paused); the sleep is the sampling step of a loop over a virtual minute, and the assert reads every sample, #290"),
+    ("canvas-daemon/tests/devices_rescan.rs", "sleep(Duration::from_millis(500))", "safe: tokio's paused clock (start_paused); the sleep is the sampling step of a loop that checks the daemon's list during a detection, and the assert reads every sample, #290"),
+    ("canvas-adapters/tests/openrgb_rescan.rs", "tokio::time::sleep(Duration::from_millis(100)).await;", "absence check: a SET_CUSTOM_MODE that must NOT be sent; the frame write before it has already returned, so 100 ms gives a wrong extra write time to land, #290"),
+    ("canvas-daemon/tests/devices_rescan.rs", "sleep(Duration::from_secs(5))", "safe: tokio's paused clock (start_paused) moves exactly 5 virtual seconds, one refresh of the supervisor; a slow runner cannot overshoot it, #290"),
+    ("canvas-daemon/tests/devices_rescan.rs", "sleep(Duration::from_secs(1))", "safe: tokio's paused clock (start_paused) moves exactly 1 virtual second, inside a detection that lasts 6; asserts the removal has NOT happened yet, #290"),
     ("canvas-daemon/src/scene_migration.rs", "sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of the file shows as a new mtime; a slower runner only widens the gap"),
     ("canvas-daemon/src/storage.rs", "std::thread::sleep(std::time::Duration::from_millis(30))", "safe: lets the clock move so a same-bytes rewrite of layouts.json shows as a new mtime; a slower runner only widens the gap"),
     ("attack_shark_x6/hid_cache.rs", "sleep(Duration::from_millis(350))", "safe: sleeps past a 300 ms TTL; a slower runner only ages the cache more"),

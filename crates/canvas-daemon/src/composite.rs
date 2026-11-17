@@ -142,6 +142,11 @@ impl DeviceAdapter for CompositeAdapter {
         self.openrgb.is_connected()
     }
 
+    async fn rescan(&mut self) -> Result<(), AdapterError> {
+        // Only OpenRGB re-detects hardware; the keyboard is a fixed HID device (#290).
+        self.openrgb.rescan().await
+    }
+
     async fn discover(&mut self) -> Result<Vec<DeviceInfo>, AdapterError> {
         // OpenRGB's copy of a natively driven device is dropped, so it is listed once.
         let mut devices: Vec<DeviceInfo> = self

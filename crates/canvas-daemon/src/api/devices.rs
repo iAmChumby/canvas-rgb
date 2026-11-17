@@ -38,8 +38,12 @@ pub async fn list_devices(
     if app.rescan_requests.try_send(request).is_err() {
         return Err(ApiFailure::service_unavailable("the device watcher is not taking rescans"));
     }
-    // The supervisor answers within the budget, unless it is busy with its own refresh first.
-    let wait = app.rescan_budget + crate::openrgb_supervisor::RESCAN_QUEUE_WAIT;
+    // The supervisor waits for OpenRGB's list to settle (at most the lane's cap, with no adapter
+    // lock) and then re-reads within the budget, unless it is busy with its own refresh first. A
+    // detection still running at the cap is answered with the list held: `DevicesResponse` has no
+    // field to say so (a spine change), and the daemon's log does (#290).
+    let detect_cap = app.frame_lane.as_ref().map_or(std::time::Duration::ZERO, |lane| lane.rescan_timing().cap);
+    let wait = detect_cap + app.rescan_budget + crate::openrgb_supervisor::RESCAN_QUEUE_WAIT;
     let found = match tokio::time::timeout(wait, answer).await {
         Ok(Ok(Ok(found))) => found,
         Ok(Ok(Err(e))) => {
@@ -51,7 +55,9 @@ pub async fn list_devices(
             return Err(ApiFailure::service_unavailable("OpenRGB did not answer the rescan in time"));
         }
     };
-    tracing::info!(count = found.len(), "the devices were rescanned");
+    // Report only what was checked: the supervisor's own line says whether OpenRGB actually
+    // re-detected anything (#290, `cause:unchecked-state`).
+    tracing::info!(count = found.len(), "answered with the device list the supervisor read");
     Ok(Json(DevicesResponse { devices: found }))
 }
 

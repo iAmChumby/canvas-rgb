@@ -270,11 +270,18 @@ fn device_key(devices: &[DeviceInfo]) -> Vec<(String, bool, Vec<u32>)> {
     key
 }
 
-/// How long a rescan may hold the adapter: about one reply timeout of the OpenRGB adapter (5 s).
-/// The handlers that take the adapter lock (a zone resize, the first run) wait for it, so a stalled
-/// OpenRGB delays them this long and no longer (#233). The frame writers do not wait: they write
-/// through the adapter's own link (`App::frame_lane`), so the lights keep moving. The adapter's own
-/// reply timeout ends a single stalled request; this ends a slow trickle of them.
+/// How long a rescan may hold the adapter for its re-read: about one reply timeout of the OpenRGB
+/// adapter (5 s). The handlers that take the adapter lock (a zone resize, the first run, the
+/// keyboard's frame writer) wait for it, so a stalled OpenRGB delays them this long and no longer
+/// (#233). The OpenRGB frame writers do not wait: they write through the adapter's own link
+/// (`App::frame_lane`), so those lights keep moving. The adapter's own reply timeout ends a single
+/// stalled request; this ends a slow trickle of them.
+///
+/// The budget covers the lock wait and the re-read only. The wait for OpenRGB's detection to go
+/// quiet (seconds) runs before it, on the frame lane and with no adapter lock, bounded by
+/// `RescanTiming::cap` (#290). A detection that times out therefore leaves the whole budget for
+/// the re-read, and a rescan that gives up on detection can never cut the re-read short and drop
+/// the link. Only a re-read that is itself slower than the budget (OpenRGB stalled) does.
 pub const RESCAN_BUDGET: Duration = Duration::from_secs(5);
 
 /// How long `GET /api/v1/devices?rescan=1` waits for the supervisor past the rescan's own budget:
@@ -293,21 +300,242 @@ pub struct Rescan {
     pub reply: tokio::sync::oneshot::Sender<Result<Vec<DeviceInfo>, String>>,
 }
 
-/// A rescan the owner asked for (#233): asks OpenRGB for its devices again and returns them.
+/// What a rescan read.
+#[derive(Debug)]
+pub struct RescanReading {
+    /// The devices to answer with.
+    pub devices: Vec<DeviceInfo>,
+    /// `devices` is the list the supervisor already held: OpenRGB's list is still changing (or is
+    /// empty), so nothing was read and there is nothing to apply again. The adapter keeps its own
+    /// list the same way, and the settled list reaches the 5 s refresh by itself.
+    pub kept_held: bool,
+}
+
+/// Whether a rescan asked OpenRGB to re-detect, and what that took.
+#[derive(Clone, Copy, Debug)]
+pub enum Detected {
+    /// OpenRGB was not asked, or could not be: the list is read as it stands.
+    No,
+    /// OpenRGB re-detected and its list went quiet; `settled_after` is how long, when known.
+    /// `by_events`: OpenRGB said the detection was over itself (103, protocol 6 and later), so a list
+    /// read now, empty or not, is the real one; without it an empty list cannot be told from a
+    /// detection that has found nothing yet.
+    Yes { settled_after: Option<Duration>, by_events: bool },
+}
+
+/// How the detection part of a rescan went.
+#[derive(Debug)]
+enum Detection {
+    /// There was nothing to ask: no frame lane, or the link is down.
+    NotAsked,
+    Redetected(canvas_adapters::openrgb::Redetected),
+    /// Nothing was re-detected and the list was not touched: reading it is safe.
+    NotRedetected,
+    /// OpenRGB's list is still changing, or empty, after the wait: detection is still running.
+    Unsettled,
+    Failed(String),
+}
+
+/// How long a list that lacks a device the daemon holds must stay the same, with no detection heard, before the
+/// daemon believes the device is gone (#290).
 ///
-/// On a live connection the list is read again (and a saved zone size a new device lacks is
-/// applied, as the 5 s refresh does). With no connection the adapter connects first, so a rescan
-/// is also a retry of the link. This reads what OpenRGB reports now; making OpenRGB look at the
-/// hardware again needs a `rescan` on the adapter trait, which lives in the spine.
+/// release_1.1 sends a client that connects nothing of a detection already running (`NetworkServer.cpp:886` is a
+/// broadcast; the server starts before detection, `ResourceManager.cpp:1362` then `:1377`), and no protocol query
+/// says whether one is. A first read right after the connect, or a read during a detection the client missed,
+/// can be empty or a part list, so a list that drops a device is not believed on sight. A 103, or the owner's
+/// own rescan, settles it at once. This bound is for what neither says: a hot-plug removal (a 100, no 103). It
+/// bounds how long an unplug can stay hidden; it does not guard against a wipe (a wipe is stopped by the rule
+/// that nothing missing is believed without a 103 or a rescan, and by an empty list never being believed
+/// here). A wrong value only delays showing an unplug: 30 s is longer than the detections seen (the
+/// 15 s a rescan waits for one) and short enough that an unplugged stick leaves the list within the minute.
+pub const UNPLUG_QUIET: Duration = Duration::from_secs(30);
+
+/// What the frame lane knows of the list it last read.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct ListView {
+    /// A read after a 103 found the list, and no list change was heard since (`OpenRgbAdapter::list_is_final`).
+    final_list: bool,
+    /// The 101 and 102 heard on this connection (`OpenRgbAdapter::detection_signals`).
+    signals: u64,
+}
+
+/// The lane's view of its list. With no lane, or no link, nothing says the list is part of a detection, so
+/// it is final.
+fn list_view(lane: Option<&canvas_adapters::openrgb::OpenRgbAdapter>) -> ListView {
+    match lane {
+        Some(lane) if lane.is_connected() => ListView { final_list: lane.list_is_final(), signals: lane.detection_signals() },
+        _ => ListView { final_list: true, signals: 0 },
+    }
+}
+
+/// What to do with a list the supervisor has just read.
+#[derive(Debug, PartialEq, Eq)]
+enum Verdict {
+    Apply,
+    /// Keep the list held: the read dropped a device it cannot be told was unplugged.
+    Keep,
+}
+
+/// A list that drops devices, and since when it has stayed the same.
+struct Seen {
+    key: Vec<(String, bool, Vec<u32>)>,
+    since: tokio::time::Instant,
+    signals: u64,
+}
+
+/// The rule for what the daemon applies from OpenRGB's list, asymmetric because the client cannot know whether
+/// a detection is running (see [`UNPLUG_QUIET`]):
+///
+/// 1. a list that keeps every held device applies at once, final or not (growing is always safe);
+/// 2. a list that drops a held device applies only when OpenRGB's list is final (a 103 was heard and no list
+///    change since), when it is the answer to the owner's own rescan, or when the same list has been read
+///    for [`UNPLUG_QUIET`] with no 101 or 102 heard in that time;
+/// 3. an empty list replaces a held one only by the first two of those, never by waiting.
+///
+/// With nothing held, anything applies.
+#[derive(Default)]
+struct Shrinks {
+    seen: Option<Seen>,
+}
+
+impl Shrinks {
+    /// A new connection counts its own 101 and 102 from zero: what was seen on the last one means nothing.
+    fn reset(&mut self) {
+        self.seen = None;
+    }
+
+    /// `by_rescan`: `read` is what the owner's rescan returned after OpenRGB said its detection was over.
+    fn judge(
+        &mut self,
+        held: &[DeviceInfo],
+        read: &[DeviceInfo],
+        list: ListView,
+        by_rescan: bool,
+        now: tokio::time::Instant,
+    ) -> Verdict {
+        let drops_a_device = held.iter().any(|kept| !read.iter().any(|device| device.id == kept.id));
+        if !drops_a_device || list.final_list || by_rescan {
+            self.seen = None;
+            return Verdict::Apply;
+        }
+        if read.is_empty() {
+            self.seen = None;
+            return Verdict::Keep;
+        }
+        let key = device_key(read);
+        match &self.seen {
+            Some(seen) if seen.key == key && seen.signals == list.signals => {
+                if now.duration_since(seen.since) >= UNPLUG_QUIET {
+                    self.seen = None;
+                    return Verdict::Apply;
+                }
+            }
+            _ => self.seen = Some(Seen { key, since: now, signals: list.signals }),
+        }
+        Verdict::Keep
+    }
+}
+
+/// Asks OpenRGB to re-detect on the frame lane and waits for its list to go quiet, holding no
+/// adapter lock (#290): the wait takes seconds, and the keyboard's frame writer and the API
+/// handlers wait on that lock.
+async fn detect_on_lane(lane: &canvas_adapters::openrgb::OpenRgbAdapter) -> Detection {
+    use canvas_adapters::openrgb::{rescan_miss, RescanMiss};
+    match lane.rescan_shared().await {
+        Ok(done) => Detection::Redetected(done),
+        Err(error) => match rescan_miss(&error) {
+            Some(RescanMiss::NotRedetected) => {
+                tracing::info!(error = %error, "OpenRGB did not re-detect; reading the list as it stands");
+                Detection::NotRedetected
+            }
+            Some(RescanMiss::Unsettled) => {
+                // The API can say only the list it holds: `DevicesResponse` has no field for "detection
+                // is still running" (a spine change), so the log says it.
+                tracing::warn!(
+                    error = %error,
+                    "OpenRGB is still detecting devices: answering with the list held; the settled list is applied when OpenRGB's list stops changing"
+                );
+                Detection::Unsettled
+            }
+            None => Detection::Failed(format!("could not rescan OpenRGB devices: {error}")),
+        },
+    }
+}
+
+/// A rescan the owner asked for (#233): reads the devices OpenRGB reports, after asking it to look
+/// at the hardware again when `detected` does not say it already did (#290).
+///
+/// `ask` is for an adapter with no frame lane: it is asked through `adapter.rescan()` here, under
+/// the lock the caller holds. The daemon's adapter has a lane and asks it before taking the lock
+/// (see [`supervise_with_lane`]), so it passes `ask = false` and says what happened in `detected`.
+///
+/// A list is read only when it can be trusted. An adapter that cannot re-detect, or OpenRGB
+/// starting no detection, is logged and the list is read as it stands. A detection that is still
+/// running reads nothing and answers with the `held` list: OpenRGB's list is mid-detection and may
+/// be empty. A list that comes back empty while `held` has devices is not applied either, unless
+/// OpenRGB said itself that the detection is over (`by_events`, protocol 6 and later): without that, an
+/// empty list is a detection that has not found its first controller yet and cannot be told from every
+/// device gone, and this keeps the lights managed. With it, an empty list is every device gone. Any other failure keeps PR #289's contract: an error and
+/// the held list alone. With no connection the adapter connects first, so a rescan is also a retry
+/// of the link.
 pub async fn rescan_devices(
     adapter: &mut dyn DeviceAdapter,
     zone_sizes: &std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>,
-) -> Result<Vec<DeviceInfo>, String> {
-    if adapter.is_connected() {
-        refresh_devices(adapter, zone_sizes).await
-    } else {
-        connect_and_prepare(adapter, zone_sizes).await
+    held: &[DeviceInfo],
+    detected: Detected,
+    ask: bool,
+) -> Result<RescanReading, String> {
+    use canvas_adapters::openrgb::{rescan_miss, RescanMiss};
+    let keep_held = || RescanReading { devices: held.to_vec(), kept_held: true };
+    let mut detected = detected;
+    if ask && !adapter.is_connected() {
+        // The link is down: connecting reads the list OpenRGB has now, and OpenRGB is not asked to
+        // look at the hardware again. Say so, or "rescanned" would claim more than was done.
+        tracing::info!("OpenRGB rescan: not connected; connecting and re-reading the list only, OpenRGB was not asked to re-detect");
     }
+    if ask && adapter.is_connected() {
+        match adapter.rescan().await {
+            Ok(()) => detected = Detected::Yes { settled_after: None, by_events: false },
+            Err(error) => match rescan_miss(&error) {
+                Some(RescanMiss::NotRedetected) => {
+                    tracing::info!(error = %error, "OpenRGB did not re-detect; reading the list as it stands");
+                }
+                Some(RescanMiss::Unsettled) => {
+                    tracing::warn!(
+                        error = %error,
+                        "OpenRGB is still detecting devices: answering with the list held; the settled list is applied when OpenRGB's list stops changing"
+                    );
+                    return Ok(keep_held());
+                }
+                None => return Err(format!("could not rescan OpenRGB devices: {error}")),
+            },
+        }
+    }
+    let devices = if adapter.is_connected() {
+        refresh_devices(adapter, zone_sizes).await?
+    } else {
+        connect_and_prepare(adapter, zone_sizes).await?
+    };
+    if let Detected::Yes { settled_after, by_events } = detected {
+        if devices.is_empty() && !held.is_empty() && !by_events {
+            tracing::warn!(
+                held = held.len(),
+                "OpenRGB re-detected and reports no devices; keeping the list held (an empty list is not told from a detection that has not found its first controller)"
+            );
+            return Ok(keep_held());
+        }
+        match settled_after {
+            Some(after) => tracing::info!(
+                count = devices.len(),
+                settled_ms = after.as_millis() as u64,
+                "OpenRGB re-detected: {} devices, list settled after {} ms",
+                devices.len(),
+                after.as_millis()
+            ),
+            None => tracing::info!(count = devices.len(), "OpenRGB re-detected: {} devices", devices.len()),
+        }
+    }
+    Ok(RescanReading { devices, kept_held: false })
 }
 
 /// The sizes the supervisor applies: the saved sizes with each hold the setups took overlaid on
@@ -504,6 +732,30 @@ pub async fn supervise_with_rescans<D, L>(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
     holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
+    on_devices: impl FnMut(Vec<DeviceInfo>) -> D,
+    on_link: impl FnMut(LinkState) -> L,
+    rescans: Option<tokio::sync::mpsc::Receiver<Rescan>>,
+    stop: tokio::sync::watch::Receiver<bool>,
+) where
+    D: std::future::Future<Output = ()>,
+    L: std::future::Future<Output = ()>,
+{
+    supervise_with_lane(adapter, None, zone_sizes, holds, on_devices, on_link, rescans, stop).await;
+}
+
+/// [`supervise_with_rescans`], with the frame lane of the OpenRGB link (`App::frame_lane`).
+///
+/// A rescan asks OpenRGB to re-detect and waits for its list to go quiet on the lane, which shares
+/// the link and needs no adapter lock: the wait takes seconds, and the keyboard's frame writer
+/// (`crates/canvas-daemon/src/writer.rs`, the non-OpenRGB path) and the API handlers take that
+/// lock. The lock is taken afterwards, for the re-read only, within the rescan's budget (#290).
+/// With no lane the adapter is asked under the lock, as the trait says.
+#[allow(clippy::too_many_arguments)]
+pub async fn supervise_with_lane<D, L>(
+    adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
+    lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
+    zone_sizes: Arc<tokio::sync::RwLock<std::collections::BTreeMap<String, std::collections::BTreeMap<u32, u32>>>>,
+    holds: Arc<tokio::sync::RwLock<ZoneHolds>>,
     mut on_devices: impl FnMut(Vec<DeviceInfo>) -> D,
     mut on_link: impl FnMut(LinkState) -> L,
     mut rescans: Option<tokio::sync::mpsc::Receiver<Rescan>>,
@@ -512,6 +764,11 @@ pub async fn supervise_with_rescans<D, L>(
     D: std::future::Future<Output = ()>,
     L: std::future::Future<Output = ()>,
 {
+    // The list the supervisor last applied: what a rescan that cannot be trusted answers with, and what
+    // stays applied across a reconnect that lands in the middle of OpenRGB's detection (#290). It outlives
+    // the connection: a restart of OpenRGB must not replace it with a part of its detection.
+    let mut held: Vec<DeviceInfo> = Vec::new();
+    let mut shrinks = Shrinks::default();
     let mut backoff = Backoff::new();
     // The rescans that ended the wait for the next attempt: that attempt answers them.
     let mut waiting: Vec<Rescan> = Vec::new();
@@ -542,7 +799,29 @@ pub async fn supervise_with_rescans<D, L>(
         match result {
             Ok(devices) => {
                 tracing::info!(count = devices.len(), "connected to OpenRGB");
+                // A connection hears nothing of a detection already running, so its first read may be empty or
+                // a part of the detection's (`Shrinks`): a list that adds devices applies, one that drops a held
+                // device waits for a 103, the owner's rescan or the quiet period. With no list held, the read is
+                // what there is.
+                shrinks.reset();
+                let devices = match shrinks.judge(&held, &devices, list_view(lane.as_ref()), false, tokio::time::Instant::now()) {
+                    Verdict::Keep => {
+                        tracing::info!(
+                            read = devices.len(),
+                            held = held.len(),
+                            "OpenRGB's list lacks devices the daemon holds and nothing says it is final: keeping the list held"
+                        );
+                        held.clone()
+                    }
+                    Verdict::Apply => devices,
+                };
+                if from_rescan {
+                    tracing::info!(
+                        "OpenRGB rescan: the link was down; connected and read the list, OpenRGB was not asked to re-detect"
+                    );
+                }
                 let mut last = device_key(&devices);
+                held = devices.clone();
                 on_devices(devices.clone()).await;
                 answer_all(&mut waiting, &Ok(devices));
                 backoff = backoff.reset();
@@ -571,12 +850,41 @@ pub async fn supervise_with_rescans<D, L>(
                             // answer: one discovery answers them all, and none of them waits for
                             // another's turn (#233).
                             let mut group = vec![rescan];
-                            let (result, cut) = within(group.iter().map(|r| r.budget).max(), async {
-                                let mut guard = adapter.lock().await;
-                                let sizes = current_sizes(&zone_sizes, &holds).await;
-                                rescan_devices(guard.as_mut(), &sizes).await
-                            })
-                            .await;
+                            let budget = group.iter().map(|r| r.budget).max();
+                            // OpenRGB is asked first, on the lane and with no adapter lock: the
+                            // wait for its list to go quiet takes seconds (#290).
+                            let detection = match &lane {
+                                Some(lane) if lane.is_connected() => detect_on_lane(lane).await,
+                                _ => {
+                                    if lane.is_some() {
+                                        tracing::info!("OpenRGB rescan: not connected; re-reading the list only, OpenRGB was not asked to re-detect");
+                                    }
+                                    Detection::NotAsked
+                                }
+                            };
+                            // OpenRGB re-detected for this rescan: the list read now is its own result.
+                            let by_rescan = matches!(detection, Detection::Redetected(_));
+                            let (result, cut) = match detection {
+                                Detection::Failed(error) => (Err(error), false),
+                                // Mid-detection: read nothing, answer with the list held.
+                                Detection::Unsettled => (Ok(RescanReading { devices: held.clone(), kept_held: true }), false),
+                                other => {
+                                    let detected = match other {
+                                        Detection::Redetected(done) => Detected::Yes {
+                                            settled_after: Some(done.settled_after),
+                                            by_events: done.by_events,
+                                        },
+                                        _ => Detected::No,
+                                    };
+                                    let ask = lane.is_none();
+                                    within(budget, async {
+                                        let mut guard = adapter.lock().await;
+                                        let sizes = current_sizes(&zone_sizes, &holds).await;
+                                        rescan_devices(guard.as_mut(), &sizes, &held, detected, ask).await
+                                    })
+                                    .await
+                                }
+                            };
                             // The rescans that queued while the attempt ran share its answer.
                             take_queued(&mut rescans, &mut group);
                             if cut {
@@ -586,10 +894,28 @@ pub async fn supervise_with_rescans<D, L>(
                                 // again instead of trusting half-applied state.
                                 let _ = adapter.lock().await.disconnect().await;
                             }
-                            if let Ok(devices) = &result {
-                                last = device_key(devices);
-                                on_devices(devices.clone()).await;
-                            }
+                            let result = match result {
+                                Ok(reading) => {
+                                    // A read that was not the result of OpenRGB's own re-detection (it did not
+                                    // start one, or none could be asked) is judged like any other.
+                                    let reading = if reading.kept_held {
+                                        reading
+                                    } else {
+                                        let now = tokio::time::Instant::now();
+                                        match shrinks.judge(&held, &reading.devices, list_view(lane.as_ref()), by_rescan, now) {
+                                            Verdict::Apply => reading,
+                                            Verdict::Keep => RescanReading { devices: held.clone(), kept_held: true },
+                                        }
+                                    };
+                                    if !reading.kept_held {
+                                        last = device_key(&reading.devices);
+                                        held = reading.devices.clone();
+                                        on_devices(reading.devices.clone()).await;
+                                    }
+                                    Ok(reading.devices)
+                                }
+                                Err(error) => Err(error),
+                            };
                             answer_all(&mut group, &result);
                             continue;
                         }
@@ -604,7 +930,10 @@ pub async fn supervise_with_rescans<D, L>(
                         break;
                     }
                     ticks += 1;
-                    if !ticks.is_multiple_of(10) {
+                    // A detection that ended while the list held is a part of it: read the final one now,
+                    // not at the next 5 s refresh.
+                    let end_unread = lane.as_ref().is_some_and(|lane| lane.detection_end_unread());
+                    if !ticks.is_multiple_of(10) && !end_unread {
                         continue;
                     }
                     let refreshed = {
@@ -612,13 +941,26 @@ pub async fn supervise_with_rescans<D, L>(
                         let sizes = current_sizes(&zone_sizes, &holds).await;
                         refresh_devices(guard.as_mut(), &sizes).await
                     };
+                    // The adapter answers with the list it holds while OpenRGB's is still changing, so
+                    // a list read mid-detection is never a different list here (#290).
                     match refreshed {
-                        Ok(devices) if device_key(&devices) != last => {
-                            tracing::info!(count = devices.len(), "the OpenRGB device list changed");
-                            last = device_key(&devices);
-                            on_devices(devices).await;
+                        Ok(devices) => {
+                            let now = tokio::time::Instant::now();
+                            match shrinks.judge(&held, &devices, list_view(lane.as_ref()), false, now) {
+                                // A list that drops a device nothing says is gone: what OpenRGB lists may be a
+                                // part of a detection, and the list held stays (#290).
+                                Verdict::Keep => {
+                                    tracing::debug!(read = devices.len(), held = held.len(), "OpenRGB's list lacks held devices and is not final; keeping the list held");
+                                }
+                                Verdict::Apply if device_key(&devices) != last => {
+                                    tracing::info!(count = devices.len(), "the OpenRGB device list changed");
+                                    last = device_key(&devices);
+                                    held = devices.clone();
+                                    on_devices(devices).await;
+                                }
+                                Verdict::Apply => {}
+                            }
                         }
-                        Ok(_) => {}
                         Err(e) => tracing::debug!(error = %e, "could not re-read the OpenRGB devices"),
                     }
                 }
@@ -746,5 +1088,222 @@ mod tests {
         assert!(args.windows(2).any(|w| w == ["--server-port", "6742"]));
         assert!(args.iter().any(|a| a == "--noautoconnect"));
         assert!(args.iter().any(|a| a == "--server"));
+    }
+
+    // ---- #290: what a rescan says and reads
+
+    use canvas_proto::device::{AdapterCapabilities, DeviceKind, ZoneInfo, ZoneKind};
+    use canvas_proto::traits::AdapterError;
+    use canvas_proto::{DeviceId, Rgb8};
+
+    fn device(serial: &str) -> DeviceInfo {
+        DeviceInfo {
+            id: DeviceId(format!("openrgb:{serial}")),
+            name: serial.into(),
+            vendor: "fake".into(),
+            kind: DeviceKind::Dram,
+            adapter: "openrgb".into(),
+            adapter_index: 0,
+            serial: serial.into(),
+            location: "smbus".into(),
+            zones: vec![ZoneInfo {
+                index: 0,
+                name: "RGB".into(),
+                kind: ZoneKind::Linear,
+                led_count: 8,
+                min_leds: 8,
+                max_leds: 8,
+                resizable: false,
+            }],
+            connected: true,
+        }
+    }
+
+    /// An adapter that answers a rescan as told and lists what it was given.
+    struct Stub {
+        rescan: fn() -> Result<(), AdapterError>,
+        list: Vec<DeviceInfo>,
+        rescans: u32,
+        /// Whether the link is up; `connect` brings it up.
+        up: bool,
+    }
+
+    #[async_trait::async_trait]
+    impl DeviceAdapter for Stub {
+        fn name(&self) -> &'static str {
+            "stub"
+        }
+        fn capabilities(&self) -> AdapterCapabilities {
+            AdapterCapabilities::default()
+        }
+        async fn connect(&mut self) -> Result<(), AdapterError> {
+            self.up = true;
+            Ok(())
+        }
+        async fn disconnect(&mut self) -> Result<(), AdapterError> {
+            self.up = false;
+            Ok(())
+        }
+        fn is_connected(&self) -> bool {
+            self.up
+        }
+        async fn rescan(&mut self) -> Result<(), AdapterError> {
+            self.rescans += 1;
+            (self.rescan)()
+        }
+        async fn discover(&mut self) -> Result<Vec<DeviceInfo>, AdapterError> {
+            Ok(self.list.clone())
+        }
+        async fn write_frame(&mut self, _device: &DeviceId, _colors: &[Rgb8]) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn set_zone_size(&mut self, _device: &DeviceId, _zone: u32, _leds: u32) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn identify(&mut self, _device: &DeviceId, _zone: u32, _led: u32) -> Result<(), AdapterError> {
+            Ok(())
+        }
+        async fn read_back(&mut self, _device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
+            Ok(Vec::new())
+        }
+    }
+
+    /// Runs `rescan_devices` on a current-thread runtime under the log capture.
+    fn rescan_logged(
+        stub: &mut Stub,
+        held: &[DeviceInfo],
+        detected: Detected,
+        ask: bool,
+    ) -> (Result<RescanReading, String>, String) {
+        captured(|| {
+            tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("a runtime")
+                .block_on(rescan_devices(stub, &BTreeMap::new(), held, detected, ask))
+        })
+    }
+
+    use crate::test_logs::captured;
+
+    /// The log line after a re-detection says what was observed: how many devices, and how long
+    /// the list took to settle. The old line claimed OpenRGB "looked at the hardware again" on any
+    /// signal.
+    #[test]
+    fn a_re_detection_logs_what_was_observed() {
+        let mut stub = Stub { rescan: || Ok(()), list: vec![device("a"), device("b")], rescans: 0, up: true };
+        let detected = Detected::Yes { settled_after: Some(Duration::from_millis(812)), by_events: false };
+        let (result, text) = rescan_logged(&mut stub, &[device("a")], detected, false);
+        assert_eq!(result.expect("a reading").devices.len(), 2);
+        assert!(text.contains("OpenRGB re-detected: 2 devices, list settled after 812 ms"), "{text}");
+        assert!(!text.contains("looked at the hardware again"), "{text}");
+    }
+
+    /// A rescan that re-detected nothing never says it did.
+    #[test]
+    fn a_rescan_that_re_detected_nothing_does_not_say_it_did() {
+        let mut stub = Stub {
+            rescan: || Err(AdapterError::Protocol(canvas_adapters::openrgb::RESCAN_NOT_REDETECTED_MESSAGE.into())),
+            list: vec![device("a")],
+            rescans: 0,
+            up: true,
+        };
+        let (result, text) = rescan_logged(&mut stub, &[device("a")], Detected::No, true);
+        let reading = result.expect("a reading");
+        assert_eq!(reading.devices.len(), 1);
+        assert!(!reading.kept_held, "the list was read as it stands");
+        assert!(!text.contains("re-detected:"), "{text}");
+        assert!(text.contains("did not re-detect"), "{text}");
+    }
+
+    /// A detection that never went quiet reads nothing: the answer is the list held, flagged so
+    /// the supervisor applies nothing, even though the adapter's list is empty right now.
+    #[test]
+    fn an_unsettled_rescan_answers_with_the_held_list_and_reads_nothing() {
+        let mut stub = Stub {
+            rescan: || Err(AdapterError::Protocol(canvas_adapters::openrgb::RESCAN_DETECT_TIMEOUT_MESSAGE.into())),
+            list: Vec::new(),
+            rescans: 0,
+            up: true,
+        };
+        let held = [device("a"), device("b")];
+        let (result, _) = rescan_logged(&mut stub, &held, Detected::No, true);
+        let reading = result.expect("a reading");
+        assert!(reading.kept_held);
+        assert_eq!(reading.devices.len(), 2, "the held list answers");
+    }
+
+    /// A list that is empty right after a re-detection, while devices are held, is a slow
+    /// detection and not every device gone: it is not applied.
+    #[test]
+    fn an_empty_list_after_a_re_detection_is_not_applied() {
+        let mut stub = Stub { rescan: || Ok(()), list: Vec::new(), rescans: 0, up: true };
+        let held = [device("a")];
+        let (result, text) = rescan_logged(&mut stub, &held, Detected::No, true);
+        let reading = result.expect("a reading");
+        assert!(reading.kept_held, "an empty list from a rescan was applied");
+        assert_eq!(reading.devices.len(), 1);
+        assert!(text.contains("keeping the list held"), "{text}");
+    }
+
+    /// OpenRGB said the detection is over (103): an empty list is every device gone, and it is applied.
+    #[test]
+    fn an_empty_list_after_a_detection_openrgb_said_is_over_is_applied() {
+        let mut stub = Stub { rescan: || Ok(()), list: Vec::new(), rescans: 0, up: true };
+        let detected = Detected::Yes { settled_after: Some(Duration::from_millis(40)), by_events: true };
+        let (result, text) = rescan_logged(&mut stub, &[device("a")], detected, false);
+        let reading = result.expect("a reading");
+        assert!(!reading.kept_held, "the empty list after 103 was not applied");
+        assert!(reading.devices.is_empty());
+        assert!(text.contains("OpenRGB re-detected: 0 devices"), "{text}");
+    }
+
+    /// A list that shrank but is not empty, from a rescan that settled, is applied: a device that
+    /// was unplugged is gone.
+    #[test]
+    fn a_shorter_list_from_a_settled_rescan_is_applied() {
+        let mut stub = Stub { rescan: || Ok(()), list: vec![device("a")], rescans: 0, up: true };
+        let (result, _) = rescan_logged(&mut stub, &[device("a"), device("b")], Detected::No, true);
+        let reading = result.expect("a reading");
+        assert!(!reading.kept_held);
+        assert_eq!(reading.devices.len(), 1);
+    }
+
+    /// A rescan on a link that is down connects and reads the list, and never asks OpenRGB to
+    /// re-detect: the log says so, so "rescanned" stays a claim about what was done.
+    #[test]
+    fn a_rescan_on_a_down_link_says_it_only_re_read_the_list() {
+        let mut stub = Stub { rescan: || Ok(()), list: vec![device("a")], rescans: 0, up: false };
+        let (result, text) = rescan_logged(&mut stub, &[], Detected::No, true);
+        assert_eq!(result.expect("a reading").devices.len(), 1);
+        assert_eq!(stub.rescans, 0, "OpenRGB was asked to re-detect on a link that was down");
+        assert!(text.contains("not connected; connecting and re-reading the list only"), "{text}");
+        assert!(text.contains("was not asked to re-detect"), "{text}");
+        assert!(!text.contains("re-detected:"), "{text}");
+    }
+
+    /// A detection that is still running at the cap is unsettled, and the line says that OpenRGB is
+    /// still detecting and which list answers (the API has no field for it, so the log says it).
+    #[test]
+    fn an_unsettled_detection_says_openrgb_is_still_detecting_and_which_list_answers() {
+        use canvas_adapters::fake::FakeOpenRgbServer;
+        use canvas_adapters::openrgb::{OpenRgbAdapter, RescanTiming};
+        let (detection, text) = captured(|| {
+            tokio::runtime::Builder::new_current_thread().enable_all().build().expect("a runtime").block_on(async {
+                let server = FakeOpenRgbServer::start(vec![device("a")]).await.expect("fake server");
+                server.hold_detection(true);
+                let timing = RescanTiming {
+                    first: Duration::from_millis(300),
+                    settle: Duration::from_millis(200),
+                    cap: Duration::from_millis(500),
+                };
+                let mut lane = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(timing);
+                lane.connect().await.expect("connect");
+                detect_on_lane(&lane).await
+            })
+        });
+        assert!(matches!(detection, Detection::Unsettled), "{detection:?}");
+        assert!(text.contains("OpenRGB is still detecting devices"), "{text}");
+        assert!(text.contains("answering with the list held"), "{text}");
     }
 }
