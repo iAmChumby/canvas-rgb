@@ -632,6 +632,73 @@ line. Three mechanisms, and one bug the timing only exposed.
   installs its own subscriber is the #45/#55 shape: go through the shared helper instead. Run
   `cargo test -p canvas-svc --test timing_class`.
 
+### `cause:blocking-io`: a slow or blocking call holds up an unrelated path
+
+A route, a task or a background job waits on something outside its own job — the render
+thread's lock, a file write, a pipe — and the path that waits for it stops answering. The
+call itself is not wrong; what is wrong is that nothing bounds the wait, or that the wait
+happens on a thread the rest of the daemon needs.
+
+- [#241](https://github.com/iAmChumby/canvas-rgb/issues/241): the fake daemon stopped
+  answering `GET /api/v1/settings` during long GPUI capture runs. The status route asked
+  the render engine on a runtime worker (`crates/canvas-daemon/src/state.rs`,
+  `App::status`), and the engine's handle is a `std::sync::Mutex` the render thread takes
+  as well: a render thread that did not hand the lock over took that worker for good. The
+  daemon's runtime has **two** workers (`crates/canvas-daemon/src/main.rs`), so two status
+  polls (the editor polls the status every second) took both, and nothing was served while
+  the port kept listening. The scenes route asked the engine the same way while it held
+  the store's read lock (`crates/canvas-daemon/src/api/scenes.rs`, `response`), and the
+  store's lock is a fair one: one writer queued behind that reader stopped every other
+  reader, so `/api/v1/settings` timed out too.
+  What is measured: an engine that does not answer takes the API down that way. What is
+  **not** established: that this is the hang the capture saw — the capture never
+  reproduced it on `main` (the report's own UNKNOWN), so the cause of that hang stays
+  open and this fix only removes one way the API can stop answering.
+  Fixed: the daemon's own watcher threads keep the engine's numbers and its group states
+  (one thread each, asking every 250 ms), and the routes read those. The copy says when
+  it was filled, and a copy older than three seconds is asked of the engine again, so a
+  watcher that stops does not freeze the numbers. The watchers ignore the daemon's quit
+  flag: a quit that could not reach the main task puts the flag back to zero
+  (`crates/canvas-daemon/src/api/status.rs`), and a watcher that stopped there would
+  freeze the numbers for the rest of the daemon's life. A route that has to ask the
+  engine itself does it on a thread of its own with a bound (`state.rs`, `EngineGate`),
+  and answers with what it already knew; when the engine has never answered, the route
+  says so (a 503, "the render engine is not answering") instead of zeros or an empty group
+  list, which look like a measurement and like a group that is fine. The store's lock is
+  given back before the engine is asked. A write that landed answers with what the
+  daemon knows (`api/scenes.rs`, `response_after_write`): a 503 after the write would
+  say the write failed when it did not.
+  **The bound alone was not enough (the review of 2026-11-16).** The first fix put the
+  call on the blocking pool and gave the route a 500 ms timeout. The timeout gives the
+  route its answer back; it does not take the thread back, and the call stays inside the
+  engine. Ten status requests therefore left ten threads inside the engine, and the
+  daemon's thread count grew with the number of requests. One call at a time per kind
+  is the bound (`state.rs`, `EngineGate`): a request that arrives while a call is
+  outstanding joins that call instead of starting one of its own, and the watchers ask
+  the engine through the same gate, so there is one thread inside the engine per kind,
+  however many requests arrive. The call runs outside every runtime, so a runtime that
+  goes away does not take it with it.
+  Regression test: `crates/canvas-daemon/tests/engine_calls.rs` — eleven tests with an
+  engine that answers far too late, with the watchers running, with the store's writer
+  queued behind a stuck scenes request, and with fifty requests at once against an
+  engine that never answers.
+- **Class fix:** not yet (one bug). The read paths are fixed; the write paths are the
+  siblings below, and they are one-off writes rather than the every-second polls the
+  report is about.
+  - **Sibling search (not fixed):** every other call the daemon makes into the render
+    engine from an async path takes the same lock on a runtime worker:
+    `crates/canvas-daemon/src/api/settings.rs:36-38` (`set_fps`, `set_brightness`,
+    `set_warmth`), `crates/canvas-daemon/src/api/output.rs:44,47,93,94,98`
+    (`set_brightness`, `set_warmth`, `write_solid`, `set_power`),
+    `crates/canvas-daemon/src/api/status.rs:33` (`write_solid` on quit),
+    `crates/canvas-daemon/src/state.rs:801` (`set_input_source`), and
+    `crates/canvas-daemon/src/scenes.rs:684,832,1175,1212,1317,1368,1396` (the takeover
+    and the pattern paths). A write that reaches one of them waits for the render thread
+    the same way; it is one request, not a poll every second. The takeover paths are left
+    alone on purpose: a takeover that is not applied leaves the lights on the old effect,
+    so a bounded wait there needs its own answer (a refusal the caller can see), not a
+    silent skip.
+
 ### `cause:state-token`: a state token taken before an await and given back only on the happy path
 
 A route or task marks something as busy or in flight before it awaits, and takes the mark away at the
