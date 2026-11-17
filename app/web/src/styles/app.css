@@ -3756,8 +3756,10 @@ button.chip:hover {
   min-width: 0;
 }
 
-/* The word of a not-connected device is in the `down` tone. */
-.rd-devices .rd-dev-row .state.down-text {
+/* The word of a not-connected device is in the `down` tone, on a device row and on a header row
+   (a board's ARGB headers carry its connection word too). */
+.rd-devices .rd-dev-row .state.down-text,
+.rd-devices .state.down-text {
   color: var(--down);
 }
 
@@ -3870,7 +3872,9 @@ button.chip:hover {
   grid-template-columns: var(--row-cols);
   align-items: center;
   gap: var(--s3);
-  height: 44px;
+  /* At least 44 px; a failed change's error line (full width) adds a grid row instead of spilling
+     over the next device. */
+  min-height: 44px;
   padding: 0 var(--s4);
   border-top: 1px dashed var(--line);
 }
