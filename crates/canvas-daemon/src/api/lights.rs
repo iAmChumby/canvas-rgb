@@ -1,5 +1,5 @@
-//! The lights routes (Scenes plan, Task 6): `GET /api/v1/lights` and
-//! `PATCH /api/v1/lights/{id}`.
+//! The lights routes (Scenes plan, Task 6): `GET /api/v1/lights`,
+//! `PATCH /api/v1/lights/{id}` and `DELETE /api/v1/lights/{id}` (#414).
 //!
 //! A light is the spine's name for a run of LEDs the owner treats as one thing; the hardware map
 //! is `lights.json` ([`canvas_proto::scene::LightsFile`]). The list answers every light the file
@@ -8,7 +8,7 @@
 
 use axum::extract::{Path, State};
 use axum::Json;
-use canvas_proto::api::{LightPatch, LightView, LightsResponse};
+use canvas_proto::api::{EmptiedGroup, LightDeleted, LightPatch, LightView, LightsResponse};
 use canvas_proto::device::{DeviceInfo, ZoneInfo};
 use canvas_proto::scene::{Light, GROUP_NAME_MAX};
 use std::sync::Arc;
@@ -159,4 +159,100 @@ pub async fn patch_light(
         tracing::info!(light = %light.id, "a light was changed");
     }
     Ok(Json(view(&light, &devices)))
+}
+
+/// `DELETE /api/v1/lights/{id}` (#414).
+///
+/// Removes a light the daemon never drives — a leftover of an old `lights.json` a device's owner
+/// cannot otherwise remove. A light on a driven device is a 409: those go through chain setup.
+/// Before anything is written a snapshot of `lights.json` and `scenes.json` is taken; a failure
+/// there answers 503 and changes nothing. Then the light leaves `lights.json` and every group, the
+/// scenes repair drops a group it left empty, both files are saved, and the answer names every
+/// group that went with it. A failed save restores the in-memory files and answers 503. As with a
+/// patch that changes the arrangement, the scene is replanned and published so the editor sees it.
+pub async fn delete_light(
+    State(app): State<Arc<App>>,
+    Path(id): Path<String>,
+) -> ApiResult<Json<LightDeleted>> {
+    let (removed, emptied) = {
+        let mut store = app.store.write().await;
+        let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
+            return Err(ApiFailure::not_found(format!("no light with the id {id}")));
+        };
+        // A light on a device the daemon drives is removed through chain setup, never here.
+        if crate::is_driven(&store.lights.lights[index].device_id) {
+            return Err(ApiFailure::conflict(format!(
+                "the light {id} is on a device the daemon drives; remove it through chain setup"
+            )));
+        }
+        // The snapshot is taken BEFORE any write: the folder holds the owner's files exactly as
+        // they were, so this removal can be undone by hand. Without it, nothing is removed.
+        if let Err(e) = crate::storage::snapshot(&store.home, "before-removing-a-light") {
+            return Err(ApiFailure::service_unavailable(format!(
+                "the light was not removed: a snapshot could not be taken: {e}"
+            )));
+        }
+        // Kept so a failed save leaves memory as it was: never ahead of the disk and the engine.
+        let before_lights = store.lights.clone();
+        let before_scenes = store.scenes.clone();
+        let removed = store.lights.lights[index].clone();
+
+        store.lights.lights.remove(index);
+        // The light leaves every group. A group it leaves empty is named in the answer; the repair
+        // below drops it, as it drops any other empty group.
+        let mut emptied: Vec<EmptiedGroup> = Vec::new();
+        for scene in &mut store.scenes.scenes {
+            for group in &mut scene.groups {
+                if group.members.iter().any(|member| member == &id) {
+                    group.members.retain(|member| member != &id);
+                    if group.members.is_empty() {
+                        emptied.push(EmptiedGroup {
+                            scene_id: scene.id.clone(),
+                            group_id: group.id.clone(),
+                            name: group.name.clone(),
+                        });
+                    }
+                }
+            }
+        }
+        // Clone the lights: both fields are reached through the write guard's DerefMut, so a
+        // mutable borrow of `scenes` and an immutable one of `lights` cannot be held together.
+        let current_lights = store.lights.clone();
+        let _changes = crate::scenes::repair(&mut store.scenes, &current_lights);
+
+        if let Err(e) = store.save_lights() {
+            store.lights = before_lights;
+            store.scenes = before_scenes;
+            return Err(ApiFailure::service_unavailable(format!(
+                "the light was not removed: {e}"
+            )));
+        }
+        if let Err(e) = store.save_scenes() {
+            store.lights = before_lights;
+            store.scenes = before_scenes;
+            // Best effort: put the lights file back too, so a half-written pair is not left behind.
+            crate::logging::warn_if_err(
+                "lights.json could not be put back after scenes.json failed to save",
+                store.save_lights(),
+            );
+            return Err(ApiFailure::service_unavailable(format!(
+                "the light was not removed: {e}"
+            )));
+        }
+        (removed, emptied)
+    };
+
+    // The scene changed, so it is replanned and published the way a patch that changes the
+    // arrangement is: the editor sees the light gone and its groups repaired.
+    {
+        let lock = app.scene.lock().await;
+        let _gate = app.draft.gate().lock().await;
+        if !app.scene.is_taken_over() {
+            crate::scenes::apply_with(&app, &lock, false).await;
+        }
+    }
+    app.scene.notify();
+
+    tracing::info!(light = %removed.id, "a light was removed");
+    Ok(Json(LightDeleted { ok: true, id: removed.id, emptied_groups: emptied }))
 }

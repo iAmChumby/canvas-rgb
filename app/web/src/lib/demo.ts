@@ -68,6 +68,8 @@ import type { ScenePut } from "@/proto/ScenePut";
 import type { SceneCreate } from "@/proto/SceneCreate";
 import type { LightView } from "@/proto/LightView";
 import type { LightPatch } from "@/proto/LightPatch";
+import type { LightDeleted } from "@/proto/LightDeleted";
+import type { EmptiedGroup } from "@/proto/EmptiedGroup";
 import type { ChainView } from "@/proto/ChainView";
 import type { SetupCommit } from "@/proto/SetupCommit";
 import type { SetupCommitted } from "@/proto/SetupCommitted";
@@ -1207,9 +1209,40 @@ function unpluggedLights(lights: LightView[]): LightView[] {
   );
 }
 
+// The daemon's drive rule (crates/canvas-adapters/src/drive.rs), mirrored so the demo refuses to
+// delete a light on a device the daemon drives just as the daemon does (#414).
+const NOT_DRIVEN_DEVICES = ["VID_3151&PID_4015"];
+function driven(deviceId: string): boolean {
+  const upper = deviceId.toUpperCase();
+  return !NOT_DRIVEN_DEVICES.some((path) => upper.includes(path));
+}
+
 function lightsRoute(s: DemoState, method: string, seg: string[], body: unknown): unknown {
   if (seg.length === 1 && method === "GET") return { lights: unpluggedLights(s.lights) };
   if (seg[1] === "flash" && method === "POST") return { ok: true };
+  if (seg.length === 2 && method === "DELETE") {
+    const id = seg[1] ?? "";
+    const view = s.lights.find((l) => l.light.id === id);
+    if (!view) fail(404, "not_found", `no light ${id}`);
+    if (driven(view.light.device_id)) {
+      fail(409, "conflict", `the light ${id} is on a device the daemon drives; remove it through chain setup`);
+    }
+    const emptied: EmptiedGroup[] = [];
+    s.lights.splice(s.lights.indexOf(view), 1);
+    for (const scene of s.scenes) {
+      for (const group of scene.groups) {
+        if (!group.members.includes(id)) continue;
+        group.members = group.members.filter((member) => member !== id);
+        if (group.members.length === 0) {
+          emptied.push({ scene_id: scene.id, group_id: group.id, name: group.name });
+        }
+      }
+      // The scenes repair drops a group the light left empty.
+      scene.groups = scene.groups.filter((group) => group.members.length > 0);
+    }
+    const answer: LightDeleted = { ok: true, id, emptied_groups: emptied };
+    return answer;
+  }
   if (seg.length === 2 && method === "PATCH") {
     const view = s.lights.find((l) => l.light.id === seg[1]);
     if (!view) fail(404, "not_found", `no light ${seg[1]}`);

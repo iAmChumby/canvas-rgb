@@ -92,7 +92,8 @@ export const routes = {
     `/api/v1/scenes/${encodeURIComponent(scene)}/groups/${encodeURIComponent(group)}/move`,
   // GET LightsResponse.
   lights: "/api/v1/lights",
-  // PATCH LightPatch.
+  // PATCH LightPatch; DELETE removes a light on a device the daemon never drives and answers a
+  // LightDeleted (#414). Both use the same path; only the verb differs.
   light: (id: string) => `/api/v1/lights/${encodeURIComponent(id)}`,
   // POST FlashRequest.
   lightsFlash: "/api/v1/lights/flash",
