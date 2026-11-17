@@ -6273,3 +6273,280 @@ fn review_427_whole_canvas_blend_modes_match_the_picture_cell_read() {
         assert_eq!(worst, 0, "{mode:?}: the per-LED read matches the picture's cell read: {worst}");
     }
 }
+
+// ================================================== #427 fix pass 2: coverage that varies in space
+
+/// A picture that varies in space, used both as a layer and as its own mask. `Vertical` is white
+/// in the lower half; `Checker` alternates every pixel. A read of the composed picture then
+/// averages a source that is half white, which averaging source and coverage separately used to
+/// read as a quarter (#427 fix pass 2).
+#[derive(Clone, Copy)]
+enum Pattern {
+    Vertical,
+    Checker,
+}
+
+struct PatternEffect {
+    pattern: Pattern,
+    read: StripRead,
+}
+
+impl Effect for PatternEffect {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "pattern".into(),
+            name: "Pattern".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &Props) {}
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        for y in 0..canvas.height {
+            for x in 0..canvas.width {
+                let on = match self.pattern {
+                    Pattern::Vertical => y >= canvas.height / 2,
+                    Pattern::Checker => (x + y) % 2 == 0,
+                };
+                canvas.set(x, y, if on { [1.0; 3] } else { [0.0; 3] });
+            }
+        }
+    }
+    fn strip_read(&self) -> StripRead {
+        self.read
+    }
+}
+
+/// The patterned pictures, plus flat cell/column layers on another device that only make a stack
+/// mixed (they never reach device d's strip).
+fn pattern_leaves() -> LeafBuilder {
+    Arc::new(|id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "pattern-v" => Box::new(PatternEffect { pattern: Pattern::Vertical, read: StripRead::Column }),
+            "pattern-c" => Box::new(PatternEffect { pattern: Pattern::Checker, read: StripRead::Cell }),
+            "cell" => Box::new(Flat { colour: [0.0; 3], read: StripRead::Cell }),
+            "column" => Box::new(Flat { colour: [0.0; 3], read: StripRead::Column }),
+            other => return Err(format!("no effect with the id {other}")),
+        };
+        Ok(effect)
+    })
+}
+
+/// #427 fix pass 2: a column layer whose mask covers only the lower half of the canvas, over a
+/// source that is white in the lower half, lights the strip with the stage's column read: the
+/// mean of source*coverage (128), not (mean source)*(mean coverage) (64). The reference is the
+/// same layer alone, whose single read makes the stage paint and read it as a column.
+#[test]
+fn review_427_a_partly_covering_mask_matches_the_stages_column_read() {
+    let devices = two_devices();
+    let mut patterned = layer("pattern-v", "pattern-v");
+    patterned.mask = Some(a_mask("pattern-v"));
+    let mixed = stack(
+        "stack:Mixed",
+        vec![
+            patterned.clone(),
+            with_area(layer("cell", "cell"), LayerArea::Device { device: DeviceId("e".into()) }),
+        ],
+    );
+    let mut effect = stack_effect!(&mixed, pattern_leaves(), live_for(&mixed), areas_for(&devices));
+    effect.init(&Props::new());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..3 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &all[..8];
+
+    let single = stack("stack:Single", vec![patterned]);
+    let mut reference = stack_effect!(&single, pattern_leaves(), live_for(&single), areas_for(&devices));
+    reference.init(&Props::new());
+    let mut ref_canvas = group_canvas();
+    for _ in 0..3 {
+        reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+    }
+    let want = &strip_colours(&devices, &ref_canvas, StripRead::Column)[..8];
+
+    let level = level_of(got);
+    let worst = worst_delta(got, want);
+    println!(
+        "#427 fix pass 2 partial mask: per-LED level {level:.1}, stage column level {:.1}, worst delta {worst}",
+        level_of(want)
+    );
+    assert!(
+        (level - 128.0).abs() <= 6.0,
+        "the strip reads the mean of source*coverage, not source times coverage: {level:.1}"
+    );
+    assert!(worst <= 6, "the per-LED read matches the stage's column read: {worst}");
+}
+
+/// #427 fix pass 2: a cell layer whose mask alternates every pixel inside one LED's cell still
+/// matches the stage's cell read. Both the picture and its mask are the same checkerboard, so the
+/// stage averages source*coverage (half white) inside the cell instead of averaging them apart
+/// (a quarter). A flat column layer on another device makes the stack mixed.
+#[test]
+fn review_427_a_mask_varying_inside_a_cell_matches_the_stages_cell_read() {
+    let devices = two_devices();
+    let mut patterned = layer("pattern-c", "pattern-c");
+    patterned.mask = Some(a_mask("pattern-c"));
+    let mixed = stack(
+        "stack:Mixed",
+        vec![
+            patterned.clone(),
+            with_area(layer("column", "column"), LayerArea::Device { device: DeviceId("e".into()) }),
+        ],
+    );
+    let mut effect = stack_effect!(&mixed, pattern_leaves(), live_for(&mixed), areas_for(&devices));
+    effect.init(&Props::new());
+    let (lights, plan) = stack::zone_group(&devices);
+    let mut canvas = group_canvas();
+    for _ in 0..3 {
+        effect.update(1.0 / 30.0, &mut canvas, &Inputs::default());
+    }
+    let all = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &all[..8];
+
+    let single = stack("stack:Single", vec![patterned]);
+    let mut reference = stack_effect!(&single, pattern_leaves(), live_for(&single), areas_for(&devices));
+    reference.init(&Props::new());
+    let mut ref_canvas = group_canvas();
+    for _ in 0..3 {
+        reference.update(1.0 / 30.0, &mut ref_canvas, &Inputs::default());
+    }
+    let want = &strip_colours(&devices, &ref_canvas, StripRead::Cell)[..8];
+
+    let level = level_of(got);
+    let worst = worst_delta(got, want);
+    println!(
+        "#427 fix pass 2 cell mask: per-LED level {level:.1}, stage cell level {:.1}, worst delta {worst}",
+        level_of(want)
+    );
+    assert!(
+        (level - 128.0).abs() <= 6.0,
+        "a mask varying inside the cell still reads the mean of source*coverage: {level:.1}"
+    );
+    assert_eq!(worst, 0, "the per-LED read matches the stage's cell read: {worst}");
+}
+
+/// A column layer whose update overruns: it keeps its green picture and is faulted after four
+/// trials, the way a slow HTML layer is (the clock is moved by hand, so no test waits).
+struct SlowColumn {
+    clock: ManualClock,
+    updates: Arc<AtomicU64>,
+}
+
+impl Effect for SlowColumn {
+    fn schema(&self) -> PropertySchema {
+        PropertySchema {
+            id: "slow-column".into(),
+            name: "Slow column".into(),
+            description: String::new(),
+            needs: InputNeeds::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        }
+    }
+    fn init(&mut self, _props: &Props) {}
+    fn update(&mut self, _dt: f32, canvas: &mut Canvas, _inputs: &Inputs) {
+        self.clock.advance_ms(20);
+        canvas.fill([0.0, 1.0, 0.0]);
+        self.updates.fetch_add(1, Ordering::SeqCst);
+    }
+    fn strip_read(&self) -> StripRead {
+        StripRead::Column
+    }
+}
+
+/// Four overrunning trials fault the layer; the clock is moved between holds.
+fn fault_four_trials(effect: &mut StackEffect, canvas: &mut Canvas, clock: &ManualClock) {
+    step(effect, canvas);
+    clock.advance_ms(251);
+    step(effect, canvas);
+    clock.advance_ms(501);
+    step(effect, canvas);
+    clock.advance_ms(1001);
+    step(effect, canvas);
+}
+
+/// #427 fix pass 2: the per-LED read skips nothing the stage still draws. `composite_layer`
+/// paints a faulted layer's last picture (only its update is skipped), so the strip must show it
+/// too. Before the fix the faulted layer was dropped from the per-LED read and device d's strip
+/// went black while the stage still showed green.
+#[test]
+fn review_427_a_faulted_layer_keeps_lighting_the_strip_like_the_stage() {
+    let devices = two_devices();
+    let clock = ManualClock::new();
+    let leaves = slow_column_leaves(&clock);
+    let mixed = stack(
+        "stack:Mixed",
+        vec![
+            layer("l1", "html:slow"),
+            with_area(layer("l2", "cell"), LayerArea::Device { device: DeviceId("e".into()) }),
+        ],
+    );
+    let mut effect = stack_effect!(&mixed, leaves, live_for(&mixed), areas_for(&devices))
+        .with_clock(clock.clock())
+        .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
+    effect.init(&Props::new());
+    let mut canvas = group_canvas();
+    fault_four_trials(&mut effect, &mut canvas, &clock);
+    assert_eq!(
+        effect.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted),
+        "the slow layer faulted"
+    );
+    step(&mut effect, &mut canvas);
+    let (lights, plan) = stack::zone_group(&devices);
+    let got = led_path_colours(&mut effect, &plan, &lights, &canvas);
+    let got = &got[..8];
+
+    // The same layer alone is a single-read stack, so its stage column read is the ground truth
+    // for what a faulted column layer still shows.
+    let ref_clock = ManualClock::new();
+    let single = stack("stack:Single", vec![layer("l1", "html:slow")]);
+    let mut reference = stack_effect!(
+        &single,
+        slow_column_leaves(&ref_clock),
+        live_for(&single),
+        areas_for(&devices)
+    )
+    .with_clock(ref_clock.clock())
+    .with_fps(Arc::new(std::sync::atomic::AtomicU32::new(30)));
+    reference.init(&Props::new());
+    let mut ref_canvas = group_canvas();
+    fault_four_trials(&mut reference, &mut ref_canvas, &ref_clock);
+    assert_eq!(
+        reference.layer_status("l1").map(|(state, _)| state),
+        Some(StackLayerState::Faulted),
+        "the reference layer faulted too"
+    );
+    let want = &strip_colours(&devices, &ref_canvas, StripRead::Column)[..8];
+
+    let level = level_of(got);
+    let worst = worst_delta(got, want);
+    println!(
+        "#427 fix pass 2 faulted layer: per-LED level {level:.1}, stage column level {:.1}, worst delta {worst}",
+        level_of(want)
+    );
+    assert!((level - 85.0).abs() <= 3.0, "a faulted layer keeps its green picture on the strip: {level:.1}");
+    assert_eq!(worst, 0, "a faulted layer's per-LED read matches the stage: {worst}");
+}
+
+/// A leaf builder for the faulted-layer test: the slow column layer plus a flat cell layer on
+/// another device that makes the stack mixed without reaching device d's strip.
+fn slow_column_leaves(clock: &ManualClock) -> LeafBuilder {
+    let clock = clock.clone();
+    Arc::new(move |id: &str| {
+        let effect: Box<dyn Effect> = match id {
+            "html:slow" => Box::new(SlowColumn { clock: clock.clone(), updates: Arc::new(AtomicU64::new(0)) }),
+            "cell" => Box::new(Flat { colour: [0.0; 3], read: StripRead::Cell }),
+            other => return Err(format!("no effect with the id {other}")),
+        };
+        Ok(effect)
+    })
+}
+
