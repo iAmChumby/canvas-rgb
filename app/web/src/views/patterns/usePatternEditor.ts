@@ -4,14 +4,21 @@
 // the history. No DOM, no request: the editor is a colour array per LED, and every change is
 // handed to `onDraft` as the whole document, at most once per animation frame.
 //
-// The document is never rebuilt. `withColors` spreads the loaded pattern and replaces
-// `frames[0].colors`, so a pattern a later version wrote keeps its second frame, its motion and
-// any key this editor has never heard of (the plan's `saving_keeps_fields_the_editor_does_not_know`).
+// The document is never rebuilt. `withDoc` spreads the loaded pattern and replaces its frames, and
+// every frame edit spreads the frame it changes, so a pattern a later version wrote keeps its
+// motion and any key this editor has never heard of (the plan's
+// `saving_keeps_fields_the_editor_does_not_know`).
+//
+// Frames (#468): the document is a list of frames, one of them selected. Painting edits the
+// selected frame; adding, duplicating, deleting and reordering frames, a frame's hold, the
+// transition after it, Loop and the fps shortcut edit the list. One history serves all of them: an
+// entry is the frames (and Loop) as they were, plus the selection, so undo puts back whatever the
+// last change was.
 //
 // The editor is mounted on one pattern. A different pattern is a different editor (the component
 // that opens it gives it a key), so the loaded document is read once and kept.
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { BLACK_HEX, hexToHsv, hsvToHex, isHex, parseHex } from "@/lib/color";
 import {
   gradientColours,
@@ -20,13 +27,29 @@ import {
   seedStops,
   type GradientStop,
 } from "@/lib/gradient";
-import { withColors } from "@/lib/patternFit";
+import {
+  addFrame as addFrameTo,
+  applyFps as applyFpsTo,
+  deleteFrame as deleteFrameFrom,
+  docOf,
+  duplicateFrame as duplicateFrameIn,
+  fpsOf,
+  moveFrame as moveFrameIn,
+  selectedAfterMove,
+  setHold as setHoldOf,
+  setLoop as setLoopOf,
+  setTransition as setTransitionOf,
+  withDoc,
+  type FrameDoc,
+} from "@/lib/patternFrames";
 import type { Shape } from "@/components/ShapePicker";
 import type { BuiltOn } from "@/proto/BuiltOn";
+import type { Frame } from "@/proto/Frame";
 import type { GridSize } from "@/proto/GridSize";
 import type { Motion } from "@/proto/Motion";
 import type { Pattern } from "@/proto/Pattern";
 import type { Rgb8 } from "@/proto/Rgb8";
+import type { Transition } from "@/proto/Transition";
 
 /**
  * The tool in the hand. `fill` fills the whole device, from a key or from any dot. `gradient`
@@ -71,7 +94,31 @@ export interface PatternEditorState {
   /** A stop's drag began / ended: the moves between are one history entry. */
   beginStopDrag(): void;
   endStopDrag(): void;
-  /** The frame's colours, in LED order. */
+  /** The frames, in play order. */
+  frames: Frame[];
+  /** The frame being painted. */
+  selected: number;
+  selectFrame(index: number): void;
+  /** A new blank frame after the selected one; it becomes the selected one. */
+  addFrame(): void;
+  /** A copy of the selected frame right after it. */
+  duplicateFrame(): void;
+  /** The selected frame removed (a pattern keeps at least one). */
+  deleteFrame(): void;
+  /** Frame `from` moved to place `to`; the selection follows the frame it was on. */
+  moveFrame(from: number, to: number): void;
+  /** How long a frame holds, in ms. */
+  setHold(index: number, ms: number): void;
+  /** How a frame passes to the next (for the last, to the first). */
+  setTransition(index: number, patch: Partial<Transition>): void;
+  /** After the last frame, back to the first (the default) or stay on the last. */
+  loop: boolean;
+  setLoop(loop: boolean): void;
+  /** Every frame holds `round(1000 / fps)` ms and every transition is a cut. */
+  applyFps(fps: number): void;
+  /** The fps the holds come to, or null when they differ (no fps is ever stored). */
+  fps: number | null;
+  /** The selected frame's colours, in LED order. */
   colours: Rgb8[];
   colour: string;
   tool: Tool;
@@ -111,20 +158,25 @@ export function usePatternEditor(
     motion: base.motion,
   });
   const ledCount = Math.max(1, Math.floor(base.built_on.led_count));
-  const [loaded] = useState<Rgb8[]>(() => coloursOf(base, ledCount));
-
-  const [colours, setColours] = useState<Rgb8[]>(loaded);
-  const coloursRef = useRef<Rgb8[]>(loaded);
-  /** The colours as they were saved last, or loaded: what `dirty` measures against. */
-  const [saved, setSaved] = useState<Rgb8[]>(loaded);
-  const [colour, setColourState] = useState<string>(() => firstOn(loaded) ?? WHITE);
+  // The loaded frames, each padded to the device's LED count so a frame that is missing colours
+  // still draws every LED. A pattern with no frames (validation refuses one) gets a blank one.
+  const [loaded] = useState<FrameDoc>(() => loadedDoc(base, ledCount));
+  const [doc, setDocState] = useState<FrameDoc>(loaded);
+  const docRef = useRef<FrameDoc>(loaded);
+  const [selected, setSelectedState] = useState(0);
+  const selectedRef = useRef(0);
+  /** The selected frame's colours: what the tools paint. */
+  const coloursRef = useRef<Rgb8[]>(loaded.frames[0]?.colors ?? []);
+  /** The frames as they were saved last, or loaded: what `dirty` measures against. */
+  const [saved, setSaved] = useState<string>(() => docKey(loaded));
+  const [colour, setColourState] = useState<string>(() => firstOn(loaded.frames[0]?.colors ?? []) ?? WHITE);
   const colourRef = useRef(colour);
   const [tool, setToolState] = useState<Tool>("paint");
   const toolRef = useRef<Tool>(tool);
-  const [undoStack, setUndoStack] = useState<Rgb8[][]>([]);
-  const undoRef = useRef<Rgb8[][]>([]);
-  const [redoStack, setRedoStack] = useState<Rgb8[][]>([]);
-  const redoRef = useRef<Rgb8[][]>([]);
+  const [undoStack, setUndoStack] = useState<Snapshot[]>([]);
+  const undoRef = useRef<Snapshot[]>([]);
+  const [redoStack, setRedoStack] = useState<Snapshot[]>([]);
+  const redoRef = useRef<Snapshot[]>([]);
   /** True between the first change of a pointer stroke and its pointer-up. */
   const inStroke = useRef(false);
   const [gradient, setGradientState] = useState<GradientState | null>(null);
@@ -150,31 +202,29 @@ export function usePatternEditor(
     if (next) draft.current(next);
   }, []);
 
-  const pushUndo = useCallback((snapshot: Rgb8[]) => {
-    const next = [...undoRef.current, snapshot];
+  /** Puts the document as it stands on the history, before a change to it. */
+  const pushUndo = useCallback(() => {
+    const next = [...undoRef.current, { doc: docRef.current, selected: selectedRef.current }];
     undoRef.current = next.length > HISTORY_DEPTH ? next.slice(next.length - HISTORY_DEPTH) : next;
     setUndoStack(undoRef.current);
     redoRef.current = [];
     setRedoStack(redoRef.current);
   }, []);
 
-  /** The document as it stands: the loaded pattern with these colours, and the shape and motion in hand. */
+  /** The document as it stands: the loaded pattern with these frames, and the shape and motion in hand. */
   const compose = useCallback(
-    (colours: Rgb8[]): Pattern => {
-      const doc = withColors(base, colours);
-      return {
-        ...doc,
-        built_on: builtOnRef.current,
-        motion: motionRef.current,
-      };
-    },
+    (frames: FrameDoc): Pattern => ({
+      ...withDoc(base, frames),
+      built_on: builtOnRef.current,
+      motion: motionRef.current,
+    }),
     [base],
   );
 
   /** Queues the document for the lights: at most one request per animation frame, the newest wins. */
   const schedule = useCallback(
-    (doc: Pattern) => {
-      pending.current = doc;
+    (next: Pattern) => {
+      pending.current = next;
       if (frame.current !== null) return;
       if (typeof requestAnimationFrame !== "function") {
         flush();
@@ -185,20 +235,35 @@ export function usePatternEditor(
     [flush],
   );
 
-  const commit = useCallback(
-    (next: Rgb8[]) => {
-      coloursRef.current = next;
-      setColours(next);
+  /** Makes these frames and this selection the document, and sends it to the lights. */
+  const applyDoc = useCallback(
+    (next: FrameDoc, at: number) => {
+      const index = Math.min(Math.max(0, at), next.frames.length - 1);
+      docRef.current = next;
+      selectedRef.current = index;
+      coloursRef.current = next.frames[index]?.colors ?? [];
+      setDocState(next);
+      setSelectedState(index);
       schedule(compose(next));
     },
     [compose, schedule],
+  );
+
+  /** The selected frame's colours replaced. */
+  const commit = useCallback(
+    (next: Rgb8[]) => {
+      const here = docRef.current;
+      const at = selectedRef.current;
+      applyDoc({ ...here, frames: here.frames.map((f, i) => (i === at ? { ...f, colors: next } : f)) }, at);
+    },
+    [applyDoc],
   );
 
   const setMotion = useCallback(
     (next: Motion) => {
       motionRef.current = next;
       setMotionState(next);
-      schedule(compose(coloursRef.current));
+      schedule(compose(docRef.current));
     },
     [compose, schedule],
   );
@@ -216,7 +281,7 @@ export function usePatternEditor(
       if (sameColours(colours, coloursRef.current)) return;
       if (entry === "new" || !inStopDrag.current) {
         if (entry === "drag") inStopDrag.current = true;
-        pushUndo(coloursRef.current);
+        pushUndo();
       }
       commit(colours);
     },
@@ -344,7 +409,7 @@ export function usePatternEditor(
       // A ring wraps its gradient; a line does not: the stops are re-laid for the new shape.
       const g = gradientRef.current;
       if (g && g.wrap !== (shape === "ring")) applyGradient({ ...g, wrap: shape === "ring" }, "new");
-      else schedule(compose(coloursRef.current));
+      else schedule(compose(docRef.current));
     },
     [applyGradient, compose, schedule],
   );
@@ -361,7 +426,7 @@ export function usePatternEditor(
     const current = coloursRef.current;
     const value = toolRef.current === "off" ? BLACK_HEX : colourRef.current;
     if (current.every((c) => c === value)) return;
-    pushUndo(current);
+    pushUndo();
     commit(Array.from({ length: current.length }, () => value));
   }, [commit, pushUndo]);
 
@@ -396,7 +461,7 @@ export function usePatternEditor(
       if (!changed) return;
       if (!inStroke.current) {
         inStroke.current = true;
-        pushUndo(current);
+        pushUndo();
       }
       commit(next);
     },
@@ -408,25 +473,101 @@ export function usePatternEditor(
     if (!previous) return;
     undoRef.current = undoRef.current.slice(0, -1);
     setUndoStack(undoRef.current);
-    redoRef.current = [...redoRef.current, coloursRef.current];
+    redoRef.current = [...redoRef.current, { doc: docRef.current, selected: selectedRef.current }];
     setRedoStack(redoRef.current);
     inStroke.current = false;
-    commit(previous);
-  }, [commit]);
+    applyDoc(previous.doc, previous.selected);
+  }, [applyDoc]);
 
   const redo = useCallback(() => {
     const next = redoRef.current[redoRef.current.length - 1];
     if (!next) return;
     redoRef.current = redoRef.current.slice(0, -1);
     setRedoStack(redoRef.current);
-    undoRef.current = [...undoRef.current, coloursRef.current];
+    undoRef.current = [...undoRef.current, { doc: docRef.current, selected: selectedRef.current }];
     setUndoStack(undoRef.current);
     inStroke.current = false;
-    commit(next);
-  }, [commit]);
+    applyDoc(next.doc, next.selected);
+  }, [applyDoc]);
+
+  // ---- frames (#468). Each change is one history entry and goes to the lights at once.
+
+  /** A frame edit: the history takes the document as it was, then the new one is the document. */
+  const edit = useCallback(
+    (next: FrameDoc | null, at: number) => {
+      if (next === null || next === docRef.current) return;
+      pushUndo();
+      inStroke.current = false;
+      applyDoc(next, at);
+    },
+    [applyDoc, pushUndo],
+  );
+
+  const selectFrame = useCallback(
+    (index: number) => {
+      if (index === selectedRef.current || index < 0 || index >= docRef.current.frames.length) return;
+      // The Gradient tool's stops describe the frame they were laid on: another frame starts over.
+      if (gradientRef.current !== null) {
+        gradientRef.current = null;
+        setGradientState(null);
+        if (toolRef.current === "gradient") {
+          toolRef.current = "paint";
+          setToolState("paint");
+        }
+      }
+      inStroke.current = false;
+      selectedRef.current = index;
+      coloursRef.current = docRef.current.frames[index]?.colors ?? [];
+      setSelectedState(index);
+    },
+    [],
+  );
+
+  const addFrame = useCallback(() => {
+    const made = addFrameTo(docRef.current, selectedRef.current);
+    if (made) edit(made.doc, made.selected);
+  }, [edit]);
+
+  const duplicateFrame = useCallback(() => {
+    const made = duplicateFrameIn(docRef.current, selectedRef.current);
+    if (made) edit(made.doc, made.selected);
+  }, [edit]);
+
+  const deleteFrame = useCallback(() => {
+    const made = deleteFrameFrom(docRef.current, selectedRef.current);
+    if (made) edit(made.doc, made.selected);
+  }, [edit]);
+
+  const moveFrame = useCallback(
+    (from: number, to: number) => {
+      edit(moveFrameIn(docRef.current, from, to), selectedAfterMove(selectedRef.current, from, to));
+    },
+    [edit],
+  );
+
+  const setHold = useCallback(
+    (index: number, ms: number) => edit(setHoldOf(docRef.current, index, ms), selectedRef.current),
+    [edit],
+  );
+
+  const setTransition = useCallback(
+    (index: number, patch: Partial<Transition>) =>
+      edit(setTransitionOf(docRef.current, index, patch), selectedRef.current),
+    [edit],
+  );
+
+  const setLoop = useCallback(
+    (loop: boolean) => edit(setLoopOf(docRef.current, loop), selectedRef.current),
+    [edit],
+  );
+
+  const applyFps = useCallback(
+    (fps: number) => edit(applyFpsTo(docRef.current, fps), selectedRef.current),
+    [edit],
+  );
 
   const pattern: Pattern = {
-    ...withColors(base, colours),
+    ...withDoc(base, doc),
     built_on: builtOn,
     motion,
   };
@@ -435,9 +576,12 @@ export function usePatternEditor(
   const canRedo = redoStack.length > 0;
 
   const markSaved = useCallback(() => {
-    setSaved(coloursRef.current);
+    setSaved(docKey(docRef.current));
     setSavedShape({ arrangement: builtOnRef.current.arrangement, motion: motionRef.current });
   }, []);
+
+  const colours = doc.frames[selected]?.colors ?? [];
+  const key = useMemo(() => docKey(doc), [doc]);
 
   const shownColour =
     tool === "gradient" && gradient ? (gradient.stops[gradient.selected]?.colour ?? colour) : colour;
@@ -456,6 +600,19 @@ export function usePatternEditor(
     setWrap,
     beginStopDrag,
     endStopDrag,
+    frames: doc.frames,
+    selected,
+    selectFrame,
+    addFrame,
+    duplicateFrame,
+    deleteFrame,
+    moveFrame,
+    setHold,
+    setTransition,
+    loop: doc.playback?.loop !== false,
+    setLoop,
+    applyFps,
+    fps: fpsOf(doc),
     colours,
     colour: shownColour,
     tool,
@@ -471,16 +628,32 @@ export function usePatternEditor(
     canUndo,
     canRedo,
     dirty:
-      !sameColours(colours, saved) ||
+      key !== saved ||
       builtOn.arrangement !== savedShape.arrangement ||
       JSON.stringify(motion) !== JSON.stringify(savedShape.motion),
   };
 }
 
-/** A frame's colours, in LED order, padded to the device's LED count. */
-function coloursOf(pattern: Pattern, ledCount: number): Rgb8[] {
-  const frame = pattern.frames[0]?.colors ?? [];
-  return Array.from({ length: ledCount }, (_, i) => frame[i] ?? BLACK_HEX);
+/** One entry of the history: the frames (and Loop) as they were, and the frame that was selected. */
+interface Snapshot {
+  doc: FrameDoc;
+  selected: number;
+}
+
+/** The loaded frames, each padded to the device's LED count; a pattern with none gets one blank frame. */
+function loadedDoc(pattern: Pattern, ledCount: number): FrameDoc {
+  const pad = (frame: Frame): Frame => {
+    if (frame.colors.length === ledCount) return frame;
+    return { ...frame, colors: Array.from({ length: ledCount }, (_, i) => frame.colors[i] ?? BLACK_HEX) };
+  };
+  const doc = docOf(pattern);
+  const frames = doc.frames.length > 0 ? doc.frames.map(pad) : [{ colors: Array.from({ length: ledCount }, () => BLACK_HEX), hold: 0 }];
+  return { ...doc, frames };
+}
+
+/** The frames and Loop as text: what `dirty` compares, by value, so a stroke painted back is no change. */
+function docKey(doc: FrameDoc): string {
+  return JSON.stringify([doc.frames, doc.playback ?? null]);
 }
 
 /** The first colour that is on, or null when every LED is off. */

@@ -137,8 +137,9 @@ fn bench_pattern() -> Pattern {
     Pattern {
         id: "pattern:bench".into(),
         built_on: BuiltOn { led_count: LEDS, arrangement: Arrangement::Strip, grid: None },
-        frames: vec![Frame { colors, hold: 0, extra: Default::default() }],
+        frames: vec![Frame { colors, hold: 0, transition: None, extra: Default::default() }],
         motion: Motion::none(),
+        playback: None,
         extra: Default::default(),
     }
 }
