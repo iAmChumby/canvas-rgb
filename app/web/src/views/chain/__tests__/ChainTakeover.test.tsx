@@ -101,8 +101,9 @@ function part(position: number, name: string, leds: number, start: number, kind:
 
 /**
  * One resizable header as the daemon lists it. `leds` is the length it has now: 0 means the app
- * does not know how long the header is, which is what the flow's first step is for. A header that
- * already has a size is never offered by itself (#380).
+ * does not know how long the header is. A size is not a chain record: a header with a size but no
+ * record is unverified (a saved size re-applied at start-up) and the takeover offers it too. Only
+ * a header with a record (set up or empty) is never offered again (#380, #470).
  */
 function chain(zone: number, name: string, state: ChainSetupState, parts: LightView[] = [], leds = 0): ChainView {
   return {
@@ -198,6 +199,36 @@ describe("the chain takeover", () => {
 
     expect(screen.queryByRole("region", SETUP)).toBeNull();
     expect(api.chains.start).not.toHaveBeenCalled();
+  });
+
+  it("a header sized 8 with no chain record is still offered", async () => {
+    await show([chain(1, "JARGB 1", "not_set_up", [], 8)]);
+
+    // A saved size is not a record: the header is offered so its devices can be checked (#470).
+    expect(screen.getByRole("region", SETUP)).toBeTruthy();
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 1/)).toBeTruthy();
+    expect(screen.getByText("Tell the app about your lights.")).toBeTruthy();
+    await press("Start");
+    expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 1);
+  });
+
+  it("Luke's state offers the sized header with no record and none of the empty ones", async () => {
+    await show([
+      chain(0, "JAF", "empty"),
+      chain(1, "JARGB 1", "not_set_up", [], 8),
+      chain(2, "JARGB 2", "empty"),
+      chain(3, "JARGB 3", "empty"),
+    ]);
+
+    // Zones 0, 2 and 3 have empty records, so they are answered and never offered again. Zone 1
+    // has a size from a saved re-apply but no record, so it is the one offered (#470).
+    expect(screen.getByText(/MSI MYSTIC LIGHT · JARGB 1/)).toBeTruthy();
+    expect(screen.queryByText(/MSI MYSTIC LIGHT · JAF/)).toBeNull();
+    expect(screen.queryByText(/MSI MYSTIC LIGHT · JARGB 2/)).toBeNull();
+    expect(screen.queryByText(/MSI MYSTIC LIGHT · JARGB 3/)).toBeNull();
+    await press("Start");
+    expect(api.chains.start).toHaveBeenCalledTimes(1);
+    expect(api.chains.start).toHaveBeenCalledWith(DEVICE, 1);
   });
 
   it("Later closes it and the header is not offered again, in this launch or the next", async () => {

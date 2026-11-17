@@ -18,7 +18,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
-- Devices: an ARGB header the app sized but you never set up now says how many LEDs it has and that they are not set up as parts, instead of a bare "Not set up" beside the LED count. (#470)
+- Setup now offers an ARGB header that has a size but was never set up, so its devices get checked instead of being skipped; its row says "Not checked" rather than repeating the LED count. (#470)
 - Scenes: a group's list of effects and presets no longer runs through its picture band and the flow across / each its own switch. The band is the sheet's own header and the list scrolls in a pane under it, so no row is ever drawn in the band's pixels or cut by its edge, and a group's own effect picker no longer covers its mode switch when the window is short or narrow. On a narrow window a group row's mode switch now sits after the brightness fader, on the same line. (#469)
 - The editor's left rail no longer scrolls sideways: its tooltips reach over the page without adding a horizontal scrollbar, and the rail still scrolls up and down in a short window. (#467)
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
