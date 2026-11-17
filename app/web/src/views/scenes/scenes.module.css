@@ -8,7 +8,7 @@
  *   who | LEDs | effect | mode | fader
  * Narrow: two lines.
  *   who | LEDs
- *   effect | mode | fader
+ *   effect | fader | mode
  */
 
 .page {
@@ -515,13 +515,16 @@
   }
 
   /* The children are effect, mode, fader in the document; pin them so the mode is the last
-     cell and the fader the middle one. */
+     cell and the fader the middle one, all on one line (grid-row 1: placing the fader in an
+     earlier column than the mode would otherwise start a second row). */
   .controls .fader {
     grid-column: 2;
+    grid-row: 1;
   }
 
   .controls .mode {
     grid-column: 3;
+    grid-row: 1;
   }
 
   .dark {

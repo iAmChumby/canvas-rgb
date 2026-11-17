@@ -109,3 +109,25 @@ describe("the menu of a group", () => {
     }
   });
 });
+
+// #469: at a narrow width the mode cell sits past the fader, and all three stay on ONE line. The
+// pinned columns alone put the fader in a second grid row (measured: 133 px rows became 165 px).
+describe("the narrow row's controls (#469)", () => {
+  it("pins the fader and the mode to the first grid row", () => {
+    const all = rules(css);
+    for (const sel of [".controls .fader", ".controls .mode"]) {
+      const pinned = all.filter((r) => r.selectors.includes(sel));
+      expect(pinned.length, `${sel} has a rule`).toBeGreaterThan(0);
+      expect(pinned.some((r) => /grid-row:\s*1\s*;/.test(r.body)), `${sel} sits on row 1`).toBe(true);
+    }
+  });
+
+  it("asks the effect picker to stay clear of its own row", () => {
+    // jsdom does no layout: the placement rule itself is pinned in PopoverPlacement.test.ts; this
+    // pins that the row asks for it, so the picker never covers the mode cell (#469).
+    const row = readFileSync(resolve(process.cwd(), "src/views/scenes/GroupRow.tsx"), "utf8");
+    const picker = row.slice(row.indexOf("label={`What ${group.name} plays`}"));
+    expect(picker.slice(0, 600)).toContain("keepClearOfAnchor");
+  });
+});
+
