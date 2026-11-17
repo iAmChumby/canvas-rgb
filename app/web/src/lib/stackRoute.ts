@@ -4,7 +4,7 @@
 // small in-page navigation rather than a Next route change, so a page that is dirty keeps the
 // unsaved prompt in charge of the browser's Back; a reload reads the same query and reopens it.
 
-import { useEffect, useRef, useState } from "react";
+import { useEffect, useLayoutEffect, useRef, useState } from "react";
 
 /** The `history.state` key of the builder's guard entry; `STACK_ENTRY_SPENT` marks an entry the builder left. */
 export const STACK_GUARD = "canvasRgbStackGuard";
@@ -27,15 +27,18 @@ function onSpentEntry(): boolean {
 export function useStackParam(): StackRoute {
   // An entry the builder's guard made, or one the builder left, opens no builder: a browser cannot
   // delete the guard's copy, so a Forward onto it, or a reload of it, lands here with the builder
-  // shut and the entry becomes the effects page it stands for. The page is only ever mounted on
-  // such an entry by a traversal or a reload, when `history.state` is already the entry's own.
-  const [spent] = useState(onSpentEntry);
-  const [name, setName] = useState<string | null>(() => (spent ? null : read()));
+  // shut and the entry becomes the effects page it stands for.
+  //
+  // Read once the page has committed, never while rendering: on a client-side navigation Next
+  // changes the history in the commit of the new page, so while it renders `history.state` is still
+  // the entry being left. A layout effect runs before the browser paints, so a spent entry is shut
+  // before the builder is ever drawn.
+  const [name, setName] = useState<string | null>(read);
   const current = useRef(name);
   current.current = name;
 
-  useEffect(() => {
-    if (spent) go(null, { replace: true });
+  useLayoutEffect(() => {
+    if (onSpentEntry()) go(null, { replace: true });
     // Once, as the page opens.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

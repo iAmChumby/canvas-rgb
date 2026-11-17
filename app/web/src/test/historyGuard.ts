@@ -35,10 +35,29 @@ export async function waitForPatternGuard(): Promise<void> {
 }
 
 /**
- * Makes the entry the document is on plain, with no guard state. An editor that unmounts with its
- * guard's entry up takes that entry back with a Back (`strictEntry`), and a test's clean-up unmounts
- * a dirty editor: the Back would reach the next test. Call it before the clean-up.
+ * Leaves the history the next test starts on plain: no guard state on the entry the document is
+ * on, and no history move still on its way.
+ *
+ * The move matters as much as the state. A builder that undoes to clean and edits again pushes a
+ * second guard entry while the first one's Back is still queued, so a Back is in flight when the
+ * test ends. Clearing the current entry's state does not stop it: it lands later, on the first
+ * guard's copy behind, whose state still carries the guard's key, and the next test's builder reads
+ * that as a spent entry and refuses to open. jsdom cancels every queued traversal when a page is
+ * pushed (`History-impl.js` `pushState`), so the plain entry is pushed over the cleared one.
+ *
+ * Also: an editor that unmounts with its guard's entry up takes that entry back with a Back
+ * (`strictEntry`), and a test's clean-up unmounts a dirty editor. Call this before the clean-up.
  */
 export function plainEntry(): void {
   window.history.replaceState({}, "", window.location.href);
+  window.history.pushState({}, "", window.location.href);
+}
+
+/**
+ * Resolves once every history move jsdom has queued has run. A traversal is two queued tasks, the
+ * second queued by the first, each one `setImmediate` hop: three hops of the event loop outlast any
+ * move queued before the call. No timer, so no wall-clock wait.
+ */
+export async function historySettled(): Promise<void> {
+  for (let hop = 0; hop < 3; hop += 1) await new Promise<void>((resolve) => setImmediate(resolve));
 }
