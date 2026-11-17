@@ -197,6 +197,47 @@ are built by `per_key_report`, `per_key_reports` and `user_picture_mode_report` 
 `write_frame` sends them for a still, when the effect holds still and the flash's budget allows
 (#312).
 
+### Live per-key: `0x0F` (#10, checked on the device 2026-11-16)
+
+**Off by default.** Set the environment variable `CANVAS_RGB_ROYUAN_LIVE=1` for the daemon and restart it; no
+rebuild is needed. The adapter reads it once, when it is built (the daemon reads its other switches from the
+environment the same way; the adapters have no settings file). Anything but `1` leaves live off. Off, the
+adapter is the one #312 shipped, byte for byte: a 22 by 6 zone of 128 lamps, the whole-board `0x0E` colour while a
+frame moves, the stored still when it holds. On, the zone is 21 by 6 and 126 lamps (the cells and their slots
+differ, so a scene built for one zone does not carry over to the other). The key map is still being mapped
+(below), which is why live stays off until the visual pass.
+
+Everything below this section was written before it: where it says "no live path", the section
+below wins for this board when live is on. `checked on the device` (Luke watching): opcode `0x0F`, the vendor's
+`sendSyncColor` (Dynamic RGB app, for the M1 V5 HE `3151:5030`), lights `3151:4015` key by key and
+writes no flash. `royuan.rs` `sync_color_reports` builds it: 7 reports, `00 0F 01 <page> 38 <last> 00 00 <ck>`
+then 56 RGB bytes, `ck = 255 - (sum(bytes 1..=7) & 255)`, length byte 56 on every page, `last` = 1 on page 6,
+126 slots (21 columns of 6), slot order column-major, bottom row first. While it is on it replaces the
+whole-board `0x0E` stream and the `SET_USERPIC` still; they stay as the fallback when a `0x0F` report errors
+(until the keyboard connects again).
+
+- **A board that ignores `0x0F` cannot be detected over HID.** The adapter falls back only when the feature-report
+  write returns an error. A board that accepts the write and shows nothing returns no error, so live frames keep
+  going out and the keys stay dark. `read_back` does not help: it returns the colour last sent (the frame's mean),
+  never what the board shows, because the keyboard cannot be read back. The only check is looking at the keys
+  (`tools/kbd-map.py map`).
+- **A single frame showed nothing; a stream lit the keys.** The adapter sends at most one frame per
+  `LIVE_FRAME_INTERVAL` (33 ms, the vendor painter's 30 ms), skips a frame identical to the last, and resends
+  once `LIVE_KEEPALIVE` (100 ms, the longest gap seen to stay lit) has passed, when the next frame arrives. The resend is
+  frame-driven, so a paused output stops it. Gaps longer than 100 ms: UNKNOWN.
+- **The map is UNKNOWN beyond one column.** Observed: N, H, Y, 6, F5 lit as one column from the bottom. `key_slot`
+  assumes a plain 21 by 6 grid, `slot = col * 6 + (5 - row)`, no stagger correction between rows. The firmware's own
+  key map (below) puts B, not N, in the column of H, Y, 6, F5, so the two grids differ at least on the bottom
+  letter row. Which cell is which key, and which cells hold no key, is settled by `tools/kbd-map.py map`.
+- **Flicker hypotheses, none settled** (`tools/kbd-map.py flicker` compares them): (1) the board blanks while a
+  frame is landing and shows it on the last page, so back to back is dark most of the time; settles by: lit
+  share rises as the interval grows. (2) the board holds a frame for a timeout and then falls back to its own
+  mode; settles by: the 250 ms and 500 ms keepalive variants going dark or staying lit. (3) host-side USB timing
+  jitter on the control endpoint; settles by: the same stream scoring differently with a mouse and keyboard
+  idle versus busy. (4) page tearing, only for frames that change; settles by: the moving-bands variants
+  scoring worse than the static ones at the same interval. A static picture flickered, which already counts
+  against (4) alone.
+
 ### What the keyboard can do
 
 - **Host-driven per-key colour at animation speed: no source shows it on stock firmware. Status: not

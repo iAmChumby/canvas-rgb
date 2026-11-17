@@ -3,7 +3,33 @@
 //! The board is driven over its vendor HID interface (interface 2, usage page 0xFFFF, usage
 //! 0x0002) with 65-byte feature reports. The key-press interfaces (0 and 1) are never opened.
 //!
-//! Two paths light it (#312). While a frame moves, the keyboard shows one colour for the whole
+//! Three paths light it. **Live per-key (#10) is off by default** and turns on with the
+//! environment variable [`LIVE_ENV`] (`CANVAS_RGB_ROYUAN_LIVE=1`), read once when the adapter is
+//! built. With it off the adapter is the one #312 shipped: a 22 by 6 zone of 128 lamps, the
+//! whole-board colour, and the stored still. With it on, live per-key is tried first and replaces
+//! the other two, which stay as the fallback when a `0x0F` report is refused on this connection
+//! (the zone is then still the 21 by 6 one: its cells are converted for the picture).
+//!
+//! **Live per-key (#10).** A frame for the matrix zone goes out as one `0x0F` frame
+//! ([`sync_color_reports`]): seven reports, `0F 01 <page> 38 <last> 00 00 <ck>` then 56 RGB
+//! bytes, the vendor's `sendSyncColor` (the Dynamic RGB app, for the M1 V5 HE `3151:5030`; seen
+//! to light `3151:4015` on 2026-11-16, issue #10). It writes no flash, so none of the wear caps
+//! below apply to it, and while it is on neither the whole-board `0x0E` colour nor a
+//! `SET_USERPIC` picture is sent. One frame alone showed nothing on the board; a stream lit the
+//! keys, so a frame goes out at most every [`LIVE_FRAME_INTERVAL`], a frame identical to the last
+//! one sent is skipped, and the last frame is sent again whenever a frame arrives and
+//! [`LIVE_KEEPALIVE`] has passed since the last send. The resend rides the engine's frames: if
+//! the output pauses, nothing is resent and the board falls back to whatever it does unfed
+//! (UNKNOWN). The slot order is column-major, bottom row first ([`key_slot`]); which key sits in
+//! which slot is UNKNOWN beyond one observed column.
+//!
+//! **A board that ignores `0x0F` cannot be told apart over HID.** The adapter learns that a
+//! report was refused only from an error on the feature-report write. A board that accepts the
+//! write and shows nothing returns no error, so the adapter keeps sending live frames and the
+//! keys stay dark; the fallback never starts. [`DeviceAdapter::read_back`] says what was last
+//! sent, never what the board shows.
+//!
+//! The two older paths follow (#312). While a frame moves, the keyboard shows one colour for the whole
 //! board: the frame's average, streamed as the single `0x0E` report. When the frame holds still
 //! for the still window ([`STILL_AFTER`] at first), the adapter uploads it once as a stored
 //! picture (`SET_USERPIC`, seven pages 100 ms apart, then light mode 13) and stops sending the
@@ -64,6 +90,44 @@ const USAGE: u16 = 0x0002;
 const REPORT_LEN: usize = 65;
 /// Re-send the same colour at least this often.
 const KEEPALIVE: Duration = Duration::from_secs(1);
+
+// ---------------------------------------------------------------- live per-key (#10)
+
+/// The environment variable that turns the live per-key path on: `CANVAS_RGB_ROYUAN_LIVE=1`.
+///
+/// Read once when the adapter is built ([`live_from`]); a change needs a daemon restart, not a
+/// rebuild. Absent, empty or anything but `1` leaves live off, and the adapter behaves as it did
+/// before #10. The other adapters have no settings file, and the daemon reads its switches the
+/// same way (`CANVAS_RGB_FAKE_OPENRGB_PORT`, `CANVAS_RGB_OPENRGB`), so this follows them.
+pub const LIVE_ENV: &str = "CANVAS_RGB_ROYUAN_LIVE";
+
+/// Whether the live per-key path is wanted for the value of [`LIVE_ENV`]: only `1` turns it on.
+pub fn live_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("1")
+}
+
+/// The shortest gap between two live frames. The vendor's painter runs at 30 ms
+/// (`L1 = 30` in the Dynamic RGB app, `dynrgb-index` bundle), so 33 ms is its rate. A frame that
+/// arrives sooner is dropped: the engine sends the next one. Tunable; the visual pass
+/// (`tools/kbd-map.py`) compares 16, 33, 66 and 100 ms.
+pub const LIVE_FRAME_INTERVAL: Duration = Duration::from_millis(33);
+/// A live frame identical to the last one sent is skipped, but sent again once this long has
+/// passed since the last send, at the next frame that arrives. The resend is frame-driven: the
+/// adapter has no timer, so a paused output stops it.
+///
+/// The board showed nothing from a single frame and kept the picture lit from a stream, so a
+/// still picture needs resending. 100 ms is the longest gap seen to stay lit (2026-11-16: one
+/// frame every 100 ms, issue #10); a longer one is UNKNOWN until the visual pass times it.
+pub const LIVE_KEEPALIVE: Duration = Duration::from_millis(100);
+/// Reports in one live frame.
+pub const LIVE_PAGES: usize = 7;
+/// Colour bytes in one live report; the length byte of every page, the last one included.
+pub const LIVE_PAGE_DATA: usize = 56;
+/// Lamps in the live grid: 21 columns of 6 (the vendor's painter grid).
+pub const LIVE_SLOTS: usize = 126;
+/// Colour bytes of a whole frame, padded to seven full pages: `LIVE_PAGES * LIVE_PAGE_DATA`.
+const LIVE_PAYLOAD_BYTES: usize = LIVE_PAGES * LIVE_PAGE_DATA;
+const SYNC_COLOR: u8 = 0x0F;
 
 // ---------------------------------------------------------------- stills (#312)
 //
@@ -162,10 +226,10 @@ pub const PER_KEY_BYTES: usize = PER_KEY_SLOTS * 3;
 pub const PER_KEY_PAGES: usize = 7;
 /// Picture bytes in one report (the last report carries the remaining 48).
 pub const PER_KEY_PAGE_DATA: usize = 56;
-/// Rows in the key matrix; the slot order runs down each column.
+/// Rows in the zone's matrix; the slot order runs up each column.
 pub const KEY_ROWS: usize = 6;
-/// Columns in the key matrix: 128 slots in columns of 6, rounded up.
-pub const KEY_COLS: usize = PER_KEY_SLOTS.div_ceil(KEY_ROWS);
+/// Columns in the zone's matrix: the live grid's 21 columns of 6.
+pub const KEY_COLS: usize = LIVE_SLOTS / KEY_ROWS;
 
 const SET_USERPIC: u8 = 0x0C;
 const SET_LEDPARAM: u8 = 0x07;
@@ -183,27 +247,85 @@ pub const SETTLED: Duration = Duration::from_secs(300);
 /// The longest wait between open attempts.
 pub const RETRY_MAX: Duration = Duration::from_secs(300);
 
-/// The slot a key has in a picture: the matrix runs down each column, six rows to a column.
+/// The zone LED a matrix cell holds, which is the slot of a live `0x0F` frame: the grid runs up
+/// each column, six rows to a column, the bottom row first (#10).
 ///
-/// `row` 0 is the top row. The slot is `col * 6 + row`; `None` for a row past the sixth or a
-/// position past the last slot (a row of 6 would alias the next column). Which key sits at
-/// which row and column is per board (the table in `docs/adapters.md`).
+/// `row` 0 is the top row. The slot is `col * 6 + (5 - row)`; `None` for a position outside the
+/// 21 by 6 grid. **Assumption, one observed column:** on the board the slots N, H, Y, 6, F5 lit
+/// as one column from the bottom (2026-11-16), so this treats the live grid as a plain 21 by 6
+/// grid, with no stagger correction between rows. The firmware's own key matrix puts B, not N,
+/// in the column of H, Y, 6 and F5, so the two grids differ at least on the bottom letter row;
+/// which key sits in which slot is UNKNOWN beyond that one column (`tools/kbd-map.py` records
+/// it, the visual pass).
 pub fn key_slot(row: usize, col: usize) -> Option<usize> {
-    let slot = col.checked_mul(KEY_ROWS)?.checked_add(row)?;
-    (row < KEY_ROWS && slot < PER_KEY_SLOTS).then_some(slot)
+    (row < KEY_ROWS && col < KEY_COLS).then(|| col * KEY_ROWS + (KEY_ROWS - 1 - row))
 }
 
-/// The row and column of a slot, the inverse of [`key_slot`].
+/// The row and column of a slot, the inverse of [`key_slot`]. A slot past the grid gives a
+/// column past the last one.
 pub fn slot_position(slot: usize) -> (usize, usize) {
-    (slot % KEY_ROWS, slot / KEY_ROWS)
+    (KEY_ROWS - 1 - slot % KEY_ROWS, slot / KEY_ROWS)
 }
 
-/// The zone's key matrix: `map[row * KEY_COLS + col]` is the slot of the key there, or `None`
-/// for the positions past the last slot (the four bottom rows of the last column).
+/// The slot a stored picture gives a matrix cell: the picture runs *down* each column from the
+/// top row, `col * 6 + row` (checked on the device, 2026-11-13: slot 9 is A). The picture and the
+/// live frame share a cell's column and row; whether they light the same physical key is
+/// UNKNOWN (the stagger above).
+fn still_slot(row: usize, col: usize) -> usize {
+    col * KEY_ROWS + row
+}
+
+/// The zone's matrix: `map[row * KEY_COLS + col]` is the zone LED of the cell, which is its live
+/// slot. All 126 cells map; no cell is a gap, because which positions have no key is UNKNOWN
+/// (the slots the layout does not use stay whatever the effect paints there, and the visual pass
+/// settles which those are).
 pub fn key_map() -> Vec<Option<u32>> {
     (0..KEY_ROWS)
         .flat_map(|row| (0..KEY_COLS).map(move |col| key_slot(row, col).map(|slot| slot as u32)))
         .collect()
+}
+
+/// Columns of the zone's matrix while live is off: 128 slots in columns of 6, rounded up. This is
+/// the shape the adapter had before #10, and it is the one every saved scene was built against.
+pub const LEGACY_KEY_COLS: usize = PER_KEY_SLOTS.div_ceil(KEY_ROWS);
+
+/// The slot a key has in a stored picture, the matrix the adapter shows while live is off: the
+/// matrix runs down each column, six rows to a column.
+///
+/// `row` 0 is the top row. The slot is `col * 6 + row`; `None` for a row past the sixth or a
+/// position past the last slot (a row of 6 would alias the next column). Which key sits at
+/// which row and column is per board (the table in `docs/adapters.md`).
+pub fn legacy_key_slot(row: usize, col: usize) -> Option<usize> {
+    let slot = col.checked_mul(KEY_ROWS)?.checked_add(row)?;
+    (row < KEY_ROWS && slot < PER_KEY_SLOTS).then_some(slot)
+}
+
+/// The row and column of a stored-picture slot, the inverse of [`legacy_key_slot`].
+pub fn legacy_slot_position(slot: usize) -> (usize, usize) {
+    (slot % KEY_ROWS, slot / KEY_ROWS)
+}
+
+/// The zone's key matrix while live is off: `map[row * LEGACY_KEY_COLS + col]` is the slot of the
+/// key there, or `None` for the positions past the last slot (the four bottom rows of the last
+/// column).
+pub fn legacy_key_map() -> Vec<Option<u32>> {
+    (0..KEY_ROWS)
+        .flat_map(|row| {
+            (0..LEGACY_KEY_COLS).map(move |col| legacy_key_slot(row, col).map(|slot| slot as u32))
+        })
+        .collect()
+}
+
+/// A zone frame as the stored picture holds it: the cell of each LED keeps its colour, and the
+/// picture's slots run down each column from the top where the zone's run up from the bottom.
+/// Colours past the grid are dropped, and slots the grid does not reach (126 and 127) are black.
+fn zone_to_picture(colors: &[Rgb8]) -> Vec<Rgb8> {
+    let mut picture = vec![Rgb8::BLACK; PER_KEY_SLOTS];
+    for (led, color) in colors.iter().take(LIVE_SLOTS).enumerate() {
+        let (row, col) = slot_position(led);
+        picture[still_slot(row, col)] = *color;
+    }
+    picture
 }
 
 /// The whole-board colour for a frame: the arithmetic mean of each channel over the colours
@@ -468,6 +590,43 @@ pub fn per_key_reports(frame: &[Rgb8]) -> [[u8; REPORT_LEN]; PER_KEY_PAGES] {
     std::array::from_fn(|page| per_key_report(page, frame))
 }
 
+/// The colour bytes of a live frame: R, G, B per slot in slot order, [`LIVE_SLOTS`] slots, black
+/// where `frame` is short, colours past the grid dropped, zero-padded to seven full pages.
+fn live_payload(frame: &[Rgb8]) -> [u8; LIVE_PAYLOAD_BYTES] {
+    let mut payload = [0u8; LIVE_PAYLOAD_BYTES];
+    for (slot, c) in frame.iter().take(LIVE_SLOTS).enumerate() {
+        payload[slot * 3..slot * 3 + 3].copy_from_slice(&[c.r, c.g, c.b]);
+    }
+    payload
+}
+
+/// One report of a live frame: report `page` (0 to 6) of `payload`.
+///
+/// Layout of the 65 bytes (index 0 is the report id): `[0]` 0x00, `[1]` 0x0F, `[2]` 0x01,
+/// `[3]` page, `[4]` 0x38 (56, the length of *every* page, the last included), `[5]` 1 on page 6
+/// and 0 before, `[6]` and `[7]` 0x00, `[8]` the checksum `255 - (sum([1..=7]) & 255)`, `[9..65]`
+/// 56 colour bytes. Page 6 carries 42 colour bytes and 14 of padding.
+fn sync_color_report(page: usize, payload: &[u8; LIVE_PAYLOAD_BYTES]) -> [u8; REPORT_LEN] {
+    assert!(page < LIVE_PAGES, "a live frame has {LIVE_PAGES} reports");
+    let mut r = [0u8; REPORT_LEN];
+    r[1] = SYNC_COLOR;
+    r[2] = 0x01;
+    r[3] = page as u8;
+    r[4] = LIVE_PAGE_DATA as u8;
+    r[5] = u8::from(page == LIVE_PAGES - 1);
+    r[8] = complement(r[1..8].iter().map(|b| u32::from(*b)).sum());
+    r[9..9 + LIVE_PAGE_DATA]
+        .copy_from_slice(&payload[page * LIVE_PAGE_DATA..(page + 1) * LIVE_PAGE_DATA]);
+    r
+}
+
+/// All seven reports of one live frame, in the order they are sent: the frame's first
+/// [`LIVE_SLOTS`] colours in slot order, black where it is short, nothing written to flash.
+pub fn sync_color_reports(frame: &[Rgb8]) -> [[u8; REPORT_LEN]; LIVE_PAGES] {
+    let payload = live_payload(frame);
+    std::array::from_fn(|page| sync_color_report(page, &payload))
+}
+
 /// The report that shows the stored picture: light mode 13 ("User Picture").
 ///
 /// Layout: `[1]` 0x07, `[2]` 0x0D, `[3]` speed 3, `[4]` brightness 4, `[5]` 0x00 (the
@@ -598,6 +757,35 @@ pub struct RoyuanAdapter {
     /// How long a still has to hold before it uploads. Doubled when a shown picture is
     /// abandoned soon after it appears, back to [`STILL_AFTER`] after a picture that stays.
     still_after: Duration,
+    /// The live per-key path (#10).
+    live: Live,
+}
+
+/// The live per-key path's state (#10).
+struct Live {
+    /// The setting: whether live per-key is wanted at all ([`LIVE_ENV`] at build time). It also
+    /// picks the zone's shape: 21 by 6 (126 lamps) with it, 22 by 6 (128 lamps) without.
+    wanted: bool,
+    /// Set when a `0x0F` report errored on this connection: the whole-board colour and the
+    /// stills take over until the keyboard connects again.
+    failed: bool,
+    /// The colour bytes of the last frame that went out, and when its last page landed.
+    last: Option<(Box<[u8; LIVE_PAYLOAD_BYTES]>, Instant)>,
+    /// A refused live frame logs one line, not one a frame.
+    warned: bool,
+}
+
+impl Live {
+    fn new(wanted: bool) -> Self {
+        Self { wanted, failed: false, last: None, warned: false }
+    }
+
+    /// A new connection: the board has not seen a frame, and a refusal may not repeat.
+    fn reset(&mut self) {
+        self.failed = false;
+        self.last = None;
+        self.warned = false;
+    }
 }
 
 /// What the keyboard's flash holds (#312 review S3).
@@ -661,6 +849,11 @@ impl RoyuanAdapter {
         Self::with_opener(Box::new(HidOpener))
     }
 
+    /// Whether [`LIVE_ENV`] asks for the live path in this process: read when an adapter is built.
+    fn live_wanted_by_env() -> bool {
+        live_from(std::env::var(LIVE_ENV).ok().as_deref())
+    }
+
     /// The adapter with an opener and a store of the caller's.
     ///
     /// The product passes the file under the daemon's user directory, so the counters and the
@@ -685,6 +878,12 @@ impl RoyuanAdapter {
     /// reports the keyboard sends. Without a store the counters and the picture live in memory
     /// only.
     pub fn with_opener(opener: Box<dyn Opener>) -> Self {
+        Self::with_opener_live(opener, Self::live_wanted_by_env())
+    }
+
+    /// [`with_opener`](Self::with_opener) with the live path chosen by the caller instead of by
+    /// [`LIVE_ENV`], so a test does not depend on the environment it runs in.
+    pub fn with_opener_live(opener: Box<dyn Opener>, live: bool) -> Self {
         Self {
             opener,
             dev: None,
@@ -704,7 +903,29 @@ impl RoyuanAdapter {
             mode_13s: VecDeque::new(),
             now: Instant::now(),
             still_after: STILL_AFTER,
+            live: Live::new(live),
         }
+    }
+
+    /// Turns the live per-key path on or off (it starts as [`LIVE_ENV`] says, which is off unless
+    /// set). Off, the keyboard shows the whole-board colour while a frame moves and a stored
+    /// still when it holds, and the zone is the 22 by 6 one of 128 lamps; the next `discover`
+    /// reports the new shape.
+    pub fn set_live(&mut self, on: bool) {
+        self.live.wanted = on;
+        self.live.reset();
+        if on && self.dev.is_some() {
+            // The board may be showing a stored picture (light mode 13): live frames need
+            // direct mode, so the next write puts it back.
+            self.drop_picture(self.now);
+            self.direct_pending = true;
+        }
+    }
+
+    /// Whether frames go out as live per-key frames now: wanted, and not refused since the
+    /// keyboard connected.
+    pub fn live_active(&self) -> bool {
+        self.live.wanted && !self.live.failed
     }
 
     /// Reads the store into the counters, the picture and the picture-mode stamps.
@@ -855,6 +1076,7 @@ impl RoyuanAdapter {
         // gap, the hour's uploads and the still window stay with it.
         self.drop_picture(self.now);
         self.picture = Picture::default();
+        self.live.reset();
         Ok(())
     }
 
@@ -1099,18 +1321,101 @@ impl RoyuanAdapter {
         }
     }
 
-    /// One frame: the whole-board colour, or a still picture over the keys (#312).
+    /// One zone frame, on the path in use: a live per-key frame (#10), or, when live is off or
+    /// refused, the whole-board colour or a still picture (#312).
     ///
-    /// The clock is the caller's, so the tests drive seconds without sleeping. The upload is a
-    /// small state machine advanced by the frames the engine already streams: one page per
-    /// [`PAGE_GAP`], then the mode report [`PICTURE_SETTLE`] after the last page. Nothing here
-    /// sleeps, so the frame path never waits for the seconds an upload takes.
+    /// `colors` is in zone LED order: [`key_slot`], column-major from the bottom row. The clock
+    /// is the caller's, so the tests drive seconds without sleeping.
+    fn write_frame_at(&mut self, colors: &[Rgb8], now: Instant) -> Result<(), AdapterError> {
+        if self.dev.is_none() {
+            return Err(AdapterError::NotConnected);
+        }
+        self.now = now;
+        if !self.live.wanted {
+            // Live off, the default: exactly the adapter #312 shipped. `colors` is the 128-lamp
+            // zone, already in the picture's slot order, and nothing of #10 runs.
+            return self.write_still_path_with(colors, frame_color(colors), now);
+        }
+        // A live frame can only be judged by the keyboard's own lights. The adapter sees a
+        // refusal as an error on the feature-report write and falls back (below); a board that
+        // accepts `0x0F` and shows nothing returns no error over HID, so this branch keeps
+        // sending and the keys stay dark. That case is UNKNOWN until the visual pass, and nothing
+        // here detects it.
+        if self.live_active() && self.write_live_at(colors, now)? {
+            return Ok(());
+        }
+        // The old paths: the whole-board colour is the zone's mean, the stored still the zone's
+        // cells in the picture's own slot order.
+        self.write_still_path_with(&zone_to_picture(colors), frame_color(colors), now)
+    }
+
+    /// One live per-key frame (#10): paced to [`LIVE_FRAME_INTERVAL`], skipped when identical to
+    /// the last one sent, and resent at least every [`LIVE_KEEPALIVE`]. `Ok(true)` when the frame
+    /// is dealt with (sent or skipped), `Ok(false)` when a report was refused: the old paths take
+    /// this frame and every one until the keyboard connects again.
+    ///
+    /// No flash is written, and nothing here sleeps: the seven pages are seven back to back
+    /// feature reports (about 21 ms on the real board).
+    fn write_live_at(&mut self, colors: &[Rgb8], now: Instant) -> Result<bool, AdapterError> {
+        self.sync_resume(now);
+        if self.direct_pending {
+            // A resume (or a failed mode report) took the mode away: direct mode first, then
+            // the frame, which the board has not seen in this mode yet.
+            self.resend_direct()?;
+            self.live.last = None;
+        }
+        let payload = Box::new(live_payload(colors));
+        if let Some((last, at)) = &self.live.last {
+            let since = now.saturating_duration_since(*at);
+            if since < LIVE_FRAME_INTERVAL || (**last == *payload && since < LIVE_KEEPALIVE) {
+                return Ok(true);
+            }
+        }
+        for page in 0..LIVE_PAGES {
+            if let Err(e) = self.send_picture_report(&sync_color_report(page, &payload)) {
+                self.live_refused(&e);
+                return Ok(false);
+            }
+        }
+        self.live.last = Some((payload, now));
+        self.last_color = frame_color(colors);
+        Ok(true)
+    }
+
+    /// A live report the keyboard refused: the old paths take over until it connects again, and
+    /// the refusal is logged once.
+    fn live_refused(&mut self, why: &str) {
+        self.live.failed = true;
+        self.live.last = None;
+        // The whole-board colour has not been sent on this footing yet.
+        self.last_sent = None;
+        if !self.live.warned {
+            self.live.warned = true;
+            tracing::warn!(
+                error = %why,
+                "the ROYUAN keyboard refused a live per-key frame; the whole-board colour and \
+                 stills take over until it connects again"
+            );
+        }
+    }
+
+    /// The whole-board colour, or a still picture over the keys (#312): the frame in the
+    /// picture's slot order and its mean colour.
+    ///
+    /// The upload is a small state machine advanced by the frames the engine already streams:
+    /// one page per [`PAGE_GAP`], then the mode report [`PICTURE_SETTLE`] after the last page.
+    /// Nothing here sleeps, so the frame path never waits for the seconds an upload takes.
     ///
     /// Once an upload starts it finishes, whatever the frame does: the flash write is spent, so
     /// dropping the remaining pages would only leave a torn picture and buy nothing (#312 review
     /// B2). A frame that moves ends a picture *on show*, and each of those abandons widens the
     /// still window.
-    fn write_frame_at(&mut self, colors: &[Rgb8], now: Instant) -> Result<(), AdapterError> {
+    fn write_still_path_with(
+        &mut self,
+        colors: &[Rgb8],
+        mean: Rgb8,
+        now: Instant,
+    ) -> Result<(), AdapterError> {
         if self.dev.is_none() {
             return Err(AdapterError::NotConnected);
         }
@@ -1187,7 +1492,7 @@ impl RoyuanAdapter {
         }
         // The moving colour is the frame's per-channel mean: the same area average a one-LED
         // zone read from the whole rect before #312, so a moving effect looks as it always did.
-        self.send_color(frame_color(colors), now)
+        self.send_color(mean, now)
     }
 
     /// Shows the picture the flash already holds: light mode 13 again, no write and no wear.
@@ -1328,6 +1633,25 @@ impl RoyuanAdapter {
         }
     }
 
+    /// The zone as the path in use shows it: the 21 by 6 grid of 126 lamps for live (#10), the
+    /// 22 by 6 matrix of 128 lamps otherwise (the shape before #10, and the default).
+    fn zone_info(&self) -> ZoneInfo {
+        let (cols, lamps, map) = if self.live.wanted {
+            (KEY_COLS, LIVE_SLOTS, key_map())
+        } else {
+            (LEGACY_KEY_COLS, PER_KEY_SLOTS, legacy_key_map())
+        };
+        ZoneInfo {
+            index: 0,
+            name: "Keyboard".into(),
+            kind: ZoneKind::Matrix { width: cols as u32, height: KEY_ROWS as u32, map },
+            led_count: lamps as u32,
+            min_leds: lamps as u32,
+            max_leds: lamps as u32,
+            resizable: false,
+        }
+    }
+
     fn device_info(&self) -> DeviceInfo {
         DeviceInfo {
             id: device_id(),
@@ -1338,19 +1662,7 @@ impl RoyuanAdapter {
             adapter_index: 0,
             serial: String::new(),
             location: format!("hid:{VENDOR_ID:04x}:{PRODUCT_ID:04x}:if{INTERFACE}"),
-            zones: vec![ZoneInfo {
-                index: 0,
-                name: "Keyboard".into(),
-                kind: ZoneKind::Matrix {
-                    width: KEY_COLS as u32,
-                    height: KEY_ROWS as u32,
-                    map: key_map(),
-                },
-                led_count: PER_KEY_SLOTS as u32,
-                min_leds: PER_KEY_SLOTS as u32,
-                max_leds: PER_KEY_SLOTS as u32,
-                resizable: false,
-            }],
+            zones: vec![self.zone_info()],
             connected: true,
         }
     }
@@ -1386,6 +1698,7 @@ impl DeviceAdapter for RoyuanAdapter {
         self.drop_picture(self.now);
         self.picture = Picture::default();
         self.sent_mode = None;
+        self.live.reset();
         Ok(())
     }
 
@@ -1419,6 +1732,8 @@ impl DeviceAdapter for RoyuanAdapter {
         self.write_at(Rgb8::WHITE, Instant::now())
     }
 
+    /// The colour last sent (the frame's mean), never what the board shows: the keyboard cannot
+    /// be read back, and a board that ignores a frame without an error looks the same from here.
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
         self.check_id(device)?;
         Ok(vec![self.last_color])
@@ -1506,6 +1821,53 @@ mod tests {
         }
     }
 
+    /// The keyboard's live frame as the fake models it (#10): the pages of the frame in
+    /// progress, and the last frame whose seventh page landed.
+    struct Screen {
+        bytes: [u8; LIVE_PAYLOAD_BYTES],
+        seen: [bool; LIVE_PAGES],
+        /// Frames that arrived whole (all seven pages, the last flagged).
+        complete: u32,
+    }
+
+    impl Default for Screen {
+        fn default() -> Self {
+            Self { bytes: [0; LIVE_PAYLOAD_BYTES], seen: [false; LIVE_PAGES], complete: 0 }
+        }
+    }
+
+    impl Screen {
+        /// The colour of each of the 126 slots of the last whole frame, in slot order.
+        fn keys(&self) -> Vec<Rgb8> {
+            self.bytes[..LIVE_SLOTS * 3].chunks(3).map(|c| Rgb8::new(c[0], c[1], c[2])).collect()
+        }
+
+        /// Takes one `0x0F` report the way the vendor's painter frames it: the checksum, the
+        /// header, the length byte 56 and the last flag are checked, and a bad report changes
+        /// nothing.
+        fn accept(&mut self, data: &[u8]) -> Result<(), String> {
+            let sum: u32 = data[1..8].iter().map(|b| u32::from(*b)).sum();
+            if data[8] != complement(sum) {
+                return Err("bad checksum".into());
+            }
+            let page = usize::from(data[3]);
+            let last = page == LIVE_PAGES - 1;
+            if data[2] != 0x01 || page >= LIVE_PAGES || data[4] != 56 || (data[5] == 1) != last
+                || data[6] != 0 || data[7] != 0
+            {
+                return Err(format!("bad live header (page {page}, length {}, last {})", data[4], data[5]));
+            }
+            self.bytes[page * LIVE_PAGE_DATA..(page + 1) * LIVE_PAGE_DATA]
+                .copy_from_slice(&data[9..9 + LIVE_PAGE_DATA]);
+            self.seen[page] = true;
+            if last && self.seen.iter().all(|s| *s) {
+                self.complete += 1;
+                self.seen = [false; LIVE_PAGES];
+            }
+            Ok(())
+        }
+    }
+
     #[derive(Default)]
     struct Shared {
         sent: Vec<Vec<u8>>,
@@ -1521,6 +1883,11 @@ mod tests {
         /// after it landed does (#312 review pass 5, B-B).
         refuse_picture_modes: usize,
         picture: Picture,
+        /// The keyboard refuses every `0x0F` report (#10): a board that does not know the opcode.
+        refuse_sync: bool,
+        /// `0x0F` reports the fake refused.
+        refused_sync: usize,
+        screen: Screen,
     }
 
     struct FakeOpener(Arc<Mutex<Shared>>);
@@ -1532,6 +1899,10 @@ mod tests {
             if s.fail_next_send {
                 s.fail_next_send = false;
                 return Err("unplugged".into());
+            }
+            if s.refuse_sync && data.get(1) == Some(&SYNC_COLOR) {
+                s.refused_sync += 1;
+                return Err("the opcode was refused".into());
             }
             if s.refuse_pages && data.get(1) == Some(&SET_USERPIC) {
                 if data.get(5) == Some(&0) {
@@ -1547,7 +1918,11 @@ mod tests {
                 s.picture.accept(data)?;
                 return Err("the report was not acknowledged".into());
             }
-            s.picture.accept(data)?;
+            if data.get(1) == Some(&SYNC_COLOR) && data.len() == REPORT_LEN && data[0] == 0 {
+                s.screen.accept(data)?;
+            } else {
+                s.picture.accept(data)?;
+            }
             s.sent.push(data.to_vec());
             Ok(())
         }
@@ -1572,16 +1947,26 @@ mod tests {
         crate::resume_serial()
     }
 
+    /// The keyboard as the product builds it: live per-key OFF, the default. The whole-board
+    /// colour and stills the #312 tests drive, through the real `write_frame_at`.
+    /// [`rig_live`] is the one with the variable set.
     fn rig(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
         let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
-        (RoyuanAdapter::with_opener(Box::new(FakeOpener(shared.clone()))), shared)
+        (RoyuanAdapter::with_opener_live(Box::new(FakeOpener(shared.clone())), false), shared)
+    }
+
+    /// The keyboard with `CANVAS_RGB_ROYUAN_LIVE=1`: live per-key on.
+    fn rig_live(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
+        let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
+        (RoyuanAdapter::with_opener_live(Box::new(FakeOpener(shared.clone())), true), shared)
     }
 
     /// The keyboard as `rig` builds it, with a store beside it (#312 review S1).
     fn rig_stored(present: bool, store: FakeStore) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
         let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
-        let adapter =
+        let mut adapter =
             RoyuanAdapter::with_store(Box::new(FakeOpener(shared.clone())), Box::new(store));
+        adapter.set_live(false);
         (adapter, shared)
     }
 
@@ -1726,8 +2111,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_describes_a_128_key_keyboard() {
+    async fn discover_describes_a_128_lamp_keyboard_and_a_126_lamp_one_with_live_on() {
         let _serial = serial();
+        let (mut live, _) = rig_live(true);
+        assert_eq!(live.discover().await.unwrap()[0].led_count(), LIVE_SLOTS as u32);
         let (mut a, _) = rig(true);
         let d = a.discover().await.unwrap();
         assert_eq!(d.len(), 1);
@@ -1948,31 +2335,61 @@ mod tests {
     }
 
     #[test]
-    fn slots_run_down_each_column() {
-        assert_eq!(key_slot(0, 0), Some(0));
-        assert_eq!(key_slot(5, 0), Some(5));
-        assert_eq!(key_slot(0, 1), Some(6));
-        // The two keys confirmed on a FUN60 Pro by the monsgeek-rgb notes (A = 9, B = 40) are the
-        // second column's home-row key and the seventh column's bottom-letter-row key.
-        assert_eq!(slot_position(9), (3, 1));
-        assert_eq!(slot_position(40), (4, 6));
-        for slot in 0..PER_KEY_SLOTS {
+    fn live_slots_run_up_each_column_from_the_bottom_row() {
+        // Row 0 is the top row; a column's slots start at its bottom row.
+        assert_eq!(key_slot(5, 0), Some(0), "the bottom row of the first column is slot 0");
+        assert_eq!(key_slot(0, 0), Some(5), "the top row of the first column is slot 5");
+        assert_eq!(key_slot(5, 1), Some(6), "the next column starts at the bottom again");
+        assert_eq!(key_slot(0, 20), Some(125), "the last cell is the last slot");
+        assert_eq!((KEY_ROWS, KEY_COLS, LIVE_SLOTS), (6, 21, 126));
+        // The one observed column (N, H, Y, 6, F5 from the bottom, 2026-11-16) takes five
+        // consecutive slots of one column: rows 4 to 0 of column 6 hold slots 37 to 41 in
+        // order. Which key is on which row there is the stagger UNKNOWN beyond this column.
+        let column: Vec<usize> = (0..KEY_ROWS).rev().filter_map(|row| key_slot(row, 6)).collect();
+        assert_eq!(column, vec![36, 37, 38, 39, 40, 41]);
+        for slot in 0..LIVE_SLOTS {
             let (row, col) = slot_position(slot);
             assert_eq!(key_slot(row, col), Some(slot));
-            assert!(col < KEY_COLS);
+            assert!(row < KEY_ROWS && col < KEY_COLS);
         }
-        assert_eq!(KEY_COLS, 22);
+    }
+
+    #[test]
+    fn a_cell_outside_the_grid_has_no_slot() {
+        // A seventh row would alias the next column's top key.
+        assert_eq!(key_slot(KEY_ROWS, 0), None);
+        assert_eq!(key_slot(0, KEY_COLS), None);
+        assert_eq!(key_slot(0, usize::MAX), None);
+        assert_eq!(key_slot(usize::MAX, 0), None);
+    }
+
+    #[test]
+    fn slots_run_down_each_column() {
+        // The matrix while live is off: the one the adapter had before #10 (copied from main).
+        assert_eq!(legacy_key_slot(0, 0), Some(0));
+        assert_eq!(legacy_key_slot(5, 0), Some(5));
+        assert_eq!(legacy_key_slot(0, 1), Some(6));
+        // The two keys confirmed on a FUN60 Pro by the monsgeek-rgb notes (A = 9, B = 40) are the
+        // second column's home-row key and the seventh column's bottom-letter-row key.
+        assert_eq!(legacy_slot_position(9), (3, 1));
+        assert_eq!(legacy_slot_position(40), (4, 6));
+        for slot in 0..PER_KEY_SLOTS {
+            let (row, col) = legacy_slot_position(slot);
+            assert_eq!(legacy_key_slot(row, col), Some(slot));
+            assert!(col < LEGACY_KEY_COLS);
+        }
+        assert_eq!(LEGACY_KEY_COLS, 22);
     }
 
     #[test]
     fn a_key_outside_the_matrix_has_no_slot() {
         // A seventh row would alias the next column's top key.
-        assert_eq!(key_slot(KEY_ROWS, 0), None);
+        assert_eq!(legacy_key_slot(KEY_ROWS, 0), None);
         // Column 21 holds slots 126 and 127 only.
-        assert_eq!(key_slot(1, 21), Some(127));
-        assert_eq!(key_slot(2, 21), None);
-        assert_eq!(key_slot(0, KEY_COLS), None);
-        assert_eq!(key_slot(0, usize::MAX), None);
+        assert_eq!(legacy_key_slot(1, 21), Some(127));
+        assert_eq!(legacy_key_slot(2, 21), None);
+        assert_eq!(legacy_key_slot(0, LEGACY_KEY_COLS), None);
+        assert_eq!(legacy_key_slot(0, usize::MAX), None);
     }
 
     #[test]
@@ -2152,12 +2569,74 @@ mod tests {
     }
 
     #[test]
+    fn the_live_matrix_names_every_lamp_once_and_has_no_gaps() {
+        let _serial = serial();
+        let (a, _) = rig_live(true);
+        let map = key_map();
+        assert_eq!(map.len(), KEY_ROWS * KEY_COLS);
+        assert!(map.iter().all(|entry| entry.is_some()), "which positions hold no key is UNKNOWN");
+        let mut slots: Vec<u32> = map.iter().flatten().copied().collect();
+        slots.sort_unstable();
+        assert_eq!(slots, (0..LIVE_SLOTS as u32).collect::<Vec<_>>(), "each lamp once");
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                assert_eq!(
+                    map[row * KEY_COLS + col],
+                    key_slot(row, col).map(|slot| slot as u32),
+                    "row {row}, column {col}"
+                );
+            }
+        }
+        // Column-major from the bottom: the bottom-left cell is slot 0, the top-left slot 5.
+        assert_eq!(map[5 * KEY_COLS], Some(0));
+        assert_eq!(map[0], Some(5));
+        assert_eq!(map[KEY_COLS - 1], Some(125));
+        let zone = &a.device_info().zones[0];
+        assert_eq!(zone.led_count, LIVE_SLOTS as u32);
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 21, height: 6, map });
+    }
+
+    #[tokio::test]
+    async fn a_live_fallback_frame_reaches_the_right_keys_by_the_key_map() {
+        // The fallback (live on, the board refuses `0x0F`): a zone frame is a still, and every
+        // matrix cell's colour reaches the picture slot the picture gives that cell (checked on
+        // the device, 2026-11-13: slot 9 is A, the cell at row 3, column 1).
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        s.lock().unwrap().refuse_sync = true;
+        a.connect().await.unwrap();
+        let map = key_map();
+        let frame: Vec<Rgb8> = (0..LIVE_SLOTS)
+            .map(|led| Rgb8::new((led * 3) as u8, (255 - led) as u8, (led / 2) as u8))
+            .collect();
+        let t0 = Instant::now();
+        for ms in (0..4700).step_by(100) {
+            a.write_frame_at(&frame, at(t0, ms)).unwrap();
+        }
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 1);
+        let keys = g.picture.keys();
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                let led = map[row * KEY_COLS + col].unwrap() as usize;
+                assert_eq!(keys[still_slot(row, col)], frame[led], "cell row {row}, column {col}");
+            }
+        }
+        // A is row 3, column 1: the live grid's slot 8, the picture's slot 9.
+        assert_eq!(map[3 * KEY_COLS + 1], Some(8));
+        assert_eq!(keys[9], frame[8]);
+        // Slots the grid does not reach stay black.
+        assert_eq!(&keys[126..], &[Rgb8::BLACK, Rgb8::BLACK]);
+    }
+
+    #[test]
     fn a_distinct_colour_frame_reaches_the_right_keys_by_the_key_map() {
+        // Live off (the default): copied from main, 128 lamps in the picture's own slot order.
         let _serial = serial();
         let (mut a, s) = rig(true);
         let t0 = Instant::now();
         a.open_and_init().expect("connect");
-        let map = key_map();
+        let map = legacy_key_map();
         let frame: Vec<Rgb8> = (0..PER_KEY_SLOTS)
             .map(|slot| Rgb8::new((slot * 3) as u8, (255 - slot) as u8, (slot / 2) as u8))
             .collect();
@@ -2166,10 +2645,10 @@ mod tests {
         assert_eq!(g.picture.complete, 1);
         let keys = g.picture.keys();
         // A is the second column's home-row key: row 3, column 1, slot 9 (checked on the device).
-        assert_eq!(map[3 * KEY_COLS + 1], Some(9));
+        assert_eq!(map[3 * LEGACY_KEY_COLS + 1], Some(9));
         assert_eq!(keys[9], frame[9]);
         // B is row 4, column 6, slot 40.
-        assert_eq!(map[4 * KEY_COLS + 6], Some(40));
+        assert_eq!(map[4 * LEGACY_KEY_COLS + 6], Some(40));
         assert_eq!(keys[40], frame[40]);
         // Every key the map names carries its slot's colour.
         for (entry, slot) in map.iter().enumerate() {
@@ -2181,28 +2660,29 @@ mod tests {
 
     #[test]
     fn gaps_in_the_matrix_are_skipped() {
+        // Live off (the default): copied from main, the 22 by 6 matrix with four gaps.
         let _serial = serial();
         let (a, _) = rig(true);
-        let map = key_map();
-        assert_eq!(map.len(), KEY_ROWS * KEY_COLS);
+        let map = legacy_key_map();
+        assert_eq!(map.len(), KEY_ROWS * LEGACY_KEY_COLS);
         assert_eq!(
             map.iter().filter(|entry| entry.is_none()).count(),
-            KEY_ROWS * KEY_COLS - PER_KEY_SLOTS,
+            KEY_ROWS * LEGACY_KEY_COLS - PER_KEY_SLOTS,
             "the four positions past slot 127 are gaps"
         );
         for row in 0..KEY_ROWS {
-            for col in 0..KEY_COLS {
+            for col in 0..LEGACY_KEY_COLS {
                 assert_eq!(
-                    map[row * KEY_COLS + col],
-                    key_slot(row, col).map(|slot| slot as u32),
+                    map[row * LEGACY_KEY_COLS + col],
+                    legacy_key_slot(row, col).map(|slot| slot as u32),
                     "row {row}, column {col}"
                 );
             }
         }
         // The last column holds the last two slots on its top rows, and gaps below them.
         assert_eq!(map[21], Some(126));
-        assert_eq!(map[KEY_COLS + 21], Some(127));
-        assert_eq!(map[2 * KEY_COLS + 21], None);
+        assert_eq!(map[LEGACY_KEY_COLS + 21], Some(127));
+        assert_eq!(map[2 * LEGACY_KEY_COLS + 21], None);
         // The zone the editor sees has one LED per key, not one per position.
         let zone = &a.device_info().zones[0];
         assert_eq!(zone.led_count, PER_KEY_SLOTS as u32);
@@ -2247,11 +2727,18 @@ mod tests {
         let zone = &d.zones[0];
         assert_eq!(zone.index, 0, "the zone index stays 0");
         assert_eq!(zone.name, "Keyboard");
-        assert_eq!(zone.kind, ZoneKind::Matrix { width: 22, height: 6, map: key_map() });
+        // Live off, the default: the zone is the one main shipped, 22 by 6 and 128 lamps.
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 22, height: 6, map: legacy_key_map() });
         assert_eq!(zone.led_count, PER_KEY_SLOTS as u32);
         assert_eq!(zone.min_leds, PER_KEY_SLOTS as u32);
         assert_eq!(zone.max_leds, PER_KEY_SLOTS as u32);
         assert!(!zone.resizable);
+        // With the variable set the zone is the 21 by 6 grid of 126 lamps, and nothing else changes.
+        let (live, _) = rig_live(true);
+        let zone = &live.device_info().zones[0];
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 21, height: 6, map: key_map() });
+        assert_eq!((zone.led_count, zone.min_leds, zone.max_leds), (126, 126, 126));
+        assert_eq!((zone.index, zone.name.as_str()), (0, "Keyboard"));
     }
 
     #[test]
@@ -3199,5 +3686,432 @@ mod tests {
         assert_eq!(g.sent[n - 2].as_slice(), direct_mode_report(), "direct mode first");
         assert_eq!(g.sent[n - 1].as_slice(), color_report(Rgb8::WHITE), "then the colour");
         assert_eq!(g.picture.mode, Some(21), "the board is back in direct mode");
+    }
+
+    // ---- #10: live per-key frames (0x0F)
+
+    fn sync_count(s: &Shared) -> usize {
+        s.sent.iter().filter(|r| r[1] == SYNC_COLOR).count()
+    }
+
+    /// A zone frame with a distinct colour in every lamp.
+    fn lamp_frame() -> Vec<Rgb8> {
+        (0..LIVE_SLOTS).map(|i| Rgb8::new(i as u8, 255 - i as u8, (i as u8).wrapping_mul(2))).collect()
+    }
+
+    /// Connects `a` and returns the clock's start.
+    async fn live_up(a: &mut RoyuanAdapter) -> Instant {
+        a.connect().await.unwrap();
+        Instant::now()
+    }
+
+    #[test]
+    fn a_live_frame_is_seven_exact_reports_for_a_known_frame() {
+        // Slot 0 (1, 2, 3), slot 9 red, slot 125 (7, 8, 9), the rest black.
+        let mut frame = vec![Rgb8::BLACK; LIVE_SLOTS];
+        frame[0] = Rgb8::new(1, 2, 3);
+        frame[9] = Rgb8::new(255, 0, 0);
+        frame[125] = Rgb8::new(7, 8, 9);
+        let reports = sync_color_reports(&frame);
+        assert_eq!(reports.len(), 7);
+        for (page, r) in reports.iter().enumerate() {
+            assert_eq!(r.len(), 65, "page {page}");
+            let last = u8::from(page == 6);
+            // 255 - (0x0F + 0x01 + page + 0x38 + last): 0xB7 on page 0, one less a page, and
+            // page 6 also carries the last flag.
+            let ck = 0xB7 - page as u8 - last;
+            assert_eq!(
+                &r[..9],
+                &[0x00, 0x0F, 0x01, page as u8, 56, last, 0x00, 0x00, ck],
+                "page {page}: the length byte is 56 on every page"
+            );
+        }
+        assert_eq!(reports[6][8], 0xB0, "page 6 checksum, last flag included");
+        // Slot 0 is the first three data bytes; slot 9 is data bytes 27..30 of page 0.
+        assert_eq!(&reports[0][9..12], &[1, 2, 3]);
+        assert_eq!(&reports[0][9 + 27..9 + 30], &[255, 0, 0]);
+        // Slot 125 is bytes 375..378, page 6 (bytes 336..392), offset 39.
+        assert_eq!(&reports[6][9 + 39..9 + 42], &[7, 8, 9]);
+        // Page 6 carries 42 colour bytes and 14 of padding, and nothing else is lit.
+        assert!(reports[6][9 + 42..].iter().all(|b| *b == 0));
+        let lit: usize = reports.iter().flat_map(|r| r[9..].iter()).filter(|b| **b != 0).count();
+        assert_eq!(lit, 3 + 1 + 3, "only the three painted lamps carry bytes");
+    }
+
+    #[test]
+    fn a_live_frame_pads_a_short_frame_and_drops_extra_colours() {
+        let short = sync_color_reports(&[Rgb8::new(4, 5, 6)]);
+        assert_eq!(&short[0][9..13], &[4, 5, 6, 0]);
+        let exact = lamp_frame();
+        let mut long = exact.clone();
+        long.extend([Rgb8::new(200, 100, 50); 10]);
+        assert_eq!(sync_color_reports(&long), sync_color_reports(&exact), "past slot 125 changes no byte");
+    }
+
+    #[test]
+    fn the_fake_refuses_a_bad_live_report() {
+        let (_, shared) = rig_live(true);
+        let mut dev = open_fake(&shared);
+        let good = sync_color_reports(&lamp_frame());
+        let mut bad_sum = good[0];
+        bad_sum[8] ^= 1;
+        assert_eq!(dev.send_feature(&bad_sum).unwrap_err(), "bad checksum");
+        let mut short_len = good[6];
+        short_len[4] = 42;
+        short_len[8] = complement(short_len[1..8].iter().map(|b| u32::from(*b)).sum());
+        assert!(dev.send_feature(&short_len).unwrap_err().starts_with("bad live header"));
+        let mut early_last = good[2];
+        early_last[5] = 1;
+        early_last[8] = complement(early_last[1..8].iter().map(|b| u32::from(*b)).sum());
+        assert!(dev.send_feature(&early_last).unwrap_err().starts_with("bad live header"));
+        assert_eq!(shared.lock().unwrap().screen.complete, 0);
+        for r in good {
+            dev.send_feature(&r).unwrap();
+        }
+        let g = shared.lock().unwrap();
+        assert_eq!(g.screen.complete, 1);
+        assert_eq!(g.screen.keys(), lamp_frame());
+    }
+
+    #[test]
+    fn a_zone_frame_becomes_the_picture_by_cell() {
+        let frame = lamp_frame();
+        let picture = zone_to_picture(&frame);
+        assert_eq!(picture.len(), PER_KEY_SLOTS);
+        // The bottom-left lamp (slot 0) is the picture's slot 5; the top-left (slot 5) is slot 0.
+        assert_eq!(picture[5], frame[0]);
+        assert_eq!(picture[0], frame[5]);
+        assert_eq!(picture[11], frame[6]);
+        assert_eq!(picture[120], frame[125]);
+        assert_eq!(&picture[126..], &[Rgb8::BLACK, Rgb8::BLACK], "the slots past the grid are black");
+        let mut long = frame.clone();
+        long.extend([Rgb8::WHITE; 4]);
+        assert_eq!(zone_to_picture(&long), picture, "colours past the grid are dropped");
+        assert_eq!(zone_to_picture(&[]), vec![Rgb8::BLACK; PER_KEY_SLOTS]);
+    }
+
+    #[tokio::test]
+    async fn live_frames_land_column_major_from_the_bottom_row() {
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        assert!(a.live_active(), "live is on with the variable set");
+        // The engine's job: each matrix cell's colour goes to the LED the map names.
+        let map = key_map();
+        let mut frame = vec![Rgb8::BLACK; LIVE_SLOTS];
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                let led = map[row * KEY_COLS + col].unwrap() as usize;
+                frame[led] = Rgb8::new(row as u8 * 40 + 1, col as u8 * 10 + 1, 9);
+            }
+        }
+        a.write_frame_at(&frame, t0).unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(g.screen.complete, 1);
+        let screen = g.screen.keys();
+        for row in 0..KEY_ROWS {
+            for col in 0..KEY_COLS {
+                // Slot = column * 6 + (5 - row): up each column, the bottom row first.
+                assert_eq!(
+                    screen[col * 6 + (5 - row)],
+                    Rgb8::new(row as u8 * 40 + 1, col as u8 * 10 + 1, 9),
+                    "row {row}, column {col}"
+                );
+            }
+        }
+        // The bottom-left cell is slot 0 and the top-left cell is slot 5.
+        assert_eq!(screen[0], Rgb8::new(5 * 40 + 1, 1, 9));
+        assert_eq!(screen[5], Rgb8::new(1, 1, 9));
+    }
+
+    #[tokio::test]
+    async fn while_live_is_on_no_picture_and_no_whole_board_colour_goes_out() {
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        // A still for 12 s (the stills path would upload at 2 s), then a moving frame for 6 s
+        // (the whole-board path would stream 0x0E).
+        let still = lamp_frame();
+        for ms in (0..12_000).step_by(50) {
+            a.write_frame_at(&still, at(t0, ms)).unwrap();
+        }
+        for step in 0..60u32 {
+            let moving: Vec<Rgb8> = (0..LIVE_SLOTS)
+                .map(|i| Rgb8::new(((i as u32 + step * 17) & 0xFF) as u8, (step * 3) as u8, 5))
+                .collect();
+            a.write_frame_at(&moving, at(t0, 12_000 + 100 * u64::from(step))).unwrap();
+        }
+        let g = s.lock().unwrap();
+        assert_eq!(userpic_count(&g), 0, "no SET_USERPIC page while live works");
+        assert_eq!(g.picture.complete, 0, "no stored picture");
+        assert_eq!(mode_count(&g), 0, "the board never entered light mode 13");
+        assert_eq!(color_count(&g), 0, "no whole-board 0x0E colour");
+        assert_eq!(direct_count(&g), 1, "direct mode went out once, on connect");
+        assert!(g.screen.complete > 60, "frames streamed: {}", g.screen.complete);
+        assert_eq!(sync_count(&g), g.screen.complete as usize * LIVE_PAGES, "whole frames only");
+    }
+
+    #[tokio::test]
+    async fn live_off_keeps_the_old_paths() {
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        a.set_live(false);
+        let id = device_id();
+        a.connect().await.unwrap();
+        a.write_frame(&id, &lamp_frame()).await.unwrap();
+        let g = s.lock().unwrap();
+        assert_eq!(sync_count(&g), 0, "no 0x0F report with live off");
+        assert_eq!(color_count(&g), 1, "the whole-board colour instead");
+        assert_eq!(g.sent.last().unwrap(), &color_report(frame_color(&lamp_frame())).to_vec());
+    }
+
+    #[tokio::test]
+    async fn an_identical_frame_is_skipped_and_resent_at_the_keepalive() {
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        let frame = lamp_frame();
+        let frames = |s: &Arc<Mutex<Shared>>| s.lock().unwrap().screen.complete;
+        a.write_frame_at(&frame, t0).unwrap();
+        assert_eq!(frames(&s), 1, "the first frame goes out");
+        // The same frame at every step up to the keepalive: skipped.
+        for ms in [10, 33, 50, 99] {
+            a.write_frame_at(&frame, at(t0, ms)).unwrap();
+        }
+        assert_eq!(frames(&s), 1, "an identical frame inside the keepalive is not sent");
+        // At the keepalive the picture is sent again, so a still picture stays lit.
+        a.write_frame_at(&frame, at(t0, LIVE_KEEPALIVE.as_millis() as u64)).unwrap();
+        assert_eq!(frames(&s), 2, "resent at the keepalive");
+        a.write_frame_at(&frame, at(t0, 199)).unwrap();
+        assert_eq!(frames(&s), 2);
+        a.write_frame_at(&frame, at(t0, 200)).unwrap();
+        assert_eq!(frames(&s), 3, "and again a keepalive later");
+        let g = s.lock().unwrap();
+        assert_eq!(g.screen.keys(), frame, "the board shows the frame");
+        assert_eq!(sync_count(&g), 3 * LIVE_PAGES);
+    }
+
+    #[tokio::test]
+    async fn a_changed_frame_goes_out_at_the_frame_interval_and_not_sooner() {
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        let first = lamp_frame();
+        let second = shifted_frame(40);
+        let third = shifted_frame(80);
+        let frames = |s: &Arc<Mutex<Shared>>| s.lock().unwrap().screen.complete;
+        a.write_frame_at(&first, t0).unwrap();
+        // A change 10 ms after a send is paced out; the engine's next frame carries it.
+        a.write_frame_at(&second[..LIVE_SLOTS], at(t0, 10)).unwrap();
+        assert_eq!(frames(&s), 1, "a frame inside the interval is dropped");
+        let interval = LIVE_FRAME_INTERVAL.as_millis() as u64;
+        a.write_frame_at(&second[..LIVE_SLOTS], at(t0, interval - 1)).unwrap();
+        assert_eq!(frames(&s), 1);
+        a.write_frame_at(&second[..LIVE_SLOTS], at(t0, interval)).unwrap();
+        assert_eq!(frames(&s), 2, "the changed frame goes out at the interval, before the keepalive");
+        assert_eq!(s.lock().unwrap().screen.keys(), second[..LIVE_SLOTS].to_vec());
+        a.write_frame_at(&third[..LIVE_SLOTS], at(t0, 2 * interval)).unwrap();
+        assert_eq!(frames(&s), 3);
+        assert_eq!(s.lock().unwrap().screen.keys(), third[..LIVE_SLOTS].to_vec());
+    }
+
+    #[tokio::test]
+    async fn a_refused_live_report_falls_back_to_the_whole_board_colour_and_stills() {
+        let _serial = serial();
+        let logs = crate::test_logs::LogBuf::default();
+        let _guard = logs.install();
+        let (mut a, s) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        s.lock().unwrap().refuse_sync = true;
+        let frame = lamp_frame();
+        a.write_frame_at(&frame, t0).unwrap();
+        {
+            let g = s.lock().unwrap();
+            assert_eq!(g.refused_sync, 1, "the first page was refused");
+            assert_eq!(g.screen.complete, 0);
+            assert_eq!(
+                g.sent.last().unwrap(),
+                &color_report(frame_color(&frame)).to_vec(),
+                "the same frame went out as the whole-board colour"
+            );
+        }
+        assert!(!a.live_active(), "live is off for this connection");
+        assert!(a.is_connected(), "a refused opcode does not cost the device");
+        // Later frames do not try the opcode again, and a still reaches the flash as before.
+        for ms in (100..4_800).step_by(100) {
+            a.write_frame_at(&frame, at(t0, ms)).unwrap();
+        }
+        {
+            let g = s.lock().unwrap();
+            assert_eq!(g.refused_sync, 1, "no more 0x0F attempts on this connection");
+            assert_eq!(g.picture.complete, 1, "the still path uploaded the picture");
+            assert_eq!(g.picture.keys(), zone_to_picture(&frame), "in the picture's slot order");
+            assert_eq!(g.picture.mode, Some(13));
+        }
+        assert_eq!(logs.text().matches("live per-key").count(), 1, "the refusal is logged once");
+        // A new connection tries live again, and a board that takes it lights per key.
+        s.lock().unwrap().refuse_sync = false;
+        a.disconnect().await.unwrap();
+        a.connect().await.unwrap();
+        assert!(a.live_active());
+        a.write_frame_at(&frame, at(t0, 10_000)).unwrap();
+        assert_eq!(s.lock().unwrap().screen.complete, 1);
+    }
+
+    #[tokio::test]
+    async fn the_first_live_frame_after_a_resume_follows_direct_mode_at_once() {
+        let _serial = serial();
+        let (mut a, s) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        let frame = lamp_frame();
+        a.write_frame_at(&frame, t0).unwrap();
+        crate::note_resume();
+        // 5 ms later: inside the interval, but the board lost its mode, so direct mode and the
+        // frame go out now.
+        let before = s.lock().unwrap().sent.len();
+        a.write_frame_at(&frame, at(t0, 5)).unwrap();
+        let g = s.lock().unwrap();
+        let sent = &g.sent[before..];
+        assert_eq!(sent.len(), 1 + LIVE_PAGES, "direct mode, then the seven pages");
+        assert_eq!(sent[0].as_slice(), direct_mode_report());
+        assert!(sent[1..].iter().all(|r| r[1] == SYNC_COLOR));
+        assert_eq!(g.screen.complete, 2);
+    }
+
+    #[tokio::test]
+    async fn read_back_after_a_live_frame_is_its_mean() {
+        let _serial = serial();
+        let (mut a, _) = rig_live(true);
+        let t0 = live_up(&mut a).await;
+        let frame = lamp_frame();
+        a.write_frame_at(&frame, t0).unwrap();
+        assert_eq!(a.read_back(&device_id()).await.unwrap(), vec![frame_color(&frame)]);
+    }
+
+    // ------------------------------------------------ live off is the adapter main shipped (#10)
+
+    /// A 128-lamp frame, different for every `n`, in the picture's slot order.
+    fn golden_frame(n: u32) -> Vec<Rgb8> {
+        (0..PER_KEY_SLOTS as u32)
+            .map(|i| {
+                Rgb8::new(((i * 7 + n * 13) % 256) as u8, ((i * 3 + n) % 256) as u8, ((255 - i + n * 5) % 256) as u8)
+            })
+            .collect()
+    }
+
+    /// A report as hex, trailing zero bytes cut.
+    fn golden_hex(report: &[u8]) -> String {
+        let end = report.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+        report[..end].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The zone the adapter shows and every report it writes for a fixed run of frames: five
+    /// moving frames, a still held long enough to be uploaded and shown, a moving frame again,
+    /// and a one-colour frame. `write_frame_at` is the real path; the clock is simulated.
+    fn golden_run(mut a: RoyuanAdapter, s: &Arc<Mutex<Shared>>) -> (String, Vec<String>) {
+        let t0 = Instant::now();
+        let zone = {
+            let z = &a.device_info().zones[0];
+            let ZoneKind::Matrix { width, height, map } = &z.kind else { panic!("a matrix zone") };
+            let cells: Vec<String> = map
+                .chunks(*width as usize)
+                .map(|row| {
+                    row.iter().map(|c| c.map_or("-".to_string(), |v| v.to_string())).collect::<Vec<_>>().join(",")
+                })
+                .collect();
+            format!(
+                "{width}x{height} leds {}/{}/{} resizable {}\n{}",
+                z.led_count,
+                z.min_leds,
+                z.max_leds,
+                z.resizable,
+                cells.join("\n")
+            )
+        };
+        a.open_and_init().expect("connect");
+        for step in 0..5u64 {
+            a.write_frame_at(&golden_frame(step as u32), at(t0, step * 100)).unwrap();
+        }
+        let still = golden_frame(9);
+        for ms in (500..4700).step_by(100) {
+            a.write_frame_at(&still, at(t0, ms)).unwrap();
+        }
+        a.write_frame_at(&golden_frame(20), at(t0, 6000)).unwrap();
+        a.write_frame_at(&[Rgb8::new(10, 20, 30)], at(t0, 6100)).unwrap();
+        let sent = s.lock().unwrap().sent.iter().map(|r| golden_hex(r)).collect();
+        (zone, sent)
+    }
+
+    /// The zone `origin/main` shows for the keyboard: 22 by 6, 128 lamps, picture slot order
+    /// down each column, four gaps (captured by running this test's run against main's
+    /// `royuan.rs`).
+    #[rustfmt::skip]
+    const GOLDEN_MAIN_ZONE: [&str; 7] = [
+        "22x6 leds 128/128/128 resizable false",
+        "0,6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126",
+        "1,7,13,19,25,31,37,43,49,55,61,67,73,79,85,91,97,103,109,115,121,127",
+        "2,8,14,20,26,32,38,44,50,56,62,68,74,80,86,92,98,104,110,116,122,-",
+        "3,9,15,21,27,33,39,45,51,57,63,69,75,81,87,93,99,105,111,117,123,-",
+        "4,10,16,22,28,34,40,46,52,58,64,70,76,82,88,94,100,106,112,118,124,-",
+        "5,11,17,23,29,35,41,47,53,59,65,71,77,83,89,95,101,107,113,119,125,-",
+    ];
+
+    /// Every report `origin/main` writes for the run in [`golden_run`], as hex with the trailing
+    /// zeros cut: direct mode, the whole-board colour, the seven picture pages and light mode 13.
+    #[rustfmt::skip]
+    const GOLDEN_MAIN_REPORTS: [&str; 22] = [
+        "000715040407000000d4",
+        "000e776bc00000004f",
+        "000e786abb00000054",
+        "000e796bb600000057",
+        "000e7c6cb100000058",
+        "000e7f6bac0000005b",
+        "000e866e930000006a",
+        "000e866e930000006a",
+        "000c0080010000007275092c7c0c2b830f2a8a12299115289818279f1b26a61e25ad2124b42423bb2722c22a21c92d20d0301fd7331ede361de5391cec3c1bf33f",
+        "000e866e930000006a",
+        "000c008001010000711afa42190145180848170f4b16164e151d51142454132b5712325a11395d1040600f47630e4e660d55690c5c6c0b636f0a6a720971750878",
+        "000c0080010200007078077f7b06867e058d81049484039b8702a28a01a98d00b090ffb793febe96fdc599fccc9cfbd39ffadaa2f9e1a5f8e8a8f7efabf6f6aef5",
+        "000c0080010300006ffdb1f404b4f30bb7f212baf119bdf020c0ef27c3ee2ec6ed35c9ec3ccceb43cfea4ad2e951d5e858d8e75fdbe666dee56de1e474e4e37be7",
+        "000c0080010400006ee282eae189ede090f0df97f3de9ef6dda5f9dcacfcdbb3ffdaba02d9c105d8c808d7cf0bd6d60ed5dd11d4e414d3eb17d2f21ad1f91dd0",
+        "000c0080010500006d20cf0723ce0e26cd1529cc1c2ccb232fca2a32c93135c83838c73f3bc6463ec54d41c45444c35b47c2624ac1694dc07050bf7753be7e56bd",
+        "000c0080010600006c8559bc8c5cbb935fba9a62b9a165b8a868b7af6bb6b66eb5bd71b4c474b3cb77b2d27ab1d97db0e080afe783aeee86ad",
+        "000e866e930000006a",
+        "000e866e930000006a",
+        "00070d03040000c8c854",
+        "000715040407000000d4",
+        "000e77715c000000ad",
+        "000e0a141e000000b5",
+    ];
+
+    #[test]
+    fn live_off_is_the_adapter_main_shipped_byte_for_byte() {
+        // The variable is unset: same zone shape, same lamps, same reports as `origin/main`.
+        let _serial = serial();
+        let (a, s) = rig(true);
+        let (zone, sent) = golden_run(a, &s);
+        assert_eq!(zone, GOLDEN_MAIN_ZONE.join("
+"), "the zone is main's 22 by 6 of 128 lamps");
+        assert_eq!(sent.len(), GOLDEN_MAIN_REPORTS.len(), "the same number of reports: {sent:#?}");
+        for (i, (got, want)) in sent.iter().zip(GOLDEN_MAIN_REPORTS).enumerate() {
+            assert_eq!(got, want, "report {i}");
+        }
+        assert!(
+            sent.iter().all(|r| !r.starts_with("000f")),
+            "no 0x0F live report goes out while live is off"
+        );
+    }
+
+    #[test]
+    fn the_variable_is_read_as_one_and_nothing_else() {
+        assert!(live_from(Some("1")));
+        assert!(live_from(Some(" 1 ")));
+        for off in [None, Some(""), Some("0"), Some("true"), Some("on"), Some("11")] {
+            assert!(!live_from(off), "{off:?} leaves live off");
+        }
+        // An adapter built the usual way takes the setting from the process environment, once.
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let built = RoyuanAdapter::with_opener(Box::new(FakeOpener(shared)));
+        assert_eq!(built.live.wanted, live_from(std::env::var(LIVE_ENV).ok().as_deref()));
     }
 }
