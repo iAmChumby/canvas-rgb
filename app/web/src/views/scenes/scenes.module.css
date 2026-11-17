@@ -1431,6 +1431,35 @@
   border-radius: var(--r-sm);
 }
 
+/* The pick button and its Remove action share one line; only a light the daemon reports as not
+   connected gets the action (#414). */
+.addRowLine {
+  display: flex;
+  align-items: center;
+  gap: var(--s2);
+}
+
+.addPickWrap {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.addRemove {
+  flex: none;
+  color: var(--mute);
+}
+
+.addRemove:hover {
+  color: var(--down);
+}
+
+.confirmActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--s2);
+  margin-left: auto;
+}
+
 .addPick {
   display: flex;
   align-items: center;

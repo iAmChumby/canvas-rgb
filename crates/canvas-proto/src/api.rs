@@ -195,7 +195,12 @@ pub mod routes {
     pub const GROUP_MOVE: &str = "/api/v1/scenes/{id}/groups/{group}/move";
     /// `GET` [`super::LightsResponse`].
     pub const LIGHTS: &str = "/api/v1/lights";
-    /// `PATCH` [`super::LightPatch`].
+    /// `PATCH` [`super::LightPatch`]. `DELETE` removes a light on a device the daemon never
+    /// drives (a leftover of an old `lights.json`) and answers [`super::LightDeleted`]: it takes a
+    /// snapshot of `lights.json` and `scenes.json` first, then drops the light from every group and
+    /// drops a group it leaves empty. `404` for an unknown light, `409 conflict` for a light on a
+    /// device the daemon drives (those are removed through chain setup), `503` when the snapshot or
+    /// the save fails, in which case nothing changes (#414).
     pub const LIGHT: &str = "/api/v1/lights/{id}";
     /// `POST` [`super::FlashRequest`]: the named lights white, every other LED black, under the
     /// identify watchdog; `stop: true` ends it.
@@ -1305,6 +1310,26 @@ where
     T: Deserialize<'de>,
 {
     Option::<T>::deserialize(d).map(Some)
+}
+
+/// A group that a light delete left empty, so the daemon dropped it (#414).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct EmptiedGroup {
+    pub scene_id: String,
+    pub group_id: String,
+    /// The group's name, for the sentence the editor shows.
+    pub name: String,
+}
+
+/// `DELETE` [`routes::LIGHT`] answer (#414).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, TS)]
+#[ts(export)]
+pub struct LightDeleted {
+    pub ok: bool,
+    pub id: String,
+    /// Groups the light was the last member of; each was dropped with it.
+    pub emptied_groups: Vec<EmptiedGroup>,
 }
 
 /// `PATCH` [`routes::LIGHT`]. A field left out is unchanged; `name: null` clears the name.

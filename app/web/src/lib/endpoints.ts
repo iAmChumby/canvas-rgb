@@ -41,6 +41,7 @@ import type { ScenesWrite } from "@/proto/ScenesWrite";
 import type { LightsResponse } from "@/proto/LightsResponse";
 import type { LightView } from "@/proto/LightView";
 import type { LightPatch } from "@/proto/LightPatch";
+import type { LightDeleted } from "@/proto/LightDeleted";
 import type { FlashRequest } from "@/proto/FlashRequest";
 import type { ChainsResponse } from "@/proto/ChainsResponse";
 import type { SetupStarted } from "@/proto/SetupStarted";
@@ -288,6 +289,12 @@ export const api = {
   lights: {
     list: () => request<LightsResponse>("GET", routes.lights),
     patch: (id: string, body: LightPatch) => request<LightView>("PATCH", routes.light(id), body),
+    /**
+     * Removes a light on a device the daemon never drives (#414). 404 for an unknown id, 409 when
+     * the device is driven, 503 when the snapshot or the save fails. The answer names any groups
+     * the removal left empty and dropped.
+     */
+    remove: (id: string) => request<LightDeleted>("DELETE", routes.light(id)),
     /** The named lights white and every other LED black; `stop` ends it. */
     flash: (body: FlashRequest) => request<unknown>("POST", routes.lightsFlash, body),
   },
