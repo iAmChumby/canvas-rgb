@@ -170,6 +170,10 @@ html[data-motion="reduced"] *::after {
   overflow: hidden;
   /* The resize handle on the rail's right edge is placed against this box. */
   position: relative;
+  /* The rail's tooltips are fixed to the window but paint inside the rail's own stack; keep
+     that stack above the page so a label is readable where it reaches over the content (#467).
+     The phone turns this column into display: contents and gives the dock its own z-index. */
+  z-index: 5;
 }
 
 /* The rail's resize handle: a thin grab strip on the rail's right edge, from 1280 px up.
@@ -3897,6 +3901,12 @@ button.chip:hover {
   flex-basis: 100%;
 }
 
+/* The shape picker's icons are for a wide row; a phone keeps the words so the shape and the
+   way round still share one line. */
+.rd-shape {
+  display: inline-flex;
+}
+
 .rd-devices .rd-dev-row + .rd-light-row {
   padding-left: var(--s4);
 }
@@ -3920,6 +3930,10 @@ button.chip:hover {
 
   .rd-light-turn {
     margin-left: 0;
+  }
+
+  .rd-shape .seg-item svg {
+    display: none;
   }
 }
 
@@ -5360,6 +5374,10 @@ button.chip:hover {
 
   .rail {
     align-items: center;
+    /* The icon rail is short enough to fit any window, so it is not a scroll container. With
+       overflow-y: auto here Chromium rounds scrollWidth one pixel past clientWidth even with
+       nothing sticking out (#467). The short-window scroll rule below is for the full rail. */
+    overflow: visible;
   }
 
   .rail-brand {
@@ -5389,9 +5407,12 @@ button.chip:hover {
 
   .rail-link::after {
     content: attr(data-label);
-    position: absolute;
-    left: calc(100% + 10px);
-    top: 50%;
+    /* Fixed, like the rail's own bubbles: an absolute label past the rail's right edge gives
+       the rail a sideways scrollbar (#467). Rail.tsx measures it and writes the window
+       coordinates to these properties on hover and focus, so it still reaches over the page. */
+    position: fixed;
+    left: var(--tip-x, 0px);
+    top: var(--tip-y, 0px);
     z-index: 70;
     padding: 4px 8px;
     border: 1px solid var(--line-2);
@@ -5402,17 +5423,13 @@ button.chip:hover {
     font-size: var(--t14);
     white-space: nowrap;
     opacity: 0;
-    transform: translate(-4px, -50%);
     pointer-events: none;
-    transition:
-      opacity var(--dur-fast) var(--ease),
-      transform var(--dur-fast) var(--ease);
+    transition: opacity var(--dur-fast) var(--ease);
   }
 
   .rail-link:hover::after,
   .rail-link:focus-visible::after {
     opacity: 1;
-    transform: translate(0, -50%);
   }
 }
 
@@ -7392,6 +7409,15 @@ button.chip:hover {
      window too short for the whole rail is handled below. The bar is thin and in the theme's
      colours (styles/scrollbars.css); this says so here, where the rail's own rules live. */
   scrollbar-width: thin;
+}
+
+/* The rail's bubbles are fixed to the window, not laid out inside the rail's scroll box. An
+   invisible 500 px bubble otherwise gives the rail a sideways scrollbar, because overflow-y:
+   auto makes overflow-x compute to auto (#467). Fixed also keeps a bubble clear of that box, so
+   on hover it reaches over the page as it was meant to. Tooltip.tsx places a fixed bubble in
+   window coordinates. */
+.rail .tip-bubble {
+  position: fixed;
 }
 
 /* The version, at the end of the brand row: the daemon that is answering. */

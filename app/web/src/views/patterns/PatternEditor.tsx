@@ -16,15 +16,21 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { LeavePrompt } from "@/components/LeavePrompt";
+import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { useFocusTrap } from "@/components/useFocusTrap";
 import { BLACK_HEX, parseHex } from "@/lib/color";
 import { api } from "@/lib/endpoints";
 import { messageOf } from "@/lib/errors";
-import { kindWords } from "@/lib/patternFit";
 import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
+import { kindWords } from "@/lib/patternFit";
+import { spinOf } from "@/lib/spin";
+import { refreshLights, useSnap } from "@/lib/store";
 import { useLeaveGuard, type LeaveReason } from "@/lib/useLeaveGuard";
 import { DotCanvas } from "@/views/patterns/DotCanvas";
+import { GradientStops } from "@/views/patterns/GradientStops";
+import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
+import { gridOfZone, referenceLight, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
 import { usePatternEditor } from "@/views/patterns/usePatternEditor";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
@@ -62,10 +68,10 @@ export function PatternEditor({
   const [problem, setProblem] = useState<string | null>(null);
   /** A save that did not land: the document on the lights is not the saved one. */
   const [saveProblem, setSaveProblem] = useState<string | null>(null);
-  /** A save is in flight. */
-  const [saving, setSaving] = useState(false);
   /** How many answers in a row said this editor's stroke is not on the lights. */
   const notApplied = useRef(0);
+  /** A save is in flight. */
+  const [saving, setSaving] = useState(false);
   /** Why the prompt is open: the Cancel key, an in-app page change, or the browser's Back. */
   const [leaving, setLeaving] = useState<LeaveReason | false>(false);
   /** A Save that will leave the editor: the guard's entry stays while it lands. */
@@ -126,6 +132,27 @@ export function PatternEditor({
   );
   const editor = usePatternEditor(pattern, { onDraft: draft });
 
+  // The shape picker writes the arrangement of the light this pattern was built on (#468).
+  const lights = useSnap((state) => state.lights);
+  const devices = useSnap((state) => state.devices);
+  const light = referenceLight(editor.builtOn, lights, devices);
+  const zone = zoneOf(light, devices);
+  const [shapeProblem, setShapeProblem] = useState<string | null>(null);
+  const chooseShape = async (shape: Shape) => {
+    setShapeProblem(null);
+    if (light && light.light.arrangement !== shape) {
+      try {
+        await api.lights.patch(light.light.id, { arrangement: shape });
+        await refreshLights();
+      } catch (error) {
+        // The light did not change, so neither does the pattern's shape: the header says why.
+        setShapeProblem(messageOf(error));
+        return;
+      }
+    }
+    editor.setShape(shape, gridOfZone(zone));
+  };
+
   // The draft opens with the editor and closes with it. The heartbeat is the spine's own: a PUT
   // of the current document every `heartbeat_ms`, which is what keeps the lease alive while the
   // owner looks at the device.
@@ -149,6 +176,12 @@ export function PatternEditor({
       void api.deleteDraft(epoch).catch(() => undefined);
     };
   }, [epoch, send]);
+
+  const name = pattern.id.startsWith(PATTERN_ID_PREFIX) ? pattern.id.slice(PATTERN_ID_PREFIX.length) : pattern.id;
+  const leds = editor.builtOn.led_count;
+  const lit = editor.colours.filter((colour) => (parseHex(colour) ?? BLACK_HEX) !== BLACK_HEX).length;
+  const line = saveProblem ?? shapeProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
+  const failed = saveProblem !== null || shapeProblem !== null || problem !== null;
 
   // The guard: the shell asks it before it changes page, the browser's Back lands on an entry
   // of the editor's own, and the browser is warned when the window closes. The editor asks
@@ -189,8 +222,6 @@ export function PatternEditor({
    * not the same leave as the Cancel key pressed afterwards.
    */
   const goAfterLeave = (reason: LeaveReason) => {
-    // The leave is under way: the editor's own clean-up must not drop the page change that it
-    // carries out, and the guard's entry stays where it is.
     pendingLeave.current = true;
     if (reason === "back") {
       // Back goes past the guard's entry and past the page itself, one page in all.
@@ -242,7 +273,6 @@ export function PatternEditor({
     if (leaving) {
       const active = document.activeElement;
       opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
-      // Keep editing is the prompt's first key: it takes focus when the prompt opens.
       promptRef.current?.querySelector<HTMLElement>(FOCUSABLE)?.focus();
       return;
     }
@@ -253,92 +283,113 @@ export function PatternEditor({
 
   useFocusTrap({ panelRef: promptRef, onEscape: keepEditing, capture: false, enabled: leaving !== false });
 
-  const name = pattern.id.startsWith(PATTERN_ID_PREFIX) ? pattern.id.slice(PATTERN_ID_PREFIX.length) : pattern.id;
-  const leds = pattern.built_on.led_count;
-  const lit = editor.colours.filter((colour) => (parseHex(colour) ?? BLACK_HEX) !== BLACK_HEX).length;
-  const line = saveProblem ?? problem ?? daemonNote ?? (note && note.length > 0 ? note : null);
-  const failed = saveProblem !== null || problem !== null;
-
   return (
     <>
-      <section className={s.editor} aria-label={`${name}, a pattern`}>
-        <header className={s.head}>
-          <div className={s.who}>
-            <h2 className={s.name}>{name}</h2>
-            <span className={s.kind}>{kindWords(pattern.built_on)}</span>
-          </div>
-          <div className={s.tally}>
-            {/* As wide as the total's digits, so the count never resizes its own box. */}
-            <span className={s.figure} style={{ minWidth: `${String(leds).length}ch` }}>
-              {lit}
-            </span>
-            <span className={s.tallyWords}>of {leds} on</span>
-            <span className={s.dirtyMark} data-on={editor.dirty ? "true" : "false"} aria-hidden="true" />
-            <span className="sr-only">{editor.dirty ? "Unsaved changes" : "No unsaved changes"}</span>
-          </div>
-          <div className={s.headKeys}>
-            {onCancel && (
-              <Button variant="ghost" icon={<X size={14} weight="bold" aria-hidden="true" />} onClick={cancel}>
-                Cancel
-              </Button>
-            )}
-            {onSave && (
-              <Button
-                variant="primary"
-                busy={saving}
-                icon={<FloppyDisk size={14} weight="bold" aria-hidden="true" />}
-                onClick={() => void save()}
-              >
-                Save
-              </Button>
-            )}
-          </div>
-        </header>
-
-        {/* The daemon's own sentence (no device of this kind, another window has the lights), or a
-            save that did not land. The row keeps its height either way, so the device never moves
-            when a sentence arrives. */}
-        <p className={s.noteRow} role="status">
-          {line !== null && <span className={failed ? s.problem : s.note}>{line}</span>}
-        </p>
-
-        <div className={s.stage}>
-          <DotCanvas
-            builtOn={pattern.built_on}
-            colours={editor.colours}
-            label={`${name}, ${kindWords(pattern.built_on)}`}
-            onBegin={editor.beginStroke}
-            onStroke={editor.stroke}
-            onEnd={editor.endStroke}
-          />
+    <section className={s.editor} aria-label={`${name}, a pattern`}>
+      <header className={s.head}>
+        <div className={s.who}>
+          <h2 className={s.name}>{name}</h2>
+          <span className={s.kind}>{kindWords(editor.builtOn)}</span>
         </div>
-
-        {/* Reserved: the frame strip comes in a later version. An empty recess, never a control. */}
-        <div className={s.frameStrip} aria-hidden="true" />
-
-        <PatternTools
-          tool={editor.tool}
-          colour={editor.colour}
-          canUndo={editor.canUndo}
-          canRedo={editor.canRedo}
-          onTool={editor.setTool}
-          onColour={editor.setColour}
-          onFillAll={editor.fillAll}
-          onUndo={editor.undo}
-          onRedo={editor.redo}
+        <ShapePicker
+          label={`What ${light ? light.label : name} is`}
+          value={editor.builtOn.arrangement}
+          shapes={shapesOf(editor.builtOn, zone)}
+          onChange={(shape) => void chooseShape(shape)}
         />
-      </section>
+        <div className={s.tally}>
+          {/* As wide as the total's digits, so the count never resizes its own box. */}
+          <span className={s.figure} style={{ minWidth: `${String(leds).length}ch` }}>
+            {lit}
+          </span>
+          <span className={s.tallyWords}>
+            of {leds} on
+          </span>
+          <span className={s.dirtyMark} data-on={editor.dirty ? "true" : "false"} aria-hidden="true" />
+          <span className="sr-only">{editor.dirty ? "Unsaved changes" : "No unsaved changes"}</span>
+        </div>
+        <div className={s.headKeys}>
+          {onCancel && (
+            <Button variant="ghost" icon={<X size={14} weight="bold" aria-hidden="true" />} onClick={cancel}>
+              Cancel
+            </Button>
+          )}
+          {onSave && (
+            <Button
+              variant="primary"
+              busy={saving}
+              icon={<FloppyDisk size={14} weight="bold" aria-hidden="true" />}
+              onClick={() => void save()}
+            >
+              Save
+            </Button>
+          )}
+        </div>
+      </header>
 
-      {leaving && (
-        <LeavePrompt
-          promptRef={promptRef}
-          saveState={saving ? "saving" : "idle"}
-          subject="pattern"
-          onKeepEditing={keepEditing}
-          onDiscard={discardLeave}
-          onSave={saveLeave}
+      {/* The daemon's own sentence (no device of this kind, another window has the lights), or a
+          save that did not land. The row keeps its height either way, so the device never moves
+          when a sentence arrives. */}
+      <p className={s.noteRow} role="status">
+        {line !== null && <span className={failed ? s.problem : s.note}>{line}</span>}
+      </p>
+
+      <div className={s.stage}>
+        <DotCanvas
+          builtOn={editor.builtOn}
+          colours={editor.colours}
+          spin={spinOf(editor.motion)}
+          label={`${name}, ${kindWords(editor.builtOn)}`}
+          onBegin={editor.beginStroke}
+          onStroke={editor.stroke}
+          onEnd={editor.endStroke}
+          overlay={
+            editor.tool === "gradient" && editor.gradient ? (
+              <GradientStops
+                builtOn={editor.builtOn}
+                state={editor.gradient}
+                onSelect={editor.selectStop}
+                onMove={editor.moveStop}
+                onBegin={editor.beginStopDrag}
+                onEnd={editor.endStopDrag}
+              />
+            ) : null
+          }
         />
-      )}
+      </div>
+
+      <MotionControl motion={editor.motion} onMotion={editor.setMotion} />
+
+      {/* Reserved: the frame strip comes in a later version. An empty recess, never a control. */}
+      <div className={s.frameStrip} aria-hidden="true" />
+
+      <PatternTools
+        tool={editor.tool}
+        colour={editor.colour}
+        canUndo={editor.canUndo}
+        canRedo={editor.canRedo}
+        gradient={editor.gradient}
+        onTool={editor.setTool}
+        onColour={editor.setColour}
+        onFillAll={editor.fillAll}
+        onUndo={editor.undo}
+        onRedo={editor.redo}
+        onWrap={editor.setWrap}
+        onAddStop={editor.addStop}
+        onRemoveStop={() => editor.gradient && editor.removeStop(editor.gradient.selected)}
+      />
+    </section>
+
+    {leaving && (
+      <LeavePrompt
+        promptRef={promptRef}
+        saveState={saving ? "saving" : "idle"}
+        subject="pattern"
+        onKeepEditing={keepEditing}
+        onDiscard={discardLeave}
+        onSave={saveLeave}
+      />
+    )}
     </>
   );
 }

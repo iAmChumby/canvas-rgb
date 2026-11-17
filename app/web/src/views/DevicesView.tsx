@@ -20,6 +20,7 @@ import { EmptyState } from "@/components/EmptyState";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
 import { Segmented } from "@/components/Segmented";
+import { ShapePicker, shapesFor } from "@/components/ShapePicker";
 import { Toggle } from "@/components/Toggle";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
@@ -282,7 +283,7 @@ function WhiteBalanceSection({
 }
 
 /**
- * One light's row: its name, what it is (a strip or a ring, where the hardware says linear), and
+ * One light's row: its name, its shape (a line or a ring, and a grid where the zone is one), and
  * whether it runs the other way. Every change goes straight to the lights route and the list is
  * read back, so two windows never disagree about a light.
  */
@@ -314,8 +315,8 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
     void patch({ name: next || null }).catch(() => setName(view.label));
   };
 
-  // The hardware says whether a light can be a ring: only a line can be one.
-  const linear = zone.kind.type === "linear";
+  // The shapes this zone may be laid out as (a line, a ring, and a grid where the zone is one).
+  const shapes = shapesFor(zone.kind.type);
 
   return (
     <div className="rd-light-row" data-busy={busy ? "true" : undefined}>
@@ -349,17 +350,15 @@ function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
           <span className="one-line">{view.label}</span>
         </Button>
       )}
-      {linear && (
-        <Segmented<"strip" | "ring">
+      <span className="rd-shape">
+        <ShapePicker
           label={`What ${view.label} is`}
-          value={light.arrangement === "ring" ? "ring" : "strip"}
-          options={[
-            { value: "strip", label: "Strip" },
-            { value: "ring", label: "Ring" },
-          ]}
+          value={light.arrangement}
+          shapes={shapes}
+          disabled={busy}
           onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
         />
-      )}
+      </span>
       <span className="rd-light-turn">
         <span className="mute">Runs the other way</span>
         <Toggle
