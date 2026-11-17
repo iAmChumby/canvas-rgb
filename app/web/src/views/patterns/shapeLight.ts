@@ -13,10 +13,11 @@ import type { LightView } from "@/proto/LightView";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
 
 /**
- * The light a pattern built on `builtOn` is laid out by, or null when none of the lights fits: one
- * with this many LEDs and, for a grid, a matrix zone of the same cells.
+ * The lights a pattern built on `builtOn` could be laid out by, best first: ones with this many LEDs
+ * and, for a grid, a matrix zone of the same cells. More than one can fit (#481), so the header's
+ * shape picker offers a chooser rather than silently writing the first in the list.
  */
-export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView | null {
+export function referenceLights(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView[] {
   const fits = (view: LightView): boolean => {
     if (view.led_count !== builtOn.led_count || view.led_count <= 0) return false;
     if (!builtOn.grid) return true;
@@ -24,7 +25,12 @@ export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, dev
     return zone?.kind.type === "matrix" && zone.kind.width === builtOn.grid.width && zone.kind.height === builtOn.grid.height;
   };
   const rank = (view: LightView) => (view.connected ? 0 : 2) + (view.light.arrangement === builtOn.arrangement ? 0 : 1);
-  return (lights ?? []).filter(fits).sort((a, b) => rank(a) - rank(b))[0] ?? null;
+  return (lights ?? []).filter(fits).sort((a, b) => rank(a) - rank(b));
+}
+
+/** The light a pattern built on `builtOn` is laid out by by default, or null when none fits. */
+export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView | null {
+  return referenceLights(builtOn, lights, devices)[0] ?? null;
 }
 
 /** The zone a light is, from the devices the daemon lists. */

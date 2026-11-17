@@ -111,4 +111,36 @@ describe("the pattern editor's state", () => {
     expect(result.current.canRedo).toBe(false);
     expect(colours(result.current.pattern)).toEqual(Array(12).fill(RED));
   });
+
+  it("seeds the Gradient tool from colours already painted without replacing them (#481)", () => {
+    const painted = ring({ 0: RED, 2: GREEN, 4: "#0000ff", 6: "#ffffff", 8: RED, 10: GREEN });
+    const { result } = editor(painted);
+    const before = [...colours(result.current.pattern)];
+    act(() => result.current.setTool("gradient"));
+    expect(colours(result.current.pattern)).toEqual(before);
+    const onRing = new Set(before.map((c) => c.toLowerCase()));
+    expect(result.current.gradient!.stops.length).toBeGreaterThanOrEqual(2);
+    expect(result.current.gradient!.stops.every((s) => onRing.has(s.colour.toLowerCase()))).toBe(true);
+  });
+
+  it("undoes and redoes a shape change, not just a colour stroke (#481)", () => {
+    const { result } = editor(ring({ 0: RED }));
+    expect(result.current.builtOn.arrangement).toBe("ring");
+    act(() => result.current.setShape("strip"));
+    expect(result.current.builtOn.arrangement).toBe("strip");
+    expect(result.current.canUndo).toBe(true);
+    act(() => result.current.undo());
+    expect(result.current.builtOn.arrangement).toBe("ring");
+    act(() => result.current.redo());
+    expect(result.current.builtOn.arrangement).toBe("strip");
+  });
+
+  it("undoes a motion change (#481)", () => {
+    const { result } = editor(ring({ 0: RED }));
+    const spin = { type: "spin", turns_per_s: 0.25 } as Pattern["motion"];
+    act(() => result.current.setMotion(spin));
+    expect(result.current.motion).toEqual(spin);
+    act(() => result.current.undo());
+    expect(result.current.motion).toEqual({ type: "none" });
+  });
 });

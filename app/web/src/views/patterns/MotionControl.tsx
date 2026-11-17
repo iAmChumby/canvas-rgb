@@ -19,8 +19,11 @@ export function MotionControl({ motion, onMotion }: { motion: Motion; onMotion: 
   const speed = spinOf(motion);
   // Off remembers the speed the owner had, so Spin comes back to it and not to the default.
   const [last, setLast] = useState(speed !== null && speed !== 0 ? speed : SPIN_TURNS_DEFAULT);
-  const mode: Mode = speed === null ? "off" : "spin";
-  const shown = speed ?? last;
+  // The daemon reads a speed of 0 as no motion (`scene_engine.rs` filters `speed != 0`). Show Off
+  // for it instead of a Spin that plays nothing; the slider still spans both directions, so a
+  // minimum above zero would take reverse spin away (#481).
+  const mode: Mode = speed === null || speed === 0 ? "off" : "spin";
+  const shown = speed !== null && speed !== 0 ? speed : last;
   const spin = (value: number) => {
     if (value !== 0) setLast(value);
     onMotion(spinMotion(value));

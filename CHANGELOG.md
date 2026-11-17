@@ -18,6 +18,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- Patterns: with two lights of the same size the header's shape picker now asks which one to change instead of silently picking the first; picking the Gradient tool on a painted pattern keeps its colours, each arrow nudge of a stop and every shape or motion change is undoable, a Spin at 0 turns/s reads as Off, unequal frame holds read as "mixed" instead of a made-up fps, and a frame connector's popover opens inside the editor rather than over the sidebar. (#481)
 - Patterns: the pattern editor asks before it throws unsaved strokes away, on the Cancel key, on a rail link, on the phone sheet's Back key, on the browser's Back and (in a browser) when the page closes, both in the effects view and on its own page: Save keeps the strokes, Discard drops them, Keep editing stays; after Discard or Save, one Back goes to the page you came from (to the effects page when the browser cannot say there was one), and a Forward onto the editor's old history entries opens the effects page instead of an editor. (#474)
 - Light setup now offers an ARGB header that has a size but was never set up (once, and "Later" is remembered), so the devices on it get checked instead of the header being skipped; on Devices such a header reads "Not checked" instead of "Not set up". (#470)
 - The icon rail's hover label stays invisible until it has been placed beside its icon, so it can never show at the window's corner. (#478)

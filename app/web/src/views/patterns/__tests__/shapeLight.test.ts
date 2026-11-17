@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { referenceLight, shapesOf } from "@/views/patterns/shapeLight";
+import { referenceLight, referenceLights, shapesOf } from "@/views/patterns/shapeLight";
 import type { DeviceInfo } from "@/proto/DeviceInfo";
 import type { LightView } from "@/proto/LightView";
 import type { ZoneInfo } from "@/proto/ZoneInfo";
@@ -20,6 +20,13 @@ describe("the light a pattern's shape picker writes to", () => {
     expect(referenceLight({ led_count: 8, arrangement: "strip" }, lights)?.light.id).toBe("strip#z0");
     expect(referenceLight({ led_count: 99, arrangement: "ring" }, lights)).toBeNull();
     expect(referenceLight({ led_count: 8, arrangement: "ring" }, null)).toBeNull();
+  });
+
+  it("lists every matching light, best first, so the header can offer a chooser (#481)", () => {
+    const lights = [view("first", 8, "strip"), view("second", 8, "strip"), view("other", 12, "strip")];
+    const found = referenceLights({ led_count: 8, arrangement: "strip" }, lights);
+    expect(found.map((l) => l.light.id)).toEqual(["first#z0", "second#z0"]);
+    expect(found[0]?.light.id).toBe(referenceLight({ led_count: 8, arrangement: "strip" }, lights)?.light.id);
   });
 
   it("is a matrix zone of the same cells for a grid pattern, never a line that happens to be 8 LEDs", () => {

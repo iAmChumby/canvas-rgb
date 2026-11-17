@@ -107,6 +107,8 @@ beforeEach(() => {
   api.putPattern.mockReset();
   api.lights.patch.mockReset();
   api.lights.list.mockReset();
+  // jsdom has no scrollIntoView; the header's light chooser asks its active option to scroll in.
+  Element.prototype.scrollIntoView = (() => {}) as typeof Element.prototype.scrollIntoView;
   patchSnap({ lights: null, devices: null });
 });
 
@@ -201,6 +203,31 @@ describe("the shape picker in the editor's header", () => {
     expect(screen.getByText(/could not be saved/)).toBeTruthy();
   });
 
+  it("lets the owner choose which light of the same size the shape writes to (#481)", async () => {
+    const first = fanLight("strip");
+    const second = { ...fanLight("strip"), light: { ...first.light, id: "fake:b#z0" }, label: "Fan 2" };
+    patchSnap({ lights: [first, second], devices: [fanDevice()] });
+    api.lights.patch.mockResolvedValue({ ...first, light: { ...first.light, arrangement: "ring" } });
+    api.lights.list.mockResolvedValue({
+      lights: [
+        { ...first, light: { ...first.light, arrangement: "ring" } },
+        { ...second, light: { ...second.light, arrangement: "ring" } },
+      ],
+    });
+    show(blank(8, "strip"));
+    await settle();
+    const chooser = screen.getByRole("combobox", { name: "Which light the shape change writes to" });
+    fireEvent.click(chooser);
+    await act(async () => {
+      fireEvent.click(screen.getByRole("option", { name: "Fan 2" }));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByRole("radio", { name: "Ring" }));
+    });
+    expect(api.lights.patch).toHaveBeenCalledWith("fake:b#z0", { arrangement: "ring" });
+    expect(api.lights.patch).not.toHaveBeenCalledWith("fake:a#z0", { arrangement: "ring" });
+  });
+
   it("offers a grid only where the zone is one", async () => {
     patchSnap({ lights: [fanLight("strip")], devices: [fanDevice("linear")] });
     const first = show(blank(8, "strip"));
@@ -254,6 +281,29 @@ describe("the Gradient tool", () => {
     expect(draft().frames[0]!.colors).not.toEqual(before);
   });
 
+  it("makes every arrow nudge undoable, not just the first (#481)", async () => {
+    show(blank(12));
+    await settle();
+    fireEvent.click(screen.getByRole("button", { name: "Gradient" }));
+    await frames();
+    const before = draft().frames[0]!.colors;
+    const stop = screen.getByRole("button", { name: /^Stop 1, #/ });
+    fireEvent.keyDown(stop, { key: "ArrowRight" });
+    await frames();
+    const afterOne = draft().frames[0]!.colors;
+    fireEvent.keyDown(stop, { key: "ArrowRight" });
+    await frames();
+    const afterTwo = draft().frames[0]!.colors;
+    expect(afterTwo).not.toEqual(afterOne);
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await frames();
+    expect(draft().frames[0]!.colors).toEqual(afterOne);
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await frames();
+    expect(draft().frames[0]!.colors).toEqual(before);
+  });
+
   it("is 4 clicks from an open editor to a saved, wrapped, spinning ring (Ring, Gradient, Spin, Save)", async () => {
     patchSnap({ lights: [fanLight("strip")], devices: [fanDevice()] });
     api.lights.patch.mockResolvedValue({ ...fanLight("ring") });
@@ -303,6 +353,13 @@ describe("the Spin control", () => {
     await frames();
     expect(draft().motion).toEqual({ type: "none" });
     expect(screen.getByText("Unsaved changes")).toBeTruthy();
+  });
+
+  it("shows Off, not Spin, at 0 turns a second: the daemon plays no motion (#481)", async () => {
+    show(blank(12, "ring", { type: "spin", turns_per_s: 0 } as Pattern["motion"]));
+    await settle();
+    expect(screen.getByRole("radio", { name: "Off" }).getAttribute("aria-checked")).toBe("true");
+    expect(screen.getByRole("radio", { name: "Spin" }).getAttribute("aria-checked")).toBe("false");
   });
 
   it("keeps a motion it does not know until the owner changes it", async () => {

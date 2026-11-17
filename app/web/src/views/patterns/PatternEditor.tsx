@@ -17,6 +17,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { FloppyDisk, X } from "@phosphor-icons/react";
 import { Button } from "@/components/Button";
 import { LeavePrompt } from "@/components/LeavePrompt";
+import { Select } from "@/components/Select";
 import { ShapePicker, type Shape } from "@/components/ShapePicker";
 import { useFocusTrap } from "@/components/useFocusTrap";
 import { BLACK_HEX, parseHex } from "@/lib/color";
@@ -34,8 +35,9 @@ import { FrameStrip } from "@/views/patterns/FrameStrip";
 import { GradientStops } from "@/views/patterns/GradientStops";
 import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
-import { gridOfZone, referenceLight, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
+import { gridOfZone, referenceLights, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
 import { usePatternEditor } from "@/views/patterns/usePatternEditor";
+import type { LightView } from "@/proto/LightView";
 import type { Pattern } from "@/proto/Pattern";
 import s from "@/views/patterns/patterns.module.css";
 
@@ -161,10 +163,14 @@ export function PatternEditor({
       ? null
       : "Nothing to play: add a frame and give the frames a hold";
 
-  // The shape picker writes the arrangement of the light this pattern was built on (#468).
+  // The shape picker writes the arrangement of the light this pattern was built on (#468). When
+  // more than one connected light has this LED count, the owner picks which one it writes to
+  // (#481); the best match is the default, and nothing is patched until a shape is chosen.
   const lights = useSnap((state) => state.lights);
   const devices = useSnap((state) => state.devices);
-  const light = referenceLight(editor.builtOn, lights, devices);
+  const matching = useMemo(() => referenceLights(editor.builtOn, lights, devices), [editor.builtOn, lights, devices]);
+  const [chosenId, setChosenId] = useState<string | null>(null);
+  const light = matching.find((l) => l.light.id === chosenId) ?? matching[0] ?? null;
   const zone = zoneOf(light, devices);
   const [shapeProblem, setShapeProblem] = useState<string | null>(null);
   const chooseShape = async (shape: Shape) => {
@@ -346,6 +352,14 @@ export function PatternEditor({
           shapes={shapesOf(editor.builtOn, zone)}
           onChange={(shape) => void chooseShape(shape)}
         />
+        {matching.length > 1 && (
+          <Select
+            label="Which light the shape change writes to"
+            value={light?.light.id ?? ""}
+            options={matching.map((l) => ({ value: l.light.id, label: lightLabel(l, matching) }))}
+            onChange={setChosenId}
+          />
+        )}
         <div className={s.tally}>
           {/* As wide as the total's digits, so the count never resizes its own box. */}
           <span className={s.figure} style={{ minWidth: `${String(leds).length}ch` }}>
@@ -459,6 +473,13 @@ export function PatternEditor({
     )}
     </>
   );
+}
+
+/** A chooser row: two lights can share a label (two DRAM sticks), so number the duplicates. */
+function lightLabel(view: LightView, all: LightView[]): string {
+  const base = view.label || view.light.id;
+  const peers = all.filter((l) => (l.label || l.light.id) === base);
+  return peers.length > 1 ? `${base} (${peers.indexOf(view) + 1})` : base;
 }
 
 /** 16 random hex characters, for one editor's draft epoch. */

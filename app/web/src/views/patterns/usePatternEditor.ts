@@ -25,6 +25,7 @@ import {
   MAX_STOPS,
   MIN_STOPS,
   seedStops,
+  stopsFromColours,
   type GradientStop,
 } from "@/lib/gradient";
 import {
@@ -202,9 +203,12 @@ export function usePatternEditor(
     if (next) draft.current(next);
   }, []);
 
-  /** Puts the document as it stands on the history, before a change to it. */
+  /** Puts the document as it stands on the history, before a change to it (#481). */
   const pushUndo = useCallback(() => {
-    const next = [...undoRef.current, { doc: docRef.current, selected: selectedRef.current }];
+    const next = [
+      ...undoRef.current,
+      { doc: docRef.current, selected: selectedRef.current, builtOn: builtOnRef.current, motion: motionRef.current },
+    ];
     undoRef.current = next.length > HISTORY_DEPTH ? next.slice(next.length - HISTORY_DEPTH) : next;
     setUndoStack(undoRef.current);
     redoRef.current = [];
@@ -261,11 +265,13 @@ export function usePatternEditor(
 
   const setMotion = useCallback(
     (next: Motion) => {
+      if (sameMotion(motionRef.current, next)) return;
+      pushUndo();
       motionRef.current = next;
       setMotionState(next);
       schedule(compose(docRef.current));
     },
-    [compose, schedule],
+    [compose, pushUndo, schedule],
   );
 
   const setGradient = useCallback((next: GradientState | null) => {
@@ -273,14 +279,18 @@ export function usePatternEditor(
     setGradientState(next);
   }, []);
 
-  /** Writes the blend of `next`'s stops into the frame. `entry` starts a history entry for it. */
+  /**
+   * Writes the blend of `next`'s stops into the frame. `entry` starts a history entry for it;
+   * `"silent"` leaves that to the caller (a shape change pushes its own entry first, #481).
+   */
   const applyGradient = useCallback(
-    (next: GradientState, entry: "new" | "drag") => {
+    (next: GradientState, entry: "new" | "drag" | "silent") => {
       setGradient(next);
       const colours = gradientColours(next.stops, coloursRef.current.length, next.wrap);
       if (sameColours(colours, coloursRef.current)) return;
-      if (entry === "new" || !inStopDrag.current) {
-        if (entry === "drag") inStopDrag.current = true;
+      if (entry === "new") pushUndo();
+      else if (entry === "drag" && !inStopDrag.current) {
+        inStopDrag.current = true;
         pushUndo();
       }
       commit(colours);
@@ -319,15 +329,17 @@ export function usePatternEditor(
       toolRef.current = next;
       setToolState(next);
       if (next !== "gradient") return;
-      // The Gradient tool seeds its stops from the hue wheel, starting where the colour in hand
-      // starts, the first time it is picked; picking it again keeps the stops in place.
+      // The first pick seeds the stops. A pattern that already has colours painted on it keeps
+      // them: the stops are read off those colours and no blend is written until the owner edits a
+      // stop (#481). An all-off pattern has nothing to lose, so it still gets the hue wheel's new
+      // gradient. Picking the tool again keeps the stops in place.
       const wrap = builtOnRef.current.arrangement === "ring";
-      const seeded = gradientRef.current ?? {
-        stops: seedStops(hexToHsv(colourRef.current).h, wrap),
-        selected: 0,
-        wrap,
-      };
-      applyGradient(seeded, "new");
+      const painted = firstOn(coloursRef.current);
+      const seeded = gradientRef.current ?? (painted
+        ? { stops: stopsFromColours(coloursRef.current, wrap), selected: 0, wrap }
+        : { stops: seedStops(hexToHsv(colourRef.current).h, wrap), selected: 0, wrap });
+      setGradient(seeded);
+      if (!painted) applyGradient(seeded, "new");
     },
     [applyGradient],
   );
@@ -401,6 +413,7 @@ export function usePatternEditor(
     (shape: Shape, grid?: GridSize) => {
       const was = builtOnRef.current;
       if (was.arrangement === shape && (shape !== "grid" || grid === undefined)) return;
+      pushUndo();
       const { grid: oldGrid, ...rest } = was;
       const cells = shape === "grid" ? (grid ?? oldGrid) : undefined;
       const next: BuiltOn = { ...rest, arrangement: shape, ...(cells ? { grid: cells } : {}) };
@@ -408,10 +421,10 @@ export function usePatternEditor(
       setBuiltOnState(next);
       // A ring wraps its gradient; a line does not: the stops are re-laid for the new shape.
       const g = gradientRef.current;
-      if (g && g.wrap !== (shape === "ring")) applyGradient({ ...g, wrap: shape === "ring" }, "new");
+      if (g && g.wrap !== (shape === "ring")) applyGradient({ ...g, wrap: shape === "ring" }, "silent");
       else schedule(compose(docRef.current));
     },
-    [applyGradient, compose, schedule],
+    [applyGradient, compose, pushUndo, schedule],
   );
 
   const beginStroke = useCallback(() => {
@@ -468,27 +481,45 @@ export function usePatternEditor(
     [commit, fillAll, pushUndo, setColour],
   );
 
+  /** Restores everything a snapshot holds: the frames, the shape and the motion (#481). */
+  const restore = useCallback(
+    (snapshot: Snapshot) => {
+      builtOnRef.current = snapshot.builtOn;
+      setBuiltOnState(snapshot.builtOn);
+      motionRef.current = snapshot.motion;
+      setMotionState(snapshot.motion);
+      applyDoc(snapshot.doc, snapshot.selected);
+    },
+    [applyDoc],
+  );
+
   const undo = useCallback(() => {
     const previous = undoRef.current[undoRef.current.length - 1];
     if (!previous) return;
     undoRef.current = undoRef.current.slice(0, -1);
     setUndoStack(undoRef.current);
-    redoRef.current = [...redoRef.current, { doc: docRef.current, selected: selectedRef.current }];
+    redoRef.current = [
+      ...redoRef.current,
+      { doc: docRef.current, selected: selectedRef.current, builtOn: builtOnRef.current, motion: motionRef.current },
+    ];
     setRedoStack(redoRef.current);
     inStroke.current = false;
-    applyDoc(previous.doc, previous.selected);
-  }, [applyDoc]);
+    restore(previous);
+  }, [restore]);
 
   const redo = useCallback(() => {
     const next = redoRef.current[redoRef.current.length - 1];
     if (!next) return;
     redoRef.current = redoRef.current.slice(0, -1);
     setRedoStack(redoRef.current);
-    undoRef.current = [...undoRef.current, { doc: docRef.current, selected: selectedRef.current }];
+    undoRef.current = [
+      ...undoRef.current,
+      { doc: docRef.current, selected: selectedRef.current, builtOn: builtOnRef.current, motion: motionRef.current },
+    ];
     setUndoStack(undoRef.current);
     inStroke.current = false;
-    applyDoc(next.doc, next.selected);
-  }, [applyDoc]);
+    restore(next);
+  }, [restore]);
 
   // ---- frames (#468). Each change is one history entry and goes to the lights at once.
 
@@ -634,10 +665,17 @@ export function usePatternEditor(
   };
 }
 
-/** One entry of the history: the frames (and Loop) as they were, and the frame that was selected. */
+/** One entry of the history: the frames (and Loop), the shape, the motion and the selected frame. */
 interface Snapshot {
   doc: FrameDoc;
   selected: number;
+  builtOn: BuiltOn;
+  motion: Motion;
+}
+
+/** Motion is a small JSON value; equality by value keeps a re-pick off the history. */
+function sameMotion(a: Motion, b: Motion): boolean {
+  return JSON.stringify(a) === JSON.stringify(b);
 }
 
 /** The loaded frames, each padded to the device's LED count; a pattern with none gets one blank frame. */
