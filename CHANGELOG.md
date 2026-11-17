@@ -12,6 +12,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- The editor's left rail no longer scrolls sideways: its tooltips reach over the page without adding a horizontal scrollbar, and the rail still scrolls up and down in a short window. (#467)
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
 - Setting up a header keeps the lights working when you close the window while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, and the setup finishes as a whole instead of being left half done. (#457)
 - Tray tests: the update suite no longer reads its verdict off the machine's clock, so a busy runner can no longer fail or hang it. (#242)
