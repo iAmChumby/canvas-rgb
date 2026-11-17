@@ -3,10 +3,12 @@
 //! The board is driven over its vendor HID interface (interface 2, usage page 0xFFFF, usage
 //! 0x0002) with 65-byte feature reports. The key-press interfaces (0 and 1) are never opened.
 //!
-//! Three paths light it. The first one that works wins (#10): **live per-key**, the one the
-//! board shows key by key while it moves, is tried first and replaces the other two; the two
-//! below it stay as the fallback when live is off ([`LIVE_PER_KEY`], [`RoyuanAdapter::set_live`])
-//! or a `0x0F` report is refused on this connection.
+//! Three paths light it. **Live per-key (#10) is off by default** and turns on with the
+//! environment variable [`LIVE_ENV`] (`CANVAS_RGB_ROYUAN_LIVE=1`), read once when the adapter is
+//! built. With it off the adapter is the one #312 shipped: a 22 by 6 zone of 128 lamps, the
+//! whole-board colour, and the stored still. With it on, live per-key is tried first and replaces
+//! the other two, which stay as the fallback when a `0x0F` report is refused on this connection
+//! (the zone is then still the 21 by 6 one: its cells are converted for the picture).
 //!
 //! **Live per-key (#10).** A frame for the matrix zone goes out as one `0x0F` frame
 //! ([`sync_color_reports`]): seven reports, `0F 01 <page> 38 <last> 00 00 <ck>` then 56 RGB
@@ -15,9 +17,17 @@
 //! below apply to it, and while it is on neither the whole-board `0x0E` colour nor a
 //! `SET_USERPIC` picture is sent. One frame alone showed nothing on the board; a stream lit the
 //! keys, so a frame goes out at most every [`LIVE_FRAME_INTERVAL`], a frame identical to the last
-//! one sent is skipped, and the last frame is sent again at least every [`LIVE_KEEPALIVE`], so a
-//! still picture stays lit. The slot order is column-major, bottom row first
-//! ([`key_slot`]); which key sits in which slot is UNKNOWN beyond one observed column.
+//! one sent is skipped, and the last frame is sent again whenever a frame arrives and
+//! [`LIVE_KEEPALIVE`] has passed since the last send. The resend rides the engine's frames: if
+//! the output pauses, nothing is resent and the board falls back to whatever it does unfed
+//! (UNKNOWN). The slot order is column-major, bottom row first ([`key_slot`]); which key sits in
+//! which slot is UNKNOWN beyond one observed column.
+//!
+//! **A board that ignores `0x0F` cannot be told apart over HID.** The adapter learns that a
+//! report was refused only from an error on the feature-report write. A board that accepts the
+//! write and shows nothing returns no error, so the adapter keeps sending live frames and the
+//! keys stay dark; the fallback never starts. [`DeviceAdapter::read_back`] says what was last
+//! sent, never what the board shows.
 //!
 //! The two older paths follow (#312). While a frame moves, the keyboard shows one colour for the whole
 //! board: the frame's average, streamed as the single `0x0E` report. When the frame holds still
@@ -83,16 +93,27 @@ const KEEPALIVE: Duration = Duration::from_secs(1);
 
 // ---------------------------------------------------------------- live per-key (#10)
 
-/// Whether the live per-key path is on by default. Turn it off and the keyboard uses the
-/// whole-board colour and stored stills only (`RoyuanAdapter::set_live(false)` does the same at
-/// run time).
-pub const LIVE_PER_KEY: bool = true;
+/// The environment variable that turns the live per-key path on: `CANVAS_RGB_ROYUAN_LIVE=1`.
+///
+/// Read once when the adapter is built ([`live_from`]); a change needs a daemon restart, not a
+/// rebuild. Absent, empty or anything but `1` leaves live off, and the adapter behaves as it did
+/// before #10. The other adapters have no settings file, and the daemon reads its switches the
+/// same way (`CANVAS_RGB_FAKE_OPENRGB_PORT`, `CANVAS_RGB_OPENRGB`), so this follows them.
+pub const LIVE_ENV: &str = "CANVAS_RGB_ROYUAN_LIVE";
+
+/// Whether the live per-key path is wanted for the value of [`LIVE_ENV`]: only `1` turns it on.
+pub fn live_from(value: Option<&str>) -> bool {
+    value.map(str::trim) == Some("1")
+}
+
 /// The shortest gap between two live frames. The vendor's painter runs at 30 ms
 /// (`L1 = 30` in the Dynamic RGB app, `dynrgb-index` bundle), so 33 ms is its rate. A frame that
 /// arrives sooner is dropped: the engine sends the next one. Tunable; the visual pass
 /// (`tools/kbd-map.py`) compares 16, 33, 66 and 100 ms.
 pub const LIVE_FRAME_INTERVAL: Duration = Duration::from_millis(33);
-/// A live frame identical to the last one sent is skipped, but sent again at least this often.
+/// A live frame identical to the last one sent is skipped, but sent again once this long has
+/// passed since the last send, at the next frame that arrives. The resend is frame-driven: the
+/// adapter has no timer, so a paused output stops it.
 ///
 /// The board showed nothing from a single frame and kept the picture lit from a stream, so a
 /// still picture needs resending. 100 ms is the longest gap seen to stay lit (2026-11-16: one
@@ -261,6 +282,37 @@ fn still_slot(row: usize, col: usize) -> usize {
 pub fn key_map() -> Vec<Option<u32>> {
     (0..KEY_ROWS)
         .flat_map(|row| (0..KEY_COLS).map(move |col| key_slot(row, col).map(|slot| slot as u32)))
+        .collect()
+}
+
+/// Columns of the zone's matrix while live is off: 128 slots in columns of 6, rounded up. This is
+/// the shape the adapter had before #10, and it is the one every saved scene was built against.
+pub const LEGACY_KEY_COLS: usize = PER_KEY_SLOTS.div_ceil(KEY_ROWS);
+
+/// The slot a key has in a stored picture, the matrix the adapter shows while live is off: the
+/// matrix runs down each column, six rows to a column.
+///
+/// `row` 0 is the top row. The slot is `col * 6 + row`; `None` for a row past the sixth or a
+/// position past the last slot (a row of 6 would alias the next column). Which key sits at
+/// which row and column is per board (the table in `docs/adapters.md`).
+pub fn legacy_key_slot(row: usize, col: usize) -> Option<usize> {
+    let slot = col.checked_mul(KEY_ROWS)?.checked_add(row)?;
+    (row < KEY_ROWS && slot < PER_KEY_SLOTS).then_some(slot)
+}
+
+/// The row and column of a stored-picture slot, the inverse of [`legacy_key_slot`].
+pub fn legacy_slot_position(slot: usize) -> (usize, usize) {
+    (slot % KEY_ROWS, slot / KEY_ROWS)
+}
+
+/// The zone's key matrix while live is off: `map[row * LEGACY_KEY_COLS + col]` is the slot of the
+/// key there, or `None` for the positions past the last slot (the four bottom rows of the last
+/// column).
+pub fn legacy_key_map() -> Vec<Option<u32>> {
+    (0..KEY_ROWS)
+        .flat_map(|row| {
+            (0..LEGACY_KEY_COLS).map(move |col| legacy_key_slot(row, col).map(|slot| slot as u32))
+        })
         .collect()
 }
 
@@ -711,7 +763,8 @@ pub struct RoyuanAdapter {
 
 /// The live per-key path's state (#10).
 struct Live {
-    /// The setting: whether live per-key is wanted at all ([`LIVE_PER_KEY`] at first).
+    /// The setting: whether live per-key is wanted at all ([`LIVE_ENV`] at build time). It also
+    /// picks the zone's shape: 21 by 6 (126 lamps) with it, 22 by 6 (128 lamps) without.
     wanted: bool,
     /// Set when a `0x0F` report errored on this connection: the whole-board colour and the
     /// stills take over until the keyboard connects again.
@@ -723,8 +776,8 @@ struct Live {
 }
 
 impl Live {
-    fn new() -> Self {
-        Self { wanted: LIVE_PER_KEY, failed: false, last: None, warned: false }
+    fn new(wanted: bool) -> Self {
+        Self { wanted, failed: false, last: None, warned: false }
     }
 
     /// A new connection: the board has not seen a frame, and a refusal may not repeat.
@@ -796,6 +849,11 @@ impl RoyuanAdapter {
         Self::with_opener(Box::new(HidOpener))
     }
 
+    /// Whether [`LIVE_ENV`] asks for the live path in this process: read when an adapter is built.
+    fn live_wanted_by_env() -> bool {
+        live_from(std::env::var(LIVE_ENV).ok().as_deref())
+    }
+
     /// The adapter with an opener and a store of the caller's.
     ///
     /// The product passes the file under the daemon's user directory, so the counters and the
@@ -820,6 +878,12 @@ impl RoyuanAdapter {
     /// reports the keyboard sends. Without a store the counters and the picture live in memory
     /// only.
     pub fn with_opener(opener: Box<dyn Opener>) -> Self {
+        Self::with_opener_live(opener, Self::live_wanted_by_env())
+    }
+
+    /// [`with_opener`](Self::with_opener) with the live path chosen by the caller instead of by
+    /// [`LIVE_ENV`], so a test does not depend on the environment it runs in.
+    pub fn with_opener_live(opener: Box<dyn Opener>, live: bool) -> Self {
         Self {
             opener,
             dev: None,
@@ -839,12 +903,14 @@ impl RoyuanAdapter {
             mode_13s: VecDeque::new(),
             now: Instant::now(),
             still_after: STILL_AFTER,
-            live: Live::new(),
+            live: Live::new(live),
         }
     }
 
-    /// Turns the live per-key path on or off (it starts at [`LIVE_PER_KEY`]). Off, the keyboard
-    /// shows the whole-board colour while a frame moves and a stored still when it holds.
+    /// Turns the live per-key path on or off (it starts as [`LIVE_ENV`] says, which is off unless
+    /// set). Off, the keyboard shows the whole-board colour while a frame moves and a stored
+    /// still when it holds, and the zone is the 22 by 6 one of 128 lamps; the next `discover`
+    /// reports the new shape.
     pub fn set_live(&mut self, on: bool) {
         self.live.wanted = on;
         self.live.reset();
@@ -1265,6 +1331,16 @@ impl RoyuanAdapter {
             return Err(AdapterError::NotConnected);
         }
         self.now = now;
+        if !self.live.wanted {
+            // Live off, the default: exactly the adapter #312 shipped. `colors` is the 128-lamp
+            // zone, already in the picture's slot order, and nothing of #10 runs.
+            return self.write_still_path_with(colors, frame_color(colors), now);
+        }
+        // A live frame can only be judged by the keyboard's own lights. The adapter sees a
+        // refusal as an error on the feature-report write and falls back (below); a board that
+        // accepts `0x0F` and shows nothing returns no error over HID, so this branch keeps
+        // sending and the keys stay dark. That case is UNKNOWN until the visual pass, and nothing
+        // here detects it.
         if self.live_active() && self.write_live_at(colors, now)? {
             return Ok(());
         }
@@ -1419,12 +1495,6 @@ impl RoyuanAdapter {
         self.send_color(mean, now)
     }
 
-    /// The old paths for a frame already in the picture's slot order, as the tests drive them.
-    #[cfg(test)]
-    fn write_still_path_at(&mut self, colors: &[Rgb8], now: Instant) -> Result<(), AdapterError> {
-        self.write_still_path_with(colors, frame_color(colors), now)
-    }
-
     /// Shows the picture the flash already holds: light mode 13 again, no write and no wear.
     ///
     /// Entering the picture mode is the one report the budget may refuse (#312 review pass 4,
@@ -1563,6 +1633,25 @@ impl RoyuanAdapter {
         }
     }
 
+    /// The zone as the path in use shows it: the 21 by 6 grid of 126 lamps for live (#10), the
+    /// 22 by 6 matrix of 128 lamps otherwise (the shape before #10, and the default).
+    fn zone_info(&self) -> ZoneInfo {
+        let (cols, lamps, map) = if self.live.wanted {
+            (KEY_COLS, LIVE_SLOTS, key_map())
+        } else {
+            (LEGACY_KEY_COLS, PER_KEY_SLOTS, legacy_key_map())
+        };
+        ZoneInfo {
+            index: 0,
+            name: "Keyboard".into(),
+            kind: ZoneKind::Matrix { width: cols as u32, height: KEY_ROWS as u32, map },
+            led_count: lamps as u32,
+            min_leds: lamps as u32,
+            max_leds: lamps as u32,
+            resizable: false,
+        }
+    }
+
     fn device_info(&self) -> DeviceInfo {
         DeviceInfo {
             id: device_id(),
@@ -1573,19 +1662,7 @@ impl RoyuanAdapter {
             adapter_index: 0,
             serial: String::new(),
             location: format!("hid:{VENDOR_ID:04x}:{PRODUCT_ID:04x}:if{INTERFACE}"),
-            zones: vec![ZoneInfo {
-                index: 0,
-                name: "Keyboard".into(),
-                kind: ZoneKind::Matrix {
-                    width: KEY_COLS as u32,
-                    height: KEY_ROWS as u32,
-                    map: key_map(),
-                },
-                led_count: LIVE_SLOTS as u32,
-                min_leds: LIVE_SLOTS as u32,
-                max_leds: LIVE_SLOTS as u32,
-                resizable: false,
-            }],
+            zones: vec![self.zone_info()],
             connected: true,
         }
     }
@@ -1655,6 +1732,8 @@ impl DeviceAdapter for RoyuanAdapter {
         self.write_at(Rgb8::WHITE, Instant::now())
     }
 
+    /// The colour last sent (the frame's mean), never what the board shows: the keyboard cannot
+    /// be read back, and a board that ignores a frame without an error looks the same from here.
     async fn read_back(&mut self, device: &DeviceId) -> Result<Vec<Rgb8>, AdapterError> {
         self.check_id(device)?;
         Ok(vec![self.last_color])
@@ -1868,18 +1947,18 @@ mod tests {
         crate::resume_serial()
     }
 
-    /// The keyboard with live per-key OFF: the whole-board colour and stills the #312 tests
-    /// drive. [`rig_live`] is the one with live on, the product's default.
+    /// The keyboard as the product builds it: live per-key OFF, the default. The whole-board
+    /// colour and stills the #312 tests drive, through the real `write_frame_at`.
+    /// [`rig_live`] is the one with the variable set.
     fn rig(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
-        let (mut adapter, shared) = rig_live(present);
-        adapter.set_live(false);
-        (adapter, shared)
+        let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
+        (RoyuanAdapter::with_opener_live(Box::new(FakeOpener(shared.clone())), false), shared)
     }
 
-    /// The keyboard as the product builds it: live per-key on.
+    /// The keyboard with `CANVAS_RGB_ROYUAN_LIVE=1`: live per-key on.
     fn rig_live(present: bool) -> (RoyuanAdapter, Arc<Mutex<Shared>>) {
         let shared = Arc::new(Mutex::new(Shared { present, ..Default::default() }));
-        (RoyuanAdapter::with_opener(Box::new(FakeOpener(shared.clone()))), shared)
+        (RoyuanAdapter::with_opener_live(Box::new(FakeOpener(shared.clone())), true), shared)
     }
 
     /// The keyboard as `rig` builds it, with a store beside it (#312 review S1).
@@ -1981,7 +2060,7 @@ mod tests {
     /// streams it. No real time passes: the clock is the caller's.
     fn hold(a: &mut RoyuanAdapter, frame: &[Rgb8], from: u64, to: u64, t0: Instant) {
         for ms in (from..to).step_by(100) {
-            a.write_still_path_at(frame, at(t0, ms)).unwrap();
+            a.write_frame_at(frame, at(t0, ms)).unwrap();
         }
     }
 
@@ -2032,15 +2111,17 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn discover_describes_a_126_lamp_keyboard() {
+    async fn discover_describes_a_128_lamp_keyboard_and_a_126_lamp_one_with_live_on() {
         let _serial = serial();
+        let (mut live, _) = rig_live(true);
+        assert_eq!(live.discover().await.unwrap()[0].led_count(), LIVE_SLOTS as u32);
         let (mut a, _) = rig(true);
         let d = a.discover().await.unwrap();
         assert_eq!(d.len(), 1);
         assert_eq!(d[0].id, DeviceId("royuan:3151:4015".into()));
         assert_eq!(d[0].name, "ROYUAN MonsGeek Keyboard");
         assert_eq!(d[0].kind, DeviceKind::Keyboard);
-        assert_eq!(d[0].led_count(), LIVE_SLOTS as u32);
+        assert_eq!(d[0].led_count(), PER_KEY_SLOTS as u32);
         assert!(d[0].connected);
         assert_eq!(a.name(), "royuan");
     }
@@ -2283,6 +2364,35 @@ mod tests {
     }
 
     #[test]
+    fn slots_run_down_each_column() {
+        // The matrix while live is off: the one the adapter had before #10 (copied from main).
+        assert_eq!(legacy_key_slot(0, 0), Some(0));
+        assert_eq!(legacy_key_slot(5, 0), Some(5));
+        assert_eq!(legacy_key_slot(0, 1), Some(6));
+        // The two keys confirmed on a FUN60 Pro by the monsgeek-rgb notes (A = 9, B = 40) are the
+        // second column's home-row key and the seventh column's bottom-letter-row key.
+        assert_eq!(legacy_slot_position(9), (3, 1));
+        assert_eq!(legacy_slot_position(40), (4, 6));
+        for slot in 0..PER_KEY_SLOTS {
+            let (row, col) = legacy_slot_position(slot);
+            assert_eq!(legacy_key_slot(row, col), Some(slot));
+            assert!(col < LEGACY_KEY_COLS);
+        }
+        assert_eq!(LEGACY_KEY_COLS, 22);
+    }
+
+    #[test]
+    fn a_key_outside_the_matrix_has_no_slot() {
+        // A seventh row would alias the next column's top key.
+        assert_eq!(legacy_key_slot(KEY_ROWS, 0), None);
+        // Column 21 holds slots 126 and 127 only.
+        assert_eq!(legacy_key_slot(1, 21), Some(127));
+        assert_eq!(legacy_key_slot(2, 21), None);
+        assert_eq!(legacy_key_slot(0, LEGACY_KEY_COLS), None);
+        assert_eq!(legacy_key_slot(0, usize::MAX), None);
+    }
+
+    #[test]
     fn per_key_report_drops_colours_past_the_last_slot() {
         let mut frame = vec![Rgb8::new(9, 9, 9); PER_KEY_SLOTS];
         frame[PER_KEY_SLOTS - 1] = Rgb8::new(1, 2, 3);
@@ -2333,7 +2443,7 @@ mod tests {
         for i in 0..frames {
             let ms = i * FRAME_MS;
             let f = frame(ms as f64 / 1000.0);
-            a.write_still_path_at(&f, at(t0, ms)).expect("a frame");
+            a.write_frame_at(&f, at(t0, ms)).expect("a frame");
         }
     }
 
@@ -2374,7 +2484,7 @@ mod tests {
                     Rgb8::new((n & 0xFF) as u8, (n.wrapping_mul(3) & 0xFF) as u8, (n.wrapping_mul(7) & 0xFF) as u8)
                 })
                 .collect();
-            a.write_still_path_at(&frame, at(t0, 100 * u64::from(step))).expect("a frame");
+            a.write_frame_at(&frame, at(t0, 100 * u64::from(step))).expect("a frame");
         }
         let g = s.lock().unwrap();
         assert_eq!(g.picture.complete, 0, "an animated effect never uploads a picture");
@@ -2394,7 +2504,7 @@ mod tests {
         hold(&mut a, &frame, 0, 2000, t0);
         assert_eq!(userpic_count(&s.lock().unwrap()), 0, "a still alone waits for two seconds");
         // The still crosses 2 s here: the first page goes out.
-        a.write_still_path_at(&frame, at(t0, 2000)).expect("the trigger frame");
+        a.write_frame_at(&frame, at(t0, 2000)).expect("the trigger frame");
         assert_eq!(userpic_count(&s.lock().unwrap()), 1, "page 0 goes out at two seconds");
         // Pages 1 to 6, 100 ms apart, then light mode 13 two seconds after page 6.
         hold(&mut a, &frame, 2100, 4700, t0);
@@ -2449,7 +2559,7 @@ mod tests {
         // The frame moves: direct mode and the whole-board colour go out in that write.
         let moving = shifted_frame(60);
         let before = s.lock().unwrap().sent.len();
-        a.write_still_path_at(&moving, at(t0, 6000)).expect("the moving frame");
+        a.write_frame_at(&moving, at(t0, 6000)).expect("the moving frame");
         let g = s.lock().unwrap();
         let sent = &g.sent[before..];
         assert_eq!(sent.len(), 2, "direct mode, then the colour, at once");
@@ -2459,9 +2569,9 @@ mod tests {
     }
 
     #[test]
-    fn the_matrix_names_every_lamp_once_and_has_no_gaps() {
+    fn the_live_matrix_names_every_lamp_once_and_has_no_gaps() {
         let _serial = serial();
-        let (a, _) = rig(true);
+        let (a, _) = rig_live(true);
         let map = key_map();
         assert_eq!(map.len(), KEY_ROWS * KEY_COLS);
         assert!(map.iter().all(|entry| entry.is_some()), "which positions hold no key is UNKNOWN");
@@ -2487,12 +2597,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn a_distinct_colour_frame_reaches_the_right_keys_by_the_key_map() {
-        // The fallback (live off): a zone frame is a still, and every matrix cell's colour
-        // reaches the picture slot the picture gives that cell (checked on the device,
-        // 2026-11-13: slot 9 is A, the cell at row 3, column 1).
+    async fn a_live_fallback_frame_reaches_the_right_keys_by_the_key_map() {
+        // The fallback (live on, the board refuses `0x0F`): a zone frame is a still, and every
+        // matrix cell's colour reaches the picture slot the picture gives that cell (checked on
+        // the device, 2026-11-13: slot 9 is A, the cell at row 3, column 1).
         let _serial = serial();
-        let (mut a, s) = rig(true);
+        let (mut a, s) = rig_live(true);
+        s.lock().unwrap().refuse_sync = true;
         a.connect().await.unwrap();
         let map = key_map();
         let frame: Vec<Rgb8> = (0..LIVE_SLOTS)
@@ -2516,6 +2627,66 @@ mod tests {
         assert_eq!(keys[9], frame[8]);
         // Slots the grid does not reach stay black.
         assert_eq!(&keys[126..], &[Rgb8::BLACK, Rgb8::BLACK]);
+    }
+
+    #[test]
+    fn a_distinct_colour_frame_reaches_the_right_keys_by_the_key_map() {
+        // Live off (the default): copied from main, 128 lamps in the picture's own slot order.
+        let _serial = serial();
+        let (mut a, s) = rig(true);
+        let t0 = Instant::now();
+        a.open_and_init().expect("connect");
+        let map = legacy_key_map();
+        let frame: Vec<Rgb8> = (0..PER_KEY_SLOTS)
+            .map(|slot| Rgb8::new((slot * 3) as u8, (255 - slot) as u8, (slot / 2) as u8))
+            .collect();
+        hold(&mut a, &frame, 0, 4700, t0);
+        let g = s.lock().unwrap();
+        assert_eq!(g.picture.complete, 1);
+        let keys = g.picture.keys();
+        // A is the second column's home-row key: row 3, column 1, slot 9 (checked on the device).
+        assert_eq!(map[3 * LEGACY_KEY_COLS + 1], Some(9));
+        assert_eq!(keys[9], frame[9]);
+        // B is row 4, column 6, slot 40.
+        assert_eq!(map[4 * LEGACY_KEY_COLS + 6], Some(40));
+        assert_eq!(keys[40], frame[40]);
+        // Every key the map names carries its slot's colour.
+        for (entry, slot) in map.iter().enumerate() {
+            if let Some(slot) = slot {
+                assert_eq!(keys[*slot as usize], frame[*slot as usize], "map entry {entry}");
+            }
+        }
+    }
+
+    #[test]
+    fn gaps_in_the_matrix_are_skipped() {
+        // Live off (the default): copied from main, the 22 by 6 matrix with four gaps.
+        let _serial = serial();
+        let (a, _) = rig(true);
+        let map = legacy_key_map();
+        assert_eq!(map.len(), KEY_ROWS * LEGACY_KEY_COLS);
+        assert_eq!(
+            map.iter().filter(|entry| entry.is_none()).count(),
+            KEY_ROWS * LEGACY_KEY_COLS - PER_KEY_SLOTS,
+            "the four positions past slot 127 are gaps"
+        );
+        for row in 0..KEY_ROWS {
+            for col in 0..LEGACY_KEY_COLS {
+                assert_eq!(
+                    map[row * LEGACY_KEY_COLS + col],
+                    legacy_key_slot(row, col).map(|slot| slot as u32),
+                    "row {row}, column {col}"
+                );
+            }
+        }
+        // The last column holds the last two slots on its top rows, and gaps below them.
+        assert_eq!(map[21], Some(126));
+        assert_eq!(map[LEGACY_KEY_COLS + 21], Some(127));
+        assert_eq!(map[2 * LEGACY_KEY_COLS + 21], None);
+        // The zone the editor sees has one LED per key, not one per position.
+        let zone = &a.device_info().zones[0];
+        assert_eq!(zone.led_count, PER_KEY_SLOTS as u32);
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 22, height: 6, map });
     }
 
     #[test]
@@ -2556,11 +2727,18 @@ mod tests {
         let zone = &d.zones[0];
         assert_eq!(zone.index, 0, "the zone index stays 0");
         assert_eq!(zone.name, "Keyboard");
-        assert_eq!(zone.kind, ZoneKind::Matrix { width: 21, height: 6, map: key_map() });
-        assert_eq!(zone.led_count, LIVE_SLOTS as u32);
-        assert_eq!(zone.min_leds, LIVE_SLOTS as u32);
-        assert_eq!(zone.max_leds, LIVE_SLOTS as u32);
+        // Live off, the default: the zone is the one main shipped, 22 by 6 and 128 lamps.
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 22, height: 6, map: legacy_key_map() });
+        assert_eq!(zone.led_count, PER_KEY_SLOTS as u32);
+        assert_eq!(zone.min_leds, PER_KEY_SLOTS as u32);
+        assert_eq!(zone.max_leds, PER_KEY_SLOTS as u32);
         assert!(!zone.resizable);
+        // With the variable set the zone is the 21 by 6 grid of 126 lamps, and nothing else changes.
+        let (live, _) = rig_live(true);
+        let zone = &live.device_info().zones[0];
+        assert_eq!(zone.kind, ZoneKind::Matrix { width: 21, height: 6, map: key_map() });
+        assert_eq!((zone.led_count, zone.min_leds, zone.max_leds), (126, 126, 126));
+        assert_eq!((zone.index, zone.name.as_str()), (0, "Keyboard"));
     }
 
     #[test]
@@ -2573,7 +2751,7 @@ mod tests {
             let frame: Vec<Rgb8> =
                 (0..len).map(|n| Rgb8::new((n & 0xFF) as u8, 7, 9)).collect();
             let expected = color_report(frame_color(&frame)).to_vec();
-            a.write_still_path_at(&frame, at(t0, 500 * i as u64)).expect("a frame of any length");
+            a.write_frame_at(&frame, at(t0, 500 * i as u64)).expect("a frame of any length");
             let g = s.lock().unwrap();
             assert_eq!(g.sent.last().unwrap(), &expected, "a {len}-colour frame averages");
         }
@@ -2943,7 +3121,7 @@ mod tests {
         hold(&mut a, &frame, 0, 4700, t0);
         assert_eq!(s.lock().unwrap().picture.complete, 1, "the still uploaded");
         // The frame moves for one write and comes back: the flash still holds it.
-        a.write_still_path_at(&shifted_frame(60), at(t0, 4700)).expect("a moving frame");
+        a.write_frame_at(&shifted_frame(60), at(t0, 4700)).expect("a moving frame");
         hold(&mut a, &frame, 4800, 13000, t0);
         let g = s.lock().unwrap();
         // The one write of the picture, and the mode report that showed it the second time.
@@ -2966,7 +3144,7 @@ mod tests {
         let mut step = 0u32;
         let mut ms = 4700;
         while ms < 12500 {
-            a.write_still_path_at(&shifted_frame((10 + step) as u8), at(t0, ms)).expect("a moving frame");
+            a.write_frame_at(&shifted_frame((10 + step) as u8), at(t0, ms)).expect("a moving frame");
             step += 1;
             ms += 500;
         }
@@ -2987,11 +3165,11 @@ mod tests {
         let frame = distinct_frame();
         hold(&mut a, &frame, 0, 4700, t0);
         // Away and back: the window doubles, then the picture shows again and stays.
-        a.write_still_path_at(&shifted_frame(60), at(t0, 4700)).expect("a moving frame");
+        a.write_frame_at(&shifted_frame(60), at(t0, 4700)).expect("a moving frame");
         hold(&mut a, &frame, 4800, 80000, t0);
         assert_eq!(s.lock().unwrap().picture.mode, Some(13), "the picture shows again");
         // It stayed well past a minute, so the next still is back to two seconds.
-        a.write_still_path_at(&shifted_frame(120), at(t0, 80000)).expect("a moving frame");
+        a.write_frame_at(&shifted_frame(120), at(t0, 80000)).expect("a moving frame");
         let next = shifted_frame(200);
         hold(&mut a, &next, 80500, 84000, t0);
         assert_eq!(upload_count(&s.lock().unwrap()), 2, "two seconds is enough again");
@@ -3010,7 +3188,7 @@ mod tests {
         assert_eq!(s.lock().unwrap().picture.complete, 1, "the still uploaded");
         // The machine sleeps and wakes with the frame where it was.
         crate::note_resume();
-        a.write_still_path_at(&frame, at(t0, 5000)).expect("the frame after the resume");
+        a.write_frame_at(&frame, at(t0, 5000)).expect("the frame after the resume");
         {
             let g = s.lock().unwrap();
             assert_eq!(upload_count(&g), 1, "the picture in the flash was not written again");
@@ -3019,7 +3197,7 @@ mod tests {
         }
         // The frame moved while the machine woke: the colour takes the board, still no write.
         let moved = shifted_frame(60);
-        a.write_still_path_at(&moved, at(t0, 5100)).expect("a moving frame");
+        a.write_frame_at(&moved, at(t0, 5100)).expect("a moving frame");
         let g = s.lock().unwrap();
         let n = g.sent.len();
         assert_eq!(g.sent[n - 2].as_slice(), direct_mode_report(), "direct mode first");
@@ -3069,7 +3247,7 @@ mod tests {
         // The still crosses two seconds, then the frame moves before the pages are all out.
         hold(&mut a, &frame, 0, 2100, t0);
         assert_eq!(userpic_count(&s.lock().unwrap()), 1, "page 0 went out");
-        a.write_still_path_at(&shifted_frame(60), at(t0, 2150)).expect("a moving frame");
+        a.write_frame_at(&shifted_frame(60), at(t0, 2150)).expect("a moving frame");
         hold(&mut a, &shifted_frame(60), 2300, 6000, t0);
         let g = s.lock().unwrap();
         // The picture was finished and shown, then the moving frame took the board back.
@@ -3121,18 +3299,18 @@ mod tests {
         let t0 = Instant::now();
         a.open_and_init().expect("connect");
         hold(&mut a, &grey_frame(100), 0, 1900, t0);
-        a.write_still_path_at(&grey_frame(101), at(t0, 2000)).expect("a drifted frame");
+        a.write_frame_at(&grey_frame(101), at(t0, 2000)).expect("a drifted frame");
         assert_eq!(upload_count(&s1.lock().unwrap()), 1, "one step is the same still");
         // Three steps is a new still, and its window starts over.
         let (mut b, s2) = rig(true);
         let t0 = Instant::now();
         b.open_and_init().expect("connect");
         hold(&mut b, &grey_frame(100), 0, 1900, t0);
-        b.write_still_path_at(&grey_frame(103), at(t0, 1900)).expect("a changed frame");
-        b.write_still_path_at(&grey_frame(103), at(t0, 2000)).expect("a still 0.1 s along");
+        b.write_frame_at(&grey_frame(103), at(t0, 1900)).expect("a changed frame");
+        b.write_frame_at(&grey_frame(103), at(t0, 2000)).expect("a still 0.1 s along");
         assert_eq!(upload_count(&s2.lock().unwrap()), 0, "three steps is a new still");
         hold(&mut b, &grey_frame(103), 2100, 3900, t0);
-        b.write_still_path_at(&grey_frame(103), at(t0, 3900)).expect("two seconds of the new still");
+        b.write_frame_at(&grey_frame(103), at(t0, 3900)).expect("two seconds of the new still");
         assert_eq!(upload_count(&s2.lock().unwrap()), 1, "and it uploads at two seconds");
     }
 
@@ -3238,7 +3416,7 @@ mod tests {
             crate::note_resume();
             let end = ms + 3000;
             while ms < end {
-                a.write_still_path_at(&frame, at(t0, ms)).expect("a frame");
+                a.write_frame_at(&frame, at(t0, ms)).expect("a frame");
                 ms += 100;
             }
         }
@@ -3264,7 +3442,7 @@ mod tests {
         hold(&mut a, &frame, 4700, 7000, t0);
         assert_eq!(s.lock().unwrap().sent.len(), before, "nothing repeats while it holds");
         // A picture rebuilt from the same still is shown by the mode it is already in.
-        a.write_still_path_at(&shifted_frame(60), at(t0, 7000)).expect("a moving frame");
+        a.write_frame_at(&shifted_frame(60), at(t0, 7000)).expect("a moving frame");
         hold(&mut a, &frame, 7100, 12_500, t0);
         let g = s.lock().unwrap();
         assert_eq!(g.picture.mode, Some(13), "the picture is back");
@@ -3317,7 +3495,7 @@ mod tests {
         }
         assert!(!a.may_enter_picture(at(t0, 4700)), "and the hour's entries are spent");
         // The effect moves: the board leaves light mode 13 at the first moving frame.
-        a.write_still_path_at(&shifted_frame(60), at(t0, 4800)).expect("the first moving frame");
+        a.write_frame_at(&shifted_frame(60), at(t0, 4800)).expect("the first moving frame");
         {
             let g = s.lock().unwrap();
             assert_eq!(g.picture.mode, Some(21), "the board leaves the picture at once");
@@ -3341,13 +3519,13 @@ mod tests {
         let frame = distinct_frame();
         // The first wake, a second after the connection: its report goes out.
         crate::note_resume();
-        a.write_still_path_at(&frame, at(t0, 1000)).expect("a frame after the wake");
+        a.write_frame_at(&frame, at(t0, 1000)).expect("a frame after the wake");
         assert_eq!(direct_count(&s.lock().unwrap()), 2, "the connect's report and the wake's");
         // The sleep drops the board out of direct mode, and the machine wakes again a minute
         // later: nothing may be assumed about the board's mode.
         s.lock().unwrap().picture.mode = None;
         crate::note_resume();
-        a.write_still_path_at(&frame, at(t0, 60_000)).expect("a frame after the second wake");
+        a.write_frame_at(&frame, at(t0, 60_000)).expect("a frame after the second wake");
         let g = s.lock().unwrap();
         assert_eq!(direct_count(&g), 3, "the second wake sets the mode again");
         assert_eq!(g.picture.mode, Some(21), "and the board is in direct mode");
@@ -3374,7 +3552,7 @@ mod tests {
         assert_eq!(g.sent.last().unwrap()[1], 0x0E, "and the colour is streaming");
         drop(g);
         // A moving frame keeps it there.
-        a.write_still_path_at(&shifted_frame(60), at(t0, 4800)).expect("a moving frame");
+        a.write_frame_at(&shifted_frame(60), at(t0, 4800)).expect("a moving frame");
         let g = s.lock().unwrap();
         assert_eq!(g.picture.mode, Some(21), "and it stays in direct mode");
         assert_eq!(g.sent.last().unwrap()[1], 0x0E, "with the colour");
@@ -3393,7 +3571,7 @@ mod tests {
         }
         assert!(!a.may_enter_picture(at(t0, 4700)), "the hour's entries are spent");
         // The keyboard comes back and must be put into direct mode, budget or no budget.
-        a.write_still_path_at(&frame, at(t0, 5000)).expect("a frame");
+        a.write_frame_at(&frame, at(t0, 5000)).expect("a frame");
         a.open_and_init().expect("the keyboard came back");
         let g = s.lock().unwrap();
         assert_eq!(direct_count(&g), 2, "the connection's reports, never refused");
@@ -3617,7 +3795,7 @@ mod tests {
         let _serial = serial();
         let (mut a, s) = rig_live(true);
         let t0 = live_up(&mut a).await;
-        assert!(a.live_active(), "live is on by default");
+        assert!(a.live_active(), "live is on with the variable set");
         // The engine's job: each matrix cell's colour goes to the LED the map names.
         let map = key_map();
         let mut frame = vec![Rgb8::BLACK; LIVE_SLOTS];
@@ -3808,5 +3986,132 @@ mod tests {
         let frame = lamp_frame();
         a.write_frame_at(&frame, t0).unwrap();
         assert_eq!(a.read_back(&device_id()).await.unwrap(), vec![frame_color(&frame)]);
+    }
+
+    // ------------------------------------------------ live off is the adapter main shipped (#10)
+
+    /// A 128-lamp frame, different for every `n`, in the picture's slot order.
+    fn golden_frame(n: u32) -> Vec<Rgb8> {
+        (0..PER_KEY_SLOTS as u32)
+            .map(|i| {
+                Rgb8::new(((i * 7 + n * 13) % 256) as u8, ((i * 3 + n) % 256) as u8, ((255 - i + n * 5) % 256) as u8)
+            })
+            .collect()
+    }
+
+    /// A report as hex, trailing zero bytes cut.
+    fn golden_hex(report: &[u8]) -> String {
+        let end = report.iter().rposition(|b| *b != 0).map_or(0, |i| i + 1);
+        report[..end].iter().map(|b| format!("{b:02x}")).collect()
+    }
+
+    /// The zone the adapter shows and every report it writes for a fixed run of frames: five
+    /// moving frames, a still held long enough to be uploaded and shown, a moving frame again,
+    /// and a one-colour frame. `write_frame_at` is the real path; the clock is simulated.
+    fn golden_run(mut a: RoyuanAdapter, s: &Arc<Mutex<Shared>>) -> (String, Vec<String>) {
+        let t0 = Instant::now();
+        let zone = {
+            let z = &a.device_info().zones[0];
+            let ZoneKind::Matrix { width, height, map } = &z.kind else { panic!("a matrix zone") };
+            let cells: Vec<String> = map
+                .chunks(*width as usize)
+                .map(|row| {
+                    row.iter().map(|c| c.map_or("-".to_string(), |v| v.to_string())).collect::<Vec<_>>().join(",")
+                })
+                .collect();
+            format!(
+                "{width}x{height} leds {}/{}/{} resizable {}\n{}",
+                z.led_count,
+                z.min_leds,
+                z.max_leds,
+                z.resizable,
+                cells.join("\n")
+            )
+        };
+        a.open_and_init().expect("connect");
+        for step in 0..5u64 {
+            a.write_frame_at(&golden_frame(step as u32), at(t0, step * 100)).unwrap();
+        }
+        let still = golden_frame(9);
+        for ms in (500..4700).step_by(100) {
+            a.write_frame_at(&still, at(t0, ms)).unwrap();
+        }
+        a.write_frame_at(&golden_frame(20), at(t0, 6000)).unwrap();
+        a.write_frame_at(&[Rgb8::new(10, 20, 30)], at(t0, 6100)).unwrap();
+        let sent = s.lock().unwrap().sent.iter().map(|r| golden_hex(r)).collect();
+        (zone, sent)
+    }
+
+    /// The zone `origin/main` shows for the keyboard: 22 by 6, 128 lamps, picture slot order
+    /// down each column, four gaps (captured by running this test's run against main's
+    /// `royuan.rs`).
+    #[rustfmt::skip]
+    const GOLDEN_MAIN_ZONE: [&str; 7] = [
+        "22x6 leds 128/128/128 resizable false",
+        "0,6,12,18,24,30,36,42,48,54,60,66,72,78,84,90,96,102,108,114,120,126",
+        "1,7,13,19,25,31,37,43,49,55,61,67,73,79,85,91,97,103,109,115,121,127",
+        "2,8,14,20,26,32,38,44,50,56,62,68,74,80,86,92,98,104,110,116,122,-",
+        "3,9,15,21,27,33,39,45,51,57,63,69,75,81,87,93,99,105,111,117,123,-",
+        "4,10,16,22,28,34,40,46,52,58,64,70,76,82,88,94,100,106,112,118,124,-",
+        "5,11,17,23,29,35,41,47,53,59,65,71,77,83,89,95,101,107,113,119,125,-",
+    ];
+
+    /// Every report `origin/main` writes for the run in [`golden_run`], as hex with the trailing
+    /// zeros cut: direct mode, the whole-board colour, the seven picture pages and light mode 13.
+    #[rustfmt::skip]
+    const GOLDEN_MAIN_REPORTS: [&str; 22] = [
+        "000715040407000000d4",
+        "000e776bc00000004f",
+        "000e786abb00000054",
+        "000e796bb600000057",
+        "000e7c6cb100000058",
+        "000e7f6bac0000005b",
+        "000e866e930000006a",
+        "000e866e930000006a",
+        "000c0080010000007275092c7c0c2b830f2a8a12299115289818279f1b26a61e25ad2124b42423bb2722c22a21c92d20d0301fd7331ede361de5391cec3c1bf33f",
+        "000e866e930000006a",
+        "000c008001010000711afa42190145180848170f4b16164e151d51142454132b5712325a11395d1040600f47630e4e660d55690c5c6c0b636f0a6a720971750878",
+        "000c0080010200007078077f7b06867e058d81049484039b8702a28a01a98d00b090ffb793febe96fdc599fccc9cfbd39ffadaa2f9e1a5f8e8a8f7efabf6f6aef5",
+        "000c0080010300006ffdb1f404b4f30bb7f212baf119bdf020c0ef27c3ee2ec6ed35c9ec3ccceb43cfea4ad2e951d5e858d8e75fdbe666dee56de1e474e4e37be7",
+        "000c0080010400006ee282eae189ede090f0df97f3de9ef6dda5f9dcacfcdbb3ffdaba02d9c105d8c808d7cf0bd6d60ed5dd11d4e414d3eb17d2f21ad1f91dd0",
+        "000c0080010500006d20cf0723ce0e26cd1529cc1c2ccb232fca2a32c93135c83838c73f3bc6463ec54d41c45444c35b47c2624ac1694dc07050bf7753be7e56bd",
+        "000c0080010600006c8559bc8c5cbb935fba9a62b9a165b8a868b7af6bb6b66eb5bd71b4c474b3cb77b2d27ab1d97db0e080afe783aeee86ad",
+        "000e866e930000006a",
+        "000e866e930000006a",
+        "00070d03040000c8c854",
+        "000715040407000000d4",
+        "000e77715c000000ad",
+        "000e0a141e000000b5",
+    ];
+
+    #[test]
+    fn live_off_is_the_adapter_main_shipped_byte_for_byte() {
+        // The variable is unset: same zone shape, same lamps, same reports as `origin/main`.
+        let _serial = serial();
+        let (a, s) = rig(true);
+        let (zone, sent) = golden_run(a, &s);
+        assert_eq!(zone, GOLDEN_MAIN_ZONE.join("
+"), "the zone is main's 22 by 6 of 128 lamps");
+        assert_eq!(sent.len(), GOLDEN_MAIN_REPORTS.len(), "the same number of reports: {sent:#?}");
+        for (i, (got, want)) in sent.iter().zip(GOLDEN_MAIN_REPORTS).enumerate() {
+            assert_eq!(got, want, "report {i}");
+        }
+        assert!(
+            sent.iter().all(|r| !r.starts_with("000f")),
+            "no 0x0F live report goes out while live is off"
+        );
+    }
+
+    #[test]
+    fn the_variable_is_read_as_one_and_nothing_else() {
+        assert!(live_from(Some("1")));
+        assert!(live_from(Some(" 1 ")));
+        for off in [None, Some(""), Some("0"), Some("true"), Some("on"), Some("11")] {
+            assert!(!live_from(off), "{off:?} leaves live off");
+        }
+        // An adapter built the usual way takes the setting from the process environment, once.
+        let shared = Arc::new(Mutex::new(Shared::default()));
+        let built = RoyuanAdapter::with_opener(Box::new(FakeOpener(shared)));
+        assert_eq!(built.live.wanted, live_from(std::env::var(LIVE_ENV).ok().as_deref()));
     }
 }

@@ -8,7 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
-- Devices: the ROYUAN MonsGeek keyboard is driven key by key, live, so effects move across its keys. (#10)
+- Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
 
 ### Fixed
 
