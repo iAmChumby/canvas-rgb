@@ -26,6 +26,12 @@ pub const PATTERN_NAME_MAX: usize = 60;
 pub const PATTERN_LEDS_MAX: u32 = 4096;
 /// The most frames a file may hold for one pattern. 0.16.0 writes one.
 pub const PATTERN_FRAMES_MAX: usize = 256;
+
+/// The fastest a pattern may spin, in turns per second, either direction (#468).
+pub const SPIN_TURNS_MAX: f32 = 5.0;
+
+/// A new pattern's spin speed when the owner turns Spin on: one lap every 4 seconds (#468).
+pub const SPIN_TURNS_DEFAULT: f32 = 0.25;
 /// The lit group of the editor's takeover.
 pub const PATTERN_EDIT_GROUP: &str = "pattern-edit";
 /// How bright the other lights are while the editor is open, in percent.
@@ -85,6 +91,27 @@ impl Motion {
 
     pub fn is_none(&self) -> bool {
         self.kind == "none"
+    }
+
+    /// Spin (#468): the pattern turns along its LEDs at `turns_per_s` laps a second (negative turns
+    /// the other way), written `{"type":"spin","turns_per_s":0.25}`. The speed is clamped to
+    /// [`SPIN_TURNS_MAX`] either way; a speed that is not finite is 0. A daemon older than #468
+    /// plays it as none, as it does any motion it does not know.
+    pub fn spin(turns_per_s: f32) -> Self {
+        let speed = if turns_per_s.is_finite() { turns_per_s.clamp(-SPIN_TURNS_MAX, SPIN_TURNS_MAX) } else { 0.0 };
+        let mut params = serde_json::Map::new();
+        params.insert("turns_per_s".into(), serde_json::Value::from(f64::from(speed)));
+        Self { kind: "spin".into(), params }
+    }
+
+    /// The spin speed in turns per second, or `None` when this is not a spin or its speed is
+    /// missing, not a number, not finite or past [`SPIN_TURNS_MAX`] (it then plays as none).
+    pub fn as_spin(&self) -> Option<f32> {
+        if self.kind != "spin" {
+            return None;
+        }
+        let speed = self.params.get("turns_per_s")?.as_f64()? as f32;
+        (speed.is_finite() && speed.abs() <= SPIN_TURNS_MAX).then_some(speed)
     }
 }
 
@@ -374,5 +401,27 @@ mod tests {
         assert_eq!(fit_kind(&ring12, 1, Arrangement::Single), FitKind::OneLed);
         assert_eq!(fit_kind(&on(1, Arrangement::Single), 1, Arrangement::Single), FitKind::Exact);
         assert_eq!(fit_kind(&ring12, 1, Arrangement::Ring), FitKind::OneLed);
+    }
+
+    #[test]
+    fn spin_round_trips_and_reads_back_its_speed() {
+        let m = Motion::spin(SPIN_TURNS_DEFAULT);
+        let json = serde_json::to_string(&m).unwrap();
+        assert_eq!(json, r#"{"type":"spin","turns_per_s":0.25}"#);
+        let back: Motion = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.as_spin(), Some(0.25));
+        assert!(!back.is_none());
+    }
+
+    #[test]
+    fn spin_clamps_and_rejects_bad_speeds() {
+        assert_eq!(Motion::spin(99.0).as_spin(), Some(SPIN_TURNS_MAX));
+        assert_eq!(Motion::spin(-99.0).as_spin(), Some(-SPIN_TURNS_MAX));
+        assert_eq!(Motion::spin(f32::NAN).as_spin(), Some(0.0));
+        let hand: Motion = serde_json::from_str(r#"{"type":"spin","turns_per_s":"fast"}"#).unwrap();
+        assert_eq!(hand.as_spin(), None);
+        let too_fast: Motion = serde_json::from_str(r#"{"type":"spin","turns_per_s":6.0}"#).unwrap();
+        assert_eq!(too_fast.as_spin(), None);
+        assert_eq!(Motion::none().as_spin(), None);
     }
 }

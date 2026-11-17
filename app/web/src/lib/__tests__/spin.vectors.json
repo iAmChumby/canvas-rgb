@@ -1,0 +1,338 @@
+{
+  "about": "Golden vectors for OKLab blending and Spin (#468). Rust (crates/canvas-core/src/pattern_spin.rs) and TypeScript (app/web/src/lib/oklab.ts, spin.ts) both read this file. The 'oklab' section is Ottosson's published values; the 'expect' fields are what the Rust makes. Rewrite them after a deliberate change by running `cargo test -p canvas-core --test spin_vectors` with the environment variable CANVAS_WRITE_VECTORS=1.",
+  "mix": [
+    {
+      "expect": "#8c53a2",
+      "from": "#ff0000",
+      "t": 0.5,
+      "to": "#0000ff"
+    },
+    {
+      "expect": "#d0a800",
+      "from": "#ff0000",
+      "t": 0.5,
+      "to": "#00ff00"
+    },
+    {
+      "expect": "#222222",
+      "from": "#000000",
+      "t": 0.25,
+      "to": "#ffffff"
+    },
+    {
+      "expect": "#222222",
+      "from": "#ffffff",
+      "t": 0.75,
+      "to": "#000000"
+    },
+    {
+      "expect": "#d2ff88",
+      "from": "#ffff00",
+      "t": 0.3,
+      "to": "#00ffff"
+    },
+    {
+      "expect": "#bfb0a2",
+      "from": "#123456",
+      "t": 0.75,
+      "to": "#fedcba"
+    },
+    {
+      "expect": "#ff0000",
+      "from": "#ff0000",
+      "t": 0.0,
+      "to": "#0000ff"
+    },
+    {
+      "expect": "#0000ff",
+      "from": "#ff0000",
+      "t": 1.0,
+      "to": "#0000ff"
+    },
+    {
+      "expect": "#336699",
+      "from": "#336699",
+      "t": 0.5,
+      "to": "#336699"
+    },
+    {
+      "expect": "#f07e4b",
+      "from": "#ff8000",
+      "t": 0.1,
+      "to": "#8000ff"
+    }
+  ],
+  "oklab": [
+    {
+      "hex": "#ffffff",
+      "lab": [
+        1.0,
+        0.0,
+        0.0
+      ]
+    },
+    {
+      "hex": "#ff0000",
+      "lab": [
+        0.62796,
+        0.22486,
+        0.12585
+      ]
+    },
+    {
+      "hex": "#00ff00",
+      "lab": [
+        0.86644,
+        -0.23389,
+        0.1795
+      ]
+    },
+    {
+      "hex": "#0000ff",
+      "lab": [
+        0.45201,
+        -0.03246,
+        -0.31153
+      ]
+    },
+    {
+      "hex": "#000000",
+      "lab": [
+        0.0,
+        0.0,
+        0.0
+      ]
+    }
+  ],
+  "spin": [
+    {
+      "colours": [
+        "#0a0000",
+        "#1e0000",
+        "#320000",
+        "#460000",
+        "#5a0000",
+        "#6e0000",
+        "#820000",
+        "#960000"
+      ],
+      "expect": [
+        "#0a0000",
+        "#1e0000",
+        "#320000",
+        "#460000",
+        "#5a0000",
+        "#6e0000",
+        "#820000",
+        "#960000"
+      ],
+      "name": "ring of 8, start",
+      "t": 0.0,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#0a0000",
+        "#1e0000",
+        "#320000",
+        "#460000",
+        "#5a0000",
+        "#6e0000",
+        "#820000",
+        "#960000"
+      ],
+      "expect": [
+        "#820000",
+        "#960000",
+        "#0a0000",
+        "#1e0000",
+        "#320000",
+        "#460000",
+        "#5a0000",
+        "#6e0000"
+      ],
+      "name": "ring of 8, one second is two LEDs",
+      "t": 1.0,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#0a0000",
+        "#1e0000",
+        "#320000",
+        "#460000",
+        "#5a0000",
+        "#6e0000",
+        "#820000",
+        "#960000"
+      ],
+      "expect": [
+        "#0a0000",
+        "#1e0000",
+        "#320000",
+        "#460000",
+        "#5a0000",
+        "#6e0000",
+        "#820000",
+        "#960000"
+      ],
+      "name": "ring of 8, a lap is the start again",
+      "t": 4.0,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff"
+      ],
+      "expect": [
+        "#8c53a2",
+        "#8c53a2",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff",
+        "#0000ff"
+      ],
+      "name": "ring of 8, half an LED",
+      "t": 0.25,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#00ff00",
+        "#0000ff",
+        "#ffff00",
+        "#00ffff",
+        "#ff00ff",
+        "#ffffff",
+        "#000000"
+      ],
+      "expect": [
+        "#9e0000",
+        "#accd00",
+        "#0081dc",
+        "#a6cfa2",
+        "#88ffd2",
+        "#e584ff",
+        "#ffcbff",
+        "#2e2e2e"
+      ],
+      "name": "ring of 8, three tenths of an LED",
+      "t": 0.15,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#00ff00",
+        "#0000ff",
+        "#ffff00",
+        "#00ffff",
+        "#ff00ff",
+        "#ffffff",
+        "#336699"
+      ],
+      "expect": [
+        "#89beb6",
+        "#9dffc1",
+        "#da99ff",
+        "#ffb9ff",
+        "#83a2c2",
+        "#b8565d",
+        "#c0bb00",
+        "#0096ce"
+      ],
+      "name": "ring of 8, the other way",
+      "t": 1.3,
+      "turns_per_s": -0.25
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#ff8000",
+        "#ffff00",
+        "#00ff00",
+        "#0000ff"
+      ],
+      "expect": [
+        "#0096ce",
+        "#a3528e",
+        "#ff6000",
+        "#ffce00",
+        "#9dff00"
+      ],
+      "name": "5 LEDs, 0.7 s",
+      "t": 0.7,
+      "turns_per_s": 0.4
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#00ff00",
+        "#0000ff"
+      ],
+      "expect": [
+        "#00e672",
+        "#383be3",
+        "#f55a00"
+      ],
+      "name": "3 LEDs, fast",
+      "t": 0.123,
+      "turns_per_s": 5.0
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#0000ff"
+      ],
+      "expect": [
+        "#8c53a2",
+        "#8c53a2"
+      ],
+      "name": "2 LEDs, half a step",
+      "t": 1.0,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#ff8040"
+      ],
+      "expect": [
+        "#ff8040"
+      ],
+      "name": "one LED does not move",
+      "t": 3.3,
+      "turns_per_s": 0.25
+    },
+    {
+      "colours": [
+        "#ff0000",
+        "#ff0000",
+        "#000000",
+        "#000000",
+        "#0000ff",
+        "#0000ff"
+      ],
+      "expect": [
+        "#0000ff",
+        "#8c53a2",
+        "#ff0000",
+        "#630000",
+        "#000000",
+        "#000063"
+      ],
+      "name": "line of 6 wraps like a ring",
+      "t": 0.5,
+      "turns_per_s": 0.5
+    }
+  ]
+}

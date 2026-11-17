@@ -8,6 +8,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Added
 
+- Patterns: pick the shape a light is in (Line, Ring, or Grid where it is one) on its Devices row or in the pattern editor, paint a Gradient round the ring with Wrap so the end meets the start, and turn on Spin to make the pattern turn along its LEDs at the same speed on any fan; colours blend in OKLab, so red to blue passes through purple. (#468)
 - Devices: the ROYUAN MonsGeek keyboard has live per-key frames, off by default and turned on with the `CANVAS_RGB_ROYUAN_LIVE=1` environment variable. The key map is still being mapped, so which key lights for which cell is not settled. (#10)
 
 ### Changed
@@ -16,6 +17,7 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 
 ### Fixed
 
+- The editor's left rail no longer scrolls sideways: its tooltips reach over the page without adding a horizontal scrollbar, and the rail still scrolls up and down in a short window. (#467)
 - The status and scenes pages keep answering while the render engine is slow: the daemon keeps the engine's numbers fresh and reads them, it says the engine is not answering when it is not, and a scene change that landed is not reported as failed. The editor tells a daemon that is up from one that is gone. (#241)
 - Effects: the New effect menu's Stack, Pattern and Code keys show their name and full note inside the key, with the icon centred and no text crossing the border. (#466)
 - Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)

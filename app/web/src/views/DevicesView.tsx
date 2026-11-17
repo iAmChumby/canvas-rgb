@@ -19,7 +19,7 @@ import { Button } from "@/components/Button";
 import { EmptyState } from "@/components/EmptyState";
 import { NameField } from "@/components/NameField";
 import { Panel } from "@/components/Panel";
-import { Segmented } from "@/components/Segmented";
+import { ShapePicker, shapesFor } from "@/components/ShapePicker";
 import { Toggle } from "@/components/Toggle";
 import { InlineSkeleton } from "@/components/Skeleton";
 import { Slider } from "@/components/Slider";
@@ -293,11 +293,11 @@ function WhiteBalanceSection({
 }
 
 /**
- * One light's row: its name, what it is (a strip or a ring, where the hardware says linear), and
+ * One light's row: its name, its shape (a line or a ring, and a grid where the zone is one), and
  * whether it runs the other way. Every change goes straight to the lights route and the list is
  * read back, so two windows never disagree about a light.
  */
-function LightControls({ view }: { view: LightView }) {
+function LightControls({ view, zone }: { view: LightView; zone: ZoneInfo }) {
   const light = view.light;
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(view.label);
@@ -325,8 +325,10 @@ function LightControls({ view }: { view: LightView }) {
     void patch({ name: next || null }).catch(() => setName(view.label));
   };
 
-  // Every light gets the same controls, whatever its zone's shape: a name, the strip or ring it
-  // is, and the way it runs. One light row differs from the next only in the device it belongs to.
+  // The shapes this zone may be laid out as (a line, a ring, and a grid where the zone is one).
+  // A single-LED zone offers none, a matrix also offers Grid (#471 fix pass).
+  const shapes = shapesFor(zone.kind.type);
+
   return (
     <div className="rd-light-row" data-busy={busy ? "true" : undefined}>
       <span className="mute rd-light-key">Light</span>
@@ -359,15 +361,16 @@ function LightControls({ view }: { view: LightView }) {
           <span className="one-line">{view.label}</span>
         </Button>
       )}
-      <Segmented<"strip" | "ring">
-        label={`What ${view.label} is`}
-        value={light.arrangement === "ring" ? "ring" : "strip"}
-        options={[
-          { value: "strip", label: "Strip" },
-          { value: "ring", label: "Ring" },
-        ]}
-        onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
-      />
+      <span className="rd-shape" data-testid="light-shape">
+        <ShapePicker
+          label={`What ${view.label} is`}
+          value={light.arrangement}
+          shapes={shapes}
+          disabled={busy}
+          onChange={(next) => void patch({ arrangement: next }).catch(() => undefined)}
+        />
+      </span>
+
       <span className="rd-light-turn">
         <span className="mute">Runs the other way</span>
         <Toggle
@@ -679,7 +682,7 @@ export function DevicesView() {
                       )}
 
                       {one && !chainOne && lightOf(one.index) && (
-                        <LightControls view={lightOf(one.index)!} />
+                        <LightControls view={lightOf(one.index)!} zone={one} />
                       )}
 
                       {d.zones.length === 0 && (
@@ -711,7 +714,7 @@ export function DevicesView() {
                               </div>
                             )}
                             {!chainOf(z.index) && lightOf(z.index) && (
-                              <LightControls view={lightOf(z.index)!} />
+                              <LightControls view={lightOf(z.index)!} zone={z} />
                             )}
                           </Fragment>
                         ))}

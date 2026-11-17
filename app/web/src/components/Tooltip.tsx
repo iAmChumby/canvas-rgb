@@ -92,7 +92,13 @@ export function Tooltip({
       // A bubble wider than the room it has wraps instead of running off the window.
       bub.style.maxWidth = "";
       bub.style.whiteSpace = "";
-      let bounds = boundsAround(bub);
+      // A fixed bubble (the rail's, #467) is outside every ancestor's scroll box, so the window
+      // is its bounds and it is placed in window coordinates. An absolute bubble is still placed
+      // inside its trigger, which may sit in a scroll container that clips it sooner.
+      const fixed = cs.position === "fixed";
+      let bounds = fixed
+        ? boundsOf({ width: document.documentElement.clientWidth, height: document.documentElement.clientHeight })
+        : boundsAround(bub);
       let room = bounds.width - 2 * TIP_MARGIN;
       if (room < MIN_TEXT_WIDTH) {
         bounds = boundsOf({ width: document.documentElement.clientWidth, height: document.documentElement.clientHeight });
@@ -115,9 +121,10 @@ export function Tooltip({
         align: ALIGNS.includes(wantedAlign) ? wantedAlign : "center",
         gap,
       });
-      // The bubble is positioned inside its `.tip`, which is the trigger.
-      bub.style.left = `${at.left - trigger.left}px`;
-      bub.style.top = `${at.top - trigger.top}px`;
+      // An absolute bubble is positioned inside its `.tip`, which is the trigger; a fixed one
+      // is positioned in the window, because its offsets are window coordinates (#467).
+      bub.style.left = `${fixed ? at.left : at.left - trigger.left}px`;
+      bub.style.top = `${fixed ? at.top : at.top - trigger.top}px`;
       bub.style.right = "auto";
       bub.style.bottom = "auto";
       bub.style.transform = "none";
