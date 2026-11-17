@@ -37,9 +37,17 @@ fn view(light: &Light, devices: &[DeviceInfo]) -> LightView {
     let zone = device.and_then(|device| {
         device.zones.iter().find(|zone| zone.index == light.zone_index)
     });
+    let leds = zone.map(|zone| led_count(light, zone)).unwrap_or(0);
+    // A zone that shrank below the owner's first LED drops it: there is no notch to show and the
+    // light plays from LED 0. The stored value is left alone (a resize back restores it); the
+    // engine's own helper applies the same rule at play time (#468).
+    let mut shown = light.clone();
+    if shown.first_led.is_some_and(|first| first >= leds) {
+        shown.first_led = None;
+    }
     LightView {
-        light: light.clone(),
-        led_count: zone.map(|zone| led_count(light, zone)).unwrap_or(0),
+        light: shown,
+        led_count: leds,
         connected: device.is_some_and(|device| device.connected),
         label: label(light, device, zone),
     }
@@ -73,9 +81,12 @@ fn label(light: &Light, device: Option<&DeviceInfo>, zone: Option<&ZoneInfo>) ->
 /// `PATCH /api/v1/lights/{id}`.
 ///
 /// `name` left out is unchanged, `name: null` clears it, a string renames the light (trimmed; an
-/// empty or over-long one is a 422). `arrangement` and `reversed` are set when given. The change
-/// is saved before it is answered, so a refused save changes nothing and answers 503. A patch
-/// that changes nothing is answered without writing the file.
+/// empty or over-long one is a 422). `arrangement` and `reversed` are set when given. `first_led`
+/// is set when given: `0` clears it (LED 0 starts the run, as before #468) unless the light runs
+/// back, where a stored 0 keeps LED 0 first and a missing one means the old flip; a value at or past
+/// the light's current LED count is a 422. The change is saved before it is answered, so a refused
+/// save changes nothing and answers 503. A patch that changes nothing is answered without writing
+/// the file.
 pub async fn patch_light(
     State(app): State<Arc<App>>,
     Path(id): Path<String>,
@@ -88,12 +99,38 @@ pub async fn patch_light(
         .map_err(|e| ApiFailure::validation(format!("the body is not a light patch: {e}")))?;
 
     let devices = app.devices.read().await.clone();
-    // A rename changes nothing the engine plays; an arrangement or a direction does.
-    let replan = patch.arrangement.is_some() || patch.reversed.is_some();
+    // A rename changes nothing the engine plays; an arrangement, a direction or a first LED does.
+    let replan = patch.arrangement.is_some() || patch.reversed.is_some() || patch.first_led.is_some();
     let (light, saved) = {
         let mut store = app.store.write().await;
         let Some(index) = store.lights.lights.iter().position(|light| light.id == id) else {
             return Err(ApiFailure::not_found(format!("no light with the id {id}")));
+        };
+        // A first LED is a physical LED of this light, so it must fit the count the device has
+        // now. 0 resets it to None. Validate before any field is changed so a refused patch
+        // leaves memory and lights.json as they were (#468).
+        // A first LED of 0 clears it, unless the light runs back: a reversed light with no first
+        // LED plays the old full flip (position 0 on its last LED), so LED 0 as the first LED of a
+        // reversed run has to be stored (#468).
+        let reversed_after = patch.reversed.unwrap_or(store.lights.lights[index].reversed);
+        let first_led = match patch.first_led {
+            None => None,
+            Some(0) if !reversed_after => Some(None),
+            Some(first) => {
+                let current = &store.lights.lights[index];
+                let count = devices
+                    .iter()
+                    .find(|device| device.id == current.device_id)
+                    .and_then(|device| device.zones.iter().find(|zone| zone.index == current.zone_index))
+                    .map(|zone| led_count(current, zone))
+                    .unwrap_or(0);
+                if first >= count {
+                    return Err(ApiFailure::validation(format!(
+                        "a light's first LED must be below its {count} LEDs"
+                    )));
+                }
+                Some(Some(first))
+            }
         };
         let name = match patch.name {
             None => None,
@@ -125,6 +162,9 @@ pub async fn patch_light(
             }
             if let Some(reversed) = patch.reversed {
                 light.reversed = reversed;
+            }
+            if let Some(first_led) = first_led {
+                light.first_led = first_led;
             }
         }
         // A patch that changes nothing leaves the file alone: the light on disk is still right.

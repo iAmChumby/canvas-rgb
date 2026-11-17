@@ -31,4 +31,12 @@ kind?: ChainPartKind,
  * mean once. The engine writes `leds.len()` once whatever this says; it only counts, so a
  * scene still sees one light. At most [`COPIES_MAX`]; the daemon validates it on write.
  */
-copies?: number, };
+copies?: number, 
+/**
+ * Which of this light's LEDs is the first in its run (#468): the physical LED, counted in the
+ * order the hardware wires them, that a pattern, a strip read and every effect treat as
+ * position 0. `None` is 0, as every light before #468. Applied before `reversed`: the first
+ * LED stays first, `reversed` sets which way the run goes from it. Must be below the light's
+ * LED count; the daemon validates it on write.
+ */
+first_led?: number, };

@@ -1350,6 +1350,11 @@ pub struct LightPatch {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[ts(optional)]
     pub kind: Option<ChainPartKind>,
+    /// Which LED is first (#468), see [`crate::scene::Light::first_led`]. 0 resets it. Must be
+    /// below the light's LED count.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[ts(optional)]
+    pub first_led: Option<u32>,
 }
 
 /// `POST` [`routes::LIGHTS_FLASH`].

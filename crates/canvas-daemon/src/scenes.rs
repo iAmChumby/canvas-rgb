@@ -96,6 +96,7 @@ fn whole_zone_light(device: &DeviceInfo, zone: &ZoneInfo) -> Light {
         reversed: false,
         kind: None,
         copies: None,
+        first_led: None,
     }
 }
 
@@ -2230,6 +2231,7 @@ pub(crate) mod tests {
                 reversed: false,
                 kind: None,
                 copies: None,
+                first_led: None,
             }).collect(),
         };
         let g = |id: &str, member: &str, effect: &str| Group {
