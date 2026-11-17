@@ -386,6 +386,30 @@ describe("a header's row on Devices", () => {
     expect(rowOf("JARGB 1").textContent).toContain("Nothing is plugged into this ARGB header.");
   });
 
+  it("a header sized outside the flow says its length is not checked, without repeating the count", async () => {
+    // A saved size re-applied at start-up is not a chain record (#470). The count cell already
+    // shows the LEDs, so the state cell names only what is unknown, in short words that keep clear
+    // of the Set up key, and never calls the devices "parts".
+    await showDevices([chain(1, "JARGB 1", "not_set_up", [], 8)]);
+
+    const row = rowOf("JARGB 1");
+    expect(within(row).getByText("Not checked")).toBeTruthy();
+    expect(row.textContent).not.toContain("parts");
+    expect(row.textContent).not.toContain("Not set up");
+    // The count cell shows the zone's length (120 here, from a different read) and the state cell
+    // must not repeat the chain's own 8 LEDs beside it (#486 review).
+    expect(row.textContent).toContain("120 LEDs");
+    expect(row.textContent).not.toContain("8 LEDs");
+    expect(within(row).getByRole("button", { name: /^Set up/ })).toBeTruthy();
+  });
+
+  it("a header with no size still says simply not set up", async () => {
+    await showDevices([chain(0, "JAF", "not_set_up", [], 0)]);
+    const row = rowOf("JAF");
+    expect(row.textContent).toContain("Not set up");
+    expect(row.textContent).not.toContain("Not checked");
+  });
+
   it("a set up header lists every part with its own controls", async () => {
     await showDevices([chain(2, "JARGB 2", "set_up", [FAN_ONE, FAN_TWO], 96)]);
 
