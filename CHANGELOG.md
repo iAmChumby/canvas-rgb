@@ -21,6 +21,8 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 - `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)
 - The "frame write failed" warning keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter still catches it. (#87)
 - Every daemon log line that moved out of the daemon's own program keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter catches all of them. (#446)
+- Scenes: a light strip playing a stack that mixes Fire or Audio Spectrum with another effect now shows every layer its own way, including layers kept to one device, zone or rectangle and layers shaped by a mask effect. (#427)
+- Scenes: on a strip playing a mixed stack, a layer whose own mask only partly covers it or fades across a light now reads as it does on the stage, and a slow layer that has faulted keeps lighting the strip with its last picture, as it does on the stage. (#427)
 - The site's hero glow no longer shows a faint line where it crosses the section edge, and a long sweep takes the same time at 30, 60 and 144 Hz. (#63)
 - Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
 - Installer notes: a failed start of canvas-rgb after an update is now named in the final note with what to do, and an uninstall that found no installation no longer claims it could not stop the service. (#77)
