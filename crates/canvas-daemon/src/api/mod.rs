@@ -91,7 +91,7 @@ pub fn router(app: Arc<App>) -> Router {
         .route(routes::GROUP_MOVE, post(scenes::move_group))
         .route(routes::LIGHTS_FLASH, post(scenes::flash_lights))
         .route(routes::LIGHTS, get(lights::list_lights))
-        .route(routes::LIGHT, patch(lights::patch_light))
+        .route(routes::LIGHT, patch(lights::patch_light).delete(lights::delete_light))
         .route(routes::CHAINS, get(chains::list_chains))
         .route(
             routes::CHAIN_SETUP,

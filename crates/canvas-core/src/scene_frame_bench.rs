@@ -276,6 +276,7 @@ fn run_with(html: Option<(&str, &str)>, k: usize, all_pattern: bool) -> Run {
                 brightness: 100,
                 effect: Some(effect),
                 props: Props::new(),
+                sequence: None,
             }
         })
         .collect();

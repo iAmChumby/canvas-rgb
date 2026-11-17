@@ -280,6 +280,7 @@ fn a_running_engine_at_thirty_fps_stays_inside_the_budget() {
             brightness: 100,
             effect: Some(Box::new(SolidEffect)),
             props: Props::new(),
+            sequence: None,
         }],
         false,
     );

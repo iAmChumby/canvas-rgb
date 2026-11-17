@@ -134,6 +134,7 @@ fn case_scene() -> ScenesFile {
                     plays: Plays::Effect { effect: role.effect.into(), props: Props::new() },
                     mode: GroupMode::FlowAcross,
                     brightness: 100,
+                    sequence: None,
                 })
                 .collect(),
         }],

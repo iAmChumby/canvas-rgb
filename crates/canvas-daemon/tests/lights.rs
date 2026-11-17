@@ -11,7 +11,7 @@ use axum::http::{Request, StatusCode};
 use canvas_daemon::api;
 use canvas_daemon::state::App;
 use canvas_daemon::storage::Store;
-use canvas_proto::api::{routes, ApiError, LightsResponse, LightView};
+use canvas_proto::api::{routes, ApiError, LightDeleted, LightsResponse, LightView};
 use canvas_proto::device::{DeviceId, DeviceInfo, DeviceKind, ZoneInfo, ZoneKind};
 use canvas_proto::layout::LedSlice;
 use canvas_proto::scene::{
@@ -179,6 +179,266 @@ async fn get_lights(router: axum::Router) -> (StatusCode, serde_json::Value) {
 
 fn views(body: &serde_json::Value) -> LightsResponse {
     serde_json::from_value(body.clone()).expect("the body is a LightsResponse")
+}
+
+/// OpenRGB's copy of the MonsGeek keyboard: `is_driven` drops it from discovery (#393).
+const UNDRIVEN: &str = "openrgb:HID: hid#VID_3151&PID_4015&MI_02#7&abc";
+
+/// The scene a leftover light landed in, on disk: one group holding only that light.
+fn scenes_with(group_id: &str, name: &str, members: &[&str]) -> serde_json::Value {
+    serde_json::json!({
+        "schema_version": 1,
+        "active": "gaming",
+        "scenes": [{
+            "id": "gaming", "name": "Gaming", "rev": 1,
+            "groups": [{
+                "id": group_id, "name": name, "members": members,
+                "plays": { "type": "off" }, "mode": "flow_across", "brightness": 100
+            }]
+        }]
+    })
+}
+
+/// A `DELETE` on one light, with the token. The id holds a space and `#`, both encoded as the
+/// editor's client sends them.
+fn delete_request(id: &str) -> Request<Body> {
+    request(
+        "DELETE",
+        &routes::LIGHT.replace("{id}", &id.replace('#', "%23").replace(' ', "%20")),
+    )
+}
+
+/// A `PUT` of a whole scene, with the token and a JSON body.
+fn put_scene_request(id: &str, put: &canvas_proto::api::ScenePut) -> Request<Body> {
+    request_with_body(
+        "PUT",
+        &routes::SCENE.replace("{id}", id),
+        &serde_json::to_string(put).expect("the scene put serialises"),
+    )
+}
+
+/// A home holding two leftover lights in one group, loaded the way the daemon starts. Deleting
+/// `id` leaves `stays` in the group, so the scene that comes back is still valid to PUT (#497).
+async fn build_delete_pair() -> (axum::Router, Arc<App>, TempHome, String) {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let stays = format!("{UNDRIVEN}#z0p2");
+    let home = TempHome::new();
+    let on_disk = lights_file(vec![
+        light(&id, UNDRIVEN, 0, Some((0, 8)), Some("Old strip")),
+        light(&stays, UNDRIVEN, 0, Some((8, 8)), Some("Other strip")),
+    ]);
+    std::fs::write(
+        home.path.join(canvas_proto::scene::LIGHTS_FILE),
+        serde_json::to_vec(&on_disk).expect("the lights file serialises"),
+    )
+    .expect("the lights file is written");
+    std::fs::write(
+        home.path.join(canvas_proto::scene::SCENES_FILE),
+        serde_json::to_vec(&scenes_with("g-shared", "Two strips", &[&id, &stays]))
+            .expect("the scenes file serialises"),
+    )
+    .expect("the scenes file is written");
+    let store = Store::load_from(&home.path);
+    let (router, app, home) = build_with(store, Vec::new(), home).await;
+    (router, app, home, id)
+}
+
+/// #414 regression: an old `lights.json` can hold a *named slice* light (id ending `p<n>`, with
+/// `leds` and a `name`) on a device the daemon never drives. The #393 start-up cleanup only removes
+/// whole-zone lights the owner never touched, so this light survives. The owner sees it in Scenes'
+/// add-devices list as "0 LEDs · not connected" and can put it in a group. `DELETE` now removes it,
+/// names the group it emptied, and drops that group. On the old code the route answered 405 (no way
+/// to remove the light), so this test fails there.
+#[tokio::test]
+async fn deleting_an_old_named_slice_light_removes_it_and_the_group_it_emptied() {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let home = TempHome::new();
+    let on_disk = lights_file(vec![light(&id, UNDRIVEN, 0, Some((0, 8)), Some("Old keyboard strip"))]);
+    std::fs::write(
+        home.path.join(canvas_proto::scene::LIGHTS_FILE),
+        serde_json::to_vec(&on_disk).expect("the lights file serialises"),
+    )
+    .expect("the lights file is written");
+    std::fs::write(
+        home.path.join(canvas_proto::scene::SCENES_FILE),
+        serde_json::to_vec(&scenes_with("g-old", "Old keyboard", &[&id]))
+            .expect("the scenes file serialises"),
+    )
+    .expect("the scenes file is written");
+    // The daemon starts from those files: the #393 cleanup runs, but a named slice is the owner's.
+    let store = Store::load_from(&home.path);
+    assert!(
+        store.lights.lights.iter().any(|l| l.id == id),
+        "the named slice survives the start-up cleanup: it carries a name and leds"
+    );
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let (router, app, home) = build_with(store, devices, home).await;
+
+    // What the owner sees from GET /lights before the delete: no LEDs, not connected.
+    let (status, body) = get_lights(router.clone()).await;
+    assert_eq!(status, StatusCode::OK);
+    let view = views(&body).lights.into_iter().find(|v| v.light.id == id).expect("the light is listed");
+    assert!(!view.connected, "the device the light names is not driven");
+    assert_eq!(view.led_count, 0, "no zone stands behind the slice");
+
+    let response = router.clone().oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let deleted: LightDeleted = serde_json::from_value(body.clone()).expect("the body is a LightDeleted");
+    assert!(deleted.ok, "{body}");
+    assert_eq!(deleted.id, id);
+    assert_eq!(deleted.emptied_groups.len(), 1, "{body}");
+    let group = &deleted.emptied_groups[0];
+    assert_eq!(group.scene_id, "gaming");
+    assert_eq!(group.group_id, "g-old");
+    assert_eq!(group.name, "Old keyboard", "the group that went is named for the note");
+
+    // The light is gone from memory, from GET and from the saved file; the empty group went too.
+    assert!(app.store.read().await.lights.lights.iter().all(|l| l.id != id));
+    let (_, body) = get_lights(router.clone()).await;
+    assert!(views(&body).lights.iter().all(|v| v.light.id != id));
+    let saved: LightsFile = serde_json::from_str(
+        &std::fs::read_to_string(home.path.join(canvas_proto::scene::LIGHTS_FILE)).unwrap(),
+    )
+    .expect("lights.json is a lights file");
+    assert!(saved.lights.iter().all(|l| l.id != id));
+    assert!(
+        app.store.read().await.scenes.scenes[0].groups.is_empty(),
+        "the group the light was the last member of was dropped"
+    );
+}
+
+/// A light that shares its group with another: the group keeps the other member and stays.
+#[tokio::test]
+async fn deleting_one_light_keeps_another_member_of_its_group() {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let other_id = format!("{UNDRIVEN}#z0p2");
+    let home = TempHome::new();
+    let on_disk = lights_file(vec![
+        light(&id, UNDRIVEN, 0, Some((0, 8)), Some("Old strip")),
+        light(&other_id, UNDRIVEN, 0, Some((8, 8)), Some("Other strip")),
+    ]);
+    std::fs::write(
+        home.path.join(canvas_proto::scene::LIGHTS_FILE),
+        serde_json::to_vec(&on_disk).unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path.join(canvas_proto::scene::SCENES_FILE),
+        serde_json::to_vec(&scenes_with(
+            "g-shared",
+            "Two strips",
+            &[&id, &other_id],
+        ))
+        .unwrap(),
+    )
+    .unwrap();
+    let store = Store::load_from(&home.path);
+    let (router, app, _home) = build_with(store, Vec::new(), home).await;
+
+    let response = router.oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    let body = json(response).await;
+    let deleted: LightDeleted = serde_json::from_value(body.clone()).expect("the body is a LightDeleted");
+    assert!(deleted.emptied_groups.is_empty(), "{body}");
+    let store = app.store.read().await;
+    let group = &store.scenes.scenes[0].groups[0];
+    assert_eq!(group.id, "g-shared", "the group stayed");
+    assert_eq!(group.members, vec![other_id.clone()], "its other member stayed");
+    assert!(store.lights.lights.iter().any(|l| l.id == other_id));
+}
+
+/// #497: the delete is a server-side scene write, so it moves the scene's rev like every other
+/// one. A PUT that still holds the rev from before the delete is refused with 409, even though its
+/// scene is valid by the time it arrives. On code that left `rev` alone the PUT succeeded (200).
+#[tokio::test]
+async fn a_scene_put_naming_the_rev_from_before_the_delete_is_a_409() {
+    let (router, app, _home, id) = build_delete_pair().await;
+    assert_eq!(app.store.read().await.scenes.scenes[0].rev, 1, "the rev before the delete");
+
+    let response = router.clone().oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(app.store.read().await.scenes.scenes[0].rev, 2, "the delete moved the rev it changed");
+
+    // The scene as it is now is valid (the group kept its other member). Only the rev is stale.
+    let after = app.store.read().await.scenes.scenes[0].clone();
+    let put = canvas_proto::api::ScenePut { scene: after, expected_rev: 1, dry_run: false };
+    let response = router.oneshot(put_scene_request("gaming", &put)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::CONFLICT, "a PUT with the old rev is stale");
+    let error: ApiError =
+        serde_json::from_value(json(response).await).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::CONFLICT);
+}
+
+/// #497: park a scene PUT between its validation and its write (through a test seam). The PUT
+/// validated while the light was still there and holds the scene order; the delete must not slip
+/// in and let the PUT write that light back after it is gone. On the code without the scene gate
+/// the delete lands first and the PUT resurrects the light in `scenes.json` — this test fails
+/// there. On the fixed code the delete waits for the scene order and follows the PUT, so the
+/// light is gone and the rev moved twice.
+#[tokio::test]
+async fn a_scene_put_parked_before_its_write_cannot_resurrect_a_deleted_light() {
+    let (router, app, home, id) = build_delete_pair().await;
+    let before = app.store.read().await.scenes.scenes[0].clone();
+    assert_eq!(before.rev, 1);
+
+    let seam: Arc<canvas_daemon::api::scenes::ScenePutSeam> = Arc::new(Default::default());
+    app.set_scene_put_seam(seam.clone());
+
+    // The PUT validates against the light (still there) and parks before its write, holding the
+    // scene order. It is spawned so the delete can be started while it waits at the seam.
+    let put = {
+        let router = router.clone();
+        let put = canvas_proto::api::ScenePut {
+            scene: before,
+            expected_rev: 1,
+            dry_run: false,
+        };
+        tokio::spawn(async move {
+            router.oneshot(put_scene_request("gaming", &put)).await.expect("the router answers")
+        })
+    };
+    seam.wait_until_reached().await;
+
+    // Start the delete while the PUT is parked. On the fixed code it waits for the scene order the
+    // PUT holds, so the light stays in the store; on code without the gate it lands now. Give each
+    // spawned task a bounded number of yields to reach its blocking point — no clock is read.
+    let delete = {
+        let router = router.clone();
+        let id = id.clone();
+        tokio::spawn(async move {
+            router.oneshot(delete_request(&id)).await.expect("the router answers")
+        })
+    };
+    for _ in 0..256 {
+        tokio::task::yield_now().await;
+        let still = app.store.read().await.scenes.scenes.iter().any(|sc| {
+            sc.groups.iter().any(|g| g.members.contains(&id))
+        });
+        if !still {
+            break; // the delete landed first (the code under test)
+        }
+    }
+
+    seam.go();
+    let put_response = put.await.expect("the PUT task finished");
+    let delete_response = delete.await.expect("the delete task finished");
+    assert_eq!(put_response.status(), StatusCode::OK, "the PUT validated while the light was there");
+    assert_eq!(delete_response.status(), StatusCode::OK);
+
+    // The PUT landed, then the delete followed it: the light is gone from both memory and the
+    // saved file, and the rev moved for the PUT and again for the delete.
+    let saved: canvas_proto::scene::ScenesFile = serde_json::from_str(
+        &std::fs::read_to_string(home.path.join(canvas_proto::scene::SCENES_FILE)).unwrap(),
+    )
+    .expect("scenes.json is a scenes file");
+    assert!(
+        saved.scenes.iter().all(|sc| sc.groups.iter().all(|g| !g.members.contains(&id))),
+        "the deleted light is not written back into scenes.json"
+    );
+    let scene = app.store.read().await.scenes.scenes[0].clone();
+    assert!(!scene.groups.iter().any(|g| g.members.contains(&id)));
+    assert_eq!(scene.rev, 3, "the PUT and the delete each moved the rev once");
 }
 
 #[tokio::test]
@@ -509,6 +769,7 @@ async fn the_lights_routes_need_the_token() {
     for (method, path) in [
         ("GET", routes::LIGHTS.to_string()),
         ("PATCH", light_path("fake:mb#z0")),
+        ("DELETE", light_path("fake:mb#z0")),
     ] {
         let response = router
             .clone()
@@ -540,6 +801,7 @@ async fn the_lights_routes_refuse_a_foreign_origin_and_a_foreign_host() {
     for (method, path) in [
         ("GET", routes::LIGHTS.to_string()),
         ("PATCH", light_path("fake:mb#z0")),
+        ("DELETE", light_path("fake:mb#z0")),
     ] {
         // A browser from another site is refused.
         let response = router
@@ -765,6 +1027,161 @@ fn modified_at(path: &std::path::Path) -> std::time::SystemTime {
         .expect("the file is there")
         .modified()
         .expect("the file has a time")
+}
+
+/// The snapshot folders a delete left, newest last.
+fn delete_snapshots(home: &std::path::Path) -> Vec<std::path::PathBuf> {
+    let Ok(entries) = std::fs::read_dir(home.join("backups")) else {
+        return Vec::new();
+    };
+    let mut dirs: Vec<_> = entries
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.is_dir()
+                && p.file_name()
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.ends_with("-before-removing-a-light"))
+        })
+        .collect();
+    dirs.sort();
+    dirs
+}
+
+/// The snapshot is taken before the write: the copy holds `lights.json` and `scenes.json` exactly
+/// as they were the moment before the light was removed, while the live files no longer do.
+#[tokio::test]
+async fn the_snapshot_holds_both_files_byte_for_byte_as_they_were_before_the_delete() {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let home = TempHome::new();
+    std::fs::write(
+        home.path.join(canvas_proto::scene::LIGHTS_FILE),
+        serde_json::to_vec(&lights_file(vec![light(
+            &id,
+            UNDRIVEN,
+            0,
+            Some((0, 8)),
+            Some("Old strip"),
+        )]))
+        .unwrap(),
+    )
+    .unwrap();
+    std::fs::write(
+        home.path.join(canvas_proto::scene::SCENES_FILE),
+        serde_json::to_vec(&scenes_with("g-old", "Old keyboard", &[&id])).unwrap(),
+    )
+    .unwrap();
+    let store = Store::load_from(&home.path);
+    // What is on disk the moment before the write, whatever the load did with it.
+    let lights_before = std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).unwrap();
+    let scenes_before = std::fs::read(home.path.join(canvas_proto::scene::SCENES_FILE)).unwrap();
+    let (router, _app, home) = build_with(store, Vec::new(), home).await;
+
+    let response = router.oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let snaps = delete_snapshots(&home.path);
+    assert_eq!(snaps.len(), 1, "one snapshot was taken: {snaps:?}");
+    assert_eq!(
+        std::fs::read(snaps[0].join(canvas_proto::scene::LIGHTS_FILE)).unwrap(),
+        lights_before,
+        "the snapshot's lights.json is byte-for-byte the pre-delete file"
+    );
+    assert_eq!(
+        std::fs::read(snaps[0].join(canvas_proto::scene::SCENES_FILE)).unwrap(),
+        scenes_before,
+        "the snapshot's scenes.json is byte-for-byte the pre-delete file"
+    );
+    assert_ne!(
+        std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).unwrap(),
+        lights_before,
+        "the live lights.json changed"
+    );
+    assert_ne!(
+        std::fs::read(home.path.join(canvas_proto::scene::SCENES_FILE)).unwrap(),
+        scenes_before,
+        "the live scenes.json changed"
+    );
+}
+
+/// Deleting a light the daemon does not know is a 404.
+#[tokio::test]
+async fn deleting_an_unknown_light_is_404() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, _home) = build(lights, devices).await;
+
+    let response = router.oneshot(delete_request("fake:mb#z9")).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let body = json(response).await;
+    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::NOT_FOUND);
+    assert_eq!(app.store.read().await.lights.lights.len(), 1, "nothing was removed");
+}
+
+/// A light on a device the daemon drives is refused: those go through chain setup.
+#[tokio::test]
+async fn deleting_a_light_on_a_driven_device_is_a_409_and_changes_nothing() {
+    let devices = vec![device("fake:mb", "MSI B850", vec![zone(0, "JARGB 1", 12)])];
+    let lights = lights_file(vec![light("fake:mb#z0", "fake:mb", 0, None, None)]);
+    let (router, app, home) = build(lights, devices).await;
+
+    let response = router.oneshot(delete_request("fake:mb#z0")).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let body = json(response).await;
+    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::CONFLICT);
+    assert!(app.store.read().await.lights.lights.iter().any(|l| l.id == "fake:mb#z0"));
+    assert!(delete_snapshots(&home.path).is_empty(), "no snapshot was taken");
+}
+
+/// A snapshot that cannot be taken answers 503 and changes nothing.
+#[tokio::test]
+async fn a_failed_snapshot_refuses_the_delete_and_changes_nothing() {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let home = TempHome::new();
+    let lights_bytes = serde_json::to_vec(&lights_file(vec![light(
+        &id,
+        UNDRIVEN,
+        0,
+        Some((0, 8)),
+        Some("Old strip"),
+    )]))
+    .unwrap();
+    let scenes_bytes = serde_json::to_vec(&scenes_with("g-old", "Old keyboard", &[&id])).unwrap();
+    std::fs::write(home.path.join(canvas_proto::scene::LIGHTS_FILE), &lights_bytes).unwrap();
+    std::fs::write(home.path.join(canvas_proto::scene::SCENES_FILE), &scenes_bytes).unwrap();
+    // `backups` is a file, so the snapshot's create_dir_all under it fails.
+    std::fs::write(home.path.join("backups"), b"not a folder").unwrap();
+    let store = Store::load_from(&home.path);
+    let (router, app, home) = build_with(store, Vec::new(), home).await;
+
+    let response = router.oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::SERVICE_UNAVAILABLE);
+    assert!(app.store.read().await.lights.lights.iter().any(|l| l.id == id), "the light stayed");
+    assert_eq!(std::fs::read(home.path.join(canvas_proto::scene::LIGHTS_FILE)).unwrap(), lights_bytes);
+    assert_eq!(std::fs::read(home.path.join(canvas_proto::scene::SCENES_FILE)).unwrap(), scenes_bytes);
+}
+
+/// A save that cannot write answers 503 and leaves the light in memory.
+#[tokio::test]
+async fn a_failed_save_refuses_the_delete_and_changes_nothing() {
+    let id = format!("{UNDRIVEN}#z0p1");
+    let home = TempHome::new();
+    let mut store = Store::at(&home.path);
+    store.lights = lights_file(vec![light(&id, UNDRIVEN, 0, Some((0, 8)), Some("Old strip"))]);
+    store.lights_blocked = true;
+    let (router, app, _home) = build_with(store, Vec::new(), home).await;
+
+    let response = router.oneshot(delete_request(&id)).await.expect("the router answers");
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    let body = json(response).await;
+    let error: ApiError = serde_json::from_value(body).expect("the body is an ApiError");
+    assert_eq!(error.error, canvas_proto::api::error_codes::SERVICE_UNAVAILABLE);
+    assert!(app.store.read().await.lights.lights.iter().any(|l| l.id == id), "the light stayed");
 }
 
 /// A light of a device that is here but has no such zone is named after the device.

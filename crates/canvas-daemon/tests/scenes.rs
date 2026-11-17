@@ -146,6 +146,7 @@ fn group(id: &str, members: &[&str], effect: &str, props: Props) -> Group {
         plays: Plays::Effect { effect: effect.into(), props },
         mode: GroupMode::FlowAcross,
         brightness: 100,
+        sequence: None,
     }
 }
 
@@ -531,6 +532,42 @@ async fn put_scene_applies_and_bumps_rev() {
     assert_eq!(on_disk.scenes[0].rev, 2, "saved");
     shows(&rig.a, rgb(GREEN), "after").await;
     shows(&rig.b, rgb(BLUE), "the other group is untouched").await;
+}
+
+/// #468 phase 4: a group's `sequence` passes the scene checks, is saved to disk, comes back from
+/// the list, and `None` is the absence of the field.
+#[tokio::test]
+async fn a_scene_put_round_trips_a_groups_sequence() {
+    use canvas_proto::scene::SequenceShape;
+    let rig = rig().await;
+    let mut scene = stored(&rig, "main").await;
+    assert_eq!(scene.groups[0].sequence, None, "a group starts with none");
+    scene.groups[0].sequence = Some(SequenceShape::Ring);
+    scene.groups[1].sequence = Some(SequenceShape::Line);
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: 1, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let saved = scene_of(answer);
+    assert_eq!(saved.groups[0].sequence, Some(SequenceShape::Ring));
+    assert_eq!(saved.groups[1].sequence, Some(SequenceShape::Line));
+    let on_disk: ScenesFile =
+        serde_json::from_slice(&std::fs::read(rig.home.path.join("scenes.json")).unwrap()).unwrap();
+    assert_eq!(on_disk.scenes[0].groups[0].sequence, Some(SequenceShape::Ring), "saved to disk");
+    let (status, list) = send(&rig, "GET", routes::SCENES, None).await;
+    assert_eq!(status, StatusCode::OK, "{list}");
+    let list: ScenesResponse = serde_json::from_value(list).unwrap();
+    assert_eq!(list.scenes[0].groups[0].sequence, Some(SequenceShape::Ring), "read back");
+    // Each light again: the field is gone from the file, not written as null.
+    let mut scene = stored(&rig, "main").await;
+    scene.groups[0].sequence = None;
+    let rev = scene.rev;
+    let body = serde_json::to_value(ScenePut { scene, expected_rev: rev, dry_run: false }).unwrap();
+    let (status, answer) = send(&rig, "PUT", &route(routes::SCENE, &[("id", "main")]), Some(body)).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+    let raw = std::fs::read_to_string(rig.home.path.join("scenes.json")).unwrap();
+    let file: serde_json::Value = serde_json::from_str(&raw).unwrap();
+    assert!(file["scenes"][0]["groups"][0].get("sequence").is_none(), "{raw}");
+    assert_eq!(file["scenes"][0]["groups"][1]["sequence"], "line");
 }
 
 /// Review Focus 4: two editor windows write the same scene.
