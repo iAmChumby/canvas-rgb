@@ -415,8 +415,9 @@ line. Three mechanisms, and one bug the timing only exposed.
   the commit's guard (`crates/canvas-daemon/src/api/chains.rs`, `if !app.scene.is_taken_over()`)
   then saw no takeover and put the committed scene over it. Traced in a failing run: the takeover
   landed, an apply that had started 29 ms earlier ended and cleared the flag, and the commit
-  applied the parts. The product is right: every takeover lands under the gate and every apply
-  that can clear the flag holds it. Fixed by landing the fake takeover under the same gate, the
+  applied the parts. Every takeover lands under the gate, and every apply that can clear the flag
+  holds it except one: deleting an effect re-applies the scene with the gate free, a real product
+  race filed as [#500](https://github.com/iAmChumby/canvas-rgb/issues/500). Fixed by landing the fake takeover under the same gate, the
   way the product lands one, and by asserting that the takeover still holds after the commit.
   0 failures in 100 suite runs. **Rule:** a fake of a state the product takes a lock for takes the
   same lock; a state set outside it can be lost by the work that lock keeps apart.
