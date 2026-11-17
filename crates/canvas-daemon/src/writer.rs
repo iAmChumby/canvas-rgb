@@ -17,10 +17,14 @@ use crate::last_frame::LastFrame;
 ///
 /// A frame that failed to be written is not recorded: the last frame is the last one that reached
 /// the device, not the last one that was tried.
+///
+/// The frames come from a watch channel: the writer takes the newest frame there is, so a device
+/// that is behind shows the newest colours and not the oldest ones it has not written yet
+/// (#308).
 pub async fn writer_loop(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     device: DeviceId,
-    frames: tokio::sync::mpsc::Receiver<Vec<Rgb8>>,
+    frames: tokio::sync::watch::Receiver<Vec<Rgb8>>,
     last_frame: Arc<LastFrame>,
 ) {
     writer_loop_with_lane(adapter, None, device, frames, last_frame).await;
@@ -36,12 +40,20 @@ pub async fn writer_loop_with_lane(
     adapter: Arc<tokio::sync::Mutex<Box<dyn DeviceAdapter>>>,
     lane: Option<canvas_adapters::openrgb::OpenRgbAdapter>,
     device: DeviceId,
-    mut frames: tokio::sync::mpsc::Receiver<Vec<Rgb8>>,
+    mut frames: tokio::sync::watch::Receiver<Vec<Rgb8>>,
     last_frame: Arc<LastFrame>,
 ) {
     let lane = lane.filter(|_| crate::composite::CompositeAdapter::is_openrgb_device(&device));
     let mut failures = 0u32;
-    while let Some(frame) = frames.recv().await {
+    // The newest frame wins: a frame that arrives while the device is behind replaces the
+    // older one, and the writer takes it when it is ready (#308).
+    while frames.changed().await.is_ok() {
+        let frame = {
+            // The borrow ends here: the frame is copied out, so the sender is never held up
+            // while the write runs.
+            let current = frames.borrow_and_update();
+            current.clone()
+        };
         let result = match &lane {
             Some(lane) => lane.write_frame_shared(&device, &frame).await,
             None => adapter.lock().await.write_frame(&device, &frame).await,
@@ -136,7 +148,7 @@ mod tests {
             Box::new(FakeAdapter { frames: Mutex::new(Vec::new()) }) as Box<dyn DeviceAdapter>,
         ));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         let writer = tokio::spawn(writer_loop(
             adapter,
             DeviceId("fake:ram".into()),
@@ -144,7 +156,7 @@ mod tests {
             Arc::clone(&last_frame),
         ));
 
-        tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
+        tx.send_replace(vec![Rgb8::WHITE; 8]);
         // Closing the channel ends the writer, after the frame it already has.
         drop(tx);
         writer.await.expect("the writer ends");
@@ -224,13 +236,13 @@ mod tests {
         let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
         let adapter = Arc::new(tokio::sync::Mutex::new(failing));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         let device = DeviceId("fake:ram".into());
         // The writer runs on this thread, so its warning goes into this capture.
         let (_, text) = crate::test_logs::captured(|| {
             runtime.block_on(async {
                 let frame = vec![Rgb8::WHITE; 8];
-                tx.send(frame).await.expect("the writer takes the frame");
+                tx.send_replace(frame);
                 // Closing the channel ends the writer.
                 drop(tx);
                 writer_loop(adapter, device, rx, Arc::clone(&last_frame)).await;
@@ -262,11 +274,11 @@ mod tests {
         let failing: Box<dyn DeviceAdapter> = Box::new(FailingAdapter);
         let adapter = Arc::new(tokio::sync::Mutex::new(failing));
         let last_frame = Arc::new(LastFrame::default());
-        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        let (tx, rx) = tokio::sync::watch::channel(Vec::new());
         // The writer runs on this thread, so its warning goes into this capture.
         let (_, text) = crate::test_logs::captured(|| {
             runtime.block_on(async {
-                tx.send(vec![Rgb8::WHITE; 8]).await.expect("the writer takes the frame");
+                tx.send_replace(vec![Rgb8::WHITE; 8]);
                 drop(tx);
                 writer_loop(adapter, DeviceId("fake:ram".into()), rx, last_frame).await;
             });

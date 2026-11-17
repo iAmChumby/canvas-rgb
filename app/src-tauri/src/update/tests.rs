@@ -25,6 +25,18 @@ use super::*;
 
 const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/fixtures/update");
 
+/// How long the fake server waits for a request that never comes. A connection that sends
+/// nothing must not hold a thread for the rest of the run (#242).
+const SERVER_READ_DEADLINE: std::time::Duration = std::time::Duration::from_secs(5);
+
+/// How long a response that promises a body keeps the connection open without sending it. The
+/// client waits for its own deadline; the server holds on past it (#242).
+const HOLD_FOREVER: Duration = Duration::from_secs(600);
+
+/// The download deadline the tests use. The production's fifteen minutes would hold a test that
+/// waits for a server that never answers (#242); this one fails the test instead.
+const TEST_DOWNLOAD_TIMEOUT: Duration = Duration::from_secs(10);
+
 fn fixture(name: &str) -> Vec<u8> {
     std::fs::read(Path::new(FIXTURES).join(name)).unwrap_or_else(|e| panic!("fixture {name}: {e}"))
 }
@@ -47,12 +59,29 @@ static COUNTER: AtomicU32 = AtomicU32::new(0);
 
 struct TempDir(PathBuf);
 
+/// Empties `dir` and makes it again.
+///
+/// A run that was killed leaves its folder behind, with the state file and the result
+/// file in it. The next run with the same process id and the same counter takes the same
+/// folder and reads those leftovers: a stale `update-result.json` is a report of an
+/// earlier install, and the test's verdict turns on it (#242).
+fn fresh_dir(dir: &Path) {
+    let _ = std::fs::remove_dir_all(dir);
+    std::fs::create_dir_all(dir).unwrap();
+}
+
 impl TempDir {
     fn new() -> Self {
         let n = COUNTER.fetch_add(1, Ordering::SeqCst);
         let dir = std::env::temp_dir().join(format!("canvas-rgb-update-test-{}-{n}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
+        fresh_dir(&dir);
         TempDir(dir)
+    }
+    /// The folder at `path`, emptied: what a run finds when it takes the folder a killed run
+    /// left behind.
+    fn at(path: PathBuf) -> Self {
+        fresh_dir(&path);
+        TempDir(path)
     }
     fn path(&self) -> &Path {
         &self.0
@@ -75,6 +104,23 @@ fn isolate_log() {
     });
 }
 
+/// The folder a test runs in starts empty, even when a killed run left one behind.
+///
+/// The folder is named after the process id and a counter, so a run that was killed leaves its
+/// folder with the state file and the result file in it, and the next run with the same process id
+/// and the same counter takes the same folder. The leftovers would decide this run: a pending
+/// version from the earlier run, a report that belongs to it (#242).
+#[test]
+fn a_test_folder_starts_empty_even_when_a_killed_run_left_something_in_it() {
+    let dir = TempDir::new();
+    let path = dir.path().to_path_buf();
+    std::fs::write(path.join("update.json"), r#"{"pending":{"version":"9.9.9","notes":""}}"#).unwrap();
+    std::fs::write(path.join("update-result.json"), r#"{"version":"9.9.9","ok":true}"#).unwrap();
+    let again = TempDir::at(path);
+    assert!(!again.path().join("update.json").exists(), "the folder starts empty");
+    assert!(!again.path().join("update-result.json").exists(), "the folder starts empty");
+}
+
 // ---- a fake release server ----
 
 #[derive(Clone)]
@@ -84,17 +130,24 @@ struct Resp {
     body: Vec<u8>,
     /// Send the body in pieces of this size, pausing between them.
     chunk: Option<usize>,
+    /// Promise the body and never send it: the client waits for bytes that never come.
+    hold: bool,
 }
 
 impl Resp {
     fn ok(body: impl Into<Vec<u8>>) -> Self {
-        Resp { status: 200, headers: vec![], body: body.into(), chunk: None }
+        Resp { status: 200, headers: vec![], body: body.into(), chunk: None, hold: false }
     }
     fn status(status: u16) -> Self {
-        Resp { status, headers: vec![], body: b"{}".to_vec(), chunk: None }
+        Resp { status, headers: vec![], body: b"{}".to_vec(), chunk: None, hold: false }
     }
     fn chunked(mut self, size: usize) -> Self {
         self.chunk = Some(size);
+        self
+    }
+    /// The body is promised in the header and never sent.
+    fn holding(mut self) -> Self {
+        self.hold = true;
         self
     }
     fn header(mut self, k: &str, val: &str) -> Self {
@@ -179,6 +232,9 @@ impl Drop for FakeServer {
 }
 
 fn serve(mut stream: TcpStream, routes: &Mutex<HashMap<String, Resp>>, hits: &Mutex<HashMap<String, u32>>) {
+    // A connection that never sends a request must not hold this thread for the rest of the run:
+    // the read has a deadline, so the thread ends and the test's wait stays short (#242).
+    let _ = stream.set_read_timeout(Some(SERVER_READ_DEADLINE));
     let mut buf = [0u8; 4096];
     let mut request = Vec::new();
     while !request.windows(4).any(|w| w == b"\r\n\r\n") {
@@ -197,6 +253,12 @@ fn serve(mut stream: TcpStream, routes: &Mutex<HashMap<String, Resp>>, hits: &Mu
     }
     out.push_str("\r\n");
     let _ = stream.write_all(out.as_bytes());
+    if resp.hold {
+        // The header promised the body; it never comes. The connection stays open, so the client
+        // waits for its own deadline (#242).
+        std::thread::sleep(HOLD_FOREVER);
+        return;
+    }
     match resp.chunk {
         None => {
             let _ = stream.write_all(&resp.body);
@@ -295,6 +357,7 @@ fn harness_full(
         result_path: dir.path().join("update-result.json"),
         guard_root: dir.path().to_path_buf(),
         progress_every: Duration::ZERO,
+        download_timeout: TEST_DOWNLOAD_TIMEOUT,
     };
     // The channel the person chose, as the prefs file would hold it. A stable tray has no prefs
     // file at all: the defaults are the stable channel.
@@ -651,12 +714,11 @@ fn check_failures_are_told_apart() {
 #[test]
 fn a_dead_server_is_offline() {
     let h = harness("0.1.0", "test.key.pub", Launch::Starts);
-    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
-    let port = dead.local_addr().unwrap().port();
-    drop(dead);
+    // The port is held, so no other socket can answer for it while the test runs (#242).
+    let dead = crate::api::closed_port();
     let ctl = Controller::new(
         Settings {
-            endpoint: format!("http://127.0.0.1:{port}/latest.json").parse().unwrap(),
+            endpoint: format!("http://{}/latest.json", dead.host_port()).parse().unwrap(),
             experimental_endpoint: h.server.url("/experimental.json").parse().unwrap(),
             pubkey: fixture_text("test.key.pub"),
             policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
@@ -666,6 +728,7 @@ fn a_dead_server_is_offline() {
             result_path: h.dir.path().join("r2.json"),
             guard_root: h.dir.path().to_path_buf(),
             progress_every: Duration::ZERO,
+            download_timeout: TEST_DOWNLOAD_TIMEOUT,
         },
         v("0.1.0"),
         Arc::new(|_: &Path| Ok(None)),
@@ -705,6 +768,7 @@ fn a_redirect_to_a_foreign_host_is_refused_and_one_to_an_allowed_host_is_followe
             result_path: h.dir.path().join("r3.json"),
             guard_root: h.dir.path().to_path_buf(),
             progress_every: Duration::ZERO,
+            download_timeout: TEST_DOWNLOAD_TIMEOUT,
         },
         v("0.1.0"),
         Arc::new(|_: &Path| Ok(None)),
@@ -813,6 +877,7 @@ fn the_host_list_stops_a_download_before_any_request() {
             result_path: h.dir.path().join("r4.json"),
             guard_root: h.dir.path().to_path_buf(),
             progress_every: Duration::ZERO,
+            download_timeout: TEST_DOWNLOAD_TIMEOUT,
         },
         v("0.1.0"),
         Arc::new(|_: &Path| Ok(None)),
@@ -1204,6 +1269,7 @@ impl Settings {
         self.result_path = dir.join("update-result.json");
         self.guard_root = dir.to_path_buf();
         self.progress_every = Duration::ZERO;
+        self.download_timeout = TEST_DOWNLOAD_TIMEOUT;
         self
     }
 }
@@ -1483,6 +1549,7 @@ fn an_http_download_address_is_refused_before_any_request() {
         result_path: h.dir.path().join("r5.json"),
         guard_root: h.dir.path().to_path_buf(),
         progress_every: Duration::ZERO,
+        download_timeout: TEST_DOWNLOAD_TIMEOUT,
     };
     let mut ctl = Controller::new(settings, v("0.1.0"), Arc::new(|_: &Path| Ok(None)), Box::new(|_| {}));
     assert_eq!(tauri::async_runtime::block_on(ctl.check(&h.handle, true)).phase, UpdatePhase::Available);
@@ -1518,6 +1585,42 @@ fn download_progress_is_sent_with_the_real_byte_counts() {
 }
 
 // ---- timeouts and a damaged state file ----
+
+/// A server that promises the installer and never sends it.
+///
+/// The download must fail at the deadline the test sets. With the production's fifteen minutes it
+/// would hold the test for a quarter of an hour instead, and a run of the suite that met such a
+/// server was the one that hung (#242).
+#[test]
+fn a_download_that_never_ends_fails_at_the_deadline_the_test_sets() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.server.set("/setup.exe", Resp::ok(fixture("payload.bin")).holding());
+    let ctl = Arc::new(Controller::new(
+        Settings {
+            endpoint: h.server.url("/latest.json").parse().unwrap(),
+            experimental_endpoint: h.server.url("/experimental.json").parse().unwrap(),
+            pubkey: fixture_text("test.key.pub"),
+            policy: DownloadPolicy { https_only: false, hosts: vec!["127.0.0.1".into()] },
+            updates_dir: h.dir.path().join("u9"),
+            state_path: h.dir.path().join("s9.json"),
+            prefs_path: h.dir.path().join("p9.json"),
+            result_path: h.dir.path().join("r9.json"),
+            guard_root: h.dir.path().to_path_buf(),
+            progress_every: Duration::ZERO,
+            download_timeout: Duration::from_secs(1),
+        },
+        v("0.1.0"),
+        Arc::new(|_: &Path| Ok(None)),
+        Box::new(|_| {}),
+    ));
+    assert_eq!(
+        tauri::async_runtime::block_on(ctl.check(&h.handle, true)).phase,
+        UpdatePhase::Available
+    );
+    let s = tauri::async_runtime::block_on(ctl.install());
+    assert!(matches!(s.phase, UpdatePhase::InstallFailed { .. }), "{:?}", s.phase);
+}
 
 #[test]
 fn a_timeout_after_connecting_is_not_offline() {
@@ -1667,17 +1770,20 @@ fn the_installer_start_runs_off_the_async_thread() {
 fn the_probe_maps_a_timeout_after_connecting_to_other_and_a_refusal_to_offline() {
     let silent = TcpListener::bind("127.0.0.1:0").unwrap();
     let url: Url = format!("http://127.0.0.1:{}/latest.json", silent.local_addr().unwrap().port()).parse().unwrap();
+    // The connection is held until the probe has answered, not for a fixed time: the probe's
+    // deadline is what the test is about, and a fixed hold would let a slow machine decide it.
+    let (release, released) = std::sync::mpsc::channel();
     let keep = std::thread::spawn(move || {
         let held: Vec<_> = silent.incoming().take(1).flatten().collect();
-        std::thread::sleep(Duration::from_millis(1200));
+        let _ = released.recv();
         drop(held);
     });
     assert_eq!(probe(&url, Duration::from_millis(300)), CheckFailReason::Other);
+    let _ = release.send(());
     keep.join().unwrap();
 
-    let dead = TcpListener::bind("127.0.0.1:0").unwrap();
-    let url: Url = format!("http://127.0.0.1:{}/latest.json", dead.local_addr().unwrap().port()).parse().unwrap();
-    drop(dead);
+    let dead = crate::api::closed_port();
+    let url: Url = format!("http://{}/latest.json", dead.host_port()).parse().unwrap();
     assert_eq!(probe(&url, Duration::from_secs(5)), CheckFailReason::Offline);
 }
 
@@ -1742,11 +1848,27 @@ fn a_setup_that_ends_any_other_way_is_settled_from_its_result() {
 
 // ---- a stale result file never decides this run (#28) ----
 
+/// The time a report written `age` after the install it belongs to carries.
+///
+/// The time is put on the file, so a test's verdict does not depend on the clock of the machine:
+/// a clock that steps back, or a file system with a coarse clock, must not make a fresh report
+/// look older than the install it belongs to (#242). Without an install to belong to, the report
+/// is dated now.
+fn written_at(h: &Harness, age: Duration) -> SystemTime {
+    match h.stored().pending_since_ms {
+        // A second after the start of the install this report belongs to.
+        Some(ms) => UNIX_EPOCH + Duration::from_millis(ms) + Duration::from_secs(1) - age,
+        None => SystemTime::now() - age,
+    }
+}
+
+/// Plants a report file with the time it would have been written: `age` after the install it
+/// belongs to. Zero means "written by this install", an hour means "left by an earlier one".
 fn plant_result(h: &Harness, version: &str, ok: bool, age: Duration) {
     let path = h.dir.path().join("update-result.json");
     std::fs::write(&path, format!(r#"{{"version":"{version}","ok":{ok},"code":0,"message":""}}"#)).unwrap();
     let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
-    file.set_modified(std::time::SystemTime::now() - age).unwrap();
+    file.set_modified(written_at(h, age)).unwrap();
 }
 
 // ---- following a service-driven install (#43) ----
@@ -1772,12 +1894,43 @@ fn service_install_started(clock: Arc<AtomicU64>) -> (Harness, Arc<Controller>) 
     (h, ctl)
 }
 
+/// Plants the report the installer would write, with the time it would have been written: after
+/// the start of the install it belongs to.
+///
+/// The time is put on the file, so the test does not read its verdict off the clock of the
+/// machine: a clock that steps back, or a file system with a coarse clock, could otherwise make
+/// the report look older than the install it belongs to, and the tray would ignore it (#242).
 fn plant_report(h: &Harness, version: &str, ok: bool, message: &str) {
+    let path = h.dir.path().join("update-result.json");
     std::fs::write(
-        h.dir.path().join("update-result.json"),
+        &path,
         format!(r#"{{"version":"{version}","ok":{ok},"code":0,"message":"{message}"}}"#),
     )
     .unwrap();
+    let file = std::fs::OpenOptions::new().write(true).open(&path).unwrap();
+    file.set_modified(written_at(h, Duration::ZERO)).unwrap();
+}
+
+/// The time a report carries is the install's, not the clock of the machine.
+///
+/// The tray reads a report only when it was written at or after the start of the install it
+/// belongs to (`read_fresh_result`). A report dated by the machine's clock can be older than the
+/// install it belongs to when the clock steps back, or when the file system's clock is coarse; the
+/// tray then ignores a report that is really this install's, and the test's verdict depends on the
+/// machine (#242).
+#[test]
+fn a_report_carries_the_time_of_the_install_it_belongs_to() {
+    let h = harness("0.1.0", "test.key.pub", Launch::Starts);
+    good_release(&h);
+    h.check(true);
+    h.install();
+    let since = h.stored().pending_since_ms.expect("the start is stored with the pending record");
+    let fresh = written_at(&h, Duration::ZERO);
+    let fresh_ms = fresh.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+    assert_eq!(fresh_ms, since + 1000, "a fresh report is dated after the install's start");
+    let stale = written_at(&h, Duration::from_secs(3600));
+    let stale_ms = stale.duration_since(UNIX_EPOCH).unwrap().as_millis() as u64;
+    assert!(stale_ms < since, "an hour earlier is before the install, so the tray ignores it");
 }
 
 #[test]
@@ -1789,7 +1942,6 @@ fn a_tray_waiting_on_the_service_sees_a_failed_report_and_shows_its_message() {
     assert!(ctl.follow_service_install(), "no report yet: look again");
     clock.fetch_add(60_000, Ordering::SeqCst);
     assert!(ctl.follow_service_install(), "a minute on: still looking");
-    std::thread::sleep(Duration::from_millis(30));
     plant_report(&h, "0.1.1", false, "OpenRGB could not be downloaded");
     assert!(!ctl.follow_service_install(), "a report arrived: stop looking");
     assert_eq!(
@@ -1804,7 +1956,6 @@ fn a_tray_waiting_on_the_service_sees_a_failed_report_and_shows_its_message() {
 fn an_ok_report_while_the_tray_lives_waits_for_the_restart() {
     let clock = Arc::new(AtomicU64::new(0));
     let (h, ctl) = service_install_started(clock);
-    std::thread::sleep(Duration::from_millis(30));
     plant_report(&h, "0.1.1", true, "");
     assert!(!ctl.follow_service_install(), "setup is done: stop looking");
     assert_eq!(ctl.state().phase, UpdatePhase::Installing);
@@ -1817,7 +1968,6 @@ fn a_report_older_than_the_start_or_for_another_version_is_not_this_installs() {
     let (h, ctl) = service_install_started(clock);
     plant_result(&h, "0.1.1", false, Duration::from_secs(3600));
     assert!(ctl.follow_service_install(), "a stale failure is ignored");
-    std::thread::sleep(Duration::from_millis(30));
     plant_report(&h, "0.0.9", false, "old");
     assert!(ctl.follow_service_install(), "another version's report is ignored");
     assert!(state::load(&h.dir.path().join("update.json")).pending.is_some());
@@ -1901,7 +2051,6 @@ fn after_a_restart_a_result_older_than_the_start_is_ignored() {
         let pending = h.stored().pending.unwrap().version;
         assert!(h.stored().pending_since_ms.is_some(), "the start is stored with the pending record");
         // A previous run's ok:true report for this version (age an hour), or one written just now.
-        std::thread::sleep(Duration::from_millis(30));
         if age == Duration::ZERO {
             plant_result(&h, &pending, true, Duration::ZERO);
         } else {

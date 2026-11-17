@@ -1761,8 +1761,8 @@ async fn a_member_naming_no_light_is_skipped_and_the_rest_light() {
 #[tokio::test]
 async fn flash_lights_the_named_lights_and_blacks_the_rest_then_restores() {
     let rig = rig().await;
-    let (tx_a, mut rx_a) = tokio::sync::mpsc::channel(8);
-    let (tx_b, mut rx_b) = tokio::sync::mpsc::channel(8);
+    let (tx_a, mut rx_a) = tokio::sync::watch::channel(Vec::new());
+    let (tx_b, mut rx_b) = tokio::sync::watch::channel(Vec::new());
     rig.app.identify.register(DeviceId(A.into()), tx_a);
     rig.app.identify.register(DeviceId(B.into()), tx_b);
 
@@ -1770,8 +1770,8 @@ async fn flash_lights_the_named_lights_and_blacks_the_rest_then_restores() {
     let (status, answer) = send(&rig, "POST", routes::LIGHTS_FLASH, Some(body)).await;
     assert_eq!(status, StatusCode::OK, "{answer}");
     assert!(rig.app.identify.is_active(), "the override holds the lights");
-    let a = rx_a.try_recv().expect("A got a frame at once");
-    let b = rx_b.try_recv().expect("B got a frame at once");
+    let a = rx_a.borrow_and_update().clone();
+    let b = rx_b.borrow_and_update().clone();
     assert_eq!(a, vec![Rgb8::WHITE; LEDS as usize], "the named light is white");
     assert_eq!(b, vec![Rgb8::BLACK; LEDS as usize], "everything else is black");
 
@@ -1779,8 +1779,8 @@ async fn flash_lights_the_named_lights_and_blacks_the_rest_then_restores() {
     let body = serde_json::json!({ "lights": ["fake:a#z0", "fake:b#z0"], "stop": false });
     let (status, _) = send(&rig, "POST", routes::LIGHTS_FLASH, Some(body)).await;
     assert_eq!(status, StatusCode::OK);
-    assert_eq!(rx_a.try_recv().unwrap(), vec![Rgb8::WHITE; LEDS as usize]);
-    assert_eq!(rx_b.try_recv().unwrap(), vec![Rgb8::WHITE; LEDS as usize]);
+    assert_eq!(rx_a.borrow_and_update().clone(), vec![Rgb8::WHITE; LEDS as usize]);
+    assert_eq!(rx_b.borrow_and_update().clone(), vec![Rgb8::WHITE; LEDS as usize]);
 
     // An id that names no light is a 404.
     let body = serde_json::json!({ "lights": ["fake:nope#z0"] });

@@ -9,13 +9,18 @@ Every change people using canvas-rgb can notice is listed here. The format follo
 ### Fixed
 
 - The API keeps answering when the render engine is slow to reply: the daemon keeps the engine's numbers fresh and the status and scenes pages read them, and they say the engine is not answering when it is not. (#241)
+- Resizing a zone keeps the lights working when you close the tab while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, the new LED count lands right away, and a device that is behind shows the newest frame instead of an older one. (#308)
+- Setting up a header keeps the lights working when you close the window while it works: the OpenRGB link no longer breaks and pauses every light for a reconnect, and the setup finishes as a whole instead of being left half done. (#457)
+- Tray tests: the update suite no longer reads its verdict off the machine's clock, so a busy runner can no longer fail or hang it. (#242)
 - Devices rows and Peripherals switches stay inside desktop windows from 721px up: the device list scrolls in its pane and the mouse's Access switches wrap to their own line when they stop fitting. (#89)
 - Effects: a same-length edit to an effect file saved inside one clock tick is now picked up on the next rescan (#75)
+- Importing an effect whose script does not finish loading within 10 s is refused and nothing is saved, instead of saving it and retrying the same load every few minutes; an effect the machine was only too busy to load at the usual two seconds is saved and retried as before (#75)
 - `effects check` reports a load that ran out of time in plain words instead of the runtime's raw `timeout:` text (#75)
 - The "frame write failed" warning keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter still catches it. (#87)
 - Every daemon log line that moved out of the daemon's own program keeps its daemon log target, so a `RUST_LOG=canvas_rgbd=...` filter catches all of them. (#446)
 - The site's hero glow no longer shows a faint line where it crosses the section edge, and a long sweep takes the same time at 30, 60 and 144 Hz. (#63)
 - Effects: a library tile whose render runs out of time now gives a plain reason, and the time spent loading a slow effect counts toward the render budget instead of being added on top of it. (#58)
+- Installer notes: a failed start of canvas-rgb after an update is now named in the final note with what to do, and an uninstall that found no installation no longer claims it could not stop the service. (#77)
 
 ## [0.17.0] - 2026-11-16
 

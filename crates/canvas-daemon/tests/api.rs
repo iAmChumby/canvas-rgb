@@ -3157,7 +3157,7 @@ async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    let (tx, rx) = tokio::sync::watch::channel(Vec::new());
     let sink = canvas_daemon::state::DeviceSink::with_gate(
         canvas_proto::DeviceId("fake:Board".into()),
         tx,
@@ -3172,14 +3172,21 @@ async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
         .expect("the router answers");
     assert_eq!(response.status(), StatusCode::OK);
     assert!(app.identify.is_active());
-    let frame = rx.try_recv().expect("the first override frame is sent at once");
+    let frame = rx.borrow().clone();
     let lit: Vec<usize> =
         frame.iter().enumerate().filter(|(_, c)| **c != canvas_proto::Rgb8::BLACK).map(|(i, _)| i).collect();
     assert_eq!(lit, vec![4, 5, 6]);
 
     // The engine's own frames are silent during the override.
     sink.submit(vec![canvas_proto::Rgb8::WHITE; 12]);
-    assert!(rx.try_recv().is_err());
+    let still: Vec<usize> = rx
+        .borrow()
+        .iter()
+        .enumerate()
+        .filter(|(_, c)| **c != canvas_proto::Rgb8::BLACK)
+        .map(|(i, _)| i)
+        .collect();
+    assert_eq!(still, vec![4, 5, 6], "the engine's frame was dropped");
 
     // A zone or LED that does not exist is a validation error.
     let response = router
@@ -3203,7 +3210,7 @@ async fn identify_is_an_override_that_stop_ends_even_with_output_paused() {
     assert_eq!(response.status(), StatusCode::OK);
     assert!(!app.identify.is_active());
     sink.submit(vec![canvas_proto::Rgb8::WHITE; 12]);
-    assert!(rx.try_recv().is_ok(), "engine frames flow again");
+    assert_eq!(rx.borrow().len(), 12, "engine frames flow again");
 }
 
 /// #81: each identify request logs the OpenRGB controller it went to and whether the frame was
@@ -3222,8 +3229,8 @@ async fn an_identify_request_logs_the_controller_and_whether_the_frame_was_queue
     *app.devices.write().await = vec![common::device("Board", DeviceKind::Motherboard, 12), ram];
 
     // A writer for both devices, so their frames are queued.
-    let (board_tx, _board_rx) = tokio::sync::mpsc::channel(4);
-    let (ram_tx, _ram_rx) = tokio::sync::mpsc::channel(4);
+    let (board_tx, _board_rx) = tokio::sync::watch::channel(Vec::new());
+    let (ram_tx, _ram_rx) = tokio::sync::watch::channel(Vec::new());
     app.identify.register(canvas_proto::DeviceId("fake:Board".into()), board_tx);
     app.identify.register(canvas_proto::DeviceId("fake:Ram".into()), ram_tx);
 

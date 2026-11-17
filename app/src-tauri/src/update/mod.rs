@@ -77,6 +77,10 @@ pub struct Settings {
     pub guard_root: PathBuf,
     /// How often download progress is sent (the tests send every chunk).
     pub progress_every: Duration,
+    /// How long the download may take. The production value is generous; the tests set a short
+    /// one, so a server that never finishes the answer fails the test instead of hanging it for
+    /// the production's fifteen minutes (#242).
+    pub download_timeout: Duration,
 }
 
 impl Settings {
@@ -99,6 +103,7 @@ impl Settings {
             result_path: install_dir.join(RESULT_FILE),
             guard_root: tray.parent().map(Path::to_path_buf).unwrap_or(tray),
             progress_every: PROGRESS_EVERY,
+            download_timeout: DOWNLOAD_TIMEOUT,
         }
     }
 }
@@ -650,7 +655,7 @@ impl Controller {
                     log::append(&format!("update: {} refused: {why}", update.version));
                     return Err(CheckFailReason::Other);
                 }
-                update.timeout = Some(DOWNLOAD_TIMEOUT);
+                update.timeout = Some(self.settings.download_timeout);
                 let info = info_of(&update);
                 Ok(Some((update, info)))
             }

@@ -452,9 +452,10 @@ impl App {
         A: DeviceAdapter + ResumeBehavior + FrameLane + 'static,
         D: canvas_proto::traits::NumericDisplayAdapter + ResumeBehavior + 'static,
     {
-        let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_and_tiles(
+        let user_effects = Arc::new(crate::user_effects::UserEffects::with_stock_tiles_and_import_load(
             crate::user_effects::html_builder(),
             crate::user_effects::html_builder_seeded(crate::thumbnail::TILE_SEED),
+            crate::user_effects::html_builder_with_import_load(),
             crate::user_effects::STOCK_EFFECTS,
         ));
         // The stacks are read before the API answers; the effect names they are checked against
@@ -741,26 +742,29 @@ impl App {
     }
 }
 
-/// A per-device frame sink: a bounded(1) channel into the device's writer task.
+/// A per-device frame sink: the newest frame, on its way to the device's writer task.
 ///
-/// When the device is slower than the render loop, the old frame is dropped and the new
-/// one takes its place. The engine never blocks.
+/// The frame sits in a watch channel and not in a queue: the device is often slower than the
+/// render loop, and the frame that matters is the newest one. A queue of one keeps the
+/// oldest frame and drops the newest, so the device would show colours the scene has left
+/// behind, and the frame that brings the lights back after a resume (#145) could be the one
+/// that is dropped (#308). The engine never blocks either way.
 pub struct DeviceSink {
     id: DeviceId,
-    tx: tokio::sync::mpsc::Sender<Vec<canvas_proto::Rgb8>>,
+    tx: tokio::sync::watch::Sender<Vec<canvas_proto::Rgb8>>,
     /// While this is active the engine's frames are dropped (the identify override).
     gate: Option<Arc<crate::identify::IdentifyGate>>,
 }
 
 impl DeviceSink {
-    pub fn new(id: DeviceId, tx: tokio::sync::mpsc::Sender<Vec<canvas_proto::Rgb8>>) -> Self {
+    pub fn new(id: DeviceId, tx: tokio::sync::watch::Sender<Vec<canvas_proto::Rgb8>>) -> Self {
         Self { id, tx, gate: None }
     }
 
     /// A sink that obeys the identify override and lets its ticker reach the same writer.
     pub fn with_gate(
         id: DeviceId,
-        tx: tokio::sync::mpsc::Sender<Vec<canvas_proto::Rgb8>>,
+        tx: tokio::sync::watch::Sender<Vec<canvas_proto::Rgb8>>,
         gate: Arc<crate::identify::IdentifyGate>,
     ) -> Self {
         gate.register(id.clone(), tx.clone());
@@ -773,17 +777,15 @@ impl FrameSink for DeviceSink {
         if self.gate.as_ref().is_some_and(|g| g.is_active()) {
             return;
         }
-        // `try_send` never blocks; a full channel means the device is behind and the old
-        // frame is dropped.
-        match self.tx.try_send(colors) {
-            Ok(()) => {}
-            Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
-                tracing::debug!(device = %self.id, "device is behind; dropping a frame");
-            }
-            Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => {
-                tracing::warn!(device = %self.id, "device writer is gone; dropping a frame");
-            }
+        // No reader left: the device's writer is gone, and nobody will take the frame.
+        if self.tx.receiver_count() == 0 {
+            tracing::warn!(device = %self.id, "device writer is gone; dropping a frame");
+            return;
         }
+        // The newest frame wins. The writer takes the frame that is there when it is ready:
+        // a frame that arrives while the device is behind replaces the older one instead of
+        // being dropped, and the engine never blocks.
+        self.tx.send_replace(colors);
     }
 }
 
@@ -825,16 +827,20 @@ mod tests {
         assert_eq!(registry.subscribers(), 1);
     }
 
+    /// The sink keeps the newest frame and never blocks the engine (#308).
+    ///
+    /// The device is often slower than the render loop. The frame that matters is the newest
+    /// one, so a frame that arrives while the device is behind replaces the older one
+    /// instead of being dropped.
     #[test]
-    fn device_sink_drops_frames_rather_than_blocking() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(1);
+    fn device_sink_keeps_the_newest_frame() {
+        let (tx, mut rx) = tokio::sync::watch::channel(vec![canvas_proto::Rgb8::BLACK]);
         let sink = DeviceSink::new(DeviceId("openrgb:abc".into()), tx);
         sink.submit(vec![canvas_proto::Rgb8::WHITE]);
-        // The channel is full now: the second frame is dropped, not queued.
-        sink.submit(vec![canvas_proto::Rgb8::BLACK]);
-        let first = rx.try_recv().unwrap();
-        assert_eq!(first, vec![canvas_proto::Rgb8::WHITE]);
-        assert!(rx.try_recv().is_err());
+        sink.submit(vec![canvas_proto::Rgb8::new(255, 0, 0)]);
+        // The writer takes the newest frame, not the first one.
+        let newest = rx.borrow_and_update().clone();
+        assert_eq!(newest, vec![canvas_proto::Rgb8::new(255, 0, 0)]);
     }
 
     #[test]

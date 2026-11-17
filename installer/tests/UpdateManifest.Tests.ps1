@@ -1644,7 +1644,7 @@ try {
         $base = (Get-Content -LiteralPath $workflowPath -Raw) -replace "`r`n", "`n"
         $all = '${{ toJSON(secrets) }}'
         $key = '${{ secrets.UPDATE_SIGNING_KEY }}'
-        $checkout = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n"
+        $checkout = "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`n        with:`n          persist-credentials: false`n"
         $variants = [ordered]@{
             'toJSON(secrets) in a publish step env'       = { param($t) $t.Replace("      - name: Build the site`n        env:`n", "      - name: Build the site`n        env:`n          ALL_SECRETS: $all`n") }
             'secrets.UPDATE_SIGNING_KEY in a publish with' = { param($t) $t.Replace("        with:`n          files: |`n", "        with:`n          key: $key`n          files: |`n") }
@@ -1857,8 +1857,8 @@ try {
         # The guard read the keys of a with: map with one indent, so a key after a nested map looked
         # like an indent the guard cannot read, and the whole step was reported.
         $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $workflowPath -Raw)).Text
-        $checkout = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n`n      - name: Tag matches the workspace version"
-        $nested = "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n        with:`n          persist-credentials: false`n          nested:`n            deep: value`n          fetch-depth: 1`n`n      - name: Tag matches the workspace version"
+        $checkout = "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`n        with:`n          persist-credentials: false`n`n      - name: Tag matches the workspace version"
+        $nested = "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`n        with:`n          persist-credentials: false`n          nested:`n            deep: value`n          fetch-depth: 1`n`n      - name: Tag matches the workspace version"
         Assert-True ($base.Contains($checkout)) 'the build job checks out with persist-credentials: false'
         $mutated = $base.Replace($checkout, $nested)
         Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
@@ -2581,7 +2581,7 @@ try {
             'a pull_request trigger'        = { param($t) $t.Replace("on:`n  workflow_dispatch:", "on:`n  pull_request:`n  workflow_dispatch:") }
             'no main guard on the publish job' = { param($t) $t.Replace("    needs: build`n    if: github.ref == 'refs/heads/main'`n", "    needs: build`n") }
             'no main guard on the build job' = { param($t) $t.Replace("    if: github.ref == 'refs/heads/main'`n    permissions:`n      contents: read`n", "    permissions:`n      contents: read`n") }
-            'an action that is not pinned'  = { param($t) $t.Replace('actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093', 'actions/download-artifact@v4') }
+            'an action that is not pinned'  = { param($t) $t.Replace('actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333', 'actions/download-artifact@v4') }
             'a write in the build job'      = { param($t) $t.Replace("    if: github.ref == 'refs/heads/main'`n    permissions:`n      contents: read`n", "    if: github.ref == 'refs/heads/main'`n    permissions:`n      contents: write`n") }
             'a write at the top level'      = { param($t) $t.Replace("permissions:`n  contents: read`n", "permissions:`n  contents: write`n") }
             'no write in the publish job'   = { param($t) $t.Replace("      contents: write # the only job that can write to the release", "      contents: read") }
@@ -2593,7 +2593,7 @@ try {
             'no --prerelease on the edit'   = { param($t) $t.Replace('gh release edit experimental --prerelease --latest=false', 'gh release edit experimental --latest=false') }
             'the release marked as the latest' = { param($t) $t.Replace('--latest=false', '--latest') }
             'npm in the publish job'        = { param($t) $t.Replace("      - name: The four files are there`n", "      - name: Install the app`n        shell: pwsh`n        run: npm ci`n`n      - name: The four files are there`n") }
-            'a checkout in the publish job' = { param($t) $t.Replace("      - name: The four files are there`n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n`n      - name: The four files are there`n") }
+            'a checkout in the publish job' = { param($t) $t.Replace("      - name: The four files are there`n", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`n`n      - name: The four files are there`n") }
             'the manifest script in the publish job' = { param($t) $t.Replace("      - name: The four files are there`n", "      - name: Write latest.json`n        shell: pwsh`n        run: pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version 0.9.1-dev.1 -SigFile dist/setup.sig -OutFile dist/latest.json`n`n      - name: The four files are there`n") }
             'latest.json uploaded first'    = { param($t) $t.Replace("          gh release upload experimental dist/latest.json --clobber`n          if (`$LASTEXITCODE -ne 0) { throw 'latest.json could not be uploaded' }`n", '').Replace("          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe`" --clobber`n", "          gh release upload experimental dist/latest.json --clobber`n          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe`" --clobber`n") }
             'the signature uploaded last'   = { param($t) $t.Replace("          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe.sig`" --clobber`n          if (`$LASTEXITCODE -ne 0) { throw 'the signature could not be uploaded' }`n", '').Replace("          gh release upload experimental dist/latest.json --clobber`n", "          gh release upload experimental dist/latest.json --clobber`n          gh release upload experimental `"dist/canvas-rgb-setup-`$env:VERSION.exe.sig`" --clobber`n") }
@@ -2719,7 +2719,7 @@ try {
         Assert-Equal $v.Count 0 "the real experimental.yml has no violation:`n$($v -join "`n")"
         $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $experimentalPath -Raw)).Text
         $cases = [ordered]@{
-            'a checkout in the publish job'         = { param($t) $t.Replace("      - name: The four files are there`n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n`n      - name: The four files are there`n") }
+            'a checkout in the publish job'         = { param($t) $t.Replace("      - name: The four files are there`n", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`n`n      - name: The four files are there`n") }
             'the manifest script in the publish job' = { param($t) $t.Replace("      - name: The four files are there`n", "      - name: Write latest.json`n        shell: pwsh`n        run: pwsh -NoProfile -File tools/make-update-manifest.ps1 -Version 0.9.1-dev.1 -SigFile dist/setup.sig -OutFile dist/latest.json`n`n      - name: The four files are there`n") }
             'npm in the publish job'                = { param($t) $t.Replace("      - name: The four files are there`n", "      - name: Install the app`n        shell: pwsh`n        run: npm ci`n`n      - name: The four files are there`n") }
         }
@@ -2806,8 +2806,12 @@ try {
         Assert-Equal ($version -replace '-dev\..*$', '') '0.9.1' 'the dev version is the next patch of the release it follows'
         $number = $version -replace '.*-dev\.', ''
         Assert-True (-not $number.StartsWith('0')) 'the number has no leading zero, so semver compares it as a number'
-        $now = [long][DateTime]::UtcNow.ToString('yyyyMMddHHmmss')
-        Assert-True ([Math]::Abs($now - [long]$number) -le 2) "the number is the UTC time of the run: [$number] against [$now]"
+        # Compare as times, not as 14-digit numbers: 20261116180759 and 20261116180800 are one second
+        # apart but 41 apart as numbers, so a numeric tolerance failed whenever the run crossed a
+        # minute (cause:timing-test).
+        $built = [DateTime]::ParseExact($number, 'yyyyMMddHHmmss', [Globalization.CultureInfo]::InvariantCulture, [Globalization.DateTimeStyles]::AssumeUniversal -bor [Globalization.DateTimeStyles]::AdjustToUniversal)
+        $skew = [Math]::Abs(([DateTime]::UtcNow - $built).TotalSeconds)
+        Assert-True ($skew -le 30) "the number is the UTC time of the run: [$number] is $([int]$skew) s from now"
         # The order the tray uses: a later build is a newer version, whichever workflow made it.
         Assert-True ((Compare-SemverVersion '0.9.1-dev.20261106130000' '0.9.1-dev.20261106120000') -gt 0) 'a later timestamp is a newer version'
         Assert-True ((Compare-SemverVersion '0.9.1-dev.20261106130000' '0.9.1-dev.50') -gt 0) 'a timestamp is newer than any run number of the same build'
@@ -2827,7 +2831,7 @@ try {
         }
         # The broken copy: a checkout after the download wipes the folder the download wrote into.
         $base = (Get-WorkflowJobsFromText (Get-Content -LiteralPath $testBuildPath -Raw)).Text
-        $mutated = $base.Replace("      - name: Checksum still matches`n", "      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4`n`n      - name: Checksum still matches`n")
+        $mutated = $base.Replace("      - name: Checksum still matches`n", "      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1`n`n      - name: Checksum still matches`n")
         Assert-True ($mutated -ne $base) 'the mutation changed the workflow text'
         $v = @(Get-WorkspaceViolations $mutated)
         Assert-True ($v.Count -gt 0) "a checkout after the download is a violation:`n$($v -join "`n")"
