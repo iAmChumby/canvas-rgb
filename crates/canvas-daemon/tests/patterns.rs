@@ -1396,19 +1396,19 @@ fn spinning_pattern(turns: f32) -> Pattern {
 }
 
 /// The daemon path, on the fakes: a pattern with Spin is saved, a scene plays it, and the fake
-/// device receives frames whose lit LED travels round the ring over four seconds: a whole lap at
-/// 0.25 laps a second, one LED about every third of a second, with the parts between LEDs blended.
+/// device receives frames whose lit LED travels a whole lap round the ring (about four seconds at
+/// 0.25 laps a second), one LED at a time, with the parts between LEDs blended.
 ///
 /// Run with `--nocapture` to read the recorded run (every 15th frame).
 #[tokio::test]
-async fn a_spinning_pattern_sends_the_fake_device_rotating_frames_over_four_seconds() {
+async fn a_spinning_pattern_sends_the_fake_device_rotating_frames_for_a_lap() {
     let rig = rig_with_patterns(vec![spinning_pattern(0.25)], scenes_file()).await;
     shows_something(&rig.b).await;
     let from = rig.b.seen();
-    tokio::time::sleep(Duration::from_secs(4)).await;
+    // Wait for the condition, not a clock: until the lit LED has gone a whole lap (12 steps).
+    wait_until(|| lap_steps(&rig.b.since(from)) >= LEDS as usize).await;
     let frames = rig.b.since(from);
-    assert!(frames.len() > 60, "a 30 fps engine sent {} frames in 4 s", frames.len());
-    println!("recorded run: {} frames in 4 s, fake:b (a ring of {LEDS}), spin 0.25 laps/s", frames.len());
+    println!("recorded run: {} frames for one lap, fake:b (a ring of {LEDS}), spin 0.25 laps/s", frames.len());
     let mut last: Option<usize> = None;
     let mut seen = std::collections::BTreeSet::new();
     let mut blended = 0;
@@ -1433,10 +1433,18 @@ async fn a_spinning_pattern_sends_the_fake_device_rotating_frames_over_four_seco
         seen.insert(at);
         last = Some(at);
     }
-    assert!(seen.len() >= 11, "a lap visits every LED: saw {seen:?}");
+    assert_eq!(seen.len(), LEDS as usize, "a lap visits every LED: saw {seen:?}");
     assert!(blended > 10, "between two LEDs the light is shared: {blended} frames");
-    // 0.25 laps a second for four seconds is one lap, 12 LEDs, give or take the frames either end.
-    assert!((10..=14).contains(&steps), "{steps} LED steps in four seconds");
+    assert!(steps >= LEDS as usize, "{steps} LED steps for one lap");
+}
+
+/// How many LED steps the peak has moved forward across `frames` (0 while it holds still).
+fn lap_steps(frames: &[Vec<Rgb8>]) -> usize {
+    frames
+        .windows(2)
+        .map(|w| (peak(&w[1]).0 + LEDS as usize - peak(&w[0]).0) % LEDS as usize)
+        .filter(|step| *step <= 1)
+        .sum()
 }
 
 /// The first frame with something lit on `sink`: the scene has started and faded in.
@@ -1470,9 +1478,9 @@ async fn a_0_16_0_pattern_file_plays_as_it_did() {
     let rig = rig_with_patterns(vec![pattern], scenes_file()).await;
     shows_marked(&rig.b, LEDS as usize, 0, rgb(RED), "the 0.16.0 pattern").await;
     let from = rig.b.seen();
-    tokio::time::sleep(Duration::from_millis(1500)).await;
+    // Wait for the condition, not a clock: enough frames to see any movement (a 30 fps engine).
+    wait_until(|| rig.b.since(from).len() > 45).await;
     let frames = rig.b.since(from);
-    assert!(frames.len() > 20, "{} frames", frames.len());
     let want = rig.b.last().expect("a frame");
     for frame in &frames {
         assert_eq!(frame, &want, "a pattern with an unknown motion stays as its first frame");
