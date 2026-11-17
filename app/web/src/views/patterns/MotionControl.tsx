@@ -15,7 +15,18 @@ import s from "@/views/patterns/patterns.module.css";
 
 type Mode = "off" | "spin";
 
-export function MotionControl({ motion, onMotion }: { motion: Motion; onMotion: (motion: Motion) => void }) {
+export function MotionControl({
+  motion,
+  onMotion,
+  onBegin,
+  onEnd,
+}: {
+  motion: Motion;
+  onMotion: (motion: Motion) => void;
+  /** Brackets one slider drag so many 0.05 steps make one history entry (#491). */
+  onBegin?: () => void;
+  onEnd?: () => void;
+}) {
   const speed = spinOf(motion);
   // Off remembers the speed the owner had, so Spin comes back to it and not to the default.
   const [last, setLast] = useState(speed !== null && speed !== 0 ? speed : SPIN_TURNS_DEFAULT);
@@ -55,6 +66,8 @@ export function MotionControl({ motion, onMotion }: { motion: Motion; onMotion: 
             step={0.05}
             disabled={mode === "off"}
             onChange={spin}
+            onBegin={onBegin}
+            onEnd={onEnd}
           />
         </span>
         <ArrowClockwise size={14} weight="bold" aria-hidden="true" />

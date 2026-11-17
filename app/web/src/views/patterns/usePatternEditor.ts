@@ -99,6 +99,9 @@ export interface PatternEditorState {
   setShape(shape: Shape, grid?: GridSize, step?: ShapeStep | null): void;
   /** The Gradient tool's stops and wrap, or null until the tool has been picked. */
   gradient: GradientState | null;
+  /** A slider press, key step or drag has begun: the motion changes until its end are one entry (#491). */
+  beginMotionDrag(): void;
+  endMotionDrag(): void;
   selectStop(index: number): void;
   /** Moves a stop to a position and writes the new blend. One drag is one history entry. */
   moveStop(index: number, at: number): void;
@@ -164,6 +167,14 @@ export function usePatternEditor(
      * the history where it was; the owner names the reason in its own row.
      */
     onShapeLight?(lightId: string, arrangement: Arrangement): Promise<void>;
+    /**
+     * The light's arrangement now, when the owner can read it. An undo or redo writes only while the
+     * light is still where the shape change left it: a change made in Devices is not overwritten
+     * (#491).
+     */
+    getShapeLight?(lightId: string): Arrangement | undefined;
+    /** The owner says why a write was skipped because the light had changed elsewhere (#491). */
+    onShapeSkipped?(step: ShapeStep, expected: Arrangement, current: Arrangement): void;
   },
 ): PatternEditorState {
   // The loaded document: the frame's colours padded to the device's LED count, so a pattern that
@@ -204,6 +215,11 @@ export function usePatternEditor(
   const gradientRef = useRef<GradientState | null>(null);
   /** True between a stop's first move and its release: one history entry. */
   const inStopDrag = useRef(false);
+  /** True between a motion slider's press and its release: one history entry for the whole drag (#491). */
+  const inMotionDrag = useRef(false);
+  /** Undo and redo share one lane, in press order: N presses undo N steps (#491). */
+  const historyPending = useRef<Array<() => void>>([]);
+  const historyBusy = useRef(false);
 
   // The draft goes out on the animation frame, not on the pointer event: a drag is many events
   // and at most one request per frame. `pending` keeps the newest document, so a frame carries the
@@ -222,6 +238,16 @@ export function usePatternEditor(
     shapeLight.current = opts.onShapeLight;
   }, [opts.onShapeLight]);
 
+  /** The light's arrangement as the owner sees it, and the note for a write it must skip (#491). */
+  const currentShapeLight = useRef(opts.getShapeLight);
+  const skippedShape = useRef(opts.onShapeSkipped);
+  useEffect(() => {
+    currentShapeLight.current = opts.getShapeLight;
+  }, [opts.getShapeLight]);
+  useEffect(() => {
+    skippedShape.current = opts.onShapeSkipped;
+  }, [opts.onShapeSkipped]);
+
   const flush = useCallback(() => {
     frame.current = null;
     const next = pending.current;
@@ -239,6 +265,8 @@ export function usePatternEditor(
         builtOn: builtOnRef.current,
         motion: motionRef.current,
         shapeStep,
+        // The Gradient tool's wrap is part of the shape: undo puts it back with the shape (#491).
+        gradientWrap: gradientRef.current?.wrap ?? null,
       },
     ];
     undoRef.current = next.length > HISTORY_DEPTH ? next.slice(next.length - HISTORY_DEPTH) : next;
@@ -298,13 +326,25 @@ export function usePatternEditor(
   const setMotion = useCallback(
     (next: Motion) => {
       if (sameMotion(motionRef.current, next)) return;
-      pushUndo();
+      // One drag of the slider is many 0.05 steps but one history entry (#491). A press opens the
+      // gate; a key press on its own still makes one entry, since no gate was opened for it.
+      if (!inMotionDrag.current) {
+        inMotionDrag.current = true;
+        pushUndo();
+      }
       motionRef.current = next;
       setMotionState(next);
       schedule(compose(docRef.current));
     },
     [compose, pushUndo, schedule],
   );
+
+  const beginMotionDrag = useCallback(() => {
+    inMotionDrag.current = false;
+  }, []);
+  const endMotionDrag = useCallback(() => {
+    inMotionDrag.current = false;
+  }, []);
 
   const setGradient = useCallback((next: GradientState | null) => {
     gradientRef.current = next;
@@ -317,14 +357,17 @@ export function usePatternEditor(
    */
   const applyGradient = useCallback(
     (next: GradientState, entry: "new" | "drag" | "silent") => {
-      setGradient(next);
       const colours = gradientColours(next.stops, coloursRef.current.length, next.wrap);
-      if (sameColours(colours, coloursRef.current)) return;
-      if (entry === "new") pushUndo();
-      else if (entry === "drag" && !inStopDrag.current) {
+      const changed = !sameColours(colours, coloursRef.current);
+      // Push before `setGradient`, so the snapshot holds the wrap the user was looking at, not the
+      // one being moved to. Push only for a change that reaches the frame (#491).
+      if (changed && entry === "new") pushUndo();
+      else if (changed && entry === "drag" && !inStopDrag.current) {
         inStopDrag.current = true;
         pushUndo();
       }
+      setGradient(next);
+      if (!changed) return;
       commit(colours);
     },
     [commit, pushUndo, setGradient],
@@ -514,44 +557,101 @@ export function usePatternEditor(
     [commit, fillAll, pushUndo, setColour],
   );
 
-  /** Restores everything a snapshot holds: the frames, the shape and the motion (#481). */
+  /** Restores everything a snapshot holds: the frames, the shape, the motion and the wrap (#481, #491). */
   const restore = useCallback(
     (snapshot: Snapshot) => {
       builtOnRef.current = snapshot.builtOn;
       setBuiltOnState(snapshot.builtOn);
       motionRef.current = snapshot.motion;
       setMotionState(snapshot.motion);
+      // A ring↔strip change re-lays the stops silently (setShape). Undo must put the wrap back too,
+      // or the next stop edit writes a wrapped blend into a line (#491). The frames already carry
+      // the right colours, so restore only the editor's wrap, without applying the gradient again.
+      const g = gradientRef.current;
+      if (g && snapshot.gradientWrap !== null && g.wrap !== snapshot.gradientWrap) {
+        setGradient({ ...g, wrap: snapshot.gradientWrap });
+      }
       applyDoc(snapshot.doc, snapshot.selected);
     },
-    [applyDoc],
+    [applyDoc, setGradient],
   );
 
   /**
-   * Writes the light a shape change touched, back to `end`: on an undo that is the arrangement the
-   * step found, on a redo the one it made (#481). True when the history may move, which a failed
-   * write does not let it: the owner names the reason and the pattern keeps the shape it shows.
+   * Writes one end of a shape step's light. `target` is the arrangement to put on the light,
+   * `expected` the one it must still be in for the write to be ours to make. A light the owner
+   * changed in Devices is left alone and named in the note row (#491). "ok" is the only result that
+   * lets a history step move: a failed or skipped write leaves the shape and the step where they
+   * were, so the light and the pattern never come apart.
    */
-  const writeShapeLight = useCallback(
-    async (step: ShapeStep, end: "from" | "to"): Promise<boolean> => {
+  const writeShapeArrangement = useCallback(
+    async (step: ShapeStep, target: Arrangement, expected: Arrangement): Promise<"ok" | "failed" | "skipped"> => {
+      const current = currentShapeLight.current?.(step.light);
+      if (current !== undefined && current !== expected) {
+        skippedShape.current?.(step, expected, current);
+        return "skipped";
+      }
       const write = shapeLight.current;
-      if (!write) return true;
+      if (!write) return "ok";
       try {
-        await write(step.light, step[end]);
-        return true;
+        await write(step.light, target);
+        return "ok";
       } catch {
-        return false;
+        return "failed";
       }
     },
     [],
   );
 
-  const undo = useCallback(() => {
-    void (async () => {
-      const previous = undoRef.current[undoRef.current.length - 1];
-      if (!previous) return;
-      if (previous.shapeStep && !(await writeShapeLight(previous.shapeStep, "from"))) return;
-      // Another change landed while the light was being written: this step is not the one to undo.
-      if (undoRef.current[undoRef.current.length - 1] !== previous) return;
+  /** Undo writes `from` (a light must be at `to`); redo writes `to` (a light must be at `from`). */
+  const writeShapeLight = useCallback(
+    (step: ShapeStep, end: "from" | "to") =>
+      end === "from"
+        ? writeShapeArrangement(step, step.from, step.to)
+        : writeShapeArrangement(step, step.to, step.from),
+    [writeShapeArrangement],
+  );
+
+  /**
+   * History changes run one at a time, in the order the keys were pressed. Without a lane, two
+   * quick undo presses both read the same top entry before either has popped it and undo one step
+   * instead of two (#491). A new edit is not queued: it lands at once and is seen as a stale step.
+   * Each step calls `done` when its own work and state updates are finished, so a step that needs
+   * no light write finishes inside this call and the next press sees the lane free at once.
+   */
+  const drainHistory = useCallback(() => {
+    if (historyBusy.current) return;
+    while (historyPending.current.length > 0) {
+      historyBusy.current = true;
+      historyPending.current.shift()!();
+      // A step waiting on a light write leaves the lane busy; its `done` frees it when the write
+      // lands. A synchronous step has already freed it, so the loop picks up the next press.
+      if (historyBusy.current) return;
+    }
+  }, []);
+
+  const releaseHistory = useCallback(() => {
+    historyBusy.current = false;
+    drainHistory();
+  }, [drainHistory]);
+
+  const enqueueHistory = useCallback(
+    (op: (done: () => void) => void) => {
+      historyPending.current.push(() => {
+        try {
+          op(releaseHistory);
+        } catch {
+          // A step that throws still has to free the lane, or every later press is stuck behind it.
+          releaseHistory();
+        }
+      });
+      drainHistory();
+    },
+    [releaseHistory, drainHistory],
+  );
+
+  /** Moves a step between the two stacks and puts its document back. Called only for a live step. */
+  const finishUndo = useCallback(
+    (previous: Snapshot) => {
       undoRef.current = undoRef.current.slice(0, -1);
       setUndoStack(undoRef.current);
       redoRef.current = [
@@ -563,20 +663,18 @@ export function usePatternEditor(
           motion: motionRef.current,
           // The redo puts the light back to the arrangement this step made.
           shapeStep: previous.shapeStep,
+          gradientWrap: gradientRef.current?.wrap ?? null,
         },
       ];
       setRedoStack(redoRef.current);
       inStroke.current = false;
       restore(previous);
-    })();
-  }, [restore, writeShapeLight]);
+    },
+    [restore],
+  );
 
-  const redo = useCallback(() => {
-    void (async () => {
-      const next = redoRef.current[redoRef.current.length - 1];
-      if (!next) return;
-      if (next.shapeStep && !(await writeShapeLight(next.shapeStep, "to"))) return;
-      if (redoRef.current[redoRef.current.length - 1] !== next) return;
+  const finishRedo = useCallback(
+    (next: Snapshot) => {
       redoRef.current = redoRef.current.slice(0, -1);
       setRedoStack(redoRef.current);
       undoRef.current = [
@@ -587,13 +685,83 @@ export function usePatternEditor(
           builtOn: builtOnRef.current,
           motion: motionRef.current,
           shapeStep: next.shapeStep,
+          gradientWrap: gradientRef.current?.wrap ?? null,
         },
       ];
       setUndoStack(undoRef.current);
       inStroke.current = false;
       restore(next);
-    })();
-  }, [restore, writeShapeLight]);
+    },
+    [restore],
+  );
+
+  const undo = useCallback(() => {
+    enqueueHistory((done) => {
+      const previous = undoRef.current[undoRef.current.length - 1];
+      if (!previous) {
+        done();
+        return;
+      }
+      // Check before the write as well: an earlier queued press may have moved past this step.
+      if (undoRef.current[undoRef.current.length - 1] !== previous) {
+        done();
+        return;
+      }
+      const step = previous.shapeStep;
+      if (!step) {
+        finishUndo(previous);
+        done();
+        return;
+      }
+      void writeShapeLight(step, "from").then((ok) => {
+        if (ok !== "ok") {
+          done();
+          return;
+        }
+        if (undoRef.current[undoRef.current.length - 1] !== previous) {
+          // An edit landed during the write. The step is abandoned, so the pattern keeps its shape;
+          // put the light back to that shape too, or it is a ring under a strip (#491).
+          void writeShapeArrangement(step, builtOnRef.current.arrangement, step.from).then(() => done());
+          return;
+        }
+        finishUndo(previous);
+        done();
+      });
+    });
+  }, [enqueueHistory, finishUndo, writeShapeArrangement, writeShapeLight]);
+
+  const redo = useCallback(() => {
+    enqueueHistory((done) => {
+      const next = redoRef.current[redoRef.current.length - 1];
+      if (!next) {
+        done();
+        return;
+      }
+      if (redoRef.current[redoRef.current.length - 1] !== next) {
+        done();
+        return;
+      }
+      const step = next.shapeStep;
+      if (!step) {
+        finishRedo(next);
+        done();
+        return;
+      }
+      void writeShapeLight(step, "to").then((ok) => {
+        if (ok !== "ok") {
+          done();
+          return;
+        }
+        if (redoRef.current[redoRef.current.length - 1] !== next) {
+          // Mirror of undo: the light was written to `to`, but the pattern kept the shape it shows.
+          void writeShapeArrangement(step, builtOnRef.current.arrangement, step.to).then(() => done());
+          return;
+        }
+        finishRedo(next);
+        done();
+      });
+    });
+  }, [enqueueHistory, finishRedo, writeShapeArrangement, writeShapeLight]);
 
   // ---- frames (#468). Each change is one history entry and goes to the lights at once.
 
@@ -698,6 +866,8 @@ export function usePatternEditor(
     setMotion,
     setShape,
     gradient,
+    beginMotionDrag,
+    endMotionDrag,
     selectStop,
     moveStop,
     addStop,
@@ -747,6 +917,8 @@ interface Snapshot {
   builtOn: BuiltOn;
   motion: Motion;
   shapeStep: ShapeStep | null;
+  /** The Gradient tool's wrap at the time of the change, restored with the shape (#491). */
+  gradientWrap: boolean | null;
 }
 
 /** Motion is a small JSON value; equality by value keeps a re-pick off the history. */

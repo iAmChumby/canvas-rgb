@@ -38,7 +38,7 @@ import { GradientStops } from "@/views/patterns/GradientStops";
 import { MotionControl } from "@/views/patterns/MotionControl";
 import { PatternTools } from "@/views/patterns/PatternTools";
 import { gridOfZone, choosableLights, shapesOf, zoneOf } from "@/views/patterns/shapeLight";
-import { usePatternEditor } from "@/views/patterns/usePatternEditor";
+import { usePatternEditor, type ShapeStep } from "@/views/patterns/usePatternEditor";
 import type { Arrangement } from "@/proto/Arrangement";
 import type { LightView } from "@/proto/LightView";
 import type { Pattern } from "@/proto/Pattern";
@@ -148,6 +148,11 @@ export function PatternEditor({
     [send],
   );
 
+  // The lights and devices the daemon lists: which light a shape change writes, and the state of
+  // that light before an undo tries to write it again (#491).
+  const lights = useSnap((state) => state.lights);
+  const devices = useSnap((state) => state.devices);
+
   /**
    * Writes a light's arrangement through the lights route, for a shape change and for its undo or
    * redo (#481). A failure is named in the note row and thrown, so an undo leaves its history step
@@ -164,7 +169,29 @@ export function PatternEditor({
     }
   }, []);
 
-  const editor = usePatternEditor(pattern, { onDraft: draft, onShapeLight: writeShape });
+  /**
+   * The light's arrangement as the daemon last listed it. An undo or redo reads this before writing
+   * the light: a change made in Devices since the shape change is not overwritten (#491).
+   */
+  const getShapeLight = useCallback(
+    (lightId: string) => lights?.find((l) => l.light.id === lightId)?.light.arrangement,
+    [lights],
+  );
+  const onShapeSkipped = useCallback(
+    (_step: ShapeStep, expected: Arrangement, current: Arrangement) => {
+      setShapeProblem(
+        `the light is a ${current} now, not the ${expected} this change needs; it was changed elsewhere, so the pattern kept its shape`,
+      );
+    },
+    [],
+  );
+
+  const editor = usePatternEditor(pattern, {
+    onDraft: draft,
+    onShapeLight: writeShape,
+    getShapeLight,
+    onShapeSkipped,
+  });
 
   // The preview (#468): Play runs the whole document on the dots with the daemon's own maths
   // (`lib/patternPlay.ts`); stopped, the dots show the frame being painted. The lights always play the
@@ -190,8 +217,6 @@ export function PatternEditor({
   // a light of another arrangement is offered only when no light of this size matches the pattern's
   // shape, where the shape change is what brings it into step. The best match is the default, and
   // nothing is patched until a shape is chosen.
-  const lights = useSnap((state) => state.lights);
-  const devices = useSnap((state) => state.devices);
   const choosable = useMemo(() => choosableLights(editor.builtOn, lights, devices), [editor.builtOn, lights, devices]);
   const [chosenId, setChosenId] = useState<string | null>(null);
   const light = choosable.find((l) => l.light.id === chosenId) ?? choosable[0] ?? null;
@@ -220,7 +245,7 @@ export function PatternEditor({
   // properties, not pattern colours: they take effect at once and sit outside the pattern's colour
   // undo history, which is all this editor's history holds.
   // The light's own LED count is the run `first_led` counts in and the daemon checks it against.
-  // `referenceLight` only returns a light whose count equals the pattern's, so the two cannot differ
+  // `choosableLights` only returns lights whose count equals the pattern's, so the two cannot differ
   // while a light is found; the light's count is used so the notch never depends on the picture.
   const lightLeds = light?.led_count ?? Math.max(1, editor.builtOn.led_count);
   const reversed = light?.light.reversed ?? false;
@@ -513,7 +538,12 @@ export function PatternEditor({
         />
       </div>
 
-      <MotionControl motion={editor.motion} onMotion={editor.setMotion} />
+      <MotionControl
+        motion={editor.motion}
+        onMotion={editor.setMotion}
+        onBegin={editor.beginMotionDrag}
+        onEnd={editor.endMotionDrag}
+      />
 
       <FrameStrip
         builtOn={editor.builtOn}

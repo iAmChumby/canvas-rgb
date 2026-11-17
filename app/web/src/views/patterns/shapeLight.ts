@@ -28,11 +28,6 @@ export function referenceLights(builtOn: BuiltOn, lights: LightView[] | null, de
   return (lights ?? []).filter(fits).sort((a, b) => rank(a) - rank(b));
 }
 
-/** The light a pattern built on `builtOn` is laid out by by default, or null when none fits. */
-export function referenceLight(builtOn: BuiltOn, lights: LightView[] | null, devices: DeviceInfo[] | null = null): LightView | null {
-  return referenceLights(builtOn, lights, devices)[0] ?? null;
-}
-
 /**
  * The lights the header's chooser offers for a shape change (#481). The chooser says which light the
  * shape change writes to, so it lists only lights already in the pattern's shape: a light of another

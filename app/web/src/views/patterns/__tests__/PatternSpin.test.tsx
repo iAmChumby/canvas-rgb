@@ -451,6 +451,31 @@ describe("the Spin control", () => {
     await settle();
     expect((onSave.mock.calls[0]![0] as Pattern).motion).toEqual(rotate);
   });
+
+  it("undoes one drag of the spin slider in one press, not one tick at a time (#491)", async () => {
+    const started = { type: "spin", turns_per_s: 0.25 } as Pattern["motion"];
+    show(blank(12, "ring", started));
+    await settle();
+    const slider = screen.getByRole("slider", { name: "Spin speed, turns per second" });
+
+    // A press on the cap and one drag across many 0.05 steps: the slider sends one onChange per
+    // step crossed, but the editor must open only one history entry for the whole gesture.
+    fireEvent.pointerDown(slider, { pointerId: 1, clientX: 210 });
+    for (let x = 220; x <= 320; x += 10) {
+      fireEvent.pointerMove(slider, { pointerId: 1, clientX: x });
+    }
+    fireEvent.pointerUp(slider, { pointerId: 1, clientX: 320 });
+    await frames();
+    const dragged = draft().motion as { type: string; turns_per_s: number };
+    expect(dragged.type).toBe("spin");
+    expect(dragged.turns_per_s).toBeGreaterThan(0.25);
+
+    fireEvent.click(screen.getByRole("button", { name: "Undo" }));
+    await frames();
+    // One press puts the whole drag back, and no entry of the drag is left to undo.
+    expect(draft().motion).toEqual(started);
+    expect((screen.getByRole("button", { name: "Undo" }) as HTMLButtonElement).disabled).toBe(true);
+  });
 });
 
 describe("the preview", () => {

@@ -38,6 +38,8 @@ export function Slider({
   busy = false,
   onChange,
   onCommit,
+  onBegin,
+  onEnd,
 }: {
   value: number;
   min: number;
@@ -53,6 +55,12 @@ export function Slider({
   busy?: boolean;
   onChange: (v: number) => void;
   onCommit?: (v: number) => void;
+  /**
+   * A gesture began: the `onChange` calls until `onEnd` are one edit. Callers that keep a history
+   * bracket a pointer drag or a key step here, so one drag is one undo entry (#491).
+   */
+  onBegin?: () => void;
+  onEnd?: () => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
   const disabled = disabledProp || busy;
@@ -112,6 +120,7 @@ export function Slider({
     setDragging(true);
     sent.current = value;
     before.current = value;
+    onBegin?.();
     follow(e.clientX);
   };
 
@@ -139,11 +148,13 @@ export function Slider({
     end(e);
     if (committed !== null) onCommit?.(committed);
     else if (sent.current !== before.current) onChange(before.current);
+    onEnd?.();
   };
 
   const onPointerCancel = (e: PointerEvent<HTMLDivElement>) => {
     if (e.pointerId !== owner.current) return;
     end(e);
+    onEnd?.();
   };
 
   const onKeyDown = (e: KeyboardEvent<HTMLDivElement>) => {
@@ -157,8 +168,10 @@ export function Slider({
     else if (e.key === "End") next = quantise(max);
     if (next === null) return;
     e.preventDefault();
+    onBegin?.();
     onChange(next);
     onCommit?.(next);
+    onEnd?.();
   };
 
   return (
