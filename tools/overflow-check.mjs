@@ -14,6 +14,10 @@
 //     such an element; they do not excuse it (#285);
 //   - a view whose document scrolls sideways (scrollWidth > clientWidth);
 //   - a panel that scrolls sideways itself (its content is wider than it shows);
+//   - any other box that scrolls sideways through a computed overflow-x: `overflow-y: auto` on its
+//     own makes overflow-x compute to auto, so a vertical scroller that is also too wide is the
+//     #467 rail class (#478) and is reported even though the sideways-declaration exemption above
+//     cannot see it;
 //   - a figure's unit that has wrapped under the figure ("70" over "°C", #268);
 //   - a portal (a Popover or a Select's list, both drawn into `body`) that passes the window on any
 //     side, or the right edge of the box its opening control sits in;
@@ -642,6 +646,22 @@ const MEASURE = ({ slack, extraBoxes, KNOWN_CLIPPED, FIT_PANES, PHONE_MAX }) => 
     if ((ox === "auto" || ox === "scroll") && box.scrollWidth > box.clientWidth + slack) {
       hits.push({ kind: "scrolls", el: name(box), text: "", over: box.scrollWidth - box.clientWidth });
     }
+  }
+
+  // #478: the #467 rail class. `overflow-y: auto` alone makes overflow-x *compute* to auto without
+  // declaring a sideways scroller, so `declaresSideways`/`scrollsX` cannot see a box that scrolls
+  // sideways that way, and the box walk above only measures panels and notes. Check every drawn
+  // element whose computed overflow-x is auto|scroll but which does not declare x scrolling: if its
+  // content is wider than it shows, that is a vertical scroller that also scrolls sideways, which
+  // is a bug. A declared horizontal scroller is allowed to scroll sideways; panels/notes are
+  // measured above, so skip them here to avoid a duplicate hit.
+  for (const el of document.querySelectorAll("body *")) {
+    if (el.matches(BOX) || !drawnBox(el)) continue;
+    const cs = getComputedStyle(el);
+    if (cs.overflowX !== "auto" && cs.overflowX !== "scroll") continue;
+    if (declaresSideways(el)) continue;
+    const over = el.scrollWidth - el.clientWidth;
+    if (over > slack) hits.push({ kind: "scrolls", el: name(el), text: "", over });
   }
   for (const el of [...boxOf.keys()].filter((e) => !(e.parentElement && boxOf.has(e.parentElement)))) {
     const over = el.getBoundingClientRect().right - boxOf.get(el).getBoundingClientRect().right;
