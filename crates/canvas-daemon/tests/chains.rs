@@ -1403,10 +1403,15 @@ async fn a_failed_rollback_keeps_both_records() {
     let setup = started(&rig, 0).await;
     assert!(wait_until(Duration::from_secs(30), || rig.server.zone_leds(0, 0) == Some(300)).await);
     rig.app.store.write().await.lights_blocked = true;
-    // The final resize is held back, so the snapshot the commit names can be damaged while the
-    // commit is between that resize and its store write: a snapshot that cannot be read is a
-    // rollback that cannot run.
-    rig.server.delay_resizes(1_500);
+    // The fake keeps its replies back, so the commit is parked before its store write and its
+    // rollback: the snapshot the commit names can be damaged inside that gap. A snapshot that
+    // cannot be read is a rollback that cannot run. The wait is on the server's own held replies,
+    // a handshake with the commit, never a timer (#411, #479): a delayed resize does not park the
+    // commit, because the adapter re-enumerates the list at once (fake.rs REQUEST_CONTROLLER_COUNT)
+    // and the delay only moves when the new size lands.
+    // Read before the hold starts, so the first held reply is the one this wait is for.
+    let held_before = rig.server.held_replies();
+    rig.server.hold_replies(true);
     let router = rig.router.clone();
     let path = commit_path(0);
     let body = serde_json::to_string(&SetupCommit {
@@ -1418,11 +1423,20 @@ async fn a_failed_rollback_keeps_both_records() {
 
     let named = wait_until(Duration::from_secs(30), || rig.home.join(CHAIN_INTENT_FILE).exists()).await;
     assert!(named, "the commit never wrote its intent");
+    assert!(
+        wait_until(Duration::from_secs(30), || rig.server.held_replies() > held_before).await,
+        "the commit never waited on the device, so it cannot be held between its resize and its write"
+    );
     let intent = read_intent(&rig.home).expect("the intent record");
     let folder = canvas_daemon::paths::backups_dir_in(&rig.home).join(&intent.snapshot);
     assert!(folder.join(LIGHTS_FILE).exists(), "the snapshot holds the lights it would put back");
     std::fs::remove_file(folder.join(LIGHTS_FILE)).expect("the snapshot's lights.json goes");
     std::fs::create_dir(folder.join(LIGHTS_FILE)).expect("a folder takes its place");
+
+    // OpenRGB answers now: the commit runs on to its refused store write and its rollback, which
+    // cannot read the damaged snapshot.
+    rig.server.hold_replies(false);
+    rig.server.release_replies();
 
     let response = tokio::time::timeout(Duration::from_secs(60), pending)
         .await

@@ -168,8 +168,10 @@ pub async fn supervise_app(app: Arc<App>, stop: watch::Receiver<bool>) {
     let adapter = Arc::clone(&app.adapter);
     let for_devices = Arc::clone(&app);
     let for_link = Arc::clone(&app);
-    crate::openrgb_supervisor::supervise_with_rescans(
+    crate::openrgb_supervisor::supervise_with_lane(
         adapter,
+        // A rescan waits for OpenRGB's detection on the frame lane, with no adapter lock (#290).
+        app.frame_lane.clone(),
         // The zone sizes are shared with the app, so a resize shows up here.
         zones,
         // The zones a setup holds raised (#338): the refresh leaves them alone.

@@ -151,8 +151,13 @@ describe("a light's row on Devices", () => {
       fireEvent.click(row.getByRole("radio", { name: "Ring" }));
     });
     await waitFor(() => expect(patch).toHaveBeenCalledWith("openrgb:strip-1#z0", { arrangement: "ring" }));
+    // The row is busy while the patch and the read-back are in flight, and both controls are
+    // disabled until they land: a click on a disabled switch is dropped, so wait for the control
+    // to be usable instead of for the patch call alone (#483).
+    const direction = () => row.getByRole("switch", { name: "Runs the other way" }) as HTMLButtonElement;
+    await waitFor(() => expect(direction().disabled).toBe(false));
     await act(async () => {
-      fireEvent.click(row.getByRole("switch", { name: "Runs the other way" }));
+      fireEvent.click(direction());
     });
     await waitFor(() => expect(patch).toHaveBeenCalledWith("openrgb:strip-1#z0", { reversed: true }));
   });

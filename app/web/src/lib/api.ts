@@ -126,10 +126,13 @@ export const CONFIG_TRANSFER_TIMEOUT_MS = 60_000;
 
 /**
  * The deadline of the device rescan (`GET /devices?rescan=1`): the daemon reads OpenRGB's device
- * list again, or connects to OpenRGB first when the link is down. It re-reads what OpenRGB
- * reports; it does not make OpenRGB look at the USB bus again (a real re-detect is issue #290).
- * The daemon answers within its own budgets (`RESCAN_BUDGET` + `RESCAN_QUEUE_WAIT`, 10 s,
- * `crates/canvas-daemon/src/openrgb_supervisor.rs`); the rest of the 30 s is margin.
+ * list again, or connects to OpenRGB first when the link is down. It asks OpenRGB to look at the
+ * hardware again, then re-reads what OpenRGB reports.
+ * The daemon answers within its own budgets: OpenRGB's detection settling (15 s at most,
+ * `RescanTiming::cap` in `crates/canvas-adapters/src/openrgb.rs`; a detection still running then
+ * is answered with the list the daemon holds, and its list is applied when it settles) plus `RESCAN_BUDGET` +
+ * `RESCAN_QUEUE_WAIT` (10 s, `crates/canvas-daemon/src/openrgb_supervisor.rs`), 25 s; the other
+ * 5 s of the 30 s are margin.
  */
 export const DEVICE_RESCAN_TIMEOUT_MS = 30_000;
 
