@@ -1593,6 +1593,126 @@ async fn a_new_takeover_is_not_put_over_by_the_dropped_guard() {
     shows(&rig.a, rgb(GREEN), "the new takeover is on the lights").await;
 }
 
+/// Waits for a state, without reading a verdict off a clock. Returns false at the deadline.
+async fn eventually(check: impl Fn() -> bool) -> bool {
+    let start = Instant::now();
+    while start.elapsed() < Duration::from_secs(10) {
+        if check() {
+            return true;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    false
+}
+
+/// Deleting the effect a group plays re-applies the active scene. A takeover that lands in that
+/// apply's window must survive it: the apply ends by clearing the takeover flag, so an apply
+/// that runs with the gate free forgets a takeover that landed under the gate (#500).
+///
+/// The apply is parked at a user effect's builder with a std condvar (no sleep): the takeover
+/// then lands under the real draft gate while the apply is in flight. On the buggy code the gate
+/// is free at the park, the takeover lands inside the window and the apply clears it. With the
+/// fix the delete holds the gate across its apply, so the takeover waits for the delete and is
+/// left alone.
+#[tokio::test]
+async fn deleting_an_effect_keeps_a_takeover_that_lands_during_the_apply() {
+    // The left group plays the effect we delete; the right one plays a user effect whose build
+    // we park, so the delete's apply stops at a deterministic point inside its window.
+    let mut scenes = draft_scenes_file();
+    scenes.scenes[0].groups[1] = group("right", &["fake:b#z0"], "html:keep", Props::new());
+
+    let reached = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let armed = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let go = Arc::new((Mutex::new(false), std::sync::Condvar::new()));
+    let (reached_park, armed_park, go_park) = (reached.clone(), armed.clone(), go.clone());
+    let builder: canvas_daemon::user_effects::Builder = Arc::new(move |id: &str, _source: &str| {
+        if id == "html:keep" && armed_park.load(std::sync::atomic::Ordering::SeqCst) {
+            reached_park.store(true, std::sync::atomic::Ordering::SeqCst);
+            let (lock, cvar) = &*go_park;
+            let mut released = lock.lock().unwrap_or_else(|e| e.into_inner());
+            while !*released {
+                released = cvar.wait(released).unwrap_or_else(|e| e.into_inner());
+            }
+            armed_park.store(false, std::sync::atomic::Ordering::SeqCst);
+        }
+        let colour = if id.starts_with("draft:") { rgb(GREEN) } else { rgb(RED) };
+        let schema = PropertySchema {
+            id: id.to_string(),
+            name: id.to_string(),
+            description: String::new(),
+            needs: Default::default(),
+            properties: Vec::new(),
+            presets: Vec::new(),
+            thumbnail: None,
+        };
+        Ok(Box::new(Solid { colour, schema, panic: None }) as Box<dyn Effect>)
+    });
+
+    let rig = rig_unstarted_with(scenes, &[("mine.html", MINE), ("keep.html", MINE)], builder).await;
+    canvas_daemon::scenes::restore_active(&rig.app).await;
+    // Arm the park for the delete's apply only.
+    armed.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let delete = tokio::spawn({
+        let router = rig.router.clone();
+        async move { send_on(&router, "DELETE", "/api/v1/effects/html:mine", None).await }
+    });
+    // The delete's apply is in flight, parked at html:keep.
+    assert!(
+        eventually(|| reached.load(std::sync::atomic::Ordering::SeqCst)).await,
+        "the delete's apply never reached the park"
+    );
+    // On the buggy code the gate is free here; with the fix the delete holds it across the apply.
+    let gate_held = rig.app.draft.gate().try_lock().is_err();
+
+    // Land a takeover the way the product does: under the draft gate, with a green effect.
+    let takeover = tokio::spawn({
+        let app = rig.app.clone();
+        async move {
+            let _gate = app.draft.gate().lock().await;
+            let build: canvas_daemon::scenes::EffectBuilder = Arc::new(|_group| {
+                let schema = PropertySchema {
+                    id: "draft:new".to_string(),
+                    name: "draft:new".to_string(),
+                    description: String::new(),
+                    needs: Default::default(),
+                    properties: Vec::new(),
+                    presets: Vec::new(),
+                    thumbnail: None,
+                };
+                Ok(Box::new(Solid { colour: rgb(GREEN), schema, panic: None }) as Box<dyn Effect>)
+            });
+            canvas_daemon::scenes::apply_takeover(&app, "draft:new", &Props::new(), None, build).await
+        }
+    });
+
+    if !gate_held {
+        // The gate was free, so the takeover lands inside the apply's window. Let it land
+        // before the apply finishes, which is what clears the flag on the old code.
+        assert!(
+            eventually(|| rig.app.scene.is_taken_over()).await,
+            "the takeover could not land with the gate free"
+        );
+    }
+
+    // Let the delete's apply finish.
+    {
+        let (lock, cvar) = &*go;
+        *lock.lock().unwrap_or_else(|e| e.into_inner()) = true;
+        cvar.notify_one();
+    }
+    let (status, _) = delete.await.expect("the delete task ends");
+    assert_eq!(status, StatusCode::OK, "the effect was deleted");
+    takeover.await.expect("the takeover task ends").expect("the takeover lands");
+
+    // The takeover still holds the lights: the delete's apply did not clear its flag.
+    assert!(
+        eventually(|| rig.app.scene.is_taken_over()).await,
+        "the takeover was dropped by the delete's apply"
+    );
+    shows(&rig.a, rgb(GREEN), "the takeover is still on the lights").await;
+}
+
 /// The legacy path (no scene on the lights): an activation whose effect cannot start answers
 /// the error and says so in the log, the way the layout route does.
 #[tokio::test]
