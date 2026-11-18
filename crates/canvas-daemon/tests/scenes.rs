@@ -3821,6 +3821,7 @@ mod scene_ops {
             plays: Plays::Effect { effect: effect.into(), props: Props::new() },
             mode: GroupMode::FlowAcross,
             brightness: 100,
+            sequence: None,
         }
     }
 
