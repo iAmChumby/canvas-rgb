@@ -2047,14 +2047,19 @@ async fn a_spinning_sequence_group_keeps_its_clock_across_a_colour_only_swap() {
         .iter()
         .position(|t| t.iter().any(|c| c.g > 60))
         .expect("a frame with the new green marker");
-    // The tick just before the new colours: the old picture at the moment the save landed. The two
-    // are one engine frame apart, so a kept clock moves the marker by an LED at most, while a clock
-    // that started over jumps back to the pattern's own LED, well behind where the run had got to.
-    let before = green.checked_sub(1).map(|i| at(&all[i], 0)).unwrap_or(0);
+    // The run position on the frame before the new colours and on the first frame with them: two
+    // ticks of the engine's own clock, next to each other in the tape whatever the save took to
+    // land. A kept clock carries the position on; a clock that started over is back at the
+    // pattern's own LED 7, well behind where the run had got to. The only other way forward is
+    // round the end of the run, two LEDs at most in one frame.
+    let previous = all[green.checked_sub(1).expect("the old colours come before the new")].clone();
+    let leds = swapped.frames[0].colors.len();
+    let before = at(&previous, 0);
     let carried = at(&all[green], 1);
+    let wrapped = before + 2 >= leds && carried <= 2;
     assert!(
-        carried >= before && (carried - before) <= 3,
-        "the green marker carries on from run position {before} (it was {carried}; a restart would show 7)"
+        carried >= before || wrapped,
+        "the run position carries on from {before} (the new colours start at {carried}; a restart gives 7)"
     );
 }
 
