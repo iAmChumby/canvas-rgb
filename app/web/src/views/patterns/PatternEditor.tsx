@@ -32,7 +32,7 @@ import { messageOf } from "@/lib/errors";
 import { cancelNavigation, continueNavigation, hasPendingNavigation } from "@/lib/navigationGuard";
 import { motionOffNow } from "@/lib/motion";
 import { kindWords } from "@/lib/patternFit";
-import { draftDocument } from "@/lib/patternDraft";
+import { draftDocument, timingKey } from "@/lib/patternDraft";
 import { isStill, timelineOf } from "@/lib/patternPlay";
 import { spinOf } from "@/lib/spin";
 import { refreshLights, useSnap } from "@/lib/store";
@@ -119,13 +119,20 @@ export function PatternEditor({
   /** The newest sequence whose answer set the clock, and the one before which no answer may set it. */
   const clockSeq = useRef(0);
   const clockFloor = useRef(0);
+  /**
+   * The timing of the document the daemon is playing, as the answers have told the page, and the clock
+   * it runs on. A PUT of that same document is skipped by the daemon, and a PUT with the same timing
+   * keeps the clock (#481, `PatternTiming`), so neither moves the preview's clock.
+   */
+  const running = useRef<{ timing: string; clock: number } | null>(null);
 
   /**
-   * Puts a stroke on the lights: the page's epoch and the next sequence. A beat is the heartbeat's
-   * own PUT of the document already there: the daemon keeps that effect running, so it starts no clock.
+   * Puts a stroke on the lights: the page's epoch and the next sequence. The heartbeat sends the
+   * document already there, which the daemon keeps running: `running` tells that apart from a stroke
+   * that starts the lights over.
    */
   const send = useCallback(
-    async (document: Pattern, beat = false) => {
+    async (document: Pattern) => {
       // An in-flight undo or shape write can land after the editor closed and its draft was deleted.
       // Never PUT again from an editor that is gone: the daemon would put the pattern back (#491).
       if (!alive.current) return;
@@ -150,9 +157,16 @@ export function PatternEditor({
       try {
         const answer = await api.putPatternDraft({ pattern: document, epoch, seq: at });
         if (!alive.current) return;
-        if (!beat && answer.applied !== false && at > clockSeq.current && at > clockFloor.current) {
+        if (answer.applied !== false && at > clockSeq.current && at > clockFloor.current) {
           clockSeq.current = at;
-          setLightsClock((sentAt + performance.now()) / 2);
+          const timing = timingKey(document);
+          const was = running.current;
+          // The same timing (the document again, or other colours): the lights' clock is the one
+          // running. Anything else was installed on the lights when the PUT landed.
+          const clock =
+            was !== null && was.timing === timing ? was.clock : (sentAt + performance.now()) / 2;
+          running.current = { timing, clock };
+          setLightsClock(clock);
         }
         if (answer.heartbeat_ms > 0) heartbeat.current = answer.heartbeat_ms;
         if (anotherWindow(answer)) setDaemonNote(SUPERSEDED);
@@ -358,7 +372,7 @@ export function PatternEditor({
     const beat = () => {
       if (!alive.current) return;
       timer = setTimeout(() => {
-        void send(latest.current, true);
+        void send(latest.current);
         beat();
       }, Math.max(1_000, heartbeat.current));
     };

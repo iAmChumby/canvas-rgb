@@ -353,21 +353,62 @@ describe("the preview runs on the lights' clock (#481, item 8)", () => {
     expect(ledZero()).toBe(BLUE);
   });
 
-  it("restarts with the lights when a change to the timeline reaches them", async () => {
+  it("restarts with the lights when a change to the timing reaches them", async () => {
+    show(framed([RED, BLUE], 1_000));
+    await settle();
+    await frames();
+    clock = 2_000;
+    play();
+    await frames(2_000);
+    // Loop off at t = 5000 changes how the frames play: the daemon starts its clock again there.
+    clock = 5_000;
+    fireEvent.click(screen.getByRole("button", { name: /^After frame 2:/ }));
+    fireEvent.click(screen.getByRole("switch", { name: "Loop back to frame 1" }));
+    await frames(5_000);
+    clock = 5_400;
+    await frames(5_400);
+    // 400 ms in: frame 1. The old clock (2000) would be 3400 ms in, and with no loop that is the last frame.
+    expect(ledZero()).toBe(RED);
+    clock = 6_200;
+    await frames(6_200);
+    expect(ledZero()).toBe(BLUE);
+  });
+
+  it("is kept by a stroke that changes colours only, as the daemon keeps it", async () => {
     const { canvas, dots } = show(framed([RED, BLUE], 1_000));
     await settle();
     await frames();
     clock = 2_000;
     play();
     await frames(2_000);
-    // A stroke at t = 5000 is a new document: the daemon starts its clock again there.
+    // A stroke at t = 5000 changes a colour and nothing about when the picture moves: the daemon carries
+    // its clock across the new document, so the preview keeps its own.
     clock = 5_000;
     await stroke(canvas, dots[5]!);
     clock = 5_400;
     await frames(5_400);
-    expect(ledZero()).toBe(RED);
-    clock = 6_200;
-    await frames(6_200);
+    // 3400 ms in on the clock of 2000, 1400 ms into a 2000 ms cycle: frame 2 (blue). A preview that
+    // restarted at the stroke would be 400 ms in and show frame 1.
+    expect(ledZero()).toBe(BLUE);
+  });
+
+  it("is kept when selecting a frame while it plays re-sends the document the lights already run", async () => {
+    show(framed([RED, BLUE], 1_000));
+    await settle();
+    await frames();
+    clock = 2_000;
+    play();
+    await frames(2_000);
+    const before = calls().length;
+    clock = 5_000;
+    fireEvent.click(key(2));
+    await frames(5_000);
+    // The same whole timeline went out again (the daemon skips it, so its clock goes on)...
+    expect(calls().length).toBeGreaterThan(before);
+    expect(JSON.stringify(sent())).toBe(JSON.stringify(calls()[before - 1]!.pattern));
+    clock = 5_400;
+    await frames(5_400);
+    // ...and the dots show what the lights show: 3400 ms on the clock of 2000, 1400 ms into the cycle, frame 2.
     expect(ledZero()).toBe(BLUE);
   });
 

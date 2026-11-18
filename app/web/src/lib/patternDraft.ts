@@ -24,3 +24,27 @@ export function draftDocument(pattern: Pattern, selected: number, playing: boole
   const { playback: _playback, ...rest } = pattern;
   return { ...rest, frames: [still] };
 }
+
+/** JSON with the keys of every object in order, so two documents with the same content read alike. */
+function canonical(value: unknown): string {
+  return JSON.stringify(value, (_key, v) =>
+    v !== null && typeof v === "object" && !Array.isArray(v)
+      ? Object.fromEntries(Object.entries(v as Record<string, unknown>).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
+      : v,
+  );
+}
+
+/**
+ * What decides when a pattern's picture moves: the same fields the engine compares across an install
+ * (`PatternTiming` in `canvas-core`), the pattern, its motion, how its frames play and each frame's hold
+ * and transition. Not the colours. A document with the key of the one running keeps its clock on the
+ * lights, so a spinning ring painted stroke by stroke does not start over with every stroke.
+ */
+export function timingKey(pattern: Pattern): string {
+  return canonical({
+    id: pattern.id,
+    motion: pattern.motion,
+    playback: pattern.playback ?? null,
+    frames: pattern.frames.map((f) => [f.hold, f.transition ?? null]),
+  });
+}
