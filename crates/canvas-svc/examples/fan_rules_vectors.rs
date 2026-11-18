@@ -23,7 +23,7 @@ use canvas_proto::fans::{
     GPU_FAN_HEADER_PREFIX, GPU_FAN_MIN_PERCENT, HOT_CPU_FAN_FLOOR_PERCENT, HOT_FLOOR_PERCENT,
     HOT_TEMP_C,
 };
-use canvas_svc::chip::{DEFAULT_MAP, MSI_ALT1_MAP};
+use canvas_svc::chip::MAPS;
 
 /// A constant the editor mirrors, with its value as a JSON literal (a quoted string or a number).
 struct Constant {
@@ -86,12 +86,12 @@ fn constants() -> Vec<Constant> {
     ]
 }
 
-/// Every header the service can see: the ids in both channel tables (`src/chip.rs`), with no hand
+/// Every header the service can see: the ids in every channel table (`chip::MAPS`), with no hand
 /// list, plus the NVML GPU headers the spine names by prefix (the tables document `gpu_fan1..4`).
 /// A new channel id, or a new GPU index, makes a new row and a stale vector file.
 fn headers() -> Vec<String> {
     let mut out: Vec<String> = Vec::new();
-    for map in [DEFAULT_MAP, MSI_ALT1_MAP] {
+    for map in MAPS {
         for channel in map.channels {
             if !out.iter().any(|id| id == channel.id) {
                 out.push(channel.id.to_string());
