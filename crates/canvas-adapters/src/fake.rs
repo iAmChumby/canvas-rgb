@@ -146,6 +146,15 @@ struct FakeState {
     rescan_order: Option<Vec<usize>>,
     /// The frames that landed on a controller, in order, with the device that received them.
     landings: Vec<Landing>,
+    /// While set, a packet 140 swaps the server's list at once (every controller registered anew, in
+    /// the order `rescan_order` names) and the 100 that says so is held back until
+    /// [`FakeOpenRgbServer::release_list_change`]: OpenRGB release_1.1 swaps the list into the server
+    /// (`ResourceManager.cpp:1041`, `:1045`, `NetworkServer.cpp:644-660`) and signals the change only
+    /// afterwards (`ResourceManager.cpp:1067`, `NetworkServer.cpp:909-917`), and a position names
+    /// whatever sits there in between (#509).
+    park_list_change: bool,
+    /// The 100 of a swapped list is being held back (see `park_list_change`).
+    list_change_parked: bool,
 }
 
 /// One `UPDATE_LEDS` that reached a controller: which device received it, at which index it was
@@ -394,6 +403,8 @@ impl FakeOpenRgbServer {
             rescan_dropped: 0,
             rescan_order: None,
             landings: Vec::new(),
+            park_list_change: false,
+            list_change_parked: false,
         }));
         let connections: Arc<Mutex<Vec<AbortHandle>>> = Arc::new(Mutex::new(Vec::new()));
         let (release, _) = tokio::sync::watch::channel(0_u64);
@@ -480,6 +491,24 @@ impl FakeOpenRgbServer {
     /// indices.
     pub fn rescan_order(&self, order: Vec<usize>) {
         guard(&self.state).rescan_order = Some(order);
+    }
+
+    /// While set, a packet 140 swaps the server's list at once and holds the 100 that announces it back
+    /// until [`release_list_change`](Self::release_list_change): the window release_1.1 has between
+    /// swapping its list into the server and telling clients (#509). The swap is done, in the order
+    /// [`rescan_order`](Self::rescan_order) names, by the time [`rescan_count`](Self::rescan_count) reads
+    /// 1, and a frame a client sends then lands on whichever device sits at its index now (see
+    /// [`landings`](Self::landings)). Nothing is timed: the server waits as long as the test does.
+    pub fn park_list_change(&self, parked: bool) {
+        guard(&self.state).park_list_change = parked;
+    }
+
+    /// Sends the 100 that `park_list_change` held back, if one is held.
+    pub fn release_list_change(&self) {
+        let mut state = guard(&self.state);
+        if std::mem::take(&mut state.list_change_parked) {
+            state.broadcast(|_| device_list_updated());
+        }
     }
 
     /// Registrations send no 102 (progress) from now on, only the 100 each one causes (see
@@ -745,6 +774,7 @@ impl FakeOpenRgbServer {
             state.rescan_run = None;
             state.rescan_listed = None;
             state.rescan_order = None;
+            state.list_change_parked = false;
             state.outbox.clear();
             for device in &mut state.devices {
                 for (zone, initial) in device.info.zones.iter_mut().zip(&device.initial_zone_leds) {
@@ -958,7 +988,25 @@ fn start_rescan(state: &mut FakeState) {
         state.rescan_dropped += 1;
         return;
     }
+    if state.park_list_change {
+        swap_the_list(state);
+        return;
+    }
     begin_detection(state);
+}
+
+/// The list is swapped into the server whole, with every controller registered anew (a new id each) and in
+/// the order `rescan_order` names, and no client is told yet: the 100 is held until
+/// [`FakeOpenRgbServer::release_list_change`] (see `FakeState::park_list_change`).
+fn swap_the_list(state: &mut FakeState) {
+    reveal_hidden(state);
+    state.finish_order();
+    for device in &mut state.devices {
+        device.id = state.next_id;
+        device.events.push(DeviceEvent::Registered);
+        state.next_id += 1;
+    }
+    state.list_change_parked = true;
 }
 
 /// A detection starts: the list is cleared and every client is told at once (a packet 140 and a
