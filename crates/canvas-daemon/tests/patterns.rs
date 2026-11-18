@@ -2477,6 +2477,85 @@ async fn a_group_the_budget_left_dark_plays_when_another_pattern_shrinks() {
     }
 }
 
+/// A valid HTML effect for the groups the HTML runtime limit leaves dark (#419).
+const LIMIT_HTML: &str = r##"<head>
+  <title>Limit</title>
+  <meta description="An effect for the HTML runtime limit." />
+</head>
+<body><canvas id="stage" width="320" height="200"></canvas></body>
+<script>
+  var c = document.getElementById("stage");
+  var ctx = c.getContext("2d");
+  function draw() {
+    ctx.fillStyle = "#203040";
+    ctx.fillRect(0, 0, 320, 200);
+    window.requestAnimationFrame(draw);
+  }
+  window.requestAnimationFrame(draw);
+</script>"##;
+
+/// Three groups playing one HTML effect on the rig's three lights, loaded with the effect already
+/// in the folder: the scene starts three HTML runtimes where the limit is two (#370).
+async fn html_limit_rig() -> Rig {
+    let rig = rig_full(
+        Vec::new(),
+        ScenesFile {
+            schema_version: SCENES_SCHEMA,
+            active: "main".into(),
+            scenes: vec![Scene {
+                id: "main".into(),
+                name: "Main".into(),
+                rev: 1,
+                groups: vec![
+                    group("one", &["fake:a#z0"], "html:limittest", Props::new()),
+                    group("two", &["fake:b#z0"], "html:limittest", Props::new()),
+                    group("three", &["fake:c#z0"], "html:limittest", Props::new()),
+                ],
+            }],
+        },
+        vec![device(A), device(B), device(C)],
+        vec![light(A), light(B), light(C)],
+    )
+    .await;
+    // The file is written after start-up, then found; the scene goes on again with it present.
+    std::fs::write(rig.home.path.join("effects").join("limittest.html"), LIMIT_HTML)
+        .expect("the effect is written");
+    rig.app.user_effects.rescan(&rig.home.path.join("effects"));
+    canvas_daemon::scenes::apply_active(&rig.app, false).await;
+    rig
+}
+
+/// #419: a pattern save must not retry a group the HTML limit left dark. The save frees no runtime,
+/// so building that group would run the scene past the cap it was loaded past (#518).
+#[tokio::test]
+async fn a_pattern_save_does_not_build_a_group_the_html_limit_left_dark() {
+    let rig = html_limit_rig().await;
+    let over = canvas_daemon::scenes::html_limit_sentence(3);
+    let built = rig.app.scene.builds();
+    let failures = rig.app.scene.failures();
+    assert_eq!(failures.len(), 1, "the two runtimes the limit allows are running: {failures:?}");
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(over.as_str()),
+        "the third group waits under the limit: {failures:?}"
+    );
+
+    // A pattern save no group plays: the incremental path revisits the groups it names, and the
+    // ones a failure left dark, which must not include a group the HTML limit left dark.
+    let mut unused = reel(1, Rgb8::new(0, 0, 200));
+    unused.id = "pattern:Unused".into();
+    let (status, answer) = put_pattern_body(&rig, "pattern:Unused", &unused).await;
+    assert_eq!(status, StatusCode::OK, "{answer}");
+
+    assert_eq!(rig.app.scene.builds(), built, "the pattern save built no HTML runtime");
+    let failures = rig.app.scene.failures();
+    assert_eq!(
+        failures.get("three").map(String::as_str),
+        Some(over.as_str()),
+        "the group the limit left dark is still dark, with the same reason: {failures:?}"
+    );
+}
+
 /// Which colour a marker is, as the channel it lights: 0 red, 1 green, 2 blue.
 type Channel = usize;
 
