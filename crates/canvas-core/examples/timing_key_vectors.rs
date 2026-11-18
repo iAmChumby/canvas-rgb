@@ -48,70 +48,65 @@ fn base() -> Pattern {
     }
 }
 
-/// One pair, and what it is meant to show.
+/// One pair, and what it is meant to show. `setup` prepares both documents the same way, so a pair
+/// can also start from a state the base does not have: a frame with no transition, playback off.
 struct Case {
     name: &'static str,
+    setup: Option<fn(&mut Pattern)>,
     change: fn(&mut Pattern),
+}
+
+/// A pair whose two documents start from [`base`].
+fn pair(name: &'static str, change: fn(&mut Pattern)) -> Case {
+    Case { name, setup: None, change }
+}
+
+/// A pair whose two documents are prepared by `setup` first, then differ by `change`.
+fn pair_after(name: &'static str, setup: fn(&mut Pattern), change: fn(&mut Pattern)) -> Case {
+    Case { name, setup: Some(setup), change }
 }
 
 /// The pairs: controls that must keep the clock, then one change for every timing field.
 fn cases() -> Vec<Case> {
     vec![
-        Case {
-            name: "only the colours change",
-            change: |p| p.frames[0].colors[0] = Rgb8::new(0, 0, 255),
-        },
-        Case {
-            name: "only built_on and extra change",
-            change: |p| {
-                p.built_on.led_count = 12;
-                p.extra.insert("note".into(), json!("a later version wrote this"));
+        pair("only the colours change", |p| p.frames[0].colors[0] = Rgb8::new(0, 0, 255)),
+        pair("only built_on and extra change", |p| {
+            p.built_on.led_count = 12;
+            p.extra.insert("note".into(), json!("a later version wrote this"));
+        }),
+        pair("the id changes", |p| p.id = "pattern:Other".into()),
+        pair("the motion kind changes", |p| p.motion = Motion::none()),
+        pair("the motion speed changes", |p| p.motion = Motion::spin(0.5)),
+        pair("playback goes away", |p| p.playback = None),
+        pair("playback stops looping", |p| p.playback = Some(Playback { looping: false })),
+        // The other direction of each option: a document that says there is no transition, or no
+        // playback, against one that says there is but not to loop.
+        pair("a frame's transition goes away", |p| p.frames[0].transition = None),
+        pair_after(
+            "a frame gains a transition",
+            |p| p.frames[0].transition = None,
+            |p| {
+                p.frames[0].transition =
+                    Some(Transition { kind: TransitionKind::Fade, ms: 400, easing: Easing::EaseInOut })
             },
-        },
-        Case {
-            name: "the id changes",
-            change: |p| p.id = "pattern:Other".into(),
-        },
-        Case {
-            name: "the motion kind changes",
-            change: |p| p.motion = Motion::none(),
-        },
-        Case {
-            name: "the motion speed changes",
-            change: |p| p.motion = Motion::spin(0.5),
-        },
-        Case {
-            name: "playback goes away",
-            change: |p| p.playback = None,
-        },
-        Case {
-            name: "playback stops looping",
-            change: |p| p.playback = Some(Playback { looping: false }),
-        },
-        Case {
-            name: "a frame's hold changes",
-            change: |p| p.frames[0].hold += 1,
-        },
-        Case {
-            name: "a frame's transition kind changes",
-            change: |p| p.frames[0].transition.as_mut().expect("a fade").kind = TransitionKind::Cut,
-        },
-        Case {
-            name: "a frame's transition ms changes",
-            change: |p| p.frames[0].transition.as_mut().expect("a fade").ms += 1,
-        },
-        Case {
-            name: "a frame's transition easing changes",
-            change: |p| p.frames[0].transition.as_mut().expect("a fade").easing = Easing::EaseOut,
-        },
-        Case {
-            name: "a frame is added",
-            change: |p| p.frames.push(p.frames[1].clone()),
-        },
-        Case {
-            name: "a frame is removed",
-            change: |p| { p.frames.pop(); },
-        },
+        ),
+        pair_after(
+            "playback is nothing instead of set not to loop",
+            |p| p.playback = Some(Playback { looping: false }),
+            |p| p.playback = None,
+        ),
+        pair("a frame's hold changes", |p| p.frames[0].hold += 1),
+        pair("a frame's transition kind changes", |p| {
+            p.frames[0].transition.as_mut().expect("a fade").kind = TransitionKind::Cut
+        }),
+        pair("a frame's transition ms changes", |p| {
+            p.frames[0].transition.as_mut().expect("a fade").ms += 1
+        }),
+        pair("a frame's transition easing changes", |p| {
+            p.frames[0].transition.as_mut().expect("a fade").easing = Easing::EaseOut
+        }),
+        pair("a frame is added", |p| p.frames.push(p.frames[1].clone())),
+        pair("a frame is removed", |p| { p.frames.pop(); }),
     ]
 }
 
@@ -138,7 +133,10 @@ fn timing_json(pattern: &Pattern) -> serde_json::Value {
 pub fn print_json() -> String {
     let mut pairs = Vec::new();
     for case in cases() {
-        let a = base();
+        let mut a = base();
+        if let Some(setup) = case.setup {
+            setup(&mut a);
+        }
         let mut b = a.clone();
         (case.change)(&mut b);
         let timing_a = timing_json(&a);
