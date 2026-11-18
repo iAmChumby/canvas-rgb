@@ -670,3 +670,65 @@ async fn a_read_back_sent_after_the_rescan_request_never_answers_with_another_de
     adapter.discover().await.expect("discover after the rescan");
     adapter.read_back(&b).await.expect("a read after the rescan");
 }
+
+/// A rescan that starts while OpenRGB's list is already unsettled (a list change that no read has settled yet)
+/// and that OpenRGB then ignores (detection off) is answered "did not start detection" once the first window has
+/// passed, and the wait awaits: the runtime keeps running other tasks meanwhile (#509). The hold the rescan puts
+/// on the list must not make the settle read claim success without reading: the wait loop then never reaches an
+/// await point, one runtime worker spins from the moment the list is quiet, and the answer is "still detecting".
+///
+/// The runtime is single-threaded, so a ticker task on it can run only while the rescan awaits. The verdict is
+/// the longest stretch the ticker went without running: a spin from the end of the settle window (250 ms) to the
+/// end of the first window (1.5 s) leaves a gap of about 1.25 s; a rescan that awaits leaves gaps of a few ms.
+#[tokio::test]
+async fn a_rescan_that_starts_from_an_unsettled_list_awaits_and_ends_with_the_right_answer() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let server = v5_server(vec![stick("one")]).await;
+    server.disable_detection(true);
+    let timing = RescanTiming { first: Duration::from_millis(1500), settle: Duration::from_millis(250), cap: Duration::from_secs(4) };
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(timing);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 1);
+    let one = DeviceId("openrgb:one".into());
+
+    // A list change from OpenRGB with no rescan: the adapter's list is unsettled until a read settles it, and
+    // a frame is refused while it is.
+    server.list_changed();
+    let mut refused = false;
+    for _ in 0..10_000 {
+        if adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.is_err() {
+            refused = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(refused, "the list change never made the list unsettled");
+
+    let longest_stall_ms = std::sync::Arc::new(AtomicU64::new(0));
+    let ticker = {
+        let longest = std::sync::Arc::clone(&longest_stall_ms);
+        tokio::spawn(async move {
+            let mut last = std::time::Instant::now();
+            loop {
+                let now = std::time::Instant::now();
+                longest.fetch_max(u64::try_from((now - last).as_millis()).unwrap_or(u64::MAX), Ordering::SeqCst);
+                last = now;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+    let started = std::time::Instant::now();
+    let failed = adapter.rescan_shared().await.expect_err("OpenRGB started no detection");
+    let took = started.elapsed();
+    // Let the ticker run once more, so a stall that ended with the rescan is counted.
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    ticker.abort();
+
+    let stall = longest_stall_ms.load(Ordering::SeqCst);
+    assert_eq!(rescan_miss(&failed), Some(RescanMiss::NotRedetected), "{failed:?} after {took:?}");
+    assert!(stall < 600, "the runtime ran no other task for {stall} ms during the rescan ({took:?} in all)");
+    // The hold is over with the call and the list is the settled one: a frame goes out again.
+    adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame after the rescan");
+}

@@ -547,14 +547,26 @@ struct RescanHold<'a> {
     epoch: u64,
     /// The list change count when it was taken. A 100 after that has cleared every hold taken before it.
     changes: u64,
+    /// The hold has been given back already (by [`release`](Self::release)).
+    released: bool,
 }
 
-impl Drop for RescanHold<'_> {
-    fn drop(&mut self) {
+impl RescanHold<'_> {
+    /// Gives the hold back, once: a 100 that came since has taken it over already and is left alone.
+    fn release(&mut self) {
+        if std::mem::replace(&mut self.released, true) {
+            return;
+        }
         let mut session = guard(&self.link.session);
         if session.epoch == self.epoch && session.list_changes == self.changes {
             session.rescan_requests = session.rescan_requests.saturating_sub(1);
         }
+    }
+}
+
+impl Drop for RescanHold<'_> {
+    fn drop(&mut self) {
+        self.release();
     }
 }
 
@@ -777,7 +789,7 @@ impl OpenRgbAdapter {
         let cap = started + timing.cap;
         // Held before packet 140 goes out, not when the 100 comes back: OpenRGB swaps its list in first and
         // tells clients after (#509), and a frame by position sent in between lands on another device.
-        let hold = self.hold_for_rescan();
+        let mut hold = self.hold_for_rescan();
         let changes_at_start = hold.changes;
         self.send(0, REQUEST_RESCAN_DEVICES, &[]).await?;
         loop {
@@ -787,6 +799,12 @@ impl OpenRgbAdapter {
                 (session.unsettled, session.list_changes, session.last_list_change, session.settle_failed_at)
             };
             let now = Instant::now();
+            // No 100 within `first` of packet 140: detection starts by clearing the list at once, so OpenRGB
+            // started none and never swapped its list. The hold ends there, before the settle read below may
+            // run: a read is trusted only when no swap can be in flight (see `try_settle`).
+            if count == changes_at_start && now >= started + timing.first {
+                hold.release();
+            }
             let wake = if !unsettled {
                 if count != changes_at_start {
                     // A detection ran, or one already running went quiet, and its list is the one held.
@@ -831,7 +849,7 @@ impl OpenRgbAdapter {
     fn hold_for_rescan(&self) -> RescanHold<'_> {
         let mut session = guard(&self.link.session);
         session.rescan_requests += 1;
-        RescanHold { link: &self.link, epoch: session.epoch, changes: session.list_changes }
+        RescanHold { link: &self.link, epoch: session.epoch, changes: session.list_changes, released: false }
     }
 
     /// A rescan on protocol 6 and later: OpenRGB says when detection starts (101) and ends (103), so
@@ -916,7 +934,15 @@ impl OpenRgbAdapter {
     async fn try_settle(&self) -> Result<bool, AdapterError> {
         {
             let mut session = guard(&self.link.session);
-            if !session.unsettled || session.settling || session.settle_failed_at == Some(session.list_changes) {
+            // Not while a rescan was requested and OpenRGB has said nothing: its list may be swapped already, a
+            // read by position can mix the old list and the new, and no 100 would say so (#509). `enumerate()`
+            // answers the held list then, which is not a settled one: claiming `true` here sent the rescan's
+            // wait round its loop again with no await in it.
+            if !session.unsettled
+                || session.settling
+                || session.rescan_requests > 0
+                || session.settle_failed_at == Some(session.list_changes)
+            {
                 return Ok(false);
             }
             if !list_is_quiet(&session, self.rescan_timing.settle) {
