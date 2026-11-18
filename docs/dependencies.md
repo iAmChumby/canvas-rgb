@@ -52,11 +52,33 @@ For a new Rust crate:
 
 For a new npm package:
 
-- `npm audit` — `tools/check-npm-deps.ps1` runs it with `--audit-level=high`;
+- `npm audit` — `tools/check-npm-deps.ps1` runs it and fails on a high or critical advisory
+  that is not on the ignore list below;
 - the licence in the package's own `package.json`;
 - whether it has an install script: the table at the bottom of this file lists the packages
   that do, and the check fails when a new one appears without a row;
 - whether it is deprecated, and what it pulls in.
+
+## The npm advisory ignore list
+
+`tools/npm-audit-ignore.json` is the npm twin of the `[advisories] ignore` list in `deny.toml`.
+Each entry holds the advisory's GHSA id, the package, the reason it stays and the date it was
+added. `tools/check-npm-deps.ps1` waves a listed advisory through only while **every copy of the
+package in the project's `package-lock.json` is dev-only** (`"dev": true`). The rule, in full:
+
+- a high or critical advisory that is not on the list fails;
+- a listed advisory that reaches a shipped copy fails and names the package and its path;
+- a listed advisory with no copy in the lock file fails, since dev-only cannot be shown;
+- an advisory below high never fails, and a listed one is printed anyway;
+- every waved advisory is printed with its reason, so the CI log shows what was waved;
+- an entry that matches no advisory in any project prints a `warning:` line. Remove it: the
+  advisory was fixed or the package left the tree. The warning does not fail the check.
+
+Add an entry only when no upgrade from here clears the advisory (no patched version, or the fix
+sits outside our version range) and the reason says why. An entry needs all four fields; one
+without a reason fails the check. Today: picomatch (GHSA-fc5q-39xc-vjpf, no patched version) and
+minimatch (GHSA-g3hv-75wg-m249), both in the eslint, vite and vitest tooling that never reaches
+the static export.
 
 ## Reading the tables
 

@@ -642,6 +642,28 @@ line. Three mechanisms, and one bug the timing only exposed.
     The production path is unchanged: `write_once_within` still waits at most its 250 ms limit. The rule
     this adds: a test that waits on a helper thread waits for the thread to end, not for a window to
     pass.
+  - #72, the windows PR #498 left in the same two files: five more tests read their verdict off a
+    clock. `a_direct_line_reaches_the_file_while_a_backlog_is_stuck` asked the direct write to finish
+    inside 250 ms; `a_failed_write_is_reported_so_the_caller_can_fall_back` asked the helper thread to
+    start and finish inside 250 ms; `a_bounded_run_gives_up_on_a_stuck_step_and_waits_for_a_quick_one`
+    put a 1 s ceiling on a give-up that happens at 250 ms (allow-listed as "open" in
+    `crates/canvas-svc/tests/timing_class.rs`, and that entry is gone now);
+    `a_write_that_lands_after_the_limit_is_not_written_twice` polled a 900 ms sleep against a 10 s
+    deadline and read the file when the poll gave up; and
+    `the_panic_hook_leaves_its_line_in_the_file_while_the_queue_is_stuck`
+    (`crates/canvas-daemon/src/exit_log.rs`) read the log file right after the hook's 250 ms write
+    window, so a machine slow to start the helper thread lost the panic line before the test looked.
+    Measured: with the slow machine simulated (the helper thread starting 2 s late, a file write
+    taking 11 s, the caller stalling 1.5 s) the old code failed four of the five ("the direct write
+    finished inside its limit", "assertion failed: write_once_within(..., || Ok(()))", "gave up after
+    1.762148s, not 5 s", "the panic line is in the file once, with the queue stuck: \"\"") and the new
+    code passed all 580; with a stalled disk alone (the file write taking 11 s) the old code also lost
+    the line that lands after the limit, which its 10 s poll gave up on. Fixed: each of the five waits
+    on the helper's end (an event) or on a generous hang guard (`logging::HANG_GUARD`), and the
+    production path is unchanged: `write_once_within` still waits at most its 250 ms limit and
+    `run_bounded` still waits at most its limit. The rule this adds: a test that waits on a helper
+    thread waits for the thread to end, not for a window to pass, and a bound that only guards against
+    a hang is generous and says so.
   - #45/#55: every daemon kill goes through `terminate_daemon(process, reason)`, which logs the pid and
     reason first; the service tests share one log buffer (`crates/canvas-svc/src/test_logs.rs`; its
     `captured()` runs one capture at a time); the kill test asserts the full announcement for the pid on
