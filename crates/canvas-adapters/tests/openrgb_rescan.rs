@@ -146,6 +146,10 @@ async fn no_list_change_after_packet_140_means_detection_did_not_start() {
     assert_eq!(server.rescan_count(), 1, "packet 140 still went out");
     assert!(adapter.is_connected());
     assert_eq!(adapter.discover().await.expect("discover").len(), 1, "the list was not touched");
+    // The hold the request put on the list ended with the call: no 100 came, so nothing changed, and a
+    // frame goes out again.
+    adapter.write_frame(&DeviceId("openrgb:one".into()), &[Rgb8::WHITE; 8]).await.expect("a frame after a rescan that started nothing");
+    until("the frame landed", || !server.landings().is_empty()).await;
 }
 
 /// A detection that keeps announcing list changes past the cap is unsettled: the call says so
@@ -529,4 +533,202 @@ async fn frames_resume_with_the_custom_mode_set_again_once_the_list_has_settled(
         1,
         "the mode was set more than once on the new object: {told:?}"
     );
+}
+
+/// Two identical sticks and a server that swaps their order (#509).
+fn twin(serial: &str) -> DeviceInfo {
+    DeviceInfo { name: "DDR5 stick".into(), ..stick(serial) }
+}
+
+/// OpenRGB release_1.1 swaps the new list into the server and only then sends the 100 that says so
+/// (`ResourceManager.cpp:1041`, `:1045`, `:1067`). On protocol 5 a frame names its controller by position, so
+/// a frame sent in between lands on whatever sits at that position now. The fake parks the server there
+/// (the list swapped, the 100 held), so the window is as long as the test makes it and nothing is timed.
+///
+/// The verdict is where each frame landed, read after the 100 has come, the list has settled and a frame
+/// sent after that has landed: the fake reads one connection in order, so every earlier frame has landed
+/// (or been refused) by then. A frame for stick a lands on stick a or nowhere.
+#[tokio::test]
+async fn a_frame_sent_after_the_rescan_request_and_before_packet_100_never_lands_on_another_device() {
+    let server = v5_server(vec![twin("a"), twin("b")]).await;
+    server.park_list_change(true);
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+    let b = DeviceId("openrgb:b".into());
+    let red = [Rgb8 { r: 255, g: 0, b: 0 }; 8];
+    let blue = [Rgb8 { r: 0, g: 0, b: 255 }; 8];
+
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    // The fake has taken packet 140 and swapped its list; it has sent no 100.
+    until("the fake took packet 140 and swapped its list", || server.rescan_count() == 1).await;
+    let in_window = [adapter.write_frame(&a, &red).await, adapter.write_frame(&b, &blue).await];
+
+    server.release_list_change();
+    rescan.await.expect("the task ends").expect("the detection settled");
+    assert_eq!(adapter.discover().await.expect("discover after the rescan").len(), 2);
+    adapter.write_frame(&a, &red).await.expect("a frame for a after the rescan");
+    adapter.write_frame(&b, &blue).await.expect("a frame for b after the rescan");
+    until("both frames after the rescan landed", || server.landings().len() >= 2).await;
+
+    let landings = server.landings();
+    for landing in &landings {
+        let wanted = if landing.serial == "a" { red[0] } else { blue[0] };
+        assert_eq!(landing.color, wanted, "a frame meant for the other stick landed on {landing:?}; in the window the adapter answered {in_window:?}");
+    }
+    assert_eq!(landings.len(), 2, "a frame sent in the window landed: {landings:?}");
+    assert!(in_window.iter().all(Result::is_err), "a frame was accepted while the list was between swap and 100: {in_window:?}");
+}
+
+/// The same window for a zone resize: `RESIZE_ZONE` names its controller by position too, so a resize of
+/// stick a's zone sent between the swap and the 100 would resize stick b's.
+#[tokio::test]
+async fn a_zone_resize_sent_before_packet_100_reaches_no_device() {
+    fn resizable(serial: &str) -> DeviceInfo {
+        let mut info = twin(serial);
+        info.zones[0].resizable = true;
+        info.zones[0].min_leds = 4;
+        info.zones[0].max_leds = 16;
+        info
+    }
+    let server = v5_server(vec![resizable("a"), resizable("b")]).await;
+    server.park_list_change(true);
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    until("the fake took packet 140 and swapped its list", || server.rescan_count() == 1).await;
+    let in_window = adapter.set_zone_size(&a, 0, 12).await;
+
+    server.release_list_change();
+    rescan.await.expect("the task ends").expect("the detection settled");
+    // A frame after the rescan is ordered after any resize on the same connection: once it has landed, a
+    // resize that was sent has reached the fake.
+    adapter.discover().await.expect("discover after the rescan");
+    adapter.write_frame(&a, &[Rgb8::WHITE; 8]).await.expect("a frame after the rescan");
+    until("the frame after the rescan landed", || !server.landings().is_empty()).await;
+    assert_eq!(server.zone_leds(0, 0), Some(8), "stick b's zone was resized by a resize meant for stick a");
+    assert_eq!(server.zone_leds(1, 0), Some(8), "stick a's zone was resized: {in_window:?}");
+    assert!(in_window.is_err(), "a resize was accepted while the list was between swap and 100");
+}
+
+/// `read_back` asks OpenRGB for a controller's colours by its position, so a read that goes out between the
+/// rescan request and packet 100 answers with whichever stick sits at that position now (#509). The read
+/// passes its settle check before the rescan, and waits for the request gate that an earlier read holds
+/// (the fake keeps that read's reply); the rescan takes its hold and writes packet 140 meanwhile, so the
+/// read's packet goes out after it. The verdict is the colours the read returns: stick a's, or none.
+#[tokio::test]
+async fn a_read_back_sent_after_the_rescan_request_never_answers_with_another_devices_colours() {
+    let server = v5_server(vec![twin("a"), twin("b")]).await;
+    server.park_list_change(true);
+    server.rescan_order(vec![1, 0]);
+    let mut adapter = adapter(&server);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 2);
+    let a = DeviceId("openrgb:a".into());
+    let b = DeviceId("openrgb:b".into());
+    let red = [Rgb8 { r: 255, g: 0, b: 0 }; 8];
+    adapter.write_frame(&a, &red).await.expect("a frame for a");
+    until("a's frame landed", || !server.landings().is_empty()).await;
+
+    // The first read holds the request gate: the fake keeps its reply.
+    server.hold_replies(true);
+    let mut reading_b = adapter.clone();
+    let first = tokio::spawn(async move { reading_b.read_back(&DeviceId("openrgb:b".into())).await });
+    until("the first read waits for its reply", || server.held_replies() == 1).await;
+    // The read of a passes its settle check (nothing is held yet) and waits for the gate. The runtime is
+    // single-threaded: a task that has been yielded to has run as far as it can.
+    let mut reading_a = adapter.clone();
+    let second = tokio::spawn(async move { reading_a.read_back(&DeviceId("openrgb:a".into())).await });
+    for _ in 0..10 {
+        tokio::task::yield_now().await;
+    }
+    // The rescan takes its hold, writes packet 140, and the fake swaps its list.
+    let scanner = adapter.clone();
+    let rescan = tokio::spawn(async move { scanner.rescan_shared().await });
+    until("the fake took packet 140 and swapped its list", || server.rescan_count() == 1).await;
+    // The first read is answered, the gate is free, and the second read's packet goes out after packet 140.
+    server.hold_replies(false);
+    server.release_replies();
+    let _ = first.await.expect("the first read ends");
+    let second = second.await.expect("the second read ends");
+
+    server.release_list_change();
+    rescan.await.expect("the task ends").expect("the detection settled");
+    if let Ok(colors) = &second {
+        assert_eq!(colors.as_slice(), red.as_slice(), "the read of stick a answered with the colours of the stick at its old index");
+    }
+    assert!(second.is_err(), "a read was accepted while the list was between swap and 100: {second:?}");
+    // The hold is over with the rescan: a read of b (which sits at index 0 now) answers.
+    adapter.discover().await.expect("discover after the rescan");
+    adapter.read_back(&b).await.expect("a read after the rescan");
+}
+
+/// A rescan that starts while OpenRGB's list is already unsettled (a list change that no read has settled yet)
+/// and that OpenRGB then ignores (detection off) is answered "did not start detection" once the first window has
+/// passed, and the wait awaits: the runtime keeps running other tasks meanwhile (#509). The hold the rescan puts
+/// on the list must not make the settle read claim success without reading: the wait loop then never reaches an
+/// await point, one runtime worker spins from the moment the list is quiet, and the answer is "still detecting".
+///
+/// The runtime is single-threaded, so a ticker task on it can run only while the rescan awaits. The verdict is
+/// the longest stretch the ticker went without running: a spin from the end of the settle window (250 ms) to the
+/// end of the first window (1.5 s) leaves a gap of about 1.25 s; a rescan that awaits leaves gaps of a few ms.
+#[tokio::test]
+async fn a_rescan_that_starts_from_an_unsettled_list_awaits_and_ends_with_the_right_answer() {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let server = v5_server(vec![stick("one")]).await;
+    server.disable_detection(true);
+    let timing = RescanTiming { first: Duration::from_millis(1500), settle: Duration::from_millis(250), cap: Duration::from_secs(4) };
+    let mut adapter = OpenRgbAdapter::new("127.0.0.1", server.port()).with_rescan_timing(timing);
+    adapter.connect().await.expect("connect");
+    assert_eq!(adapter.discover().await.expect("first discover").len(), 1);
+    let one = DeviceId("openrgb:one".into());
+
+    // A list change from OpenRGB with no rescan: the adapter's list is unsettled until a read settles it, and
+    // a frame is refused while it is.
+    server.list_changed();
+    let mut refused = false;
+    for _ in 0..10_000 {
+        if adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.is_err() {
+            refused = true;
+            break;
+        }
+        tokio::task::yield_now().await;
+    }
+    assert!(refused, "the list change never made the list unsettled");
+
+    let longest_stall_ms = std::sync::Arc::new(AtomicU64::new(0));
+    let ticker = {
+        let longest = std::sync::Arc::clone(&longest_stall_ms);
+        tokio::spawn(async move {
+            let mut last = std::time::Instant::now();
+            loop {
+                let now = std::time::Instant::now();
+                longest.fetch_max(u64::try_from((now - last).as_millis()).unwrap_or(u64::MAX), Ordering::SeqCst);
+                last = now;
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+    };
+    let started = std::time::Instant::now();
+    let failed = adapter.rescan_shared().await.expect_err("OpenRGB started no detection");
+    let took = started.elapsed();
+    // Let the ticker run once more, so a stall that ended with the rescan is counted.
+    for _ in 0..3 {
+        tokio::task::yield_now().await;
+    }
+    ticker.abort();
+
+    let stall = longest_stall_ms.load(Ordering::SeqCst);
+    assert_eq!(rescan_miss(&failed), Some(RescanMiss::NotRedetected), "{failed:?} after {took:?}");
+    assert!(stall < 600, "the runtime ran no other task for {stall} ms during the rescan ({took:?} in all)");
+    // The hold is over with the call and the list is the settled one: a frame goes out again.
+    adapter.write_frame(&one, &[Rgb8::WHITE; 8]).await.expect("a frame after the rescan");
 }

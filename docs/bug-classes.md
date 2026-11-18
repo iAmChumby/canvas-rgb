@@ -242,6 +242,30 @@ or acts as if a step worked without checking that it did.
   `api/settings.rs:361`, `api/patterns.rs:164`); `scenes::apply_active` (`scenes.rs:692`) takes the
   scene order but no gate and has no product callers, only tests, so it is a trap rather than a
   second sighting. No sibling found; the class fix is not due on this count.
+- [#509](https://github.com/iAmChumby/canvas-rgb/issues/509): on OpenRGB protocol 5 a packet names a
+  controller by its position in OpenRGB's list, and a rescan swaps the list into the server before
+  it sends packet 100 (`ResourceManager.cpp:1041,1045,1067`). The adapter held the list only from
+  packet 100, so a frame, a zone resize or a colour read sent between its own
+  REQUEST_RESCAN_DEVICES and packet 100 reached whatever device then sat at that position
+  (`crates/canvas-adapters/src/openrgb.rs`, `rescan_shared`). Fixed: `rescan_shared` takes a hold
+  (`Session::rescan_requests`, the `RescanHold` guard) before it writes packet 140, a 100 hands the
+  hold to `unsettled`, and `write_packet` re-checks it under the socket lock for every positional
+  packet (`send_frame`, `send_positional`, `request_positional`). While the hold is on, `try_settle`
+  refuses to call the list settled, and the hold ends early once `first` passes with no 100 (OpenRGB
+  sends its 100 inside the packet-140 handler, so none means no detection started); without that
+  guard a rescan from an already-changing list spun a runtime worker until the cap. Protocol 6 names a controller by an
+  id that is never reused and is unchanged. Regression tests on the fakes, with the fake's
+  `park_list_change` holding packet 100 back
+  (`crates/canvas-adapters/tests/openrgb_rescan.rs`): a frame, a resize and a `read_back` sent in the
+  window land on, resize or read no device; the socket-lock re-check has its own tests in
+  `openrgb.rs` (`rescan_hold_tests`). Sibling search: every `controller()` caller (frame, identify,
+  SET_CUSTOM_MODE, resize, `read_back`) and every `send*`/`request*` that carries a position; the
+  read in `enumerate()` is the one deliberate exception (it settles the list). **The rule:** an
+  address that is a position is valid only for the list it was read from; a packet that carries one
+  goes through `write_packet` with `positional` set, and the check sits under the socket lock, where
+  a list change cannot slip between the check and the write. Left: a list change OpenRGB makes on its
+  own (a hot plug) is announced only by its 100, after the swap, and no hold the client takes can
+  cover it.
 - **Class fix:** done (PR #23). Every user-facing claim about system state comes from a field the
   daemon or service measured, never from a constant: `DisplayInfo.blocked_by` (spine) replaces the
   hard-coded ZEUS CAST warning, and the onboarding tag names what was checked ("SignalRGB not seen").
